@@ -1,0 +1,207 @@
+[2025-12-28 10:43:08.388][23][trace][http] [source/common/http/conn_manager_impl.cc:152] LoadShedPoint envoy.load_shed_points.http_connection_manager_decode_headers is not found. Is it configured?
+2025-12-28T10:43:08.388759707Z [2025-12-28 10:43:08.388][23][trace][http] [source/common/http/conn_manager_impl.cc:155] LoadShedPoint envoy.load_shed_points.hcm_ondata_creating_codec is not found. Is it configured?
+2025-12-28T10:43:08.388805785Z [2025-12-28 10:43:08.388][23][trace][misc] [source/common/event/scaled_range_timer_manager_impl.cc:60] enableTimer called on 0x51637fb1b600 for 3600000ms, min is 3600000ms
+2025-12-28T10:43:08.388818480Z [2025-12-28 10:43:08.388][23][debug][config] [source/extensions/filters/common/set_filter_state/filter_config.cc:74] Created the filter state 'aether.network.network_namespace' from value '/host/run/netns/450464c6b813'
+2025-12-28T10:43:08.388829544Z [2025-12-28 10:43:08.388][23][trace][connection] [source/common/network/connection_impl.cc:521] [Tags: "ConnectionId":"7"] raising connection event 2
+2025-12-28T10:43:08.388842540Z [2025-12-28 10:43:08.388][23][debug][conn_handler] [source/common/listener_manager/active_tcp_listener.cc:162] [Tags: "ConnectionId":"7"] new connection from 127.0.0.1:50418
+2025-12-28T10:43:08.388855714Z [2025-12-28 10:43:08.388][23][trace][misc] [source/common/network/tcp_listener_impl.cc:123] TcpListener accepted 1 new connections.
+2025-12-28T10:43:08.388885186Z [2025-12-28 10:43:08.388][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"7"] socket event: 3
+2025-12-28T10:43:08.388899263Z [2025-12-28 10:43:08.388][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"7"] write ready
+2025-12-28T10:43:08.388913251Z [2025-12-28 10:43:08.388][23][trace][connection] [source/common/network/connection_impl.cc:712] [Tags: "ConnectionId":"7"] read ready. dispatch_buffered_data=0
+2025-12-28T10:43:08.388927281Z [2025-12-28 10:43:08.388][23][trace][connection] [source/common/network/raw_buffer_socket.cc:25] [Tags: "ConnectionId":"7"] read returns: 69
+2025-12-28T10:43:08.388940162Z [2025-12-28 10:43:08.388][23][trace][connection] [source/common/network/raw_buffer_socket.cc:39] [Tags: "ConnectionId":"7"] read error: Resource temporarily unavailable, code: 0
+2025-12-28T10:43:08.388954057Z [2025-12-28 10:43:08.388][23][trace][http] [source/common/http/http1/codec_impl.cc:1093] LoadShedPoint envoy.load_shed_points.http1_server_abort_dispatch is not found. Is it configured?
+2025-12-28T10:43:08.388970916Z [2025-12-28 10:43:08.388][23][trace][http] [source/common/http/http1/codec_impl.cc:649] [Tags: "ConnectionId":"7"] parsing 69 bytes
+2025-12-28T10:43:08.388981298Z [2025-12-28 10:43:08.388][23][trace][http] [source/common/http/http1/codec_impl.cc:591] [Tags: "ConnectionId":"7"] message begin
+2025-12-28T10:43:08.388992567Z [2025-12-28 10:43:08.388][23][debug][http] [source/common/http/conn_manager_impl.cc:417] [Tags: "ConnectionId":"7"] new stream
+2025-12-28T10:43:08.389005298Z [2025-12-28 10:43:08.388][23][trace][http] [./source/common/http/filter_manager.h:1196] LoadShedPoint envoy.load_shed_points.http_downstream_filter_check is not found. Is it configured?
+2025-12-28T10:43:08.389051202Z [2025-12-28 10:43:08.388][23][trace][misc] [source/common/event/scaled_range_timer_manager_impl.cc:60] enableTimer called on 0x51637fa7fa80 for 300000ms, min is 300000ms
+2025-12-28T10:43:08.389070799Z [2025-12-28 10:43:08.388][23][trace][http] [source/common/http/http1/codec_impl.cc:548] [Tags: "ConnectionId":"7"] completed header: key=Host value=svc-2
+2025-12-28T10:43:08.389084663Z [2025-12-28 10:43:08.388][23][trace][http] [source/common/http/http1/codec_impl.cc:548] [Tags: "ConnectionId":"7"] completed header: key=User-Agent value=curl/8.14.1
+2025-12-28T10:43:08.389096300Z [2025-12-28 10:43:08.389][23][trace][http] [source/common/http/http1/codec_impl.cc:841] [Tags: "ConnectionId":"7"] onHeadersCompleteImpl
+2025-12-28T10:43:08.389105457Z [2025-12-28 10:43:08.389][23][trace][http] [source/common/http/http1/codec_impl.cc:548] [Tags: "ConnectionId":"7"] completed header: key=Accept value=*/*
+2025-12-28T10:43:08.389120165Z [2025-12-28 10:43:08.389][23][trace][http] [source/common/http/http1/codec_impl.cc:1207] [Tags: "ConnectionId":"7"] Server: onHeadersComplete size=3
+2025-12-28T10:43:08.389131818Z [2025-12-28 10:43:08.389][23][trace][http] [source/common/http/http1/codec_impl.cc:958] [Tags: "ConnectionId":"7"] message complete
+2025-12-28T10:43:08.389201593Z [2025-12-28 10:43:08.389][23][debug][http] [source/common/http/conn_manager_impl.cc:1333] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] request headers complete (end_stream=true):
+2025-12-28T10:43:08.389229263Z ':authority', 'svc-2'
+2025-12-28T10:43:08.389237692Z ':path', '/'
+2025-12-28T10:43:08.389244872Z ':method', 'GET'
+2025-12-28T10:43:08.389250710Z 'user-agent', 'curl/8.14.1'
+2025-12-28T10:43:08.389256679Z 'accept', '*/*'
+2025-12-28T10:43:08.389262977Z
+2025-12-28T10:43:08.389268913Z [2025-12-28 10:43:08.389][23][debug][http] [source/common/http/conn_manager_impl.cc:1316] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] request end stream timestamp recorded
+2025-12-28T10:43:08.389279735Z [2025-12-28 10:43:08.389][23][debug][connection] [./source/common/network/connection_impl.h:101] [Tags: "ConnectionId":"7"] current connecting state: false
+2025-12-28T10:43:08.389286677Z [2025-12-28 10:43:08.389][23][debug][router] [source/common/router/router.cc:543] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] cluster 'svc_2' match for URL '/'
+2025-12-28T10:43:08.389491786Z [2025-12-28 10:43:08.389][23][trace][pool] [source/common/conn_pool/conn_pool_base.cc:65] LoadShedPoint envoy.load_shed_points.connection_pool_new_connection is not found. Is it configured?
+2025-12-28T10:43:08.389560586Z [2025-12-28 10:43:08.389][23][debug][router] [source/common/router/router.cc:829] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] router decoding headers:
+2025-12-28T10:43:08.389578821Z ':authority', 'svc-2'
+2025-12-28T10:43:08.389583336Z ':path', '/'
+2025-12-28T10:43:08.389587307Z ':method', 'GET'
+2025-12-28T10:43:08.389591222Z ':scheme', 'http'
+2025-12-28T10:43:08.389595077Z 'user-agent', 'curl/8.14.1'
+2025-12-28T10:43:08.389599129Z 'accept', '*/*'
+2025-12-28T10:43:08.389617940Z 'x-forwarded-proto', 'http'
+2025-12-28T10:43:08.389622298Z 'x-request-id', 'a5434f57-faa2-40d0-acc8-54056d8181a6'
+2025-12-28T10:43:08.389626515Z 'x-envoy-expected-rq-timeout-ms', '15000'
+2025-12-28T10:43:08.389630661Z
+2025-12-28T10:43:08.389642166Z [2025-12-28 10:43:08.389][23][debug][pool] [source/common/http/conn_pool_base.cc:78] queueing stream due to no available connections (ready=0 busy=0 connecting=0)
+2025-12-28T10:43:08.389649629Z [2025-12-28 10:43:08.389][23][debug][pool] [source/common/conn_pool/conn_pool_base.cc:356] trying to create new connection
+2025-12-28T10:43:08.389668884Z [2025-12-28 10:43:08.389][23][trace][pool] [source/common/conn_pool/conn_pool_base.cc:357] ConnPoolImplBase 0x51637fc0cc00, ready_clients_.size(): 0, busy_clients_.size(): 0, connecting_clients_.size(): 0, connecting_stream_capacity_: 0, connecting_and_connected_stream_capacity_: 0, num_active_streams_: 0, pending_streams_.size(): 1 per upstream preconnect ratio: 1
+2025-12-28T10:43:08.389678112Z [2025-12-28 10:43:08.389][23][trace][pool] [source/common/conn_pool/conn_pool_base.cc:155] per-upstream shouldCreateNewConnection returns true for pending 1 active 0 connecting_and_connected_capacity 0 connecting_capacity 0 ratio 1
+2025-12-28T10:43:08.389683468Z [2025-12-28 10:43:08.389][23][trace][pool] [source/common/conn_pool/conn_pool_base.cc:189] creating new preconnect connection
+2025-12-28T10:43:08.389688478Z [2025-12-28 10:43:08.389][23][debug][pool] [source/common/conn_pool/conn_pool_base.cc:208] creating a new connection (connecting=0)
+2025-12-28T10:43:08.389824833Z [2025-12-28 10:43:08.389][23][trace][http2] [source/common/http/http2/codec_impl.cc:2129] Codec does not have Metadata frame support.
+2025-12-28T10:43:08.389913240Z [2025-12-28 10:43:08.389][23][debug][http2] [source/common/http/http2/codec_impl.cc:1783] [Tags: "ConnectionId":"8"] updating connection-level initial window size to 25165824
+2025-12-28T10:43:08.389932426Z [2025-12-28 10:43:08.389][23][debug][connection] [./source/common/network/connection_impl.h:101] [Tags: "ConnectionId":"8"] current connecting state: true
+2025-12-28T10:43:08.389940762Z [2025-12-28 10:43:08.389][23][debug][client] [source/common/http/codec_client.cc:57] [Tags: "ConnectionId":"8"] connecting
+2025-12-28T10:43:08.389948671Z [2025-12-28 10:43:08.389][23][debug][connection] [source/common/network/connection_impl.cc:1118] [Tags: "ConnectionId":"8"] connecting to 172.18.0.5:18080
+2025-12-28T10:43:08.390141293Z [2025-12-28 10:43:08.390][23][debug][connection] [source/common/network/connection_impl.cc:1137] [Tags: "ConnectionId":"8"] connection in progress
+2025-12-28T10:43:08.390161266Z [2025-12-28 10:43:08.390][23][trace][pool] [source/common/conn_pool/conn_pool_base.cc:155] per-upstream shouldCreateNewConnection returns false for pending 1 active 0 connecting_and_connected_capacity 1024 connecting_capacity 1024 ratio 1
+2025-12-28T10:43:08.390169106Z [2025-12-28 10:43:08.390][23][trace][http] [source/common/http/filter_manager.cc:607] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] decode headers called: filter=envoy.filters.http.upstream_codec status=4
+2025-12-28T10:43:08.390177028Z [2025-12-28 10:43:08.390][23][trace][http] [source/common/http/filter_manager.cc:607] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] decode headers called: filter=envoy.filters.http.router status=1
+2025-12-28T10:43:08.390197352Z [2025-12-28 10:43:08.390][23][trace][misc] [source/common/event/scaled_range_timer_manager_impl.cc:60] enableTimer called on 0x51637fa7fa80 for 300000ms, min is 300000ms
+2025-12-28T10:43:08.390219302Z [2025-12-28 10:43:08.390][23][trace][http] [source/common/http/http1/codec_impl.cc:699] [Tags: "ConnectionId":"7"] parsed 69 bytes
+2025-12-28T10:43:08.390230455Z [2025-12-28 10:43:08.390][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"8"] socket event: 2
+2025-12-28T10:43:08.390237618Z [2025-12-28 10:43:08.390][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"8"] write ready
+2025-12-28T10:43:08.390244863Z [2025-12-28 10:43:08.390][23][debug][connection] [source/common/network/connection_impl.cc:821] [Tags: "ConnectionId":"8"] connected
+2025-12-28T10:43:08.390363430Z [2025-12-28 10:43:08.390][23][trace][connection] [source/common/tls/ssl_handshaker.cc:152] [Tags: "ConnectionId":"8"] ssl error occurred while read: WANT_READ
+2025-12-28T10:43:08.390826640Z [2025-12-28 10:43:08.390][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"8"] socket event: 3
+2025-12-28T10:43:08.390855805Z [2025-12-28 10:43:08.390][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"8"] write ready
+2025-12-28T10:43:08.391242682Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:521] [Tags: "ConnectionId":"8"] raising connection event 2
+2025-12-28T10:43:08.391267689Z [2025-12-28 10:43:08.391][23][debug][client] [source/common/http/codec_client.cc:96] [Tags: "ConnectionId":"8"] connected
+2025-12-28T10:43:08.391277849Z [2025-12-28 10:43:08.391][23][debug][pool] [source/common/conn_pool/conn_pool_base.cc:400] [Tags: "ConnectionId":"8"] attaching to next stream
+2025-12-28T10:43:08.391284663Z [2025-12-28 10:43:08.391][23][debug][pool] [source/common/conn_pool/conn_pool_base.cc:247] [Tags: "ConnectionId":"8"] creating stream
+2025-12-28T10:43:08.391387153Z [2025-12-28 10:43:08.391][23][debug][router] [source/common/router/upstream_request.cc:599] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] pool ready
+2025-12-28T10:43:08.391397912Z [2025-12-28 10:43:08.391][23][trace][router] [source/common/router/upstream_codec_filter.cc:61] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] proxying headers
+2025-12-28T10:43:08.391403924Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1497] [Tags: "ConnectionId":"8"] send data: bytes=24
+2025-12-28T10:43:08.391409669Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:581] [Tags: "ConnectionId":"8"] writing 24 bytes, end_stream false
+2025-12-28T10:43:08.391445292Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1448] [Tags: "ConnectionId":"8"] about to send frame type=4, flags=0
+2025-12-28T10:43:08.391454827Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1497] [Tags: "ConnectionId":"8"] send data: bytes=39
+2025-12-28T10:43:08.391476053Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:581] [Tags: "ConnectionId":"8"] writing 39 bytes, end_stream false
+2025-12-28T10:43:08.391482782Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1335] [Tags: "ConnectionId":"8"] sent frame type=4, stream_id=0, length=30
+2025-12-28T10:43:08.391489136Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1448] [Tags: "ConnectionId":"8"] about to send frame type=8, flags=0
+2025-12-28T10:43:08.391495413Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1497] [Tags: "ConnectionId":"8"] send data: bytes=13
+2025-12-28T10:43:08.391501984Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:581] [Tags: "ConnectionId":"8"] writing 13 bytes, end_stream false
+2025-12-28T10:43:08.391508378Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1335] [Tags: "ConnectionId":"8"] sent frame type=8, stream_id=0, length=4
+2025-12-28T10:43:08.391529571Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1448] [Tags: "ConnectionId":"8"] about to send frame type=1, flags=5
+2025-12-28T10:43:08.391536846Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1497] [Tags: "ConnectionId":"8"] send data: bytes=119
+2025-12-28T10:43:08.391543288Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:581] [Tags: "ConnectionId":"8"] writing 119 bytes, end_stream false
+2025-12-28T10:43:08.391549814Z [2025-12-28 10:43:08.391][23][trace][http2] [source/common/http/http2/codec_impl.cc:1335] [Tags: "ConnectionId":"8"] sent frame type=1, stream_id=1, length=110
+2025-12-28T10:43:08.391556216Z [2025-12-28 10:43:08.391][23][debug][client] [source/common/http/codec_client.cc:150] [Tags: "ConnectionId":"8"] encode complete
+2025-12-28T10:43:08.391562965Z [2025-12-28 10:43:08.391][23][trace][http] [source/common/http/filter_manager.cc:77] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] continuing filter chain: filter=0x51637fb0d7a0
+2025-12-28T10:43:08.391569939Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"8"] write ready
+2025-12-28T10:43:08.391592133Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/tls/ssl_socket.cc:305] [Tags: "ConnectionId":"8"] ssl write returns: 195
+2025-12-28T10:43:08.391598755Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:712] [Tags: "ConnectionId":"8"] read ready. dispatch_buffered_data=0
+2025-12-28T10:43:08.391605256Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/tls/ssl_socket.cc:94] [Tags: "ConnectionId":"8"] ssl read returns: -1
+2025-12-28T10:43:08.391613852Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/tls/ssl_socket.cc:134] [Tags: "ConnectionId":"8"] ssl error occurred while read: WANT_READ
+2025-12-28T10:43:08.391620183Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/tls/ssl_socket.cc:170] [Tags: "ConnectionId":"8"] ssl read 0 bytes
+2025-12-28T10:43:08.391633657Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"8"] socket event: 2
+2025-12-28T10:43:08.391648016Z [2025-12-28 10:43:08.391][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"8"] write ready
+2025-12-28T10:43:08.392665163Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"8"] socket event: 3
+2025-12-28T10:43:08.392687464Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"8"] write ready
+2025-12-28T10:43:08.392694214Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/network/connection_impl.cc:712] [Tags: "ConnectionId":"8"] read ready. dispatch_buffered_data=0
+2025-12-28T10:43:08.392718684Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/tls/ssl_socket.cc:94] [Tags: "ConnectionId":"8"] ssl read returns: 55
+2025-12-28T10:43:08.392788818Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/tls/ssl_socket.cc:94] [Tags: "ConnectionId":"8"] ssl read returns: -1
+2025-12-28T10:43:08.392796510Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/tls/ssl_socket.cc:134] [Tags: "ConnectionId":"8"] ssl error occurred while read: WANT_READ
+2025-12-28T10:43:08.392803585Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/tls/ssl_socket.cc:170] [Tags: "ConnectionId":"8"] ssl read 55 bytes
+2025-12-28T10:43:08.392810265Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1077] [Tags: "ConnectionId":"8"] dispatching 55 bytes
+2025-12-28T10:43:08.392817359Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1888] [Tags: "ConnectionId":"8"] Http2Visitor::OnFrameHeader(0, 24, 4, 0)
+2025-12-28T10:43:08.392828662Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1187] [Tags: "ConnectionId":"8"] about to recv frame type=4, flags=0, stream_id=0
+2025-12-28T10:43:08.392873162Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1475] [Tags: "ConnectionId":"8"] track inbound frame type=4 flags=0 length=24 padding_length=0
+2025-12-28T10:43:08.392880545Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1888] [Tags: "ConnectionId":"8"] Http2Visitor::OnFrameHeader(0, 0, 4, 1)
+2025-12-28T10:43:08.392886268Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1187] [Tags: "ConnectionId":"8"] about to recv frame type=4, flags=1, stream_id=0
+2025-12-28T10:43:08.392891630Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1475] [Tags: "ConnectionId":"8"] track inbound frame type=4 flags=1 length=0 padding_length=0
+2025-12-28T10:43:08.392897360Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1888] [Tags: "ConnectionId":"8"] Http2Visitor::OnFrameHeader(0, 4, 8, 0)
+2025-12-28T10:43:08.392903081Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1187] [Tags: "ConnectionId":"8"] about to recv frame type=8, flags=0, stream_id=0
+2025-12-28T10:43:08.392908750Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1475] [Tags: "ConnectionId":"8"] track inbound frame type=8 flags=0 length=4 padding_length=0
+2025-12-28T10:43:08.392927344Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1115] [Tags: "ConnectionId":"8"] dispatched 55 bytes
+2025-12-28T10:43:08.392932684Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1448] [Tags: "ConnectionId":"8"] about to send frame type=4, flags=1
+2025-12-28T10:43:08.392939335Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1497] [Tags: "ConnectionId":"8"] send data: bytes=9
+2025-12-28T10:43:08.392946514Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/network/connection_impl.cc:581] [Tags: "ConnectionId":"8"] writing 9 bytes, end_stream false
+2025-12-28T10:43:08.392953500Z [2025-12-28 10:43:08.392][23][trace][http2] [source/common/http/http2/codec_impl.cc:1335] [Tags: "ConnectionId":"8"] sent frame type=4, stream_id=0, length=0
+2025-12-28T10:43:08.392983395Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"8"] socket event: 2
+2025-12-28T10:43:08.392999125Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"8"] write ready
+2025-12-28T10:43:08.393026042Z [2025-12-28 10:43:08.392][23][trace][connection] [source/common/tls/ssl_socket.cc:305] [Tags: "ConnectionId":"8"] ssl write returns: 9
+2025-12-28T10:43:08.394211341Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"8"] socket event: 3
+2025-12-28T10:43:08.394237902Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"8"] write ready
+2025-12-28T10:43:08.394243520Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/network/connection_impl.cc:712] [Tags: "ConnectionId":"8"] read ready. dispatch_buffered_data=0
+2025-12-28T10:43:08.394253800Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/tls/ssl_socket.cc:94] [Tags: "ConnectionId":"8"] ssl read returns: 692
+2025-12-28T10:43:08.394259352Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/tls/ssl_socket.cc:94] [Tags: "ConnectionId":"8"] ssl read returns: -1
+2025-12-28T10:43:08.394264654Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/tls/ssl_socket.cc:134] [Tags: "ConnectionId":"8"] ssl error occurred while read: WANT_READ
+2025-12-28T10:43:08.394269994Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/tls/ssl_socket.cc:170] [Tags: "ConnectionId":"8"] ssl read 692 bytes
+2025-12-28T10:43:08.394275632Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1077] [Tags: "ConnectionId":"8"] dispatching 692 bytes
+2025-12-28T10:43:08.394281080Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1888] [Tags: "ConnectionId":"8"] Http2Visitor::OnFrameHeader(1, 102, 1, 4)
+2025-12-28T10:43:08.394288772Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1187] [Tags: "ConnectionId":"8"] about to recv frame type=1, flags=4, stream_id=1
+2025-12-28T10:43:08.394304546Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1475] [Tags: "ConnectionId":"8"] track inbound frame type=1 flags=4 length=102 padding_length=0
+2025-12-28T10:43:08.394360510Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1945] [Tags: "ConnectionId":"8"] Http2Visitor::OnEndHeadersForStream(1)
+2025-12-28T10:43:08.394382177Z [2025-12-28 10:43:08.394][23][trace][http] [source/common/http/filter_manager.cc:940] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] commonEncodePrefix end_stream: false, isHalfCloseEnabled: false
+2025-12-28T10:43:08.394391499Z [2025-12-28 10:43:08.394][23][trace][router] [source/common/router/upstream_request.cc:270] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] end_stream: false, upstream response headers:
+2025-12-28T10:43:08.394400499Z ':status', '200'
+2025-12-28T10:43:08.394407537Z 'content-type', 'application/json'
+2025-12-28T10:43:08.394414648Z 'x-content-type-options', 'nosniff'
+2025-12-28T10:43:08.394421633Z 'content-length', '572'
+2025-12-28T10:43:08.394428685Z 'date', 'Sun, 28 Dec 2025 10:43:08 GMT'
+2025-12-28T10:43:08.394435745Z 'x-envoy-upstream-service-time', '1'
+2025-12-28T10:43:08.394445004Z 'server', 'envoy'
+2025-12-28T10:43:08.394455130Z
+2025-12-28T10:43:08.394480203Z [2025-12-28 10:43:08.394][23][debug][router] [source/common/router/router.cc:1706] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] upstream headers complete: end_stream=false
+2025-12-28T10:43:08.394489322Z [2025-12-28 10:43:08.394][23][trace][misc] [source/common/event/scaled_range_timer_manager_impl.cc:60] enableTimer called on 0x51637fa7fa80 for 300000ms, min is 300000ms
+2025-12-28T10:43:08.394497491Z [2025-12-28 10:43:08.394][23][trace][http] [source/common/http/filter_manager.cc:940] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] commonEncodePrefix end_stream: false, isHalfCloseEnabled: false
+2025-12-28T10:43:08.394506614Z [2025-12-28 10:43:08.394][23][debug][http] [source/common/http/conn_manager_impl.cc:2018] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] encoding headers via codec (end_stream=false):
+2025-12-28T10:43:08.394515080Z ':status', '200'
+2025-12-28T10:43:08.394521984Z 'content-type', 'application/json'
+2025-12-28T10:43:08.394531981Z 'x-content-type-options', 'nosniff'
+2025-12-28T10:43:08.394541855Z 'content-length', '572'
+2025-12-28T10:43:08.394552626Z 'date', 'Sun, 28 Dec 2025 10:43:08 GMT'
+2025-12-28T10:43:08.394559861Z 'x-envoy-upstream-service-time', '4'
+2025-12-28T10:43:08.394566844Z 'server', 'envoy'
+2025-12-28T10:43:08.394573780Z
+2025-12-28T10:43:08.394580631Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/network/connection_impl.cc:581] [Tags: "ConnectionId":"7"] writing 191 bytes, end_stream false
+2025-12-28T10:43:08.394592807Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1888] [Tags: "ConnectionId":"8"] Http2Visitor::OnFrameHeader(1, 572, 0, 1)
+2025-12-28T10:43:08.394614588Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1187] [Tags: "ConnectionId":"8"] about to recv frame type=0, flags=1, stream_id=1
+2025-12-28T10:43:08.394626888Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1953] [Tags: "ConnectionId":"8"] Http2Visitor::OnBeginDataForStream(1, 572)
+2025-12-28T10:43:08.394638189Z [2025-12-28 10:43:08.394][23][debug][http2] [source/common/http/http2/codec_impl.cc:1965] [Tags: "ConnectionId":"8"] Http2Visitor: remaining data payload: 572, stream_id: 1, end_stream: true
+2025-12-28T10:43:08.394646829Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:2001] [Tags: "ConnectionId":"8"] Http2Visitor: remaining data payload: 0, stream_id: 1, end_stream: true
+2025-12-28T10:43:08.394655094Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:2006] [Tags: "ConnectionId":"8"] Http2Visitor::OnEndStream(1)
+2025-12-28T10:43:08.394662918Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:2011] [Tags: "ConnectionId":"8"] Http2Visitor dispatching DATA for stream 1
+2025-12-28T10:43:08.394670805Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1239] [Tags: "ConnectionId":"8"] recv frame type=DATA stream_id=1
+2025-12-28T10:43:08.394679380Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1475] [Tags: "ConnectionId":"8"] track inbound frame type=0 flags=1 length=572 padding_length=0
+2025-12-28T10:43:08.394687486Z [2025-12-28 10:43:08.394][23][debug][client] [source/common/http/codec_client.cc:137] [Tags: "ConnectionId":"8"] response complete
+2025-12-28T10:43:08.394697027Z [2025-12-28 10:43:08.394][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=1)
+2025-12-28T10:43:08.394711249Z [2025-12-28 10:43:08.394][23][debug][pool] [source/common/conn_pool/conn_pool_base.cc:282] [Tags: "ConnectionId":"8"] destroying stream: 0 active remaining, readyForStream true, currentUnusedCapacity 1024
+2025-12-28T10:43:08.394740943Z [2025-12-28 10:43:08.394][23][trace][http] [source/common/http/filter_manager.cc:940] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] commonEncodePrefix end_stream: true, isHalfCloseEnabled: false
+2025-12-28T10:43:08.394794016Z [2025-12-28 10:43:08.394][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=2)
+2025-12-28T10:43:08.394818266Z [2025-12-28 10:43:08.394][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=3)
+2025-12-28T10:43:08.394830656Z [2025-12-28 10:43:08.394][23][debug][router] [source/common/router/router.cc:1152] Executing cleanup(): resetting retry_state_ and disabling timers
+2025-12-28T10:43:08.394842978Z [2025-12-28 10:43:08.394][23][trace][misc] [source/common/event/scaled_range_timer_manager_impl.cc:60] enableTimer called on 0x51637fa7fa80 for 300000ms, min is 300000ms
+2025-12-28T10:43:08.394854690Z [2025-12-28 10:43:08.394][23][trace][http] [source/common/http/filter_manager.cc:940] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] commonEncodePrefix end_stream: true, isHalfCloseEnabled: false
+2025-12-28T10:43:08.394874624Z [2025-12-28 10:43:08.394][23][trace][http] [source/common/http/conn_manager_impl.cc:2042] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] encoding data via codec (size=572 end_stream=true)
+2025-12-28T10:43:08.394909432Z [2025-12-28 10:43:08.394][23][trace][connection] [source/common/network/connection_impl.cc:581] [Tags: "ConnectionId":"7"] writing 572 bytes, end_stream false
+2025-12-28T10:43:08.394921297Z [2025-12-28 10:43:08.394][23][debug][http] [source/common/http/conn_manager_impl.cc:2134] [Tags: "ConnectionId":"7","StreamId":"2252476815553669812"] Codec completed encoding stream.
+2025-12-28T10:43:08.394936602Z [2025-12-28 10:43:08.394][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=4)
+2025-12-28T10:43:08.394947621Z [2025-12-28 10:43:08.394][23][debug][router] [source/common/router/router.cc:1152] Executing cleanup(): resetting retry_state_ and disabling timers
+2025-12-28T10:43:08.394957512Z [2025-12-28 10:43:08.394][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=5)
+2025-12-28T10:43:08.394987823Z [2025-12-28 10:43:08.394][23][trace][misc] [source/common/event/scaled_range_timer_manager_impl.cc:60] enableTimer called on 0x51637fb1b600 for 3600000ms, min is 3600000ms
+2025-12-28T10:43:08.395002082Z [2025-12-28 10:43:08.394][23][debug][http2] [source/common/http/http2/codec_impl.cc:1522] [Tags: "ConnectionId":"8"] stream 1 closed: 0
+2025-12-28T10:43:08.395014154Z [2025-12-28 10:43:08.394][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=6)
+2025-12-28T10:43:08.395024669Z [2025-12-28 10:43:08.394][23][debug][http2] [source/common/http/http2/codec_impl.cc:1593] [Tags: "ConnectionId":"8"] Recouping 0 bytes of flow control window for stream 1.
+2025-12-28T10:43:08.395035657Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:2029] [Tags: "ConnectionId":"8"] Http2Visitor invoking stream close listener for stream 1
+2025-12-28T10:43:08.395050025Z [2025-12-28 10:43:08.394][23][trace][http2] [source/common/http/http2/codec_impl.cc:1115] [Tags: "ConnectionId":"8"] dispatched 692 bytes
+2025-12-28T10:43:08.395061720Z [2025-12-28 10:43:08.394][23][trace][main] [source/common/event/dispatcher_impl.cc:123] clearing deferred deletion list (size=6)
+2025-12-28T10:43:08.395081705Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"7"] socket event: 2
+2025-12-28T10:43:08.395092692Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"7"] write ready
+2025-12-28T10:43:08.395175002Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/raw_buffer_socket.cc:70] [Tags: "ConnectionId":"7"] write returns: 763
+2025-12-28T10:43:08.395874758Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/connection_impl.cc:666] [Tags: "ConnectionId":"7"] socket event: 3
+2025-12-28T10:43:08.395920562Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/connection_impl.cc:812] [Tags: "ConnectionId":"7"] write ready
+2025-12-28T10:43:08.395928922Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/connection_impl.cc:712] [Tags: "ConnectionId":"7"] read ready. dispatch_buffered_data=0
+2025-12-28T10:43:08.395956139Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/raw_buffer_socket.cc:25] [Tags: "ConnectionId":"7"] read returns: 0
+2025-12-28T10:43:08.395963185Z [2025-12-28 10:43:08.395][23][debug][connection] [source/common/network/connection_impl.cc:785] [Tags: "ConnectionId":"7"] remote close
+2025-12-28T10:43:08.395970242Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/connection_impl.cc:296] [Tags: "ConnectionId":"7"] connection is closing not through the filter manager
+2025-12-28T10:43:08.395977791Z [2025-12-28 10:43:08.395][23][debug][connection] [source/common/network/connection_impl.cc:317] [Tags: "ConnectionId":"7"] closing socket: 0
+2025-12-28T10:43:08.396024420Z [2025-12-28 10:43:08.395][23][trace][connection] [source/common/network/connection_impl.cc:521] [Tags: "ConnectionId":"7"] raising connection event 0
+2025-12-28T10:43:08.396050086Z [2025-12-28 10:43:08.395][23][trace][conn_handler] [source/common/listener_manager/active_stream_listener_base.cc:114] [Tags: "ConnectionId":"7"] tcp connection on event 0
+2025-12-28T10:43:08.396062443Z [2025-12-28 10:43:08.395][23][debug][conn_handler] [source/common/listener_manager/active_stream_listener_base.cc:125] [Tags: "ConnectionId":"7"] adding to cleanup list
+2025-12-28T10:43:08.396077996Z [2025-12-28 10:43:08.395][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=1)
+2025-12-28T10:43:08.396088561Z [2025-12-28 10:43:08.395][23][trace][main] [source/common/event/dispatcher_impl.cc:249] item added to deferred deletion list (size=2)
+2025-12-28T10:43:08.396098131Z [2025-12-28 10:43:08.395][23][trace][main] [source/common/event/dispatcher_impl.cc:123] clearing deferred deletion list (size=2)
+2025-12-28T10:43:08.396135470Z [2025-12-28 10:43:08.396][23][debug][connection] [source/common/network/connection_impl.cc:152] [Tags: "ConnectionId":"7"] Not closing conn, socket is not open

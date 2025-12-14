@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "file",
+    srcs = [
+        "fadvise_linux.go",
+        "fadvise_unspecified.go",
+        "file.go",
+    ],
+    importpath = "github.com/bpalermo/aether/agent/pkg/file",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)

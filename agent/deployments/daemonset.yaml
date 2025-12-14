@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aether-agent
+  namespace: aether-system
+  labels:
+    app: aether-agent
+    app.kubernetes.io/name: aether-agent
+spec:
+  selector:
+    matchLabels:
+      app: aether-agent
+      app.kubernetes.io/name: aether-agent
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: aether-agent
+        app.kubernetes.io/name: aether-agent
+    spec:
+      hostNetwork: true
+      serviceAccountName: aether-agent
+      priorityClassName: system-node-critical
+      containers:
+        - name: agent
+          image: docker.io/palermo/aether-agent:latest
+          imagePullPolicy: Always
+          args:
+            - "--proxy-id=$(NODE_NAME)"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+                  divisor: "1"
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.cpu
+                  divisor: "1"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          securityContext:
+            privileged: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: run-dir
+              mountPath: /run/aether
+              mountPropagation: HostToContainer
+            - name: cni-bin-dir
+              mountPath: /host/opt/cni/bin
+            - name: cni-conf-dir
+              mountPath: /host/etc/cni/net.d
+            - name: cni-netns-dir
+              mountPath: /host/var/run/netns
+              mountPropagation: HostToContainer
+            - name: cni-registry-dir
+              mountPath: /host/var/lib/aether/registry
+              mountPropagation: HostToContainer
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: run-dir
+          hostPath:
+            path: /run/aether
+            type: DirectoryOrCreate
+        - name: cni-bin-dir
+          hostPath:
+            path: /opt/cni/bin
+            type: DirectoryOrCreate
+        - name: cni-conf-dir
+          hostPath:
+            path: /etc/cni/net.d
+            type: DirectoryOrCreate
+        - name: cni-netns-dir
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate
+            # DirectoryOrCreate instead of Directory for the following reason - CNI may not bind mount this until a non-hostnetwork pod is scheduled on the node,
+            # and we don't want to block CNI agent pod creation on waiting for the first non-hostnetwork pod.
+            # Once the CNI does mount this, it will get populated and we're good.
+        - name: cni-registry-dir
+          hostPath:
+            path: /var/lib/aether/registry
+            type: DirectoryOrCreate
+            # DirectoryOrCreate instead of Directory for the following reason - CNI may not bind mount this until a non-hostnetwork pod is scheduled on the node,
+            # and we don't want to block CNI agent pod creation on waiting for the first non-hostnetwork pod.
+            # Once the CNI does mount this, it will get populated and we're good.

@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aether-proxy
+  namespace: aether-system
+  labels:
+    app: aether-proxy
+    app.kubernetes.io/name: aether-proxy
+spec:
+  selector:
+    matchLabels:
+      app: aether-proxy
+      app.kubernetes.io/name: aether-proxy
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: aether-proxy
+        app.kubernetes.io/name: aether-proxy
+    spec:
+      hostNetwork: true
+      serviceAccountName: aether-proxy
+      priorityClassName: system-node-critical
+      containers:
+        - name: proxy
+          image: docker.io/envoyproxy/envoy:distroless-dev-3b039a3c72e3dfe92e63cfcf970e316e377e485d
+          command:
+            - "/usr/local/bin/envoy"
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            - "-l"
+            - "info"
+            - "--service-cluster"
+            - "aether-proxy"
+            - "--service-node"
+            - "$(NODE_NAME)"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            - name: ENVOY_UID
+              value: "0"
+            - name: ENVOY_GID
+              value: "0"
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: proxy-config
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: run-dir
+              mountPath: /run/aether
+              mountPropagation: HostToContainer
+            - name: netns-dir
+              mountPath: /var/run/netns
+              mountPropagation: HostToContainer
+      volumes:
+        - name: proxy-config
+          configMap:
+            name: aether-proxy-config
+            items:
+              - key: envoy.yaml
+                path: envoy.yaml
+        - name: netns-dir
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate
+        - name: run-dir
+          hostPath:
+            path: /run/aether
+            type: DirectoryOrCreate

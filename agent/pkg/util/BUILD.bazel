@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "util",
+    srcs = [
+        "plugin.go",
+        "watcher.go",
+    ],
+    importpath = "github.com/bpalermo/aether/agent/pkg/util",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent/pkg/file",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ],
+)

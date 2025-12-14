@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "plugin_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/cni/cmd/plugin",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//cni/internal/log",
+        "//cni/pkg/plugin",
+        "@com_github_containernetworking_cni//pkg/skel",
+        "@com_github_containernetworking_cni//pkg/version",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_binary(
+    name = "plugin",
+    out = "aether-cni",
+    embed = [":plugin_lib"],
+    visibility = ["//visibility:public"],
+)

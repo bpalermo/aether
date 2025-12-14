@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "log",
+    srcs = ["log.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/log",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "@io_k8s_sigs_controller_runtime//pkg/log/zap",
+        "@org_uber_go_zap//zapcore",
+    ],
+)

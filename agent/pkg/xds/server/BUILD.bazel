@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "server",
+    srcs = ["server.go"],
+    importpath = "github.com/bpalermo/aether/agent/pkg/xds/server",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent/pkg/constants",
+        "//agent/pkg/xds/proxy",
+        "//api/aether/registry/v1:registry",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/endpoint/v3:endpoint",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/route/v3:route",
+        "@com_github_go_logr_logr//:logr",
+        "@org_golang_google_grpc//:grpc",
+    ],
+)

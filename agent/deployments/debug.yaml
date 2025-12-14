@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: debug
+  namespace: aether-system
+  labels:
+    app: debug
+    app.kubernetes.io/name: debug
+spec:
+  selector:
+    matchLabels:
+      app: debug
+      app.kubernetes.io/name: debug
+  template:
+    metadata:
+      labels:
+        app: debug
+        app.kubernetes.io/name: debug
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      containers:
+        - name: debug
+          image: ubuntu:22.04
+          command: ["/bin/bash"]
+          args: ["-c", "apt-get update && apt-get install -y curl wget vim net-tools iproute2 tcpdump jq && sleep infinity"]
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+              readOnly: false
+            - name: proc
+              mountPath: /host/proc
+              readOnly: false
+            - name: sys
+              mountPath: /host/sys
+              readOnly: false
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+      restartPolicy: Always

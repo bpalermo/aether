@@ -1,0 +1,109 @@
+services:
+  envoy-a:
+    image: envoyproxy/envoy:dev-3b039a3c72e3dfe92e63cfcf970e316e377e485d
+    privileged: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    command:
+    - "-c"
+    - "/etc/envoy/envoy.yaml"
+    - "-l"
+    - "info"
+    environment:
+      ENVOY_UID: "0"
+      ENVOY_GID: "0"
+    ports:
+      - "9901:9901"
+    volumes:
+      - ./config/envoy-a.yaml:/etc/envoy/envoy.yaml
+      - ./certs/:/var/lib/certs/:ro
+      - /var/run/docker/netns/:/host/run/netns/:ro
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+  svc-0:
+    image: gcr.io/k8s-staging-gateway-api/echo-basic
+    environment:
+      HTTP_PORT: "8080"
+      H2C_PORT: "8081"
+      POD_NAME: "svc-0"
+      NAMESPACE: "default"
+  netshoot-0:
+    image: nicolaka/netshoot
+    command: sh -c "sleep infinity"
+    volumes:
+      - ./certs/:/var/lib/certs/:ro
+      - /var/run/docker/netns/:/host/run/netns/
+    network_mode: service:svc-0
+  svc-1:
+    image: gcr.io/k8s-staging-gateway-api/echo-basic
+    environment:
+      HTTP_PORT: "8082"
+      H2C_PORT: "8083"
+      POD_NAME: "svc-1"
+      NAMESPACE: "default"
+  netshoot-1:
+    image: nicolaka/netshoot
+    command: sh -c "sleep infinity"
+    volumes:
+      - ./certs/:/var/lib/certs/:ro
+      - /var/run/docker/netns/:/host/run/netns/
+    network_mode: service:svc-1
+  envoy-b:
+    image: envoyproxy/envoy:dev-3b039a3c72e3dfe92e63cfcf970e316e377e485d
+    privileged: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    command:
+      - "-c"
+      - "/etc/envoy/envoy.yaml"
+      - "-l"
+      - "info"
+    environment:
+      ENVOY_UID: "0"
+      ENVOY_GID: "0"
+    ports:
+      - "9902:9901"
+    volumes:
+      - ./config/envoy-b.yaml:/etc/envoy/envoy.yaml
+      - ./certs/:/var/lib/certs/:ro
+      - /var/run/docker/netns/:/host/run/netns/:ro
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+  svc-2:
+    image: gcr.io/k8s-staging-gateway-api/echo-basic
+    environment:
+      HTTP_PORT: "8090"
+      H2C_PORT: "8091"
+      POD_NAME: "svc-2"
+      NAMESPACE: "default"
+  netshoot-2:
+    image: nicolaka/netshoot
+    command: sh -c "sleep infinity"
+    volumes:
+      - ./certs/:/var/lib/certs/:ro
+      - /var/run/docker/netns/:/host/run/netns/
+    network_mode: service:svc-2
+  svc-3:
+    image: gcr.io/k8s-staging-gateway-api/echo-basic
+    environment:
+      HTTP_PORT: "8092"
+      H2C_PORT: "8093"
+      POD_NAME: "svc-3"
+      NAMESPACE: "default"
+  netshoot-3:
+    image: nicolaka/netshoot
+    command: sh -c "sleep infinity"
+    volumes:
+      - ./certs/:/var/lib/certs/:ro
+      - /var/run/docker/netns/:/host/run/netns/
+    network_mode: service:svc-3

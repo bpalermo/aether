@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "plugin",
+    srcs = [
+        "config.go",
+        "plugin.go",
+        "registry.go",
+    ],
+    importpath = "github.com/bpalermo/aether/cni/pkg/plugin",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/aether/registry/v1:registry",
+        "//cni/pkg/constants",
+        "@com_github_containernetworking_cni//pkg/skel",
+        "@com_github_containernetworking_cni//pkg/types",
+        "@com_github_containernetworking_cni//pkg/types/100",
+        "@com_github_containernetworking_cni//pkg/version",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_uber_go_zap//:zap",
+    ],
+)
