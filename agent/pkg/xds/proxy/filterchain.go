@@ -12,6 +12,7 @@ func buildDefaultInboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	routeConfig := buildInboundRouteConfiguration()
 
 	hcm := buildHTTPConnectionManager(name, routeConfig)
+	hcm.ForwardClientCertDetails = http_connection_managerv3.HttpConnectionManager_SANITIZE
 	hcm.SetCurrentClientCertDetails = &http_connection_managerv3.HttpConnectionManager_SetCurrentClientCertDetails{
 		Subject: wrapperspb.Bool(true),
 	}
