@@ -11,7 +11,7 @@ static_resources:
         socket_address:
           address: 0.0.0.0
           port_value: 18080
-          network_namespace_filepath: "/host/run/netns/d7b60a7e79e3"
+          network_namespace_filepath: "/host/run/netns/24e5dd9465bf"
       traffic_direction: INBOUND
       listener_filters:
         - name: "envoy.filters.listener.tls_inspector"
@@ -70,7 +70,7 @@ static_resources:
         socket_address:
           address: 0.0.0.0
           port_value: 18080
-          network_namespace_filepath: "/host/run/netns/1fb499d47f74"
+          network_namespace_filepath: "/host/run/netns/70d77c75ffc1"
       traffic_direction: INBOUND
       listener_filters:
         - name: "envoy.filters.listener.tls_inspector"
@@ -150,7 +150,7 @@ static_resources:
         source_address:
           address: 127.0.0.1
           port_value: 0
-          network_namespace_filepath: "/host/run/netns/d7b60a7e79e3"
+          network_namespace_filepath: "/host/run/netns/24e5dd9465bf"
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -171,7 +171,7 @@ static_resources:
         source_address:
           address: 127.0.0.1
           port_value: 0
-          network_namespace_filepath: "/host/run/netns/1fb499d47f74"
+          network_namespace_filepath: "/host/run/netns/70d77c75ffc1"
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions

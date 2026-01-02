@@ -1,6 +1,6 @@
 services:
   envoy-a:
-    image: envoyproxy/envoy:dev-3b039a3c72e3dfe92e63cfcf970e316e377e485d
+    image: envoyproxy/envoy:dev-c3ab4443ebc614d6a3dd323cee7ffd2f2a5c7216
     privileged: true
     cap_drop:
       - ALL
@@ -54,7 +54,7 @@ services:
       - /var/run/docker/netns/:/host/run/netns/
     network_mode: service:svc-1
   envoy-b:
-    image: envoyproxy/envoy:dev-3b039a3c72e3dfe92e63cfcf970e316e377e485d
+    image: envoyproxy/envoy:dev-c3ab4443ebc614d6a3dd323cee7ffd2f2a5c7216
     privileged: true
     cap_drop:
       - ALL

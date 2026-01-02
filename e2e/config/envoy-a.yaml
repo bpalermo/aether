@@ -11,7 +11,7 @@ static_resources:
         socket_address:
           address: 127.0.0.1
           port_value: 18081
-          network_namespace_filepath: "/host/run/netns/450464c6b813"
+          network_namespace_filepath: "/host/run/netns/99cca569ea1f"
       traffic_direction: OUTBOUND
       filter_chains:
         - filters:
@@ -87,13 +87,13 @@ static_resources:
               key: aether.network.network_namespace
           exact_match_map:
             map:
-              "/host/run/netns/450464c6b813":
+              "/host/run/netns/99cca569ea1f":
                 action:
                   name: envoy.matching.action.transport_socket.name
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.matching.common_inputs.transport_socket.v3.TransportSocketNameAction
                     name: svc_0_socket
-              "/host/run/netns/7c0068f3eb4c":
+              "/host/run/netns/00b4a7e976cf":
                 action:
                   name: envoy.matching.action.transport_socket.name
                   typed_config:
