@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/google/renameio/v2"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -68,7 +69,7 @@ func (p *AetherPlugin) writeRegistryEntryFile(netns string, args K8sArgs, dst st
 	filename := getEntryFileName(dst, args)
 
 	// Write the file with appropriate permissions
-	if err := os.WriteFile(filename, data, 0644); err != nil {
+	if err := renameio.WriteFile(filename, data, 0644); err != nil {
 		p.logger.Error("failed to write registry file",
 			zap.String("file", filename),
 			zap.Error(err))

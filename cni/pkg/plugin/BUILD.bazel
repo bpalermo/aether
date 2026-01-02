@@ -16,6 +16,7 @@ go_library(
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_containernetworking_cni//pkg/types/100",
         "@com_github_containernetworking_cni//pkg/version",
+        "@com_github_google_renameio_v2//:renameio",
         "@org_golang_google_protobuf//encoding/protojson",
         "@org_uber_go_zap//:zap",
     ],
