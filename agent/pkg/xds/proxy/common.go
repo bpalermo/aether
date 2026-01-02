@@ -6,6 +6,6 @@ import (
 )
 
 func typedConfig(config proto.Message) *anypb.Any {
-	typedConfig, _ := anypb.New(config)
-	return typedConfig
+	c, _ := anypb.New(config)
+	return c
 }
