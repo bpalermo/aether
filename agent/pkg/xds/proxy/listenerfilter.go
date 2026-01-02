@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/bpalermo/aether/agent/pkg/xds/config"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tls_inspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	"google.golang.org/protobuf/proto"
@@ -15,15 +16,15 @@ func buildInboundListenerFilters() []*listenerv3.ListenerFilter {
 }
 
 func tlsInspector() *listenerv3.ListenerFilter {
-	config := &tls_inspectorv3.TlsInspector{}
-	return listenerFilter("envoy.filters.listener.tls_inspector", config)
+	filter := &tls_inspectorv3.TlsInspector{}
+	return listenerFilter("envoy.filters.listener.tls_inspector", filter)
 }
 
-func listenerFilter(name string, config proto.Message) *listenerv3.ListenerFilter {
+func listenerFilter(name string, msg proto.Message) *listenerv3.ListenerFilter {
 	return &listenerv3.ListenerFilter{
 		Name: name,
 		ConfigType: &listenerv3.ListenerFilter_TypedConfig{
-			TypedConfig: typedConfig(config),
+			TypedConfig: config.TypedConfig(msg),
 		},
 	}
 }

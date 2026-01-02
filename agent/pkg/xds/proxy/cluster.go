@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/bpalermo/aether/agent/pkg/xds/config"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
@@ -22,7 +23,7 @@ func NewCluster(name string, pod *corev1.Pod) *clusterv3.Cluster {
 			},
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": typedConfig(protocolOptions),
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": config.TypedConfig(protocolOptions),
 		},
 	}
 }

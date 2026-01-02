@@ -4,7 +4,6 @@ go_library(
     name = "proxy",
     srcs = [
         "cluster.go",
-        "common.go",
         "endpoint.go",
         "filterchain.go",
         "httpfilter.go",
@@ -17,6 +16,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/pkg/xds/proxy",
     visibility = ["//visibility:public"],
     deps = [
+        "//agent/pkg/xds/config",
         "//api/aether/registry/v1:registry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",

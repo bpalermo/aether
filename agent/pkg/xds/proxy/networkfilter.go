@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/bpalermo/aether/agent/pkg/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -19,7 +20,7 @@ func buildNetworkNamespaceFilterState() *listenerv3.Filter {
 }
 
 func buildSetFilterState(objectKey string, inlineStringFormatString string) *listenerv3.Filter {
-	config := &set_filter_state_v3.Config{
+	filter := &set_filter_state_v3.Config{
 		OnNewConnection: []*setFilterStatev3.FilterStateValue{
 			{
 				Key: &setFilterStatev3.FilterStateValue_ObjectKey{
@@ -41,7 +42,7 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 			},
 		},
 	}
-	return networkFilter("envoy.filters.network.set_filter_state", config)
+	return networkFilter("envoy.filters.network.set_filter_state", filter)
 }
 
 func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
@@ -61,11 +62,11 @@ func buildHTTPConnectionManagerFilter(config *http_connection_managerv3.HttpConn
 	return networkFilter("envoy.http_connection_manager", config)
 }
 
-func networkFilter(name string, config proto.Message) *listenerv3.Filter {
+func networkFilter(name string, msg proto.Message) *listenerv3.Filter {
 	return &listenerv3.Filter{
 		Name: name,
 		ConfigType: &listenerv3.Filter_TypedConfig{
-			TypedConfig: typedConfig(config),
+			TypedConfig: config.TypedConfig(msg),
 		},
 	}
 }
