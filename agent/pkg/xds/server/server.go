@@ -9,6 +9,8 @@ import (
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
@@ -20,6 +22,8 @@ import (
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -123,11 +127,15 @@ func (s *XdsServer) Start(ctx context.Context) error {
 }
 
 func (s *XdsServer) initialSnapshot(ctx context.Context, entries []*registryv1.RegistryEntry) error {
-	s.log.Info("creating initial snapshot", "entries", len(entries))
+	s.log.Info("creating initial snapshot")
+
+	clusters, endpoints, err := s.collectServices(ctx)
+
+	s.log.Info("initial snapshot", "entries", len(entries), "clusters", len(clusters), "endpoints", len(endpoints))
 
 	snapshot, err := cachev3.NewSnapshot(fmt.Sprintf("%v.0", 0), map[resource.Type][]types.Resource{
-		resource.EndpointType: make([]types.Resource, 0),
-		resource.ClusterType:  make([]types.Resource, 0),
+		resource.EndpointType: endpoints,
+		resource.ClusterType:  clusters,
 		resource.RouteType:    make([]types.Resource, 0),
 		resource.ListenerType: proxy.GenerateListenersFromEntries(entries),
 	})
@@ -144,4 +152,72 @@ func (s *XdsServer) initialSnapshot(ctx context.Context, entries []*registryv1.R
 
 func (s *XdsServer) GetCache() cachev3.SnapshotCache {
 	return s.snapshotCache
+}
+
+func (s *XdsServer) collectServices(ctx context.Context) ([]types.Resource, []types.Resource, error) {
+	podList := &corev1.PodList{}
+
+	// Use ListOptions to filter
+	listOpts := []client.ListOption{
+		client.HasLabels{constants.AetherServiceLabel},
+	}
+
+	if err := s.mgr.GetClient().List(ctx, podList, listOpts...); err != nil {
+		return nil, nil, err
+	}
+	if len(podList.Items) == 0 {
+		s.log.Info("no pods found with service label")
+		return make([]types.Resource, 0), make([]types.Resource, 0), nil
+	}
+	s.log.Info("found pods with service label", "total", len(podList.Items))
+
+	// Convert to slice of pointers
+	cdsData := map[string]*clusterv3.Cluster{}
+	edsData := map[string]*endpointv3.ClusterLoadAssignment{}
+	for i := range podList.Items {
+		s.log.Info("processing pod", "pod", podList.Items[i].Name)
+		pod := &podList.Items[i]
+
+		if pod.Status.PodIP == "" {
+			s.log.Info("IP address has not yet been allocated for pod, skipping", "pod", pod.Name)
+			continue
+		}
+
+		serviceName := getServiceNameFromPod(pod)
+		if serviceName == "" {
+			s.log.Info("pod has no service label, skipping", "pod", pod.Name)
+			continue
+		}
+
+		if _, ok := cdsData[serviceName]; !ok {
+			cdsData[serviceName] = proxy.NewCluster(serviceName, pod)
+		}
+
+		if _, ok := edsData[serviceName]; !ok {
+			edsData[serviceName] = proxy.NewClusterLoadAssignment(serviceName)
+		}
+
+		edsData[serviceName].Endpoints = append(edsData[serviceName].Endpoints, proxy.LocalityLbEndpointFromPod(pod))
+	}
+
+	edsResources := make([]types.Resource, 0, len(edsData))
+	for _, cla := range edsData {
+		edsResources = append(edsResources, cla)
+	}
+
+	cdsResources := make([]types.Resource, 0, len(cdsData))
+	for _, c := range cdsData {
+		cdsResources = append(cdsResources, c)
+	}
+
+	return cdsResources, edsResources, nil
+}
+
+func getServiceNameFromPod(pod *corev1.Pod) string {
+	serviceName, ok := pod.Labels[constants.AetherServiceLabel]
+	if !ok {
+		// this is not expected to happen as we rely on the validation webhook to prevent empty service names
+		return ""
+	}
+	return serviceName
 }

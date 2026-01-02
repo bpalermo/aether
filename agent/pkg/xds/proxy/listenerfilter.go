@@ -4,7 +4,6 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tls_inspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 )
 
 func buildInboundListenerFilters() []*listenerv3.ListenerFilter {
@@ -21,12 +20,10 @@ func tlsInspector() *listenerv3.ListenerFilter {
 }
 
 func listenerFilter(name string, config proto.Message) *listenerv3.ListenerFilter {
-	typedConfig, _ := anypb.New(config)
-
 	return &listenerv3.ListenerFilter{
 		Name: name,
 		ConfigType: &listenerv3.ListenerFilter_TypedConfig{
-			TypedConfig: typedConfig,
+			TypedConfig: typedConfig(config),
 		},
 	}
 }

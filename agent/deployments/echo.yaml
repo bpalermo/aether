@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: aether-system
+  labels:
+    app: svc-a
+    app.kubernetes.io/name: svc-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: svc-a
+      app.kubernetes.io/name: svc-a
+  template:
+    metadata:
+      labels:
+        app: svc-a
+        app.kubernetes.io/name: svc-a
+        aether.io/service: svc-a
+    spec:
+      containers:
+        - name: echo
+          image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
+          env:
+            - name: HTTP_PORT
+              value: "8080"
+            - name: H2C_PORT
+              value: "8081"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 10m
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-b
+  namespace: aether-system
+  labels:
+    app: svc-b
+    app.kubernetes.io/name: svc-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: svc-b
+      app.kubernetes.io/name: svc-b
+  template:
+    metadata:
+      labels:
+        app: svc-b
+        app.kubernetes.io/name: svc-b
+        aether.io/service: svc-b
+    spec:
+      containers:
+        - name: echo
+          image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
+          env:
+            - name: HTTP_PORT
+              value: "8080"
+            - name: H2C_PORT
+              value: "8081"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 10m

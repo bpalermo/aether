@@ -8,7 +8,6 @@ import (
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	set_filter_state_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 )
 
 const (
@@ -63,12 +62,10 @@ func buildHTTPConnectionManagerFilter(config *http_connection_managerv3.HttpConn
 }
 
 func networkFilter(name string, config proto.Message) *listenerv3.Filter {
-	typedConfig, _ := anypb.New(config)
-
 	return &listenerv3.Filter{
 		Name: name,
 		ConfigType: &listenerv3.Filter_TypedConfig{
-			TypedConfig: typedConfig,
+			TypedConfig: typedConfig(config),
 		},
 	}
 }
