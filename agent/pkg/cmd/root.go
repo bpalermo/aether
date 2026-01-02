@@ -76,7 +76,13 @@ func runAgent() error {
 	}
 
 	// Create XDS server
-	srv := server.NewXdsServer(logger, cfg.ProxyServiceNodeID, registryWatcher.GetInitializationChan(), registryWatcher.GetEntryChan())
+	srv := server.NewXdsServer(
+		m,
+		logger,
+		cfg.ProxyServiceNodeID,
+		registryWatcher.GetInitializationChan(),
+		registryWatcher.GetEntryChan(),
+	)
 	if err = m.Add(srv); err != nil {
 		return err
 	}

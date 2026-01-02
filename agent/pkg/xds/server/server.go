@@ -20,6 +20,7 @@ import (
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 type XdsServer struct {
@@ -30,6 +31,7 @@ type XdsServer struct {
 	snapshotCache cachev3.SnapshotCache
 	grpcServer    *grpc.Server
 
+	mgr              manager.Manager
 	registryInitChan <-chan struct{}
 	entryChan        <-chan *registryv1.RegistryEntry
 
@@ -38,8 +40,9 @@ type XdsServer struct {
 
 type XdsServerOption func(*XdsServer)
 
-func NewXdsServer(log logr.Logger, proxyServiceNodeID string, registryInitChan <-chan struct{}, entryChan <-chan *registryv1.RegistryEntry, opts ...XdsServerOption) *XdsServer {
+func NewXdsServer(mgr manager.Manager, log logr.Logger, proxyServiceNodeID string, registryInitChan <-chan struct{}, entryChan <-chan *registryv1.RegistryEntry, opts ...XdsServerOption) *XdsServer {
 	srv := &XdsServer{
+		mgr:                mgr,
 		log:                log.WithName("xds"),
 		address:            constants.DefaultXdsSocketPath,
 		proxyServiceNodeID: proxyServiceNodeID,
@@ -89,6 +92,11 @@ func (s *XdsServer) Start(ctx context.Context) error {
 		}
 		s.grpcServer.GracefulStop()
 	}()
+
+	// Wait for the cache to be synced
+	if r := s.mgr.GetCache().WaitForCacheSync(ctx); !r {
+		return fmt.Errorf("cache sync failed")
+	}
 
 	// wait for the registry channel to close before populate the initial snapshot
 	entries := make([]*registryv1.RegistryEntry, 0)

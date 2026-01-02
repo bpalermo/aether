@@ -19,6 +19,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//service/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//service/route/v3:route",
         "@com_github_go_logr_logr//:logr",
+        "@io_k8s_sigs_controller_runtime//pkg/manager",
         "@org_golang_google_grpc//:grpc",
     ],
 )
