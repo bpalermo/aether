@@ -10,6 +10,8 @@ import (
 )
 
 const (
+	defaultInboundAddress   = "0.0.0.0"
+	defaultHTTPInboundPort  = 18080
 	defaultOutboundAddress  = "127.0.0.1"
 	defaultHTTPOutboundPort = 18081
 )
@@ -17,10 +19,34 @@ const (
 func GenerateListenersFromEntries(entries []*registryv1.RegistryEntry) []types.Resource {
 	var listeners []types.Resource
 	for _, entry := range entries {
+		listeners = append(listeners, generateInboundHTTPListener(entry))
 		listeners = append(listeners, generateOutboundHTTPListener(entry))
 	}
 
 	return listeners
+}
+
+func generateInboundHTTPListener(entry *registryv1.RegistryEntry) *listenerv3.Listener {
+	return &listenerv3.Listener{
+		Name: fmt.Sprintf("inbound_http"),
+		Address: &corev3.Address{
+			Address: &corev3.Address_SocketAddress{
+				SocketAddress: &corev3.SocketAddress{
+					Protocol: corev3.SocketAddress_TCP,
+					Address:  defaultInboundAddress,
+					PortSpecifier: &corev3.SocketAddress_PortValue{
+						PortValue: defaultHTTPInboundPort,
+					},
+					NetworkNamespaceFilepath: entry.NetworkNs,
+				},
+			},
+		},
+		TrafficDirection: corev3.TrafficDirection_INBOUND,
+		ListenerFilters:  buildInboundListenerFilters(),
+		FilterChains: []*listenerv3.FilterChain{
+			buildDefaultInboundHTTPFilterChain(entry.PodName),
+		},
+	}
 }
 
 func generateOutboundHTTPListener(entry *registryv1.RegistryEntry) *listenerv3.Listener {

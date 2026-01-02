@@ -45,8 +45,8 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 	return networkFilter("envoy.filters.network.set_filter_state", config)
 }
 
-func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfiguration) *listenerv3.Filter {
-	config := &http_connection_managerv3.HttpConnectionManager{
+func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
+	return &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: name,
 		CodecType:  http_connection_managerv3.HttpConnectionManager_AUTO,
 		HttpFilters: []*http_connection_managerv3.HttpFilter{
@@ -56,7 +56,9 @@ func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfigura
 			RouteConfig: routeConfig,
 		},
 	}
+}
 
+func buildHTTPConnectionManagerFilter(config *http_connection_managerv3.HttpConnectionManager) *listenerv3.Filter {
 	return networkFilter("envoy.http_connection_manager", config)
 }
 

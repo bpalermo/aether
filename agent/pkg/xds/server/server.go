@@ -93,7 +93,7 @@ func (s *XdsServer) Start(ctx context.Context) error {
 		s.grpcServer.GracefulStop()
 	}()
 
-	// Wait for the cache to be synced
+	// Wait for the controller cache to be synced
 	if r := s.mgr.GetCache().WaitForCacheSync(ctx); !r {
 		return fmt.Errorf("cache sync failed")
 	}
