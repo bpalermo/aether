@@ -10,6 +10,7 @@ import (
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // ClusterCache is an optimized cache for clusters
@@ -34,16 +35,19 @@ func NewClusterCache() *ClusterCache {
 	}
 }
 
-// AddCluster adds a cluster to the cache
-func (c *ClusterCache) AddCluster(cluster *clusterv3.Cluster) {
+// AddClusterOrUpdate adds a cluster if it doesn't exist or updates if it does
+func (c *ClusterCache) AddClusterOrUpdate(cluster *clusterv3.Cluster) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if _, exists := c.clusters[cluster.Name]; !exists {
 		c.totalClusters++
+		c.clusters[cluster.Name] = cluster
+		c.dirty = true
+	} else if !proto.Equal(c.clusters[cluster.Name], cluster) {
+		c.clusters[cluster.Name] = cluster
+		c.dirty = true
 	}
-	c.clusters[cluster.Name] = cluster
-	c.dirty = true
 }
 
 // RemoveCluster removes a cluster from the cache
@@ -152,7 +156,7 @@ func (c *ListenerCache) GetListeners(path string) []types.Resource {
 	}
 
 	if pl.dirty {
-		c.rebuildResources(pl)
+		c.rebuildListenerResources(pl)
 		pl.dirty = false
 	}
 
@@ -167,7 +171,7 @@ func (c *ListenerCache) GetAllListeners() []types.Resource {
 	resources := make([]types.Resource, 0, c.totalListeners)
 	for _, pl := range c.listeners {
 		if pl.dirty {
-			c.rebuildResources(pl)
+			c.rebuildListenerResources(pl)
 			pl.dirty = false
 		}
 		resources = append(resources, pl.resources...)
@@ -175,8 +179,8 @@ func (c *ListenerCache) GetAllListeners() []types.Resource {
 	return resources
 }
 
-// rebuildResources rebuilds the resource slice from listeners
-func (c *ListenerCache) rebuildResources(pl *pathListeners) {
+// rebuildListenerResources rebuilds the resource slice from listeners
+func (c *ListenerCache) rebuildListenerResources(pl *pathListeners) {
 	pl.resources = make([]types.Resource, 0, len(pl.listeners))
 	for _, listener := range pl.listeners {
 		pl.resources = append(pl.resources, listener)
@@ -185,13 +189,15 @@ func (c *ListenerCache) rebuildResources(pl *pathListeners) {
 
 type ClusterName string
 
-type PodName string
+type NamespacedPodName string
 
 // EndpointCache is an optimized cache for endpoints with better memory layout
 type EndpointCache struct {
 	mu sync.RWMutex
 	// Main cache indexed by cluster name
 	clusters map[ClusterName]*registryCluster
+	// podToCluster is a reverse index to optimize endpoint search
+	podToCluster map[NamespacedPodName]ClusterName
 	// Track total endpoints for capacity planning
 	totalEndpoints int
 }
@@ -201,22 +207,23 @@ type registryCluster struct {
 	// Pre-built ClusterLoadAssignment for quick retrieval
 	cla *endpointv3.ClusterLoadAssignment
 	// Endpoints indexed by pod for O(1) lookups
-	endpoints map[PodName]*endpointv3.LocalityLbEndpoints
-	// Cache the locality to avoid rebuilding
-	locality *endpointv3.LocalityLbEndpoints
+	endpoints map[NamespacedPodName]*endpointv3.LocalityLbEndpoints
 	// Track if CLA needs rebuild
 	dirty bool
 }
 
 // NewEndpointCache creates a new endpoint cache with initial capacity
+// when a pod is deleted, we can't fetch the service name from the labels anymore,
+// so we can't use a map indexed by the cluster name.
 func NewEndpointCache() *EndpointCache {
 	return &EndpointCache{
-		clusters: make(map[ClusterName]*registryCluster, 8), // Pre-allocate for typical cluster count
+		clusters:     make(map[ClusterName]*registryCluster, 8), // Pre-allocate for typical cluster count
+		podToCluster: make(map[NamespacedPodName]ClusterName, 32),
 	}
 }
 
 // AddEndpoint adds an endpoint to the cache efficiently
-func (c *EndpointCache) AddEndpoint(clusterName ClusterName, pod *registryv1.Event_Pod) {
+func (c *EndpointCache) AddEndpoint(clusterName ClusterName, pod *registryv1.Event_KubernetesPod) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -225,38 +232,52 @@ func (c *EndpointCache) AddEndpoint(clusterName ClusterName, pod *registryv1.Eve
 		// Initialize a new cluster with the pre-allocated endpoint map
 		cluster = &registryCluster{
 			cla:       proxy.NewClusterLoadAssignment(string(clusterName)),
-			endpoints: make(map[PodName]*endpointv3.LocalityLbEndpoints, 2), // Pre-allocate
+			endpoints: make(map[NamespacedPodName]*endpointv3.LocalityLbEndpoints, 2), // Pre-allocate
 			dirty:     false,
 		}
 		c.clusters[clusterName] = cluster
 	}
 
-	podName := PodName(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+	namespacedPodName := namespacedPodNameFromEvent(pod)
+
+	// Update reverse index
+	c.podToCluster[namespacedPodName] = clusterName
 
 	// Only update if the endpoint doesn't exist or has changed
-	if _, exists := cluster.endpoints[podName]; !exists {
-		cluster.endpoints[podName] = proxy.LocalityLbEndpointFromPod(pod)
+	le := proxy.LocalityLbEndpointFromPod(pod)
+	if _, exists = cluster.endpoints[namespacedPodName]; !exists {
+		cluster.endpoints[namespacedPodName] = le
 		cluster.dirty = true
 		c.totalEndpoints++
+	} else if !proto.Equal(cluster.endpoints[namespacedPodName], le) {
+		cluster.endpoints[namespacedPodName] = le
+		cluster.dirty = true
 	}
 }
 
-// RemoveEndpoint removes an endpoint from the cache efficiently
-func (c *EndpointCache) RemoveEndpoint(clusterName ClusterName, podName PodName) {
+// RemoveEndpoint removes an endpoint from the cache efficiently.
+func (c *EndpointCache) RemoveEndpoint(pod *registryv1.Event_KubernetesPod) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	cluster, exists := c.clusters[clusterName]
+	namespacedPodName := namespacedPodNameFromEvent(pod)
+
+	// O(1) lookup instead of O(n) scan
+	clusterName, exists := c.podToCluster[namespacedPodName]
 	if !exists {
 		return
 	}
 
-	if _, exists := cluster.endpoints[podName]; exists {
-		delete(cluster.endpoints, podName)
+	cluster := c.clusters[clusterName]
+	if cluster != nil {
+		delete(cluster.endpoints, namespacedPodName)
 		cluster.dirty = true
 		c.totalEndpoints--
 
-		// Remove empty clusters to free memory
+		// Clean up reverse index
+		delete(c.podToCluster, namespacedPodName)
+
+		// Remove empty clusters
 		if len(cluster.endpoints) == 0 {
 			delete(c.clusters, clusterName)
 		}
@@ -288,4 +309,8 @@ func (c *EndpointCache) rebuildCLA(cluster *registryCluster) {
 		localities = append(localities, endpoint)
 	}
 	cluster.cla.Endpoints = localities
+}
+
+func namespacedPodNameFromEvent(pod *registryv1.Event_KubernetesPod) NamespacedPodName {
+	return NamespacedPodName(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 }

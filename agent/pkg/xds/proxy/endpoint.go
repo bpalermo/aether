@@ -13,7 +13,7 @@ func NewClusterLoadAssignment(name string) *endpointv3.ClusterLoadAssignment {
 	}
 }
 
-func LocalityLbEndpointFromPod(pod *registryv1.Event_Pod) *endpointv3.LocalityLbEndpoints {
+func LocalityLbEndpointFromPod(pod *registryv1.Event_KubernetesPod) *endpointv3.LocalityLbEndpoints {
 	return &endpointv3.LocalityLbEndpoints{
 		LbEndpoints: []*endpointv3.LbEndpoint{
 			{

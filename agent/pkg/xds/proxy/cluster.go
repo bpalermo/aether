@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
-func NewCluster(pod *registryv1.Event_Pod) *clusterv3.Cluster {
+func NewCluster(pod *registryv1.Event_KubernetesPod) *clusterv3.Cluster {
 	protocolOptions := http2ProtocolOptions()
 
 	return &clusterv3.Cluster{

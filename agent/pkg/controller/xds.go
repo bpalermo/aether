@@ -50,7 +50,7 @@ func NewXdsController(ctx context.Context, mgr ctrl.Manager, initWg *sync.WaitGr
 
 	return &XdsController{
 		mgr,
-		logger,
+		logger.WithName("xds-controller"),
 		mgr.GetClient(),
 		podInformer,
 		initWg,
@@ -82,8 +82,8 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		c.logger.Info("pod informer has synced, ready to process")
 	}
 
-	resourceEvent := &registryv1.Event_Pod_{
-		Pod: &registryv1.Event_Pod{
+	resourceEvent := &registryv1.Event_Pod{
+		Pod: &registryv1.Event_KubernetesPod{
 			Name:      req.Name,
 			Namespace: req.Namespace,
 		},
@@ -94,7 +94,7 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := c.client.Get(ctx, req.NamespacedName, pod); err != nil {
 		if errors.IsNotFound(err) {
 			// Pod was deleted - send delete event
-			c.logger.Info("pod not found, sending delete event", "pod", req.NamespacedName)
+			c.logger.Info("pod not found, sending delete event", "pod", req.Name, "namespace", req.Namespace)
 			// write DELETE operation to the event channel
 			event := &registryv1.Event{
 				Operation: registryv1.Event_DELETED,
@@ -103,11 +103,11 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 			select {
 			case c.eventChan <- event:
-				c.logger.V(1).Info("sent delete event", "pod", req.NamespacedName)
+				c.logger.Info("sent delete event", "pod", req.Name, "namespace", req.Namespace)
 			case <-ctx.Done():
 				return ctrl.Result{}, ctx.Err()
 			default:
-				c.logger.V(1).Info("event channel full, re-queuing delete", "pod", req.NamespacedName)
+				c.logger.Info("event channel full, re-queuing delete", "pod", req.Name, "namespace", req.Namespace)
 				return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 			}
 
@@ -120,8 +120,14 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	op := registryv1.Event_CREATED
 	if !pod.DeletionTimestamp.IsZero() {
 		op = registryv1.Event_DELETED
-		c.logger.Info("pod is marked for deletion", "pod", req.NamespacedName)
+		c.logger.Info("pod is marked for deletion", "pod", req.Name, "namespace", req.Namespace)
 	}
+
+	if pod.Status.PodIP == "" {
+		c.logger.Info("pod IP not yet available", "pod", req.Name, "namespace", req.Namespace)
+		return ctrl.Result{}, nil
+	}
+
 	// At this point we have a pod
 	resourceEvent.Pod.Ip = pod.Status.PodIP
 	resourceEvent.Pod.ServiceName = pod.Labels[constants.AetherServiceLabel]
@@ -134,12 +140,12 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// Send event with context awareness
 	select {
 	case c.eventChan <- event:
-		c.logger.Info("sent event", "pod", req.NamespacedName, "operation", op.String())
+		c.logger.Info("sent event", "pod", req.Name, "namespace", req.Namespace, "operation", op.String())
 	case <-ctx.Done():
 		return ctrl.Result{}, ctx.Err()
 	default:
 		// Channel is full, requeue
-		c.logger.Info("event channel full, re-queuing", "pod", req.NamespacedName, "op", op.String())
+		c.logger.Info("event channel full, re-queuing", "pod", req.Name, "namespace", req.Namespace, "op", op.String())
 		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
 

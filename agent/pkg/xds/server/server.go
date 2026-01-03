@@ -45,11 +45,9 @@ type XdsServer struct {
 type XdsServerOption func(*XdsServer)
 
 func NewXdsServer(mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, registry *XdsRegistry, opts ...XdsServerOption) *XdsServer {
-	xDSlog := log.WithName("xds")
-
 	srv := &XdsServer{
 		mgr:      mgr,
-		log:      xDSlog,
+		log:      log.WithName("xds-server"),
 		address:  constants.DefaultXdsSocketPath,
 		initWg:   initWg,
 		registry: registry,
@@ -111,6 +109,7 @@ func (s *XdsServer) Start(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	s.log.Info("starting XDS server")
 	return s.grpcServer.Serve(listener)
 }
 

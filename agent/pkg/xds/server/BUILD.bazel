@@ -29,6 +29,7 @@ go_library(
         "@io_k8s_api//core/v1:core",
         "@io_k8s_sigs_controller_runtime//pkg/manager",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_protobuf//proto",
     ],
 )
 
@@ -40,10 +41,9 @@ go_test(
     ],
     embed = [":server"],
     deps = [
-        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
+        "//api/aether/registry/v1:registry",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

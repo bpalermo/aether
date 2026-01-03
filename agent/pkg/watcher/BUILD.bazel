@@ -2,7 +2,7 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "watcher",
-    srcs = ["registry.go"],
+    srcs = ["cni.go"],
     importpath = "github.com/bpalermo/aether/agent/pkg/watcher",
     visibility = ["//visibility:public"],
     deps = [

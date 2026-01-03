@@ -15,7 +15,7 @@ message Event {
 
   Operation operation = 1;
 
-  message Pod {
+  message KubernetesPod {
     string namespace = 1;
     string name = 2;
     string service_name = 3;
@@ -24,11 +24,11 @@ message Event {
 
   message NetworkNamespace {
     string path = 1;
-    Pod pod = 2;
+    KubernetesPod pod = 2;
   }
 
   oneof resource {
-    Pod pod = 2;
+    KubernetesPod pod = 2;
     NetworkNamespace network_ns = 3;
   }
 }

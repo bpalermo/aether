@@ -14,6 +14,10 @@ import (
 	"github.com/go-logr/logr"
 )
 
+const (
+	eventBuffer = 32
+)
+
 type XdsRegistry struct {
 	log logr.Logger
 
@@ -37,7 +41,7 @@ func NewXdsRegistry(nodeID string, log logr.Logger) *XdsRegistry {
 		NewClusterCache(),
 		NewListenerCache(),
 		NewEndpointCache(),
-		make(chan *registryv1.Event),
+		make(chan *registryv1.Event, eventBuffer),
 		nodeID,
 		cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil),
 		0,
@@ -65,21 +69,21 @@ func (r *XdsRegistry) Start(ctx context.Context) error {
 }
 
 func (r *XdsRegistry) processEvent(ctx context.Context, event *registryv1.Event) error {
-	r.log.Info("processing event", "type", event.GetResource())
+	r.log.Info("processing event", "operation", event.Operation)
 
 	// Switch on the resource type
 	switch res := event.GetResource().(type) {
-	case *registryv1.Event_Pod_:
+	case *registryv1.Event_Pod:
 		return r.processPodEvent(ctx, event.Operation, res.Pod)
 	case *registryv1.Event_NetworkNs:
 		return r.processNetworkNs(ctx, event.Operation, res.NetworkNs)
 	default:
-		r.log.V(1).Info("unknown resource type", "event", event)
+		r.log.Info("unknown resource type", "event", event)
 		return nil
 	}
 }
 
-func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_Operation, event *registryv1.Event_Pod) error {
+func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_Operation, event *registryv1.Event_KubernetesPod) error {
 	r.log.Info("processing pod event",
 		"operation", op.String(),
 		"name", event.GetName(),
@@ -89,11 +93,12 @@ func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_O
 
 	switch op {
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
+		// order here matters
+		r.clusterCache.AddClusterOrUpdate(proxy.NewCluster(event))
 		r.endpointCache.AddEndpoint(ClusterName(event.GetServiceName()), event)
-		r.clusterCache.AddCluster(proxy.NewCluster(event))
 	case registryv1.Event_DELETED:
-		r.endpointCache.RemoveEndpoint(ClusterName(event.GetServiceName()), PodName(event.GetName()))
 		r.clusterCache.RemoveCluster(event.GetServiceName())
+		r.endpointCache.RemoveEndpoint(event)
 	}
 
 	return r.generateSnapshot(ctx)
@@ -154,19 +159,21 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 }
 
 func (r *XdsRegistry) generateEndpoints() []types.Resource {
+	r.endpointCache.mu.Lock()
+	defer r.endpointCache.mu.Unlock()
+
 	var clas []types.Resource
 
-	r.endpointCache.mu.RLock()
-	defer r.endpointCache.mu.RUnlock()
-
-	// Collect all ClusterLoadAssignments from the cache
+	// Rebuild dirty CLAs first
 	for _, cluster := range r.endpointCache.clusters {
-		// Get the CLA, rebuilding if necessary
 		if cluster.dirty {
 			r.endpointCache.rebuildCLA(cluster)
 			cluster.dirty = false
 		}
+	}
 
+	// Collect all ClusterLoadAssignments
+	for _, cluster := range r.endpointCache.clusters {
 		if cluster.cla != nil {
 			clas = append(clas, cluster.cla)
 		}
