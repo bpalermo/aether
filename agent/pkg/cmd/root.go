@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"sync"
+
 	"github.com/bpalermo/aether/agent/internal/log"
 	"github.com/bpalermo/aether/agent/pkg/constants"
+	"github.com/bpalermo/aether/agent/pkg/controller"
 	"github.com/bpalermo/aether/agent/pkg/install"
 	"github.com/bpalermo/aether/agent/pkg/watcher"
 	"github.com/bpalermo/aether/agent/pkg/xds/server"
@@ -69,25 +72,56 @@ func runAgent() error {
 		return err
 	}
 
-	// Create the registry watcher
-	registryWatcher, err := watcher.NewRegistryWatcher(cfg.MountedCNIRegistryDir, logger)
-	if err != nil {
+	// use wait group for initialization synchronization
+	initWg := &sync.WaitGroup{}
+	initWg.Add(2)
+
+	// Create xDS registry
+	registry := server.NewXdsRegistry(cfg.ProxyServiceNodeID, logger)
+	if err = m.Add(registry); err != nil {
 		return err
 	}
 
-	// Create XDS server
+	// Create xDS server
 	srv := server.NewXdsServer(
 		m,
 		logger,
-		cfg.ProxyServiceNodeID,
-		registryWatcher.GetInitializationChan(),
-		registryWatcher.GetEntryChan(),
+		initWg,
+		registry,
 	)
 	if err = m.Add(srv); err != nil {
 		return err
 	}
 
+	// Create the registry watcher
+	registryWatcher, err := watcher.NewCNIWatcher(
+		cfg.MountedCNIRegistryDir,
+		initWg,
+		srv.GetRegistryEventChan(),
+		logger,
+	)
+	if err != nil {
+		return err
+	}
+
 	if err = m.Add(registryWatcher); err != nil {
+		return err
+	}
+
+	// Create the XDS controller
+	c, err := controller.NewXdsController(
+		ctx,
+		m,
+		initWg,
+		srv.GetRegistryEventChan(),
+		logger,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = c.SetupWithManager(m)
+	if err != nil {
 		return err
 	}
 

@@ -2,18 +2,18 @@ package proxy
 
 import (
 	"github.com/bpalermo/aether/agent/pkg/xds/config"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"google.golang.org/protobuf/types/known/anypb"
-	corev1 "k8s.io/api/core/v1"
 )
 
-func NewCluster(name string, pod *corev1.Pod) *clusterv3.Cluster {
+func NewCluster(pod *registryv1.Event_Pod) *clusterv3.Cluster {
 	protocolOptions := http2ProtocolOptions()
 
 	return &clusterv3.Cluster{
-		Name: name,
+		Name: pod.ServiceName,
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_EDS,
 		},

@@ -16,17 +16,15 @@ const (
 	defaultHTTPOutboundPort = 18081
 )
 
-func GenerateListenersFromEntries(entries []*registryv1.RegistryEntry) []types.Resource {
+func GenerateListenersFromEvent(netNs *registryv1.Event_NetworkNamespace) []types.Resource {
 	var listeners []types.Resource
-	for _, entry := range entries {
-		listeners = append(listeners, generateInboundHTTPListener(entry))
-		listeners = append(listeners, generateOutboundHTTPListener(entry))
-	}
+	listeners = append(listeners, generateInboundHTTPListener(netNs))
+	listeners = append(listeners, generateOutboundHTTPListener(netNs))
 
 	return listeners
 }
 
-func generateInboundHTTPListener(entry *registryv1.RegistryEntry) *listenerv3.Listener {
+func generateInboundHTTPListener(netNs *registryv1.Event_NetworkNamespace) *listenerv3.Listener {
 	return &listenerv3.Listener{
 		Name: fmt.Sprintf("inbound_http"),
 		Address: &corev3.Address{
@@ -37,19 +35,19 @@ func generateInboundHTTPListener(entry *registryv1.RegistryEntry) *listenerv3.Li
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: defaultHTTPInboundPort,
 					},
-					NetworkNamespaceFilepath: entry.NetworkNs,
+					NetworkNamespaceFilepath: netNs.Path,
 				},
 			},
 		},
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultInboundHTTPFilterChain(entry.PodName),
+			buildDefaultInboundHTTPFilterChain(netNs.Pod.Name),
 		},
 	}
 }
 
-func generateOutboundHTTPListener(entry *registryv1.RegistryEntry) *listenerv3.Listener {
+func generateOutboundHTTPListener(netNs *registryv1.Event_NetworkNamespace) *listenerv3.Listener {
 	return &listenerv3.Listener{
 		Name: fmt.Sprintf("outbound_http"),
 		Address: &corev3.Address{
@@ -60,13 +58,13 @@ func generateOutboundHTTPListener(entry *registryv1.RegistryEntry) *listenerv3.L
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: defaultHTTPOutboundPort,
 					},
-					NetworkNamespaceFilepath: entry.NetworkNs,
+					NetworkNamespaceFilepath: netNs.Path,
 				},
 			},
 		},
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultOutboundHTTPFilterChain(entry.PodName),
+			buildDefaultOutboundHTTPFilterChain(netNs.Pod.Name),
 		},
 	}
 }

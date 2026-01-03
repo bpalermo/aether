@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/fsnotify/fsnotify"
@@ -13,32 +14,32 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-type RegistryWatcher struct {
+type CNIWatcher struct {
 	watcher      *fsnotify.Watcher
 	registryPath string
 	logger       logr.Logger
 
-	initializationChan chan struct{} // bidirectional internally
-	entryChan          chan *registryv1.RegistryEntry
+	initWg    *sync.WaitGroup
+	eventChan chan<- *registryv1.Event
 }
 
-func NewRegistryWatcher(registryPath string, logger logr.Logger) (*RegistryWatcher, error) {
+func NewCNIWatcher(registryPath string, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event, logger logr.Logger) (*CNIWatcher, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 
-	rw := &RegistryWatcher{
-		watcher:            watcher,
-		registryPath:       registryPath,
-		logger:             logger.WithName("registry-watcher"),
-		initializationChan: make(chan struct{}),
-		entryChan:          make(chan *registryv1.RegistryEntry),
+	rw := &CNIWatcher{
+		watcher:      watcher,
+		registryPath: registryPath,
+		logger:       logger.WithName("cni-watcher"),
+		initWg:       initWg,
+		eventChan:    eventChan,
 	}
 
 	// Add the registry path to watch
-	if err := watcher.Add(registryPath); err != nil {
-		err := watcher.Close()
+	if err = watcher.Add(registryPath); err != nil {
+		err = watcher.Close()
 		if err != nil {
 			rw.logger.Error(err, "failed to close watcher")
 			return nil, err
@@ -51,7 +52,7 @@ func NewRegistryWatcher(registryPath string, logger logr.Logger) (*RegistryWatch
 	return rw, nil
 }
 
-func (rw *RegistryWatcher) Start(ctx context.Context) error {
+func (rw *CNIWatcher) Start(ctx context.Context) error {
 	rw.logger.Info("starting registry watcher", "path", rw.registryPath)
 	defer func(watcher *fsnotify.Watcher) {
 		err := watcher.Close()
@@ -87,44 +88,55 @@ func (rw *RegistryWatcher) Start(ctx context.Context) error {
 	}
 }
 
-func (rw *RegistryWatcher) GetInitializationChan() <-chan struct{} {
-	return rw.initializationChan
-}
-
-func (rw *RegistryWatcher) GetEntryChan() <-chan *registryv1.RegistryEntry {
-	return rw.entryChan
-}
-
-func (rw *RegistryWatcher) handleEvent(event fsnotify.Event) {
+func (rw *CNIWatcher) handleEvent(event fsnotify.Event) {
 	// Only process JSON files
 	if filepath.Ext(event.Name) != ".json" {
 		return
 	}
 
+	var registryEvent *registryv1.Event
+
 	switch {
 	case event.Op&fsnotify.Create == fsnotify.Create:
 		rw.logger.Info("file created", "file", event.Name)
-		if err := rw.processFile(event.Name); err != nil {
+		entry := &registryv1.RegistryEntry{}
+		if err := rw.unmarshalFile(event.Name, entry); err != nil {
 			rw.logger.Error(err, "failed to process created file", "file", event.Name)
+			return
 		}
+		registryEvent = eventFromEntry(registryv1.Event_CREATED, entry)
 
 	case event.Op&fsnotify.Write == fsnotify.Write:
 		rw.logger.Info("file modified", "file", event.Name)
-		if err := rw.processFile(event.Name); err != nil {
+		entry := &registryv1.RegistryEntry{}
+		if err := rw.unmarshalFile(event.Name, entry); err != nil {
 			rw.logger.Error(err, "failed to process modified file", "file", event.Name)
+			return
 		}
+		registryEvent = eventFromEntry(registryv1.Event_UPDATED, entry)
 
 	case event.Op&fsnotify.Remove == fsnotify.Remove:
 		rw.logger.Info("file removed", "file", event.Name)
-		// Handle pod deletion
+		entry := &registryv1.RegistryEntry{}
+		if err := rw.unmarshalFile(event.Name, entry); err != nil {
+			rw.logger.Error(err, "failed to process deleted file", "file", event.Name)
+			return
+		}
+		registryEvent = eventFromEntry(registryv1.Event_DELETED, entry)
+	}
 
-	case event.Op&fsnotify.Rename == fsnotify.Rename:
-		rw.logger.Info("file renamed", "file", event.Name)
-		// Handle the rename if needed
+	// Send event to the channel if created
+	if registryEvent != nil {
+		select {
+		case rw.eventChan <- registryEvent:
+			// Event sent successfully
+		default:
+			rw.logger.Info("event channel full, dropping event", "file", event.Name)
+		}
 	}
 }
 
-func (rw *RegistryWatcher) processExistingFiles() error {
+func (rw *CNIWatcher) processExistingFiles() error {
 	files, err := filepath.Glob(filepath.Join(rw.registryPath, "*.json"))
 	if err != nil {
 		return fmt.Errorf("failed to list existing files: %w", err)
@@ -133,21 +145,27 @@ func (rw *RegistryWatcher) processExistingFiles() error {
 	var errs []error
 	for _, file := range files {
 		// Process each existing file as if it was just created
-		if err = rw.processFile(file); err != nil {
+		entry := &registryv1.RegistryEntry{}
+		if err = rw.unmarshalFile(file, entry); err != nil {
 			rw.logger.Error(err, "failed to process existing file", "file", file)
 			errs = append(errs, fmt.Errorf("failed to process %s: %w", file, err))
+			continue
+		}
+		registryEvent := eventFromEntry(registryv1.Event_CREATED, entry)
+		select {
+		case rw.eventChan <- registryEvent:
+			// Event sent successfully
+		default:
+			rw.logger.Info("event channel full, dropping event", "path", registryEvent.GetNetworkNs().GetPath())
 		}
 	}
 
-	if rw.initializationChan != nil {
-		close(rw.initializationChan)
-		rw.initializationChan = nil
-	}
+	rw.initWg.Done()
 
 	return errors.Join(errs...)
 }
 
-func (rw *RegistryWatcher) processFile(file string) error {
+func (rw *CNIWatcher) unmarshalFile(file string, entry *registryv1.RegistryEntry) error {
 	rw.logger.Info("processing file", "file", file)
 
 	// Read the file contents
@@ -162,7 +180,6 @@ func (rw *RegistryWatcher) processFile(file string) error {
 		return nil
 	}
 
-	entry := &registryv1.RegistryEntry{}
 	if err := protojson.Unmarshal(data, entry); err != nil {
 		return fmt.Errorf("failed to unmarshal file %s: %w", file, err)
 	}
@@ -173,8 +190,21 @@ func (rw *RegistryWatcher) processFile(file string) error {
 		"netns", entry.NetworkNs,
 	)
 
-	// Send entry to channel
-	rw.entryChan <- entry
-
 	return nil
+}
+
+func eventFromEntry(op registryv1.Event_Operation, entry *registryv1.RegistryEntry) *registryv1.Event {
+	return &registryv1.Event{
+		Operation: op,
+		Resource: &registryv1.Event_NetworkNs{
+			NetworkNs: &registryv1.Event_NetworkNamespace{
+				Pod: &registryv1.Event_Pod{
+					Name:      entry.PodName,
+					Namespace: entry.PodNs,
+				},
+				Path: entry.NetworkNs,
+			},
+		},
+	}
+
 }
