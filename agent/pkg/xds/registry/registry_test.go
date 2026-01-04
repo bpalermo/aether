@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/agent/pkg/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/go-logr/logr"
@@ -264,14 +263,14 @@ func TestXdsRegistry_generateSnapshot(t *testing.T) {
 	registry := NewXdsRegistry("test-node", logr.Discard())
 
 	// Add some test data
-	pod := &registryv1.Event_KubernetesPod{
+	event := &registryv1.Event_KubernetesPod{
 		Name:        "test-pod",
 		Namespace:   "default",
 		ServiceName: "test-service",
 		Ip:          "10.0.0.1",
 	}
-	registry.clusterCache.AddClusterOrUpdate(proxy.NewCluster(pod)) // Would need actual cluster
-	registry.endpointCache.AddEndpoint("test-service", pod)
+	registry.clusterCache.AddClusterOrUpdate(event) // Would need actual cluster
+	registry.endpointCache.AddEndpoint("test-service", event)
 
 	err := registry.generateSnapshot(ctx)
 	require.NoError(t, err)

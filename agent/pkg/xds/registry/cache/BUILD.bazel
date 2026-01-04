@@ -6,6 +6,7 @@ go_library(
         "cluster.go",
         "endpoint.go",
         "listener.go",
+        "vhost.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/pkg/xds/registry/cache",
     visibility = ["//visibility:public"],
@@ -16,6 +17,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
         "@org_golang_google_protobuf//proto",
     ],
 )
@@ -30,9 +32,6 @@ go_test(
     embed = [":cache"],
     deps = [
         "//api/aether/registry/v1:registry",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

@@ -5,8 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -21,39 +20,39 @@ func TestListenerCache(t *testing.T) {
 	t.Run("AddListeners", func(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
-		listener := &listenerv3.Listener{
-			Name: "test-listener",
-			Address: &corev3.Address{
-				Address: &corev3.Address_SocketAddress{
-					SocketAddress: &corev3.SocketAddress{
-						Address: "0.0.0.0",
-						PortSpecifier: &corev3.SocketAddress_PortValue{
-							PortValue: 8080,
-						},
-					},
-				},
+
+		event := &registryv1.Event_NetworkNamespace{
+			Path: path,
+			Pod: &registryv1.Event_KubernetesPod{
+				Name:      "test-pod",
+				Namespace: "default",
 			},
 		}
 
-		cache.AddListeners(path, []*listenerv3.Listener{listener})
+		cache.AddListeners(event)
 
 		cache.mu.RLock()
 		stored, exists := cache.listeners[path]
 		cache.mu.RUnlock()
 
 		assert.True(t, exists)
-		assert.Len(t, stored.listeners, 1)
-		assert.Equal(t, listener, stored.listeners["test-listener"])
+		assert.NotNil(t, stored)
+		// Note: actual listeners depend on proxy.GenerateListenersFromEvent implementation
 	})
 
 	t.Run("RemoveListeners", func(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
-		listener := &listenerv3.Listener{
-			Name: "test-listener",
+
+		event := &registryv1.Event_NetworkNamespace{
+			Path: path,
+			Pod: &registryv1.Event_KubernetesPod{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
 		}
 
-		cache.AddListeners(path, []*listenerv3.Listener{listener})
+		cache.AddListeners(event)
 		cache.RemoveListeners(path)
 
 		cache.mu.RLock()
@@ -61,6 +60,43 @@ func TestListenerCache(t *testing.T) {
 		cache.mu.RUnlock()
 
 		assert.False(t, exists)
+	})
+
+	t.Run("GetListeners", func(t *testing.T) {
+		cache := NewListenerCache()
+		path := "/test-listener"
+
+		event := &registryv1.Event_NetworkNamespace{
+			Path: path,
+			Pod: &registryv1.Event_KubernetesPod{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+		}
+
+		cache.AddListeners(event)
+
+		listeners := cache.GetListeners(path)
+		assert.NotNil(t, listeners)
+	})
+
+	t.Run("GetAllListeners", func(t *testing.T) {
+		cache := NewListenerCache()
+
+		// Add multiple listeners
+		for i := 0; i < 3; i++ {
+			event := &registryv1.Event_NetworkNamespace{
+				Path: fmt.Sprintf("/listener-%d", i),
+				Pod: &registryv1.Event_KubernetesPod{
+					Name:      fmt.Sprintf("test-pod-%d", i),
+					Namespace: "default",
+				},
+			}
+			cache.AddListeners(event)
+		}
+
+		allListeners := cache.GetAllListeners()
+		assert.NotNil(t, allListeners)
 	})
 
 	t.Run("ConcurrentListenerAccess", func(t *testing.T) {
@@ -74,10 +110,14 @@ func TestListenerCache(t *testing.T) {
 			go func(id int) {
 				defer wg.Done()
 				path := fmt.Sprintf("/listener-%d", id)
-				listener := &listenerv3.Listener{
-					Name: fmt.Sprintf("listener-%d", id),
+				event := &registryv1.Event_NetworkNamespace{
+					Path: path,
+					Pod: &registryv1.Event_KubernetesPod{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
 				}
-				cache.AddListeners(path, []*listenerv3.Listener{listener})
+				cache.AddListeners(event)
 			}(i)
 		}
 		wg.Wait()

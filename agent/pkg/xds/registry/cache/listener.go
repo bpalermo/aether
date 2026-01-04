@@ -3,6 +3,8 @@ package cache
 import (
 	"sync"
 
+	"github.com/bpalermo/aether/agent/pkg/xds/proxy"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
@@ -34,18 +36,26 @@ func NewListenerCache() *ListenerCache {
 }
 
 // AddListeners adds listeners to the cache efficiently
-func (c *ListenerCache) AddListeners(path string, listeners []*listenerv3.Listener) {
+func (c *ListenerCache) AddListeners(event *registryv1.Event_NetworkNamespace) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	pl, exists := c.listeners[path]
+	resources := proxy.GenerateListenersFromEvent(event)
+	listeners := make([]*listenerv3.Listener, 0, len(resources))
+	for _, res := range resources {
+		if listener, ok := res.(*listenerv3.Listener); ok {
+			listeners = append(listeners, listener)
+		}
+	}
+
+	pl, exists := c.listeners[event.GetPath()]
 	if !exists {
 		pl = &pathListeners{
 			listeners: make(map[string]*listenerv3.Listener, len(listeners)),
 			resources: make([]types.Resource, 0, len(listeners)),
 			dirty:     false,
 		}
-		c.listeners[path] = pl
+		c.listeners[event.GetPath()] = pl
 	}
 
 	// Add or update listeners

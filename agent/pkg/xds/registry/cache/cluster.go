@@ -3,6 +3,8 @@ package cache
 import (
 	"sync"
 
+	"github.com/bpalermo/aether/agent/pkg/xds/proxy"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"google.golang.org/protobuf/proto"
@@ -24,16 +26,18 @@ type ClusterCache struct {
 // NewClusterCache creates a new cluster cache with initial capacity
 func NewClusterCache() *ClusterCache {
 	return &ClusterCache{
-		clusters:  make(map[string]*clusterv3.Cluster, 32), // Pre-allocate for typical cluster count
+		clusters:  make(map[string]*clusterv3.Cluster, 16),
 		resources: make([]types.Resource, 0, 32),
 		dirty:     false,
 	}
 }
 
 // AddClusterOrUpdate adds a cluster if it doesn't exist or updates if it does
-func (c *ClusterCache) AddClusterOrUpdate(cluster *clusterv3.Cluster) {
+func (c *ClusterCache) AddClusterOrUpdate(event *registryv1.Event_KubernetesPod) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	cluster := proxy.NewCluster(event)
 
 	if _, exists := c.clusters[cluster.Name]; !exists {
 		c.totalClusters++

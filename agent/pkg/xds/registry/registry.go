@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/bpalermo/aether/agent/pkg/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/xds/registry/cache"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
@@ -95,7 +93,7 @@ func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_O
 	switch op {
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
 		// order here matters
-		r.clusterCache.AddClusterOrUpdate(proxy.NewCluster(event))
+		r.clusterCache.AddClusterOrUpdate(event)
 		r.endpointCache.AddEndpoint(cache.ClusterName(event.GetServiceName()), event)
 	case registryv1.Event_DELETED:
 		r.clusterCache.RemoveCluster(event.GetServiceName())
@@ -110,14 +108,7 @@ func (r *XdsRegistry) processNetworkNs(ctx context.Context, op registryv1.Event_
 
 	switch op {
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
-		resources := proxy.GenerateListenersFromEvent(event)
-		listeners := make([]*listenerv3.Listener, 0, len(resources))
-		for _, res := range resources {
-			if listener, ok := res.(*listenerv3.Listener); ok {
-				listeners = append(listeners, listener)
-			}
-		}
-		r.listenerCache.AddListeners(event.GetPath(), listeners)
+		r.listenerCache.AddListeners(event)
 	case registryv1.Event_DELETED:
 		r.listenerCache.RemoveListeners(event.GetPath())
 	}
