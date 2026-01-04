@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "registry",
+    srcs = ["registry.go"],
+    importpath = "github.com/bpalermo/aether/agent/pkg/xds/registry",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent/pkg/xds/proxy",
+        "//agent/pkg/xds/registry/cache",
+        "//api/aether/registry/v1:registry",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_go_logr_logr//:logr",
+    ],
+)
+
+go_test(
+    name = "registry_test",
+    srcs = ["registry_test.go"],
+    embed = [":registry"],
+    deps = [
+        "//agent/pkg/xds/registry/cache",
+        "//api/aether/registry/v1:registry",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

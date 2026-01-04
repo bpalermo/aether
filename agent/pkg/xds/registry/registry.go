@@ -1,4 +1,4 @@
-package server
+package registry
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/bpalermo/aether/agent/pkg/xds/proxy"
+	"github.com/bpalermo/aether/agent/pkg/xds/registry/cache"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -22,9 +23,9 @@ type XdsRegistry struct {
 	log logr.Logger
 
 	mu            sync.RWMutex
-	clusterCache  *ClusterCache
-	listenerCache *ListenerCache
-	endpointCache *EndpointCache
+	clusterCache  *cache.ClusterCache
+	listenerCache *cache.ListenerCache
+	endpointCache *cache.EndpointCache
 
 	eventChan chan *registryv1.Event
 
@@ -38,9 +39,9 @@ func NewXdsRegistry(nodeID string, log logr.Logger) *XdsRegistry {
 	return &XdsRegistry{
 		log.WithName("registry"),
 		sync.RWMutex{},
-		NewClusterCache(),
-		NewListenerCache(),
-		NewEndpointCache(),
+		cache.NewClusterCache(),
+		cache.NewListenerCache(),
+		cache.NewEndpointCache(),
 		make(chan *registryv1.Event, eventBuffer),
 		nodeID,
 		cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil),
@@ -95,7 +96,7 @@ func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_O
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
 		// order here matters
 		r.clusterCache.AddClusterOrUpdate(proxy.NewCluster(event))
-		r.endpointCache.AddEndpoint(ClusterName(event.GetServiceName()), event)
+		r.endpointCache.AddEndpoint(cache.ClusterName(event.GetServiceName()), event)
 	case registryv1.Event_DELETED:
 		r.clusterCache.RemoveCluster(event.GetServiceName())
 		r.endpointCache.RemoveEndpoint(event)
@@ -109,7 +110,6 @@ func (r *XdsRegistry) processNetworkNs(ctx context.Context, op registryv1.Event_
 
 	switch op {
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
-		// Convert types.Resource to []*listenerv3.Listener
 		resources := proxy.GenerateListenersFromEvent(event)
 		listeners := make([]*listenerv3.Listener, 0, len(resources))
 		for _, res := range resources {
@@ -130,9 +130,9 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 	defer r.mu.Unlock()
 
 	resources := map[resource.Type][]types.Resource{
-		resource.EndpointType: r.generateEndpoints(),
+		resource.EndpointType: r.endpointCache.GetAllEndpoints(),
 		resource.ClusterType:  r.clusterCache.GetAllClusters(),
-		resource.RouteType:    r.generateRoutes(),
+		resource.RouteType:    make([]types.Resource, 0),
 		resource.ListenerType: r.listenerCache.GetAllListeners(),
 	}
 
@@ -158,32 +158,8 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 	return nil
 }
 
-func (r *XdsRegistry) generateEndpoints() []types.Resource {
-	r.endpointCache.mu.Lock()
-	defer r.endpointCache.mu.Unlock()
-
-	var clas []types.Resource
-
-	// Rebuild dirty CLAs first
-	for _, cluster := range r.endpointCache.clusters {
-		if cluster.dirty {
-			r.endpointCache.rebuildCLA(cluster)
-			cluster.dirty = false
-		}
-	}
-
-	// Collect all ClusterLoadAssignments
-	for _, cluster := range r.endpointCache.clusters {
-		if cluster.cla != nil {
-			clas = append(clas, cluster.cla)
-		}
-	}
-
-	return clas
-}
-
-func (r *XdsRegistry) generateRoutes() []types.Resource {
-	return make([]types.Resource, 0)
+func (r *XdsRegistry) GetSnapshot() cachev3.SnapshotCache {
+	return r.snapshot
 }
 
 func (r *XdsRegistry) GetEventChan() chan<- *registryv1.Event {

@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	registry2 "github.com/bpalermo/aether/agent/pkg/xds/registry"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
@@ -19,7 +19,6 @@ import (
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -39,12 +38,12 @@ type XdsServer struct {
 
 	initWg *sync.WaitGroup
 
-	registry *XdsRegistry
+	registry *registry2.XdsRegistry
 }
 
 type XdsServerOption func(*XdsServer)
 
-func NewXdsServer(mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, registry *XdsRegistry, opts ...XdsServerOption) *XdsServer {
+func NewXdsServer(mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, registry *registry2.XdsRegistry, opts ...XdsServerOption) *XdsServer {
 	srv := &XdsServer{
 		mgr:      mgr,
 		log:      log.WithName("xds-server"),
@@ -57,7 +56,7 @@ func NewXdsServer(mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, 
 		option(srv)
 	}
 
-	server := serverv3.NewServer(context.Background(), srv.registry.snapshot, nil)
+	server := serverv3.NewServer(context.Background(), srv.registry.GetSnapshot(), nil)
 	srv.grpcServer = grpc.NewServer()
 
 	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(srv.grpcServer, server)
@@ -111,17 +110,4 @@ func (s *XdsServer) Start(ctx context.Context) error {
 
 	s.log.Info("starting XDS server")
 	return s.grpcServer.Serve(listener)
-}
-
-func (s *XdsServer) GetRegistryEventChan() chan<- *registryv1.Event {
-	return s.registry.eventChan
-}
-
-func getServiceNameFromPod(pod *corev1.Pod) string {
-	serviceName, ok := pod.Labels[constants.AetherServiceLabel]
-	if !ok {
-		// this is not expected to happen as we rely on the validation webhook to prevent empty service names
-		return ""
-	}
-	return serviceName
 }

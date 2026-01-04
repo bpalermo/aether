@@ -8,6 +8,7 @@ import (
 	"github.com/bpalermo/aether/agent/pkg/controller"
 	"github.com/bpalermo/aether/agent/pkg/install"
 	"github.com/bpalermo/aether/agent/pkg/watcher"
+	"github.com/bpalermo/aether/agent/pkg/xds/registry"
 	"github.com/bpalermo/aether/agent/pkg/xds/server"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
@@ -77,8 +78,8 @@ func runAgent() error {
 	initWg.Add(2)
 
 	// Create xDS registry
-	registry := server.NewXdsRegistry(cfg.ProxyServiceNodeID, logger)
-	if err = m.Add(registry); err != nil {
+	r := registry.NewXdsRegistry(cfg.ProxyServiceNodeID, logger)
+	if err = m.Add(r); err != nil {
 		return err
 	}
 
@@ -87,7 +88,7 @@ func runAgent() error {
 		m,
 		logger,
 		initWg,
-		registry,
+		r,
 	)
 	if err = m.Add(srv); err != nil {
 		return err
@@ -97,7 +98,7 @@ func runAgent() error {
 	registryWatcher, err := watcher.NewCNIWatcher(
 		cfg.MountedCNIRegistryDir,
 		initWg,
-		srv.GetRegistryEventChan(),
+		r.GetEventChan(),
 		logger,
 	)
 	if err != nil {
@@ -113,7 +114,7 @@ func runAgent() error {
 		ctx,
 		m,
 		initWg,
-		srv.GetRegistryEventChan(),
+		r.GetEventChan(),
 		logger,
 	)
 	if err != nil {

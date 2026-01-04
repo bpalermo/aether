@@ -7,7 +7,7 @@ import (
 
 func buildInboundRouteConfiguration() *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
-		Name: "inbound_http",
+		Name: "in_http",
 		VirtualHosts: []*routev3.VirtualHost{
 			{
 				Name:    "catch_all",
@@ -38,7 +38,7 @@ func buildInboundRouteConfiguration() *routev3.RouteConfiguration {
 
 func buildOutboundRouteConfiguration() *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
-		Name: "outbound_http",
+		Name: "out_http",
 		VirtualHosts: []*routev3.VirtualHost{
 			{
 				Name:    "catch_all",

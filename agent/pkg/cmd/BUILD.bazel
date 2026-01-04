@@ -11,6 +11,7 @@ go_library(
         "//agent/pkg/controller",
         "//agent/pkg/install",
         "//agent/pkg/watcher",
+        "//agent/pkg/xds/registry",
         "//agent/pkg/xds/server",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",

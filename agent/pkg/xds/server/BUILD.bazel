@@ -1,51 +1,23 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "server",
-    srcs = [
-        "cache.go",
-        "registry.go",
-        "server.go",
-    ],
+    srcs = ["server.go"],
     importpath = "github.com/bpalermo/aether/agent/pkg/xds/server",
     visibility = ["//visibility:public"],
     deps = [
         "//agent/pkg/constants",
-        "//agent/pkg/xds/proxy",
-        "//api/aether/registry/v1:registry",
-        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
-        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
-        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "//agent/pkg/xds/registry",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//service/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_envoyproxy_go_control_plane_envoy//service/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//service/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//service/route/v3:route",
         "@com_github_go_logr_logr//:logr",
-        "@io_k8s_api//core/v1:core",
         "@io_k8s_sigs_controller_runtime//pkg/manager",
         "@org_golang_google_grpc//:grpc",
-        "@org_golang_google_protobuf//proto",
-    ],
-)
-
-go_test(
-    name = "server_test",
-    srcs = [
-        "cache_test.go",
-        "registry_test.go",
-    ],
-    embed = [":server"],
-    deps = [
-        "//api/aether/registry/v1:registry",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
     ],
 )
