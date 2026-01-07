@@ -39,6 +39,14 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to parse previous result: %v", err)
 	}
 
+	// Extract the allocated IP addresses
+	var podIPs []string
+	for _, ipConfig := range prevResult.IPs {
+		if ipConfig.Address.IP != nil {
+			podIPs = append(podIPs, ipConfig.Address.IP.String())
+		}
+	}
+
 	k8sArgs := K8sArgs{}
 	if err := types.LoadArgs(args.Args, &k8sArgs); err != nil {
 		msg := "failed to load args"
@@ -51,6 +59,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		zap.String("container_id", args.ContainerID),
 		zap.String("netns", args.Netns),
 		zap.String("interface", args.IfName),
+		zap.Strings("pod_ips", podIPs),
 		zap.String("cni_version", netConf.CNIVersion))
 
 	err = p.createRegistryEntry(args.Netns, k8sArgs, netConf)
