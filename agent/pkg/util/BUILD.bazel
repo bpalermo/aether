@@ -1,8 +1,9 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "util",
     srcs = [
+        "file.go",
         "plugin.go",
         "watcher.go",
     ],
@@ -13,4 +14,10 @@ go_library(
         "@com_github_fsnotify_fsnotify//:fsnotify",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
     ],
+)
+
+go_test(
+    name = "util_test",
+    srcs = ["file_test.go"],
+    embed = [":util"],
 )

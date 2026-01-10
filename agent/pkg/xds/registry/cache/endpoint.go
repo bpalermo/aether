@@ -47,7 +47,7 @@ func NewEndpointCache() *EndpointCache {
 }
 
 // AddEndpoint adds an endpoint to the cache efficiently
-func (c *EndpointCache) AddEndpoint(clusterName ClusterName, pod *registryv1.Event_KubernetesPod) {
+func (c *EndpointCache) AddEndpoint(clusterName ClusterName, pod *registryv1.KubernetesPod) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -80,7 +80,7 @@ func (c *EndpointCache) AddEndpoint(clusterName ClusterName, pod *registryv1.Eve
 }
 
 // RemoveEndpoint removes an endpoint from the cache efficiently.
-func (c *EndpointCache) RemoveEndpoint(pod *registryv1.Event_KubernetesPod) {
+func (c *EndpointCache) RemoveEndpoint(pod *registryv1.KubernetesPod) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -135,7 +135,7 @@ func (c *EndpointCache) rebuildCLA(cluster *registryCluster) {
 	cluster.cla.Endpoints = localities
 }
 
-func namespacedPodNameFromEvent(pod *registryv1.Event_KubernetesPod) NamespacedPodName {
+func namespacedPodNameFromEvent(pod *registryv1.KubernetesPod) NamespacedPodName {
 	return NamespacedPodName(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 }
 

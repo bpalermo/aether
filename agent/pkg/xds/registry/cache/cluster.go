@@ -33,7 +33,7 @@ func NewClusterCache() *ClusterCache {
 }
 
 // AddClusterOrUpdate adds a cluster if it doesn't exist or updates if it does
-func (c *ClusterCache) AddClusterOrUpdate(event *registryv1.Event_KubernetesPod) {
+func (c *ClusterCache) AddClusterOrUpdate(event *registryv1.KubernetesPod) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

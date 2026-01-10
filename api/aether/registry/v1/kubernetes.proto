@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package aether.registry.v1;
+
+option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
+
+message KubernetesPod {
+  string namespace = 1;
+  string name = 2;
+  string service_name = 3;
+  string ip = 4;
+}

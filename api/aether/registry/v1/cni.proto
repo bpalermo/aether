@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package aether.registry.v1;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
+
+message CNIPod {
+  string name = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  string namespace = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  string network_namespace = 3 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  string container_id = 4 [
+    (buf.validate.field).required = true
+  ];
+
+  repeated string ips = 5;
+
+  message PodAnnotations {
+    map<string, string> annotations = 1;
+  }
+
+  PodAnnotations annotations = 6;
+}

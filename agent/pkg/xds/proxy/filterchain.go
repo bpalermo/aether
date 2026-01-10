@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 
+	"github.com/bpalermo/aether/agent/pkg/xds/config"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -27,9 +28,14 @@ func buildDefaultInboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 }
 
 func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
-	routeConfig := buildOutboundRouteConfiguration()
+	hcm := buildHTTPConnectionManager(name, nil)
 
-	hcm := buildHTTPConnectionManager(name, routeConfig)
+	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
+		Rds: &http_connection_managerv3.Rds{
+			RouteConfigName: "out_http",
+			ConfigSource:    config.XDSConfigSourceADS(),
+		},
+	}
 
 	var networkFilters []*listenerv3.Filter
 	networkFilters = append(networkFilters, buildNetworkNamespaceFilterState())

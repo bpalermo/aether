@@ -37,8 +37,8 @@ func TestXdsRegistry_Start(t *testing.T) {
 		// Send test event
 		event := &registryv1.Event{
 			Operation: registryv1.Event_CREATED,
-			Resource: &registryv1.Event_Pod{
-				Pod: &registryv1.Event_KubernetesPod{
+			Resource: &registryv1.Event_K8SPod{
+				K8SPod: &registryv1.KubernetesPod{
 					Name:        "test-pod",
 					Namespace:   "default",
 					ServiceName: "test-service",
@@ -78,8 +78,8 @@ func TestXdsRegistry_Start(t *testing.T) {
 		assert.NotPanics(t, func() {
 			registry.eventChan <- &registryv1.Event{
 				Operation: registryv1.Event_CREATED,
-				Resource: &registryv1.Event_Pod{
-					Pod: &registryv1.Event_KubernetesPod{
+				Resource: &registryv1.Event_K8SPod{
+					K8SPod: &registryv1.KubernetesPod{
 						ServiceName: "fake",
 					},
 				},
@@ -98,8 +98,8 @@ func TestXdsRegistry_processEvent(t *testing.T) {
 			name: "pod event",
 			event: &registryv1.Event{
 				Operation: registryv1.Event_CREATED,
-				Resource: &registryv1.Event_Pod{
-					Pod: &registryv1.Event_KubernetesPod{
+				Resource: &registryv1.Event_K8SPod{
+					K8SPod: &registryv1.KubernetesPod{
 						Name:        "test-pod",
 						Namespace:   "default",
 						ServiceName: "test-service",
@@ -113,13 +113,11 @@ func TestXdsRegistry_processEvent(t *testing.T) {
 			name: "network namespace event",
 			event: &registryv1.Event{
 				Operation: registryv1.Event_CREATED,
-				Resource: &registryv1.Event_NetworkNs{
-					NetworkNs: &registryv1.Event_NetworkNamespace{
-						Path: "/var/run/netns/test",
-						Pod: &registryv1.Event_KubernetesPod{
-							Name:      "test-pod",
-							Namespace: "default",
-						},
+				Resource: &registryv1.Event_CniPod{
+					CniPod: &registryv1.CNIPod{
+						Name:             "test-pod",
+						Namespace:        "default",
+						NetworkNamespace: "/var/run/netns/test",
 					},
 				},
 			},
@@ -151,7 +149,7 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 
 	t.Run("CREATED operation", func(t *testing.T) {
 		registry := NewXdsRegistry("test-node", logr.Discard())
-		pod := &registryv1.Event_KubernetesPod{
+		pod := &registryv1.KubernetesPod{
 			Name:        "test-pod",
 			Namespace:   "default",
 			ServiceName: "test-service",
@@ -175,7 +173,7 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 
 	t.Run("UPDATED operation", func(t *testing.T) {
 		registry := NewXdsRegistry("test-node", logr.Discard())
-		pod := &registryv1.Event_KubernetesPod{
+		pod := &registryv1.KubernetesPod{
 			Name:        "test-pod",
 			Namespace:   "default",
 			ServiceName: "test-service",
@@ -192,7 +190,7 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 		registry := NewXdsRegistry("test-node", logr.Discard())
 
 		// First add a pod
-		pod := &registryv1.Event_KubernetesPod{
+		pod := &registryv1.KubernetesPod{
 			Name:        "test-pod",
 			Namespace:   "default",
 			ServiceName: "test-service",
@@ -221,15 +219,13 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 
 	t.Run("CREATED operation", func(t *testing.T) {
 		registry := NewXdsRegistry("test-node", logr.Discard())
-		netns := &registryv1.Event_NetworkNamespace{
-			Path: "/var/run/netns/test",
-			Pod: &registryv1.Event_KubernetesPod{
-				Name:      "test-pod",
-				Namespace: "default",
-			},
+		cniPod := &registryv1.CNIPod{
+			Name:             "test-pod",
+			Namespace:        "default",
+			NetworkNamespace: "/var/run/netns/test",
 		}
 
-		err := registry.processNetworkNs(ctx, registryv1.Event_CREATED, netns)
+		err := registry.processCNIPod(ctx, registryv1.Event_CREATED, cniPod)
 		require.NoError(t, err)
 
 		assert.Equal(t, uint64(1), registry.version)
@@ -239,19 +235,17 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 
 	t.Run("DELETED operation", func(t *testing.T) {
 		registry := NewXdsRegistry("test-node", logr.Discard())
-		netns := &registryv1.Event_NetworkNamespace{
-			Path: "/var/run/netns/test",
-			Pod: &registryv1.Event_KubernetesPod{
-				Name:      "test-pod",
-				Namespace: "default",
-			},
+		cniPod := &registryv1.CNIPod{
+			Name:             "test-pod",
+			Namespace:        "default",
+			NetworkNamespace: "/var/run/netns/test",
 		}
 
 		// First add
-		registry.processNetworkNs(ctx, registryv1.Event_CREATED, netns)
+		registry.processCNIPod(ctx, registryv1.Event_CREATED, cniPod)
 
 		// Then delete
-		err := registry.processNetworkNs(ctx, registryv1.Event_DELETED, netns)
+		err := registry.processCNIPod(ctx, registryv1.Event_DELETED, cniPod)
 		require.NoError(t, err)
 
 		assert.Equal(t, uint64(2), registry.version)
@@ -263,7 +257,7 @@ func TestXdsRegistry_generateSnapshot(t *testing.T) {
 	registry := NewXdsRegistry("test-node", logr.Discard())
 
 	// Add some test data
-	event := &registryv1.Event_KubernetesPod{
+	event := &registryv1.KubernetesPod{
 		Name:        "test-pod",
 		Namespace:   "default",
 		ServiceName: "test-service",
@@ -320,7 +314,7 @@ func TestXdsRegistry_ConcurrentAccess(t *testing.T) {
 	// Simulate concurrent pod events
 	for i := 0; i < 10; i++ {
 		go func(id int) {
-			pod := &registryv1.Event_KubernetesPod{
+			pod := &registryv1.KubernetesPod{
 				Name:        fmt.Sprintf("pod-%d", id),
 				Namespace:   "default",
 				ServiceName: fmt.Sprintf("service-%d", id),
@@ -329,8 +323,8 @@ func TestXdsRegistry_ConcurrentAccess(t *testing.T) {
 
 			event := &registryv1.Event{
 				Operation: registryv1.Event_CREATED,
-				Resource: &registryv1.Event_Pod{
-					Pod: pod,
+				Resource: &registryv1.Event_K8SPod{
+					K8SPod: pod,
 				},
 			}
 

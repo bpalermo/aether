@@ -1,4 +1,7 @@
 load("@gazelle//:def.bzl", "gazelle")
 
 # gazelle:prefix github.com/bpalermo/aether
+# gazelle:resolve proto buf/validate/validate.proto @protovalidate//proto/protovalidate/buf/validate:validate_proto
+# gazelle:resolve proto go buf/validate/validate.proto @build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate
+# gazelle:go_grpc_compilers @rules_go//proto:go_grpc_v2
 gazelle(name = "gazelle")

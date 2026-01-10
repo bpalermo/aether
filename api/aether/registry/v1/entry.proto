@@ -9,4 +9,6 @@ message RegistryEntry {
   string pod_ns = 2;
   string network_ns = 3;
   string container_id = 4;
+  repeated string ips = 5;
+  map<string, string> annotations = 6;
 }

@@ -11,12 +11,12 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-func (p *AetherPlugin) createRegistryEntry(netns string, args K8sArgs, conf AetherConf) error {
+func (p *AetherPlugin) createRegistryEntry(netns string, args K8sArgs, conf AetherConf, ips []string) error {
 	if err := p.checkRegistryPathOrCreate(conf.RegistryPath); err != nil {
 		return fmt.Errorf("failed to ensure registry directory: %v", err)
 	}
 
-	if err := p.writeRegistryEntryFile(netns, args, conf.RegistryPath); err != nil {
+	if err := p.writeRegistryEntryFile(netns, args, conf, ips); err != nil {
 		return fmt.Errorf("failed to write registry entry file: %w", err)
 	}
 
@@ -48,12 +48,19 @@ func (p *AetherPlugin) checkRegistryPathOrCreate(registryPath string) error {
 
 // writeRegistryEntryFile writes a registry entry file to the specified destination.
 // Returns an error if the operation fails.
-func (p *AetherPlugin) writeRegistryEntryFile(netns string, args K8sArgs, dst string) error {
+func (p *AetherPlugin) writeRegistryEntryFile(netns string, args K8sArgs, conf AetherConf, ips []string) error {
+	var annotations map[string]string
+	if conf.RuntimeConfig != nil && conf.RuntimeConfig.PodAnnotations != nil {
+		annotations = *conf.RuntimeConfig.PodAnnotations
+	}
+
 	entry := &registryv1.RegistryEntry{
 		PodName:     string(args.K8S_POD_NAME),
 		PodNs:       string(args.K8S_POD_NAMESPACE),
 		NetworkNs:   netns,
 		ContainerId: string(args.K8S_POD_INFRA_CONTAINER_ID),
+		Ips:         ips,
+		Annotations: annotations,
 	}
 
 	// Marshal to JSON
@@ -66,7 +73,7 @@ func (p *AetherPlugin) writeRegistryEntryFile(netns string, args K8sArgs, dst st
 	}
 
 	// Create filename using pod name
-	filename := getEntryFileName(dst, args)
+	filename := getEntryFileName(conf.RegistryPath, args)
 
 	// Write the file with appropriate permissions
 	if err := renameio.WriteFile(filename, data, 0644); err != nil {

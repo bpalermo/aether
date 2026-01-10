@@ -82,8 +82,8 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		c.logger.Info("pod informer has synced, ready to process")
 	}
 
-	resourceEvent := &registryv1.Event_Pod{
-		Pod: &registryv1.Event_KubernetesPod{
+	resourceEvent := &registryv1.Event_K8SPod{
+		K8SPod: &registryv1.KubernetesPod{
 			Name:      req.Name,
 			Namespace: req.Namespace,
 		},
@@ -129,8 +129,8 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// At this point we have a pod
-	resourceEvent.Pod.Ip = pod.Status.PodIP
-	resourceEvent.Pod.ServiceName = pod.Labels[constants.AetherServiceLabel]
+	resourceEvent.K8SPod.Ip = pod.Status.PodIP
+	resourceEvent.K8SPod.ServiceName = pod.Labels[constants.AetherServiceLabel]
 
 	event := &registryv1.Event{
 		Operation: op,

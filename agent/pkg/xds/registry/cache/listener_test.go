@@ -21,12 +21,10 @@ func TestListenerCache(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
 
-		event := &registryv1.Event_NetworkNamespace{
-			Path: path,
-			Pod: &registryv1.Event_KubernetesPod{
-				Name:      "test-pod",
-				Namespace: "default",
-			},
+		event := &registryv1.CNIPod{
+			Name:             "test-pod",
+			Namespace:        "default",
+			NetworkNamespace: path,
 		}
 
 		cache.AddListeners(event)
@@ -44,12 +42,10 @@ func TestListenerCache(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
 
-		event := &registryv1.Event_NetworkNamespace{
-			Path: path,
-			Pod: &registryv1.Event_KubernetesPod{
-				Name:      "test-pod",
-				Namespace: "default",
-			},
+		event := &registryv1.CNIPod{
+			Name:             "test-pod",
+			Namespace:        "default",
+			NetworkNamespace: path,
 		}
 
 		cache.AddListeners(event)
@@ -66,12 +62,10 @@ func TestListenerCache(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
 
-		event := &registryv1.Event_NetworkNamespace{
-			Path: path,
-			Pod: &registryv1.Event_KubernetesPod{
-				Name:      "test-pod",
-				Namespace: "default",
-			},
+		event := &registryv1.CNIPod{
+			Name:             "test-pod",
+			Namespace:        "default",
+			NetworkNamespace: path,
 		}
 
 		cache.AddListeners(event)
@@ -85,12 +79,10 @@ func TestListenerCache(t *testing.T) {
 
 		// Add multiple listeners
 		for i := 0; i < 3; i++ {
-			event := &registryv1.Event_NetworkNamespace{
-				Path: fmt.Sprintf("/listener-%d", i),
-				Pod: &registryv1.Event_KubernetesPod{
-					Name:      fmt.Sprintf("test-pod-%d", i),
-					Namespace: "default",
-				},
+			event := &registryv1.CNIPod{
+				Name:             fmt.Sprintf("test-pod-%d", i),
+				Namespace:        "default",
+				NetworkNamespace: fmt.Sprintf("/listener-%d", i),
 			}
 			cache.AddListeners(event)
 		}
@@ -110,12 +102,10 @@ func TestListenerCache(t *testing.T) {
 			go func(id int) {
 				defer wg.Done()
 				path := fmt.Sprintf("/listener-%d", id)
-				event := &registryv1.Event_NetworkNamespace{
-					Path: path,
-					Pod: &registryv1.Event_KubernetesPod{
-						Name:      "test-pod",
-						Namespace: "default",
-					},
+				event := &registryv1.CNIPod{
+					Name:             "test-pod",
+					Namespace:        "default",
+					NetworkNamespace: path,
 				}
 				cache.AddListeners(event)
 			}(i)

@@ -24,6 +24,7 @@ type XdsRegistry struct {
 	clusterCache  *cache.ClusterCache
 	listenerCache *cache.ListenerCache
 	endpointCache *cache.EndpointCache
+	routeCache    *cache.RouteCache
 
 	eventChan chan *registryv1.Event
 
@@ -40,6 +41,7 @@ func NewXdsRegistry(nodeID string, log logr.Logger) *XdsRegistry {
 		cache.NewClusterCache(),
 		cache.NewListenerCache(),
 		cache.NewEndpointCache(),
+		cache.NewRouteCache(),
 		make(chan *registryv1.Event, eventBuffer),
 		nodeID,
 		cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil),
@@ -72,17 +74,17 @@ func (r *XdsRegistry) processEvent(ctx context.Context, event *registryv1.Event)
 
 	// Switch on the resource type
 	switch res := event.GetResource().(type) {
-	case *registryv1.Event_Pod:
-		return r.processPodEvent(ctx, event.Operation, res.Pod)
-	case *registryv1.Event_NetworkNs:
-		return r.processNetworkNs(ctx, event.Operation, res.NetworkNs)
+	case *registryv1.Event_K8SPod:
+		return r.processPodEvent(ctx, event.Operation, res.K8SPod)
+	case *registryv1.Event_CniPod:
+		return r.processCNIPod(ctx, event.Operation, res.CniPod)
 	default:
 		r.log.Info("unknown resource type", "event", event)
 		return nil
 	}
 }
 
-func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_Operation, event *registryv1.Event_KubernetesPod) error {
+func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_Operation, event *registryv1.KubernetesPod) error {
 	r.log.Info("processing pod event",
 		"operation", op.String(),
 		"name", event.GetName(),
@@ -94,23 +96,25 @@ func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_O
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
 		// order here matters
 		r.clusterCache.AddClusterOrUpdate(event)
-		r.endpointCache.AddEndpoint(cache.ClusterName(event.GetServiceName()), event)
+		r.endpointCache.AddEndpoint(cache.ClusterName(event.ServiceName), event)
+		r.routeCache.AddOutboundVirtualHost(event.ServiceName)
 	case registryv1.Event_DELETED:
-		r.clusterCache.RemoveCluster(event.GetServiceName())
+		r.clusterCache.RemoveCluster(event.ServiceName)
 		r.endpointCache.RemoveEndpoint(event)
+		r.routeCache.RemoveOutboundVirtualHost(event.ServiceName)
 	}
 
 	return r.generateSnapshot(ctx)
 }
 
-func (r *XdsRegistry) processNetworkNs(ctx context.Context, op registryv1.Event_Operation, event *registryv1.Event_NetworkNamespace) error {
-	r.log.Info("processing network namespace event", "operation", op.String(), "path", event.GetPath())
+func (r *XdsRegistry) processCNIPod(ctx context.Context, op registryv1.Event_Operation, event *registryv1.CNIPod) error {
+	r.log.Info("processing network namespace event", "operation", op.String(), "path", event.NetworkNamespace)
 
 	switch op {
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
 		r.listenerCache.AddListeners(event)
 	case registryv1.Event_DELETED:
-		r.listenerCache.RemoveListeners(event.GetPath())
+		r.listenerCache.RemoveListeners(event.NetworkNamespace)
 	}
 
 	return r.generateSnapshot(ctx)
@@ -123,7 +127,7 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 	resources := map[resource.Type][]types.Resource{
 		resource.EndpointType: r.endpointCache.GetAllEndpoints(),
 		resource.ClusterType:  r.clusterCache.GetAllClusters(),
-		resource.RouteType:    make([]types.Resource, 0),
+		resource.RouteType:    r.routeCache.GetAllRouteConfiguration(),
 		resource.ListenerType: r.listenerCache.GetAllListeners(),
 	}
 

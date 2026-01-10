@@ -21,7 +21,7 @@ func TestEndpointCache(t *testing.T) {
 	t.Run("AddEndpoint", func(t *testing.T) {
 		cache := NewEndpointCache()
 		clusterName := ClusterName("test-cluster")
-		pod := &registryv1.Event_KubernetesPod{
+		pod := &registryv1.KubernetesPod{
 			Name:      "test-pod",
 			Namespace: "default",
 			Ip:        "127.0.0.1",
@@ -42,7 +42,7 @@ func TestEndpointCache(t *testing.T) {
 	t.Run("RemoveEndpoint", func(t *testing.T) {
 		cache := NewEndpointCache()
 		clusterName := ClusterName("test-cluster")
-		pod := &registryv1.Event_KubernetesPod{
+		pod := &registryv1.KubernetesPod{
 			Name:      "test-pod",
 			Namespace: "default",
 			Ip:        "127.0.0.1",
@@ -63,7 +63,7 @@ func TestEndpointCache(t *testing.T) {
 		clusterName := ClusterName("test-cluster")
 
 		// Add an initial endpoint
-		pod1 := &registryv1.Event_KubernetesPod{
+		pod1 := &registryv1.KubernetesPod{
 			Name:      "test-pod",
 			Namespace: "default",
 			Ip:        "127.0.0.1",
@@ -71,7 +71,7 @@ func TestEndpointCache(t *testing.T) {
 		cache.AddEndpoint(clusterName, pod1)
 
 		// Add another endpoint to the same cluster
-		pod2 := &registryv1.Event_KubernetesPod{
+		pod2 := &registryv1.KubernetesPod{
 			Name:      "test-pod-2",
 			Namespace: "default",
 			Ip:        "127.0.0.2",
@@ -92,7 +92,7 @@ func TestEndpointCache(t *testing.T) {
 		iterations := 100
 
 		// Store pods for removal
-		pods := make([]*registryv1.Event_KubernetesPod, iterations)
+		pods := make([]*registryv1.KubernetesPod, iterations)
 
 		// Add endpoints concurrently
 		wg.Add(iterations)
@@ -100,7 +100,7 @@ func TestEndpointCache(t *testing.T) {
 			go func(id int) {
 				defer wg.Done()
 				clusterName := ClusterName(fmt.Sprintf("cluster-%d", id))
-				pod := &registryv1.Event_KubernetesPod{
+				pod := &registryv1.KubernetesPod{
 					Name:      fmt.Sprintf("pod-%d", id),
 					Namespace: "default",
 					Ip:        fmt.Sprintf("10.0.0.%d", id),

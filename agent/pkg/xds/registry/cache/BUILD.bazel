@@ -6,7 +6,7 @@ go_library(
         "cluster.go",
         "endpoint.go",
         "listener.go",
-        "vhost.go",
+        "route.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/pkg/xds/registry/cache",
     visibility = ["//visibility:public"],

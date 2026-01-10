@@ -4,12 +4,12 @@ import (
 	"sync"
 
 	"github.com/bpalermo/aether/agent/internal/log"
+	cniServer "github.com/bpalermo/aether/agent/pkg/cni/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/controller"
 	"github.com/bpalermo/aether/agent/pkg/install"
-	"github.com/bpalermo/aether/agent/pkg/watcher"
 	"github.com/bpalermo/aether/agent/pkg/xds/registry"
-	"github.com/bpalermo/aether/agent/pkg/xds/server"
+	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -84,7 +84,7 @@ func runAgent() error {
 	}
 
 	// Create xDS server
-	srv := server.NewXdsServer(
+	srv := xdsServer.NewXdsServer(
 		m,
 		logger,
 		initWg,
@@ -94,18 +94,14 @@ func runAgent() error {
 		return err
 	}
 
-	// Create the registry watcher
-	registryWatcher, err := watcher.NewCNIWatcher(
+	cniSrv := cniServer.NewCNIServer(
 		cfg.MountedCNIRegistryDir,
+		"",
 		initWg,
 		r.GetEventChan(),
-		logger,
 	)
-	if err != nil {
-		return err
-	}
 
-	if err = m.Add(registryWatcher); err != nil {
+	if err = m.Add(cniSrv); err != nil {
 		return err
 	}
 

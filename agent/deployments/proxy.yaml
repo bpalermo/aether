@@ -24,7 +24,7 @@ spec:
       priorityClassName: system-node-critical
       containers:
         - name: proxy
-          image: docker.io/envoyproxy/envoy:distroless-dev-3b039a3c72e3dfe92e63cfcf970e316e377e485d
+          image: docker.io/envoyproxy/envoy@sha256:5bfdcd197ef884afbb705130f202aef868c41b1628eae23e05563752ce8f9ab7
           command:
             - "/usr/local/bin/envoy"
             - "-c"
@@ -35,12 +35,23 @@ spec:
             - "aether-proxy"
             - "--service-node"
             - "$(NODE_NAME)"
+            - "--service-zone"
+            - "$(ZONE)"
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: spec.nodeName
+            - name: REGION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['topology.kubernetes.io/region']
+            - name: ZONE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.annotations['topology.kubernetes.io/zone']
             - name: ENVOY_UID
               value: "0"
             - name: ENVOY_GID

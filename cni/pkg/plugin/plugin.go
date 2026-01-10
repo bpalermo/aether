@@ -62,7 +62,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		zap.Strings("pod_ips", podIPs),
 		zap.String("cni_version", netConf.CNIVersion))
 
-	err = p.createRegistryEntry(args.Netns, k8sArgs, netConf)
+	err = p.createRegistryEntry(args.Netns, k8sArgs, netConf, podIPs)
 	if err != nil {
 		return fmt.Errorf("failed to ensure registry directory: %v", err)
 	}

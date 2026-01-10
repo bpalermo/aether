@@ -11,4 +11,5 @@ const (
 	DefaultHostCNIRegistryDir = "/host" + cniConstants.DefaultRegistryPath
 
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
+	DefaultCNISocketPath = "/run/aether/cni.sock"
 )

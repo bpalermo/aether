@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
-func NewCluster(pod *registryv1.Event_KubernetesPod) *clusterv3.Cluster {
+func NewCluster(pod *registryv1.KubernetesPod) *clusterv3.Cluster {
 	protocolOptions := http2ProtocolOptions()
 
 	return &clusterv3.Cluster{
@@ -18,9 +18,7 @@ func NewCluster(pod *registryv1.Event_KubernetesPod) *clusterv3.Cluster {
 			Type: clusterv3.Cluster_EDS,
 		},
 		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
-			EdsConfig: &corev3.ConfigSource{
-				ConfigSourceSpecifier: &corev3.ConfigSource_Ads{},
-			},
+			EdsConfig: config.XDSConfigSourceADS(),
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": config.TypedConfig(protocolOptions),

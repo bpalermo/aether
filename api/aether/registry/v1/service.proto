@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package aether.registry.v1;
+
+import "api/aether/registry/v1/cni.proto";
+
+option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
+
+service CNIService {
+  rpc AddPod (AddPodRequest) returns (AddPodResponse) {}
+  rpc RemovePod (RemovePodRequest) returns (RemovePodResponse) {}
+}
+
+message AddPodRequest {
+  CNIPod pod = 1;
+}
+
+message AddPodResponse {
+  enum Result {
+    RESULT_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    ERROR = 2;
+  }
+
+  Result result = 1;
+}
+
+message RemovePodRequest {
+  string name = 1;
+  string namespace = 2;
+}
+
+message RemovePodResponse {
+  enum Result {
+    RESULT_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    ERROR = 2;
+  }
+
+  Result result = 1;
+}

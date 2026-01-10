@@ -19,7 +19,7 @@ func TestClusterCache(t *testing.T) {
 
 	t.Run("AddCluster", func(t *testing.T) {
 		cache := NewClusterCache()
-		pod := &registryv1.Event_KubernetesPod{
+		pod := &registryv1.KubernetesPod{
 			Name:        "test-pod",
 			Namespace:   "default",
 			ServiceName: "test-cluster",
@@ -39,7 +39,7 @@ func TestClusterCache(t *testing.T) {
 
 	t.Run("RemoveCluster", func(t *testing.T) {
 		cache := NewClusterCache()
-		pod := &registryv1.Event_KubernetesPod{
+		pod := &registryv1.KubernetesPod{
 			Name:        "test-pod",
 			Namespace:   "default",
 			ServiceName: "test-cluster",
@@ -61,7 +61,7 @@ func TestClusterCache(t *testing.T) {
 
 		// Add multiple clusters
 		for i := 0; i < 3; i++ {
-			pod := &registryv1.Event_KubernetesPod{
+			pod := &registryv1.KubernetesPod{
 				Name:        fmt.Sprintf("pod-%d", i),
 				Namespace:   "default",
 				ServiceName: fmt.Sprintf("cluster-%d", i),
@@ -78,7 +78,7 @@ func TestClusterCache(t *testing.T) {
 		cache := NewClusterCache()
 
 		// Add initial pod
-		pod1 := &registryv1.Event_KubernetesPod{
+		pod1 := &registryv1.KubernetesPod{
 			Name:        "pod-1",
 			Namespace:   "default",
 			ServiceName: "test-cluster",
@@ -87,7 +87,7 @@ func TestClusterCache(t *testing.T) {
 		cache.AddClusterOrUpdate(pod1)
 
 		// Update with different pod (same service)
-		pod2 := &registryv1.Event_KubernetesPod{
+		pod2 := &registryv1.KubernetesPod{
 			Name:        "pod-2",
 			Namespace:   "default",
 			ServiceName: "test-cluster",
@@ -110,7 +110,7 @@ func TestClusterCache(t *testing.T) {
 		for i := 0; i < iterations; i++ {
 			go func(id int) {
 				defer wg.Done()
-				pod := &registryv1.Event_KubernetesPod{
+				pod := &registryv1.KubernetesPod{
 					Name:        fmt.Sprintf("pod-%d", id),
 					Namespace:   "default",
 					ServiceName: fmt.Sprintf("cluster-%d", id),

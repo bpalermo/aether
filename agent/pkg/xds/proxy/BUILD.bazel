@@ -18,7 +18,6 @@ go_library(
     deps = [
         "//agent/pkg/xds/config",
         "//api/aether/registry/v1:registry",
-        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",

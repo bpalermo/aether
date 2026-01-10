@@ -12,6 +12,12 @@ import (
 type AetherConf struct {
 	types.PluginConf
 	RegistryPath string `json:"registry_path"`
+
+	RuntimeConfig *RuntimeConfig `json:"runtimeConfig,omitempty"`
+}
+
+type RuntimeConfig struct {
+	PodAnnotations *map[string]string `json:"io.kubernetes.cri.pod-annotations,omitempty"`
 }
 
 // K8sArgs is the valid CNI_ARGS used for Kubernetes
@@ -19,10 +25,15 @@ type AetherConf struct {
 // https://github.com/containerd/containerd/blob/ced9b18c231a28990617bc0a4b8ce2e81ee2ffa1/pkg/cri/server/sandbox_run.go#L526-L532
 type K8sArgs struct {
 	types.CommonArgs
-	K8S_POD_NAME               types.UnmarshallableString // nolint: revive, stylecheck
-	K8S_POD_NAMESPACE          types.UnmarshallableString // nolint: revive, stylecheck
+
+	// K8S_POD_NAME is pod's name
+	K8S_POD_NAME types.UnmarshallableString // nolint: revive, stylecheck
+	// K8S_POD_NAMESPACE is pod's namespace
+	K8S_POD_NAMESPACE types.UnmarshallableString // nolint: revive, stylecheck
+	// K8S_POD_INFRA_CONTAINER_ID is pod's sandbox id
 	K8S_POD_INFRA_CONTAINER_ID types.UnmarshallableString // nolint: revive, stylecheck
-	K8S_POD_UID                types.UnmarshallableString // nolint: revive, stylecheck
+	// K8S_POD_UID
+	K8S_POD_UID types.UnmarshallableString // nolint: revive, stylecheck
 }
 
 func NewConf(stdinData []byte) (AetherConf, error) {
