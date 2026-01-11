@@ -67,7 +67,10 @@ func init() {
 func runAgent() error {
 	var ctx = ctrl.SetupSignalHandler()
 
-	logger.Info("starting aether agent", "proxy-id", cfg.ProxyServiceNodeID)
+	logger.Info("starting aether agent",
+		"proxy-id", cfg.ProxyServiceNodeID,
+		"cluster", cfg.ClusterName,
+		"debug", cfg.Debug)
 
 	logger.Info("installing CNI binaries")
 	installer := install.NewInstaller(logger, cfg)
