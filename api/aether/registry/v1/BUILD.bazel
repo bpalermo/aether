@@ -6,7 +6,6 @@ proto_library(
     name = "registryv1_proto",
     srcs = [
         "cni.proto",
-        "entry.proto",
         "event.proto",
         "kubernetes.proto",
         "service.proto",
