@@ -26,7 +26,6 @@ func TestNewXdsRegistry(t *testing.T) {
 	assert.NotNil(t, registry.endpointCache)
 	assert.NotNil(t, registry.eventChan)
 	assert.NotNil(t, registry.snapshot)
-	assert.Equal(t, uint64(0), registry.version)
 }
 
 func TestXdsRegistry_Start(t *testing.T) {
@@ -159,9 +158,6 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 		err := registry.processPodEvent(ctx, registryv1.Event_CREATED, pod)
 		require.NoError(t, err)
 
-		// Verify snapshot was updated
-		assert.Equal(t, uint64(1), registry.version)
-
 		// Verify cluster was added
 		clusters := registry.clusterCache.GetAllClusters()
 		assert.NotEmpty(t, clusters)
@@ -182,8 +178,6 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 
 		err := registry.processPodEvent(ctx, registryv1.Event_UPDATED, pod)
 		require.NoError(t, err)
-
-		assert.Equal(t, uint64(1), registry.version)
 	})
 
 	t.Run("DELETED operation", func(t *testing.T) {
@@ -201,8 +195,6 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 		// Then delete it
 		err := registry.processPodEvent(ctx, registryv1.Event_DELETED, pod)
 		require.NoError(t, err)
-
-		assert.Equal(t, uint64(2), registry.version)
 
 		// Verify cluster was removed
 		clusters := registry.clusterCache.GetAllClusters()
@@ -227,10 +219,6 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 
 		err := registry.processCNIPod(ctx, registryv1.Event_CREATED, cniPod)
 		require.NoError(t, err)
-
-		assert.Equal(t, uint64(1), registry.version)
-		// Note: listeners will be empty because proxy.GenerateListenersFromEvent returns empty
-		// This is expected behavior for the test
 	})
 
 	t.Run("DELETED operation", func(t *testing.T) {
@@ -247,8 +235,6 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 		// Then delete
 		err := registry.processCNIPod(ctx, registryv1.Event_DELETED, cniPod)
 		require.NoError(t, err)
-
-		assert.Equal(t, uint64(2), registry.version)
 	})
 }
 
@@ -268,9 +254,6 @@ func TestXdsRegistry_generateSnapshot(t *testing.T) {
 
 	err := registry.generateSnapshot(ctx)
 	require.NoError(t, err)
-
-	// Verify version was incremented
-	assert.Equal(t, uint64(1), registry.version)
 
 	// Verify the snapshot was set
 	snapshot, err := registry.snapshot.GetSnapshot(registry.nodeID)

@@ -53,13 +53,15 @@ func GetCommand() *cobra.Command {
 
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
+	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster", "", "Cluster name. It will be used to push registration info to the control plane.")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
 	rootCmd.Flags().StringVar(&cfg.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
 	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
 	rootCmd.Flags().StringVar(&cfg.MountedCNIRegistryDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
 
-	_ = rootCmd.MarkPersistentFlagRequired("node-id")
+	_ = rootCmd.MarkPersistentFlagRequired("cluster")
+	_ = rootCmd.MarkPersistentFlagRequired("proxy-id")
 }
 
 func runAgent() error {

@@ -28,6 +28,7 @@ spec:
           imagePullPolicy: Always
           args:
             - "--debug=true"
+            - "--cluster=oci-main"
             - "--proxy-id=$(NODE_NAME)"
           env:
             - name: NODE_NAME

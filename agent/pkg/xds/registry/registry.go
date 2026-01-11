@@ -32,7 +32,7 @@ type XdsRegistry struct {
 	nodeID string
 
 	snapshot cachev3.SnapshotCache
-	version  uint64
+	version  string
 }
 
 func NewXdsRegistry(nodeID string, log logr.Logger) *XdsRegistry {
@@ -46,7 +46,7 @@ func NewXdsRegistry(nodeID string, log logr.Logger) *XdsRegistry {
 		make(chan *registryv1.Event, eventBuffer),
 		nodeID,
 		cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil),
-		0,
+		generateVersion(),
 	}
 }
 
@@ -132,7 +132,7 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 		resource.ListenerType: r.listenerCache.GetAllListeners(),
 	}
 
-	snapshot, err := cachev3.NewSnapshot(r.generateVersion(), resources)
+	snapshot, err := cachev3.NewSnapshot(generateVersion(), resources)
 	if err != nil {
 		return err
 	}
@@ -149,8 +149,6 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 		return err
 	}
 
-	r.version = r.version + 1
-
 	return nil
 }
 
@@ -162,6 +160,6 @@ func (r *XdsRegistry) GetEventChan() chan<- *registryv1.Event {
 	return r.eventChan
 }
 
-func (r *XdsRegistry) generateVersion() string {
-	return fmt.Sprintf("%d.%d", time.Now().UnixNano(), r.version)
+func generateVersion() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
