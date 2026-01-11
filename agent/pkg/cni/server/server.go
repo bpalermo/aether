@@ -68,6 +68,8 @@ func (s *CNIServer) Start(ctx context.Context) error {
 		return err
 	}
 
+	s.initWg.Done()
+
 	return s.startServer(ctx)
 }
 
@@ -90,8 +92,6 @@ func (s *CNIServer) initialize(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-
-	s.initWg.Done()
 
 	return nil
 }
@@ -121,21 +121,19 @@ func (s *CNIServer) startServer(ctx context.Context) error {
 
 	registryv1.RegisterCNIServiceServer(s.grpcServer, s)
 
-	// Start serving in a goroutine
-	go func() {
-		if err := s.grpcServer.Serve(listener); err != nil {
-			// Only log if not a normal shutdown
-			select {
-			case <-ctx.Done():
-				// Context canceled, normal shutdown
-			default:
-				fmt.Printf("gRPC server error: %v\n", err)
-			}
-		}
-	}()
-
-	// Wait for the shutdown signal
+	// Start the shutdown handler in a goroutine
 	go s.waitForShutdown(ctx)
+
+	// Block here serving requests
+	if err = s.grpcServer.Serve(listener); err != nil {
+		// Only return error if not a normal shutdown
+		select {
+		case <-ctx.Done():
+			return nil // Context canceled, normal shutdown
+		default:
+			return fmt.Errorf("gRPC server error: %w", err)
+		}
+	}
 
 	return nil
 }
