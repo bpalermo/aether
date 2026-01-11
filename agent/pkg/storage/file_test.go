@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -71,7 +71,7 @@ func TestCachedFileStorage_AddResource(t *testing.T) {
 				assert.Equal(t, tt.value, cached.Value)
 
 				// Verify on disk
-				filePath := filepath.Join(dir, tt.key+".pb")
+				filePath := filepath.Join(dir, tt.key+".json")
 				assert.FileExists(t, filePath)
 			}
 		})
@@ -132,10 +132,10 @@ func TestCachedFileStorage_GetResourceFromDisk(t *testing.T) {
 
 	// Create a file on disk without going through storage
 	msg := &wrapperspb.StringValue{Value: "disk_value"}
-	data, err := proto.Marshal(msg)
+	data, err := protojson.Marshal(msg)
 	require.NoError(t, err)
 
-	filePath := filepath.Join(dir, "disk_key.pb")
+	filePath := filepath.Join(dir, "disk_key.json")
 	err = os.WriteFile(filePath, data, 0644)
 	require.NoError(t, err)
 
@@ -162,7 +162,7 @@ func TestCachedFileStorage_RemoveResource(t *testing.T) {
 	require.NoError(t, storage.AddResource("remove_key", msg))
 
 	// Verify it exists
-	filePath := filepath.Join(dir, "remove_key.pb")
+	filePath := filepath.Join(dir, "remove_key.json")
 	assert.FileExists(t, filePath)
 	_, ok := storage.cache["remove_key"]
 	assert.True(t, ok)
@@ -193,10 +193,10 @@ func TestCachedFileStorage_LoadAll(t *testing.T) {
 
 	for key, value := range files {
 		msg := &wrapperspb.StringValue{Value: value}
-		data, err := proto.Marshal(msg)
+		data, err := protojson.Marshal(msg)
 		require.NoError(t, err)
 
-		filePath := filepath.Join(dir, key+".pb")
+		filePath := filepath.Join(dir, key+".json")
 		err = os.WriteFile(filePath, data, 0644)
 		require.NoError(t, err)
 	}

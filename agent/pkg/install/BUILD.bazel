@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/pkg/install",
     visibility = ["//visibility:public"],
     deps = [
+        "//agent/pkg/constants",
         "//agent/pkg/file",
         "//agent/pkg/util",
         "//cni/pkg/plugin",

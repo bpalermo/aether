@@ -17,5 +17,6 @@ go_library(
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
         "@io_k8s_sigs_controller_runtime//pkg/log/zap",
+        "@org_uber_go_zap//zapcore",
     ],
 )

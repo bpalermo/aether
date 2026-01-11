@@ -25,6 +25,5 @@ go_test(
         "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-        "@org_golang_google_protobuf//types/known/wrapperspb",
     ],
 )

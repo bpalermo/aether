@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/bpalermo/aether/agent/pkg/util"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -32,7 +33,7 @@ func (f *CachedFileStorage[T]) AddResource(key string, resource T) error {
 	defer f.mu.Unlock()
 
 	// Marshal the protobuf message
-	data, err := proto.Marshal(resource)
+	data, err := protojson.Marshal(resource)
 	if err != nil {
 		return fmt.Errorf("failed to marshal resource: %w", err)
 	}
@@ -42,7 +43,7 @@ func (f *CachedFileStorage[T]) AddResource(key string, resource T) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	filePath := filepath.Join(f.basePath, key+".pb")
+	filePath := filepath.Join(f.basePath, key+".json")
 
 	// Write to disk atomically
 	if err := util.WriteFileAtomic(filePath, data); err != nil {
@@ -60,7 +61,7 @@ func (f *CachedFileStorage[T]) RemoveResource(key string) error {
 	defer f.mu.Unlock()
 
 	// Remove from disk
-	filePath := filepath.Join(f.basePath, key+".pb")
+	filePath := filepath.Join(f.basePath, key+".json")
 	if err := os.Remove(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("failed to remove file: %w", err)
@@ -93,7 +94,7 @@ func (f *CachedFileStorage[T]) GetResource(key string) (T, error) {
 	}
 
 	var resource T
-	filePath := filepath.Join(f.basePath, key+".pb")
+	filePath := filepath.Join(f.basePath, key+".json")
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -103,7 +104,7 @@ func (f *CachedFileStorage[T]) GetResource(key string) (T, error) {
 	// Create a new instance of T using the factory function
 	resource = f.newFunc()
 
-	if err := proto.Unmarshal(data, resource); err != nil {
+	if err := protojson.Unmarshal(data, resource); err != nil {
 		return resource, fmt.Errorf("failed to unmarshal resource: %w", err)
 	}
 
@@ -125,11 +126,11 @@ func (f *CachedFileStorage[T]) LoadAll() ([]T, error) {
 
 	var resources []T
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".pb" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 
-		key := entry.Name()[:len(entry.Name())-3] // Remove .pb extension
+		key := entry.Name()[:len(entry.Name())-5] // Remove .json extension
 		filePath := filepath.Join(f.basePath, entry.Name())
 
 		data, err := os.ReadFile(filePath)
@@ -138,7 +139,7 @@ func (f *CachedFileStorage[T]) LoadAll() ([]T, error) {
 		}
 
 		resource := f.newFunc()
-		if err := proto.Unmarshal(data, resource); err != nil {
+		if err := protojson.Unmarshal(data, resource); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal resource from %s: %w", filePath, err)
 		}
 

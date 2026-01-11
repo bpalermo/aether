@@ -12,6 +12,7 @@ import (
 	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap/zapcore"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -22,8 +23,8 @@ const (
 )
 
 var (
-	cfg = &install.InstallerConfig{}
-
+	cfg    = &install.InstallerConfig{}
+	debug  bool
 	logger logr.Logger
 )
 
@@ -33,6 +34,10 @@ var rootCmd = &cobra.Command{
 	SilenceUsage: true,
 	PersistentPreRun: func(_ *cobra.Command, _ []string) {
 		opts := log.DefaultOptions()
+		if debug {
+			opts.Development = true
+			opts.Level = zapcore.DebugLevel
+		}
 		ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 		logger = ctrl.Log.WithName(name)
 	},
@@ -47,6 +52,7 @@ func GetCommand() *cobra.Command {
 }
 
 func init() {
+	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
 	rootCmd.Flags().StringVar(&cfg.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
@@ -84,17 +90,18 @@ func runAgent() error {
 	}
 
 	// Create xDS server
-	srv := xdsServer.NewXdsServer(
+	xdsSrv := xdsServer.NewXdsServer(
 		m,
 		logger,
 		initWg,
 		r,
 	)
-	if err = m.Add(srv); err != nil {
+	if err = m.Add(xdsSrv); err != nil {
 		return err
 	}
 
 	cniSrv := cniServer.NewCNIServer(
+		logger,
 		cfg.MountedCNIRegistryDir,
 		"",
 		initWg,

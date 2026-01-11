@@ -11,9 +11,11 @@ import (
 
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/go-logr/zapr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -27,6 +29,8 @@ func newCNIPod() *registryv1.CNIPod {
 }
 
 func TestNewCNIServer(t *testing.T) {
+	logger := zapr.NewLogger(zap.NewNop())
+
 	tests := []struct {
 		name         string
 		registryPath string
@@ -49,7 +53,7 @@ func TestNewCNIServer(t *testing.T) {
 			initWg := &sync.WaitGroup{}
 			initWg.Add(1)
 			eventChan := make(chan *registryv1.Event)
-			server := NewCNIServer(tt.registryPath, tt.socketPath, initWg, eventChan)
+			server := NewCNIServer(logger, tt.registryPath, tt.socketPath, initWg, eventChan)
 			assert.NotNil(t, server)
 			assert.NotNil(t, server.storage)
 		})
@@ -57,12 +61,13 @@ func TestNewCNIServer(t *testing.T) {
 }
 
 func TestCNIServer_StartStop(t *testing.T) {
+	logger := zapr.NewLogger(zap.NewNop())
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	registryPath := t.TempDir()
 
 	initWg := &sync.WaitGroup{}
 	initWg.Add(1)
-	server := NewCNIServer(registryPath, socketPath, initWg, make(chan<- *registryv1.Event))
+	server := NewCNIServer(logger, registryPath, socketPath, initWg, make(chan<- *registryv1.Event))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -230,12 +235,13 @@ func TestCNIServer_RemovePod(t *testing.T) {
 }
 
 func TestCNIServer_Integration(t *testing.T) {
+	logger := zapr.NewLogger(zap.NewNop())
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	registryPath := t.TempDir()
 
 	initWg := &sync.WaitGroup{}
 	initWg.Add(1)
-	server := NewCNIServer(registryPath, socketPath, initWg, make(chan<- *registryv1.Event))
+	server := NewCNIServer(logger, registryPath, socketPath, initWg, make(chan<- *registryv1.Event))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/file"
 	"github.com/bpalermo/aether/agent/pkg/util"
 	"github.com/bpalermo/aether/cni/pkg/plugin"
@@ -42,6 +43,8 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig.Name = "aether"
 	pluginConfig.Type = "aether-cni"
 	pluginConfig.CNIVersion = "0.0.1"
+	pluginConfig.AgentCNIPath = constants.DefaultCNISocketPath
+
 	marshalledJSON, err := json.MarshalIndent(pluginConfig, "", "  ")
 	if err != nil {
 		return "", err

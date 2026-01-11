@@ -27,6 +27,7 @@ spec:
           image: docker.io/palermo/aether-agent:latest
           imagePullPolicy: Always
           args:
+            - "--debug=true"
             - "--proxy-id=$(NODE_NAME)"
           env:
             - name: NODE_NAME
@@ -73,7 +74,8 @@ spec:
             - name: cni-registry-dir
               mountPath: /host/var/lib/aether/registry
               mountPropagation: HostToContainer
-              readOnly: true
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 200m
@@ -108,3 +110,5 @@ spec:
             # DirectoryOrCreate instead of Directory for the following reason - CNI may not bind mount this until a non-hostnetwork pod is scheduled on the node,
             # and we don't want to block CNI agent pod creation on waiting for the first non-hostnetwork pod.
             # Once the CNI does mount this, it will get populated and we're good.
+        - name: tmp
+          emptyDir: {}

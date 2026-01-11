@@ -11,6 +11,7 @@ import (
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/go-logr/logr"
 	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -19,6 +20,8 @@ import (
 
 type CNIServer struct {
 	registryv1.UnimplementedCNIServiceServer
+
+	logger logr.Logger
 
 	socketPath string
 	grpcServer *grpc.Server
@@ -31,7 +34,7 @@ type CNIServer struct {
 }
 
 // NewCNIServer creates a new CNI gRPC server
-func NewCNIServer(registryPath string, socketPath string, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event) *CNIServer {
+func NewCNIServer(logger logr.Logger, registryPath string, socketPath string, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event) *CNIServer {
 	if socketPath == "" {
 		socketPath = constants.DefaultCNISocketPath
 	}
@@ -47,6 +50,7 @@ func NewCNIServer(registryPath string, socketPath string, initWg *sync.WaitGroup
 	)
 
 	return &CNIServer{
+		logger:     logger.WithName("cni-server"),
 		grpcServer: grpcServer,
 		socketPath: socketPath,
 		storage: storage.NewFileStorage[*registryv1.CNIPod](registryPath, func() *registryv1.CNIPod {
@@ -106,8 +110,12 @@ func (s *CNIServer) startServer(ctx context.Context) error {
 	s.listener = listener
 
 	// Set socket permissions
-	if err := os.Chmod(s.socketPath, os.ModePerm); err != nil {
-		listener.Close()
+	if err = os.Chmod(s.socketPath, os.ModePerm); err != nil {
+		lisErr := listener.Close()
+		if lisErr != nil {
+			s.logger.Error(lisErr, "failed to close listener")
+			return lisErr
+		}
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
@@ -138,10 +146,16 @@ func (s *CNIServer) Stop() {
 		s.grpcServer.GracefulStop()
 	}
 	if s.listener != nil {
-		s.listener.Close()
+		err := s.listener.Close()
+		if err != nil {
+			s.logger.Error(err, "failed to close listener")
+		}
 	}
 	// Clean up socket file
-	os.RemoveAll(s.socketPath)
+	err := os.RemoveAll(s.socketPath)
+	if err != nil {
+		s.logger.Error(err, "failed to remove socket file")
+	}
 }
 
 // waitForShutdown handles graceful shutdown on context cancellation
@@ -160,6 +174,8 @@ func (s *CNIServer) AddPod(_ context.Context, req *registryv1.AddPodRequest) (*r
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
 
+	// TODO: block until the configuration is actually loaded
+
 	return &registryv1.AddPodResponse{
 		Result: registryv1.AddPodResponse_SUCCESS,
 	}, nil
@@ -170,6 +186,8 @@ func (s *CNIServer) RemovePod(_ context.Context, req *registryv1.RemovePodReques
 	if err := s.storage.RemoveResource(req.Name); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
+
+	// TODO: block until the configuration is actually loaded
 
 	return &registryv1.RemovePodResponse{
 		Result: registryv1.RemovePodResponse_SUCCESS,
