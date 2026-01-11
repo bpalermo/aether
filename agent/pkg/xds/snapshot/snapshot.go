@@ -1,4 +1,4 @@
-package registry
+package snapshot
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bpalermo/aether/agent/pkg/xds/registry/cache"
+	"github.com/bpalermo/aether/agent/pkg/xds/snapshot/cache"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -18,7 +18,7 @@ const (
 	eventBuffer = 32
 )
 
-type XdsRegistry struct {
+type XdsSnapshot struct {
 	log logr.Logger
 
 	mu            sync.RWMutex
@@ -35,8 +35,8 @@ type XdsRegistry struct {
 	version  string
 }
 
-func NewXdsRegistry(nodeID string, log logr.Logger) *XdsRegistry {
-	return &XdsRegistry{
+func NewXdsSnapshot(nodeID string, log logr.Logger) *XdsSnapshot {
+	return &XdsSnapshot{
 		log.WithName("registry"),
 		sync.RWMutex{},
 		cache.NewClusterCache(),
@@ -50,7 +50,7 @@ func NewXdsRegistry(nodeID string, log logr.Logger) *XdsRegistry {
 	}
 }
 
-func (r *XdsRegistry) Start(ctx context.Context) error {
+func (r *XdsSnapshot) Start(ctx context.Context) error {
 	for {
 		select {
 		case event := <-r.eventChan:
@@ -70,7 +70,7 @@ func (r *XdsRegistry) Start(ctx context.Context) error {
 	}
 }
 
-func (r *XdsRegistry) processEvent(ctx context.Context, event *registryv1.Event) error {
+func (r *XdsSnapshot) processEvent(ctx context.Context, event *registryv1.Event) error {
 	r.log.Info("processing event", "operation", event.Operation)
 
 	// Switch on the resource type
@@ -85,7 +85,7 @@ func (r *XdsRegistry) processEvent(ctx context.Context, event *registryv1.Event)
 	}
 }
 
-func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_Operation, event *registryv1.KubernetesPod) error {
+func (r *XdsSnapshot) processPodEvent(ctx context.Context, op registryv1.Event_Operation, event *registryv1.KubernetesPod) error {
 	r.log.Info("processing pod event",
 		"operation", op.String(),
 		"name", event.GetName(),
@@ -108,7 +108,7 @@ func (r *XdsRegistry) processPodEvent(ctx context.Context, op registryv1.Event_O
 	return r.generateSnapshot(ctx)
 }
 
-func (r *XdsRegistry) processCNIPod(ctx context.Context, op registryv1.Event_Operation, event *registryv1.CNIPod) error {
+func (r *XdsSnapshot) processCNIPod(ctx context.Context, op registryv1.Event_Operation, event *registryv1.CNIPod) error {
 	r.log.Info("processing network namespace event", "operation", op.String(), "path", event.NetworkNamespace)
 
 	switch op {
@@ -121,7 +121,7 @@ func (r *XdsRegistry) processCNIPod(ctx context.Context, op registryv1.Event_Ope
 	return r.generateSnapshot(ctx)
 }
 
-func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
+func (r *XdsSnapshot) generateSnapshot(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -152,11 +152,11 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 	return nil
 }
 
-func (r *XdsRegistry) GetSnapshot() cachev3.SnapshotCache {
+func (r *XdsSnapshot) GetSnapshot() cachev3.SnapshotCache {
 	return r.snapshot
 }
 
-func (r *XdsRegistry) GetEventChan() chan<- *registryv1.Event {
+func (r *XdsSnapshot) GetEventChan() chan<- *registryv1.Event {
 	return r.eventChan
 }
 

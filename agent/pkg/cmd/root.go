@@ -8,8 +8,8 @@ import (
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/controller"
 	"github.com/bpalermo/aether/agent/pkg/install"
-	"github.com/bpalermo/aether/agent/pkg/xds/registry"
 	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
+	"github.com/bpalermo/aether/agent/pkg/xds/snapshot"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap/zapcore"
@@ -88,8 +88,8 @@ func runAgent() error {
 	initWg := &sync.WaitGroup{}
 	initWg.Add(2)
 
-	// Create xDS registry
-	r := registry.NewXdsRegistry(cfg.ProxyServiceNodeID, logger)
+	// Create xDS snapshot
+	r := snapshot.NewXdsSnapshot(cfg.ProxyServiceNodeID, logger)
 	if err = m.Add(r); err != nil {
 		return err
 	}

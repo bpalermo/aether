@@ -1,12 +1,12 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "registry",
-    srcs = ["registry.go"],
-    importpath = "github.com/bpalermo/aether/agent/pkg/xds/registry",
+    name = "snapshot",
+    srcs = ["snapshot.go"],
+    importpath = "github.com/bpalermo/aether/agent/pkg/xds/snapshot",
     visibility = ["//visibility:public"],
     deps = [
-        "//agent/pkg/xds/registry/cache",
+        "//agent/pkg/xds/snapshot/cache",
         "//api/aether/registry/v1:registry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
@@ -16,9 +16,9 @@ go_library(
 )
 
 go_test(
-    name = "registry_test",
-    srcs = ["registry_test.go"],
-    embed = [":registry"],
+    name = "snapshot_test",
+    srcs = ["snapshot_test.go"],
+    embed = [":snapshot"],
     deps = [
         "//api/aether/registry/v1:registry",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",

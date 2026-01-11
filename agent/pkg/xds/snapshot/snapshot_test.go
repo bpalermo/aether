@@ -1,4 +1,4 @@
-package registry
+package snapshot
 
 import (
 	"context"
@@ -13,11 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewXdsRegistry(t *testing.T) {
+func TestNewXdsSnapshot(t *testing.T) {
 	nodeID := "test-node"
 	log := logr.Discard()
 
-	registry := NewXdsRegistry(nodeID, log)
+	registry := NewXdsSnapshot(nodeID, log)
 
 	assert.NotNil(t, registry)
 	assert.Equal(t, nodeID, registry.nodeID)
@@ -30,7 +30,7 @@ func TestNewXdsRegistry(t *testing.T) {
 
 func TestXdsRegistry_Start(t *testing.T) {
 	t.Run("processes events until context canceled", func(t *testing.T) {
-		registry := NewXdsRegistry("test-node", logr.Discard())
+		registry := NewXdsSnapshot("test-node", logr.Discard())
 		ctx, cancel := context.WithCancel(context.Background())
 
 		// Send test event
@@ -63,7 +63,7 @@ func TestXdsRegistry_Start(t *testing.T) {
 	})
 
 	t.Run("handles nil events", func(t *testing.T) {
-		registry := NewXdsRegistry("test-node", logr.Discard())
+		registry := NewXdsSnapshot("test-node", logr.Discard())
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 
@@ -134,7 +134,7 @@ func TestXdsRegistry_processEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			registry := NewXdsRegistry("test-node", logr.Discard())
+			registry := NewXdsSnapshot("test-node", logr.Discard())
 			ctx := context.Background()
 
 			err := registry.processEvent(ctx, tt.event)
@@ -147,7 +147,7 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("CREATED operation", func(t *testing.T) {
-		registry := NewXdsRegistry("test-node", logr.Discard())
+		registry := NewXdsSnapshot("test-node", logr.Discard())
 		pod := &registryv1.KubernetesPod{
 			Name:        "test-pod",
 			Namespace:   "default",
@@ -168,7 +168,7 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 	})
 
 	t.Run("UPDATED operation", func(t *testing.T) {
-		registry := NewXdsRegistry("test-node", logr.Discard())
+		registry := NewXdsSnapshot("test-node", logr.Discard())
 		pod := &registryv1.KubernetesPod{
 			Name:        "test-pod",
 			Namespace:   "default",
@@ -181,7 +181,7 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 	})
 
 	t.Run("DELETED operation", func(t *testing.T) {
-		registry := NewXdsRegistry("test-node", logr.Discard())
+		registry := NewXdsSnapshot("test-node", logr.Discard())
 
 		// First add a pod
 		pod := &registryv1.KubernetesPod{
@@ -210,7 +210,7 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("CREATED operation", func(t *testing.T) {
-		registry := NewXdsRegistry("test-node", logr.Discard())
+		registry := NewXdsSnapshot("test-node", logr.Discard())
 		cniPod := &registryv1.CNIPod{
 			Name:             "test-pod",
 			Namespace:        "default",
@@ -222,7 +222,7 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 	})
 
 	t.Run("DELETED operation", func(t *testing.T) {
-		registry := NewXdsRegistry("test-node", logr.Discard())
+		registry := NewXdsSnapshot("test-node", logr.Discard())
 		cniPod := &registryv1.CNIPod{
 			Name:             "test-pod",
 			Namespace:        "default",
@@ -240,7 +240,7 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 
 func TestXdsRegistry_generateSnapshot(t *testing.T) {
 	ctx := context.Background()
-	registry := NewXdsRegistry("test-node", logr.Discard())
+	registry := NewXdsSnapshot("test-node", logr.Discard())
 
 	// Add some test data
 	event := &registryv1.KubernetesPod{
@@ -266,14 +266,14 @@ func TestXdsRegistry_generateSnapshot(t *testing.T) {
 }
 
 func TestXdsRegistry_GetSnapshot(t *testing.T) {
-	registry := NewXdsRegistry("test-node", logr.Discard())
+	registry := NewXdsSnapshot("test-node", logr.Discard())
 
 	snapshot := registry.GetSnapshot()
 	assert.NotNil(t, snapshot)
 }
 
 func TestXdsRegistry_GetEventChan(t *testing.T) {
-	registry := NewXdsRegistry("test-node", logr.Discard())
+	registry := NewXdsSnapshot("test-node", logr.Discard())
 
 	eventChan := registry.GetEventChan()
 	assert.NotNil(t, eventChan)
@@ -289,7 +289,7 @@ func TestXdsRegistry_GetEventChan(t *testing.T) {
 
 func TestXdsRegistry_ConcurrentAccess(t *testing.T) {
 	ctx := context.Background()
-	registry := NewXdsRegistry("test-node", logr.Discard())
+	registry := NewXdsSnapshot("test-node", logr.Discard())
 
 	// Start registry
 	go registry.Start(ctx)

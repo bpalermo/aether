@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	registry2 "github.com/bpalermo/aether/agent/pkg/xds/registry"
+	registry2 "github.com/bpalermo/aether/agent/pkg/xds/snapshot"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
@@ -38,12 +38,12 @@ type XdsServer struct {
 
 	initWg *sync.WaitGroup
 
-	registry *registry2.XdsRegistry
+	registry *registry2.XdsSnapshot
 }
 
 type XdsServerOption func(*XdsServer)
 
-func NewXdsServer(mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, registry *registry2.XdsRegistry, opts ...XdsServerOption) *XdsServer {
+func NewXdsServer(mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, registry *registry2.XdsSnapshot, opts ...XdsServerOption) *XdsServer {
 	srv := &XdsServer{
 		mgr:      mgr,
 		log:      log.WithName("xds-server"),

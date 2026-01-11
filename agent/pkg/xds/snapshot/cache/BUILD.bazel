@@ -8,7 +8,7 @@ go_library(
         "listener.go",
         "route.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/pkg/xds/registry/cache",
+    importpath = "github.com/bpalermo/aether/agent/pkg/xds/snapshot/cache",
     visibility = ["//visibility:public"],
     deps = [
         "//agent/pkg/xds/proxy",

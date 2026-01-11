@@ -7,7 +7,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent/pkg/constants",
-        "//agent/pkg/xds/registry",
+        "//agent/pkg/xds/snapshot",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
