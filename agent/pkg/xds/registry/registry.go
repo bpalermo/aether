@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/bpalermo/aether/agent/pkg/xds/registry/cache"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -131,7 +132,7 @@ func (r *XdsRegistry) generateSnapshot(ctx context.Context) error {
 		resource.ListenerType: r.listenerCache.GetAllListeners(),
 	}
 
-	snapshot, err := cachev3.NewSnapshot(fmt.Sprintf("%d", r.version), resources)
+	snapshot, err := cachev3.NewSnapshot(r.generateVersion(), resources)
 	if err != nil {
 		return err
 	}
@@ -159,4 +160,8 @@ func (r *XdsRegistry) GetSnapshot() cachev3.SnapshotCache {
 
 func (r *XdsRegistry) GetEventChan() chan<- *registryv1.Event {
 	return r.eventChan
+}
+
+func (r *XdsRegistry) generateVersion() string {
+	return fmt.Sprintf("%d.%d", time.Now().UnixNano(), r.version)
 }

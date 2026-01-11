@@ -6,13 +6,15 @@ proto_library(
     name = "registryv1_proto",
     srcs = [
         "cni.proto",
+        "endpoint.proto",
         "event.proto",
         "kubernetes.proto",
         "service.proto",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "@protobuf//:wrappers_proto",
+        "@protobuf//:any_proto",
+        "@protobuf//:struct_proto",
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
     ],
 )

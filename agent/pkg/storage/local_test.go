@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +18,7 @@ func newStringValue() *wrapperspb.StringValue {
 }
 
 func TestNewFileStorage(t *testing.T) {
-	storage := NewFileStorage[*wrapperspb.StringValue]("/tmp/test", newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue]("/tmp/test", newStringValue)
 
 	assert.NotNil(t, storage)
 	assert.Equal(t, "/tmp/test", storage.basePath)
@@ -27,7 +28,7 @@ func TestNewFileStorage(t *testing.T) {
 
 func TestCachedFileStorage_AddResource(t *testing.T) {
 	dir := t.TempDir()
-	storage := NewFileStorage[*wrapperspb.StringValue](dir, newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
 
 	tests := []struct {
 		name    string
@@ -58,7 +59,7 @@ func TestCachedFileStorage_AddResource(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := &wrapperspb.StringValue{Value: tt.value}
-			err := storage.AddResource(tt.key, msg)
+			err := storage.AddResource(context.Background(), tt.key, msg)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -80,13 +81,13 @@ func TestCachedFileStorage_AddResource(t *testing.T) {
 
 func TestCachedFileStorage_GetResource(t *testing.T) {
 	dir := t.TempDir()
-	storage := NewFileStorage[*wrapperspb.StringValue](dir, newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
 
 	// Add resources
 	msg1 := &wrapperspb.StringValue{Value: "value1"}
 	msg2 := &wrapperspb.StringValue{Value: "value2"}
-	require.NoError(t, storage.AddResource("key1", msg1))
-	require.NoError(t, storage.AddResource("key2", msg2))
+	require.NoError(t, storage.AddResource(context.Background(), "key1", msg1))
+	require.NoError(t, storage.AddResource(context.Background(), "key2", msg2))
 
 	tests := []struct {
 		name      string
@@ -115,7 +116,7 @@ func TestCachedFileStorage_GetResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := storage.GetResource(tt.key)
+			result, err := storage.GetResource(context.Background(), tt.key)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -140,10 +141,10 @@ func TestCachedFileStorage_GetResourceFromDisk(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create storage after the file exists
-	storage := NewFileStorage[*wrapperspb.StringValue](dir, newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
 
 	// Get resource (should load from disk)
-	result, err := storage.GetResource("disk_key")
+	result, err := storage.GetResource(context.Background(), "disk_key")
 	assert.NoError(t, err)
 	assert.Equal(t, "disk_value", result.Value)
 
@@ -155,11 +156,11 @@ func TestCachedFileStorage_GetResourceFromDisk(t *testing.T) {
 
 func TestCachedFileStorage_RemoveResource(t *testing.T) {
 	dir := t.TempDir()
-	storage := NewFileStorage[*wrapperspb.StringValue](dir, newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
 
 	// Add resources
 	msg := &wrapperspb.StringValue{Value: "value_to_remove"}
-	require.NoError(t, storage.AddResource("remove_key", msg))
+	require.NoError(t, storage.AddResource(context.Background(), "remove_key", msg))
 
 	// Verify it exists
 	filePath := filepath.Join(dir, "remove_key.json")
@@ -168,7 +169,7 @@ func TestCachedFileStorage_RemoveResource(t *testing.T) {
 	assert.True(t, ok)
 
 	// Remove resource
-	err := storage.RemoveResource("remove_key")
+	err := storage.RemoveResource(context.Background(), "remove_key")
 	assert.NoError(t, err)
 
 	// Verify it's removed from disk and cache
@@ -177,7 +178,7 @@ func TestCachedFileStorage_RemoveResource(t *testing.T) {
 	assert.False(t, ok)
 
 	// Try to remove non-existent resource
-	err = storage.RemoveResource("nonexistent")
+	err = storage.RemoveResource(context.Background(), "nonexistent")
 	assert.NoError(t, err)
 }
 
@@ -206,8 +207,8 @@ func TestCachedFileStorage_LoadAll(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create storage and load all
-	storage := NewFileStorage[*wrapperspb.StringValue](dir, newStringValue)
-	_, err = storage.LoadAll()
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
+	_, err = storage.LoadAll(context.Background())
 	assert.NoError(t, err)
 
 	// Verify all files are loaded into cache
@@ -221,24 +222,24 @@ func TestCachedFileStorage_LoadAll(t *testing.T) {
 
 func TestCachedFileStorage_LoadAllEmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	storage := NewFileStorage[*wrapperspb.StringValue](dir, newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
 
-	_, err := storage.LoadAll()
+	_, err := storage.LoadAll(context.Background())
 	assert.NoError(t, err)
 	assert.Empty(t, storage.cache)
 }
 
 func TestCachedFileStorage_LoadAllNonExistentDir(t *testing.T) {
-	storage := NewFileStorage[*wrapperspb.StringValue]("/nonexistent/dir", newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue]("/nonexistent/dir", newStringValue)
 
-	_, err := storage.LoadAll()
+	_, err := storage.LoadAll(context.Background())
 	assert.Error(t, err)
 	assert.Empty(t, storage.cache)
 }
 
 func TestCachedFileStorage_ConcurrentAccess(t *testing.T) {
 	dir := t.TempDir()
-	storage := NewFileStorage[*wrapperspb.StringValue](dir, newStringValue)
+	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
 
 	done := make(chan bool)
 
@@ -248,7 +249,7 @@ func TestCachedFileStorage_ConcurrentAccess(t *testing.T) {
 			key := fmt.Sprintf("concurrent_%d", n)
 			value := fmt.Sprintf("value_%d", n)
 			msg := &wrapperspb.StringValue{Value: value}
-			err := storage.AddResource(key, msg)
+			err := storage.AddResource(context.Background(), key, msg)
 			assert.NoError(t, err)
 			done <- true
 		}(i)
@@ -259,7 +260,7 @@ func TestCachedFileStorage_ConcurrentAccess(t *testing.T) {
 		go func(n int) {
 			key := fmt.Sprintf("concurrent_%d", n)
 			// May or may not find the resource depending on timing
-			_, _ = storage.GetResource(key)
+			_, _ = storage.GetResource(context.Background(), key)
 			done <- true
 		}(i)
 	}
@@ -273,7 +274,7 @@ func TestCachedFileStorage_ConcurrentAccess(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("concurrent_%d", i)
 		value := fmt.Sprintf("value_%d", i)
-		result, err := storage.GetResource(key)
+		result, err := storage.GetResource(context.Background(), key)
 		assert.NoError(t, err)
 		assert.Equal(t, value, result.Value)
 	}

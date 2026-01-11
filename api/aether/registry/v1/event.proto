@@ -3,8 +3,8 @@ syntax = "proto3";
 package aether.registry.v1;
 
 import "api/aether/registry/v1/cni.proto";
+import "api/aether/registry/v1/endpoint.proto";
 import "api/aether/registry/v1/kubernetes.proto";
-import "google/protobuf/wrappers.proto";
 
 option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
 
@@ -22,5 +22,6 @@ message Event {
   oneof resource {
     CNIPod cni_pod = 2;
     KubernetesPod k8s_pod = 3;
+    Endpoint endpoint = 4;
   }
 }

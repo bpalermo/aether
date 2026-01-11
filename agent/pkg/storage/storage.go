@@ -1,10 +1,14 @@
 package storage
 
-import "google.golang.org/protobuf/proto"
+import (
+	"context"
+
+	"google.golang.org/protobuf/proto"
+)
 
 type Storage[T proto.Message] interface {
-	AddResource(string, T) error
-	RemoveResource(string) error
-	GetResource(string) (T, error)
-	LoadAll() ([]T, error)
+	AddResource(context.Context, string, T) error
+	RemoveResource(context.Context, string) error
+	GetResource(context.Context, string) (T, error)
+	LoadAll(context.Context) ([]T, error)
 }

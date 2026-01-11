@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,24 +12,24 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type CachedFileStorage[T proto.Message] struct {
+type CachedLocalStorage[T proto.Message] struct {
 	basePath string
 	cache    map[string]T
 	mu       sync.RWMutex
 	newFunc  func() T // Factory function to create new instances
 }
 
-// NewFileStorage creates a new cached file storage
+// NewCachedLocalStorage creates a new cached file storage
 // Resources are stored as individual files in the specified basePath and in memory
-func NewFileStorage[T proto.Message](basePath string, newFunc func() T) *CachedFileStorage[T] {
-	return &CachedFileStorage[T]{
+func NewCachedLocalStorage[T proto.Message](basePath string, newFunc func() T) *CachedLocalStorage[T] {
+	return &CachedLocalStorage[T]{
 		basePath: basePath,
 		cache:    make(map[string]T),
 		newFunc:  newFunc,
 	}
 }
 
-func (f *CachedFileStorage[T]) AddResource(key string, resource T) error {
+func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key string, resource T) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -56,7 +57,7 @@ func (f *CachedFileStorage[T]) AddResource(key string, resource T) error {
 	return nil
 }
 
-func (f *CachedFileStorage[T]) RemoveResource(key string) error {
+func (f *CachedLocalStorage[T]) RemoveResource(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -74,7 +75,7 @@ func (f *CachedFileStorage[T]) RemoveResource(key string) error {
 	return nil
 }
 
-func (f *CachedFileStorage[T]) GetResource(key string) (T, error) {
+func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key string) (T, error) {
 	f.mu.RLock()
 
 	// Check cache first
@@ -115,7 +116,7 @@ func (f *CachedFileStorage[T]) GetResource(key string) (T, error) {
 }
 
 // LoadAll loads all resources from disk into memory cache
-func (f *CachedFileStorage[T]) LoadAll() ([]T, error) {
+func (f *CachedLocalStorage[T]) LoadAll(_ context.Context) ([]T, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

@@ -53,9 +53,10 @@ func NewCNIServer(logger logr.Logger, registryPath string, socketPath string, in
 		logger:     logger.WithName("cni-server"),
 		grpcServer: grpcServer,
 		socketPath: socketPath,
-		storage: storage.NewFileStorage[*registryv1.CNIPod](registryPath, func() *registryv1.CNIPod {
-			return &registryv1.CNIPod{}
-		}),
+		storage: storage.NewCachedLocalStorage[*registryv1.CNIPod](
+			registryPath,
+			func() *registryv1.CNIPod { return &registryv1.CNIPod{} },
+		),
 		initWg:    initWg,
 		eventChan: eventChan,
 	}
@@ -74,7 +75,7 @@ func (s *CNIServer) Start(ctx context.Context) error {
 }
 
 func (s *CNIServer) initialize(ctx context.Context) error {
-	resources, err := s.storage.LoadAll()
+	resources, err := s.storage.LoadAll(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load resources from storage: %w", err)
 	}
@@ -162,13 +163,13 @@ func (s *CNIServer) waitForShutdown(ctx context.Context) {
 	s.Stop()
 }
 
-func (s *CNIServer) AddPod(_ context.Context, req *registryv1.AddPodRequest) (*registryv1.AddPodResponse, error) {
+func (s *CNIServer) AddPod(ctx context.Context, req *registryv1.AddPodRequest) (*registryv1.AddPodResponse, error) {
 	if req.Pod == nil {
 		return nil, status.Error(codes.InvalidArgument, "pod is required")
 	}
 
 	// Store the registry entry
-	if err := s.storage.AddResource(req.Pod.Name, req.Pod); err != nil {
+	if err := s.storage.AddResource(ctx, req.Pod.Name, req.Pod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
 
@@ -179,9 +180,9 @@ func (s *CNIServer) AddPod(_ context.Context, req *registryv1.AddPodRequest) (*r
 	}, nil
 }
 
-func (s *CNIServer) RemovePod(_ context.Context, req *registryv1.RemovePodRequest) (*registryv1.RemovePodResponse, error) {
+func (s *CNIServer) RemovePod(ctx context.Context, req *registryv1.RemovePodRequest) (*registryv1.RemovePodResponse, error) {
 	// Remove the registry entry from storage
-	if err := s.storage.RemoveResource(req.Name); err != nil {
+	if err := s.storage.RemoveResource(ctx, req.Name); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
 

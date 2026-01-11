@@ -69,7 +69,7 @@ func TestCNIServer_StartStop(t *testing.T) {
 	initWg.Add(1)
 	eventChan := make(chan *registryv1.Event, 10) // Add buffer to prevent blocking
 	server := NewCNIServer(logger, registryPath, socketPath, initWg, eventChan)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	// Start the server in a goroutine since it now blocks
@@ -106,7 +106,7 @@ func TestCNIServer_StartStop(t *testing.T) {
 
 func TestCNIServer_AddPod(t *testing.T) {
 	registryPath := t.TempDir()
-	mockStorage := storage.NewFileStorage[*registryv1.CNIPod](registryPath, newCNIPod)
+	mockStorage := storage.NewCachedLocalStorage[*registryv1.CNIPod](registryPath, newCNIPod)
 
 	server := &CNIServer{
 		storage: mockStorage,
@@ -152,7 +152,7 @@ func TestCNIServer_AddPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := server.AddPod(context.Background(), tt.req)
+			resp, err := server.AddPod(t.Context(), tt.req)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -168,7 +168,7 @@ func TestCNIServer_AddPod(t *testing.T) {
 
 				// Verify pod was stored
 				if tt.req != nil && tt.req.Pod != nil {
-					stored, err := mockStorage.GetResource(tt.req.Pod.Name)
+					stored, err := mockStorage.GetResource(t.Context(), tt.req.Pod.Name)
 					assert.NoError(t, err)
 					protoEqual(t, tt.req.Pod, stored)
 				}
@@ -179,7 +179,7 @@ func TestCNIServer_AddPod(t *testing.T) {
 
 func TestCNIServer_RemovePod(t *testing.T) {
 	registryPath := t.TempDir()
-	mockStorage := storage.NewFileStorage[*registryv1.CNIPod](registryPath, newCNIPod)
+	mockStorage := storage.NewCachedLocalStorage[*registryv1.CNIPod](registryPath, newCNIPod)
 
 	server := &CNIServer{
 		storage: mockStorage,
@@ -190,7 +190,7 @@ func TestCNIServer_RemovePod(t *testing.T) {
 		Name:      "existing-pod",
 		Namespace: "default",
 	}
-	err := mockStorage.AddResource(testPod.Name, testPod)
+	err := mockStorage.AddResource(t.Context(), testPod.Name, testPod)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -227,7 +227,7 @@ func TestCNIServer_RemovePod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := server.RemovePod(context.Background(), tt.req)
+			resp, err := server.RemovePod(t.Context(), tt.req)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -243,7 +243,7 @@ func TestCNIServer_RemovePod(t *testing.T) {
 
 				// Verify pod was removed
 				if tt.req != nil && tt.req.Name != "" {
-					_, err := mockStorage.GetResource(tt.req.Name)
+					_, err := mockStorage.GetResource(t.Context(), tt.req.Name)
 					assert.Error(t, err)
 				}
 			}
@@ -260,7 +260,7 @@ func TestCNIServer_Integration(t *testing.T) {
 	initWg.Add(1)
 	eventChan := make(chan *registryv1.Event, 10) // Add buffer
 	server := NewCNIServer(logger, registryPath, socketPath, initWg, eventChan)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	// Start the server in a goroutine since it now blocks
@@ -296,7 +296,7 @@ func TestCNIServer_Integration(t *testing.T) {
 	assert.Equal(t, registryv1.AddPodResponse_SUCCESS, addResp.Result)
 
 	// Verify pod exists in storage
-	stored, err := server.storage.GetResource("test-pod")
+	stored, err := server.storage.GetResource(t.Context(), "test-pod")
 	assert.NoError(t, err)
 	assert.Equal(t, "test-pod", stored.Name)
 
@@ -309,7 +309,7 @@ func TestCNIServer_Integration(t *testing.T) {
 	assert.Equal(t, registryv1.RemovePodResponse_SUCCESS, removeResp.Result)
 
 	// Verify pod was removed from storage
-	_, err = server.storage.GetResource("test-pod")
+	_, err = server.storage.GetResource(t.Context(), "test-pod")
 	assert.Error(t, err)
 
 	// Cleanup: cancel context and wait for server to stop
@@ -324,7 +324,7 @@ func TestCNIServer_Integration(t *testing.T) {
 
 func TestCNIServer_ConcurrentOperations(t *testing.T) {
 	registryPath := t.TempDir()
-	mockStorage := storage.NewFileStorage[*registryv1.CNIPod](registryPath, newCNIPod)
+	mockStorage := storage.NewCachedLocalStorage[*registryv1.CNIPod](registryPath, newCNIPod)
 
 	server := &CNIServer{
 		storage: mockStorage,
@@ -343,7 +343,7 @@ func TestCNIServer_ConcurrentOperations(t *testing.T) {
 					Namespace: "default",
 				},
 			}
-			_, err := server.AddPod(context.Background(), req)
+			_, err := server.AddPod(t.Context(), req)
 			assert.NoError(t, err)
 			done <- true
 		}(i)
@@ -357,7 +357,7 @@ func TestCNIServer_ConcurrentOperations(t *testing.T) {
 	// Verify all pods were added
 	for i := 0; i < numOperations; i++ {
 		name := fmt.Sprintf("pod-%d", i)
-		pod, err := mockStorage.GetResource(name)
+		pod, err := mockStorage.GetResource(t.Context(), name)
 		assert.NoError(t, err)
 		assert.Equal(t, name, pod.Name)
 	}
@@ -368,7 +368,7 @@ func TestCNIServer_ConcurrentOperations(t *testing.T) {
 			req := &registryv1.RemovePodRequest{
 				Name: fmt.Sprintf("pod-%d", n),
 			}
-			_, err := server.RemovePod(context.Background(), req)
+			_, err := server.RemovePod(t.Context(), req)
 			assert.NoError(t, err)
 			done <- true
 		}(i)
@@ -382,7 +382,7 @@ func TestCNIServer_ConcurrentOperations(t *testing.T) {
 	// Verify all pods were removed
 	for i := 0; i < numOperations; i++ {
 		name := fmt.Sprintf("pod-%d", i)
-		_, err := mockStorage.GetResource(name)
+		_, err := mockStorage.GetResource(t.Context(), name)
 		assert.Error(t, err)
 	}
 }
