@@ -67,20 +67,37 @@ func TestCNIServer_StartStop(t *testing.T) {
 
 	initWg := &sync.WaitGroup{}
 	initWg.Add(1)
-	server := NewCNIServer(logger, registryPath, socketPath, initWg, make(chan<- *registryv1.Event))
+	eventChan := make(chan *registryv1.Event, 10) // Add buffer to prevent blocking
+	server := NewCNIServer(logger, registryPath, socketPath, initWg, eventChan)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start server
-	err := server.Start(ctx)
-	require.NoError(t, err)
+	// Start the server in a goroutine since it now blocks
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Start(ctx)
+	}()
+
+	// Wait for initialization to complete
+	initWg.Wait()
+
+	// Give the server time to start listening
+	time.Sleep(100 * time.Millisecond)
 
 	// Verify socket exists
-	_, err = os.Stat(socketPath)
+	_, err := os.Stat(socketPath)
 	assert.NoError(t, err)
 
-	// Stop server
-	server.Stop()
+	// Stop server by canceling context
+	cancel()
+
+	// Wait for the server to finish with timeout
+	select {
+	case err := <-serverErr:
+		assert.NoError(t, err) // Should be nil on graceful shutdown
+	case <-time.After(2 * time.Second):
+		t.Fatal("server failed to stop within timeout")
+	}
 
 	// Verify the socket is cleaned up
 	_, err = os.Stat(socketPath)
@@ -241,16 +258,21 @@ func TestCNIServer_Integration(t *testing.T) {
 
 	initWg := &sync.WaitGroup{}
 	initWg.Add(1)
-	server := NewCNIServer(logger, registryPath, socketPath, initWg, make(chan<- *registryv1.Event))
+	eventChan := make(chan *registryv1.Event, 10) // Add buffer
+	server := NewCNIServer(logger, registryPath, socketPath, initWg, eventChan)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start server
-	err := server.Start(ctx)
-	require.NoError(t, err)
-	defer server.Stop()
+	// Start the server in a goroutine since it now blocks
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Start(ctx)
+	}()
 
-	// Wait for the server to be ready
+	// Wait for initialization to complete
+	initWg.Wait()
+
+	// Give the server time to start listening
 	time.Sleep(100 * time.Millisecond)
 
 	// Create a client connection
@@ -289,6 +311,15 @@ func TestCNIServer_Integration(t *testing.T) {
 	// Verify pod was removed from storage
 	_, err = server.storage.GetResource("test-pod")
 	assert.Error(t, err)
+
+	// Cleanup: cancel context and wait for server to stop
+	cancel()
+	select {
+	case <-serverErr:
+		// Server stopped successfully
+	case <-time.After(2 * time.Second):
+		t.Fatal("server failed to stop within timeout")
+	}
 }
 
 func TestCNIServer_ConcurrentOperations(t *testing.T) {
