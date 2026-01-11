@@ -1,8 +1,10 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
 
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -62,9 +64,38 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		zap.Strings("pod_ips", podIPs),
 		zap.String("cni_version", netConf.CNIVersion))
 
-	err = p.createRegistryEntry(args.Netns, k8sArgs, netConf, podIPs)
+	cniPod := &registryv1.CNIPod{
+		ContainerId:      args.ContainerID,
+		Name:             string(k8sArgs.K8S_POD_NAME),
+		Namespace:        string(k8sArgs.K8S_POD_NAMESPACE),
+		NetworkNamespace: args.Netns,
+		Ips:              podIPs,
+	}
+
+	client, err := NewCNIClient(p.logger, netConf.AgentCNIPath)
 	if err != nil {
-		return fmt.Errorf("failed to ensure registry directory: %v", err)
+		p.logger.Error("failed to create CNI client", zap.Error(err))
+		return err
+	}
+	defer func(client *CNIClient) {
+		if err = client.Close(); err != nil {
+			p.logger.Error("failed to close CNI client", zap.Error(err))
+		}
+	}(client)
+
+	if err != nil {
+		return err
+	}
+
+	res, err := client.AddPod(context.Background(), cniPod)
+	if err != nil {
+		p.logger.Error("failed to add pod to agent", zap.Error(err))
+		return fmt.Errorf("failed to add pod to agent: %v", err)
+	}
+
+	if res.Result != registryv1.AddPodResponse_SUCCESS {
+		p.logger.Warn("adding pod from agent was not successful", zap.String("result", res.Result.String()))
+		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
 
 	// Return the previous result to maintain the chain
@@ -72,6 +103,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 }
 
 func (p *AetherPlugin) CmdCheck(_ *skel.CmdArgs) error {
+	p.logger.Debug("running CNI check command")
 	return nil
 }
 
@@ -95,17 +127,37 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
 		zap.String("pod", string(k8sArgs.K8S_POD_NAME)))
 
-	if err = p.removeRegistryEntry(k8sArgs, conf); err != nil {
+	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
+	if err != nil {
+		p.logger.Error("failed to create CNI client", zap.Error(err))
 		return err
+	}
+	defer func(client *CNIClient) {
+		if err = client.Close(); err != nil {
+			p.logger.Error("failed to close CNI client", zap.Error(err))
+		}
+	}(client)
+
+	res, err := client.RemovePod(context.Background(), string(k8sArgs.K8S_POD_NAME), string(k8sArgs.K8S_POD_NAMESPACE))
+	if err != nil {
+		p.logger.Error("failed to remove pod from agent", zap.Error(err))
+		return fmt.Errorf("failed to remove pod from agent: %v", err)
+	}
+
+	if res.Result != registryv1.RemovePodResponse_SUCCESS {
+		p.logger.Warn("removing pod from agent was not successful", zap.String("result", res.Result.String()))
+		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
 
 	return nil
 }
 
 func (p *AetherPlugin) CmdGC(_ *skel.CmdArgs) error {
+	p.logger.Debug("running CNI GC command")
 	return nil
 }
 
 func (p *AetherPlugin) CmdStatus(_ *skel.CmdArgs) error {
+	p.logger.Debug("running CNI status command")
 	return nil
 }

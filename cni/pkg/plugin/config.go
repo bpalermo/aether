@@ -4,14 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/bpalermo/aether/cni/pkg/constants"
+	agentConstans "github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
 )
 
 type AetherConf struct {
 	types.PluginConf
-	RegistryPath string `json:"registry_path"`
+	AgentCNIPath string `json:"agent_cni_path"`
 
 	RuntimeConfig *RuntimeConfig `json:"runtimeConfig,omitempty"`
 }
@@ -45,8 +45,8 @@ func NewConf(stdinData []byte) (AetherConf, error) {
 		return c, err
 	}
 
-	if c.RegistryPath == "" {
-		c.RegistryPath = constants.DefaultRegistryPath
+	if c.AgentCNIPath == "" {
+		c.AgentCNIPath = agentConstans.DefaultCNISocketPath
 	}
 
 	return c, nil

@@ -1,23 +1,43 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "plugin",
     srcs = [
+        "client.go",
         "config.go",
         "plugin.go",
-        "registry.go",
     ],
     importpath = "github.com/bpalermo/aether/cni/pkg/plugin",
     visibility = ["//visibility:public"],
     deps = [
+        "//agent/pkg/constants",
         "//api/aether/registry/v1:registry",
-        "//cni/pkg/constants",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_containernetworking_cni//pkg/types/100",
         "@com_github_containernetworking_cni//pkg/version",
-        "@com_github_google_renameio_v2//:renameio",
-        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "plugin_test",
+    srcs = [
+        "client_test.go",
+        "config_test.go",
+    ],
+    embed = [":plugin"],
+    deps = [
+        "//agent/pkg/constants",
+        "//api/aether/registry/v1:registry",
+        "@com_github_containernetworking_cni//pkg/types",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//test/bufconn",
         "@org_uber_go_zap//:zap",
     ],
 )

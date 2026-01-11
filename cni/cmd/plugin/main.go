@@ -22,7 +22,7 @@ func main() {
 		logger.Fatal("failed to initialize logger", zap.Error(err))
 		os.Exit(1)
 	}
-	logger.Info("aether CNI plugin started")
+	logger.Debug("aether CNI plugin started")
 
 	p := plugin.NewAetherPlugin(logger)
 
