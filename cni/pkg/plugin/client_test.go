@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -19,26 +19,28 @@ import (
 
 // mockCNIService implements a mock CNI service for testing
 type mockCNIService struct {
-	registryv1.UnimplementedCNIServiceServer
+	cniv1.UnimplementedCNIServiceServer
 	addPodCalled    bool
 	removePodCalled bool
-	lastAddedPod    *registryv1.CNIPod
+	lastAddedPod    *cniv1.CNIPod
 	lastRemovedName string
 }
 
-func (m *mockCNIService) AddPod(_ context.Context, req *registryv1.AddPodRequest) (*registryv1.AddPodResponse, error) {
+func (m *mockCNIService) AddPod(_ context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
 	m.addPodCalled = true
 	m.lastAddedPod = req.Pod
-	return &registryv1.AddPodResponse{
-		Result: registryv1.AddPodResponse_SUCCESS,
+	return &cniv1.AddPodResponse{
+		Result: cniv1.AddPodResponse_SUCCESS,
 	}, nil
 }
 
-func (m *mockCNIService) RemovePod(_ context.Context, req *registryv1.RemovePodRequest) (*registryv1.RemovePodResponse, error) {
+func (m *mockCNIService) RemovePod(_ context.Context, req *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
 	m.removePodCalled = true
-	m.lastRemovedName = req.Name
-	return &registryv1.RemovePodResponse{
-		Result: registryv1.RemovePodResponse_SUCCESS,
+	if req.Pod != nil {
+		m.lastRemovedName = req.Pod.Name
+	}
+	return &cniv1.RemovePodResponse{
+		Result: cniv1.RemovePodResponse_SUCCESS,
 	}, nil
 }
 
@@ -66,7 +68,7 @@ func TestCNIClient_AddPod(t *testing.T) {
 	mockService := &mockCNIService{}
 
 	server := grpc.NewServer()
-	registryv1.RegisterCNIServiceServer(server, mockService)
+	cniv1.RegisterCNIServiceServer(server, mockService)
 
 	go func() {
 		if err := server.Serve(lis); err != nil {
@@ -91,11 +93,11 @@ func TestCNIClient_AddPod(t *testing.T) {
 	client := &CNIClient{
 		logger: zap.NewNop(),
 		conn:   conn,
-		client: registryv1.NewCNIServiceClient(conn),
+		client: cniv1.NewCNIServiceClient(conn),
 	}
 
 	// Test AddPod
-	pod := &registryv1.CNIPod{
+	pod := &cniv1.CNIPod{
 		Name:             "test-pod",
 		Namespace:        "default",
 		NetworkNamespace: "/proc/1234/ns/net",
@@ -105,7 +107,7 @@ func TestCNIClient_AddPod(t *testing.T) {
 	resp, err := client.AddPod(ctx, pod)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
-	assert.Equal(t, registryv1.AddPodResponse_SUCCESS, resp.Result)
+	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, resp.Result)
 	assert.True(t, mockService.addPodCalled)
 	assert.Equal(t, pod.Name, mockService.lastAddedPod.Name)
 }
@@ -116,7 +118,7 @@ func TestCNIClient_RemovePod(t *testing.T) {
 	mockService := &mockCNIService{}
 
 	server := grpc.NewServer()
-	registryv1.RegisterCNIServiceServer(server, mockService)
+	cniv1.RegisterCNIServiceServer(server, mockService)
 
 	go func() {
 		if err := server.Serve(lis); err != nil {
@@ -141,14 +143,18 @@ func TestCNIClient_RemovePod(t *testing.T) {
 	client := &CNIClient{
 		logger: zap.NewNop(),
 		conn:   conn,
-		client: registryv1.NewCNIServiceClient(conn),
+		client: cniv1.NewCNIServiceClient(conn),
 	}
 
 	// Test RemovePod
-	resp, err := client.RemovePod(ctx, "test-pod", "default")
+	pod := &cniv1.CNIPod{
+		Name:      "test-pod",
+		Namespace: "default",
+	}
+	resp, err := client.RemovePod(ctx, pod)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
-	assert.Equal(t, registryv1.RemovePodResponse_SUCCESS, resp.Result)
+	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, resp.Result)
 	assert.True(t, mockService.removePodCalled)
 	assert.Equal(t, "test-pod", mockService.lastRemovedName)
 }
@@ -187,7 +193,7 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 
 	mockService := &mockCNIService{}
 	server := grpc.NewServer()
-	registryv1.RegisterCNIServiceServer(server, mockService)
+	cniv1.RegisterCNIServiceServer(server, mockService)
 
 	go func() {
 		if err := server.Serve(lis); err != nil {
@@ -209,7 +215,7 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	// Test operations
-	pod := &registryv1.CNIPod{
+	pod := &cniv1.CNIPod{
 		Name:             "integration-pod",
 		Namespace:        "test",
 		NetworkNamespace: "/proc/5678/ns/net",
@@ -218,9 +224,13 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 
 	addResp, err := client.AddPod(ctx, pod)
 	assert.NoError(t, err)
-	assert.Equal(t, registryv1.AddPodResponse_SUCCESS, addResp.Result)
+	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, addResp.Result)
 
-	removeResp, err := client.RemovePod(ctx, "integration-pod", "test")
+	removePod := &cniv1.CNIPod{
+		Name:      "integration-pod",
+		Namespace: "test",
+	}
+	removeResp, err := client.RemovePod(ctx, removePod)
 	assert.NoError(t, err)
-	assert.Equal(t, registryv1.RemovePodResponse_SUCCESS, removeResp.Result)
+	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, removeResp.Result)
 }

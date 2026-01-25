@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "registry",
+    srcs = [
+        "annotation.go",
+        "endpoint.go",
+        "registry.go",
+    ],
+    importpath = "github.com/bpalermo/aether/agent/pkg/registry",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent/pkg/constants",
+        "//api/aether/registry/v1:registry",
+    ],
+)

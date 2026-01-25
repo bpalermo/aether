@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -64,13 +64,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		zap.Strings("pod_ips", podIPs),
 		zap.String("cni_version", netConf.CNIVersion))
 
-	cniPod := &registryv1.CNIPod{
-		ContainerId:      args.ContainerID,
-		Name:             string(k8sArgs.K8S_POD_NAME),
-		Namespace:        string(k8sArgs.K8S_POD_NAMESPACE),
-		NetworkNamespace: args.Netns,
-		Ips:              podIPs,
-	}
+	cniPod := newPodFromArgs(args, k8sArgs, podIPs)
 
 	client, err := NewCNIClient(p.logger, netConf.AgentCNIPath)
 	if err != nil {
@@ -93,7 +87,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to add pod to agent: %v", err)
 	}
 
-	if res.Result != registryv1.AddPodResponse_SUCCESS {
+	if res.Result != cniv1.AddPodResponse_SUCCESS {
 		p.logger.Warn("adding pod from agent was not successful", zap.String("result", res.Result.String()))
 		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
@@ -138,13 +132,15 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		}
 	}(client)
 
-	res, err := client.RemovePod(context.Background(), string(k8sArgs.K8S_POD_NAME), string(k8sArgs.K8S_POD_NAMESPACE))
+	cniPod := newPodFromArgs(args, k8sArgs, nil)
+
+	res, err := client.RemovePod(context.Background(), cniPod)
 	if err != nil {
 		p.logger.Error("failed to remove pod from agent", zap.Error(err))
 		return fmt.Errorf("failed to remove pod from agent: %v", err)
 	}
 
-	if res.Result != registryv1.RemovePodResponse_SUCCESS {
+	if res.Result != cniv1.RemovePodResponse_SUCCESS {
 		p.logger.Warn("removing pod from agent was not successful", zap.String("result", res.Result.String()))
 		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
@@ -160,4 +156,14 @@ func (p *AetherPlugin) CmdGC(_ *skel.CmdArgs) error {
 func (p *AetherPlugin) CmdStatus(_ *skel.CmdArgs) error {
 	p.logger.Debug("running CNI status command")
 	return nil
+}
+
+func newPodFromArgs(args *skel.CmdArgs, k8sArgs K8sArgs, podIPs []string) *cniv1.CNIPod {
+	return &cniv1.CNIPod{
+		ContainerId:      args.ContainerID,
+		Name:             string(k8sArgs.K8S_POD_NAME),
+		Namespace:        string(k8sArgs.K8S_POD_NAMESPACE),
+		NetworkNamespace: args.Netns,
+		Ips:              podIPs,
+	}
 }

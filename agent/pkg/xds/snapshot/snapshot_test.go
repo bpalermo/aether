@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/go-logr/logr"
@@ -112,11 +113,13 @@ func TestXdsRegistry_processEvent(t *testing.T) {
 			name: "network namespace event",
 			event: &registryv1.Event{
 				Operation: registryv1.Event_CREATED,
-				Resource: &registryv1.Event_CniPod{
-					CniPod: &registryv1.CNIPod{
-						Name:             "test-pod",
-						Namespace:        "default",
-						NetworkNamespace: "/var/run/netns/test",
+				Resource: &registryv1.Event_RegistryPod{
+					RegistryPod: &registryv1.RegistryPod{
+						CniPod: &cniv1.CNIPod{
+							Name:             "test-pod",
+							Namespace:        "default",
+							NetworkNamespace: "/var/run/netns/test",
+						},
 					},
 				},
 			},
@@ -211,29 +214,33 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 
 	t.Run("CREATED operation", func(t *testing.T) {
 		registry := NewXdsSnapshot("test-node", logr.Discard())
-		cniPod := &registryv1.CNIPod{
-			Name:             "test-pod",
-			Namespace:        "default",
-			NetworkNamespace: "/var/run/netns/test",
+		cniPod := &registryv1.RegistryPod{
+			CniPod: &cniv1.CNIPod{
+				Name:             "test-pod",
+				Namespace:        "default",
+				NetworkNamespace: "/var/run/netns/test",
+			},
 		}
 
-		err := registry.processCNIPod(ctx, registryv1.Event_CREATED, cniPod)
+		err := registry.processRegistryPod(ctx, registryv1.Event_CREATED, cniPod)
 		require.NoError(t, err)
 	})
 
 	t.Run("DELETED operation", func(t *testing.T) {
 		registry := NewXdsSnapshot("test-node", logr.Discard())
-		cniPod := &registryv1.CNIPod{
-			Name:             "test-pod",
-			Namespace:        "default",
-			NetworkNamespace: "/var/run/netns/test",
+		registryPod := &registryv1.RegistryPod{
+			CniPod: &cniv1.CNIPod{
+				Name:             "test-pod",
+				Namespace:        "default",
+				NetworkNamespace: "/var/run/netns/test",
+			},
 		}
 
 		// First add
-		registry.processCNIPod(ctx, registryv1.Event_CREATED, cniPod)
+		registry.processRegistryPod(ctx, registryv1.Event_CREATED, registryPod)
 
 		// Then delete
-		err := registry.processCNIPod(ctx, registryv1.Event_DELETED, cniPod)
+		err := registry.processRegistryPod(ctx, registryv1.Event_DELETED, registryPod)
 		require.NoError(t, err)
 	})
 }

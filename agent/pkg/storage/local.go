@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/bpalermo/aether/agent/pkg/types"
 	"github.com/bpalermo/aether/agent/pkg/util"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -14,7 +15,7 @@ import (
 
 type CachedLocalStorage[T proto.Message] struct {
 	basePath string
-	cache    map[string]T
+	cache    map[types.ContainerID]T
 	mu       sync.RWMutex
 	newFunc  func() T // Factory function to create new instances
 }
@@ -24,12 +25,12 @@ type CachedLocalStorage[T proto.Message] struct {
 func NewCachedLocalStorage[T proto.Message](basePath string, newFunc func() T) *CachedLocalStorage[T] {
 	return &CachedLocalStorage[T]{
 		basePath: basePath,
-		cache:    make(map[string]T),
+		cache:    make(map[types.ContainerID]T),
 		newFunc:  newFunc,
 	}
 }
 
-func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key string, resource T) error {
+func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key types.ContainerID, resource T) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -44,7 +45,7 @@ func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key string, resou
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	filePath := filepath.Join(f.basePath, key+".json")
+	filePath := filepath.Join(f.basePath, key.String()+".json")
 
 	// Write to disk atomically
 	if err := util.WriteFileAtomic(filePath, data); err != nil {
@@ -57,12 +58,12 @@ func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key string, resou
 	return nil
 }
 
-func (f *CachedLocalStorage[T]) RemoveResource(_ context.Context, key string) error {
+func (f *CachedLocalStorage[T]) RemoveResource(_ context.Context, key types.ContainerID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	// Remove from disk
-	filePath := filepath.Join(f.basePath, key+".json")
+	filePath := filepath.Join(f.basePath, key.String()+".json")
 	if err := os.Remove(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("failed to remove file: %w", err)
@@ -75,7 +76,7 @@ func (f *CachedLocalStorage[T]) RemoveResource(_ context.Context, key string) er
 	return nil
 }
 
-func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key string) (T, error) {
+func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.ContainerID) (T, error) {
 	f.mu.RLock()
 
 	// Check cache first
@@ -95,7 +96,7 @@ func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key string) (T, e
 	}
 
 	var resource T
-	filePath := filepath.Join(f.basePath, key+".json")
+	filePath := filepath.Join(f.basePath, key.String()+".json")
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -144,7 +145,7 @@ func (f *CachedLocalStorage[T]) LoadAll(_ context.Context) ([]T, error) {
 			return nil, fmt.Errorf("failed to unmarshal resource from %s: %w", filePath, err)
 		}
 
-		f.cache[key] = resource
+		f.cache[types.ContainerID(key)] = resource
 		resources = append(resources, resource)
 	}
 

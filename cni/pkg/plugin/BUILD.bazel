@@ -11,7 +11,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent/pkg/constants",
-        "//api/aether/registry/v1:registry",
+        "//api/aether/cni/v1:cni",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_containernetworking_cni//pkg/types/100",
@@ -31,7 +31,7 @@ go_test(
     embed = [":plugin"],
     deps = [
         "//agent/pkg/constants",
-        "//api/aether/registry/v1:registry",
+        "//api/aether/cni/v1:cni",
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

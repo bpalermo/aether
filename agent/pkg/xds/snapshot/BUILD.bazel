@@ -20,6 +20,7 @@ go_test(
     srcs = ["snapshot_test.go"],
     embed = [":snapshot"],
     deps = [
+        "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
         "@com_github_go_logr_logr//:logr",

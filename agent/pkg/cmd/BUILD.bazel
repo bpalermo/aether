@@ -1,8 +1,11 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "cmd",
-    srcs = ["root.go"],
+    srcs = [
+        "config.go",
+        "root.go",
+    ],
     importpath = "github.com/bpalermo/aether/agent/pkg/cmd",
     visibility = ["//visibility:public"],
     deps = [
@@ -11,12 +14,29 @@ go_library(
         "//agent/pkg/constants",
         "//agent/pkg/controller",
         "//agent/pkg/install",
+        "//agent/pkg/registry/ddb",
         "//agent/pkg/xds/server",
         "//agent/pkg/xds/snapshot",
+        "//api/aether/registry/v1:registry",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_config//:config",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
         "@io_k8s_sigs_controller_runtime//pkg/log/zap",
         "@org_uber_go_zap//zapcore",
+    ],
+)
+
+go_test(
+    name = "cmd_test",
+    srcs = ["config_test.go"],
+    embed = [":cmd"],
+    deps = [
+        "//agent/pkg/cni/server",
+        "//agent/pkg/constants",
+        "//agent/pkg/install",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )

@@ -37,9 +37,9 @@ func NewListenerCache() *ListenerCache {
 }
 
 // AddListeners adds listeners to the cache efficiently
-func (c *ListenerCache) AddListeners(cniPod *registryv1.CNIPod) {
+func (c *ListenerCache) AddListeners(registryPod *registryv1.RegistryPod) {
 	// Generate listeners first (before lock) if this operation is pure/thread-safe
-	inbound, outbound := proxy.GenerateListenersFromEvent(cniPod)
+	inbound, outbound := proxy.GenerateListenersFromEvent(registryPod)
 
 	// Early return if no listeners generated
 	if inbound == nil && outbound == nil {
@@ -60,7 +60,7 @@ func (c *ListenerCache) AddListeners(cniPod *registryv1.CNIPod) {
 		return
 	}
 
-	path := cniPod.NetworkNamespace
+	path := registryPod.GetCniPod().NetworkNamespace
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

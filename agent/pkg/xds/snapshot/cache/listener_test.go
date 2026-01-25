@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
 )
@@ -21,10 +22,12 @@ func TestListenerCache(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
 
-		event := &registryv1.CNIPod{
-			Name:             "test-pod",
-			Namespace:        "default",
-			NetworkNamespace: path,
+		event := &registryv1.RegistryPod{
+			CniPod: &cniv1.CNIPod{
+				Name:             "test-pod",
+				Namespace:        "default",
+				NetworkNamespace: path,
+			},
 		}
 
 		cache.AddListeners(event)
@@ -42,10 +45,12 @@ func TestListenerCache(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
 
-		event := &registryv1.CNIPod{
-			Name:             "test-pod",
-			Namespace:        "default",
-			NetworkNamespace: path,
+		event := &registryv1.RegistryPod{
+			CniPod: &cniv1.CNIPod{
+				Name:             "test-pod",
+				Namespace:        "default",
+				NetworkNamespace: path,
+			},
 		}
 
 		cache.AddListeners(event)
@@ -62,10 +67,12 @@ func TestListenerCache(t *testing.T) {
 		cache := NewListenerCache()
 		path := "/test-listener"
 
-		event := &registryv1.CNIPod{
-			Name:             "test-pod",
-			Namespace:        "default",
-			NetworkNamespace: path,
+		event := &registryv1.RegistryPod{
+			CniPod: &cniv1.CNIPod{
+				Name:             "test-pod",
+				Namespace:        "default",
+				NetworkNamespace: path,
+			},
 		}
 
 		cache.AddListeners(event)
@@ -79,12 +86,14 @@ func TestListenerCache(t *testing.T) {
 
 		// Add multiple listeners
 		for i := 0; i < 3; i++ {
-			event := &registryv1.CNIPod{
-				Name:             fmt.Sprintf("test-pod-%d", i),
-				Namespace:        "default",
-				NetworkNamespace: fmt.Sprintf("/listener-%d", i),
+			registryPod := &registryv1.RegistryPod{
+				CniPod: &cniv1.CNIPod{
+					Name:             fmt.Sprintf("test-pod-%d", i),
+					Namespace:        "default",
+					NetworkNamespace: fmt.Sprintf("/listener-%d", i),
+				},
 			}
-			cache.AddListeners(event)
+			cache.AddListeners(registryPod)
 		}
 
 		allListeners := cache.GetAllListeners()
@@ -102,12 +111,14 @@ func TestListenerCache(t *testing.T) {
 			go func(id int) {
 				defer wg.Done()
 				path := fmt.Sprintf("/listener-%d", id)
-				event := &registryv1.CNIPod{
-					Name:             "test-pod",
-					Namespace:        "default",
-					NetworkNamespace: path,
+				registryPod := &registryv1.RegistryPod{
+					CniPod: &cniv1.CNIPod{
+						Name:             "test-pod",
+						Namespace:        "default",
+						NetworkNamespace: path,
+					},
 				}
-				cache.AddListeners(event)
+				cache.AddListeners(registryPod)
 			}(i)
 		}
 		wg.Wait()

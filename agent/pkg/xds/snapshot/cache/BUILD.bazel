@@ -31,6 +31,7 @@ go_test(
     ],
     embed = [":cache"],
     deps = [
+        "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

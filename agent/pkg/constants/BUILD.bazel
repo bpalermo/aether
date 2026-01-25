@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "constants",
     srcs = [
+        "annotation.go",
         "constants.go",
         "label.go",
     ],

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bpalermo/aether/agent/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -58,8 +59,9 @@ func TestCachedFileStorage_AddResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			containerId := types.ContainerID(tt.key)
 			msg := &wrapperspb.StringValue{Value: tt.value}
-			err := storage.AddResource(context.Background(), tt.key, msg)
+			err := storage.AddResource(context.Background(), containerId, msg)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -67,7 +69,7 @@ func TestCachedFileStorage_AddResource(t *testing.T) {
 				assert.NoError(t, err)
 
 				// Verify in cache
-				cached, ok := storage.cache[tt.key]
+				cached, ok := storage.cache[containerId]
 				assert.True(t, ok)
 				assert.Equal(t, tt.value, cached.Value)
 
@@ -116,7 +118,8 @@ func TestCachedFileStorage_GetResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := storage.GetResource(context.Background(), tt.key)
+			containerId := types.ContainerID(tt.key)
+			result, err := storage.GetResource(context.Background(), containerId)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -214,7 +217,7 @@ func TestCachedFileStorage_LoadAll(t *testing.T) {
 	// Verify all files are loaded into cache
 	assert.Len(t, storage.cache, 3)
 	for key, expectedValue := range files {
-		cached, ok := storage.cache[key]
+		cached, ok := storage.cache[types.ContainerID(key)]
 		assert.True(t, ok, "key %s should be in cache", key)
 		assert.Equal(t, expectedValue, cached.Value)
 	}
@@ -249,7 +252,7 @@ func TestCachedFileStorage_ConcurrentAccess(t *testing.T) {
 			key := fmt.Sprintf("concurrent_%d", n)
 			value := fmt.Sprintf("value_%d", n)
 			msg := &wrapperspb.StringValue{Value: value}
-			err := storage.AddResource(context.Background(), key, msg)
+			err := storage.AddResource(context.Background(), types.ContainerID(key), msg)
 			assert.NoError(t, err)
 			done <- true
 		}(i)
@@ -260,7 +263,7 @@ func TestCachedFileStorage_ConcurrentAccess(t *testing.T) {
 		go func(n int) {
 			key := fmt.Sprintf("concurrent_%d", n)
 			// May or may not find the resource depending on timing
-			_, _ = storage.GetResource(context.Background(), key)
+			_, _ = storage.GetResource(context.Background(), types.ContainerID(key))
 			done <- true
 		}(i)
 	}
@@ -274,7 +277,7 @@ func TestCachedFileStorage_ConcurrentAccess(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("concurrent_%d", i)
 		value := fmt.Sprintf("value_%d", i)
-		result, err := storage.GetResource(context.Background(), key)
+		result, err := storage.GetResource(context.Background(), types.ContainerID(key))
 		assert.NoError(t, err)
 		assert.Equal(t, value, result.Value)
 	}

@@ -77,8 +77,8 @@ func (r *XdsSnapshot) processEvent(ctx context.Context, event *registryv1.Event)
 	switch res := event.GetResource().(type) {
 	case *registryv1.Event_K8SPod:
 		return r.processPodEvent(ctx, event.Operation, res.K8SPod)
-	case *registryv1.Event_CniPod:
-		return r.processCNIPod(ctx, event.Operation, res.CniPod)
+	case *registryv1.Event_RegistryPod:
+		return r.processRegistryPod(ctx, event.Operation, res.RegistryPod)
 	default:
 		r.log.Info("unknown resource type", "event", event)
 		return nil
@@ -108,14 +108,16 @@ func (r *XdsSnapshot) processPodEvent(ctx context.Context, op registryv1.Event_O
 	return r.generateSnapshot(ctx)
 }
 
-func (r *XdsSnapshot) processCNIPod(ctx context.Context, op registryv1.Event_Operation, event *registryv1.CNIPod) error {
-	r.log.Info("processing network namespace event", "operation", op.String(), "path", event.NetworkNamespace)
+func (r *XdsSnapshot) processRegistryPod(ctx context.Context, op registryv1.Event_Operation, event *registryv1.RegistryPod) error {
+	r.log.Info("processing network namespace event",
+		"operation", op.String(),
+		"path", event.GetCniPod().GetNetworkNamespace())
 
 	switch op {
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
 		r.listenerCache.AddListeners(event)
 	case registryv1.Event_DELETED:
-		r.listenerCache.RemoveListeners(event.NetworkNamespace)
+		r.listenerCache.RemoveListeners(event.GetCniPod().GetNetworkNamespace())
 	}
 
 	return r.generateSnapshot(ctx)

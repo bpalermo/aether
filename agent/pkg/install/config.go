@@ -1,12 +1,8 @@
 package install
 
+import "github.com/bpalermo/aether/agent/pkg/constants"
+
 type InstallerConfig struct {
-	// Debug
-	Debug bool
-	// ClusterName the cluster where the agent is running in
-	ClusterName string
-	// XDS nodeID
-	ProxyServiceNodeID string
 	// Location of the CNI config files in the container's filesystem (mount location of the CNINetDir)
 	MountedCNINetDir string
 	// Name of the CNI config file
@@ -17,4 +13,13 @@ type InstallerConfig struct {
 	CNIBinTargetDir string
 	// Directory into which to registry entries are created
 	MountedCNIRegistryDir string
+}
+
+func NewInstallerConfig() *InstallerConfig {
+	return &InstallerConfig{
+		CNIBinSourceDir:       constants.DefaultCNIBinDir,
+		CNIBinTargetDir:       constants.DefaultHostCNIBinDir,
+		MountedCNINetDir:      constants.DefaultHostCNINetDir,
+		MountedCNIRegistryDir: constants.DefaultHostCNIRegistryDir,
+	}
 }

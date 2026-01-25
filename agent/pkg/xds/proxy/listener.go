@@ -15,14 +15,15 @@ const (
 	defaultHTTPOutboundPort = 18081
 )
 
-func GenerateListenersFromEvent(cniPod *registryv1.CNIPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener) {
+func GenerateListenersFromEvent(cniPod *registryv1.RegistryPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener) {
 	inbound = generateInboundHTTPListener(cniPod)
 	outbound = generateOutboundHTTPListener(cniPod)
 
 	return inbound, outbound
 }
 
-func generateInboundHTTPListener(cniPod *registryv1.CNIPod) *listenerv3.Listener {
+func generateInboundHTTPListener(registryPod *registryv1.RegistryPod) *listenerv3.Listener {
+	cniPod := registryPod.GetCniPod()
 	return &listenerv3.Listener{
 		Name: fmt.Sprintf("inbound_http"),
 		Address: &corev3.Address{
@@ -45,7 +46,8 @@ func generateInboundHTTPListener(cniPod *registryv1.CNIPod) *listenerv3.Listener
 	}
 }
 
-func generateOutboundHTTPListener(cniPod *registryv1.CNIPod) *listenerv3.Listener {
+func generateOutboundHTTPListener(registryPod *registryv1.RegistryPod) *listenerv3.Listener {
+	cniPod := registryPod.GetCniPod()
 	return &listenerv3.Listener{
 		Name: fmt.Sprintf("outbound_http"),
 		Address: &corev3.Address{

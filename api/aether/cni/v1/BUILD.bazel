@@ -1,0 +1,32 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+
+proto_library(
+    name = "cniv1_proto",
+    srcs = [
+        "cni.proto",
+        "service.proto",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["@protovalidate//proto/protovalidate/buf/validate:validate_proto"],
+)
+
+go_proto_library(
+    name = "cniv1_go_proto",
+    compilers = [
+        "@rules_go//proto:go_grpc_v2",
+        "@rules_go//proto:go_proto",  # keep
+    ],
+    importpath = "github.com/bpalermo/aether/api/aether/cni/v1",
+    proto = ":cniv1_proto",
+    visibility = ["//visibility:public"],
+    deps = ["@build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate"],
+)
+
+go_library(
+    name = "cni",
+    embed = [":cniv1_go_proto"],
+    importpath = "github.com/bpalermo/aether/api/aether/cni/v1",
+    visibility = ["//visibility:public"],
+)

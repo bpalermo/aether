@@ -1,10 +1,10 @@
 syntax = "proto3";
 
-package aether.registry.v1;
+package aether.cni.v1;
 
 import "buf/validate/validate.proto";
 
-option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
+option go_package = "github.com/bpalermo/aether/api/aether/cni/v1;cniv1";
 
 message CNIPod {
   string name = 1 [
@@ -28,9 +28,4 @@ message CNIPod {
 
   repeated string ips = 5;
 
-  message PodAnnotations {
-    map<string, string> annotations = 1;
-  }
-
-  PodAnnotations annotations = 6;
 }

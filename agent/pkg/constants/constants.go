@@ -3,7 +3,8 @@ package constants
 import cniConstants "github.com/bpalermo/aether/cni/pkg/constants"
 
 const (
-	DefaultProxyID = "proxy"
+	DefaultProxyID     = "proxy"
+	DefaultClusterName = "unknown"
 
 	DefaultCNIBinDir          = "/opt/cni/bin"
 	DefaultHostCNIBinDir      = "/host/opt/cni/bin"
@@ -12,4 +13,7 @@ const (
 
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
 	DefaultCNISocketPath = "/run/aether/cni.sock"
+
+	// DefaultDynamoDBEndpointTableName the default endpoint table name
+	DefaultDynamoDBEndpointTableName = "AetherEndpoint"
 )

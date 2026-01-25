@@ -119,8 +119,8 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.7
-	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.30
-	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.53.6
+	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.31
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.54.0
 	github.com/aws/smithy-go v1.24.0
 	github.com/containernetworking/cni v1.3.0
 	github.com/envoyproxy/go-control-plane v0.13.5-0.20251024222203-75eaa193e329
