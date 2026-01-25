@@ -13,14 +13,14 @@ const (
 	defaultEndpointWeight        = 1024
 )
 
-func GetServiceFromAnnotations(annotations map[string]string) string {
+func getServiceFromAnnotations(annotations map[string]string) string {
 	if service, ok := annotations[constants.AetherServiceAnnotation]; ok {
 		return service
 	}
 	return ""
 }
 
-func GetEndpointPortOrDefault(annotations map[string]string) uint32 {
+func getEndpointPortOrDefault(annotations map[string]string) uint32 {
 	if portStr, ok := annotations[constants.AetherEndpointPortAnnotation]; ok {
 		if port, err := strconv.ParseUint(portStr, 10, 32); err == nil {
 			return uint32(port)
@@ -29,7 +29,7 @@ func GetEndpointPortOrDefault(annotations map[string]string) uint32 {
 	return defaultEndpointPort
 }
 
-func GetEndpointWeightOrDefault(annotations map[string]string) uint32 {
+func getEndpointWeightOrDefault(annotations map[string]string) uint32 {
 	if weightStr, ok := annotations[constants.AetherEndpointWeightAnnotation]; ok {
 		if weight, err := strconv.ParseUint(weightStr, 10, 32); err == nil {
 			return uint32(weight)
@@ -38,21 +38,21 @@ func GetEndpointWeightOrDefault(annotations map[string]string) uint32 {
 	return defaultEndpointWeight
 }
 
-func GetEndpointRegionOrDefault(annotations map[string]string) string {
+func getEndpointRegionOrDefault(annotations map[string]string) string {
 	if region, ok := annotations[constants.KubernetesTopologyRegionAnnotation]; ok {
 		return region
 	}
 	return defaultEndpointRegion
 }
 
-func GetEndpointZoneOrDefault(annotations map[string]string) string {
+func getEndpointZoneOrDefault(annotations map[string]string) string {
 	if zone, ok := annotations[constants.KubernetesTopologyZoneAnnotation]; ok {
 		return zone
 	}
 	return defaultEndpointZone
 }
 
-func GetEndpointMetadata(annotations map[string]string) map[string]string {
+func getEndpointMetadata(annotations map[string]string) map[string]string {
 	metadata := map[string]string{}
 	prefix := constants.AetherEndpointMetadataAnnotationPrefix
 	for key, value := range annotations {

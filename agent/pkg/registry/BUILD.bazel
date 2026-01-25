@@ -1,10 +1,11 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "registry",
     srcs = [
         "annotation.go",
         "endpoint.go",
+        "pod.go",
         "registry.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/pkg/registry",
@@ -12,5 +13,16 @@ go_library(
     deps = [
         "//agent/pkg/constants",
         "//api/aether/registry/v1:registry",
+    ],
+)
+
+go_test(
+    name = "registry_test",
+    srcs = ["pod_test.go"],
+    embed = [":registry"],
+    deps = [
+        "//api/aether/registry/v1:registry",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )
