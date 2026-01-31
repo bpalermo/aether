@@ -26,7 +26,7 @@ var rootCmd = &cobra.Command{
 	Short:        "Runs the aether register service.",
 	SilenceUsage: true,
 	PersistentPreRun: func(_ *cobra.Command, _ []string) {
-		logger = log.NewLogger(cfg.Debug)
+		logger = log.NewLogger(cfg.Debug).WithName("register")
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runRegister(cmd.Context())
@@ -38,6 +38,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
+	rootCmd.Flags().Uint16Var(&cfg.srvCfg.Port, "serverPort", 50051, "gRPC server port")
 	rootCmd.Flags().DurationVar(&cfg.ShutdownTimeout, "shutdownTimeout", 30*time.Second, "Shutdown timeout for graceful shutdown")
 }
 
@@ -48,12 +49,12 @@ func GetCommand() *cobra.Command {
 
 func runRegister(ctx context.Context) error {
 	logger.Info("starting register server", "debug", cfg.Debug)
-	_, err := server.NewRegisterServer(logger)
+	srv, err := server.NewRegisterServer(cfg.srvCfg, logger)
 	if err != nil {
 		return err
 	}
 
-	hook.AddShutdownHook(ctx, 30*time.Second, logger)
+	hook.AddShutdownHook(ctx, 30*time.Second, logger, srv)
 
 	return nil
 }

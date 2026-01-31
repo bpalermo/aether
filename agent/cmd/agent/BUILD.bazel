@@ -7,7 +7,10 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/bpalermo/aether/agent/cmd/agent",
     visibility = ["//visibility:private"],
-    deps = ["//agent/pkg/cmd"],
+    deps = [
+        "//agent/pkg/cmd",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ],
 )
 
 go_binary(

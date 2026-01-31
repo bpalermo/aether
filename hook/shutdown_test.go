@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -44,17 +43,19 @@ func TestAddShutdownHook_CallsAllHooks(t *testing.T) {
 	hook1 := &mockShutdownHook{}
 	hook2 := &mockShutdownHook{}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	done := make(chan struct{})
 	go func() {
-		AddShutdownHook(context.Background(), 5*time.Second, log, hook1, hook2)
+		AddShutdownHook(ctx, 5*time.Second, log, hook1, hook2)
 		close(done)
 	}()
 
 	// Give time for the signal handler to be set up
 	time.Sleep(50 * time.Millisecond)
 
-	// Send SIGTERM to trigger shutdown
-	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	// Trigger shutdown via context cancellation instead of signal
+	cancel()
 
 	select {
 	case <-done:
@@ -76,14 +77,16 @@ func TestAddShutdownHook_HandlesHookError(t *testing.T) {
 	hook1 := &mockShutdownHook{shutdownErr: errors.New("shutdown error")}
 	hook2 := &mockShutdownHook{}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	done := make(chan struct{})
 	go func() {
-		AddShutdownHook(context.Background(), 5*time.Second, log, hook1, hook2)
+		AddShutdownHook(ctx, 5*time.Second, log, hook1, hook2)
 		close(done)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	cancel()
 
 	select {
 	case <-done:
@@ -91,7 +94,7 @@ func TestAddShutdownHook_HandlesHookError(t *testing.T) {
 		t.Fatal("timeout waiting for shutdown")
 	}
 
-	// Both hooks should still be called even if one error
+	// Both hooks should still be called even with one error
 	if !hook1.wasCalled() {
 		t.Error("hook1 Shutdown was not called")
 	}

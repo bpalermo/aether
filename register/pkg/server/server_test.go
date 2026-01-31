@@ -12,8 +12,9 @@ import (
 
 func TestNewRegisterServer(t *testing.T) {
 	log := testr.New(t)
+	cfg := &RegisterServerConfig{}
 
-	rs, err := NewRegisterServer(log)
+	rs, err := NewRegisterServer(cfg, log)
 	if err != nil {
 		t.Fatalf("NewRegisterServer failed: %v", err)
 	}
@@ -34,8 +35,9 @@ func TestNewRegisterServer(t *testing.T) {
 
 func TestRegisterServer_Shutdown_NoClients(t *testing.T) {
 	log := testr.New(t)
+	cfg := &RegisterServerConfig{}
 
-	rs, err := NewRegisterServer(log)
+	rs, err := NewRegisterServer(cfg, log)
 	if err != nil {
 		t.Fatalf("NewRegisterServer failed: %v", err)
 	}
@@ -51,8 +53,9 @@ func TestRegisterServer_Shutdown_NoClients(t *testing.T) {
 
 func TestRegisterServer_Shutdown_WithClients(t *testing.T) {
 	log := testr.New(t)
+	cfg := &RegisterServerConfig{}
 
-	rs, err := NewRegisterServer(log)
+	rs, err := NewRegisterServer(cfg, log)
 	if err != nil {
 		t.Fatalf("NewRegisterServer failed: %v", err)
 	}
@@ -72,8 +75,9 @@ func TestRegisterServer_Shutdown_WithClients(t *testing.T) {
 
 func TestRegisterServer_Shutdown_ContextTimeout(t *testing.T) {
 	log := testr.New(t)
+	cfg := &RegisterServerConfig{}
 
-	rs, err := NewRegisterServer(log)
+	rs, err := NewRegisterServer(cfg, log)
 	if err != nil {
 		t.Fatalf("NewRegisterServer failed: %v", err)
 	}

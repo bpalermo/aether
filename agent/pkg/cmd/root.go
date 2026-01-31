@@ -47,8 +47,8 @@ var rootCmd = &cobra.Command{
 		ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 		logger = ctrl.Log.WithName(name)
 	},
-	RunE: func(_ *cobra.Command, _ []string) (err error) {
-		return runAgent()
+	RunE: func(cmd *cobra.Command, _ []string) (err error) {
+		return runAgent(cmd.Context())
 	},
 }
 
@@ -70,9 +70,7 @@ func init() {
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-id")
 }
 
-func runAgent() error {
-	ctx := ctrl.SetupSignalHandler()
-
+func runAgent(ctx context.Context) error {
 	logger.Info("starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"cluster", cfg.ClusterName,

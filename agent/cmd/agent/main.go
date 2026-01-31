@@ -4,11 +4,13 @@ import (
 	"os"
 
 	"github.com/bpalermo/aether/agent/pkg/cmd"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 func main() {
+	ctx := ctrl.SetupSignalHandler()
 	rootCmd := cmd.GetCommand()
-	if err := rootCmd.Execute(); err != nil {
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
 }

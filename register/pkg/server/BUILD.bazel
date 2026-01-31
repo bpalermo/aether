@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "server",
     srcs = [
+        "config.go",
         "endpoint.go",
         "receiver.go",
         "server.go",
@@ -13,6 +14,7 @@ go_library(
         "//api/aether/register/v1:register",
         "//api/aether/registry/v1:registry",
         "@com_github_anthdm_hollywood//actor",
+        "@com_github_anthdm_hollywood//remote",
         "@com_github_go_logr_logr//:logr",
     ],
 )

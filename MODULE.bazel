@@ -66,6 +66,7 @@ use_repo(
     "io_k8s_client_go",
     "io_k8s_sigs_controller_runtime",
     "io_k8s_sigs_json",
+    "io_storj_drpc",
     "org_golang_google_grpc",
     "org_golang_google_protobuf",
     "org_golang_x_oauth2",
