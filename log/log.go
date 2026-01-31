@@ -1,6 +1,7 @@
 package log
 
 import (
+	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -35,4 +36,13 @@ func DefaultOptions() zap.Options {
 	})
 
 	return opts
+}
+
+func NewLogger(debug bool) logr.Logger {
+	opts := DefaultOptions()
+	if debug {
+		opts.Development = true
+		opts.Level = zapcore.DebugLevel
+	}
+	return zap.New(zap.UseFlagOptions(&opts))
 }

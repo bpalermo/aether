@@ -9,7 +9,6 @@ import (
 	"github.com/bpalermo/aether/register/pkg/server"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
-	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -19,7 +18,6 @@ const (
 
 var (
 	cfg    = NewRegisterConfig()
-	debug  bool
 	logger logr.Logger
 )
 
@@ -28,11 +26,7 @@ var rootCmd = &cobra.Command{
 	Short:        "Runs the aether register service.",
 	SilenceUsage: true,
 	PersistentPreRun: func(_ *cobra.Command, _ []string) {
-		opts := log.DefaultOptions()
-		if debug {
-			opts.Development = true
-			opts.Level = zapcore.DebugLevel
-		}
+		logger = log.NewLogger(cfg.Debug)
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runRegister(cmd.Context())
@@ -53,7 +47,7 @@ func GetCommand() *cobra.Command {
 }
 
 func runRegister(ctx context.Context) error {
-
+	logger.Info("starting register server", "debug", cfg.Debug)
 	_, err := server.NewRegisterServer(logger)
 	if err != nil {
 		return err

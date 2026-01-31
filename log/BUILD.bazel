@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/log",
     visibility = ["//visibility:public"],
     deps = [
+        "@com_github_go_logr_logr//:logr",
         "@io_k8s_sigs_controller_runtime//pkg/log/zap",
         "@org_uber_go_zap//zapcore",
     ],
