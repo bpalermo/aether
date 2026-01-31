@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/bpalermo/aether/agent/pkg/cmd"
+	"github.com/bpalermo/aether/register/pkg/cmd"
 )
 
 func main() {

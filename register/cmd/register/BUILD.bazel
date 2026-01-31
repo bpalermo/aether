@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "register_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/register/cmd/register",
+    visibility = ["//visibility:private"],
+    deps = ["//register/pkg/cmd"],
+)
+
+go_binary(
+    name = "register",
+    embed = [":register_lib"],
+    visibility = ["//visibility:public"],
+)

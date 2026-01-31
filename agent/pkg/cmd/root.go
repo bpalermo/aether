@@ -7,7 +7,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/bpalermo/aether/agent/internal/log"
 	cniServer "github.com/bpalermo/aether/agent/pkg/cni/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/controller"
@@ -16,6 +15,7 @@ import (
 	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
 	"github.com/bpalermo/aether/agent/pkg/xds/snapshot"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/log"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap/zapcore"
