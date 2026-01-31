@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "hook",
+    srcs = ["shutdown.go"],
+    importpath = "github.com/bpalermo/aether/hook",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_go_logr_logr//:logr"],
+)
+
+go_test(
+    name = "hook_test",
+    srcs = ["shutdown_test.go"],
+    embed = [":hook"],
+    deps = ["@com_github_go_logr_logr//testr"],
+)
