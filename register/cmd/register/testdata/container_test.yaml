@@ -1,0 +1,12 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/register"]
+  user: 65532 # nonroot
+fileExistenceTests:
+  - name: 'register'
+    path: '/register'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    uid: 0
+    gid: 0
+    isExecutableBy: 'other'

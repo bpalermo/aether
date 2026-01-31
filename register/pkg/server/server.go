@@ -13,7 +13,8 @@ type RegisterServer struct {
 
 	e *actor.Engine
 
-	agents map[string]*actor.PID // key: node hostname
+	clients map[string]*actor.PID // key: address value: *pid
+	agents  map[string]string     // key: address value: hostname
 }
 
 func NewRegisterServer(log logr.Logger) (*RegisterServer, error) {
@@ -26,13 +27,14 @@ func NewRegisterServer(log logr.Logger) (*RegisterServer, error) {
 		log,
 		e,
 		make(map[string]*actor.PID),
+		make(map[string]string),
 	}, nil
 }
 
 func (rs *RegisterServer) Shutdown(ctx context.Context) error {
 	var wg sync.WaitGroup
 
-	for node, pid := range rs.agents {
+	for node, pid := range rs.clients {
 		wg.Add(1)
 		rs.log.Info("stopping actor", "node", node, "pid", pid)
 

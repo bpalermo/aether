@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package aether.register.v1;
+
+option go_package = "github.com/bpalermo/aether/api/aether/register/v1;registerv1";
+
+message Connect {
+  string node_hostname = 1;
+}

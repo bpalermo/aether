@@ -1,12 +1,28 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "server",
-    srcs = ["server.go"],
+    srcs = [
+        "endpoint.go",
+        "receiver.go",
+        "server.go",
+    ],
     importpath = "github.com/bpalermo/aether/register/pkg/server",
     visibility = ["//visibility:public"],
     deps = [
+        "//api/aether/register/v1:register",
+        "//api/aether/registry/v1:registry",
         "@com_github_anthdm_hollywood//actor",
         "@com_github_go_logr_logr//:logr",
+    ],
+)
+
+go_test(
+    name = "server_test",
+    srcs = ["server_test.go"],
+    embed = [":server"],
+    deps = [
+        "@com_github_anthdm_hollywood//actor",
+        "@com_github_go_logr_logr//testr",
     ],
 )
