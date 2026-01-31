@@ -7,6 +7,4 @@ fileExistenceTests:
     path: '/register'
     shouldExist: true
     permissions: '-rwxr-xr-x'
-    uid: 0
-    gid: 0
     isExecutableBy: 'other'

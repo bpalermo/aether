@@ -1,5 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
-load("//bazel/oci:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 
 go_library(
     name = "register_lib",
@@ -19,5 +19,4 @@ go_multi_arch_image(
     name = "register_image",
     binary = ":register",
     repository = "index.docker.io/palermo/aether-register",
-    visibility = ["//visibility:public"],
 )
