@@ -18,6 +18,7 @@ spec:
         app: aether-registrar
         app.kubernetes.io/name: aether-registrar
     spec:
+      serviceAccountName: aether-registrar
       containers:
         - name: registrar
           image: docker.io/palermo/aether-registrar:latest
@@ -54,3 +55,14 @@ spec:
               memory: 64Mi
             limits:
               memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
