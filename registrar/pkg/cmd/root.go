@@ -39,9 +39,12 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
+	rootCmd.Flags().StringVar(&cfg.srvCfg.ClusterName, "cluster", "unknown", "Cluster name. It will be used to push registration info to the registry.")
 	rootCmd.Flags().StringVar(&cfg.srvCfg.Network, "serverNetwork", "tcp", "gRPC server listener network")
 	rootCmd.Flags().StringVar(&cfg.srvCfg.Address, "serverAddress", ":50051", "gRPC server listener address")
 	rootCmd.Flags().DurationVar(&cfg.ShutdownTimeout, "shutdownTimeout", 30*time.Second, "Shutdown timeout for graceful shutdown")
+
+	_ = rootCmd.MarkPersistentFlagRequired("cluster")
 }
 
 // GetCommand returns the main cobra.Command object for this application

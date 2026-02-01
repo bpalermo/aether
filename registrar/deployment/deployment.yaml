@@ -25,6 +25,8 @@ spec:
           imagePullPolicy: Always
           args:
             - "--debug"
+            - "--cluster"
+            - "oci-main"
           env:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:

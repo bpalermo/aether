@@ -6,6 +6,10 @@ gazelle:
 tidy:
 	@bazel mod tidy
 
+.PHONY: test
+test:
+	@bazel test --test_output=errors //...
+
 .PHONY: build-agent
 build-agent:
 	@bazel build //agent/cmd/agent/...
