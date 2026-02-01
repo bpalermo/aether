@@ -1,4 +1,4 @@
-package cmd
+package awsconfig
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 )
 
-func loadAWSConfig(ctx context.Context) (aws.Config, error) {
+func LoadConfig(ctx context.Context) (aws.Config, error) {
 	return config.LoadDefaultConfig(ctx,
 		config.WithRegion("us-east-1"), // Fallback region
 		config.WithEC2IMDSRegion(),     // Try EC2 metadata

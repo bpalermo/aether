@@ -18,5 +18,5 @@ go_binary(
 go_multi_arch_image(
     name = "registrar_image",
     binary = ":registrar",
-    repository = "index.docker.io/palermo/aether-registrar",
+    repository = "palermo/aether-registrar",
 )

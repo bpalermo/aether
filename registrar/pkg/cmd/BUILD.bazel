@@ -3,7 +3,6 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "cmd",
     srcs = [
-        "aws.go",
         "config.go",
         "root.go",
     ],
@@ -11,9 +10,9 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//log",
+        "//registrar/internal/awsconfig",
+        "//registrar/internal/registry/ddb",
         "//registrar/pkg/server",
-        "@com_github_aws_aws_sdk_go_v2//aws",
-        "@com_github_aws_aws_sdk_go_v2_config//:config",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",
     ],

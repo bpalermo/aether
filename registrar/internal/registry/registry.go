@@ -7,6 +7,7 @@ import (
 )
 
 type Registry interface {
+	Start(ctx context.Context, errCh chan<- error) error
 	RegisterEndpoint(ctx context.Context, pod *registryv1.RegistryPod) error
 	UnregisterEndpoints(ctx context.Context, pod *registryv1.RegistryPod) error
 	ListEndpoints(ctx context.Context, service string, protocol string) ([]Endpoint, error)

@@ -9,6 +9,7 @@ import (
 	"buf.build/go/protovalidate"
 	"github.com/anthdm/hollywood/actor"
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
+	"github.com/bpalermo/aether/registrar/internal/registry"
 	"github.com/go-logr/logr"
 	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
 	"google.golang.org/grpc"
@@ -28,12 +29,14 @@ type RegistrarServer struct {
 	healthServer *health.Server
 	listener     net.Listener
 
-	subscribers   map[string]registrarv1.RegistrarService_SubscribeServer
+	clients       map[string]*actor.PID                                   // key: proxyID
+	subscribers   map[string]registrarv1.RegistrarService_SubscribeServer // key: proxyID
 	subscribersMu sync.RWMutex
-	clients       map[string]*actor.PID
+
+	registry registry.Registry
 }
 
-func NewRegistrarServer(cfg *RegistrarServerConfig, log logr.Logger) (*RegistrarServer, error) {
+func NewRegistrarServer(cfg *RegistrarServerConfig, reg registry.Registry, log logr.Logger) (*RegistrarServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -56,6 +59,7 @@ func NewRegistrarServer(cfg *RegistrarServerConfig, log logr.Logger) (*Registrar
 		subscribers:                         make(map[string]registrarv1.RegistrarService_SubscribeServer),
 		subscribersMu:                       sync.RWMutex{},
 		clients:                             make(map[string]*actor.PID),
+		registry:                            reg,
 	}, nil
 }
 
@@ -71,8 +75,8 @@ func (rs *RegistrarServer) Start(errCh chan<- error) error {
 	rs.setHealthStatus(grpc_health_v1.HealthCheckResponse_SERVING)
 
 	go func() {
-		if err := rs.grpcServer.Serve(listener); err != nil {
-			errCh <- err
+		if serveErr := rs.grpcServer.Serve(listener); serveErr != nil {
+			errCh <- serveErr
 		}
 	}()
 
@@ -104,6 +108,7 @@ func (rs *RegistrarServer) Shutdown(ctx context.Context) error {
 }
 
 func (rs *RegistrarServer) setHealthStatus(status grpc_health_v1.HealthCheckResponse_ServingStatus) {
+	rs.log.V(1).Info("setting health status", "status", status)
 	rs.healthServer.SetServingStatus("", status)
 	rs.healthServer.SetServingStatus(registrarv1.RegistrarService_ServiceDesc.ServiceName, status)
 }

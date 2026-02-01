@@ -2,6 +2,7 @@ package ddb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,10 +27,29 @@ var _ registry.Registry = (*DynamoDBRegistry)(nil)
 
 func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) *DynamoDBRegistry {
 	return &DynamoDBRegistry{
-		log:       log.WithName("dynamodb-registry"),
+		log:       log.WithName("registry-dynamodb"),
 		client:    dynamodb.NewFromConfig(awsCfg),
 		tableName: constants.DefaultDynamoDBEndpointTableName,
 	}
+}
+
+func (r *DynamoDBRegistry) Start(ctx context.Context, _ chan<- error) error {
+	_, err := r.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(r.tableName),
+	})
+	if err != nil {
+		var notFoundErr *types.ResourceNotFoundException
+		if errors.As(err, &notFoundErr) {
+			r.log.Info("table does not exist", "table", r.tableName)
+			return fmt.Errorf("table %s does not exist", r.tableName)
+		}
+		r.log.Error(err, "failed to verify table exists", "table", r.tableName)
+		return fmt.Errorf("table %s is not accessible: %w", r.tableName, err)
+	}
+
+	r.log.V(1).Info("registry table exists", "table", r.tableName)
+	r.log.Info("DynamoDB registry started", "table", r.tableName)
+	return nil
 }
 
 // RegisterEndpoint registers the given endpoint to its service.

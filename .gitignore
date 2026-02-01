@@ -16,3 +16,5 @@
 .volumes
 
 certs
+
+secretes.yaml

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/log"
+	"github.com/bpalermo/aether/registrar/internal/awsconfig"
+	"github.com/bpalermo/aether/registrar/internal/registry/ddb"
 	"github.com/bpalermo/aether/registrar/pkg/server"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
@@ -49,20 +51,34 @@ func GetCommand() *cobra.Command {
 
 func runRegistrar(ctx context.Context) error {
 	logger.Info("starting register server", "debug", cfg.Debug)
-	srv, err := server.NewRegistrarServer(cfg.srvCfg, logger)
+
+	awsCfg, err := awsconfig.LoadConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	reg := ddb.NewDynamoDBRegistry(logger, awsCfg)
+
+	srv, err := server.NewRegistrarServer(cfg.srvCfg, reg, logger)
 	if err != nil {
 		return err
 	}
 
 	errCh := make(chan error, 1)
+
+	if err = reg.Start(ctx, errCh); err != nil {
+		logger.Error(nil, "failed to start registrar registry")
+		return err
+	}
+
 	if err = srv.Start(errCh); err != nil {
-		logger.Error(err, "failed to start register server")
+		logger.Error(err, "failed to start registrar server")
 		return err
 	}
 
 	select {
 	case chErr := <-errCh:
-		logger.Error(chErr, "gRPC server error")
+		logger.Error(chErr, "initialization error")
 		return chErr
 	case <-ctx.Done():
 		logger.V(1).Info("received shutdown signal")

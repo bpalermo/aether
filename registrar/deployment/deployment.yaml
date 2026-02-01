@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aether-registrar
+  namespace: aether-system
+  labels:
+    app: aether-registrar
+    app.kubernetes.io/name: aether-registrar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aether-registrar
+      app.kubernetes.io/name: aether-registrar
+  template:
+    metadata:
+      labels:
+        app: aether-registrar
+        app.kubernetes.io/name: aether-registrar
+    spec:
+      containers:
+        - name: registrar
+          image: docker.io/palermo/aether-registrar:latest
+          imagePullPolicy: Always
+          args:
+            - "--debug"
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aether-registrar-aws-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aether-registrar-aws-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: 64Mi
+            limits:
+              memory: 64Mi
