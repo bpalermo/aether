@@ -15,7 +15,6 @@ func TestNewAgentConfig(t *testing.T) {
 
 	require.NotNil(t, c)
 	assert.False(t, c.Debug)
-	assert.Equal(t, constants.DefaultClusterName, c.ClusterName)
 	assert.Equal(t, constants.DefaultProxyID, c.ProxyServiceNodeID)
 	assert.NotNil(t, c.InstallConfig)
 	assert.NotNil(t, c.CNIServerConfig)
@@ -33,11 +32,6 @@ func TestAgentConfig_DefaultValues(t *testing.T) {
 			name:     "debug is false by default",
 			got:      c.Debug,
 			expected: false,
-		},
-		{
-			name:     "cluster name uses default",
-			got:      c.ClusterName,
-			expected: constants.DefaultClusterName,
 		},
 		{
 			name:     "proxy service node ID uses default",
@@ -68,11 +62,9 @@ func TestAgentConfig_ConfigurableFields(t *testing.T) {
 
 	// Test that fields can be modified
 	c.Debug = true
-	c.ClusterName = "production-cluster"
 	c.ProxyServiceNodeID = "custom-proxy-id"
 
 	assert.True(t, c.Debug)
-	assert.Equal(t, "production-cluster", c.ClusterName)
 	assert.Equal(t, "custom-proxy-id", c.ProxyServiceNodeID)
 }
 

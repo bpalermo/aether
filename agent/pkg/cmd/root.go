@@ -56,7 +56,6 @@ func GetCommand() *cobra.Command {
 
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
-	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster", "", "Cluster name. It will be used to push registration info to the control plane.")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
@@ -70,7 +69,6 @@ func init() {
 func runAgent(ctx context.Context) error {
 	logger.Info("starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
-		"cluster", cfg.ClusterName,
 		"debug", cfg.Debug)
 
 	// Install CNI binaries

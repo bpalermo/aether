@@ -9,8 +9,6 @@ import (
 type AgentConfig struct {
 	// Debug
 	Debug bool
-	// ClusterName the cluster where the agent is running in
-	ClusterName string
 	// XDS nodeID
 	ProxyServiceNodeID string
 
@@ -21,7 +19,6 @@ type AgentConfig struct {
 func NewAgentConfig() *AgentConfig {
 	return &AgentConfig{
 		Debug:              false,
-		ClusterName:        constants.DefaultClusterName,
 		ProxyServiceNodeID: constants.DefaultProxyID,
 		InstallConfig:      install.NewInstallerConfig(),
 		CNIServerConfig:    cniServer.NewCNIServerConfig(),
