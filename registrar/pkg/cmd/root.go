@@ -49,7 +49,7 @@ func GetCommand() *cobra.Command {
 
 func runRegistrar(ctx context.Context) error {
 	logger.Info("starting register server", "debug", cfg.Debug)
-	srv, err := server.NewRegisterServer(cfg.srvCfg, logger)
+	srv, err := server.NewRegistrarServer(cfg.srvCfg, logger)
 	if err != nil {
 		return err
 	}

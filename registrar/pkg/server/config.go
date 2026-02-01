@@ -1,12 +1,12 @@
 package server
 
-type RegisterServerConfig struct {
+type RegistrarServerConfig struct {
 	Network string
 	Address string
 }
 
-func NewRegisterServerConfig() *RegisterServerConfig {
-	return &RegisterServerConfig{
+func NewRegisterServerConfig() *RegistrarServerConfig {
+	return &RegistrarServerConfig{
 		Network: "tcp",
 		Address: ":50051",
 	}

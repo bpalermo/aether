@@ -17,10 +17,10 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-type RegisterServer struct {
+type RegistrarServer struct {
 	registrarv1.UnimplementedRegistrarServiceServer
 
-	cfg *RegisterServerConfig
+	cfg *RegistrarServerConfig
 
 	log logr.Logger
 
@@ -33,7 +33,7 @@ type RegisterServer struct {
 	clients       map[string]*actor.PID
 }
 
-func NewRegisterServer(cfg *RegisterServerConfig, log logr.Logger) (*RegisterServer, error) {
+func NewRegistrarServer(cfg *RegistrarServerConfig, log logr.Logger) (*RegistrarServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -46,7 +46,7 @@ func NewRegisterServer(cfg *RegisterServerConfig, log logr.Logger) (*RegisterSer
 	// Register reflection service
 	reflection.Register(grpcServer)
 
-	return &RegisterServer{
+	return &RegistrarServer{
 		UnimplementedRegistrarServiceServer: registrarv1.UnimplementedRegistrarServiceServer{},
 		cfg:                                 cfg,
 		log:                                 log.WithName("register-server"),
@@ -59,7 +59,7 @@ func NewRegisterServer(cfg *RegisterServerConfig, log logr.Logger) (*RegisterSer
 	}, nil
 }
 
-func (rs *RegisterServer) Start(errCh chan<- error) error {
+func (rs *RegistrarServer) Start(errCh chan<- error) error {
 	listener, err := net.Listen(rs.cfg.Network, rs.cfg.Address)
 	if err != nil {
 		rs.log.Error(err, "failed to listen", "network", rs.cfg.Network, "address", rs.cfg.Address)
@@ -79,7 +79,7 @@ func (rs *RegisterServer) Start(errCh chan<- error) error {
 	return nil
 }
 
-func (rs *RegisterServer) Shutdown(ctx context.Context) error {
+func (rs *RegistrarServer) Shutdown(ctx context.Context) error {
 	rs.setHealthStatus(grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
 	if rs.grpcServer == nil {
@@ -103,7 +103,7 @@ func (rs *RegisterServer) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (rs *RegisterServer) setHealthStatus(status grpc_health_v1.HealthCheckResponse_ServingStatus) {
+func (rs *RegistrarServer) setHealthStatus(status grpc_health_v1.HealthCheckResponse_ServingStatus) {
 	rs.healthServer.SetServingStatus("", status)
 	rs.healthServer.SetServingStatus(registrarv1.RegistrarService_ServiceDesc.ServiceName, status)
 }

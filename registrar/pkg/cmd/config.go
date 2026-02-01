@@ -15,7 +15,7 @@ type RegisterConfig struct {
 
 	ShutdownTimeout time.Duration
 
-	srvCfg *server.RegisterServerConfig
+	srvCfg *server.RegistrarServerConfig
 }
 
 func NewRegisterConfig() *RegisterConfig {
