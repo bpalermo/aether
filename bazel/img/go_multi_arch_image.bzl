@@ -4,7 +4,7 @@ load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
 
-def go_multi_arch_image(name, binary, repository, registry = "index.docker.io", base = "@distroless_static_2", container_test_configs = ["testdata/container_test.yaml"], tars = []):
+def go_multi_arch_image(name, binary, repository, registry = "index.docker.io", base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = {}):
     """
     Creates a containerized binary from Go sources.
     Parameters:
@@ -30,10 +30,20 @@ def go_multi_arch_image(name, binary, repository, registry = "index.docker.io", 
         compress = "zstd",  # Use zstd compression (optional, uses global default otherwise)
     )
 
+    image_layer(
+        name = "additional_layer",
+        srcs = tars_layer,
+        default_metadata = file_metadata(
+            mode = "0755",
+        ),
+        include_runfiles = False,
+        compress = "zstd",  # Use zstd compression (optional, uses global default otherwise)
+    )
+
     image_manifest(
         name = "image_manifest",
         base = base,
-        layers = [":binary_layer"] + tars,
+        layers = [":binary_layer", "additional_layer"],
         visibility = ["//visibility:private"],
         entrypoint = [entrypoint],
     )

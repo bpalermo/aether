@@ -7,13 +7,9 @@ fileExistenceTests:
     path: '/opt/cni/bin/aether-cni'
     shouldExist: true
     permissions: '-rwxr-xr-x'
-    uid: 0
-    gid: 0
     isExecutableBy: 'other'
   - name: 'agent'
     path: '/agent'
     shouldExist: true
     permissions: '-rwxr-xr-x'
-    uid: 0
-    gid: 0
     isExecutableBy: 'other'

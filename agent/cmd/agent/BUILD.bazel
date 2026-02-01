@@ -1,6 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
-load("@rules_pkg//:pkg.bzl", "pkg_tar")
-load("//bazel/oci:go_multi_arch_image.bzl", "go_multi_arch_image")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 
 go_library(
     name = "agent_lib",
@@ -19,21 +18,11 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
-pkg_tar(
-    name = "cni",
-    srcs = ["//cni/cmd/plugin"],
-    mode = "755",
-    package_dir = "/opt/cni/bin",
-    remap_paths = {
-        "plugin": "aether-cni",
-    },
-    visibility = ["//visibility:private"],
-)
-
 go_multi_arch_image(
     name = "agent_image",
     binary = ":agent",
-    repository = "index.docker.io/palermo/aether-agent",
-    tars = [":cni"],
-    visibility = ["//visibility:public"],
+    repository = "palermo/aether-agent",
+    tars_layer = {
+        "/opt/cni/bin/aether-cni": "//cni/cmd/plugin:plugin",
+    },
 )
