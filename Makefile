@@ -38,4 +38,4 @@ push-registrar-image:
 load-all: load-agent-image load-registrar-image
 
 .PHONY: push-all
-load-all: push-agent-image push-registrar-image
+push-all: push-agent-image push-registrar-image

@@ -15,9 +15,7 @@ import (
 	"github.com/bpalermo/aether/log"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
-	"go.uber.org/zap/zapcore"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 const (
@@ -26,8 +24,8 @@ const (
 )
 
 var (
-	cfg    = NewAgentConfig()
-	debug  bool
+	cfg = NewAgentConfig()
+
 	logger logr.Logger
 )
 
@@ -36,13 +34,7 @@ var rootCmd = &cobra.Command{
 	Short:        "Runs the aether node agent.",
 	SilenceUsage: true,
 	PersistentPreRun: func(_ *cobra.Command, _ []string) {
-		opts := log.DefaultOptions()
-		if debug {
-			opts.Development = true
-			opts.Level = zapcore.DebugLevel
-		}
-		ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-		logger = ctrl.Log.WithName(name)
+		logger = log.NewLogger(cfg.Debug).WithName("agent")
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runAgent(cmd.Context())
@@ -108,12 +100,6 @@ func installCNI(ctx context.Context) error {
 	logger.Info("installing CNI binaries")
 	installer := install.NewInstaller(logger, cfg.InstallConfig)
 	return installer.Run(ctx)
-}
-
-type agentComponents struct {
-	xdsSnapshot *snapshot.XdsSnapshot
-	xdsServer   *xdsServer.XdsServer
-	cniServer   *cniServer.CNIServer
 }
 
 func setupComponents(m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, error) {
