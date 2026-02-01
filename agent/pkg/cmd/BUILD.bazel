@@ -13,7 +13,6 @@ go_library(
         "//agent/pkg/constants",
         "//agent/pkg/controller",
         "//agent/pkg/install",
-        "//agent/pkg/registry/ddb",
         "//agent/pkg/xds/server",
         "//agent/pkg/xds/snapshot",
         "//api/aether/registry/v1:registry",

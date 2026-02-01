@@ -13,7 +13,4 @@ const (
 
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
 	DefaultCNISocketPath = "/run/aether/cni.sock"
-
-	// DefaultDynamoDBEndpointTableName the default endpoint table name
-	DefaultDynamoDBEndpointTableName = "AetherEndpoint"
 )

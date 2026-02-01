@@ -9,7 +9,6 @@ import (
 
 	"buf.build/go/protovalidate"
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	"github.com/bpalermo/aether/agent/pkg/registry"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -30,8 +29,7 @@ type CNIServer struct {
 	grpcServer *grpc.Server
 	listener   net.Listener
 
-	storage  storage.Storage[*registryv1.RegistryPod]
-	registry registry.Registry
+	storage storage.Storage[*registryv1.RegistryPod]
 
 	initWg    *sync.WaitGroup
 	eventChan chan<- *registryv1.Event
@@ -54,7 +52,7 @@ func NewCNIServerConfig() *CNIServerConfig {
 }
 
 // NewCNIServer creates a new CNI gRPC server
-func NewCNIServer(logger logr.Logger, k8sClient client.Client, cfg *CNIServerConfig, reg registry.Registry, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event) *CNIServer {
+func NewCNIServer(logger logr.Logger, k8sClient client.Client, cfg *CNIServerConfig, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event) *CNIServer {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -70,7 +68,6 @@ func NewCNIServer(logger logr.Logger, k8sClient client.Client, cfg *CNIServerCon
 			cfg.LocalStoragePath,
 			func() *registryv1.RegistryPod { return &registryv1.RegistryPod{} },
 		),
-		registry:  reg,
 		initWg:    initWg,
 		eventChan: eventChan,
 		k8sClient: k8sClient,

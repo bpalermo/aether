@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/pkg/registry"
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -33,10 +32,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 
 	// TODO: block until the configuration is actually loaded
 
-	// Now we can add to the registry
-	if err := s.registry.RegisterEndpoint(ctx, pod); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to add pod to registry: %v", err)
-	}
+	// TODO: notify registrar
 
 	return &cniv1.AddPodResponse{
 		Result: cniv1.AddPodResponse_SUCCESS,
@@ -51,10 +47,8 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to get pod from storage: %v", err)
 	}
 
-	// Remove pod from the registry
-	if err := s.registry.UnregisterEndpoints(ctx, registryPod); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to remove pod to registry: %v", err)
-	}
+	// TODO: remove from registrar
+	var _ = registryPod
 
 	// Remove from the local storage
 	if err := s.storage.RemoveResource(ctx, types.ContainerID(req.Pod.ContainerId)); err != nil {
@@ -84,9 +78,31 @@ func (s *CNIServer) newRegistryPod(ctx context.Context, pod *cniv1.CNIPod) (*reg
 		return nil, fmt.Errorf("failed to get pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
-	if err = registry.ProcessPodAnnotations(s.clusterName, k8sPod.Annotations, registryPod); err != nil {
+	if err = processPodAnnotations(s.clusterName, k8sPod.Annotations, registryPod); err != nil {
 		return nil, err
 	}
 
 	return registryPod, nil
+}
+
+func processPodAnnotations(cluster string, annotations map[string]string, pod *registryv1.RegistryPod) error {
+
+	pod.ServiceName = getServiceFromAnnotations(annotations)
+	pod.ClusterName = cluster
+	pod.PodLocality = &registryv1.RegistryPod_Locality{
+		Region: getEndpointRegionOrDefault(annotations),
+		Zone:   getEndpointZoneOrDefault(annotations),
+	}
+
+	pod.PortProtocol = registryv1.RegistryPod_HTTP
+	pod.ServicePort = &registryv1.RegistryPod_ServicePort{
+		PortSpecifier: &registryv1.RegistryPod_ServicePort_PortNumber{
+			PortNumber: getEndpointPortOrDefault(annotations),
+		},
+	}
+	pod.EndpointWeight = getEndpointWeightOrDefault(annotations)
+
+	pod.AdditionalMetadata = getEndpointMetadata(annotations)
+
+	return nil
 }

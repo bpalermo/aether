@@ -1,0 +1,10 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/registrar"]
+  user: 65532 # nonroot
+fileExistenceTests:
+  - name: 'registrar'
+    path: '/registrar'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'

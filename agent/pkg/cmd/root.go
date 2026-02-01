@@ -11,7 +11,6 @@ import (
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/controller"
 	"github.com/bpalermo/aether/agent/pkg/install"
-	"github.com/bpalermo/aether/agent/pkg/registry/ddb"
 	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
 	"github.com/bpalermo/aether/agent/pkg/xds/snapshot"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -91,7 +90,7 @@ func runAgent(ctx context.Context) error {
 	initWg := &sync.WaitGroup{}
 	initWg.Add(2)
 
-	components, err := setupComponents(ctx, m, initWg)
+	components, err := setupComponents(m, initWg)
 	if err != nil {
 		return err
 	}
@@ -121,26 +120,18 @@ type agentComponents struct {
 	cniServer   *cniServer.CNIServer
 }
 
-func setupComponents(ctx context.Context, m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, error) {
+func setupComponents(m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, error) {
 	// Create xDS snapshot
 	xdsSnapshot := snapshot.NewXdsSnapshot(cfg.ProxyServiceNodeID, logger)
 
 	// Create xDS server
 	xdsSrv := xdsServer.NewXdsServer(m, logger, initWg, xdsSnapshot)
 
-	// Setup AWS and Kubernetes clients
-	awsCfg, err := loadAWSConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	// Create a registry and CNI server
-	reg := ddb.NewDynamoDBRegistry(logger, awsCfg)
 	cniSrv := cniServer.NewCNIServer(
 		logger,
 		m.GetClient(),
 		cfg.CNIServerConfig,
-		reg,
 		initWg,
 		xdsSnapshot.GetEventChan(),
 	)

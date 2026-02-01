@@ -16,7 +16,7 @@ go_proto_library(
     name = "cniv1_go_proto",
     compilers = [
         "@rules_go//proto:go_grpc_v2",
-        "@rules_go//proto:go_proto",  # keep
+        "@rules_go//proto:go_proto",
     ],
     importpath = "github.com/bpalermo/aether/api/aether/cni/v1",
     proto = ":cniv1_proto",
