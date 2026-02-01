@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/bpalermo/aether/hook"
 	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registrar/pkg/server"
 	"github.com/go-logr/logr"
@@ -13,7 +12,7 @@ import (
 
 const (
 	// name is the controller name used for logging
-	name = "aether-register"
+	name = "aether-registrar"
 )
 
 var (
@@ -22,14 +21,14 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:          "register",
+	Use:          "registrar",
 	Short:        "Runs the aether register service.",
 	SilenceUsage: true,
 	PersistentPreRun: func(_ *cobra.Command, _ []string) {
 		logger = log.NewLogger(cfg.Debug).WithName("register")
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
-		return runRegister(cmd.Context())
+		return runRegistrar(cmd.Context())
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 
@@ -48,7 +47,7 @@ func GetCommand() *cobra.Command {
 	return rootCmd
 }
 
-func runRegister(ctx context.Context) error {
+func runRegistrar(ctx context.Context) error {
 	logger.Info("starting register server", "debug", cfg.Debug)
 	srv, err := server.NewRegisterServer(cfg.srvCfg, logger)
 	if err != nil {
@@ -61,13 +60,18 @@ func runRegister(ctx context.Context) error {
 		return err
 	}
 
-	go func() {
-		if err := <-errCh; err != nil {
-			logger.Error(err, "gRPC server error")
+	select {
+	case chErr := <-errCh:
+		logger.Error(chErr, "gRPC server error")
+		return chErr
+	case <-ctx.Done():
+		logger.V(1).Info("received shutdown signal")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if shutdownErr := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error(shutdownErr, "shutdown error")
+			return shutdownErr
 		}
-	}()
-
-	hook.AddShutdownHook(ctx, cfg.ShutdownTimeout, logger, srv)
-
-	return nil
+		return nil
+	}
 }

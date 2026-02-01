@@ -17,8 +17,6 @@ go_library(
         "//agent/pkg/xds/snapshot",
         "//api/aether/registry/v1:registry",
         "//log",
-        "@com_github_aws_aws_sdk_go_v2//aws",
-        "@com_github_aws_aws_sdk_go_v2_config//:config",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",

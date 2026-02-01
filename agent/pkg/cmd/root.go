@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	cniServer "github.com/bpalermo/aether/agent/pkg/cni/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/controller"
@@ -141,13 +139,6 @@ func setupComponents(m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, 
 		xdsServer:   xdsSrv,
 		cniServer:   cniSrv,
 	}, nil
-}
-
-func loadAWSConfig(ctx context.Context) (aws.Config, error) {
-	return config.LoadDefaultConfig(ctx,
-		config.WithRegion("us-east-1"), // Fallback region
-		config.WithEC2IMDSRegion(),     // Try EC2 metadata
-	)
 }
 
 func addComponentsToManager(m ctrl.Manager, components *agentComponents) error {
