@@ -15,5 +15,8 @@ go_library(
         "@com_github_go_logr_logr//:logr",
         "@com_github_grpc_ecosystem_go_grpc_middleware_v2//interceptors/protovalidate",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//health",
+        "@org_golang_google_grpc//health/grpc_health_v1",
+        "@org_golang_google_grpc//reflection",
     ],
 )
