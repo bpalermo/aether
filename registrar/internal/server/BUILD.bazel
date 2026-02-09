@@ -6,8 +6,8 @@ go_library(
         "config.go",
         "server.go",
     ],
-    importpath = "github.com/bpalermo/aether/registrar/pkg/server",
-    visibility = ["//visibility:public"],
+    importpath = "github.com/bpalermo/aether/registrar/internal/server",
+    visibility = ["//registrar:__subpackages__"],
     deps = [
         "//api/aether/registrar/v1:registrar",
         "//registrar/internal/registry",

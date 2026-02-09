@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -52,7 +53,7 @@ func NewRegistrarServer(cfg *RegistrarServerConfig, reg registry.Registry, log l
 	return &RegistrarServer{
 		UnimplementedRegistrarServiceServer: registrarv1.UnimplementedRegistrarServiceServer{},
 		cfg:                                 cfg,
-		log:                                 log.WithName("register-server"),
+		log:                                 log.WithName("server"),
 		grpcServer:                          grpcServer,
 		healthServer:                        healthServer,
 		listener:                            nil,
@@ -63,7 +64,7 @@ func NewRegistrarServer(cfg *RegistrarServerConfig, reg registry.Registry, log l
 	}, nil
 }
 
-func (rs *RegistrarServer) Start(errCh chan<- error) error {
+func (rs *RegistrarServer) Start(ctx context.Context) error {
 	rs.log.V(1).Info("starting registrar server", "network", rs.cfg.Network, "address", rs.cfg.Address, "cluster", rs.cfg.ClusterName)
 	listener, err := net.Listen(rs.cfg.Network, rs.cfg.Address)
 	if err != nil {
@@ -75,16 +76,29 @@ func (rs *RegistrarServer) Start(errCh chan<- error) error {
 	registrarv1.RegisterRegistrarServiceServer(rs.grpcServer, rs)
 	rs.setHealthStatus(grpc_health_v1.HealthCheckResponse_SERVING)
 
+	errCh := make(chan error, 1)
+
 	go func() {
-		if serveErr := rs.grpcServer.Serve(listener); serveErr != nil {
+		if serveErr := rs.grpcServer.Serve(listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
 			errCh <- serveErr
 		}
+		close(errCh)
 	}()
 
-	return nil
+	select {
+	case <-ctx.Done():
+		rs.log.V(1).Info("context cancelled, stopping registrar server")
+		return rs.shutdown()
+	case serveErr := <-errCh:
+		return serveErr
+
+	}
 }
 
-func (rs *RegistrarServer) Shutdown(ctx context.Context) error {
+func (rs *RegistrarServer) shutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), rs.cfg.ShutdownTimeout)
+	defer cancel()
+
 	rs.setHealthStatus(grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
 	if rs.grpcServer == nil {

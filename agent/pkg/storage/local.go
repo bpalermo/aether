@@ -13,6 +13,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+var unmarshalOpts = protojson.UnmarshalOptions{DiscardUnknown: true}
+
 type CachedLocalStorage[T proto.Message] struct {
 	basePath string
 	cache    map[types.ContainerID]T
@@ -105,8 +107,7 @@ func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.Contain
 
 	// Create a new instance of T using the factory function
 	resource = f.newFunc()
-
-	if err := protojson.Unmarshal(data, resource); err != nil {
+	if err := unmarshalOpts.Unmarshal(data, resource); err != nil {
 		return resource, fmt.Errorf("failed to unmarshal resource: %w", err)
 	}
 
@@ -141,7 +142,7 @@ func (f *CachedLocalStorage[T]) LoadAll(_ context.Context) ([]T, error) {
 		}
 
 		resource := f.newFunc()
-		if err := protojson.Unmarshal(data, resource); err != nil {
+		if err := unmarshalOpts.Unmarshal(data, resource); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal resource from %s: %w", filePath, err)
 		}
 

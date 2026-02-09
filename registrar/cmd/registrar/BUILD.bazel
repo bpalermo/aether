@@ -6,7 +6,10 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/bpalermo/aether/registrar/cmd/registrar",
     visibility = ["//visibility:private"],
-    deps = ["//registrar/pkg/cmd"],
+    deps = [
+        "//registrar/pkg/cmd",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ],
 )
 
 go_binary(

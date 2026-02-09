@@ -19,6 +19,8 @@ spec:
         app.kubernetes.io/name: aether-registrar
     spec:
       serviceAccountName: aether-registrar
+      imagePullSecrets:
+        - name: dockerhub-credentials
       containers:
         - name: registrar
           image: docker.io/palermo/aether-registrar:latest

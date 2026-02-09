@@ -22,13 +22,14 @@ spec:
       hostNetwork: true
       serviceAccountName: aether-agent
       priorityClassName: system-node-critical
+      imagePullSecrets:
+        - name: dockerhub-credentials
       containers:
         - name: agent
           image: docker.io/palermo/aether-agent:latest
           imagePullPolicy: Always
           args:
             - "--debug=true"
-            - "--cluster=oci-main"
             - "--proxy-id=$(NODE_NAME)"
           env:
             - name: NODE_NAME

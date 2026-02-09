@@ -33,7 +33,9 @@ func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) *DynamoDBRegistry {
 	}
 }
 
-func (r *DynamoDBRegistry) Start(ctx context.Context, _ chan<- error) error {
+func (r *DynamoDBRegistry) Start(ctx context.Context) error {
+	r.log.V(1).Info("starting registry and checking for table existence", "table", r.tableName)
+
 	_, err := r.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(r.tableName),
 	})
@@ -161,16 +163,16 @@ func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, pod *registryv1
 
 // UnregisterEndpoints removes endpoints from the registry
 func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, pod *registryv1.RegistryPod) error {
-	var errors []error
+	var errs []error
 	for _, ip := range pod.CniPod.GetIps() {
 		err := r.unregisterEndpoint(ctx, pod, ip)
 		if err != nil {
-			errors = append(errors, err)
+			errs = append(errs, err)
 		}
 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to unregister some endpoints: %v", errors)
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to unregister some endpoints: %v", errs)
 	}
 
 	r.log.Info("endpoint unregistered successfully", "service", pod.GetServiceName(), "protocol", pod.PortProtocol)

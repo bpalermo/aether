@@ -22,6 +22,8 @@ spec:
       hostNetwork: true
       serviceAccountName: aether-proxy
       priorityClassName: system-node-critical
+      imagePullSecrets:
+        - name: dockerhub-credentials
       containers:
         - name: proxy
           image: docker.io/envoyproxy/envoy@sha256:5bfdcd197ef884afbb705130f202aef868c41b1628eae23e05563752ce8f9ab7

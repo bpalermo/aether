@@ -110,13 +110,17 @@ func setupComponents(m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, 
 	xdsSrv := xdsServer.NewXdsServer(m, logger, initWg, xdsSnapshot)
 
 	// Create a registry and CNI server
-	cniSrv := cniServer.NewCNIServer(
+	cniSrv, err := cniServer.NewCNIServer(
+		cfg.ProxyServiceNodeID,
 		logger,
 		m.GetClient(),
 		cfg.CNIServerConfig,
 		initWg,
 		xdsSnapshot.GetEventChan(),
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	return &agentComponents{
 		xdsSnapshot: xdsSnapshot,

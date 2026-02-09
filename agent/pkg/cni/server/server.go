@@ -8,9 +8,9 @@ import (
 	"sync"
 
 	"buf.build/go/protovalidate"
-	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/go-logr/logr"
 	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
@@ -24,6 +24,7 @@ type CNIServer struct {
 	logger logr.Logger
 
 	clusterName string
+	proxyID     string
 
 	socketPath string
 	grpcServer *grpc.Server
@@ -35,24 +36,14 @@ type CNIServer struct {
 	eventChan chan<- *registryv1.Event
 
 	k8sClient client.Client
-}
 
-type CNIServerConfig struct {
-	ClusterName      string
-	SocketPath       string
-	LocalStoragePath string
-}
-
-func NewCNIServerConfig() *CNIServerConfig {
-	return &CNIServerConfig{
-		ClusterName:      constants.DefaultClusterName,
-		SocketPath:       constants.DefaultCNISocketPath,
-		LocalStoragePath: constants.DefaultHostCNIRegistryDir,
-	}
+	registrarConn   *grpc.ClientConn
+	registrarClient registrarv1.RegistrarServiceClient
+	subscribeStream grpc.BidiStreamingClient[registrarv1.SubscribeRequest, registrarv1.SubscribeResponse]
 }
 
 // NewCNIServer creates a new CNI gRPC server
-func NewCNIServer(logger logr.Logger, k8sClient client.Client, cfg *CNIServerConfig, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event) *CNIServer {
+func NewCNIServer(proxyID string, logger logr.Logger, k8sClient client.Client, cfg *CNIServerConfig, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -62,6 +53,7 @@ func NewCNIServer(logger logr.Logger, k8sClient client.Client, cfg *CNIServerCon
 	return &CNIServer{
 		logger:      logger.WithName("cni-server"),
 		clusterName: cfg.ClusterName,
+		proxyID:     proxyID,
 		grpcServer:  grpcServer,
 		socketPath:  cfg.SocketPath,
 		storage: storage.NewCachedLocalStorage[*registryv1.RegistryPod](
@@ -71,7 +63,7 @@ func NewCNIServer(logger logr.Logger, k8sClient client.Client, cfg *CNIServerCon
 		initWg:    initWg,
 		eventChan: eventChan,
 		k8sClient: k8sClient,
-	}
+	}, nil
 }
 
 // Start starts the gRPC server on a Unix socket
@@ -153,6 +145,13 @@ func (s *CNIServer) startServer(ctx context.Context) error {
 
 // Stop gracefully stops the gRPC server
 func (s *CNIServer) Stop() {
+	// Close the bidirectional stream first
+	if s.subscribeStream != nil {
+		err := s.subscribeStream.CloseSend()
+		if err != nil {
+			s.logger.Error(err, "failed to close registrar stream")
+		}
+	}
 	if s.grpcServer != nil {
 		s.grpcServer.GracefulStop()
 	}
@@ -160,6 +159,12 @@ func (s *CNIServer) Stop() {
 		err := s.listener.Close()
 		if err != nil {
 			s.logger.Error(err, "failed to close listener")
+		}
+	}
+	if s.registrarConn != nil {
+		err := s.registrarConn.Close()
+		if err != nil {
+			s.logger.Error(err, "failed to close registrar client connection")
 		}
 	}
 	// Clean up socket file

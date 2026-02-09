@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -16,6 +17,15 @@ import (
 func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
 	if req.Pod == nil {
 		return nil, status.Error(codes.InvalidArgument, "pod is required")
+	}
+
+	// Ignore aether system pods
+	// we want to prevent circular dependencies
+	if strings.HasPrefix(req.Pod.Name, "aether-") {
+		s.logger.V(1).Info("ignoring aether system pod", "name", req.Pod.Name)
+		return &cniv1.AddPodResponse{
+			Result: cniv1.AddPodResponse_SUCCESS,
+		}, nil
 	}
 
 	pod, err := s.newRegistryPod(ctx, req.Pod)
@@ -32,7 +42,13 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 
 	// TODO: block until the configuration is actually loaded
 
-	// TODO: notify registrar
+	//err = s.subscribeStream.Send(&registrarv1.SubscribeRequest{
+	//	ProxyId: s.proxyID,
+	//})
+	//if err != nil {
+	//	s.logger.Error(err, "failed to send subscribe request to registrar")
+	//	return nil, err
+	//}
 
 	return &cniv1.AddPodResponse{
 		Result: cniv1.AddPodResponse_SUCCESS,
@@ -40,6 +56,19 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 }
 
 func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
+	if req.Pod == nil {
+		return nil, status.Error(codes.InvalidArgument, "pod is required")
+	}
+
+	// Ignore aether system pods
+	// we want to prevent circular dependencies
+	if strings.HasPrefix(req.Pod.Name, "aether-") {
+		s.logger.V(1).Info("ignoring aether system pod", "name", req.Pod.Name)
+		return &cniv1.RemovePodResponse{
+			Result: cniv1.RemovePodResponse_SUCCESS,
+		}, nil
+	}
+
 	containerID := types.ContainerID(req.GetPod().GetContainerId())
 
 	registryPod, err := s.storage.GetResource(ctx, containerID)

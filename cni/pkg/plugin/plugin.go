@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/containernetworking/cni/pkg/skel"
@@ -41,6 +42,21 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to parse previous result: %v", err)
 	}
 
+	k8sArgs := K8sArgs{}
+	if err := types.LoadArgs(args.Args, &k8sArgs); err != nil {
+		msg := "failed to load args"
+		p.logger.Error(msg, zap.Error(err))
+		return fmt.Errorf("%s: %v", msg, err)
+	}
+
+	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
+	if ignorableNamespace(namespace) {
+		p.logger.Info("skipping CNI add for system pod",
+			zap.String("namespace", namespace),
+			zap.String("pod", string(k8sArgs.K8S_POD_NAME)))
+		return types.PrintResult(prevResult, netConf.CNIVersion)
+	}
+
 	// Extract the allocated IP addresses
 	var podIPs []string
 	for _, ipConfig := range prevResult.IPs {
@@ -49,12 +65,6 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
-	k8sArgs := K8sArgs{}
-	if err := types.LoadArgs(args.Args, &k8sArgs); err != nil {
-		msg := "failed to load args"
-		p.logger.Error(msg, zap.Error(err))
-		return fmt.Errorf("%s: %v", msg, err)
-	}
 	p.logger.Info("processing CNI add request",
 		zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
 		zap.String("pod", string(k8sArgs.K8S_POD_NAME)),
@@ -117,6 +127,14 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to load args during delete: %v", err)
 	}
 
+	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
+	if ignorableNamespace(namespace) {
+		p.logger.Info("skipping CNI add for system pod",
+			zap.String("namespace", namespace),
+			zap.String("pod", string(k8sArgs.K8S_POD_NAME)))
+		return nil
+	}
+
 	p.logger.Info("deleting network for pod",
 		zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
 		zap.String("pod", string(k8sArgs.K8S_POD_NAME)))
@@ -166,4 +184,8 @@ func newPodFromArgs(args *skel.CmdArgs, k8sArgs K8sArgs, podIPs []string) *cniv1
 		NetworkNamespace: args.Netns,
 		Ips:              podIPs,
 	}
+}
+
+func ignorableNamespace(namespace string) bool {
+	return strings.EqualFold(namespace, "kube-system") || strings.EqualFold(namespace, "aether-system")
 }

@@ -1,19 +1,11 @@
 package cmd
 
 import (
-	"time"
-
-	"github.com/bpalermo/aether/registrar/pkg/server"
-)
-
-const (
-	defaultShutdownTimeout = 30 * time.Second
+	"github.com/bpalermo/aether/registrar/internal/server"
 )
 
 type RegisterConfig struct {
 	Debug bool
-
-	ShutdownTimeout time.Duration
 
 	srvCfg *server.RegistrarServerConfig
 }
@@ -21,7 +13,6 @@ type RegisterConfig struct {
 func NewRegisterConfig() *RegisterConfig {
 	return &RegisterConfig{
 		false,
-		defaultShutdownTimeout,
 		server.NewRegisterServerConfig(),
 	}
 }
