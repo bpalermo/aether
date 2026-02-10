@@ -16,24 +16,45 @@ data:
         api_type: DELTA_GRPC
         grpc_services:
           - envoy_grpc:
-              cluster_name: xds_server
+              cluster_name: local_xds
       cds_config:
         ads: {}
       lds_config:
-        ads: {}
+        api_config_source:
+          api_type: DELTA_GRPC
+          grpc_services:
+            - envoy_grpc:
+                cluster_name: registrar_xds
     
     static_resources:
       clusters:
-      - name: xds_server
+      - name: local_xds
         type: STATIC
         load_assignment:
-          cluster_name: xds_server
+          cluster_name: local_xds
           endpoints:
             - lb_endpoints:
                 - endpoint:
                     address:
                       pipe:
                         path: /run/aether/xds.sock
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
+      - name: registrar_xds
+        type: STRICT_DNS
+        dns_lookup_family: V4_ONLY
+        load_assignment:
+          cluster_name: registrar_xds
+          endpoints:
+            - lb_endpoints:
+                - endpoint:
+                    address:
+                      socket_address:
+                        address: aether-registrar.aether-system.svc.cluster.local
+                        port_value: 50051
         typed_extension_protocol_options:
           envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
             "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions

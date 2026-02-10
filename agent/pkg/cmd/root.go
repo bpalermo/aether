@@ -78,7 +78,7 @@ func runAgent(ctx context.Context) error {
 	initWg := &sync.WaitGroup{}
 	initWg.Add(2)
 
-	components, err := setupComponents(m, initWg)
+	components, err := setupComponents(ctx, m, initWg)
 	if err != nil {
 		return err
 	}
@@ -102,12 +102,12 @@ func installCNI(ctx context.Context) error {
 	return installer.Run(ctx)
 }
 
-func setupComponents(m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, error) {
+func setupComponents(ctx context.Context, m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, error) {
 	// Create xDS snapshot
 	xdsSnapshot := snapshot.NewXdsSnapshot(cfg.ProxyServiceNodeID, logger)
 
 	// Create xDS server
-	xdsSrv := xdsServer.NewXdsServer(m, logger, initWg, xdsSnapshot)
+	xdsSrv := xdsServer.NewXdsServer(ctx, m, logger, initWg, xdsSnapshot)
 
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(

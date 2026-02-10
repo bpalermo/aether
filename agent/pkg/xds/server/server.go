@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	registry2 "github.com/bpalermo/aether/agent/pkg/xds/snapshot"
+	"github.com/bpalermo/aether/agent/pkg/xds/snapshot"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
@@ -38,25 +38,25 @@ type XdsServer struct {
 
 	initWg *sync.WaitGroup
 
-	registry *registry2.XdsSnapshot
+	xdsSnapshot *snapshot.XdsSnapshot
 }
 
 type XdsServerOption func(*XdsServer)
 
-func NewXdsServer(mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, registry *registry2.XdsSnapshot, opts ...XdsServerOption) *XdsServer {
+func NewXdsServer(ctx context.Context, mgr manager.Manager, log logr.Logger, initWg *sync.WaitGroup, xdsSnapshot *snapshot.XdsSnapshot, opts ...XdsServerOption) *XdsServer {
 	srv := &XdsServer{
-		mgr:      mgr,
-		log:      log.WithName("xds-server"),
-		address:  constants.DefaultXdsSocketPath,
-		initWg:   initWg,
-		registry: registry,
+		mgr:         mgr,
+		log:         log.WithName("xds-server"),
+		address:     constants.DefaultXdsSocketPath,
+		initWg:      initWg,
+		xdsSnapshot: xdsSnapshot,
 	}
 
 	for _, option := range opts {
 		option(srv)
 	}
 
-	server := serverv3.NewServer(context.Background(), srv.registry.GetSnapshot(), nil)
+	server := serverv3.NewServer(ctx, srv.xdsSnapshot.GetSnapshot(), nil)
 	srv.grpcServer = grpc.NewServer()
 
 	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(srv.grpcServer, server)

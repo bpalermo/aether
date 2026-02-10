@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cache",
+    srcs = [
+        "cache.go",
+        "hash.go",
+    ],
+    importpath = "github.com/bpalermo/aether/registrar/internal/server/cache",
+    visibility = ["//registrar:__subpackages__"],
+    deps = [
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
+        "@com_github_envoyproxy_go_control_plane//pkg/log",
+        "@com_github_envoyproxy_go_control_plane_envoy//api/v2/core",
+    ],
+)

@@ -6,84 +6,85 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
-	"buf.build/go/protovalidate"
-	"github.com/anthdm/hollywood/actor"
-	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	"github.com/bpalermo/aether/registrar/internal/registry"
+	"github.com/bpalermo/aether/registrar/internal/server/cache"
+	"github.com/bpalermo/aether/xds"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/go-logr/logr"
-	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
+	"go.uber.org/atomic"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
-	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/reflection"
 )
 
 type RegistrarServer struct {
-	registrarv1.UnimplementedRegistrarServiceServer
+	xds *xds.Server
 
 	cfg *RegistrarServerConfig
 
 	log logr.Logger
 
-	grpcServer   *grpc.Server
-	healthServer *health.Server
-	listener     net.Listener
-
-	clients       map[string]*actor.PID                                   // key: proxyID
-	subscribers   map[string]registrarv1.RegistrarService_SubscribeServer // key: proxyID
-	subscribersMu sync.RWMutex
-
 	registry registry.Registry
+
+	liveness  *atomic.Bool
+	readiness *atomic.Bool
+
+	currentSnapshot *cachev3.Snapshot
+	snapshotMU      sync.RWMutex
 }
 
-func NewRegistrarServer(cfg *RegistrarServerConfig, reg registry.Registry, log logr.Logger) (*RegistrarServer, error) {
-	validator, _ := protovalidate.New()
+func NewRegistrarServer(ctx context.Context, cfg *RegistrarServerConfig, reg registry.Registry, log logr.Logger) (*RegistrarServer, error) {
+	// we want ADS to be explicitly false because we won't be including listeners.
+	// listeners are the responsibility of the agent on each node.
+	fallbackCache := cache.NewFallbackSnapshotCache(false, nil, "*")
 
-	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(protovalidate_middleware.UnaryServerInterceptor(validator)),
-	)
-
-	healthServer := health.NewServer()
-	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
-
-	// Register reflection service
-	reflection.Register(grpcServer)
+	// Set the default snapshot for all unknown nodes
+	defaultSnapshot, _ := cachev3.NewSnapshot("1", map[resource.Type][]types.Resource{
+		resource.ListenerType: make([]types.Resource, 0),
+		resource.ClusterType:  make([]types.Resource, 0),
+		resource.EndpointType: make([]types.Resource, 0),
+		resource.RouteType:    make([]types.Resource, 0),
+	})
+	err := fallbackCache.SetSnapshot(ctx, "*", defaultSnapshot)
+	if err != nil {
+		return nil, err
+	}
 
 	return &RegistrarServer{
-		UnimplementedRegistrarServiceServer: registrarv1.UnimplementedRegistrarServiceServer{},
-		cfg:                                 cfg,
-		log:                                 log.WithName("server"),
-		grpcServer:                          grpcServer,
-		healthServer:                        healthServer,
-		listener:                            nil,
-		subscribers:                         make(map[string]registrarv1.RegistrarService_SubscribeServer),
-		subscribersMu:                       sync.RWMutex{},
-		clients:                             make(map[string]*actor.PID),
-		registry:                            reg,
+		xds:             xds.NewServer(ctx, fallbackCache, nil),
+		cfg:             cfg,
+		log:             log.WithName("server"),
+		registry:        reg,
+		currentSnapshot: nil,
+		snapshotMU:      sync.RWMutex{},
+		liveness:        atomic.NewBool(false),
+		readiness:       atomic.NewBool(false),
 	}, nil
 }
 
 func (rs *RegistrarServer) Start(ctx context.Context) error {
 	rs.log.V(1).Info("starting registrar server", "network", rs.cfg.Network, "address", rs.cfg.Address)
+
 	listener, err := net.Listen(rs.cfg.Network, rs.cfg.Address)
 	if err != nil {
 		rs.log.Error(err, "failed to listen", "network", rs.cfg.Network, "address", rs.cfg.Address)
 		return fmt.Errorf("failed to listen: %w", err)
 	}
-	rs.listener = listener
-
-	registrarv1.RegisterRegistrarServiceServer(rs.grpcServer, rs)
-	rs.setHealthStatus(grpc_health_v1.HealthCheckResponse_SERVING)
 
 	errCh := make(chan error, 1)
-
 	go func() {
-		if serveErr := rs.grpcServer.Serve(listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
+		rs.log.V(1).Info("starting gRPC server")
+		if serveErr := rs.xds.GetGrpcServer().Serve(listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
 			errCh <- serveErr
 		}
 		close(errCh)
 	}()
+
+	rs.liveness.Store(true)
+	// TODO: fix
+	rs.readiness.Store(true)
 
 	select {
 	case <-ctx.Done():
@@ -99,15 +100,15 @@ func (rs *RegistrarServer) shutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), rs.cfg.ShutdownTimeout)
 	defer cancel()
 
-	rs.setHealthStatus(grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	rs.readiness.Store(false)
 
-	if rs.grpcServer == nil {
+	if rs.xds.GetGrpcServer() == nil {
 		return nil
 	}
 
 	stopped := make(chan struct{})
 	go func() {
-		rs.grpcServer.GracefulStop()
+		rs.xds.GetGrpcServer().GracefulStop()
 		close(stopped)
 	}()
 
@@ -117,13 +118,11 @@ func (rs *RegistrarServer) shutdown() error {
 		return nil
 	case <-ctx.Done():
 		rs.log.V(1).Info("gRPC server forced stop due to timeout")
-		rs.grpcServer.Stop()
+		rs.xds.GetGrpcServer().Stop()
 		return ctx.Err()
 	}
 }
 
-func (rs *RegistrarServer) setHealthStatus(status grpc_health_v1.HealthCheckResponse_ServingStatus) {
-	rs.log.V(1).Info("setting health status", "status", status)
-	rs.healthServer.SetServingStatus("", status)
-	rs.healthServer.SetServingStatus(registrarv1.RegistrarService_ServiceDesc.ServiceName, status)
+func generateSnapshotVersion() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
