@@ -5,6 +5,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 env:
   IMAGE_REGISTRY: index.docker.io/palermo
 
@@ -13,16 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: main
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.14.0
+        uses: bazel-contrib/setup-bazel@0.18.0
         with:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
@@ -34,8 +32,8 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Build
         run: |
-          bazel build //...
+          bazel build --stamp //...
       - name: Push
-        run: |          
-          bazel run //agent/cmd/agent:push -- --repository ${{ env.IMAGE_REGISTRY }}/${{ github.event.repository.name }}-agent --tag ${{ github.sha }}
-          bazel run //agent/cmd/agent:push -- --repository ${{ env.IMAGE_REGISTRY }}/${{ github.event.repository.name }}-agent --tag latest
+        run: |
+          bazel run --stamp //agent/cmd/agent:image_push
+          bazel run --stamp //registrar/cmd/registrar:image_push

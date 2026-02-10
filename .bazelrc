@@ -1,0 +1,4 @@
+# Configure workspace status script
+build --workspace_status_command=./bazel/workspace_status.sh
+
+run --workspace_status_command=./bazel/workspace_status.sh

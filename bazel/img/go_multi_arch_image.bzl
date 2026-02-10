@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@container_structure_test//:defs.bzl", "container_structure_test")
 load("@rules_img//img:image.bzl", "image_index", "image_manifest")
 load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
@@ -17,6 +18,11 @@ def go_multi_arch_image(name, binary, repository, registry = "index.docker.io", 
     """
     binary_name = binary[1:]
     entrypoint = "/{}".format(binary_name)
+
+    string_flag(
+        name = "release_tag",
+        build_setting_default = "dev",
+    )
 
     image_layer(
         name = "binary_layer",
@@ -83,5 +89,11 @@ def go_multi_arch_image(name, binary, repository, registry = "index.docker.io", 
         image = ":image_index",
         registry = registry,
         repository = repository,
-        tag = "latest",
+        tag_list = [
+            "{{if (eq .GIT_BRANCH \"main\")}}dev{{else}}{{.tag}}{{end}}",
+            "{{if .GIT_COMMIT}}{{.tag}}-{{.GIT_COMMIT}}{{end}}",
+        ],
+        build_settings = {
+            "tag": ":release_tag",
+        },
     )
