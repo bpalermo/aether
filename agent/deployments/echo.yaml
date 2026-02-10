@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: svc-a
-  namespace: aether-system
+  namespace: aether-test
   labels:
     app: svc-a
     app.kubernetes.io/name: svc-a
@@ -43,7 +43,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: svc-b
-  namespace: aether-system
+  namespace: aether-test
   labels:
     app: svc-b
     app.kubernetes.io/name: svc-b

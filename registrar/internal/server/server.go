@@ -65,7 +65,7 @@ func NewRegistrarServer(cfg *RegistrarServerConfig, reg registry.Registry, log l
 }
 
 func (rs *RegistrarServer) Start(ctx context.Context) error {
-	rs.log.V(1).Info("starting registrar server", "network", rs.cfg.Network, "address", rs.cfg.Address, "cluster", rs.cfg.ClusterName)
+	rs.log.V(1).Info("starting registrar server", "network", rs.cfg.Network, "address", rs.cfg.Address)
 	listener, err := net.Listen(rs.cfg.Network, rs.cfg.Address)
 	if err != nil {
 		rs.log.Error(err, "failed to listen", "network", rs.cfg.Network, "address", rs.cfg.Address)

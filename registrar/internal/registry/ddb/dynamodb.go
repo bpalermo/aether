@@ -9,7 +9,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registrar/internal/constants"
 	"github.com/bpalermo/aether/registrar/internal/registry"
 	"github.com/go-logr/logr"
@@ -56,116 +55,62 @@ func (r *DynamoDBRegistry) Start(ctx context.Context) error {
 
 // RegisterEndpoint registers the given endpoint to its service.
 // It will register one endpoint for each of its IPs.
-func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, pod *registryv1.RegistryPod) error {
+func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, endpoint registry.Endpoint) error {
 	r.log.V(1).Info(
 		"registering endpoint",
-		"service", pod.GetServiceName(),
-		"cluster", pod.GetClusterName(),
-		"pod", pod.CniPod.GetName(),
+		"service", endpoint.GetServiceName(),
+		"cluster", endpoint.GetClusterName(),
+		"ip", endpoint.GetIp(),
 	)
 
-	// Validate input
-	cniPod := pod.GetCniPod()
-	if cniPod == nil || len(cniPod.GetIps()) == 0 {
-		return fmt.Errorf("pod has no IPs to register")
+	// Create endpoint item
+	item := &DynamoDBEndpoint{
+		PK:          fmt.Sprintf("service#%s", endpoint.GetServiceName()),
+		SK:          fmt.Sprintf("endpoint#%s#protocol#%s", endpoint.GetIp(), endpoint.GetPortProtocol()),
+		ServiceName: endpoint.GetServiceName(),
+		ClusterName: endpoint.GetClusterName(),
+		IP:          endpoint.GetIp(),
+		Protocol:    string(endpoint.GetPortProtocol()),
+		Port:        endpoint.GetPort(),
+		Weight:      endpoint.GetWeight(),
+		Locality: &EndpointLocality{
+			Region: endpoint.GetRegion(),
+			Zone:   endpoint.GetSubzone(),
+		},
+		AdditionalMetadata: endpoint.GetAdditionalMetadata(),
 	}
 
-	// Prepare endpoints for each IP
-	var writeRequests []types.WriteRequest
-	for _, ip := range cniPod.GetIps() {
-		var port uint16
-
-		// Handle the oneof service_port field
-		switch portSpec := pod.GetServicePort().GetPortSpecifier().(type) {
-		case *registryv1.RegistryPod_ServicePort_PortNumber:
-			port = uint16(portSpec.PortNumber)
-		default:
-			return fmt.Errorf("unsupported service port type: %T", portSpec)
-		}
-
-		// Create endpoint item
-		endpoint := &DynamoDBEndpoint{
-			PK:          fmt.Sprintf("service#%s", pod.GetServiceName()),
-			SK:          fmt.Sprintf("protocol#%s#endpoint#%s", pod.GetPortProtocol(), ip),
-			ServiceName: pod.GetServiceName(),
-			ClusterName: pod.GetClusterName(),
-			ContainerID: cniPod.GetContainerId(),
-			Namespace:   cniPod.GetNamespace(),
-			PodName:     cniPod.GetName(),
-			IP:          ip,
-			Protocol:    pod.GetPortProtocol().String(),
-			Port:        port,
-			Weight:      pod.GetEndpointWeight(),
-		}
-
-		// Add locality if present
-		if pod.GetPodLocality() != nil {
-			endpoint.Locality = &EndpointLocality{
-				Region: pod.GetPodLocality().GetRegion(),
-				Zone:   pod.GetPodLocality().GetZone(),
-			}
-		}
-
-		// Add additional metadata if present
-		endpoint.AdditionalMetadata = pod.GetAdditionalMetadata()
-
-		// Marshal endpoint to DynamoDB attribute values
-		av, err := attributevalue.MarshalMap(endpoint)
-		if err != nil {
-			r.log.Error(err, "failed to marshal endpoint", "ip", ip)
-			return fmt.Errorf("failed to marshal endpoint for IP %s: %w", ip, err)
-		}
-
-		// Add to batch write requests
-		writeRequests = append(writeRequests, types.WriteRequest{
-			PutRequest: &types.PutRequest{
-				Item: av,
-			},
-		})
+	// Marshal endpoint to DynamoDB attribute values
+	av, err := attributevalue.MarshalMap(item)
+	if err != nil {
+		r.log.Error(err, "failed to marshal endpoint", "ip", endpoint.GetIp())
+		return fmt.Errorf("failed to marshal endpoint for IP %s: %w", endpoint.GetIp(), err)
 	}
 
-	// Batch write all endpoints (DynamoDB limits to 25 items per batch)
-	for i := 0; i < len(writeRequests); i += 25 {
-		end := i + 25
-		if end > len(writeRequests) {
-			end = len(writeRequests)
-		}
-
-		batch := writeRequests[i:end]
-		input := &dynamodb.BatchWriteItemInput{
-			RequestItems: map[string][]types.WriteRequest{
-				r.tableName: batch,
-			},
-		}
-
-		output, err := r.client.BatchWriteItem(ctx, input)
-		if err != nil {
-			r.log.Error(err, "failed to batch write endpoints", "batch_start", i, "batch_end", end)
-			return fmt.Errorf("failed to batch write endpoints: %w", err)
-		}
-
-		// Handle unprocessed items (retry logic could be added here)
-		if len(output.UnprocessedItems) > 0 {
-			r.log.V(1).Info("unprocessed items in batch write", "count", len(output.UnprocessedItems[r.tableName]))
-			// For now, just log - could implement retry logic
-		}
+	// Save item to DynamoDB
+	_, err = r.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(r.tableName),
+		Item:      av,
+	})
+	if err != nil {
+		r.log.Error(err, "failed to save endpoint", "ip", endpoint.GetIp())
+		return fmt.Errorf("failed to save endpoint for IP %s: %w", endpoint.GetIp(), err)
 	}
 
 	r.log.Info(
-		"endpoints registered successfully",
-		"service", pod.GetServiceName(),
-		"cluster", pod.GetClusterName(),
-		"pod", pod.GetCniPod().GetName(),
-		"ip_count", len(pod.GetCniPod().GetIps()),
+		"endpoint registered successfully",
+		"service", endpoint.GetServiceName(),
+		"cluster", endpoint.GetClusterName(),
+		"ip", endpoint.GetIp(),
 	)
 	return nil
 }
 
 // UnregisterEndpoints removes endpoints from the registry
-func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, pod *registryv1.RegistryPod) error {
+func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error {
 	var errs []error
-	for _, ip := range pod.CniPod.GetIps() {
-		err := r.unregisterEndpoint(ctx, pod, ip)
+	for _, ip := range ips {
+		err := r.unregisterEndpoint(ctx, serviceName, ip)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -175,38 +120,60 @@ func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, pod *registr
 		return fmt.Errorf("failed to unregister some endpoints: %v", errs)
 	}
 
-	r.log.Info("endpoint unregistered successfully", "service", pod.GetServiceName(), "protocol", pod.PortProtocol)
+	r.log.Info("endpoint unregistered successfully", "service", serviceName)
 	return nil
 }
 
-func (r *DynamoDBRegistry) unregisterEndpoint(ctx context.Context, pod *registryv1.RegistryPod, ip string) error {
+func (r *DynamoDBRegistry) unregisterEndpoint(ctx context.Context, serviceName string, ip string) error {
 	r.log.V(1).Info("unregistering endpoint",
-		"service", pod.GetServiceName(),
-		"protocol", pod.GetPortProtocol())
+		"service", serviceName)
 
-	// Build the delete input with composite keys
-	input := &dynamodb.DeleteItemInput{
-		TableName: aws.String(r.tableName),
-		Key: map[string]types.AttributeValue{
-			"PK": &types.AttributeValueMemberS{Value: fmt.Sprintf("service#%s", pod.GetServiceName())},
-			"SK": &types.AttributeValueMemberS{Value: fmt.Sprintf("protocol#%s#endpoint#%s", pod.GetPortProtocol(), ip)},
-		}, // Return old values for logging/debugging
-		ReturnValues: types.ReturnValueAllOld,
+	// First, query for all endpoints matching the prefix
+	queryInput := &dynamodb.QueryInput{
+		TableName:              aws.String(r.tableName),
+		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :skprefix)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk":       &types.AttributeValueMemberS{Value: fmt.Sprintf("service#%s", serviceName)},
+			":skprefix": &types.AttributeValueMemberS{Value: fmt.Sprintf("endpoint#%s", ip)},
+		},
 	}
 
-	// Execute delete
-	result, err := r.client.DeleteItem(ctx, input)
+	result, err := r.client.Query(ctx, queryInput)
 	if err != nil {
-		r.log.Error(err, "failed to delete endpoint",
-			"service", pod.GetServiceName(),
-			"protocol", pod.GetPortProtocol())
-		return fmt.Errorf("failed to delete endpoint: %w", err)
+		r.log.Error(err, "failed to query endpoints for deletion", "service", serviceName, "ip", ip)
+		return fmt.Errorf("failed to query endpoints: %w", err)
 	}
 
-	// Check if an item was actually deleted
-	if len(result.Attributes) == 0 {
-		r.log.V(1).Info("endpoint not found", "service", pod.GetServiceName(), "protocol", pod.PortProtocol)
-		return fmt.Errorf("endpoint not found: service=%s, protocol=%s", pod.GetServiceName(), pod.PortProtocol)
+	if len(result.Items) == 0 {
+		r.log.V(1).Info("no endpoints found to delete", "service", serviceName, "ip", ip)
+		return nil
+	}
+
+	// Delete each matching item
+	for _, item := range result.Items {
+		// Build the delete input with composite keys
+		input := &dynamodb.DeleteItemInput{
+			TableName: aws.String(r.tableName),
+			Key: map[string]types.AttributeValue{
+				"PK": item["PK"],
+				"SK": item["SK"],
+			}, // Return old values for logging/debugging
+			ReturnValues: types.ReturnValueAllOld,
+		}
+
+		// Execute delete
+		res, deleteErr := r.client.DeleteItem(ctx, input)
+		if deleteErr != nil {
+			r.log.Error(deleteErr, "failed to delete endpoint",
+				"service", serviceName,
+				"ip", ip)
+		}
+
+		// Check if an item was actually deleted
+		if len(res.Attributes) == 0 {
+			r.log.V(1).Info("endpoint not found", "service", serviceName, "ip", ip)
+			return fmt.Errorf("endpoint not found: service=%s, ip=%s", serviceName, ip)
+		}
 	}
 
 	return nil

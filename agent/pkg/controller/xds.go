@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bpalermo/aether/agent/pkg/constants"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/constants"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -68,7 +68,7 @@ func (c *XdsController) SetupWithManager(mgr ctrl.Manager) error {
 				return false
 			}
 			// Only reconcile pods with a specific label
-			_, hasLabel := pod.Labels[constants.AetherServiceLabel]
+			_, hasLabel := pod.Labels[constants.LabelAetherService]
 			return hasLabel
 		})).
 		Complete(c)
@@ -130,7 +130,7 @@ func (c *XdsController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// At this point we have a pod
 	resourceEvent.K8SPod.Ip = pod.Status.PodIP
-	resourceEvent.K8SPod.ServiceName = pod.Labels[constants.AetherServiceLabel]
+	resourceEvent.K8SPod.ServiceName = pod.Labels[constants.LabelAetherService]
 
 	event := &registryv1.Event{
 		Operation: op,

@@ -6,7 +6,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/registrar/internal/controller",
     visibility = ["//registrar:__subpackages__"],
     deps = [
-        "//agent/pkg/constants",
+        "//constants",
         "//registrar/internal/registry",
         "@com_github_go_logr_logr//:logr",
         "@io_k8s_api//core/v1:core",

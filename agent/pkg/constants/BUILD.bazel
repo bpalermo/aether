@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "annotation.go",
         "constants.go",
-        "label.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/pkg/constants",
     visibility = ["//visibility:public"],

@@ -6,6 +6,7 @@ import (
 
 	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registrar/internal/awsconfig"
+	"github.com/bpalermo/aether/registrar/internal/controller"
 	"github.com/bpalermo/aether/registrar/internal/registry"
 	"github.com/bpalermo/aether/registrar/internal/registry/ddb"
 	"github.com/bpalermo/aether/registrar/internal/server"
@@ -20,7 +21,7 @@ const (
 )
 
 var (
-	cfg = NewRegisterConfig()
+	cfg = NewRegistrarConfig()
 
 	l logr.Logger
 )
@@ -44,7 +45,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
-	rootCmd.Flags().StringVar(&cfg.srvCfg.ClusterName, "cluster", "unknown", "Cluster name. It will be used to push registration info to the registry.")
+	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster", "unknown", "Cluster name. It will be used to push registration info to the registry.")
 	rootCmd.Flags().StringVar(&cfg.srvCfg.Network, "serverNetwork", "tcp", "gRPC server listener network")
 	rootCmd.Flags().StringVar(&cfg.srvCfg.Address, "serverAddress", ":50051", "gRPC server listener address")
 	rootCmd.Flags().DurationVar(&cfg.srvCfg.ShutdownTimeout, "shutdownTimeout", 30*time.Second, "Shutdown timeout for graceful shutdown")
@@ -72,6 +73,12 @@ func runRegistrar(ctx context.Context) error {
 	}
 
 	if err = setupRegistrar(m, reg); err != nil {
+		return err
+	}
+
+	rCtrl := controller.NewRegistrarController(cfg.ClusterName, m.GetClient(), reg, l)
+	err = rCtrl.SetupWithManager(m)
+	if err != nil {
 		return err
 	}
 

@@ -8,9 +8,6 @@ type DynamoDBEndpoint struct {
 	// Core endpoint attributes
 	ServiceName        string            `dynamodbav:"service_name"`
 	ClusterName        string            `dynamodbav:"cluster_name"`
-	ContainerID        string            `dynamodbav:"container_id"`
-	Namespace          string            `dynamodbav:"namespace"`
-	PodName            string            `dynamodbav:"pod_name"`
 	IP                 string            `dynamodbav:"ip"`
 	Locality           *EndpointLocality `dynamodbav:"locality"`
 	AdditionalMetadata map[string]string `dynamodbav:"additional_metadata"`

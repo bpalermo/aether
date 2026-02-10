@@ -4,15 +4,19 @@ import (
 	"github.com/bpalermo/aether/registrar/internal/server"
 )
 
-type RegisterConfig struct {
+const defaultClusterName = "unknown"
+
+type RegistrarConfig struct {
 	Debug bool
 
-	srvCfg *server.RegistrarServerConfig
+	ClusterName string
+	srvCfg      *server.RegistrarServerConfig
 }
 
-func NewRegisterConfig() *RegisterConfig {
-	return &RegisterConfig{
+func NewRegistrarConfig() *RegistrarConfig {
+	return &RegistrarConfig{
 		false,
+		defaultClusterName,
 		server.NewRegisterServerConfig(),
 	}
 }

@@ -1,0 +1,11 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "constants",
+    srcs = [
+        "annotations.go",
+        "labels.go",
+    ],
+    importpath = "github.com/bpalermo/aether/constants",
+    visibility = ["//visibility:public"],
+)

@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//log",
         "//registrar/internal/awsconfig",
+        "//registrar/internal/controller",
         "//registrar/internal/registry",
         "//registrar/internal/registry/ddb",
         "//registrar/internal/server",
