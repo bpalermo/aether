@@ -9,8 +9,8 @@ const defaultClusterName = "unknown"
 type RegistrarConfig struct {
 	Debug bool
 
-	ClusterName string
-	srvCfg      *server.RegistrarServerConfig
+	ClusterName  string
+	registrarCfg *server.RegistrarServerConfig
 }
 
 func NewRegistrarConfig() *RegistrarConfig {
