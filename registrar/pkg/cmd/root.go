@@ -7,9 +7,9 @@ import (
 	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registrar/internal/awsconfig"
 	"github.com/bpalermo/aether/registrar/internal/controller"
-	"github.com/bpalermo/aether/registrar/internal/registry"
-	"github.com/bpalermo/aether/registrar/internal/registry/ddb"
 	"github.com/bpalermo/aether/registrar/internal/server"
+	"github.com/bpalermo/aether/registry"
+	"github.com/bpalermo/aether/registry/types"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -97,7 +97,7 @@ func runRegistrar(ctx context.Context) error {
 	return m.Start(ctx)
 }
 
-func setupRegistrar(ctx context.Context, m ctrl.Manager, reg registry.Registry) (*server.RegistrarServer, error) {
+func setupRegistrar(ctx context.Context, m ctrl.Manager, reg types.Registry) (*server.RegistrarServer, error) {
 	srv, err := server.NewRegistrarServer(ctx, cfg.srvCfg, reg, l)
 	if err != nil {
 		return nil, err
@@ -110,13 +110,13 @@ func setupRegistrar(ctx context.Context, m ctrl.Manager, reg registry.Registry) 
 	return srv, nil
 }
 
-func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
+func setupRegistry(ctx context.Context, m ctrl.Manager) (types.Registry, error) {
 	awsCfg, err := awsconfig.LoadConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	reg := ddb.NewDynamoDBRegistry(l, awsCfg)
+	reg := registry.NewDynamoDBRegistry(l, awsCfg)
 	if err = m.Add(reg); err != nil {
 		return nil, err
 	}

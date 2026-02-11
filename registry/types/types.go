@@ -1,4 +1,13 @@
-package registry
+package types
+
+import "context"
+
+type Registry interface {
+	Start(ctx context.Context) error
+	RegisterEndpoint(ctx context.Context, endpoint Endpoint) error
+	UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error
+	ListEndpoints(ctx context.Context, service string, protocol string) ([]Endpoint, error)
+}
 
 type Endpoint interface {
 	GetClusterName() string
@@ -15,8 +24,5 @@ type Endpoint interface {
 type EndpointProtocol string
 
 const (
-	defaultEndpointPort   uint16 = 8080
-	defaultEndpointWeight uint32 = 1024
-
 	EndpointProtocolHTTP EndpointProtocol = "http"
 )

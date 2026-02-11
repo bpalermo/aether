@@ -5,7 +5,8 @@ import (
 	"fmt"
 
 	"github.com/bpalermo/aether/constants"
-	"github.com/bpalermo/aether/registrar/internal/registry"
+	"github.com/bpalermo/aether/registry"
+	"github.com/bpalermo/aether/registry/types"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -20,10 +21,10 @@ type RegistrarController struct {
 	clusterName string
 
 	client client.Client
-	reg    registry.Registry
+	reg    types.Registry
 }
 
-func NewRegistrarController(clusterName string, c client.Client, registry registry.Registry, l logr.Logger) *RegistrarController {
+func NewRegistrarController(clusterName string, c client.Client, registry types.Registry, l logr.Logger) *RegistrarController {
 	return &RegistrarController{
 		l:           l.WithName("controller"),
 		clusterName: clusterName,

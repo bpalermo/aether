@@ -9,8 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/bpalermo/aether/registrar/internal/constants"
-	"github.com/bpalermo/aether/registrar/internal/registry"
+	"github.com/bpalermo/aether/constants"
+	registryTypes "github.com/bpalermo/aether/registry/types"
 	"github.com/go-logr/logr"
 )
 
@@ -21,8 +21,6 @@ type DynamoDBRegistry struct {
 
 	tableName string
 }
-
-var _ registry.Registry = (*DynamoDBRegistry)(nil)
 
 func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) *DynamoDBRegistry {
 	return &DynamoDBRegistry{
@@ -55,7 +53,7 @@ func (r *DynamoDBRegistry) Start(ctx context.Context) error {
 
 // RegisterEndpoint registers the given endpoint to its service.
 // It will register one endpoint for each of its IPs.
-func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, endpoint registry.Endpoint) error {
+func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, endpoint registryTypes.Endpoint) error {
 	r.log.V(1).Info(
 		"registering endpoint",
 		"service", endpoint.GetServiceName(),
@@ -180,7 +178,7 @@ func (r *DynamoDBRegistry) unregisterEndpoint(ctx context.Context, serviceName s
 }
 
 // ListEndpoints returns the endpoints registered for the given service and its protocol.
-func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, protocol string) ([]registry.Endpoint, error) {
+func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, protocol string) ([]registryTypes.Endpoint, error) {
 	r.log.V(1).Info("listing endpoints", "service", service, "protocol", protocol)
 
 	input := &dynamodb.QueryInput{
@@ -208,9 +206,9 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 		return nil, fmt.Errorf("failed to query endpoints: %w", err)
 	}
 
-	endpoints := make([]registry.Endpoint, 0, len(result.Items))
+	endpoints := make([]registryTypes.Endpoint, 0, len(result.Items))
 	for _, item := range result.Items {
-		var endpoint registry.Endpoint
+		var endpoint registryTypes.Endpoint
 		if err := attributevalue.UnmarshalMap(item, &endpoint); err != nil {
 			r.log.Error(err, "failed to unmarshal endpoint item")
 			continue

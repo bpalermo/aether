@@ -10,8 +10,8 @@ go_library(
     importpath = "github.com/bpalermo/aether/registrar/internal/server",
     visibility = ["//registrar:__subpackages__"],
     deps = [
-        "//registrar/internal/registry",
         "//registrar/internal/server/cache",
+        "//registry/types",
         "//xds",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",

@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/registry/types"
 )
 
 type KubernetesEndpoint struct {
@@ -14,12 +15,12 @@ type KubernetesEndpoint struct {
 	subzone      string
 	ip           string
 	port         uint16
-	portProtocol EndpointProtocol
+	portProtocol types.EndpointProtocol
 	metadata     map[string]string
 	weight       uint32
 }
 
-var _ Endpoint = (*KubernetesEndpoint)(nil)
+var _ types.Endpoint = (*KubernetesEndpoint)(nil)
 
 func NewKubernetesEndpoint(clusterName string, annotations map[string]string, labels map[string]string, ip string, nodeLabels map[string]string) (*KubernetesEndpoint, error) {
 	serviceName, ok := labels[constants.LabelAetherService]
@@ -45,7 +46,7 @@ func NewKubernetesEndpoint(clusterName string, annotations map[string]string, la
 		ip:           ip,
 		metadata:     getEndpointMetadata(annotations),
 		port:         port,
-		portProtocol: EndpointProtocolHTTP,
+		portProtocol: types.EndpointProtocolHTTP,
 		weight:       weight,
 	}, nil
 }
@@ -78,7 +79,7 @@ func (ke *KubernetesEndpoint) GetPort() uint16 {
 	return ke.port
 }
 
-func (ke *KubernetesEndpoint) GetPortProtocol() EndpointProtocol {
+func (ke *KubernetesEndpoint) GetPortProtocol() types.EndpointProtocol {
 	return ke.portProtocol
 }
 
@@ -89,7 +90,7 @@ func (ke *KubernetesEndpoint) GetWeight() uint32 {
 func getPortAnnotation(annotations map[string]string) (uint16, error) {
 	s, ok := annotations[constants.AnnotationEndpointPort]
 	if !ok {
-		return defaultEndpointPort, nil
+		return constants.DefaultEndpointPort, nil
 	}
 	port, err := strconv.ParseUint(s, 10, 16)
 	if err != nil {
@@ -102,7 +103,7 @@ func getPortAnnotation(annotations map[string]string) (uint16, error) {
 func getWeight(annotations map[string]string) (uint32, error) {
 	s, ok := annotations[constants.AnnotationEndpointWeight]
 	if !ok {
-		return defaultEndpointWeight, nil
+		return constants.DefaultEndpointWeight, nil
 	}
 
 	weight, err := strconv.ParseUint(s, 10, 32)

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bpalermo/aether/registrar/internal/registry"
 	"github.com/bpalermo/aether/registrar/internal/server/cache"
+	registryTypes "github.com/bpalermo/aether/registry/types"
 	"github.com/bpalermo/aether/xds"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -26,7 +26,7 @@ type RegistrarServer struct {
 
 	log logr.Logger
 
-	registry registry.Registry
+	registry registryTypes.Registry
 
 	liveness  *atomic.Bool
 	readiness *atomic.Bool
@@ -35,7 +35,7 @@ type RegistrarServer struct {
 	snapshotMU      sync.RWMutex
 }
 
-func NewRegistrarServer(ctx context.Context, cfg *RegistrarServerConfig, reg registry.Registry, log logr.Logger) (*RegistrarServer, error) {
+func NewRegistrarServer(ctx context.Context, cfg *RegistrarServerConfig, reg registryTypes.Registry, log logr.Logger) (*RegistrarServer, error) {
 	// we want ADS to be explicitly false because we won't be including listeners.
 	// listeners are the responsibility of the agent on each node.
 	fallbackCache := cache.NewFallbackSnapshotCache(false, nil, "*")
