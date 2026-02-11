@@ -42,9 +42,9 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster", "unknown", "Cluster name. It will be used to push registration info to the registry.")
-	rootCmd.Flags().StringVar(&cfg.srvCfg.Network, "serverNetwork", "tcp", "gRPC server listener network")
-	rootCmd.Flags().StringVar(&cfg.srvCfg.Address, "serverAddress", ":50051", "gRPC server listener address")
-	rootCmd.Flags().DurationVar(&cfg.srvCfg.ShutdownTimeout, "shutdownTimeout", 30*time.Second, "Shutdown timeout for graceful shutdown")
+	rootCmd.Flags().StringVar(&cfg.registrarCfg.SrvCfg.Network, "serverNetwork", "tcp", "gRPC server listener network")
+	rootCmd.Flags().StringVar(&cfg.registrarCfg.SrvCfg.Address, "serverAddress", ":50051", "gRPC server listener address")
+	rootCmd.Flags().DurationVar(&cfg.registrarCfg.SrvCfg.ShutdownTimeout, "shutdownTimeout", 30*time.Second, "Shutdown timeout for graceful shutdown")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster")
 }
@@ -98,7 +98,7 @@ func runRegistrar(ctx context.Context) error {
 }
 
 func setupRegistrar(ctx context.Context, m ctrl.Manager, reg types.Registry) (*server.RegistrarServer, error) {
-	srv, err := server.NewRegistrarServer(ctx, cfg.srvCfg, reg, l)
+	srv, err := server.NewRegistrarServer(ctx, cfg.registrarCfg, reg, l)
 	if err != nil {
 		return nil, err
 	}

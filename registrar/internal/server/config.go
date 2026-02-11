@@ -1,23 +1,15 @@
 package server
 
-import "time"
-
-const (
-	defaultClusterName           = "unknown"
-	defaultServerShutdownTimeout = time.Second * 30
+import (
+	"github.com/bpalermo/aether/xds"
 )
 
 type RegistrarServerConfig struct {
-	Network string
-	Address string
-
-	ShutdownTimeout time.Duration
+	SrvCfg *xds.ServerConfig
 }
 
 func NewRegisterServerConfig() *RegistrarServerConfig {
 	return &RegistrarServerConfig{
-		Network:         "tcp",
-		Address:         ":50051",
-		ShutdownTimeout: defaultServerShutdownTimeout,
+		SrvCfg: xds.NewServerConfig(),
 	}
 }
