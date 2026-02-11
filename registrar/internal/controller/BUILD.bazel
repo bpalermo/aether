@@ -7,7 +7,8 @@ go_library(
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//constants",
-        "//registrar/internal/registry",
+        "//registry",
+        "//registry/types",
         "@com_github_go_logr_logr//:logr",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
