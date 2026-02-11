@@ -20,6 +20,7 @@ spec:
         app.kubernetes.io/name: aether-proxy
     spec:
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: aether-proxy
       priorityClassName: system-node-critical
       imagePullSecrets:

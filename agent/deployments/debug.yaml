@@ -20,11 +20,12 @@ spec:
       hostNetwork: true
       hostPID: true
       hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: debug
           image: ubuntu:22.04
           command: ["/bin/bash"]
-          args: ["-c", "apt-get update && apt-get install -y curl wget vim net-tools iproute2 tcpdump jq && sleep infinity"]
+          args: ["-c", "apt-get update && apt-get install -y curl wget vim net-tools iproute2 tcpdump jq dnsutils netcat && sleep infinity"]
           securityContext:
             privileged: true
           volumeMounts:

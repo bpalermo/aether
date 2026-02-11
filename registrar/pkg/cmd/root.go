@@ -13,11 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
-)
-
-const (
-	// name is the controller name used for logging
-	name = "aether-registrar"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 var (
@@ -30,8 +26,8 @@ var rootCmd = &cobra.Command{
 	Use:          "registrar",
 	Short:        "Runs the aether register service.",
 	SilenceUsage: true,
-	PersistentPreRun: func(_ *cobra.Command, _ []string) {
-		l = log.NewLogger(cfg.Debug).WithName("registrar")
+	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		l = log.NewLogger(cfg.Debug).WithName(cmd.Name())
 		// Set the controller-runtime logger
 		ctrl.SetLogger(l)
 	},
@@ -62,7 +58,12 @@ func runRegistrar(ctx context.Context) error {
 	l.Info("starting registrar server", "debug", cfg.Debug)
 
 	// Create a controller manager
-	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{})
+	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		HealthProbeBindAddress: ":8080",
+		Metrics: metricsserver.Options{
+			BindAddress: ":8081",
+		},
+	})
 	if err != nil {
 		return err
 	}
@@ -72,7 +73,8 @@ func runRegistrar(ctx context.Context) error {
 		return err
 	}
 
-	if err = setupRegistrar(m, reg); err != nil {
+	rSrv, err := setupRegistrar(ctx, m, reg)
+	if err != nil {
 		return err
 	}
 
@@ -82,20 +84,30 @@ func runRegistrar(ctx context.Context) error {
 		return err
 	}
 
-	return m.Start(ctx)
-}
-
-func setupRegistrar(m ctrl.Manager, reg registry.Registry) error {
-	srv, err := server.NewRegistrarServer(cfg.srvCfg, reg, l)
+	err = m.AddHealthzCheck("xds", rSrv.HealthzCheck)
 	if err != nil {
 		return err
 	}
 
-	if err = m.Add(srv); err != nil {
+	err = m.AddReadyzCheck("xds", rSrv.ReadyzCheck)
+	if err != nil {
 		return err
 	}
 
-	return nil
+	return m.Start(ctx)
+}
+
+func setupRegistrar(ctx context.Context, m ctrl.Manager, reg registry.Registry) (*server.RegistrarServer, error) {
+	srv, err := server.NewRegistrarServer(ctx, cfg.srvCfg, reg, l)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = m.Add(srv); err != nil {
+		return nil, err
+	}
+
+	return srv, nil
 }
 
 func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {

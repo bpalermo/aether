@@ -45,7 +45,9 @@ func NewXdsSnapshot(nodeID string, log logr.Logger) *XdsSnapshot {
 		cache.NewRouteCache(),
 		make(chan *registryv1.Event, eventBuffer),
 		nodeID,
-		cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil),
+		// we won't be serving all resources from the agent, the agent will serve listeners on each node.
+		// but routes and endpoints will be served from the registrar.
+		cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),
 		generateVersion(),
 	}
 }

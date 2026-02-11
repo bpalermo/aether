@@ -23,7 +23,7 @@ spec:
         - name: dockerhub-credentials
       containers:
         - name: registrar
-          image: docker.io/palermo/aether-registrar:latest
+          image: docker.io/palermo/aether-registrar:dev
           imagePullPolicy: Always
           args:
             - "--debug"
@@ -41,17 +41,25 @@ spec:
                   name: aether-registrar-aws-credentials
                   key: AWS_SECRET_ACCESS_KEY
           ports:
-            - name: grpc
+            - name: http-controller
+              containerPort: 8080
+              protocol: TCP
+            - name: http-metrics
+              containerPort: 8081
+              protocol: TCP
+            - name: grpc-xds
               containerPort: 50051
               protocol: TCP
           livenessProbe:
-            grpc:
-              port: 50051
+            httpGet:
+              path: /healthz
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-            grpc:
-              port: 50051
+            httpGet:
+              path: /readyz
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
