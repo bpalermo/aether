@@ -3,11 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/registry"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -21,8 +22,8 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 
 	// Ignore aether system pods
 	// we want to prevent circular dependencies
-	if strings.HasPrefix(req.Pod.Name, "aether-") {
-		s.logger.V(1).Info("ignoring aether system pod", "name", req.Pod.Name)
+	if isIgnorablePod(req.Pod.Namespace) {
+		s.log.V(1).Info("ignoring aether system pod", "name", req.Pod.Name, "namespace", req.Pod.Namespace)
 		return &cniv1.AddPodResponse{
 			Result: cniv1.AddPodResponse_SUCCESS,
 		}, nil
@@ -33,22 +34,19 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to retrieve endpoint data: %v", err)
 	}
 
-	// Store the registry entry
+	// Store in the local storage
 	containerdID := types.ContainerID(req.Pod.ContainerId)
-	s.logger.Info("adding pod to storage", "containerID", containerdID, "name", req.Pod.Name)
+	s.log.Info("adding pod to storage", "containerID", containerdID, "name", req.Pod.Name)
 	if err := s.storage.AddResource(ctx, containerdID, pod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
 
-	// TODO: block until the configuration is actually loaded
+	ke, err := registry.NewRegistryPodEndpoint(s.clusterName, pod)
+	if err = s.registry.RegisterEndpoint(ctx, ke); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
+	}
 
-	//err = s.subscribeStream.Send(&registrarv1.SubscribeRequest{
-	//	ProxyId: s.proxyID,
-	//})
-	//if err != nil {
-	//	s.logger.Error(err, "failed to send subscribe request to registrar")
-	//	return nil, err
-	//}
+	// TODO: block until the configuration is actually loaded
 
 	return &cniv1.AddPodResponse{
 		Result: cniv1.AddPodResponse_SUCCESS,
@@ -62,8 +60,8 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 
 	// Ignore aether system pods
 	// we want to prevent circular dependencies
-	if strings.HasPrefix(req.Pod.Name, "aether-") {
-		s.logger.V(1).Info("ignoring aether system pod", "name", req.Pod.Name)
+	if isIgnorablePod(req.Pod.Namespace) {
+		s.log.V(1).Info("ignoring aether system pod", "name", req.Pod.Name, "namespace", req.Pod.Namespace)
 		return &cniv1.RemovePodResponse{
 			Result: cniv1.RemovePodResponse_SUCCESS,
 		}, nil
@@ -76,15 +74,16 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to get pod from storage: %v", err)
 	}
 
-	// TODO: remove from registrar
-	var _ = registryPod
+	if err = s.registry.UnregisterEndpoints(ctx, getServiceName(registryPod), registryPod.CniPod.Ips); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service %s: %v", err)
+	}
 
 	// Remove from the local storage
 	if err := s.storage.RemoveResource(ctx, types.ContainerID(req.Pod.ContainerId)); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
 
-	// TODO: block until the configuration is actually loaded
+	// TODO: block until the configuration is actually removed
 
 	return &cniv1.RemovePodResponse{
 		Result: cniv1.RemovePodResponse_SUCCESS,
@@ -107,31 +106,18 @@ func (s *CNIServer) newRegistryPod(ctx context.Context, pod *cniv1.CNIPod) (*reg
 		return nil, fmt.Errorf("failed to get pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
-	if err = processPodAnnotations(s.clusterName, k8sPod.Annotations, registryPod); err != nil {
-		return nil, err
-	}
+	registryPod.Annotations = k8sPod.Annotations
 
 	return registryPod, nil
 }
 
-func processPodAnnotations(cluster string, annotations map[string]string, pod *registryv1.RegistryPod) error {
-
-	pod.ServiceName = getServiceFromAnnotations(annotations)
-	pod.ClusterName = cluster
-	pod.PodLocality = &registryv1.RegistryPod_Locality{
-		Region: getEndpointRegionOrDefault(annotations),
-		Zone:   getEndpointZoneOrDefault(annotations),
+func isIgnorablePod(namespace string) bool {
+	if namespace == "kube-system" || namespace == "aether-system" {
+		return true
 	}
+	return false
+}
 
-	pod.PortProtocol = registryv1.RegistryPod_HTTP
-	pod.ServicePort = &registryv1.RegistryPod_ServicePort{
-		PortSpecifier: &registryv1.RegistryPod_ServicePort_PortNumber{
-			PortNumber: getEndpointPortOrDefault(annotations),
-		},
-	}
-	pod.EndpointWeight = getEndpointWeightOrDefault(annotations)
-
-	pod.AdditionalMetadata = getEndpointMetadata(annotations)
-
-	return nil
+func getServiceName(registryPod *registryv1.RegistryPod) string {
+	return registryPod.Labels[constants.LabelAetherService]
 }

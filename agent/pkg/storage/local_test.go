@@ -211,7 +211,7 @@ func TestCachedFileStorage_LoadAll(t *testing.T) {
 
 	// Create storage and load all
 	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
-	_, err = storage.LoadAll(context.Background())
+	_, err = storage.loadAll(context.Background())
 	assert.NoError(t, err)
 
 	// Verify all files are loaded into cache
@@ -227,7 +227,7 @@ func TestCachedFileStorage_LoadAllEmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	storage := NewCachedLocalStorage[*wrapperspb.StringValue](dir, newStringValue)
 
-	_, err := storage.LoadAll(context.Background())
+	_, err := storage.loadAll(context.Background())
 	assert.NoError(t, err)
 	assert.Empty(t, storage.cache)
 }
@@ -235,7 +235,7 @@ func TestCachedFileStorage_LoadAllEmptyDir(t *testing.T) {
 func TestCachedFileStorage_LoadAllNonExistentDir(t *testing.T) {
 	storage := NewCachedLocalStorage[*wrapperspb.StringValue]("/nonexistent/dir", newStringValue)
 
-	_, err := storage.LoadAll(context.Background())
+	_, err := storage.loadAll(context.Background())
 	assert.Error(t, err)
 	assert.Empty(t, storage.cache)
 }

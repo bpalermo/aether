@@ -3,23 +3,7 @@ package util
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 )
-
-// ReadCNIConfigMap reads CNI config from a file and returns the unmarshalled JSON as a map
-func ReadCNIConfigMap(path string) (map[string]any, error) {
-	cniConfig, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var cniConfigMap map[string]any
-	if err = json.Unmarshal(cniConfig, &cniConfigMap); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-
-	return cniConfigMap, nil
-}
 
 // GetPlugins given an unmarshalled CNI config JSON map, return the plugin list asserted as a []interface{}
 func GetPlugins(cniConfigMap map[string]any) (plugins []any, err error) {

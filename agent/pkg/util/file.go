@@ -20,19 +20,19 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	// Clean up temp file on error
 	defer func() {
 		if err != nil {
-			os.Remove(tempPath)
+			_ = os.Remove(tempPath)
 		}
 	}()
 
 	// Write data to the temp file
 	if _, err = tempFile.Write(data); err != nil {
-		tempFile.Close()
+		_ = tempFile.Close()
 		return fmt.Errorf("failed to write to temp file: %w", err)
 	}
 
 	// Ensure data is flushed to the disk
 	if err = tempFile.Sync(); err != nil {
-		tempFile.Close()
+		_ = tempFile.Close()
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 

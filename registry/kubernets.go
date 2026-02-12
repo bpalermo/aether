@@ -23,17 +23,17 @@ type KubernetesEndpoint struct {
 var _ types.Endpoint = (*KubernetesEndpoint)(nil)
 
 func NewKubernetesEndpoint(clusterName string, annotations map[string]string, labels map[string]string, ip string, nodeLabels map[string]string) (*KubernetesEndpoint, error) {
-	serviceName, ok := labels[constants.LabelAetherService]
-	if !ok {
+	serviceName, err := getServiceNameFromLabels(labels)
+	if err != nil {
 		return nil, fmt.Errorf("missing service label")
 	}
 
-	port, err := getPortAnnotation(annotations)
+	port, err := getPortFromAnnotations(annotations)
 	if err != nil {
 		return nil, err
 	}
 
-	weight, err := getWeight(annotations)
+	weight, err := getWeightFromAnnotations(annotations)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +44,7 @@ func NewKubernetesEndpoint(clusterName string, annotations map[string]string, la
 		region:       nodeLabels[constants.LabelKubernetesTopologyRegion],
 		subzone:      nodeLabels[constants.LabelKubernetesTopologyZone],
 		ip:           ip,
-		metadata:     getEndpointMetadata(annotations),
+		metadata:     getEndpointMetadataFromAnnotations(annotations),
 		port:         port,
 		portProtocol: types.EndpointProtocolHTTP,
 		weight:       weight,
@@ -87,7 +87,15 @@ func (ke *KubernetesEndpoint) GetWeight() uint32 {
 	return ke.weight
 }
 
-func getPortAnnotation(annotations map[string]string) (uint16, error) {
+func getServiceNameFromLabels(labels map[string]string) (string, error) {
+	serviceName, ok := labels[constants.LabelAetherService]
+	if !ok {
+		return "", fmt.Errorf("missing service label")
+	}
+	return serviceName, nil
+}
+
+func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
 	s, ok := annotations[constants.AnnotationEndpointPort]
 	if !ok {
 		return constants.DefaultEndpointPort, nil
@@ -100,7 +108,7 @@ func getPortAnnotation(annotations map[string]string) (uint16, error) {
 	return uint16(port), nil
 }
 
-func getWeight(annotations map[string]string) (uint32, error) {
+func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 	s, ok := annotations[constants.AnnotationEndpointWeight]
 	if !ok {
 		return constants.DefaultEndpointWeight, nil
@@ -114,7 +122,7 @@ func getWeight(annotations map[string]string) (uint32, error) {
 	return uint32(weight), nil
 }
 
-func getEndpointMetadata(annotations map[string]string) map[string]string {
+func getEndpointMetadataFromAnnotations(annotations map[string]string) map[string]string {
 	metadata := map[string]string{}
 	prefix := constants.AnnotationAetherEndpointMetadataPrefix
 	for key, value := range annotations {

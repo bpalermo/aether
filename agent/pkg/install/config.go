@@ -11,15 +11,12 @@ type InstallerConfig struct {
 	CNIBinSourceDir string
 	// Directory into which to copy the CNI binaries
 	CNIBinTargetDir string
-	// Directory into which to registry entries are created
-	MountedCNIRegistryDir string
 }
 
 func NewInstallerConfig() *InstallerConfig {
 	return &InstallerConfig{
-		CNIBinSourceDir:       constants.DefaultCNIBinDir,
-		CNIBinTargetDir:       constants.DefaultHostCNIBinDir,
-		MountedCNINetDir:      constants.DefaultHostCNINetDir,
-		MountedCNIRegistryDir: constants.DefaultHostCNIRegistryDir,
+		CNIBinSourceDir:  constants.DefaultCNIBinDir,
+		CNIBinTargetDir:  constants.DefaultHostCNIBinDir,
+		MountedCNINetDir: constants.DefaultHostCNINetDir,
 	}
 }

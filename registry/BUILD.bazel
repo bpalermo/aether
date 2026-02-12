@@ -5,10 +5,12 @@ go_library(
     srcs = [
         "kubernets.go",
         "registry.go",
+        "registrypod.go",
     ],
     importpath = "github.com/bpalermo/aether/registry",
     visibility = ["//visibility:public"],
     deps = [
+        "//api/aether/registry/v1:registry",
         "//constants",
         "//registry/internal/ddb",
         "//registry/types",

@@ -12,10 +12,25 @@ type ServerConfig struct {
 	ShutdownTimeout time.Duration
 }
 
-func NewServerConfig() *ServerConfig {
-	return &ServerConfig{
+type ServerConfigOpt func(*ServerConfig)
+
+func WithUDS(address string) ServerConfigOpt {
+	return func(c *ServerConfig) {
+		c.Network = "unix"
+		c.Address = address
+	}
+}
+
+func NewServerConfig(opts ...ServerConfigOpt) *ServerConfig {
+	cfg := &ServerConfig{
 		Network:         "tcp",
 		Address:         ":50051",
 		ShutdownTimeout: defaultServerShutdownTimeout,
 	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	return cfg
 }

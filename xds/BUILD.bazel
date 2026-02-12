@@ -3,9 +3,11 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "xds",
     srcs = [
+        "callbacks.go",
         "config.go",
         "readiness.go",
         "server.go",
+        "xds.go",
     ],
     importpath = "github.com/bpalermo/aether/xds",
     visibility = ["//visibility:public"],
@@ -13,6 +15,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_envoyproxy_go_control_plane_envoy//service/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_envoyproxy_go_control_plane_envoy//service/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//service/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//service/route/v3:route",

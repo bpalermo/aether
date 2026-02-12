@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync"
 
-	"github.com/bpalermo/aether/registrar/internal/server/cache"
 	registryTypes "github.com/bpalermo/aether/registry/types"
 	"github.com/bpalermo/aether/xds"
+	"github.com/bpalermo/aether/xds/cache"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
@@ -14,7 +14,7 @@ import (
 )
 
 type RegistrarServer struct {
-	xds.Server
+	xds.XdsServer
 
 	cfg *RegistrarServerConfig
 
@@ -46,7 +46,7 @@ func NewRegistrarServer(ctx context.Context, cfg *RegistrarServerConfig, reg reg
 	l := log.WithName("server")
 
 	return &RegistrarServer{
-		Server:          xds.NewServer(ctx, cfg.SrvCfg, fallbackCache, nil, l),
+		XdsServer:       xds.NewXdsServer(ctx, cfg.SrvCfg, fallbackCache, nil, l),
 		cfg:             cfg,
 		log:             l,
 		registry:        reg,

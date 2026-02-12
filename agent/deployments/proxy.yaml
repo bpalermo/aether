@@ -27,7 +27,8 @@ spec:
         - name: dockerhub-credentials
       containers:
         - name: proxy
-          image: docker.io/envoyproxy/envoy@sha256:5bfdcd197ef884afbb705130f202aef868c41b1628eae23e05563752ce8f9ab7
+          # envoyproxy/envoy:distroless-v1.37.0
+          image: docker.io/envoyproxy/envoy@sha256:92fdb97b9fdb47da82fbe3651b83bd1419e544966d264632af4864004652685f
           command:
             - "/usr/local/bin/envoy"
             - "-c"
