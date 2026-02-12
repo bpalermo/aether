@@ -16,10 +16,14 @@ import (
 var unmarshalOpts = protojson.UnmarshalOptions{DiscardUnknown: true}
 
 type CachedLocalStorage[T proto.Message] struct {
-	basePath string
-	cache    map[types.ContainerID]T
-	mu       sync.RWMutex
-	newFunc  func() T // Factory function to create new instances
+	basePath    string
+	cache       map[types.ContainerID]T
+	mu          sync.RWMutex
+	newFunc     func() T // Factory function to create new instances
+	initialized bool
+	initOnce    sync.Once
+	initDone    chan struct{}
+	initErr     error
 }
 
 // NewCachedLocalStorage creates a new cached file storage
@@ -29,6 +33,32 @@ func NewCachedLocalStorage[T proto.Message](basePath string, newFunc func() T) *
 		basePath: basePath,
 		cache:    make(map[types.ContainerID]T),
 		newFunc:  newFunc,
+		initDone: make(chan struct{}),
+	}
+}
+
+// Initialize loads all resources from the disk into the cache.
+// Safe to call multiple times - only the first call performs initialization.
+func (f *CachedLocalStorage[T]) Initialize(ctx context.Context) error {
+	f.initOnce.Do(func() {
+		_, f.initErr = f.loadAll(ctx)
+		if f.initErr == nil {
+			f.mu.Lock()
+			f.initialized = true
+			f.mu.Unlock()
+		}
+		close(f.initDone)
+	})
+	return f.initErr
+}
+
+// WaitUntilReady blocks until the cache is populated or context is canceled.
+func (f *CachedLocalStorage[T]) WaitUntilReady(ctx context.Context) error {
+	select {
+	case <-f.initDone:
+		return f.initErr
+	case <-ctx.Done():
+		return fmt.Errorf("initialization cancelled: %w", ctx.Err())
 	}
 }
 
@@ -117,8 +147,22 @@ func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.Contain
 	return resource, nil
 }
 
-// LoadAll loads all resources from disk into memory cache
-func (f *CachedLocalStorage[T]) LoadAll(_ context.Context) ([]T, error) {
+// GetAll returns all resources from the cache as a slice
+func (f *CachedLocalStorage[T]) GetAll(_ context.Context) ([]T, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	// Create a slice with all cached values
+	result := make([]T, 0, len(f.cache))
+	for _, v := range f.cache {
+		result = append(result, v)
+	}
+
+	return result, nil
+}
+
+// loadAll loads all resources from the disk into the memory cache
+func (f *CachedLocalStorage[T]) loadAll(_ context.Context) ([]T, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

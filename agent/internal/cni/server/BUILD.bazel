@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "server",
@@ -8,15 +8,18 @@ go_library(
         "pod.go",
         "server.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/pkg/cni/server",
-    visibility = ["//visibility:public"],
+    importpath = "github.com/bpalermo/aether/agent/internal/cni/server",
+    visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//agent/pkg/types",
         "//api/aether/cni/v1:cni",
-        "//api/aether/registrar/v1:registrar",
         "//api/aether/registry/v1:registry",
+        "//constants",
+        "//registry",
+        "//registry/types",
+        "//xds",
         "@build_buf_go_protovalidate//:protovalidate",
         "@com_github_go_logr_logr//:logr",
         "@com_github_grpc_ecosystem_go_grpc_middleware_v2//interceptors/protovalidate",
@@ -25,16 +28,5 @@ go_library(
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//status",
-    ],
-)
-
-go_test(
-    name = "server_test",
-    srcs = ["pod_test.go"],
-    embed = [":server"],
-    deps = [
-        "//api/aether/registry/v1:registry",
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
     ],
 )

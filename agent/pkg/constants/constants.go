@@ -3,8 +3,10 @@ package constants
 import cniConstants "github.com/bpalermo/aether/cni/pkg/constants"
 
 const (
-	DefaultProxyID     = "proxy"
-	DefaultClusterName = "unknown"
+	DefaultProxyID         = "proxy"
+	DefaultProxyRegionName = "unknown"
+	DefaultProxyZoneName   = "unknown"
+	DefaultClusterName     = "unknown"
 
 	DefaultCNIBinDir          = "/opt/cni/bin"
 	DefaultHostCNIBinDir      = "/host/opt/cni/bin"

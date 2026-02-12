@@ -22,9 +22,7 @@ func TestNewXdsSnapshot(t *testing.T) {
 
 	assert.NotNil(t, registry)
 	assert.Equal(t, nodeID, registry.nodeID)
-	assert.NotNil(t, registry.clusterCache)
 	assert.NotNil(t, registry.listenerCache)
-	assert.NotNil(t, registry.endpointCache)
 	assert.NotNil(t, registry.eventChan)
 	assert.NotNil(t, registry.snapshot)
 }
@@ -160,14 +158,6 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 
 		err := registry.processPodEvent(ctx, registryv1.Event_CREATED, pod)
 		require.NoError(t, err)
-
-		// Verify cluster was added
-		clusters := registry.clusterCache.GetAllClusters()
-		assert.NotEmpty(t, clusters)
-
-		// Verify endpoint was added
-		endpoints := registry.endpointCache.GetAllEndpoints()
-		assert.NotEmpty(t, endpoints)
 	})
 
 	t.Run("UPDATED operation", func(t *testing.T) {
@@ -198,14 +188,6 @@ func TestXdsRegistry_processPodEvent(t *testing.T) {
 		// Then delete it
 		err := registry.processPodEvent(ctx, registryv1.Event_DELETED, pod)
 		require.NoError(t, err)
-
-		// Verify cluster was removed
-		clusters := registry.clusterCache.GetAllClusters()
-		assert.Empty(t, clusters)
-
-		// Verify endpoint was removed
-		endpoints := registry.endpointCache.GetAllEndpoints()
-		assert.Empty(t, endpoints)
 	})
 }
 
@@ -248,16 +230,6 @@ func TestXdsRegistry_processNetworkNs(t *testing.T) {
 func TestXdsRegistry_generateSnapshot(t *testing.T) {
 	ctx := context.Background()
 	registry := NewXdsSnapshot("test-node", logr.Discard())
-
-	// Add some test data
-	event := &registryv1.KubernetesPod{
-		Name:        "test-pod",
-		Namespace:   "default",
-		ServiceName: "test-service",
-		Ip:          "10.0.0.1",
-	}
-	registry.clusterCache.AddClusterOrUpdate(event) // Would need actual cluster
-	registry.endpointCache.AddEndpoint("test-service", event)
 
 	err := registry.generateSnapshot(ctx)
 	require.NoError(t, err)

@@ -22,10 +22,7 @@ type XdsSnapshot struct {
 	log logr.Logger
 
 	mu            sync.RWMutex
-	clusterCache  *cache.ClusterCache
 	listenerCache *cache.ListenerCache
-	endpointCache *cache.EndpointCache
-	routeCache    *cache.RouteCache
 
 	eventChan chan *registryv1.Event
 
@@ -39,10 +36,7 @@ func NewXdsSnapshot(nodeID string, log logr.Logger) *XdsSnapshot {
 	return &XdsSnapshot{
 		log.WithName("registry"),
 		sync.RWMutex{},
-		cache.NewClusterCache(),
 		cache.NewListenerCache(),
-		cache.NewEndpointCache(),
-		cache.NewRouteCache(),
 		make(chan *registryv1.Event, eventBuffer),
 		nodeID,
 		// we won't be serving all resources from the agent, the agent will serve listeners on each node.
@@ -98,13 +92,7 @@ func (r *XdsSnapshot) processPodEvent(ctx context.Context, op registryv1.Event_O
 	switch op {
 	case registryv1.Event_CREATED, registryv1.Event_UPDATED:
 		// order here matters
-		r.clusterCache.AddClusterOrUpdate(event)
-		r.endpointCache.AddEndpoint(cache.ClusterName(event.ServiceName), event)
-		r.routeCache.AddOutboundVirtualHost(event.ServiceName)
 	case registryv1.Event_DELETED:
-		r.clusterCache.RemoveCluster(event.ServiceName)
-		r.endpointCache.RemoveEndpoint(event)
-		r.routeCache.RemoveOutboundVirtualHost(event.ServiceName)
 	}
 
 	return r.generateSnapshot(ctx)
@@ -130,9 +118,9 @@ func (r *XdsSnapshot) generateSnapshot(ctx context.Context) error {
 	defer r.mu.Unlock()
 
 	resources := map[resource.Type][]types.Resource{
-		resource.EndpointType: r.endpointCache.GetAllEndpoints(),
-		resource.ClusterType:  r.clusterCache.GetAllClusters(),
-		resource.RouteType:    r.routeCache.GetAllRouteConfiguration(),
+		resource.EndpointType: make([]types.Resource, 0),
+		resource.ClusterType:  make([]types.Resource, 0),
+		resource.RouteType:    make([]types.Resource, 0),
 		resource.ListenerType: r.listenerCache.GetAllListeners(),
 	}
 

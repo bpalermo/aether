@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	cniServer "github.com/bpalermo/aether/agent/pkg/cni/server"
+	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/install"
 	"github.com/stretchr/testify/assert"

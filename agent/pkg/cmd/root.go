@@ -3,16 +3,17 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"sync"
 
-	cniServer "github.com/bpalermo/aether/agent/pkg/cni/server"
+	"github.com/bpalermo/aether/agent/internal/awsconfig"
+	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	"github.com/bpalermo/aether/agent/pkg/controller"
 	"github.com/bpalermo/aether/agent/pkg/install"
+	"github.com/bpalermo/aether/agent/pkg/storage"
 	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
-	"github.com/bpalermo/aether/agent/pkg/xds/snapshot"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/log"
+	"github.com/bpalermo/aether/registry"
+	"github.com/bpalermo/aether/registry/types"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -26,15 +27,16 @@ const (
 var (
 	cfg = NewAgentConfig()
 
-	logger logr.Logger
+	l logr.Logger
 )
 
 var rootCmd = &cobra.Command{
 	Use:          "agent",
 	Short:        "Runs the aether node agent.",
 	SilenceUsage: true,
-	PersistentPreRun: func(_ *cobra.Command, _ []string) {
-		logger = log.NewLogger(cfg.Debug).WithName("agent")
+	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		l = log.NewLogger(cfg.Debug).WithName(cmd.Name())
+		ctrl.SetLogger(l)
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runAgent(cmd.Context())
@@ -49,17 +51,21 @@ func GetCommand() *cobra.Command {
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
+	rootCmd.Flags().StringVar(&cfg.ProxyRegion, "proxy-region", constants.DefaultProxyRegionName, "The xDS proxy region")
+	rootCmd.Flags().StringVar(&cfg.ProxyZone, "proxy-zone", constants.DefaultProxyZoneName, "The xDS proxy zone")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
-	rootCmd.Flags().StringVar(&cfg.InstallConfig.MountedCNIRegistryDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
+	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster")
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-id")
+	_ = rootCmd.MarkPersistentFlagRequired("proxy-region")
+	_ = rootCmd.MarkPersistentFlagRequired("proxy-zone")
 }
 
 func runAgent(ctx context.Context) error {
-	logger.Info("starting aether agent",
+	l.Info("starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug)
 
@@ -74,86 +80,95 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 
-	// Setup all components
-	initWg := &sync.WaitGroup{}
-	initWg.Add(2)
-
-	components, err := setupComponents(ctx, m, initWg)
+	localStorage, err := setupStorage(ctx, cfg.MountedLocalStorageDir)
 	if err != nil {
 		return err
 	}
 
-	// Add components to the manager
-	if err = addComponentsToManager(m, components); err != nil {
+	ddbRegistry, err := setupRegistry(ctx, m)
+	if err != nil {
 		return err
 	}
 
-	// Setup XDS controller
-	if err = setupXDSController(ctx, m, initWg, components.xdsSnapshot.GetEventChan()); err != nil {
+	if err = setXDSServer(ctx, m, localStorage); err != nil {
 		return err
 	}
 
+	if err = setupCNIServer(m, localStorage, ddbRegistry); err != nil {
+		return err
+	}
+
+	l.V(1).Info("waiting for local storage to be ready")
+	if err = localStorage.WaitUntilReady(ctx); err != nil {
+		return err
+	}
+
+	l.V(1).Info("local storage is ready, starting manager")
 	return m.Start(ctx)
 }
 
 func installCNI(ctx context.Context) error {
-	logger.Info("installing CNI binaries")
-	installer := install.NewInstaller(logger, cfg.InstallConfig)
+	l.Info("installing CNI binaries")
+	installer := install.NewInstaller(l, cfg.InstallConfig)
 	return installer.Run(ctx)
 }
 
-func setupComponents(ctx context.Context, m ctrl.Manager, initWg *sync.WaitGroup) (*agentComponents, error) {
-	// Create xDS snapshot
-	xdsSnapshot := snapshot.NewXdsSnapshot(cfg.ProxyServiceNodeID, logger)
-
+func setXDSServer(ctx context.Context, m ctrl.Manager, localStorage storage.Storage[*registryv1.RegistryPod]) error {
 	// Create xDS server
-	xdsSrv := xdsServer.NewXdsServer(ctx, m, logger, initWg, xdsSnapshot)
-
-	// Create a registry and CNI server
-	cniSrv, err := cniServer.NewCNIServer(
-		cfg.ProxyServiceNodeID,
-		logger,
-		m.GetClient(),
-		cfg.CNIServerConfig,
-		initWg,
-		xdsSnapshot.GetEventChan(),
-	)
+	xdsSrv, err := xdsServer.NewXdsServer(ctx, cfg.ProxyServiceNodeID, localStorage, l)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	return &agentComponents{
-		xdsSnapshot: xdsSnapshot,
-		xdsServer:   xdsSrv,
-		cniServer:   cniSrv,
-	}, nil
-}
-
-func addComponentsToManager(m ctrl.Manager, components *agentComponents) error {
-	if err := m.Add(components.xdsSnapshot); err != nil {
-		return fmt.Errorf("failed to add xDS snapshot: %w", err)
-	}
-
-	if err := m.Add(components.xdsServer); err != nil {
+	if err = m.Add(xdsSrv); err != nil {
 		return fmt.Errorf("failed to add xDS server: %w", err)
 	}
 
-	if err := m.Add(components.cniServer); err != nil {
+	return nil
+}
+
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*registryv1.RegistryPod], registry types.Registry) error {
+	// Create a registry and CNI server
+	cniSrv, err := cniServer.NewCNIServer(
+		cfg.ProxyServiceNodeID,
+		localStorage,
+		registry,
+		l,
+		m.GetClient(),
+		cfg.CNIServerConfig,
+	)
+	if err != nil {
+		return err
+	}
+	if err = m.Add(cniSrv); err != nil {
 		return fmt.Errorf("failed to add CNI server: %w", err)
 	}
 
 	return nil
 }
 
-func setupXDSController(ctx context.Context, m ctrl.Manager, initWg *sync.WaitGroup, eventChan chan<- *registryv1.Event) error {
-	c, err := controller.NewXdsController(ctx, m, initWg, eventChan, logger)
+func setupStorage(ctx context.Context, path string) (storage.Storage[*registryv1.RegistryPod], error) {
+	s := storage.NewCachedLocalStorage[*registryv1.RegistryPod](
+		path,
+		func() *registryv1.RegistryPod { return &registryv1.RegistryPod{} },
+	)
+
+	if err := s.Initialize(ctx); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func setupRegistry(ctx context.Context, m ctrl.Manager) (types.Registry, error) {
+	awsCfg, err := awsconfig.LoadConfig(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create XDS controller: %w", err)
+		return nil, err
 	}
 
-	if err := c.SetupWithManager(m); err != nil {
-		return fmt.Errorf("failed to setup XDS controller: %w", err)
+	reg := registry.NewDynamoDBRegistry(l, awsCfg)
+	if err = m.Add(reg); err != nil {
+		return nil, err
 	}
 
-	return nil
+	return reg, nil
 }

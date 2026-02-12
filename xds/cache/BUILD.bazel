@@ -6,8 +6,8 @@ go_library(
         "cache.go",
         "hash.go",
     ],
-    importpath = "github.com/bpalermo/aether/registrar/internal/server/cache",
-    visibility = ["//registrar:__subpackages__"],
+    importpath = "github.com/bpalermo/aether/xds/cache",
+    visibility = ["//visibility:public"],
     deps = [
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/log",
