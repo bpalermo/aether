@@ -1,12 +1,16 @@
 package registry
 
 import (
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/bpalermo/aether/registry/internal/ddb"
-	"github.com/bpalermo/aether/registry/types"
-	"github.com/go-logr/logr"
+	"context"
+
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 )
 
-func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) types.Registry {
-	return ddb.NewDynamoDBRegistry(log, awsCfg)
+type Registry interface {
+	Start(ctx context.Context) error
+	RegisterEndpoint(ctx context.Context, serviceName string, protocol string, endpoint *registryv1.ServiceEndpoint) error
+	UnregisterEndpoint(ctx context.Context, serviceName string, ip string) error
+	UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error
+	ListEndpoints(ctx context.Context, service string, protocol string) ([]*registryv1.ServiceEndpoint, error)
+	ListAllEndpoints(ctx context.Context, protocol string) (map[string][]*registryv1.ServiceEndpoint, error)
 }

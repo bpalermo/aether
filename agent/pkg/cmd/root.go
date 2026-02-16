@@ -10,10 +10,9 @@ import (
 	"github.com/bpalermo/aether/agent/pkg/install"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registry"
-	"github.com/bpalermo/aether/registry/types"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,6 +50,7 @@ func GetCommand() *cobra.Command {
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
+	rootCmd.Flags().StringVar(&cfg.CNIServerConfig.ClusterName, "cluster-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.ProxyRegion, "proxy-region", constants.DefaultProxyRegionName, "The xDS proxy region")
 	rootCmd.Flags().StringVar(&cfg.ProxyZone, "proxy-zone", constants.DefaultProxyZoneName, "The xDS proxy zone")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
@@ -58,7 +58,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
 
-	_ = rootCmd.MarkPersistentFlagRequired("cluster")
+	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-id")
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-region")
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-zone")
@@ -67,7 +67,9 @@ func init() {
 func runAgent(ctx context.Context) error {
 	l.Info("starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
-		"debug", cfg.Debug)
+		"debug", cfg.Debug,
+		"clusterName", cfg.CNIServerConfig.ClusterName,
+	)
 
 	// Install CNI binaries
 	if err := installCNI(ctx); err != nil {
@@ -90,7 +92,7 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 
-	if err = setXDSServer(ctx, m, localStorage); err != nil {
+	if err = setXDSServer(ctx, m, ddbRegistry, localStorage); err != nil {
 		return err
 	}
 
@@ -113,9 +115,9 @@ func installCNI(ctx context.Context) error {
 	return installer.Run(ctx)
 }
 
-func setXDSServer(ctx context.Context, m ctrl.Manager, localStorage storage.Storage[*registryv1.RegistryPod]) error {
+func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod]) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewXdsServer(ctx, cfg.ProxyServiceNodeID, localStorage, l)
+	xdsSrv, err := xdsServer.NewXdsServer(ctx, cfg.ProxyServiceNodeID, registry, localStorage, l)
 	if err != nil {
 		return err
 	}
@@ -126,7 +128,7 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, localStorage storage.Stor
 	return nil
 }
 
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*registryv1.RegistryPod], registry types.Registry) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ProxyServiceNodeID,
@@ -146,10 +148,10 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*registryv1.Reg
 	return nil
 }
 
-func setupStorage(ctx context.Context, path string) (storage.Storage[*registryv1.RegistryPod], error) {
-	s := storage.NewCachedLocalStorage[*registryv1.RegistryPod](
+func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIPod], error) {
+	s := storage.NewCachedLocalStorage[*cniv1.CNIPod](
 		path,
-		func() *registryv1.RegistryPod { return &registryv1.RegistryPod{} },
+		func() *cniv1.CNIPod { return &cniv1.CNIPod{} },
 	)
 
 	if err := s.Initialize(ctx); err != nil {
@@ -159,7 +161,7 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*registryv1
 	return s, nil
 }
 
-func setupRegistry(ctx context.Context, m ctrl.Manager) (types.Registry, error) {
+func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
 	awsCfg, err := awsconfig.LoadConfig(ctx)
 	if err != nil {
 		return nil, err

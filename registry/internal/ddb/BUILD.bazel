@@ -1,20 +1,23 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "ddb",
-    srcs = [
-        "dynamodb.go",
-        "endpoint.go",
-    ],
+    srcs = ["dynamodb.go"],
     importpath = "github.com/bpalermo/aether/registry/internal/ddb",
     visibility = ["//registry:__subpackages__"],
     deps = [
+        "//api/aether/registry/v1:registry",
         "//constants",
-        "//registry/types",
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_aws_aws_sdk_go_v2_feature_dynamodb_attributevalue//:attributevalue",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//types",
         "@com_github_go_logr_logr//:logr",
     ],
+)
+
+go_test(
+    name = "ddb_test",
+    srcs = ["dynamodb_test.go"],
+    embed = [":ddb"],
 )

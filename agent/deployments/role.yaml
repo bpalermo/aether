@@ -9,3 +9,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "get", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "get", "watch"]

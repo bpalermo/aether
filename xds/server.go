@@ -13,7 +13,7 @@ import (
 )
 
 type Server struct {
-	log logr.Logger
+	Log logr.Logger
 
 	cfg *ServerConfig
 
@@ -30,7 +30,7 @@ type ServerOption func(*Server)
 
 func NewServer(cfg *ServerConfig, log logr.Logger, opts ...ServerOption) Server {
 	s := Server{
-		log:       log.WithName("xds"),
+		Log:       log.WithName("xds"),
 		cfg:       cfg,
 		liveness:  atomic.NewBool(false),
 		readiness: atomic.NewBool(false),
@@ -54,15 +54,11 @@ func (s *Server) AddCallback(callback ServerCallback) {
 	s.callback = callback
 }
 
-func (s *Server) Log() logr.Logger {
-	return s.log
-}
-
 func (s *Server) Start(ctx context.Context) error {
-	s.log.V(1).Info("starting server", "network", s.cfg.Network, "address", s.cfg.Address)
+	s.Log.V(1).Info("starting server", "network", s.cfg.Network, "address", s.cfg.Address)
 
 	if s.callback != nil {
-		s.log.V(1).Info("invoking pre listen callback")
+		s.Log.V(1).Info("invoking pre listen callback")
 		if err := s.callback.PreListen(ctx); err != nil {
 			return err
 		}
@@ -70,7 +66,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	listener, err := net.Listen(s.cfg.Network, s.cfg.Address)
 	if err != nil {
-		s.log.Error(err, "failed to listen", "network", s.cfg.Network, "address", s.cfg.Address)
+		s.Log.Error(err, "failed to listen", "network", s.cfg.Network, "address", s.cfg.Address)
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
@@ -83,7 +79,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		s.log.V(1).Info("starting gRPC server")
+		s.Log.V(1).Info("starting gRPC server")
 		if serveErr := s.gSrv.Serve(listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
 			errCh <- serveErr
 		}
@@ -96,7 +92,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		s.log.V(1).Info("context cancelled, stopping server")
+		s.Log.V(1).Info("context cancelled, stopping server")
 		return s.shutdown()
 	case serveErr := <-errCh:
 		return serveErr
@@ -122,10 +118,10 @@ func (s *Server) shutdown() error {
 
 	select {
 	case <-stopped:
-		s.log.V(1).Info("gRPC server graceful stop completed")
+		s.Log.V(1).Info("gRPC server graceful stop completed")
 		return nil
 	case <-ctx.Done():
-		s.log.V(1).Info("gRPC server forced stop due to timeout")
+		s.Log.V(1).Info("gRPC server forced stop due to timeout")
 		s.gSrv.Stop()
 		return ctx.Err()
 	}

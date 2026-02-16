@@ -8,7 +8,9 @@ go_library(
     deps = [
         "//agent/pkg/constants",
         "//agent/pkg/storage",
-        "//api/aether/registry/v1:registry",
+        "//agent/pkg/xds/proxy",
+        "//api/aether/cni/v1:cni",
+        "//registry",
         "//xds",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",

@@ -3,17 +3,17 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "registry",
     srcs = [
-        "kubernets.go",
+        "cni.go",
+        "ddb.go",
         "registry.go",
-        "registrypod.go",
     ],
     importpath = "github.com/bpalermo/aether/registry",
     visibility = ["//visibility:public"],
     deps = [
+        "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//constants",
         "//registry/internal/ddb",
-        "//registry/types",
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_go_logr_logr//:logr",
     ],

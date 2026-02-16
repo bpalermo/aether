@@ -1,6 +1,6 @@
 package constants
 
 const (
-	// DefaultDynamoDBEndpointTableName the default endpoint table name
-	DefaultDynamoDBEndpointTableName = "AetherEndpoint"
+	// DefaultDynamoDBServiceTableName the default service table name
+	DefaultDynamoDBServiceTableName = "AetherService"
 )

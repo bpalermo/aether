@@ -17,6 +17,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent/pkg/xds/config",
+        "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",

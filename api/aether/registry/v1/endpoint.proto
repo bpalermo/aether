@@ -3,90 +3,39 @@ syntax = "proto3";
 package aether.registry.v1;
 
 import "buf/validate/validate.proto";
-import "google/protobuf/any.proto";
-import "google/protobuf/struct.proto";
 
 option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
 
-// we could try to use envoy's messages but currently it causes import conflicts
-// between @com_github_envoyproxy_go_control_plane_envoy and @@envoy_api
-message Endpoint {
+message ServiceEndpoint {
 
-  message Address {
-    string address = 1 [(buf.validate.field).string.min_len = 1];
-    uint32 port = 2 [(buf.validate.field).uint32.lte = 65535];
-  }
+  string ip = 1 [(buf.validate.field).string.min_len = 1];
 
-  // The upstream host address.
-  Address address = 1 [(buf.validate.field).required = true];
+  string cluster_name = 2 [(buf.validate.field).string.min_len = 1];
 
-  // Identifies location of where either Envoy runs or where upstream hosts run.
+  uint32 port = 3 [(buf.validate.field).uint32.lte = 65535];
+
+  uint32 weight = 4 [(buf.validate.field).uint32.gte = 0];
+
   message Locality {
-    // Region this :ref:`zone <envoy_v3_api_field_config.core.v3.Locality.zone>` belongs to.
     string region = 1;
-
-    // Defines the local service zone where Envoy is running. Though optional, it
-    // should be set if discovery service routing is used and the discovery
-    // service exposes :ref:`zone data <envoy_v3_api_field_config.endpoint.v3.LocalityLbEndpoints.locality>`,
-    // either in this message or via :option:`--service-zone`. The meaning of zone
-    // is context dependent, e.g. `Availability Zone (AZ)
-    // <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-regions-availability-zones.html>`_
-    // on AWS, `Zone <https://cloud.google.com/compute/docs/regions-zones/>`_ on
-    // GCP, etc.
     string zone = 2;
-
-    // When used for locality of upstream hosts, this field further splits zone
-    // into smaller chunks of sub-zones so they can be load balanced
-    // independently.
-    string sub_zone = 3;
   }
 
-  // Identifies location of where the upstream hosts run.
-  Locality locality = 2;
+  Locality locality = 5;
 
-  // Metadata provides additional inputs to filters based on matched listeners,
-  // filter chains, routes and endpoints. It is structured as a map, usually from
-  // filter name (in reverse DNS format) to metadata specific to the filter. Metadata
-  // key-values for a filter are merged as connection and request handling occurs,
-  // with later values for the same key overriding earlier values.
-  //
-  // An example use of metadata is providing additional values to
-  // http_connection_manager in the envoy.http_connection_manager.access_log
-  // namespace.
-  //
-  // Another example use of metadata is to per service config info in cluster metadata, which may get
-  // consumed by multiple filters.
-  //
-  // For load balancing, Metadata provides a means to subset cluster endpoints.
-  // Endpoints have a Metadata object associated and routes contain a Metadata
-  // object to match against. There are some well defined metadata used today for
-  // this purpose:
-  //
-  // * ``{"envoy.lb": {"canary": <bool> }}`` This indicates the canary status of an
-  //   endpoint and is also used during header processing
-  //   (x-envoy-upstream-canary) and for stats purposes.
-  // [#next-major-version: move to type/metadata/v2]
-  message Metadata {
-    // Key is the reverse DNS filter name, e.g. com.acme.widget. The ``envoy.*``
-    // namespace is reserved for Envoy's built-in filters.
-    // If both ``filter_metadata`` and
-    // :ref:`typed_filter_metadata <envoy_v3_api_field_config.core.v3.Metadata.typed_filter_metadata>`
-    // fields are present in the metadata with same keys,
-    // only ``typed_filter_metadata`` field will be parsed.
-    map<string, google.protobuf.Struct> filter_metadata = 1
-    [(buf.validate.field).map.keys.string.min_len = 1];
+  map <string, string> metadata = 6;
 
-    // Key is the reverse DNS filter name, e.g. com.acme.widget. The ``envoy.*``
-    // namespace is reserved for Envoy's built-in filters.
-    // The value is encoded as google.protobuf.Any.
-    // If both :ref:`filter_metadata <envoy_v3_api_field_config.core.v3.Metadata.filter_metadata>`
-    // and ``typed_filter_metadata`` fields are present in the metadata with same keys,
-    // only ``typed_filter_metadata`` field will be parsed.
-    map<string, google.protobuf.Any> typed_filter_metadata = 2
-    [(buf.validate.field).map.keys.string.min_len = 1];
+  message ContainerMetadata {
+    string container_id = 1 [(buf.validate.field).string.min_len = 1];
+    string network_namespace = 2 [(buf.validate.field).string.min_len = 1];
   }
 
-  // Metadata to provide additional information about the locality endpoints in aggregate.
-  Metadata metadata = 3;
+  ContainerMetadata container_metadata = 7;
 
+  message KubernetesMetadata {
+    string namespace = 1 [(buf.validate.field).string.min_len = 1];
+    string pod_name = 2 [(buf.validate.field).string.min_len = 1];
+  }
+
+  KubernetesMetadata kubernetes_metadata = 8;
 }

@@ -6,28 +6,25 @@ proto_library(
     name = "registryv1_proto",
     srcs = [
         "endpoint.proto",
-        "event.proto",
-        "kubernetes.proto",
-        "registry.proto",
+        "service.proto",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//api/aether/cni/v1:cniv1_proto",
-        "@protobuf//:any_proto",
-        "@protobuf//:struct_proto",
+        "@com_github_pquerna_protoc_gen_dynamo//proto/dynamo/v1:v1_proto",
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
     ],
 )
 
 go_proto_library(
     name = "registryv1_go_proto",
+    compilers = [
+        "@rules_go//proto:go_proto",
+        "//bazel/go:go_dynamo",
+    ],
     importpath = "github.com/bpalermo/aether/api/aether/registry/v1",
     proto = ":registryv1_proto",
     visibility = ["//visibility:public"],
-    deps = [
-        "//api/aether/cni/v1:cni",
-        "@build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate",
-    ],
+    deps = ["@build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate"],
 )
 
 go_library(

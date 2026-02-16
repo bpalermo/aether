@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package aether.registry.v1;
+
+import "api/aether/registry/v1/endpoint.proto";
+import "buf/validate/validate.proto";
+import "proto/dynamo/v1/dynamo.proto";
+
+option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
+
+message Service {
+  option (dynamo.v1.msg).key = {
+    pk_fields: [
+      "name"
+    ]
+    sk_fields: [
+      "protocol"
+    ]
+  };
+
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+
+  enum Protocol {
+    PROTOCOL_UNSPECIFIED = 0;
+    HTTP = 1;
+  }
+
+  Protocol protocol = 2 [(buf.validate.field).enum.defined_only = true];
+
+  map <string, ServiceEndpoint> endpoints = 3;
+
+}
