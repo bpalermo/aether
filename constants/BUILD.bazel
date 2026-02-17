@@ -6,6 +6,7 @@ go_library(
         "annotations.go",
         "endpoint.go",
         "labels.go",
+        "node.go",
         "registry.go",
     ],
     importpath = "github.com/bpalermo/aether/constants",

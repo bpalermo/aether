@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"buf.build/go/protovalidate"
-	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/xds"
 	"github.com/go-logr/logr"
