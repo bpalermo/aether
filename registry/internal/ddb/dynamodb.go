@@ -38,8 +38,7 @@ func (r *DynamoDBRegistry) Start(ctx context.Context) error {
 		TableName: aws.String(r.tableName),
 	})
 	if err != nil {
-		var notFoundErr *types.ResourceNotFoundException
-		if errors.As(err, &notFoundErr) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 			r.log.Info("table does not exist", "table", r.tableName)
 			return fmt.Errorf("table %s does not exist", r.tableName)
 		}
@@ -54,7 +53,7 @@ func (r *DynamoDBRegistry) Start(ctx context.Context) error {
 
 // RegisterEndpoint registers the given endpoint to its service.
 // It stores the endpoint in a map attribute keyed by the endpoint IP.
-func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol string, endpoint *registryv1.ServiceEndpoint) error {
+func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
 	ip := endpoint.GetIp()
 	r.log.V(1).Info(
 		"registering endpoint",
@@ -181,12 +180,8 @@ func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName 
 }
 
 // ListEndpoints returns the endpoints registered for the given service and its protocol.
-func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, protocol string) ([]*registryv1.ServiceEndpoint, error) {
+func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.log.V(1).Info("listing endpoints", "service", service, "protocol", protocol)
-
-	if protocol == "" {
-		return nil, fmt.Errorf("protocol is required")
-	}
 
 	input := &dynamodb.QueryInput{
 		TableName:              aws.String(r.tableName),
@@ -218,26 +213,20 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 }
 
 // ListAllEndpoints returns all endpoints registered for the given protocol.
-func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol string) (map[string][]*registryv1.ServiceEndpoint, error) {
+func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	r.log.V(1).Info("listing all endpoints for protocol", "protocol", protocol)
 
 	input := &dynamodb.ScanInput{
-		TableName:     aws.String(r.tableName),
-		Segment:       aws.Int32(0), // Current segment
-		TotalSegments: aws.Int32(4), // Split into 4 parallel scans
-	}
-
-	// Filter by protocol if specified
-	if protocol != "" {
-		input.FilterExpression = aws.String("Protocol = :protocol")
-		input.ExpressionAttributeValues = map[string]types.AttributeValue{
-			":protocol": &types.AttributeValueMemberS{Value: protocol},
-		}
+		TableName:        aws.String(r.tableName),
+		FilterExpression: aws.String("begins_with(PK, :pkprefix) AND SK = :sk"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pkprefix": &types.AttributeValueMemberS{Value: "service#"},
+			":sk":       &types.AttributeValueMemberS{Value: fmt.Sprintf("protocol#%s", protocol)},
+		},
 	}
 
 	endpointsByService := make(map[string][]*registryv1.ServiceEndpoint)
 
-	// Use paginator to handle large result sets
 	paginator := dynamodb.NewScanPaginator(r.client, input)
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
@@ -247,21 +236,28 @@ func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol string
 		}
 
 		for _, item := range page.Items {
-			var endpoint registryv1.ServiceEndpoint
-			if err := attributevalue.UnmarshalMap(item, &endpoint); err != nil {
-				r.log.Error(err, "failed to unmarshal endpoint item")
+			pkAttr, ok := item["PK"].(*types.AttributeValueMemberS)
+			if !ok {
 				continue
 			}
-			// Extract service name from PK (format: "service#<serviceName>")
-			if pkAttr, ok := item["PK"].(*types.AttributeValueMemberS); ok {
-				serviceName := pkAttr.Value
-				if len(serviceName) > 8 && serviceName[:8] == "service#" {
-					serviceName = serviceName[8:]
+			serviceName := strings.TrimPrefix(pkAttr.Value, "service#")
+
+			endpointsAttr, ok := item["endpoints"].(*types.AttributeValueMemberM)
+			if !ok {
+				continue
+			}
+
+			for _, epAttr := range endpointsAttr.Value {
+				var endpoint registryv1.ServiceEndpoint
+				if err := attributevalue.Unmarshal(epAttr, &endpoint); err != nil {
+					r.log.Error(err, "failed to unmarshal endpoint")
+					continue
 				}
 				endpointsByService[serviceName] = append(endpointsByService[serviceName], &endpoint)
 			}
 		}
 	}
 
+	r.log.V(1).Info("listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
 	return endpointsByService, nil
 }

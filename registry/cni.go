@@ -9,22 +9,22 @@ import (
 	"github.com/bpalermo/aether/constants"
 )
 
-func NewServiceEndpointFromCNIPod(clusterName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, string, *registryv1.ServiceEndpoint, error) {
+func NewServiceEndpointFromCNIPod(clusterName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
 	protocol := registryv1.Service_HTTP
 
 	serviceName, err := getServiceNameFromLabels(cniPod.GetLabels())
 	if err != nil {
-		return "", "", nil, err
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
 	}
 
 	port, err := getPortFromAnnotations(cniPod.GetAnnotations())
 	if err != nil {
-		return "", "", nil, err
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
 	}
 
 	weight, err := getWeightFromAnnotations(cniPod.GetAnnotations())
 	if err != nil {
-		return "", "", nil, err
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
 	}
 
 	endpoint := &registryv1.ServiceEndpoint{
@@ -47,7 +47,7 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeRegion string, nodeZon
 		},
 	}
 
-	return serviceName, protocol.String(), endpoint, nil
+	return serviceName, protocol, endpoint, nil
 }
 
 func ExtractCNIPodInformation(pod *cniv1.CNIPod) (string, []string, error) {

@@ -15,14 +15,29 @@ const (
 	defaultHTTPOutboundPort = 18081
 )
 
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener) {
-	inbound = generateInboundHTTPListener(cniPod)
-	outbound = generateOutboundHTTPListener(cniPod)
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, err error) {
+	inbound, err = generateInboundHTTPListener(cniPod)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	return inbound, outbound
+	outbound, err = generateOutboundHTTPListener(cniPod)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return inbound, outbound, nil
 }
 
-func generateInboundHTTPListener(cniPod *cniv1.CNIPod) *listenerv3.Listener {
+func generateInboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, error) {
+	if cniPod == nil {
+		return nil, fmt.Errorf("pod is required")
+	}
+
+	if cniPod.GetNetworkNamespace() == "" {
+		return nil, fmt.Errorf("network namespace is required")
+	}
+
 	return &listenerv3.Listener{
 		Name: "inbound_http",
 		Address: &corev3.Address{
@@ -43,10 +58,18 @@ func generateInboundHTTPListener(cniPod *cniv1.CNIPod) *listenerv3.Listener {
 		FilterChains: []*listenerv3.FilterChain{
 			buildDefaultInboundHTTPFilterChain(cniPod.GetName()),
 		},
-	}
+	}, nil
 }
 
-func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) *listenerv3.Listener {
+func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, error) {
+	if cniPod == nil {
+		return nil, fmt.Errorf("pod is required")
+	}
+
+	if cniPod.GetNetworkNamespace() == "" {
+		return nil, fmt.Errorf("network namespace is required")
+	}
+
 	return &listenerv3.Listener{
 		Name: "outbound_http",
 		Address: &corev3.Address{
@@ -66,5 +89,5 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) *listenerv3.Listener {
 		FilterChains: []*listenerv3.FilterChain{
 			buildDefaultOutboundHTTPFilterChain(cniPod.GetName()),
 		},
-	}
+	}, nil
 }

@@ -8,9 +8,9 @@ import (
 
 type Registry interface {
 	Start(ctx context.Context) error
-	RegisterEndpoint(ctx context.Context, serviceName string, protocol string, endpoint *registryv1.ServiceEndpoint) error
+	RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error
 	UnregisterEndpoint(ctx context.Context, serviceName string, ip string) error
 	UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error
-	ListEndpoints(ctx context.Context, service string, protocol string) ([]*registryv1.ServiceEndpoint, error)
-	ListAllEndpoints(ctx context.Context, protocol string) (map[string][]*registryv1.ServiceEndpoint, error)
+	ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error)
+	ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error)
 }
