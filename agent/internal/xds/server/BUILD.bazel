@@ -10,6 +10,7 @@ go_library(
         "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//api/aether/cni/v1:cni",
+        "//api/aether/registry/v1:registry",
         "//registry",
         "//xds",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
