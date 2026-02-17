@@ -14,28 +14,30 @@ import (
 )
 
 func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
-	pod := req.GetPod()
-	if pod == nil {
+	cniPod := req.GetPod()
+	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
+
+	if cniPod == nil {
 		return nil, status.Error(codes.InvalidArgument, "pod is required")
 	}
 
 	// Ignore aether system pods
 	// we want to prevent circular dependencies
-	if isIgnorablePod(pod.GetNamespace()) {
-		s.log.V(1).Info("ignoring aether system pod", "name", pod.GetName(), "namespace", pod.GetNamespace())
+	if isIgnorablePod(cniPod.GetNamespace()) {
+		log.V(1).Info("ignoring aether system pod")
 		return &cniv1.AddPodResponse{
 			Result: cniv1.AddPodResponse_SUCCESS,
 		}, nil
 	}
 
-	cniPod, err := s.newRegistryPod(ctx, pod)
+	err := s.enhanceCNIPod(ctx, cniPod)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to retrieve endpoint data: %v", err)
 	}
 
 	// Store in the local storage
-	containerdID := types.ContainerID(pod.GetContainerId())
-	s.log.Info("adding pod to storage", "containerID", containerdID, "name", pod.GetName())
+	containerdID := types.ContainerID(cniPod.GetContainerId())
+	log.Info("adding pod to storage", "containerID", containerdID)
 	if err := s.storage.AddResource(ctx, containerdID, cniPod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
@@ -53,21 +55,23 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 }
 
 func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
-	pod := req.GetPod()
-	if pod == nil {
+	cniPod := req.GetPod()
+	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
+
+	if cniPod == nil {
 		return nil, status.Error(codes.InvalidArgument, "pod is required")
 	}
 
 	// Ignore aether system pods
 	// we want to prevent circular dependencies
-	if isIgnorablePod(pod.GetNamespace()) {
-		s.log.V(1).Info("ignoring aether system pod", "name", pod.GetName(), "namespace", pod.GetNamespace())
+	if isIgnorablePod(cniPod.GetNamespace()) {
+		log.V(1).Info("ignoring aether system pod")
 		return &cniv1.RemovePodResponse{
 			Result: cniv1.RemovePodResponse_SUCCESS,
 		}, nil
 	}
 
-	containerID := types.ContainerID(pod.GetContainerId())
+	containerID := types.ContainerID(cniPod.GetContainerId())
 
 	storedPod, err := s.storage.GetResource(ctx, containerID)
 	if err != nil {
@@ -80,7 +84,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 
 	// Remove from the local storage
-	if err := s.storage.RemoveResource(ctx, containerID); err != nil {
+	if err = s.storage.RemoveResource(ctx, containerID); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
 
@@ -91,25 +95,23 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}, nil
 }
 
-// newRegistryPod create a new RegistryPod from a CNIPod with additional data retrieved from the API server
+// enhanceCNIPod enhances a CNIPod with additional data retrieved from the API server
 // we collect all annotations and labels, regardless. We leave to the registry implementation the decision of which to keep.
 // This will allow us to change registry implementation without having to change the CNI implementation, as the local stored file
 // will always contain all the relevant information.
-func (s *CNIServer) newRegistryPod(ctx context.Context, cniPod *cniv1.CNIPod) (*cniv1.CNIPod, error) {
-	// Get the pod from Kubernetes
-	k8sPod := &corev1.Pod{}
-	err := s.k8sClient.Get(ctx, client.ObjectKey{
+func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) error {
+	var k8sPod corev1.Pod
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{
 		Namespace: cniPod.GetNamespace(),
 		Name:      cniPod.GetName(),
-	}, k8sPod)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), err)
+	}, &k8sPod); err != nil {
+		return fmt.Errorf("failed to get pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), err)
 	}
 
 	cniPod.Annotations = k8sPod.Annotations
 	cniPod.Labels = k8sPod.Labels
 
-	return cniPod, nil
+	return nil
 }
 
 func isIgnorablePod(namespace string) bool {

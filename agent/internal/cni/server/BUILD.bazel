@@ -3,7 +3,6 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "server",
     srcs = [
-        "annotation.go",
         "config.go",
         "pod.go",
         "server.go",
@@ -15,6 +14,7 @@ go_library(
         "//agent/pkg/storage",
         "//agent/pkg/types",
         "//api/aether/cni/v1:cni",
+        "//constants",
         "//registry",
         "//xds",
         "@build_buf_go_protovalidate//:protovalidate",
