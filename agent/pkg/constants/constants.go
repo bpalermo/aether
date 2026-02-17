@@ -1,6 +1,6 @@
 package constants
 
-import cniConstants "github.com/bpalermo/aether/cni/pkg/constants"
+import "github.com/bpalermo/aether/constants"
 
 const (
 	DefaultProxyID         = "proxy"
@@ -11,7 +11,7 @@ const (
 	DefaultCNIBinDir          = "/opt/cni/bin"
 	DefaultHostCNIBinDir      = "/host/opt/cni/bin"
 	DefaultHostCNINetDir      = "/host/etc/cni/net.d"
-	DefaultHostCNIRegistryDir = "/host" + cniConstants.DefaultRegistryPath
+	DefaultHostCNIRegistryDir = "/host" + constants.CNIDefaultRegistryPath
 
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
 	DefaultCNISocketPath = "/run/aether/cni.sock"
