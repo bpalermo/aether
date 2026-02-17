@@ -6,10 +6,10 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/awsconfig"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/install"
 	"github.com/bpalermo/aether/agent/pkg/storage"
-	xdsServer "github.com/bpalermo/aether/agent/pkg/xds/server"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registry"

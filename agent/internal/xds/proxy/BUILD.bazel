@@ -13,10 +13,10 @@ go_library(
         "route.go",
         "vhost.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/pkg/xds/proxy",
-    visibility = ["//visibility:public"],
+    importpath = "github.com/bpalermo/aether/agent/internal/xds/proxy",
+    visibility = ["//agent:__subpackages__"],
     deps = [
-        "//agent/pkg/xds/config",
+        "//agent/internal/xds/config",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",

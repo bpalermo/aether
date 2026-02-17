@@ -11,10 +11,10 @@ go_library(
     deps = [
         "//agent/internal/awsconfig",
         "//agent/internal/cni/server",
+        "//agent/internal/xds/server",
         "//agent/pkg/constants",
         "//agent/pkg/install",
         "//agent/pkg/storage",
-        "//agent/pkg/xds/server",
         "//api/aether/cni/v1:cni",
         "//log",
         "//registry",
