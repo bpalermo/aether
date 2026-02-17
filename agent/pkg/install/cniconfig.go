@@ -12,7 +12,7 @@ import (
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/file"
 	"github.com/bpalermo/aether/agent/pkg/util"
-	"github.com/bpalermo/aether/cni/pkg/plugin"
+	"github.com/bpalermo/aether/cni/pkg/config"
 	"github.com/containernetworking/cni/libcni"
 )
 
@@ -38,7 +38,7 @@ import (
 	}
 */
 func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, error) {
-	pluginConfig := plugin.AetherConf{}
+	pluginConfig := config.AetherConf{}
 
 	pluginConfig.Name = "aether"
 	pluginConfig.Type = "aether-cni"

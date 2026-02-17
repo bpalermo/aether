@@ -1,8 +1,0 @@
-load("@rules_go//go:def.bzl", "go_library")
-
-go_library(
-    name = "constants",
-    srcs = ["constants.go"],
-    importpath = "github.com/bpalermo/aether/cni/pkg/constants",
-    visibility = ["//visibility:public"],
-)

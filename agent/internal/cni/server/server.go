@@ -84,5 +84,5 @@ func (s *CNIServer) queryNodeTopology(ctx context.Context, client client.Client)
 		return "", "", fmt.Errorf("failed to get node: %w", err)
 	}
 
-	return node.Labels[constants.KubernetesTopologyRegionAnnotation], node.Labels[constants.KubernetesTopologyZoneAnnotation], nil
+	return node.Labels[constants.AnnotationKubernetesNodeTopologyRegion], node.Labels[constants.AnnotationKubernetesNodeTopologyZone], nil
 }

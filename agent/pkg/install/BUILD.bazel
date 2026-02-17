@@ -13,7 +13,7 @@ go_library(
         "//agent/pkg/constants",
         "//agent/pkg/file",
         "//agent/pkg/util",
-        "//cni/pkg/plugin",
+        "//cni/pkg/config",
         "@com_github_containernetworking_cni//libcni",
         "@com_github_go_logr_logr//:logr",
         "@com_github_google_renameio_v2//:renameio",

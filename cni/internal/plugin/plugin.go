@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/cni/pkg/config"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -24,7 +25,7 @@ func NewAetherPlugin(logger *zap.Logger) *AetherPlugin {
 
 func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI add command")
-	netConf, err := NewConf(args.StdinData)
+	netConf, err := config.NewConf(args.StdinData)
 	if err != nil {
 		return err
 	}
@@ -42,7 +43,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to parse previous result: %v", err)
 	}
 
-	k8sArgs := K8sArgs{}
+	k8sArgs := config.K8sArgs{}
 	if err := types.LoadArgs(args.Args, &k8sArgs); err != nil {
 		msg := "failed to load args"
 		p.logger.Error(msg, zap.Error(err))
@@ -113,7 +114,7 @@ func (p *AetherPlugin) CmdCheck(_ *skel.CmdArgs) error {
 
 func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI del command")
-	conf, err := NewConf(args.StdinData)
+	conf, err := config.NewConf(args.StdinData)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %v", err)
 	}
@@ -121,7 +122,7 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	// For chained plugins, we typically don't need to do cleanup
 	// as the main plugin handles network teardown
 	// Just log the deletion for debugging
-	k8sArgs := K8sArgs{}
+	k8sArgs := config.K8sArgs{}
 	if err := types.LoadArgs(args.Args, &k8sArgs); err != nil {
 		p.logger.Error("failed to load args during delete", zap.Error(err))
 		return fmt.Errorf("failed to load args during delete: %v", err)
@@ -176,7 +177,7 @@ func (p *AetherPlugin) CmdStatus(_ *skel.CmdArgs) error {
 	return nil
 }
 
-func newPodFromArgs(args *skel.CmdArgs, k8sArgs K8sArgs, podIPs []string) *cniv1.CNIPod {
+func newPodFromArgs(args *skel.CmdArgs, k8sArgs config.K8sArgs, podIPs []string) *cniv1.CNIPod {
 	return &cniv1.CNIPod{
 		ContainerId:      args.ContainerID,
 		Name:             string(k8sArgs.K8S_POD_NAME),

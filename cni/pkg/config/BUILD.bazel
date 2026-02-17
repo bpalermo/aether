@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "config",
+    srcs = ["config.go"],
+    importpath = "github.com/bpalermo/aether/cni/pkg/config",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent/pkg/constants",
+        "@com_github_containernetworking_cni//pkg/types",
+        "@com_github_containernetworking_cni//pkg/version",
+    ],
+)
+
+go_test(
+    name = "config_test",
+    srcs = ["config_test.go"],
+    embed = [":config"],
+    deps = [
+        "//agent/pkg/constants",
+        "@com_github_containernetworking_cni//pkg/types",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

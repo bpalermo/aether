@@ -5,5 +5,5 @@ go_library(
     srcs = ["constants.go"],
     importpath = "github.com/bpalermo/aether/agent/pkg/constants",
     visibility = ["//visibility:public"],
-    deps = ["//cni/pkg/constants"],
+    deps = ["//constants"],
 )

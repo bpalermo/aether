@@ -7,7 +7,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//cni/internal/log",
-        "//cni/pkg/plugin",
+        "//cni/internal/plugin",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/version",
         "@org_uber_go_zap//:zap",

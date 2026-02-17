@@ -4,7 +4,7 @@ import (
 	"os"
 
 	"github.com/bpalermo/aether/cni/internal/log"
-	"github.com/bpalermo/aether/cni/pkg/plugin"
+	"github.com/bpalermo/aether/cni/internal/plugin"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/version"
 	"go.uber.org/zap"
