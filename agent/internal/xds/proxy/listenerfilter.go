@@ -7,6 +7,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	listenerFilterTLSInspectorName = "envoy.filters.listener.tls_inspector"
+)
+
 func buildInboundListenerFilters() []*listenerv3.ListenerFilter {
 	var filters []*listenerv3.ListenerFilter
 
@@ -17,7 +21,7 @@ func buildInboundListenerFilters() []*listenerv3.ListenerFilter {
 
 func tlsInspector() *listenerv3.ListenerFilter {
 	filter := &tls_inspectorv3.TlsInspector{}
-	return listenerFilter("envoy.filters.listener.tls_inspector", filter)
+	return listenerFilter(listenerFilterTLSInspectorName, filter)
 }
 
 func listenerFilter(name string, msg proto.Message) *listenerv3.ListenerFilter {
