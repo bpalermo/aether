@@ -1,9 +1,0 @@
-syntax = "proto3";
-
-package aether.registrar.v1;
-
-option go_package = "github.com/bpalermo/aether/api/aether/registrar/v1;registrarv1";
-
-message Endpoint {
-  string node_hostname = 1;
-}
