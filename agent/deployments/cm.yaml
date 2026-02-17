@@ -16,19 +16,15 @@ data:
         api_type: DELTA_GRPC
         grpc_services:
           - envoy_grpc:
-              cluster_name: local_xds
+              cluster_name: agent_xds
       cds_config:
         ads: {}
       lds_config:
-        api_config_source:
-          api_type: DELTA_GRPC
-          grpc_services:
-            - envoy_grpc:
-                cluster_name: registrar_xds
+        ads: {}
     
     static_resources:
       clusters:
-      - name: local_xds
+      - name: agent_xds
         type: STATIC
         load_assignment:
           cluster_name: local_xds
@@ -42,21 +38,10 @@ data:
           envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
             "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
             explicit_http_config:
-              http2_protocol_options: {}
-      - name: registrar_xds
-        type: STRICT_DNS
-        dns_lookup_family: V4_ONLY
-        load_assignment:
-          cluster_name: registrar_xds
-          endpoints:
-            - lb_endpoints:
-                - endpoint:
-                    address:
-                      socket_address:
-                        address: aether-registrar.aether-system.svc.cluster.local
-                        port_value: 50051
-        typed_extension_protocol_options:
-          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-            explicit_http_config:
-              http2_protocol_options: {}
+              http2_protocol_options:
+                connection_keepalive:
+                  interval: 15s
+                  timeout: 5s
+                initial_stream_window_size: 1048576    # 1 MiB
+                initial_connection_window_size: 1048576 # 1 MiB
+                max_concurrent_streams: 10

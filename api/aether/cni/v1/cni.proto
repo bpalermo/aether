@@ -28,4 +28,8 @@ message CNIPod {
 
   repeated string ips = 5;
 
+  map <string, string> labels = 6;
+
+  map <string, string> annotations = 7;
+
 }

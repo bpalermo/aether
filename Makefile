@@ -26,16 +26,8 @@ push-agent-image:
 build-registrar:
 	@bazel build //registrar/cmd/registrar/...
 
-.PHONY: load-registrar-image
-load-registrar-image:
-	@bazel run //registrar/cmd/registrar:image_load
-
-.PHONY: push-registrar-image
-push-registrar-image:
-	@bazel run //registrar/cmd/registrar:image_push
-
 .PHONY: load-all
-load-all: load-agent-image load-registrar-image
+load-all: load-agent-image
 
 .PHONY: push-all
-push-all: push-agent-image push-registrar-image
+push-all: push-agent-image

@@ -6,8 +6,6 @@ import (
 
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -16,33 +14,34 @@ import (
 )
 
 func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
-	if req.Pod == nil {
+	pod := req.GetPod()
+	if pod == nil {
 		return nil, status.Error(codes.InvalidArgument, "pod is required")
 	}
 
 	// Ignore aether system pods
 	// we want to prevent circular dependencies
-	if isIgnorablePod(req.Pod.Namespace) {
-		s.log.V(1).Info("ignoring aether system pod", "name", req.Pod.Name, "namespace", req.Pod.Namespace)
+	if isIgnorablePod(pod.GetNamespace()) {
+		s.log.V(1).Info("ignoring aether system pod", "name", pod.GetName(), "namespace", pod.GetNamespace())
 		return &cniv1.AddPodResponse{
 			Result: cniv1.AddPodResponse_SUCCESS,
 		}, nil
 	}
 
-	pod, err := s.newRegistryPod(ctx, req.Pod)
+	cniPod, err := s.newRegistryPod(ctx, pod)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to retrieve endpoint data: %v", err)
 	}
 
 	// Store in the local storage
-	containerdID := types.ContainerID(req.Pod.ContainerId)
-	s.log.Info("adding pod to storage", "containerID", containerdID, "name", req.Pod.Name)
-	if err := s.storage.AddResource(ctx, containerdID, pod); err != nil {
+	containerdID := types.ContainerID(pod.GetContainerId())
+	s.log.Info("adding pod to storage", "containerID", containerdID, "name", pod.GetName())
+	if err := s.storage.AddResource(ctx, containerdID, cniPod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
 
-	ke, err := registry.NewRegistryPodEndpoint(s.clusterName, pod)
-	if err = s.registry.RegisterEndpoint(ctx, ke); err != nil {
+	serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeRegion, s.nodeZone, cniPod)
+	if err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, sEndpoint); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
 	}
 
@@ -54,32 +53,34 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 }
 
 func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
-	if req.Pod == nil {
+	pod := req.GetPod()
+	if pod == nil {
 		return nil, status.Error(codes.InvalidArgument, "pod is required")
 	}
 
 	// Ignore aether system pods
 	// we want to prevent circular dependencies
-	if isIgnorablePod(req.Pod.Namespace) {
-		s.log.V(1).Info("ignoring aether system pod", "name", req.Pod.Name, "namespace", req.Pod.Namespace)
+	if isIgnorablePod(pod.GetNamespace()) {
+		s.log.V(1).Info("ignoring aether system pod", "name", pod.GetName(), "namespace", pod.GetNamespace())
 		return &cniv1.RemovePodResponse{
 			Result: cniv1.RemovePodResponse_SUCCESS,
 		}, nil
 	}
 
-	containerID := types.ContainerID(req.GetPod().GetContainerId())
+	containerID := types.ContainerID(pod.GetContainerId())
 
-	registryPod, err := s.storage.GetResource(ctx, containerID)
+	storedPod, err := s.storage.GetResource(ctx, containerID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to get pod from storage: %v", err)
 	}
 
-	if err = s.registry.UnregisterEndpoints(ctx, getServiceName(registryPod), registryPod.CniPod.Ips); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service %s: %v", err)
+	serviceName, ips, err := registry.ExtractCNIPodInformation(storedPod)
+	if err = s.registry.UnregisterEndpoints(ctx, serviceName, ips); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
 	}
 
 	// Remove from the local storage
-	if err := s.storage.RemoveResource(ctx, types.ContainerID(req.Pod.ContainerId)); err != nil {
+	if err := s.storage.RemoveResource(ctx, containerID); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
 
@@ -91,24 +92,24 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 }
 
 // newRegistryPod create a new RegistryPod from a CNIPod with additional data retrieved from the API server
-func (s *CNIServer) newRegistryPod(ctx context.Context, pod *cniv1.CNIPod) (*registryv1.RegistryPod, error) {
-	registryPod := &registryv1.RegistryPod{
-		CniPod: pod,
-	}
-
+// we collect all annotations and labels, regardless. We leave to the registry implementation the decision of which to keep.
+// This will allow us to change registry implementation without having to change the CNI implementation, as the local stored file
+// will always contain all the relevant information.
+func (s *CNIServer) newRegistryPod(ctx context.Context, cniPod *cniv1.CNIPod) (*cniv1.CNIPod, error) {
 	// Get the pod from Kubernetes
 	k8sPod := &corev1.Pod{}
 	err := s.k8sClient.Get(ctx, client.ObjectKey{
-		Namespace: pod.Namespace,
-		Name:      pod.Name,
+		Namespace: cniPod.GetNamespace(),
+		Name:      cniPod.GetName(),
 	}, k8sPod)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return nil, fmt.Errorf("failed to get pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), err)
 	}
 
-	registryPod.Annotations = k8sPod.Annotations
+	cniPod.Annotations = k8sPod.Annotations
+	cniPod.Labels = k8sPod.Labels
 
-	return registryPod, nil
+	return cniPod, nil
 }
 
 func isIgnorablePod(namespace string) bool {
@@ -116,8 +117,4 @@ func isIgnorablePod(namespace string) bool {
 		return true
 	}
 	return false
-}
-
-func getServiceName(registryPod *registryv1.RegistryPod) string {
-	return registryPod.Labels[constants.LabelAetherService]
 }

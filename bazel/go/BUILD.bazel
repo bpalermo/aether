@@ -1,0 +1,12 @@
+load("@rules_go//proto:compiler.bzl", "go_proto_compiler")
+
+go_proto_compiler(
+    name = "go_dynamo",
+    plugin = "@com_github_pquerna_protoc_gen_dynamo//:protoc-gen-dynamo",
+    suffix = "pb.dynamo.go",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_pquerna_protoc_gen_dynamo//dynamo/v1:go_default_library",
+        "@com_github_pquerna_protoc_gen_dynamo//pkg/protozstd:go_default_library",
+    ],
+)

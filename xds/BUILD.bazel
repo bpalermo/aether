@@ -21,6 +21,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//service/route/v3:route",
         "@com_github_go_logr_logr//:logr",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//keepalive",
         "@org_uber_go_atomic//:atomic",
     ],
 )

@@ -22,7 +22,7 @@ func buildDefaultInboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	networkFilters = append(networkFilters, buildHTTPConnectionManagerFilter(hcm))
 
 	return &listenerv3.FilterChain{
-		Name:    fmt.Sprintf("inbound_http_%s", name),
+		Name:    fmt.Sprintf("in_http_%s", name),
 		Filters: networkFilters,
 	}
 }
@@ -42,7 +42,7 @@ func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	networkFilters = append(networkFilters, buildHTTPConnectionManagerFilter(hcm))
 
 	return &listenerv3.FilterChain{
-		Name:    fmt.Sprintf("outbound_http_%s", name),
+		Name:    fmt.Sprintf("out_http_%s", name),
 		Filters: networkFilters,
 	}
 }

@@ -3,7 +3,7 @@ package proxy
 import (
 	"fmt"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 )
@@ -15,17 +15,16 @@ const (
 	defaultHTTPOutboundPort = 18081
 )
 
-func GenerateListenersFromEvent(cniPod *registryv1.RegistryPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener) {
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener) {
 	inbound = generateInboundHTTPListener(cniPod)
 	outbound = generateOutboundHTTPListener(cniPod)
 
 	return inbound, outbound
 }
 
-func generateInboundHTTPListener(registryPod *registryv1.RegistryPod) *listenerv3.Listener {
-	cniPod := registryPod.GetCniPod()
+func generateInboundHTTPListener(cniPod *cniv1.CNIPod) *listenerv3.Listener {
 	return &listenerv3.Listener{
-		Name: fmt.Sprintf("inbound_http"),
+		Name: "inbound_http",
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
@@ -34,22 +33,22 @@ func generateInboundHTTPListener(registryPod *registryv1.RegistryPod) *listenerv
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: defaultHTTPInboundPort,
 					},
-					NetworkNamespaceFilepath: cniPod.NetworkNamespace,
+					NetworkNamespaceFilepath: cniPod.GetNetworkNamespace(),
 				},
 			},
 		},
+		StatPrefix:       fmt.Sprintf("in_http_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultInboundHTTPFilterChain(cniPod.Name),
+			buildDefaultInboundHTTPFilterChain(cniPod.GetName()),
 		},
 	}
 }
 
-func generateOutboundHTTPListener(registryPod *registryv1.RegistryPod) *listenerv3.Listener {
-	cniPod := registryPod.GetCniPod()
+func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) *listenerv3.Listener {
 	return &listenerv3.Listener{
-		Name: fmt.Sprintf("outbound_http"),
+		Name: "outbound_http",
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
@@ -58,13 +57,14 @@ func generateOutboundHTTPListener(registryPod *registryv1.RegistryPod) *listener
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: defaultHTTPOutboundPort,
 					},
-					NetworkNamespaceFilepath: cniPod.NetworkNamespace,
+					NetworkNamespaceFilepath: cniPod.GetNetworkNamespace(),
 				},
 			},
 		},
+		StatPrefix:       fmt.Sprintf("out_http_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultOutboundHTTPFilterChain(cniPod.Name),
+			buildDefaultOutboundHTTPFilterChain(cniPod.GetName()),
 		},
 	}
 }
