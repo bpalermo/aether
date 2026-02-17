@@ -1,5 +1,5 @@
 package constants
 
 const (
-	CNIDefaultRegistryPath = "/var/lib/cni/registry"
+	CNIDefaultRegistryPath = "/var/lib/aether/registry"
 )
