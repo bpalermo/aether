@@ -7,8 +7,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	httpRouterFilterName = "envoy.filters.http.router"
+)
+
 func routerHttpFilter() *http_connection_managerv3.HttpFilter {
-	return httpFilter("envoy.filters.http.router", &routerv3.Router{})
+	return httpFilter(httpRouterFilterName, &routerv3.Router{})
 }
 
 func httpFilter(name string, msg proto.Message) *http_connection_managerv3.HttpFilter {

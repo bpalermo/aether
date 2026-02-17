@@ -8,9 +8,9 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
-func NewCluster(serviceName string) *clusterv3.Cluster {
-	return NewClusterForService(serviceName)
-}
+const (
+	upstreamHTTPProtocolOptionsKey = "envoy.extensions.upstreams.http.v3.HttpProtocolOptions"
+)
 
 func NewClusterForService(serviceName string) *clusterv3.Cluster {
 	protocolOptions := http2ProtocolOptions()
@@ -24,7 +24,7 @@ func NewClusterForService(serviceName string) *clusterv3.Cluster {
 			EdsConfig: config.XDSConfigSourceADS(),
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": config.TypedConfig(protocolOptions),
+			upstreamHTTPProtocolOptionsKey: config.TypedConfig(protocolOptions),
 		},
 	}
 }
