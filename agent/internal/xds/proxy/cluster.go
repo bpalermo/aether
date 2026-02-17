@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"github.com/bpalermo/aether/agent/pkg/xds/config"
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"

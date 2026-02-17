@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"github.com/bpalermo/aether/agent/pkg/xds/config"
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tls_inspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	"google.golang.org/protobuf/proto"

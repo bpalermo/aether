@@ -3,12 +3,12 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "server",
     srcs = ["server.go"],
-    importpath = "github.com/bpalermo/aether/agent/pkg/xds/server",
-    visibility = ["//visibility:public"],
+    importpath = "github.com/bpalermo/aether/agent/internal/xds/server",
+    visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/xds/proxy",
         "//agent/pkg/constants",
         "//agent/pkg/storage",
-        "//agent/pkg/xds/proxy",
         "//api/aether/cni/v1:cni",
         "//registry",
         "//xds",

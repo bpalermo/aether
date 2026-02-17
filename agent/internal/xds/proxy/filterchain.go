@@ -3,7 +3,7 @@ package proxy
 import (
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/pkg/xds/config"
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"google.golang.org/protobuf/types/known/wrapperspb"
