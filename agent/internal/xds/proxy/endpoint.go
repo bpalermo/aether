@@ -14,12 +14,42 @@ const (
 	subsetIPKey           = "ip"
 	subsetPodNamespaceKey = "namespace"
 	subsetPodNameKey      = "pod"
+
+	defaultLocalEndpointBindAddress = "127.0.0.1"
 )
 
 func NewClusterLoadAssignment(serviceName string) *endpointv3.ClusterLoadAssignment {
 	return &endpointv3.ClusterLoadAssignment{
 		ClusterName: serviceName,
 		Endpoints:   []*endpointv3.LocalityLbEndpoints{},
+	}
+}
+
+func LocalLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint) *endpointv3.LocalityLbEndpoints {
+	return &endpointv3.LocalityLbEndpoints{
+		LbEndpoints: []*endpointv3.LbEndpoint{
+			{
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+					Endpoint: &endpointv3.Endpoint{
+						Address: &core.Address{
+							Address: &core.Address_SocketAddress{
+								SocketAddress: &core.SocketAddress{
+									Protocol: core.SocketAddress_TCP,
+									Address:  defaultLocalEndpointBindAddress,
+									PortSpecifier: &core.SocketAddress_PortValue{
+										PortValue: endpoint.GetPort(),
+									},
+								},
+							},
+						},
+						HealthCheckConfig: &endpointv3.Endpoint_HealthCheckConfig{
+							Hostname:  "localhost",
+							PortValue: endpoint.GetPort(),
+						},
+					},
+				},
+			},
+		},
 	}
 }
 

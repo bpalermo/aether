@@ -32,7 +32,7 @@ func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
-			RouteConfigName: "out_http",
+			RouteConfigName: OutboundHTTPRouteName,
 			ConfigSource:    config.XDSConfigSourceADS(),
 		},
 	}

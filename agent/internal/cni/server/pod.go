@@ -17,21 +17,16 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	cniPod := req.GetPod()
 	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
 
-	if cniPod == nil {
-		return nil, status.Error(codes.InvalidArgument, "pod is required")
-	}
-
-	// Ignore aether system pods
-	// we want to prevent circular dependencies
-	if isIgnorablePod(cniPod.GetNamespace()) {
-		log.V(1).Info("ignoring aether system pod")
-		return &cniv1.AddPodResponse{
-			Result: cniv1.AddPodResponse_SUCCESS,
-		}, nil
-	}
-
-	err := s.enhanceCNIPod(ctx, cniPod)
+	ignorable, err := validateAndCheckIgnorable(cniPod)
 	if err != nil {
+		return nil, err
+	}
+	if ignorable {
+		log.V(1).Info("ignoring aether system pod")
+		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_SUCCESS}, nil
+	}
+
+	if err = s.enhanceCNIPod(ctx, cniPod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to retrieve endpoint data: %v", err)
 	}
 
@@ -42,7 +37,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
 
-	serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeRegion, s.nodeZone, cniPod)
+	serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cniPod)
 	if err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, sEndpoint); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
 	}
@@ -58,17 +53,13 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	cniPod := req.GetPod()
 	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
 
-	if cniPod == nil {
-		return nil, status.Error(codes.InvalidArgument, "pod is required")
+	ignorable, err := validateAndCheckIgnorable(cniPod)
+	if err != nil {
+		return nil, err
 	}
-
-	// Ignore aether system pods
-	// we want to prevent circular dependencies
-	if isIgnorablePod(cniPod.GetNamespace()) {
+	if ignorable {
 		log.V(1).Info("ignoring aether system pod")
-		return &cniv1.RemovePodResponse{
-			Result: cniv1.RemovePodResponse_SUCCESS,
-		}, nil
+		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS}, nil
 	}
 
 	containerID := types.ContainerID(cniPod.GetContainerId())
@@ -112,6 +103,13 @@ func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) err
 	cniPod.Labels = k8sPod.Labels
 
 	return nil
+}
+
+func validateAndCheckIgnorable(cniPod *cniv1.CNIPod) (bool, error) {
+	if cniPod == nil {
+		return false, status.Error(codes.InvalidArgument, "pod is required")
+	}
+	return isIgnorablePod(cniPod.GetNamespace()), nil
 }
 
 func isIgnorablePod(namespace string) bool {

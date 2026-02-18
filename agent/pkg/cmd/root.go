@@ -49,16 +49,16 @@ func GetCommand() *cobra.Command {
 
 func init() {
 	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug mode")
+	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
+	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
-	rootCmd.Flags().StringVar(&cfg.CNIServerConfig.ClusterName, "cluster-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
-	rootCmd.Flags().StringVar(&cfg.ProxyRegion, "proxy-region", constants.DefaultProxyRegionName, "The xDS proxy region")
-	rootCmd.Flags().StringVar(&cfg.ProxyZone, "proxy-zone", constants.DefaultProxyZoneName, "The xDS proxy zone")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
 	rootCmd.Flags().StringVar(&cfg.InstallConfig.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
+	_ = rootCmd.MarkPersistentFlagRequired("node-name")
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-id")
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-region")
 	_ = rootCmd.MarkPersistentFlagRequired("proxy-zone")
@@ -68,7 +68,7 @@ func runAgent(ctx context.Context) error {
 	l.Info("starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug,
-		"clusterName", cfg.CNIServerConfig.ClusterName,
+		"clusterName", cfg.ClusterName,
 	)
 
 	// Install CNI binaries
@@ -117,7 +117,7 @@ func installCNI(ctx context.Context) error {
 
 func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod]) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewXdsServer(ctx, cfg.ProxyServiceNodeID, registry, localStorage, l)
+	xdsSrv, err := xdsServer.NewXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, registry, localStorage, l)
 	if err != nil {
 		return err
 	}
@@ -131,6 +131,8 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
+		cfg.ClusterName,
+		cfg.NodeName,
 		cfg.ProxyServiceNodeID,
 		localStorage,
 		registry,

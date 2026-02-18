@@ -32,6 +32,7 @@ spec:
             - "--debug=true"
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name=oci-main"
+            - "--node-name=$(NODE_NAME)"
           env:
             - name: NODE_NAME
               valueFrom:

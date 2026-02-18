@@ -11,8 +11,9 @@ type AgentConfig struct {
 	Debug bool
 	// XDS nodeID
 	ProxyServiceNodeID string
-	ProxyRegion        string
-	ProxyZone          string
+
+	NodeName    string
+	ClusterName string
 
 	MountedLocalStorageDir string
 
