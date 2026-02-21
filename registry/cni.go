@@ -9,7 +9,7 @@ import (
 	"github.com/bpalermo/aether/constants"
 )
 
-func NewServiceEndpointFromCNIPod(clusterName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
+func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
 	protocol := registryv1.Service_HTTP
 
 	serviceName, err := getServiceNameFromLabels(cniPod.GetLabels())
@@ -40,6 +40,7 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeRegion string, nodeZon
 		KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
 			Namespace: cniPod.GetNamespace(),
 			PodName:   cniPod.GetName(),
+			NodeName:  nodeName,
 		},
 		Locality: &registryv1.ServiceEndpoint_Locality{
 			Region: nodeRegion,

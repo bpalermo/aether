@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"fmt"
+
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 )
@@ -74,9 +76,10 @@ func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.Rou
 }
 
 func BuildOutboundClusterVirtualHost(clusterName string) *routev3.VirtualHost {
+	fqdn := fmt.Sprintf("%s.%s", clusterName, "aether.internal")
 	return &routev3.VirtualHost{
 		Name:    clusterName,
-		Domains: []string{clusterName},
+		Domains: []string{clusterName, fqdn},
 		Routes: []*routev3.Route{
 			{
 				Match: &routev3.RouteMatch{

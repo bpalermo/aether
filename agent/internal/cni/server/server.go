@@ -26,6 +26,7 @@ type CNIServer struct {
 
 	clusterName string
 	proxyID     string
+	nodeName    string
 	nodeRegion  string
 	nodeZone    string
 
@@ -38,19 +39,18 @@ type CNIServer struct {
 var _ xds.ServerCallback = (*CNIServer)(nil)
 
 // NewCNIServer creates a new CNI gRPC server
-func NewCNIServer(proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
+func NewCNIServer(clusterName string, nodeName string, proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(protovalidate_middleware.UnaryServerInterceptor(validator)),
 	)
 
-	cniLog := log.WithName("cni")
-
 	cniSrv := &CNIServer{
 		Server:      xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
-		log:         cniLog,
-		clusterName: cfg.ClusterName,
+		log:         log.WithName("cni"),
+		clusterName: clusterName,
+		nodeName:    nodeName,
 		proxyID:     proxyID,
 		storage:     localStorage,
 		registry:    registry,
@@ -65,8 +65,8 @@ func NewCNIServer(proxyID string, localStorage storage.Storage[*cniv1.CNIPod], r
 }
 
 func (s *CNIServer) PreListen(ctx context.Context) error {
-	s.log.V(2).Info("querying node topology")
-	region, zone, err := s.queryNodeTopology(ctx, s.k8sClient)
+	s.log.V(2).Info("querying node metadata")
+	region, zone, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
 	if err != nil {
 		return err
 	}
@@ -74,13 +74,13 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.nodeRegion = region
 	s.nodeZone = zone
 
-	s.log.V(1).Info("node topology queried successfully", "region", region, "zone", zone)
+	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone)
 	return nil
 }
 
-func (s *CNIServer) queryNodeTopology(ctx context.Context, client client.Client) (string, string, error) {
+func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (string, string, error) {
 	node := &corev1.Node{}
-	if err := client.Get(ctx, types.NamespacedName{Name: s.proxyID}, node); err != nil {
+	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {
 		return "", "", fmt.Errorf("failed to get node: %w", err)
 	}
 

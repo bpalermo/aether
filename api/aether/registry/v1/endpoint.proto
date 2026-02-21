@@ -35,6 +35,7 @@ message ServiceEndpoint {
   message KubernetesMetadata {
     string namespace = 1 [(buf.validate.field).string.min_len = 1];
     string pod_name = 2 [(buf.validate.field).string.min_len = 1];
+    string node_name = 3 [(buf.validate.field).string.min_len = 1];
   }
 
   KubernetesMetadata kubernetes_metadata = 8;
