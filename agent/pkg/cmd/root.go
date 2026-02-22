@@ -8,7 +8,6 @@ import (
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	"github.com/bpalermo/aether/agent/pkg/install"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/log"
@@ -52,9 +51,6 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
-	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
-	rootCmd.Flags().StringVar(&cfg.InstallConfig.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
-	rootCmd.Flags().StringVar(&cfg.InstallConfig.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
@@ -70,11 +66,6 @@ func runAgent(ctx context.Context) error {
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,
 	)
-
-	// Install CNI binaries
-	if err := installCNI(ctx); err != nil {
-		return err
-	}
 
 	// Create a controller manager
 	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{})
@@ -107,12 +98,6 @@ func runAgent(ctx context.Context) error {
 
 	l.V(1).Info("local storage is ready, starting manager")
 	return m.Start(ctx)
-}
-
-func installCNI(ctx context.Context) error {
-	l.Info("installing CNI binaries")
-	installer := install.NewInstaller(l, cfg.InstallConfig)
-	return installer.Run(ctx)
 }
 
 func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod]) error {

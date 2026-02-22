@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/pkg/file"
+	"github.com/bpalermo/aether/common/file"
 	"github.com/fsnotify/fsnotify"
 	ctrl "sigs.k8s.io/controller-runtime"
 )

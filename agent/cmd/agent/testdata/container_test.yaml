@@ -3,11 +3,6 @@ metadataTest:
   entrypoint: ["/agent"]
   user: 65532 # nonroot
 fileExistenceTests:
-  - name: 'cni'
-    path: '/opt/cni/bin/aether-cni'
-    shouldExist: true
-    permissions: '-rwxr-xr-x'
-    isExecutableBy: 'other'
   - name: 'agent'
     path: '/agent'
     shouldExist: true

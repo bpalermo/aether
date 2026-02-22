@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cmd",
+    srcs = ["root.go"],
+    importpath = "github.com/bpalermo/aether/cni/pkg/cmd",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//cni/internal/constants",
+        "//cni/internal/install",
+        "//log",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

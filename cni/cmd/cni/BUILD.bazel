@@ -1,9 +1,9 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 
 go_library(
-    name = "plugin_lib",
+    name = "cni_lib",
     srcs = ["main.go"],
-    importpath = "github.com/bpalermo/aether/cni/cmd/plugin",
+    importpath = "github.com/bpalermo/aether/cni/cmd/cni",
     visibility = ["//visibility:private"],
     deps = [
         "//cni/internal/log",
@@ -15,8 +15,7 @@ go_library(
 )
 
 go_binary(
-    name = "plugin",
-    out = "aether-cni",
-    embed = [":plugin_lib"],
+    name = "cni",
+    embed = [":cni_lib"],
     visibility = ["//visibility:public"],
 )

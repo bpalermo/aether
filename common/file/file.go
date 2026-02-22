@@ -12,6 +12,48 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
+func WriteFileAtomic(filePath string, data []byte) error {
+	dir := filepath.Dir(filePath)
+	base := filepath.Base(filePath)
+
+	// Write atomically using a temporary file
+	tempFile, err := os.CreateTemp(dir, fmt.Sprintf(".%s-*.tmp", base))
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+
+	// Clean up temp file on error
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	// Write data to the temp file
+	if _, err = tempFile.Write(data); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("failed to write to temp file: %w", err)
+	}
+
+	// Ensure data is flushed to the disk
+	if err = tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+
+	if err = tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Atomically rename the temp file to the final destination
+	if err = os.Rename(tempPath, filePath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return nil
+}
+
 func Exists(name string) bool {
 	// We must explicitly check if the error is due to the file not existing (as opposed to a
 	// permissions error).

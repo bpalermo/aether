@@ -1,8 +1,9 @@
 package install
 
-import "github.com/bpalermo/aether/agent/pkg/constants"
+import "github.com/bpalermo/aether/cni/internal/constants"
 
 type InstallerConfig struct {
+	Debug bool
 	// Location of the CNI config files in the container's filesystem (mount location of the CNINetDir)
 	MountedCNINetDir string
 	// Name of the CNI config file

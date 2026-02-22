@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+
+go_library(
+    name = "cni-install_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/cni/cmd/cni-install",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//cni/pkg/cmd",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ],
+)
+
+go_binary(
+    name = "cni-install",
+    embed = [":cni-install_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_multi_arch_image(
+    name = "cni-install_image",
+    binary = ":cni-install",
+    repository = "palermo/aether-cni-install",
+    tars_layer = {
+        "/opt/cni/bin/aether-cni": "//cni/cmd/cni:cni",
+    },
+)

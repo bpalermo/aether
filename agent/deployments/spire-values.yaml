@@ -1,0 +1,20 @@
+global:
+  openshift:
+  spire:
+    recommendations:
+      enabled: true
+    namespaces:
+      create: true
+    ingressControllerType: "" # If not openshift, and want to expose services, set to a supported option [ingress-nginx]
+    # Update these
+    clusterName: oci-main
+    trustDomain: aether.internal
+    caSubject:
+      country: BR
+      organization: Aether
+      commonName: aether.internal
+    persistence:
+      storageClass: oci-bv-encrypted
+
+spiffe-oidc-discovery-provider:
+  enabled: false

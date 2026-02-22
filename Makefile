@@ -22,12 +22,20 @@ load-agent-image:
 push-agent-image:
 	@bazel run //agent/cmd/agent:image_push
 
-.PHONY: build-registrar
-build-registrar:
-	@bazel build //registrar/cmd/registrar/...
+.PHONY: build-cni-install
+build-cni-install:
+	@bazel build //cni/cmd/cni-install/...
+
+.PHONY: load-cni-install-image
+load-cni-install-image:
+	@bazel run //cni/cmd/cni-install:image_load
+
+.PHONY: push-cni-install-image
+push-cni-install-image:
+	@bazel run //cni/cmd/cni-install:image_push
 
 .PHONY: load-all
-load-all: load-agent-image
+load-all: load-agent-image load-cni-install-image
 
 .PHONY: push-all
-push-all: push-agent-image
+push-all: push-agent-image push-cni-install-image

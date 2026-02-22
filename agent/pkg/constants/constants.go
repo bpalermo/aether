@@ -3,14 +3,8 @@ package constants
 import "github.com/bpalermo/aether/constants"
 
 const (
-	DefaultProxyID         = "proxy"
-	DefaultProxyRegionName = "unknown"
-	DefaultProxyZoneName   = "unknown"
-	DefaultClusterName     = "unknown"
+	DefaultProxyID = "proxy"
 
-	DefaultCNIBinDir          = "/opt/cni/bin"
-	DefaultHostCNIBinDir      = "/host/opt/cni/bin"
-	DefaultHostCNINetDir      = "/host/etc/cni/net.d"
 	DefaultHostCNIRegistryDir = "/host" + constants.CNIDefaultRegistryPath
 
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
