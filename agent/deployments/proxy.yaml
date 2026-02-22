@@ -23,8 +23,6 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: aether-proxy
       priorityClassName: system-node-critical
-      imagePullSecrets:
-        - name: dockerhub-credentials
       containers:
         - name: proxy
           # envoyproxy/envoy:distroless-v1.37.0

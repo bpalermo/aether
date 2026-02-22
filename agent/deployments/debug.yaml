@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: debug
-  namespace: aether-system
+  namespace: aether-debug
   labels:
     app: debug
     app.kubernetes.io/name: debug

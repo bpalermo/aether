@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	"github.com/bpalermo/aether/agent/pkg/file"
-	"github.com/bpalermo/aether/agent/pkg/util"
+	"github.com/bpalermo/aether/cni/internal/util"
 	"github.com/bpalermo/aether/cni/pkg/config"
+	"github.com/bpalermo/aether/common/file"
 	"github.com/containernetworking/cni/libcni"
 )
 

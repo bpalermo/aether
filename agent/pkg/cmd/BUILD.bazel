@@ -13,7 +13,6 @@ go_library(
         "//agent/internal/cni/server",
         "//agent/internal/xds/server",
         "//agent/pkg/constants",
-        "//agent/pkg/install",
         "//agent/pkg/storage",
         "//api/aether/cni/v1:cni",
         "//log",
@@ -31,7 +30,6 @@ go_test(
     deps = [
         "//agent/internal/cni/server",
         "//agent/pkg/constants",
-        "//agent/pkg/install",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

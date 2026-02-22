@@ -22,8 +22,28 @@ spec:
       hostNetwork: true
       serviceAccountName: aether-agent
       priorityClassName: system-node-critical
-      imagePullSecrets:
-        - name: dockerhub-credentials
+      initContainers:
+        - name: cni-install
+          image: docker.io/palermo/aether-cni-install:dev
+          imagePullPolicy: Always
+          args:
+            - "--debug=true"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+          volumeMounts:
+            - name: cni-bin-dir
+              mountPath: /host/opt/cni/bin
+            - name: cni-conf-dir
+              mountPath: /host/etc/cni/net.d
+          resources:
+            requests:
+              cpu: 100m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
       containers:
         - name: agent
           image: docker.io/palermo/aether-agent:dev
@@ -31,7 +51,7 @@ spec:
           args:
             - "--debug=true"
             - "--proxy-id=$(NODE_NAME)"
-            - "--cluster-name=oci-main"
+            - "--cluster-name=kind-aether"
             - "--node-name=$(NODE_NAME)"
           env:
             - name: NODE_NAME
@@ -60,15 +80,17 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: aether-registrar-aws-credentials
+                  name: aether-agent-aws-credentials
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: aether-registrar-aws-credentials
+                  name: aether-agent-aws-credentials
                   key: AWS_SECRET_ACCESS_KEY
           securityContext:
-            privileged: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsUser: 0
             capabilities:
               drop:
                 - ALL
@@ -78,10 +100,6 @@ spec:
             - name: run-dir
               mountPath: /run/aether
               mountPropagation: HostToContainer
-            - name: cni-bin-dir
-              mountPath: /host/opt/cni/bin
-            - name: cni-conf-dir
-              mountPath: /host/etc/cni/net.d
             - name: cni-netns-dir
               mountPath: /host/var/run/netns
               mountPropagation: HostToContainer

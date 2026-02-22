@@ -5,7 +5,6 @@ import (
 
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
-	"github.com/bpalermo/aether/agent/pkg/install"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +15,6 @@ func TestNewAgentConfig(t *testing.T) {
 	require.NotNil(t, c)
 	assert.False(t, c.Debug)
 	assert.Equal(t, constants.DefaultProxyID, c.ProxyServiceNodeID)
-	assert.NotNil(t, c.InstallConfig)
 	assert.NotNil(t, c.CNIServerConfig)
 }
 
@@ -37,11 +35,6 @@ func TestAgentConfig_DefaultValues(t *testing.T) {
 			name:     "proxy service node ID uses default",
 			got:      c.ProxyServiceNodeID,
 			expected: constants.DefaultProxyID,
-		},
-		{
-			name:     "install config is initialized",
-			got:      c.InstallConfig,
-			expected: install.NewInstallerConfig(),
 		},
 		{
 			name:     "CNI server config is initialized",
@@ -73,6 +66,5 @@ func TestAgentConfig_SubConfigsAreIndependent(t *testing.T) {
 	cfg2 := NewAgentConfig()
 
 	// Verify that configs are independent instances
-	assert.NotSame(t, cfg1.InstallConfig, cfg2.InstallConfig)
 	assert.NotSame(t, cfg1.CNIServerConfig, cfg2.CNIServerConfig)
 }

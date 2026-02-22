@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - role.yaml
+  - rolebinding.yaml
+  - sa.yaml
+  - cm.yaml
+  - agent.yaml
+  - proxy.yaml
+  - secretes.yaml

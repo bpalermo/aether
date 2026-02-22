@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "file",
@@ -7,7 +7,7 @@ go_library(
         "fadvise_unspecified.go",
         "file.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/pkg/file",
+    importpath = "github.com/bpalermo/aether/common/file",
     visibility = ["//visibility:public"],
     deps = [
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
@@ -20,4 +20,10 @@ go_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+go_test(
+    name = "file_test",
+    srcs = ["file_test.go"],
+    embed = [":file"],
 )

@@ -22,7 +22,4 @@ go_multi_arch_image(
     name = "agent_image",
     binary = ":agent",
     repository = "palermo/aether-agent",
-    tars_layer = {
-        "/opt/cni/bin/aether-cni": "//cni/cmd/plugin:plugin",
-    },
 )

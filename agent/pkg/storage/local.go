@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/bpalermo/aether/agent/pkg/types"
-	"github.com/bpalermo/aether/agent/pkg/util"
+	"github.com/bpalermo/aether/common/file"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -80,7 +80,7 @@ func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key types.Contain
 	filePath := filepath.Join(f.basePath, key.String()+".json")
 
 	// Write to disk atomically
-	if err := util.WriteFileAtomic(filePath, data); err != nil {
+	if err := file.WriteFileAtomic(filePath, data); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 

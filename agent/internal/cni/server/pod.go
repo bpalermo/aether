@@ -6,6 +6,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -17,17 +18,17 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	cniPod := req.GetPod()
 	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
 
+	if err := s.enhanceCNIPod(ctx, cniPod); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to retrieve endpoint data: %v", err)
+	}
+
 	ignorable, err := validateAndCheckIgnorable(cniPod)
 	if err != nil {
 		return nil, err
 	}
 	if ignorable {
-		log.V(1).Info("ignoring aether system pod")
+		log.V(1).Info("ignoring pod")
 		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_SUCCESS}, nil
-	}
-
-	if err = s.enhanceCNIPod(ctx, cniPod); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to retrieve endpoint data: %v", err)
 	}
 
 	// Store in the local storage
@@ -53,20 +54,20 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	cniPod := req.GetPod()
 	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
 
-	ignorable, err := validateAndCheckIgnorable(cniPod)
-	if err != nil {
-		return nil, err
-	}
-	if ignorable {
-		log.V(1).Info("ignoring aether system pod")
-		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS}, nil
-	}
-
 	containerID := types.ContainerID(cniPod.GetContainerId())
 
 	storedPod, err := s.storage.GetResource(ctx, containerID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to get pod from storage: %v", err)
+	}
+
+	ignorable, err := validateAndCheckIgnorable(storedPod)
+	if err != nil {
+		return nil, err
+	}
+	if ignorable {
+		log.V(1).Info("ignoring pod")
+		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS}, nil
 	}
 
 	serviceName, ips, err := registry.ExtractCNIPodInformation(storedPod)
@@ -109,12 +110,27 @@ func validateAndCheckIgnorable(cniPod *cniv1.CNIPod) (bool, error) {
 	if cniPod == nil {
 		return false, status.Error(codes.InvalidArgument, "pod is required")
 	}
-	return isIgnorablePod(cniPod.GetNamespace()), nil
+	return isIgnorablePod(cniPod), nil
 }
 
-func isIgnorablePod(namespace string) bool {
-	if namespace == "kube-system" || namespace == "aether-system" {
+func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
+	if cniPod.GetNamespace() == "kube-system" || cniPod.GetNamespace() == "aether-system" {
 		return true
 	}
+
+	labels := cniPod.GetLabels()
+	if labels == nil {
+		return true
+	}
+
+	_, ok := labels[constants.LabelAetherService]
+	if !ok {
+		return true
+	}
+
+	if cniPod.GetIps() == nil || len(cniPod.GetIps()) == 0 {
+		return true
+	}
+
 	return false
 }
