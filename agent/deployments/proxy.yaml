@@ -79,6 +79,9 @@ spec:
             - name: netns-dir
               mountPath: /var/run/netns
               mountPropagation: HostToContainer
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
       volumes:
         - name: proxy-config
           configMap:
@@ -94,3 +97,7 @@ spec:
           hostPath:
             path: /run/aether
             type: DirectoryOrCreate
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true

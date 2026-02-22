@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
@@ -75,7 +76,7 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.log.V(1).Info("generated clusters and endpoints", "count", len(clusters), "endpoints", len(endpoints))
+	s.log.V(1).Info("generated clusters and endpoints", "clusters", len(clusters), "endpoints", len(endpoints))
 
 	routes, err := generateRoutes(clusters, s.log)
 	if err != nil {
@@ -150,7 +151,7 @@ func generateClustersAndEndpoints(ctx context.Context, clusterName string, nodeN
 	log.V(1).Info("found service endpoints in registry", "count", len(serviceEndpoints))
 
 	clusters := make([]types.Resource, 0, len(serviceEndpoints))
-	clas := make([]types.Resource, len(serviceEndpoints))
+	clas := make([]types.Resource, 0, len(serviceEndpoints))
 	for serviceName, endpoints := range serviceEndpoints {
 		clusters = append(clusters, proxy.NewClusterForService(serviceName))
 		cla := proxy.NewClusterLoadAssignment(serviceName)
@@ -179,6 +180,9 @@ func generateClustersAndEndpoints(ctx context.Context, clusterName string, nodeN
 
 		clas = append(clas, cla)
 	}
+
+	clusters = append(clusters, config.NewLocalSpireCluster())
+	clas = append(clas, config.NewLocalSpireClusterLoadAssignment())
 
 	return clusters, clas, nil
 }
