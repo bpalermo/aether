@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -58,6 +59,12 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 
 	storedPod, err := s.storage.GetResource(ctx, containerID)
 	if err != nil {
+		if os.IsNotExist(err) {
+			log.V(1).Info("resource was not found locally. we assume it was either already removed or ignored during registration")
+			return &cniv1.RemovePodResponse{
+				Result: cniv1.RemovePodResponse_SUCCESS,
+			}, nil
+		}
 		return nil, status.Errorf(codes.Internal, "failed to get pod from storage: %v", err)
 	}
 

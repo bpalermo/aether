@@ -1,5 +1,5 @@
 global:
-  openshift:
+  openshift: false
   spire:
     recommendations:
       enabled: true
@@ -7,14 +7,14 @@ global:
       create: true
     ingressControllerType: "" # If not openshift, and want to expose services, set to a supported option [ingress-nginx]
     # Update these
-    clusterName: oci-main
+    clusterName: talos-main
     trustDomain: aether.internal
     caSubject:
       country: BR
       organization: Aether
       commonName: aether.internal
     persistence:
-      storageClass: oci-bv-encrypted
+      storageClass: openebs-hostpath
 
 spiffe-oidc-discovery-provider:
   enabled: false

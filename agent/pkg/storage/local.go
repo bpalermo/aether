@@ -129,6 +129,10 @@ func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.Contain
 
 	var resource T
 	filePath := filepath.Join(f.basePath, key.String()+".json")
+	_, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		return resource, err
+	}
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {

@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/xds/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
         "//agent/pkg/constants",
         "//agent/pkg/storage",
