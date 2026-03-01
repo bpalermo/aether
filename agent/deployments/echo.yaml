@@ -19,6 +19,11 @@ spec:
         app.kubernetes.io/name: svc-a
         aether.io/service: svc-a
     spec:
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: echo
           image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
@@ -38,6 +43,14 @@ spec:
           resources:
             requests:
               cpu: 10m
+          securityContext:
+            privileged: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -60,6 +73,11 @@ spec:
         app.kubernetes.io/name: svc-b
         aether.io/service: svc-b
     spec:
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: echo
           image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
@@ -79,3 +97,11 @@ spec:
           resources:
             requests:
               cpu: 10m
+          securityContext:
+            privileged: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

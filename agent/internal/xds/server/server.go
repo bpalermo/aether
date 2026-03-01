@@ -138,6 +138,8 @@ func generateListeners(ctx context.Context, storage storage.Storage[*cniv1.CNIPo
 		return nil, errors.Join(errs...)
 	}
 
+	log.V(1).Info("generated listeners", "count", len(listeners))
+
 	return listeners, nil
 }
 

@@ -3,6 +3,7 @@ syntax = "proto3";
 package aether.cni.v1;
 
 import "api/aether/cni/v1/cni.proto";
+import "buf/validate/validate.proto";
 
 option go_package = "github.com/bpalermo/aether/api/aether/cni/v1;cniv1";
 
@@ -26,7 +27,20 @@ message AddPodResponse {
 }
 
 message RemovePodRequest {
-  CNIPod pod = 1;
+  string name = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  string namespace = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  string container_id = 4 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1
+  ];
 }
 
 message RemovePodResponse {

@@ -25,6 +25,8 @@ func NewAetherPlugin(logger *zap.Logger) *AetherPlugin {
 
 func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI add command")
+	ctx := context.Background()
+
 	netConf, err := config.NewConf(args.StdinData)
 	if err != nil {
 		return err
@@ -92,7 +94,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	res, err := client.AddPod(context.Background(), cniPod)
+	res, err := client.AddPod(ctx, cniPod)
 	if err != nil {
 		p.logger.Error("failed to add pod to agent", zap.Error(err))
 		return fmt.Errorf("failed to add pod to agent: %v", err)
@@ -114,6 +116,8 @@ func (p *AetherPlugin) CmdCheck(_ *skel.CmdArgs) error {
 
 func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI del command")
+	ctx := context.Background()
+
 	conf, err := config.NewConf(args.StdinData)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %v", err)
@@ -128,6 +132,8 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to load args during delete: %v", err)
 	}
 
+	containerID := string(k8sArgs.K8S_POD_INFRA_CONTAINER_ID)
+	podName := string(k8sArgs.K8S_POD_NAME)
 	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
 	if ignorableNamespace(namespace) {
 		p.logger.Info("skipping CNI add for system pod",
@@ -137,8 +143,8 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	}
 
 	p.logger.Info("deleting network for pod",
-		zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
-		zap.String("pod", string(k8sArgs.K8S_POD_NAME)))
+		zap.String("namespace", namespace),
+		zap.String("pod", podName))
 
 	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
 	if err != nil {
@@ -151,9 +157,7 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		}
 	}(client)
 
-	cniPod := newPodFromArgs(args, k8sArgs, nil)
-
-	res, err := client.RemovePod(context.Background(), cniPod)
+	res, err := client.RemovePod(ctx, podName, namespace, containerID)
 	if err != nil {
 		p.logger.Error("failed to remove pod from agent", zap.Error(err))
 		return fmt.Errorf("failed to remove pod from agent: %v", err)

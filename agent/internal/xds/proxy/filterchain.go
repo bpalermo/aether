@@ -9,7 +9,11 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-func buildDefaultInboundHTTPFilterChain(name string) *listenerv3.FilterChain {
+const (
+	spiffeDefaultBundleName = "ROOTCA"
+)
+
+func buildDefaultInboundHTTPFilterChain(name string, tlsCertificateSecretName string) *listenerv3.FilterChain {
 	routeConfig := buildInboundRouteConfiguration()
 
 	hcm := buildHTTPConnectionManager(name, routeConfig)
@@ -22,8 +26,9 @@ func buildDefaultInboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	networkFilters = append(networkFilters, buildHTTPConnectionManagerFilter(hcm))
 
 	return &listenerv3.FilterChain{
-		Name:    fmt.Sprintf("in_http_%s", name),
-		Filters: networkFilters,
+		Name:            fmt.Sprintf("in_http_%s", name),
+		Filters:         networkFilters,
+		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, spiffeDefaultBundleName),
 	}
 }
 

@@ -114,6 +114,7 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.0
+	k8s.io/cri-api v0.35.2
 	sigs.k8s.io/controller-runtime v0.22.4
 )
 

@@ -18,3 +18,25 @@ global:
 
 spiffe-oidc-discovery-provider:
   enabled: false
+
+spire-server:
+  controllerManager:
+    ignoreNamespaces:
+      - kube-system
+      - kube-public
+      - local-path-storage
+      # openshift creates many namespaces that should be typically ignored:
+      - openshift-.*
+      # ibmcloud specific namespaces:
+      - ibm-.*
+      - openebs
+
+spire-agent:
+  logFormat: json
+  sockets:
+    admin:
+      enabled: true
+  authorizedDelegates:
+    - spiffe://aether.internal/ns/aether-system/sa/aether-proxy
+  sds:
+    enabled: true
