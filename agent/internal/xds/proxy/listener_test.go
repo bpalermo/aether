@@ -33,9 +33,22 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 				Name:             "test-pod",
 				NetworkNamespace: "",
 			},
+			expectedError: true,
+		},
+		{
+			name:          "nil pod",
+			cniPod:        nil,
+			expectedError: true,
+		},
+		{
+			name: "empty validation context name",
+			cniPod: &cniv1.CNIPod{
+				Name:             "test-pod",
+				NetworkNamespace: "/var/run/netns/test",
+			},
 			expectedInboundName:  "inbound_http",
 			expectedOutboundName: "outbound_http",
-			expectedError:        true,
+			expectedError:        false,
 		},
 	}
 
@@ -81,9 +94,20 @@ func TestGenerateInboundHTTPListener(t *testing.T) {
 				Name:             "another-pod",
 				NetworkNamespace: "",
 			},
-			expectedStatPrefix:       "in_http_another-pod",
-			expectedNetworkNamespace: "",
-			expectedError:            true,
+			expectedError: true,
+		}, {
+			name:          "nil pod",
+			cniPod:        nil,
+			expectedError: true,
+		}, {
+			name: "custom validation context name",
+			cniPod: &cniv1.CNIPod{
+				Name:             "secure-pod",
+				NetworkNamespace: "/var/run/netns/secure",
+			},
+			expectedStatPrefix:       "in_http_secure-pod",
+			expectedNetworkNamespace: "/var/run/netns/secure",
+			expectedError:            false,
 		},
 	}
 
@@ -142,9 +166,12 @@ func TestGenerateOutboundHTTPListener(t *testing.T) {
 				Name:             "another-pod",
 				NetworkNamespace: "",
 			},
-			expectedStatPrefix:       "out_http_another-pod",
-			expectedNetworkNamespace: "",
-			expectedError:            true,
+			expectedError: true,
+		},
+		{
+			name:          "nil pod",
+			cniPod:        nil,
+			expectedError: true,
 		},
 	}
 

@@ -52,10 +52,12 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 }
 
 func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
-	cniPod := req.GetPod()
-	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
+	containerId := req.GetContainerId()
+	podName := req.GetName()
+	namespace := req.GetNamespace()
+	log := s.log.WithValues("pod", podName, "namespace", namespace)
 
-	containerID := types.ContainerID(cniPod.GetContainerId())
+	containerID := types.ContainerID(containerId)
 
 	storedPod, err := s.storage.GetResource(ctx, containerID)
 	if err != nil {

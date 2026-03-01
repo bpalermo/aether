@@ -52,13 +52,16 @@ func (c *CNIClient) AddPod(ctx context.Context, pod *cniv1.CNIPod) (*cniv1.AddPo
 }
 
 // RemovePod removes a pod from the registry
-func (c *CNIClient) RemovePod(ctx context.Context, cniPod *cniv1.CNIPod) (*cniv1.RemovePodResponse, error) {
+func (c *CNIClient) RemovePod(ctx context.Context, podName string, namespace string, containerId string) (*cniv1.RemovePodResponse, error) {
 	c.logger.Debug("removing pod to registry",
-		zap.String("name", cniPod.Name),
-		zap.String("namespace", cniPod.Namespace))
+		zap.String("containerId", containerId),
+		zap.String("name", podName),
+		zap.String("namespace", namespace))
 
 	req := &cniv1.RemovePodRequest{
-		Pod: cniPod,
+		Name:        podName,
+		Namespace:   namespace,
+		ContainerId: containerId,
 	}
 	return c.client.RemovePod(ctx, req)
 }

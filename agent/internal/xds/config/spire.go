@@ -1,20 +1,24 @@
 package config
 
 import (
+	"time"
+
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 const (
 	SpireAgentClusterName = "spire_sds"
-	spireAgentSocketFile  = "/run/secrets/workload-spiffe-uds/socket/spire-agent.sock"
+	spireAgentSocketFile  = "/run/secrets/workload-spiffe-uds/socket"
 )
 
 func NewLocalSpireCluster() *clusterv3.Cluster {
 	return &clusterv3.Cluster{
-		Name: SpireAgentClusterName,
+		Name:           SpireAgentClusterName,
+		ConnectTimeout: durationpb.New(250 * time.Millisecond),
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_EDS,
 		},

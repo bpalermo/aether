@@ -38,6 +38,9 @@ func generateInboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, er
 		return nil, fmt.Errorf("network namespace is required")
 	}
 
+	// TODO: fix to use the correct one
+	tlsCertificateSecretName := "default"
+
 	return &listenerv3.Listener{
 		Name: "inbound_http",
 		Address: &corev3.Address{
@@ -56,7 +59,7 @@ func generateInboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, er
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultInboundHTTPFilterChain(cniPod.GetName()),
+			buildDefaultInboundHTTPFilterChain(cniPod.GetName(), tlsCertificateSecretName),
 		},
 	}, nil
 }

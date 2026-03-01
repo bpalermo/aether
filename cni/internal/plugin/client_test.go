@@ -36,8 +36,8 @@ func (m *mockCNIService) AddPod(_ context.Context, req *cniv1.AddPodRequest) (*c
 
 func (m *mockCNIService) RemovePod(_ context.Context, req *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
 	m.removePodCalled = true
-	if req.Pod != nil {
-		m.lastRemovedName = req.Pod.Name
+	if req.GetName() != "" {
+		m.lastRemovedName = req.GetName()
 	}
 	return &cniv1.RemovePodResponse{
 		Result: cniv1.RemovePodResponse_SUCCESS,
@@ -147,11 +147,7 @@ func TestCNIClient_RemovePod(t *testing.T) {
 	}
 
 	// Test RemovePod
-	pod := &cniv1.CNIPod{
-		Name:      "test-pod",
-		Namespace: "default",
-	}
-	resp, err := client.RemovePod(ctx, pod)
+	resp, err := client.RemovePod(ctx, "test-pod", "default", "container-1234")
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, resp.Result)
@@ -216,21 +212,16 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 
 	// Test operations
 	pod := &cniv1.CNIPod{
-		Name:             "integration-pod",
-		Namespace:        "test",
-		NetworkNamespace: "/proc/5678/ns/net",
-		ContainerId:      "container-456",
+		Name:        "integration-pod",
+		Namespace:   "test",
+		ContainerId: "container-456",
 	}
 
 	addResp, err := client.AddPod(ctx, pod)
 	assert.NoError(t, err)
 	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, addResp.Result)
 
-	removePod := &cniv1.CNIPod{
-		Name:      "integration-pod",
-		Namespace: "test",
-	}
-	removeResp, err := client.RemovePod(ctx, removePod)
+	removeResp, err := client.RemovePod(ctx, "integration-pod", "test", "container-456")
 	assert.NoError(t, err)
 	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, removeResp.Result)
 }

@@ -38,6 +38,12 @@ spec:
             - name: sys
               mountPath: /host/sys
               readOnly: false
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            - name: containerd-run-dir
+              mountPath: /run/containerd
+              mountPropagation: HostToContainer
       volumes:
         - name: host-root
           hostPath:
@@ -51,4 +57,12 @@ spec:
           hostPath:
             path: /sys
             type: Directory
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+        - name: containerd-run-dir
+          hostPath:
+            path: /run/containerd
+            type: DirectoryOrCreate
       restartPolicy: Always

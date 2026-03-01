@@ -62,6 +62,7 @@ func NewLocalClusterForService(serviceName string, endpoint *registryv1.ServiceE
 				HealthyThreshold:   wrapperspb.UInt32(1),
 				UnhealthyThreshold: wrapperspb.UInt32(1),
 				Interval:           durationpb.New(5 * time.Second),
+				Timeout:            durationpb.New(1 * time.Second),
 				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
 					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
 						Host:            endpoint.GetKubernetesMetadata().GetPodName(),
