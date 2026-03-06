@@ -178,7 +178,11 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	socketPath := filepath.Join(t.TempDir(), "test.sock")
+	// Use a short temp dir to avoid exceeding the 104-byte Unix socket path limit on macOS.
+	tmpDir, err := os.MkdirTemp("/tmp", "cni-test-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	socketPath := filepath.Join(tmpDir, "test.sock")
 
 	// Setup real Unix socket server
 	lis, err := net.Listen("unix", socketPath)
