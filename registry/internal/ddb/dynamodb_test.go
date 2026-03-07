@@ -17,7 +17,9 @@ import (
 	tcdynamodb "github.com/testcontainers/testcontainers-go/modules/dynamodb"
 )
 
-func setupRegistry(ctx context.Context, t *testing.T) *ddb.DynamoDBRegistry {
+// startContainer creates a DynamoDB Local container and returns an aws.Config
+// pointing at it. The container is terminated when the test finishes.
+func startContainer(ctx context.Context, t *testing.T) aws.Config {
 	t.Helper()
 
 	container, err := tcdynamodb.Run(ctx, "amazon/dynamodb-local:2.5.4")
@@ -27,17 +29,20 @@ func setupRegistry(ctx context.Context, t *testing.T) *ddb.DynamoDBRegistry {
 	endpoint, err := container.ConnectionString(ctx)
 	require.NoError(t, err)
 
-	awsCfg := aws.Config{
+	return aws.Config{
 		Region: "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider(
 			"DUMMYID", "DUMMYKEY", ""),
 		BaseEndpoint: aws.String("http://" + endpoint),
 	}
+}
+
+// createTable creates the service registry table in DynamoDB Local.
+func createTable(ctx context.Context, t *testing.T, awsCfg aws.Config) {
+	t.Helper()
 
 	client := dynamodb.NewFromConfig(awsCfg)
-
-	// Create the service table
-	_, err = client.CreateTable(ctx, &dynamodb.CreateTableInput{
+	_, err := client.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName: aws.String(constants.DefaultDynamoDBServiceTableName),
 		KeySchema: []types.KeySchemaElement{
 			{AttributeName: aws.String("PK"), KeyType: types.KeyTypeHash},
@@ -50,9 +55,18 @@ func setupRegistry(ctx context.Context, t *testing.T) *ddb.DynamoDBRegistry {
 		BillingMode: types.BillingModePayPerRequest,
 	})
 	require.NoError(t, err)
+}
 
-	log := logr.Discard()
-	registry := ddb.NewDynamoDBRegistry(log, awsCfg)
+// setupRegistry creates a DynamoDB Local container, the service table, and
+// returns a started DynamoDBRegistry ready for use.
+func setupRegistry(ctx context.Context, t *testing.T) *ddb.DynamoDBRegistry {
+	t.Helper()
+
+	awsCfg := startContainer(ctx, t)
+	createTable(ctx, t, awsCfg)
+
+	registry := ddb.NewDynamoDBRegistry(logr.Discard(), awsCfg)
+	require.NoError(t, registry.Start(ctx))
 
 	return registry
 }
@@ -65,31 +79,19 @@ func TestDynamoDBRegistry_Start(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("successful start with existing table", func(t *testing.T) {
-		registry := setupRegistry(ctx, t)
+		awsCfg := startContainer(ctx, t)
+		createTable(ctx, t, awsCfg)
 
+		registry := ddb.NewDynamoDBRegistry(logr.Discard(), awsCfg)
 		err := registry.Start(ctx)
 		assert.NoError(t, err)
 	})
 
 	t.Run("fails when table does not exist", func(t *testing.T) {
-		container, err := tcdynamodb.Run(ctx, "amazon/dynamodb-local:2.5.4")
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = container.Terminate(ctx) })
+		awsCfg := startContainer(ctx, t)
 
-		endpoint, err := container.ConnectionString(ctx)
-		require.NoError(t, err)
-
-		awsCfg := aws.Config{
-			Region: "us-east-1",
-			Credentials: credentials.NewStaticCredentialsProvider(
-				"DUMMYID", "DUMMYKEY", ""),
-			BaseEndpoint: aws.String("http://" + endpoint),
-		}
-
-		log := logr.Discard()
-		registry := ddb.NewDynamoDBRegistry(log, awsCfg)
-
-		err = registry.Start(ctx)
+		registry := ddb.NewDynamoDBRegistry(logr.Discard(), awsCfg)
+		err := registry.Start(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "does not exist")
 	})
@@ -102,7 +104,6 @@ func TestDynamoDBRegistry_RegisterEndpoint(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	ep := &registryv1.ServiceEndpoint{
 		Ip:          "10.0.1.5",
@@ -153,7 +154,6 @@ func TestDynamoDBRegistry_RegisterMultipleEndpoints(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	endpoints := []*registryv1.ServiceEndpoint{
 		{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100},
@@ -186,7 +186,6 @@ func TestDynamoDBRegistry_UnregisterEndpoint(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	endpoints := []*registryv1.ServiceEndpoint{
 		{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100},
@@ -214,7 +213,6 @@ func TestDynamoDBRegistry_UnregisterEndpoints(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	endpoints := []*registryv1.ServiceEndpoint{
 		{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100},
@@ -243,7 +241,6 @@ func TestDynamoDBRegistry_UnregisterEndpoints_EmptyList(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	err := registry.UnregisterEndpoints(ctx, "nonexistent", []string{})
 	assert.NoError(t, err)
@@ -256,7 +253,6 @@ func TestDynamoDBRegistry_ListEndpoints_Empty(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	endpoints, err := registry.ListEndpoints(ctx, "nonexistent", registryv1.Service_HTTP)
 	require.NoError(t, err)
@@ -270,7 +266,6 @@ func TestDynamoDBRegistry_ListAllEndpoints(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	services := map[string][]*registryv1.ServiceEndpoint{
 		"frontend": {
@@ -310,7 +305,6 @@ func TestDynamoDBRegistry_ListAllEndpoints_Empty(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	allEndpoints, err := registry.ListAllEndpoints(ctx, registryv1.Service_HTTP)
 	require.NoError(t, err)
@@ -324,7 +318,6 @@ func TestDynamoDBRegistry_OverwriteEndpoint(t *testing.T) {
 
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
-	require.NoError(t, registry.Start(ctx))
 
 	ep1 := &registryv1.ServiceEndpoint{
 		Ip:          "10.0.1.1",
