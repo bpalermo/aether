@@ -24,7 +24,6 @@ go_test(
     deps = [
         ":ddb",
         "//api/aether/registry/v1:registry",
-        "//constants",
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_aws_aws_sdk_go_v2_credentials//:credentials",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",

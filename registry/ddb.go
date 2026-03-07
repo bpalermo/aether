@@ -6,7 +6,13 @@ import (
 	"github.com/go-logr/logr"
 )
 
+// DynamoDBOption configures a DynamoDB registry.
+type DynamoDBOption = ddb.Option
+
+// WithDynamoDBTableName overrides the default DynamoDB table name.
+var WithDynamoDBTableName = ddb.WithTableName
+
 // NewDynamoDBRegistry creates a new Registry implementation backed by DynamoDB.
-func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) Registry {
-	return ddb.NewDynamoDBRegistry(log, awsCfg)
+func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config, opts ...DynamoDBOption) Registry {
+	return ddb.NewDynamoDBRegistry(log, awsCfg, opts...)
 }

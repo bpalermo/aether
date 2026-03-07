@@ -2,6 +2,9 @@ package ddb_test
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -9,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry/internal/ddb"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -17,33 +19,50 @@ import (
 	tcdynamodb "github.com/testcontainers/testcontainers-go/modules/dynamodb"
 )
 
-// startContainer creates a DynamoDB Local container and returns an aws.Config
-// pointing at it. The container is terminated when the test finishes.
-func startContainer(ctx context.Context, t *testing.T) aws.Config {
-	t.Helper()
+var testAWSCfg aws.Config
 
+func TestMain(m *testing.M) {
+	ctx := context.Background()
 	container, err := tcdynamodb.Run(ctx, "amazon/dynamodb-local:2.5.4")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = container.Terminate(ctx) })
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to start dynamodb container: %v\n", err)
+		os.Exit(1)
+	}
 
 	endpoint, err := container.ConnectionString(ctx)
-	require.NoError(t, err)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		fmt.Fprintf(os.Stderr, "failed to get endpoint: %v\n", err)
+		os.Exit(1)
+	}
 
-	return aws.Config{
+	testAWSCfg = aws.Config{
 		Region: "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider(
 			"DUMMYID", "DUMMYKEY", ""),
 		BaseEndpoint: aws.String("http://" + endpoint),
 	}
+
+	code := m.Run()
+	_ = container.Terminate(ctx)
+	os.Exit(code)
 }
 
-// createTable creates the service registry table in DynamoDB Local.
-func createTable(ctx context.Context, t *testing.T, awsCfg aws.Config) {
+// tableName returns a unique table name derived from the test name.
+func tableName(t *testing.T) string {
+	t.Helper()
+	// DynamoDB table names: 3-255 chars, [a-zA-Z0-9_.-]
+	name := strings.ReplaceAll(t.Name(), "/", "_")
+	return name
+}
+
+// createTable creates a DynamoDB table with the given name.
+func createTable(ctx context.Context, t *testing.T, name string) {
 	t.Helper()
 
-	client := dynamodb.NewFromConfig(awsCfg)
+	client := dynamodb.NewFromConfig(testAWSCfg)
 	_, err := client.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName: aws.String(constants.DefaultDynamoDBServiceTableName),
+		TableName: aws.String(name),
 		KeySchema: []types.KeySchemaElement{
 			{AttributeName: aws.String("PK"), KeyType: types.KeyTypeHash},
 			{AttributeName: aws.String("SK"), KeyType: types.KeyTypeRange},
@@ -57,15 +76,14 @@ func createTable(ctx context.Context, t *testing.T, awsCfg aws.Config) {
 	require.NoError(t, err)
 }
 
-// setupRegistry creates a DynamoDB Local container, the service table, and
-// returns a started DynamoDBRegistry ready for use.
+// setupRegistry creates a per-test table and returns a started registry.
 func setupRegistry(ctx context.Context, t *testing.T) *ddb.DynamoDBRegistry {
 	t.Helper()
 
-	awsCfg := startContainer(ctx, t)
-	createTable(ctx, t, awsCfg)
+	table := tableName(t)
+	createTable(ctx, t, table)
 
-	registry := ddb.NewDynamoDBRegistry(logr.Discard(), awsCfg)
+	registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName(table))
 	require.NoError(t, registry.Start(ctx))
 
 	return registry
@@ -79,18 +97,16 @@ func TestDynamoDBRegistry_Start(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("successful start with existing table", func(t *testing.T) {
-		awsCfg := startContainer(ctx, t)
-		createTable(ctx, t, awsCfg)
+		table := tableName(t)
+		createTable(ctx, t, table)
 
-		registry := ddb.NewDynamoDBRegistry(logr.Discard(), awsCfg)
+		registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName(table))
 		err := registry.Start(ctx)
 		assert.NoError(t, err)
 	})
 
 	t.Run("fails when table does not exist", func(t *testing.T) {
-		awsCfg := startContainer(ctx, t)
-
-		registry := ddb.NewDynamoDBRegistry(logr.Discard(), awsCfg)
+		registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName("nonexistent"))
 		err := registry.Start(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "does not exist")
