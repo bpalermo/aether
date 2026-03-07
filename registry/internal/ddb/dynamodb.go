@@ -200,8 +200,8 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 		TableName:              aws.String(r.tableName),
 		KeyConditionExpression: aws.String("PK = :pk AND SK = :sk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("service:%s", service)},
-			":sk": &types.AttributeValueMemberS{Value: fmt.Sprintf("protocol:%s", protocol)},
+			":pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("service#%s", service)},
+			":sk": &types.AttributeValueMemberS{Value: fmt.Sprintf("protocol#%s", protocol)},
 		},
 	}
 
@@ -211,14 +211,21 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 		return nil, fmt.Errorf("failed to query endpoints: %w", err)
 	}
 
-	endpoints := make([]*registryv1.ServiceEndpoint, 0, len(result.Items))
+	var endpoints []*registryv1.ServiceEndpoint
 	for _, item := range result.Items {
-		var endpoint registryv1.ServiceEndpoint
-		if err := attributevalue.UnmarshalMap(item, &endpoint); err != nil {
-			r.log.Error(err, "failed to unmarshal endpoint item")
+		endpointsAttr, ok := item["endpoints"].(*types.AttributeValueMemberM)
+		if !ok {
 			continue
 		}
-		endpoints = append(endpoints, &endpoint)
+
+		for _, epAttr := range endpointsAttr.Value {
+			var endpoint registryv1.ServiceEndpoint
+			if err := attributevalue.Unmarshal(epAttr, &endpoint); err != nil {
+				r.log.Error(err, "failed to unmarshal endpoint")
+				continue
+			}
+			endpoints = append(endpoints, &endpoint)
+		}
 	}
 
 	r.log.V(1).Info("listed endpoints", "service", service, "protocol", protocol, "count", len(endpoints))
