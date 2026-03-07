@@ -18,7 +18,9 @@ go_library(
 
 go_test(
     name = "ddb_test",
+    size = "medium",
     srcs = ["dynamodb_test.go"],
+    tags = ["integration"],
     deps = [
         ":ddb",
         "//api/aether/registry/v1:registry",
