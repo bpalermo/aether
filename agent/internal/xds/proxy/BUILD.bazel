@@ -4,7 +4,6 @@ go_library(
     name = "proxy",
     srcs = [
         "cluster.go",
-        "doc.go",
         "endpoint.go",
         "filterchain.go",
         "httpfilter.go",
