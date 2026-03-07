@@ -21,6 +21,11 @@ type AgentConfig struct {
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
 
+	// RegistryBackend selects the registry backend ("dynamodb" or "etcd")
+	RegistryBackend string
+	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
+	EtcdEndpoints []string
+
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
 }
@@ -32,5 +37,7 @@ func NewAgentConfig() *AgentConfig {
 		ProxyServiceNodeID:     constants.DefaultProxyID,
 		CNIServerConfig:        cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
+		RegistryBackend:        "dynamodb",
+		EtcdEndpoints:          []string{"localhost:2379"},
 	}
 }
