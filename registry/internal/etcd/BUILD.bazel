@@ -15,6 +15,7 @@ go_library(
 
 go_test(
     name = "etcd_test",
+    size = "medium",
     srcs = ["etcd_test.go"],
     tags = ["integration"],
     deps = [
