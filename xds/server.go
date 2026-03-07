@@ -12,6 +12,10 @@ import (
 	"google.golang.org/grpc"
 )
 
+// Server is a gRPC server that manages lifecycle and provides health checks.
+// It supports both TCP and Unix domain socket transports and implements graceful shutdown.
+//
+// Server is safe for concurrent use.
 type Server struct {
 	Log logr.Logger
 
@@ -25,9 +29,11 @@ type Server struct {
 	callback ServerCallback
 }
 
-// ServerOption is a functional option for configuring the Server
+// ServerOption is a functional option for configuring a Server.
 type ServerOption func(*Server)
 
+// NewServer creates a new Server with the given configuration and logger.
+// The server is not started until Start is called.
 func NewServer(cfg *ServerConfig, log logr.Logger, opts ...ServerOption) Server {
 	s := Server{
 		Log:       log.WithName("xds"),
@@ -44,16 +50,23 @@ func NewServer(cfg *ServerConfig, log logr.Logger, opts ...ServerOption) Server 
 	return s
 }
 
+// WithGRPCServer sets a pre-configured gRPC server to be used by the Server.
+// If not provided, a new gRPC server will be created with default settings.
 func WithGRPCServer(srv *grpc.Server) ServerOption {
 	return func(s *Server) {
 		s.gSrv = srv
 	}
 }
 
+// AddCallback registers a ServerCallback to be invoked before the server starts listening.
 func (s *Server) AddCallback(callback ServerCallback) {
 	s.callback = callback
 }
 
+// Start starts the gRPC server and blocks until the context is cancelled or the server errors.
+// It invokes the PreListen callback before starting to listen if a callback is registered.
+// For Unix domain sockets, it sets appropriate permissions on the socket file.
+// The server will attempt graceful shutdown when the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	s.Log.V(1).Info("starting server", "network", s.cfg.Network, "address", s.cfg.Address)
 
@@ -100,6 +113,10 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// shutdown performs graceful shutdown of the gRPC server.
+// It first sets readiness to false, then waits for the server to gracefully stop.
+// If graceful stop takes longer than the configured ShutdownTimeout, the server
+// is forcefully stopped.
 func (s *Server) shutdown() error {
 	s.readiness.Store(false)
 

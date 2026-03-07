@@ -1,3 +1,7 @@
+// Package proxy provides functions to generate Envoy resource types
+// (listeners, clusters, endpoints, routes, filter chains) from pod and
+// service registry data. It encapsulates the details of building Envoy
+// configurations for transparent traffic interception and service discovery.
 package proxy
 
 import (
@@ -14,9 +18,13 @@ import (
 )
 
 const (
+	// defaultLocalClusterUpstreamBindConfigAddress is the default bind address for local cluster upstreams
 	defaultLocalClusterUpstreamBindConfigAddress = "127.0.0.1"
 )
 
+// NewClusterForService creates an Envoy cluster for a service.
+// The cluster uses EDS for dynamic endpoint discovery via ADS.
+// Upstream connections use HTTP/2 protocol.
 func NewClusterForService(serviceName string) *clusterv3.Cluster {
 	protocolOptions := config.Http2ProtocolOptions()
 
@@ -34,6 +42,9 @@ func NewClusterForService(serviceName string) *clusterv3.Cluster {
 	}
 }
 
+// NewLocalClusterForService creates an Envoy cluster for a local service endpoint.
+// The cluster binds to 127.0.0.1 and uses the target pod's network namespace.
+// It includes health checks and uses HTTP/2 for upstream connections.
 func NewLocalClusterForService(serviceName string, endpoint *registryv1.ServiceEndpoint) *clusterv3.Cluster {
 	protocolOptions := config.Http2ProtocolOptions()
 

@@ -10,9 +10,12 @@ import (
 )
 
 const (
+	// spiffeDefaultBundleName is the SPIRE default bundle name used for root CA trust
 	spiffeDefaultBundleName = "ROOTCA"
 )
 
+// buildDefaultInboundHTTPFilterChain creates a filter chain for inbound HTTP traffic.
+// It includes TLS configuration, client certificate forwarding, and an HTTP connection manager.
 func buildDefaultInboundHTTPFilterChain(name string, tlsCertificateSecretName string) *listenerv3.FilterChain {
 	routeConfig := buildInboundRouteConfiguration()
 
@@ -32,6 +35,9 @@ func buildDefaultInboundHTTPFilterChain(name string, tlsCertificateSecretName st
 	}
 }
 
+// buildDefaultOutboundHTTPFilterChain creates a filter chain for outbound HTTP traffic.
+// It uses RDS (Route Discovery Service) to dynamically fetch routes and includes
+// network namespace filter state.
 func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager(name, nil)
 

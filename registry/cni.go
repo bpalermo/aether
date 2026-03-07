@@ -9,6 +9,10 @@ import (
 	"github.com/bpalermo/aether/constants"
 )
 
+// NewServiceEndpointFromCNIPod creates a ServiceEndpoint from a CNIPod.
+// It extracts the service name from the pod's labels and the port and weight from annotations.
+// The service protocol is always HTTP. Container and Kubernetes metadata are included
+// along with node locality information.
 func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
 	protocol := registryv1.Service_HTTP
 
@@ -51,6 +55,7 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 	return serviceName, protocol, endpoint, nil
 }
 
+// ExtractCNIPodInformation extracts the service name and IP addresses from a CNIPod.
 func ExtractCNIPodInformation(pod *cniv1.CNIPod) (string, []string, error) {
 	serviceName, err := getServiceNameFromLabels(pod.GetLabels())
 	if err != nil {
@@ -60,6 +65,7 @@ func ExtractCNIPodInformation(pod *cniv1.CNIPod) (string, []string, error) {
 	return serviceName, pod.GetIps(), nil
 }
 
+// getServiceNameFromLabels extracts the service name from a pod's labels.
 func getServiceNameFromLabels(labels map[string]string) (string, error) {
 	serviceName, ok := labels[constants.LabelAetherService]
 	if !ok {
@@ -68,6 +74,8 @@ func getServiceNameFromLabels(labels map[string]string) (string, error) {
 	return serviceName, nil
 }
 
+// getPortFromAnnotations extracts the endpoint port from pod annotations.
+// If the port annotation is not present, it returns the default endpoint port.
 func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
 	s, ok := annotations[constants.AnnotationEndpointPort]
 	if !ok {
@@ -81,6 +89,8 @@ func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
 	return uint16(port), nil
 }
 
+// getWeightFromAnnotations extracts the endpoint weight from pod annotations.
+// If the weight annotation is not present, it returns the default endpoint weight.
 func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 	s, ok := annotations[constants.AnnotationEndpointWeight]
 	if !ok {
@@ -95,6 +105,8 @@ func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 	return uint32(weight), nil
 }
 
+// getEndpointMetadataFromAnnotations extracts endpoint metadata from pod annotations.
+// All annotations with the aether endpoint metadata prefix are included in the result.
 func getEndpointMetadataFromAnnotations(annotations map[string]string) map[string]string {
 	metadata := map[string]string{}
 	prefix := constants.AnnotationAetherEndpointMetadataPrefix
