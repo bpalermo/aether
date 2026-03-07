@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "etcd",
+    srcs = ["etcd.go"],
+    importpath = "github.com/bpalermo/aether/registry/internal/etcd",
+    visibility = ["//registry:__subpackages__"],
+    deps = [
+        "//api/aether/registry/v1:registry",
+        "@com_github_go_logr_logr//:logr",
+        "@io_etcd_go_etcd_client_v3//:client",
+        "@org_golang_google_protobuf//proto",
+    ],
+)
+
+go_test(
+    name = "etcd_test",
+    srcs = ["etcd_test.go"],
+    tags = ["integration"],
+    deps = [
+        ":etcd",
+        "//api/aether/registry/v1:registry",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@com_github_testcontainers_testcontainers_go_modules_etcd//:etcd",
+    ],
+)

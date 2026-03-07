@@ -52,6 +52,8 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
+	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "dynamodb", "Registry backend (dynamodb, etcd)")
+	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "etcd endpoints")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
 	_ = rootCmd.MarkPersistentFlagRequired("node-name")
@@ -149,13 +151,24 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 }
 
 func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
-	awsCfg, err := awsconfig.LoadConfig(ctx)
-	if err != nil {
-		return nil, err
+	var reg registry.Registry
+
+	switch cfg.RegistryBackend {
+	case "dynamodb":
+		awsCfg, err := awsconfig.LoadConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		reg = registry.NewDynamoDBRegistry(l, awsCfg)
+	case "etcd":
+		reg = registry.NewEtcdRegistry(l, registry.EtcdConfig{
+			Endpoints: cfg.EtcdEndpoints,
+		})
+	default:
+		return nil, fmt.Errorf("unknown registry backend: %s", cfg.RegistryBackend)
 	}
 
-	reg := registry.NewDynamoDBRegistry(l, awsCfg)
-	if err = m.Add(reg); err != nil {
+	if err := m.Add(reg); err != nil {
 		return nil, err
 	}
 
