@@ -22,4 +22,4 @@ jobs:
           repository-cache: true
       - name: Test
         run: |
-          bazel test --test_output=errors --test_size_filters=medium //registry/internal/etcd:etcd_test
+          bazel test --test_output=errors //registry/internal/etcd:etcd_test
