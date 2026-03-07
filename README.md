@@ -4,20 +4,19 @@ A Kubernetes service mesh data plane built in Go. Aether runs a per-node agent (
 
 ## Architecture
 
-```
-┌─────────────────────────────────────── Node ───────────────────────────────────────┐
-│                                                                                    │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────────────────────────┐    │
-│  │  CNI Plugin   │────▶│  Agent       │────▶│  Envoy (xDS)                     │    │
-│  │  (intercept)  │     │  (DaemonSet) │     │  listeners, clusters, endpoints  │    │
-│  └──────────────┘     └──────┬───────┘     └──────────────────────────────────┘    │
-│                              │                                                     │
-└──────────────────────────────┼─────────────────────────────────────────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │  Service Registry    │
-                    │  (DynamoDB or etcd)  │
-                    └─────────────────────┘
+```mermaid
+graph TD
+    subgraph Node
+        CNI["CNI Plugin<br/><i>traffic interception</i>"]
+        Agent["Agent<br/><i>DaemonSet</i>"]
+        Envoy["Envoy<br/><i>listeners, clusters, endpoints, routes</i>"]
+
+        CNI -- "gRPC<br/>Unix socket" --> Agent
+        Agent -- "xDS" --> Envoy
+    end
+
+    Registry["Service Registry<br/><i>DynamoDB or etcd</i>"]
+    Agent -- "endpoint discovery" --> Registry
 ```
 
 **Agent** — Runs on each node via `controller-runtime`. Manages the xDS server, CNI gRPC server, and registry connection as runnables. Generates Envoy configuration (listeners, clusters, endpoints, routes) from local pod data and the service registry.
