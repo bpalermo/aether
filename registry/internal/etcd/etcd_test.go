@@ -2,6 +2,9 @@ package etcd_test
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,16 +16,60 @@ import (
 	tcetcd "github.com/testcontainers/testcontainers-go/modules/etcd"
 )
 
-func setupEtcd(ctx context.Context, t *testing.T) (*tcetcd.EtcdContainer, string) {
-	t.Helper()
+var testEndpoint string
+
+func TestMain(m *testing.M) {
+	ctx := context.Background()
 
 	container, err := tcetcd.Run(ctx, "gcr.io/etcd-development/etcd:v3.5.21")
-	require.NoError(t, err)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to start etcd container: %v\n", err)
+		os.Exit(1)
+	}
 
-	endpoint, err := container.ClientEndpoint(ctx)
-	require.NoError(t, err)
+	testEndpoint, err = container.ClientEndpoint(ctx)
+	if err != nil {
+		_ = container.Terminate(ctx)
+		fmt.Fprintf(os.Stderr, "failed to get endpoint: %v\n", err)
+		os.Exit(1)
+	}
 
-	return container, endpoint
+	// Verify etcd is ready before running tests
+	ready := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		Endpoints:   []string{testEndpoint},
+		DialTimeout: 30 * time.Second,
+	})
+	if err := ready.Start(ctx); err != nil {
+		_ = container.Terminate(ctx)
+		fmt.Fprintf(os.Stderr, "etcd not ready: %v\n", err)
+		os.Exit(1)
+	}
+	_ = ready.Close()
+
+	code := m.Run()
+	_ = container.Terminate(ctx)
+	os.Exit(code)
+}
+
+// keyPrefix returns a unique etcd key prefix derived from the test name.
+func keyPrefix(t *testing.T) string {
+	t.Helper()
+	return "/" + strings.ReplaceAll(t.Name(), "/", "_")
+}
+
+// setupRegistry returns a started EtcdRegistry with a per-test key prefix.
+func setupRegistry(ctx context.Context, t *testing.T) *etcd.EtcdRegistry {
+	t.Helper()
+
+	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		Endpoints:   []string{testEndpoint},
+		DialTimeout: 5 * time.Second,
+		KeyPrefix:   keyPrefix(t),
+	})
+	require.NoError(t, registry.Start(ctx))
+	t.Cleanup(func() { _ = registry.Close() })
+
+	return registry
 }
 
 func TestEtcdRegistry_Start(t *testing.T) {
@@ -31,24 +78,21 @@ func TestEtcdRegistry_Start(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
-
-	log := logr.Discard()
 
 	t.Run("successful connection", func(t *testing.T) {
-		registry := etcd.NewEtcdRegistry(log, etcd.Config{
-			Endpoints:   []string{endpoint},
+		registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+			Endpoints:   []string{testEndpoint},
 			DialTimeout: 5 * time.Second,
+			KeyPrefix:   keyPrefix(t),
 		})
 
 		err := registry.Start(ctx)
 		assert.NoError(t, err)
-		defer func() { _ = registry.Close() }()
+		_ = registry.Close()
 	})
 
 	t.Run("invalid endpoint", func(t *testing.T) {
-		registry := etcd.NewEtcdRegistry(log, etcd.Config{
+		registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
 			Endpoints:   []string{"localhost:99999"},
 			DialTimeout: 1 * time.Second,
 		})
@@ -64,16 +108,7 @@ func TestEtcdRegistry_RegisterEndpoint(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
-
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
+	registry := setupRegistry(ctx, t)
 
 	ep := &registryv1.ServiceEndpoint{
 		Ip:          "10.0.1.5",
@@ -101,7 +136,6 @@ func TestEtcdRegistry_RegisterEndpoint(t *testing.T) {
 	err := registry.RegisterEndpoint(ctx, "frontend", registryv1.Service_HTTP, ep)
 	assert.NoError(t, err)
 
-	// Verify endpoint was registered by listing it
 	endpoints, err := registry.ListEndpoints(ctx, "frontend", registryv1.Service_HTTP)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 1)
@@ -123,16 +157,7 @@ func TestEtcdRegistry_RegisterMultipleEndpoints(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
-
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
+	registry := setupRegistry(ctx, t)
 
 	endpoints := []*registryv1.ServiceEndpoint{
 		{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100},
@@ -149,7 +174,6 @@ func TestEtcdRegistry_RegisterMultipleEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, listed, 3)
 
-	// Verify all IPs are present
 	ips := make(map[string]bool)
 	for _, ep := range listed {
 		ips[ep.Ip] = true
@@ -165,18 +189,8 @@ func TestEtcdRegistry_UnregisterEndpoint(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
+	registry := setupRegistry(ctx, t)
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
-
-	// Register endpoints
 	endpoints := []*registryv1.ServiceEndpoint{
 		{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100},
 		{Ip: "10.0.1.2", ClusterName: "cluster-1", Port: 8080, Weight: 100},
@@ -187,11 +201,9 @@ func TestEtcdRegistry_UnregisterEndpoint(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Unregister one endpoint
 	err := registry.UnregisterEndpoint(ctx, "backend", "10.0.1.1")
 	require.NoError(t, err)
 
-	// Verify only one endpoint remains
 	listed, err := registry.ListEndpoints(ctx, "backend", registryv1.Service_HTTP)
 	require.NoError(t, err)
 	assert.Len(t, listed, 1)
@@ -204,18 +216,8 @@ func TestEtcdRegistry_UnregisterEndpoints(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
+	registry := setupRegistry(ctx, t)
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
-
-	// Register endpoints
 	endpoints := []*registryv1.ServiceEndpoint{
 		{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100},
 		{Ip: "10.0.1.2", ClusterName: "cluster-1", Port: 8080, Weight: 100},
@@ -227,11 +229,9 @@ func TestEtcdRegistry_UnregisterEndpoints(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Unregister multiple endpoints
 	err := registry.UnregisterEndpoints(ctx, "workers", []string{"10.0.1.1", "10.0.1.3"})
 	require.NoError(t, err)
 
-	// Verify only one endpoint remains
 	listed, err := registry.ListEndpoints(ctx, "workers", registryv1.Service_HTTP)
 	require.NoError(t, err)
 	assert.Len(t, listed, 1)
@@ -244,18 +244,8 @@ func TestEtcdRegistry_UnregisterEndpoints_EmptyList(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
+	registry := setupRegistry(ctx, t)
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
-
-	// Unregistering empty list should not error
 	err := registry.UnregisterEndpoints(ctx, "nonexistent", []string{})
 	assert.NoError(t, err)
 }
@@ -266,18 +256,8 @@ func TestEtcdRegistry_ListEndpoints_Empty(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
+	registry := setupRegistry(ctx, t)
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
-
-	// List endpoints for non-existent service
 	endpoints, err := registry.ListEndpoints(ctx, "nonexistent", registryv1.Service_HTTP)
 	require.NoError(t, err)
 	assert.Empty(t, endpoints)
@@ -289,18 +269,8 @@ func TestEtcdRegistry_ListAllEndpoints(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
+	registry := setupRegistry(ctx, t)
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
-
-	// Register endpoints for multiple services
 	services := map[string][]*registryv1.ServiceEndpoint{
 		"frontend": {
 			{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100},
@@ -323,7 +293,6 @@ func TestEtcdRegistry_ListAllEndpoints(t *testing.T) {
 		}
 	}
 
-	// List all endpoints
 	allEndpoints, err := registry.ListAllEndpoints(ctx, registryv1.Service_HTTP)
 	require.NoError(t, err)
 
@@ -339,18 +308,8 @@ func TestEtcdRegistry_ListAllEndpoints_Empty(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
+	registry := setupRegistry(ctx, t)
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
-
-	// List all endpoints when none exist
 	allEndpoints, err := registry.ListAllEndpoints(ctx, registryv1.Service_HTTP)
 	require.NoError(t, err)
 	assert.Empty(t, allEndpoints)
@@ -362,38 +321,26 @@ func TestEtcdRegistry_OverwriteEndpoint(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
+	registry := setupRegistry(ctx, t)
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 5 * time.Second,
-	})
-	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
-
-	// Register endpoint
-	endpoint1 := &registryv1.ServiceEndpoint{
+	ep1 := &registryv1.ServiceEndpoint{
 		Ip:          "10.0.1.1",
 		ClusterName: "cluster-1",
 		Port:        8080,
 		Weight:      100,
 	}
-	err := registry.RegisterEndpoint(ctx, "service", registryv1.Service_HTTP, endpoint1)
+	err := registry.RegisterEndpoint(ctx, "service", registryv1.Service_HTTP, ep1)
 	require.NoError(t, err)
 
-	// Register same IP with different data (should overwrite)
-	endpoint2 := &registryv1.ServiceEndpoint{
+	ep2 := &registryv1.ServiceEndpoint{
 		Ip:          "10.0.1.1",
 		ClusterName: "cluster-2",
 		Port:        9090,
 		Weight:      200,
 	}
-	err = registry.RegisterEndpoint(ctx, "service", registryv1.Service_HTTP, endpoint2)
+	err = registry.RegisterEndpoint(ctx, "service", registryv1.Service_HTTP, ep2)
 	require.NoError(t, err)
 
-	// Verify only one endpoint exists with updated data
 	endpoints, err := registry.ListEndpoints(ctx, "service", registryv1.Service_HTTP)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 1)
@@ -410,17 +357,14 @@ func TestEtcdRegistry_CustomKeyPrefix(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
+	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   "/custom/prefix",
 	})
 	require.NoError(t, registry.Start(ctx))
-	defer func() { _ = registry.Close() }()
+	t.Cleanup(func() { _ = registry.Close() })
 
 	ep := &registryv1.ServiceEndpoint{
 		Ip:          "10.0.1.1",
@@ -444,13 +388,11 @@ func TestEtcdRegistry_Close(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	container, endpoint := setupEtcd(ctx, t)
-	defer func() { _ = container.Terminate(ctx) }()
 
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
-		Endpoints:   []string{endpoint},
+	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
+		KeyPrefix:   keyPrefix(t),
 	})
 	require.NoError(t, registry.Start(ctx))
 
@@ -463,13 +405,11 @@ func TestEtcdRegistry_Close(t *testing.T) {
 }
 
 func TestEtcdRegistry_CloseWithoutStart(t *testing.T) {
-	log := logr.Discard()
-	registry := etcd.NewEtcdRegistry(log, etcd.Config{
+	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
 		Endpoints:   []string{"localhost:2379"},
 		DialTimeout: 5 * time.Second,
 	})
 
-	// Close without starting should not error
 	err := registry.Close()
 	assert.NoError(t, err)
 }
