@@ -18,6 +18,20 @@ go_library(
 
 go_test(
     name = "ddb_test",
+    size = "medium",
     srcs = ["dynamodb_test.go"],
-    embed = [":ddb"],
+    tags = ["integration"],
+    deps = [
+        ":ddb",
+        "//api/aether/registry/v1:registry",
+        "//constants",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_credentials//:credentials",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//types",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@com_github_testcontainers_testcontainers_go_modules_dynamodb//:dynamodb",
+    ],
 )

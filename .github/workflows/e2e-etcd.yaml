@@ -1,4 +1,4 @@
-name: test
+name: e2e-etcd
 
 on:
   pull_request:
@@ -8,11 +8,8 @@ on:
 permissions:
   contents: read
 
-env:
-  IMAGE_REGISTRY: index.docker.io/palermo
-
 jobs:
-  test:
+  e2e-etcd:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,6 +20,6 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
-      - name: Build
+      - name: Test
         run: |
-          make test
+          bazel test --test_output=errors //registry/internal/etcd:etcd_test
