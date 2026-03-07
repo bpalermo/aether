@@ -29,15 +29,29 @@ type DynamoDBRegistry struct {
 	tableName string
 }
 
+// Option configures a DynamoDBRegistry.
+type Option func(*DynamoDBRegistry)
+
+// WithTableName overrides the default table name.
+func WithTableName(name string) Option {
+	return func(r *DynamoDBRegistry) {
+		r.tableName = name
+	}
+}
+
 // NewDynamoDBRegistry creates a new DynamoDB-backed Registry.
 // It uses the AWS SDK client from the provided configuration and connects to
 // the default service table name.
-func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) *DynamoDBRegistry {
-	return &DynamoDBRegistry{
+func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config, opts ...Option) *DynamoDBRegistry {
+	r := &DynamoDBRegistry{
 		log:       log.WithName("registry-dynamodb"),
 		client:    dynamodb.NewFromConfig(awsCfg),
 		tableName: constants.DefaultDynamoDBServiceTableName,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Start initializes the DynamoDB registry by verifying that the service table exists.
