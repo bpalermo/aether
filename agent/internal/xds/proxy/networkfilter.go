@@ -12,13 +12,17 @@ import (
 )
 
 const (
+	// networkNamespaceFilterStateKey is the filter state key for the network namespace
 	networkNamespaceFilterStateKey = "aether.network.network_namespace"
 )
 
+// buildNetworkNamespaceFilterState creates a filter that captures the network namespace
+// from Envoy's filter state and makes it available to upstream filters.
 func buildNetworkNamespaceFilterState() *listenerv3.Filter {
 	return buildSetFilterState(networkNamespaceFilterStateKey, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%")
 }
 
+// buildSetFilterState creates a set_filter_state network filter that stores a value in filter state.
 func buildSetFilterState(objectKey string, inlineStringFormatString string) *listenerv3.Filter {
 	filter := &set_filter_state_v3.Config{
 		OnNewConnection: []*setFilterStatev3.FilterStateValue{
@@ -45,6 +49,9 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 	return networkFilter("envoy.filters.network.set_filter_state", filter)
 }
 
+// buildHTTPConnectionManager creates an HTTP connection manager for processing HTTP traffic.
+// It includes a router HTTP filter and uses the provided route configuration.
+// If routeConfig is nil, routes will be retrieved via RDS.
 func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
 	return &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: name,
@@ -58,10 +65,12 @@ func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfigura
 	}
 }
 
+// buildHTTPConnectionManagerFilter creates a network filter wrapping an HTTP connection manager.
 func buildHTTPConnectionManagerFilter(config *http_connection_managerv3.HttpConnectionManager) *listenerv3.Filter {
 	return networkFilter("envoy.http_connection_manager", config)
 }
 
+// networkFilter creates a network filter with the given name and configuration.
 func networkFilter(name string, msg proto.Message) *listenerv3.Filter {
 	return &listenerv3.Filter{
 		Name: name,

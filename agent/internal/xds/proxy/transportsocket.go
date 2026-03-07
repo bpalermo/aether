@@ -9,9 +9,12 @@ import (
 )
 
 const (
+	// tlsTransportSocketName is the Envoy TLS transport socket name
 	tlsTransportSocketName = "envoy.transport_sockets.tls"
 )
 
+// DownstreamTransportSocket creates a TLS transport socket for downstream (inbound) connections.
+// It requires mutual TLS and retrieves certificates and validation context from SPIRE via SDS.
 func DownstreamTransportSocket(tlsCertificateSecretName string, validationContextName string) *corev3.TransportSocket {
 	downstreamTlsContext := &transport_sockets_v3.DownstreamTlsContext{
 		RequireClientCertificate: wrapperspb.Bool(true),
@@ -66,6 +69,8 @@ func DownstreamTransportSocket(tlsCertificateSecretName string, validationContex
 	return transportSocket(downstreamTlsContext)
 }
 
+// UpstreamTransportSocket creates a TLS transport socket for upstream (outbound) connections.
+// It requires mutual TLS and retrieves validation context from SPIRE via SDS.
 func UpstreamTransportSocket(validationContextName string) *corev3.TransportSocket {
 	upstreamTlsContext := &transport_sockets_v3.DownstreamTlsContext{
 		RequireClientCertificate: wrapperspb.Bool(true),
@@ -98,6 +103,7 @@ func UpstreamTransportSocket(validationContextName string) *corev3.TransportSock
 	return transportSocket(upstreamTlsContext)
 }
 
+// transportSocket creates a TLS transport socket from the given TLS context message.
 func transportSocket(msg proto.Message) *corev3.TransportSocket {
 	return &corev3.TransportSocket{
 		Name: tlsTransportSocketName,

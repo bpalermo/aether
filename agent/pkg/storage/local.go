@@ -15,6 +15,9 @@ import (
 
 var unmarshalOpts = protojson.UnmarshalOptions{DiscardUnknown: true}
 
+// CachedLocalStorage is a storage implementation that persists resources to the local filesystem
+// and maintains an in-memory cache for fast access. Each resource is stored as a JSON file.
+// The implementation is safe for concurrent access using RWMutex.
 type CachedLocalStorage[T proto.Message] struct {
 	basePath    string
 	cache       map[types.ContainerID]T
@@ -26,8 +29,9 @@ type CachedLocalStorage[T proto.Message] struct {
 	initErr     error
 }
 
-// NewCachedLocalStorage creates a new cached file storage
-// Resources are stored as individual files in the specified basePath and in memory
+// NewCachedLocalStorage creates a new CachedLocalStorage instance.
+// Resources are stored as individual JSON files in the specified basePath and cached in memory.
+// The newFunc parameter is a factory function that creates new instances of type T for unmarshaling.
 func NewCachedLocalStorage[T proto.Message](basePath string, newFunc func() T) *CachedLocalStorage[T] {
 	return &CachedLocalStorage[T]{
 		basePath: basePath,
@@ -37,8 +41,9 @@ func NewCachedLocalStorage[T proto.Message](basePath string, newFunc func() T) *
 	}
 }
 
-// Initialize loads all resources from the disk into the cache.
-// Safe to call multiple times - only the first call performs initialization.
+// Initialize loads all resources from disk into the in-memory cache.
+// It is safe to call multiple times; only the first call performs initialization.
+// Subsequent calls return the result of the first initialization.
 func (f *CachedLocalStorage[T]) Initialize(ctx context.Context) error {
 	f.initOnce.Do(func() {
 		_, f.initErr = f.loadAll(ctx)
@@ -52,7 +57,8 @@ func (f *CachedLocalStorage[T]) Initialize(ctx context.Context) error {
 	return f.initErr
 }
 
-// WaitUntilReady blocks until the cache is populated or context is canceled.
+// WaitUntilReady blocks until the cache is populated from disk or the context is canceled.
+// It should be called before using other methods to ensure all resources are loaded.
 func (f *CachedLocalStorage[T]) WaitUntilReady(ctx context.Context) error {
 	select {
 	case <-f.initDone:
@@ -62,6 +68,8 @@ func (f *CachedLocalStorage[T]) WaitUntilReady(ctx context.Context) error {
 	}
 }
 
+// AddResource stores a resource atomically to disk and updates the in-memory cache.
+// The resource is serialized as JSON and written atomically to ensure consistency.
 func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key types.ContainerID, resource T) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -90,6 +98,8 @@ func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key types.Contain
 	return nil
 }
 
+// RemoveResource deletes a resource from disk and the in-memory cache.
+// It does not return an error if the resource file does not exist.
 func (f *CachedLocalStorage[T]) RemoveResource(_ context.Context, key types.ContainerID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -108,6 +118,8 @@ func (f *CachedLocalStorage[T]) RemoveResource(_ context.Context, key types.Cont
 	return nil
 }
 
+// GetResource retrieves a resource by key, checking the in-memory cache first.
+// If not in cache, it loads the resource from disk and caches it for future access.
 func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.ContainerID) (T, error) {
 	f.mu.RLock()
 
@@ -151,7 +163,8 @@ func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.Contain
 	return resource, nil
 }
 
-// GetAll returns all resources from the cache as a slice
+// GetAll returns all cached resources as a slice.
+// Resources must be initialized before calling this method.
 func (f *CachedLocalStorage[T]) GetAll(_ context.Context) ([]T, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -165,7 +178,8 @@ func (f *CachedLocalStorage[T]) GetAll(_ context.Context) ([]T, error) {
 	return result, nil
 }
 
-// loadAll loads all resources from the disk into the memory cache
+// loadAll loads all resources from disk into the in-memory cache.
+// It reads all JSON files from the base directory and unmarshals them.
 func (f *CachedLocalStorage[T]) loadAll(_ context.Context) ([]T, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

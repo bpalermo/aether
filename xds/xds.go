@@ -16,6 +16,13 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
+// XdsServer is a gRPC server that implements Envoy's xDS discovery services.
+// It embeds Server and registers discovery service handlers for LDS, CDS, EDS, RDS,
+// and ADS with Envoy's go-control-plane server. The server uses a snapshot cache
+// to manage versioned Envoy configurations.
+//
+// XdsServer is configured with appropriate keepalive parameters for long-lived client
+// connections and supports up to 1000 concurrent gRPC streams.
 type XdsServer struct {
 	Server
 
@@ -24,6 +31,10 @@ type XdsServer struct {
 	cache cachev3.SnapshotCache
 }
 
+// NewXdsServer creates a new XdsServer with Envoy discovery services registered.
+// It configures the gRPC server with keepalive parameters suitable for long-lived
+// client connections, registers all Envoy discovery services (LDS, CDS, EDS, RDS, ADS),
+// and returns an XdsServer ready to be started.
 func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.SnapshotCache, callbacks serverv3.Callbacks, log logr.Logger) XdsServer {
 	keepAliveTime := 30 * time.Second
 	grpcServer := grpc.NewServer(

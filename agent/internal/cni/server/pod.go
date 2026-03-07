@@ -15,6 +15,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// AddPod handles CNI ADD requests for a pod.
+// It enriches the pod data with Kubernetes annotations and labels, validates that the pod
+// should be managed (not in system namespaces or lacking the aether service label),
+// stores the pod locally, and registers its endpoints in the service registry.
 func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
 	cniPod := req.GetPod()
 	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
@@ -51,6 +55,10 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	}, nil
 }
 
+// RemovePod handles CNI DEL requests for a pod.
+// It retrieves the pod from local storage, validates that it should be managed,
+// unregisters its endpoints from the service registry, and removes the pod from local storage.
+// If the pod is not found locally, it assumes the pod was either already removed or ignored.
 func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
 	containerId := req.GetContainerId()
 	podName := req.GetName()
@@ -96,10 +104,10 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}, nil
 }
 
-// enhanceCNIPod enhances a CNIPod with additional data retrieved from the API server
-// we collect all annotations and labels, regardless. We leave to the registry implementation the decision of which to keep.
-// This will allow us to change registry implementation without having to change the CNI implementation, as the local stored file
-// will always contain all the relevant information.
+// enhanceCNIPod enriches a CNIPod with annotations and labels retrieved from the Kubernetes API server.
+// All annotations and labels are collected and stored; the registry implementation decides which to use.
+// This allows changing the registry implementation without modifying the CNI plugin,
+// since the local stored file contains all relevant information.
 func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) error {
 	var k8sPod corev1.Pod
 	if err := s.k8sClient.Get(ctx, client.ObjectKey{
@@ -115,6 +123,8 @@ func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) err
 	return nil
 }
 
+// validateAndCheckIgnorable validates a CNIPod and determines if it should be ignored.
+// It returns an error if the pod is nil, or a boolean indicating if the pod is ignorable.
 func validateAndCheckIgnorable(cniPod *cniv1.CNIPod) (bool, error) {
 	if cniPod == nil {
 		return false, status.Error(codes.InvalidArgument, "pod is required")
@@ -122,6 +132,9 @@ func validateAndCheckIgnorable(cniPod *cniv1.CNIPod) (bool, error) {
 	return isIgnorablePod(cniPod), nil
 }
 
+// isIgnorablePod determines if a pod should be ignored by the service mesh.
+// Pods in kube-system or aether-system namespaces, pods without the aether service label,
+// or pods without IP addresses are considered ignorable.
 func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
 	if cniPod.GetNamespace() == "kube-system" || cniPod.GetNamespace() == "aether-system" {
 		return true

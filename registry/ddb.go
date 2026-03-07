@@ -6,6 +6,7 @@ import (
 	"github.com/go-logr/logr"
 )
 
+// NewDynamoDBRegistry creates a new Registry implementation backed by DynamoDB.
 func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) Registry {
 	return ddb.NewDynamoDBRegistry(log, awsCfg)
 }

@@ -9,12 +9,20 @@ import (
 )
 
 const (
-	defaultInboundAddress   = "0.0.0.0"
-	defaultHTTPInboundPort  = 18080
-	defaultOutboundAddress  = "127.0.0.1"
+	// defaultInboundAddress is the address for inbound listeners (all interfaces)
+	defaultInboundAddress = "0.0.0.0"
+	// defaultHTTPInboundPort is the port for inbound HTTP listeners
+	defaultHTTPInboundPort = 18080
+	// defaultOutboundAddress is the address for outbound listeners (localhost only)
+	defaultOutboundAddress = "127.0.0.1"
+	// defaultHTTPOutboundPort is the port for outbound HTTP listeners
 	defaultHTTPOutboundPort = 18081
 )
 
+// GenerateListenersFromRegistryPod generates inbound and outbound HTTP listeners for a pod.
+// Inbound listeners accept traffic from any interface on the pod's network namespace.
+// Outbound listeners route traffic destined for other services.
+// Both listeners use HTTP protocol and include appropriate filter chains.
 func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, err error) {
 	inbound, err = generateInboundHTTPListener(cniPod)
 	if err != nil {

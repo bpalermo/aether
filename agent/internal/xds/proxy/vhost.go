@@ -4,6 +4,8 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 )
 
+// NewServiceVirtualHost creates a virtual host that routes all traffic to a service.
+// It matches requests by service name and routes all paths to the corresponding cluster.
 func NewServiceVirtualHost(svcName string) *routev3.VirtualHost {
 	return &routev3.VirtualHost{
 		Name:    svcName,

@@ -18,6 +18,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// CNIServer is a gRPC server that implements the CNI plugin interface.
+// It handles pod registration and deregistration requests, stores pod data locally,
+// and registers service endpoints in the registry. The server also queries Kubernetes
+// node metadata (region and zone) for topology-aware routing.
+//
+// CNIServer embeds xds.Server and implements the ServerCallback interface to query
+// node metadata before accepting client connections.
 type CNIServer struct {
 	cniv1.UnimplementedCNIServiceServer
 	xds.Server
@@ -38,7 +45,9 @@ type CNIServer struct {
 
 var _ xds.ServerCallback = (*CNIServer)(nil)
 
-// NewCNIServer creates a new CNI gRPC server
+// NewCNIServer creates a new CNI gRPC server.
+// The server listens on a Unix domain socket and registers the CNI service with
+// protovalidate middleware for request validation.
 func NewCNIServer(clusterName string, nodeName string, proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
@@ -64,6 +73,8 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, localStor
 	return cniSrv, nil
 }
 
+// PreListen queries Kubernetes node metadata before the server starts accepting connections.
+// It retrieves the region and zone labels from the node object.
 func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.log.V(2).Info("querying node metadata")
 	region, zone, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
@@ -78,6 +89,9 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	return nil
 }
 
+// queryNodeMetadata retrieves the region and zone labels from a Kubernetes node.
+// It returns the topology.kubernetes.io/region and topology.kubernetes.io/zone labels,
+// or empty strings if the labels are not present.
 func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (string, string, error) {
 	node := &corev1.Node{}
 	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {

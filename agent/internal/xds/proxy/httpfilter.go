@@ -8,13 +8,16 @@ import (
 )
 
 const (
+	// httpRouterFilterName is the Envoy HTTP router filter name
 	httpRouterFilterName = "envoy.filters.http.router"
 )
 
+// routerHttpFilter creates a router HTTP filter for forwarding matched requests to clusters.
 func routerHttpFilter() *http_connection_managerv3.HttpFilter {
 	return httpFilter(httpRouterFilterName, &routerv3.Router{})
 }
 
+// httpFilter creates an HTTP filter with the given name and configuration.
 func httpFilter(name string, msg proto.Message) *http_connection_managerv3.HttpFilter {
 	return &http_connection_managerv3.HttpFilter{
 		Name: name,

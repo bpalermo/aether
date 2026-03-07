@@ -1,3 +1,6 @@
+// Package server implements the agent-specific Envoy xDS server.
+// It builds xDS snapshots from local pod storage and the service registry,
+// generating Envoy listeners, clusters, endpoints, and routes.
 package server
 
 import (
@@ -24,6 +27,12 @@ import (
 	"go.uber.org/atomic"
 )
 
+// AgentXdsServer is an xDS server that generates Envoy configuration from local pod storage
+// and a service registry. It embeds xds.XdsServer and implements the ServerCallback interface
+// to generate an initial snapshot before starting to accept connections.
+//
+// The server maintains versioned snapshots of Envoy resources (listeners, clusters, endpoints, routes)
+// and serves them to local Envoy proxy instances via the xDS protocol.
 type AgentXdsServer struct {
 	xds.XdsServer
 
@@ -40,6 +49,10 @@ type AgentXdsServer struct {
 	version *atomic.Uint64
 }
 
+// NewXdsServer creates a new AgentXdsServer.
+// It initializes an xDS server with a snapshot cache and registers itself as a callback
+// to generate the initial Envoy snapshot before listening for client connections.
+// The server listens on a Unix domain socket at the default xDS socket path.
 func NewXdsServer(ctx context.Context, clusterName string, nodeName string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], log logr.Logger) (*AgentXdsServer, error) {
 	cfg := xds.NewServerConfig(
 		xds.WithUDS(constants.DefaultXdsSocketPath),
@@ -63,6 +76,9 @@ func NewXdsServer(ctx context.Context, clusterName string, nodeName string, regi
 	return aXdsServer, nil
 }
 
+// PreListen generates the initial Envoy snapshot from local pod storage and the service registry.
+// It creates listeners, clusters, endpoints, and routes, then sets the snapshot in the cache
+// before the server starts accepting xDS client connections.
 func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	s.log.V(1).Info("generating initial snapshot")
 
@@ -104,12 +120,18 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	return nil
 }
 
+// generateSnapshotVersion generates a unique version string for snapshots.
+// The version combines the current Unix millisecond timestamp with an incrementing counter
+// to ensure uniqueness even for snapshots generated in the same millisecond.
 func (s *AgentXdsServer) generateSnapshotVersion() string {
 	timestamp := time.Now().UnixMilli()
 	version := s.version.Add(1)
 	return fmt.Sprintf("%d.%d", timestamp, version)
 }
 
+// generateListeners generates Envoy listener resources from local pod data.
+// It creates inbound and outbound listeners for each pod in the local storage.
+// If any listener generation fails, the errors are collected and returned.
 func generateListeners(ctx context.Context, storage storage.Storage[*cniv1.CNIPod], log logr.Logger) ([]types.Resource, error) {
 	log.V(2).Info("generating listeners")
 
@@ -143,6 +165,10 @@ func generateListeners(ctx context.Context, storage storage.Storage[*cniv1.CNIPo
 	return listeners, nil
 }
 
+// generateClustersAndEndpoints generates Envoy cluster and endpoint resources from the registry.
+// It creates clusters and cluster load assignments for each service endpoint found in the registry.
+// For endpoints on the local node, it also creates local-only clusters and endpoints to support
+// topology-aware routing. Additionally, it creates a special local SPIRE cluster for mTLS.
 func generateClustersAndEndpoints(ctx context.Context, clusterName string, nodeName string, registry registry.Registry, log logr.Logger) ([]types.Resource, []types.Resource, error) {
 	log.V(2).Info("generating endpoints")
 
@@ -189,6 +215,9 @@ func generateClustersAndEndpoints(ctx context.Context, clusterName string, nodeN
 	return clusters, clas, nil
 }
 
+// generateRoutes generates Envoy route resources from cluster information.
+// It creates virtual hosts for outbound traffic, one per cluster, and returns
+// a single outbound route configuration containing all virtual hosts.
 func generateRoutes(clusters []types.Resource, log logr.Logger) ([]types.Resource, error) {
 	var errs []error
 
@@ -214,6 +243,8 @@ func generateRoutes(clusters []types.Resource, log logr.Logger) ([]types.Resourc
 	return []types.Resource{outRoute}, nil
 }
 
+// isLocal determines if a service endpoint is on the local node.
+// It returns true if the endpoint's cluster name and node name match the provided values.
 func isLocal(clusterName string, nodeName string, endpoint *registryv1.ServiceEndpoint) bool {
 	return clusterName == endpoint.GetClusterName() && nodeName == endpoint.GetKubernetesMetadata().GetNodeName()
 }

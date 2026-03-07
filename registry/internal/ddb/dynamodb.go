@@ -1,3 +1,6 @@
+// Package ddb implements the Registry interface using AWS DynamoDB as the backend.
+// Service endpoints are organized by service name and protocol, with endpoints stored
+// in a map keyed by IP address.
 package ddb
 
 import (
@@ -15,6 +18,9 @@ import (
 	"github.com/go-logr/logr"
 )
 
+// DynamoDBRegistry is a Registry implementation backed by AWS DynamoDB.
+// It stores service endpoints in a DynamoDB table with partition key (service name)
+// and sort key (protocol), and endpoints are organized in a map attribute.
 type DynamoDBRegistry struct {
 	log logr.Logger
 
@@ -23,6 +29,9 @@ type DynamoDBRegistry struct {
 	tableName string
 }
 
+// NewDynamoDBRegistry creates a new DynamoDB-backed Registry.
+// It uses the AWS SDK client from the provided configuration and connects to
+// the default service table name.
 func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) *DynamoDBRegistry {
 	return &DynamoDBRegistry{
 		log:       log.WithName("registry-dynamodb"),
@@ -31,6 +40,7 @@ func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config) *DynamoDBRegistry {
 	}
 }
 
+// Start initializes the DynamoDB registry by verifying that the service table exists.
 func (r *DynamoDBRegistry) Start(ctx context.Context) error {
 	r.log.V(1).Info("starting registry and checking for table existence", "table", r.tableName)
 
@@ -51,8 +61,9 @@ func (r *DynamoDBRegistry) Start(ctx context.Context) error {
 	return nil
 }
 
-// RegisterEndpoint registers the given endpoint to its service.
-// It stores the endpoint in a map attribute keyed by the endpoint IP.
+// RegisterEndpoint registers an endpoint to a service and protocol in DynamoDB.
+// It stores the endpoint in the endpoints map attribute keyed by the endpoint IP address.
+// If the endpoints map doesn't exist, it is created first.
 func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
 	ip := endpoint.GetIp()
 	r.log.V(1).Info(
@@ -116,11 +127,13 @@ func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName str
 	return nil
 }
 
+// UnregisterEndpoint removes a single endpoint from the registry for all protocols.
 func (r *DynamoDBRegistry) UnregisterEndpoint(ctx context.Context, serviceName string, ip string) error {
 	return r.UnregisterEndpoints(ctx, serviceName, []string{ip})
 }
 
-// UnregisterEndpoints removes endpoints from the registry for all protocols
+// UnregisterEndpoints removes multiple endpoints from the registry for all protocols.
+// It queries all protocol items for the service and removes the specified IPs from each.
 func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error {
 	r.log.V(1).Info("unregistering endpoints",
 		"service", serviceName,
@@ -179,7 +192,7 @@ func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName 
 	return nil
 }
 
-// ListEndpoints returns the endpoints registered for the given service and its protocol.
+// ListEndpoints retrieves all endpoints for a specific service and protocol from DynamoDB.
 func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.log.V(1).Info("listing endpoints", "service", service, "protocol", protocol)
 
@@ -212,7 +225,9 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 	return endpoints, nil
 }
 
-// ListAllEndpoints returns all endpoints registered for the given protocol.
+// ListAllEndpoints retrieves all endpoints for the given protocol across all services from DynamoDB.
+// Endpoints are organized by service name in the returned map.
+// It uses pagination to handle large result sets.
 func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	r.log.V(1).Info("listing all endpoints for protocol", "protocol", protocol)
 

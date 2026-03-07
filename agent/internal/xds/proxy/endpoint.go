@@ -8,16 +8,24 @@ import (
 )
 
 const (
+	// envoyFilterMetadataSubsetNamespace is the Envoy metadata namespace for load balancing subsets
 	envoyFilterMetadataSubsetNamespace = "envoy.lb"
 
-	subsetClusterKey      = "cluster"
-	subsetIPKey           = "ip"
+	// subsetClusterKey is the metadata key for the cluster name
+	subsetClusterKey = "cluster"
+	// subsetIPKey is the metadata key for the endpoint IP address
+	subsetIPKey = "ip"
+	// subsetPodNamespaceKey is the metadata key for the pod namespace
 	subsetPodNamespaceKey = "namespace"
-	subsetPodNameKey      = "pod"
+	// subsetPodNameKey is the metadata key for the pod name
+	subsetPodNameKey = "pod"
 
+	// defaultLocalEndpointBindAddress is the default bind address for local endpoints (localhost)
 	defaultLocalEndpointBindAddress = "127.0.0.1"
 )
 
+// NewClusterLoadAssignment creates an empty cluster load assignment for a service.
+// Endpoints should be added to the Endpoints field.
 func NewClusterLoadAssignment(serviceName string) *endpointv3.ClusterLoadAssignment {
 	return &endpointv3.ClusterLoadAssignment{
 		ClusterName: serviceName,
@@ -25,6 +33,8 @@ func NewClusterLoadAssignment(serviceName string) *endpointv3.ClusterLoadAssignm
 	}
 }
 
+// LocalLocalityLbEndpointFromRegistryEndpoint creates a locality lb endpoint for a local service endpoint.
+// It binds to 127.0.0.1 (localhost) for local-only access within the pod's network namespace.
 func LocalLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint) *endpointv3.LocalityLbEndpoints {
 	return &endpointv3.LocalityLbEndpoints{
 		LbEndpoints: []*endpointv3.LbEndpoint{
@@ -53,6 +63,10 @@ func LocalLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEnd
 	}
 }
 
+// LocalityLbEndpointFromRegistryEndpoint creates a locality lb endpoint from a service endpoint in the registry.
+// It includes the endpoint's IP address and port, along with metadata for load balancing subsets.
+// Metadata includes cluster name, IP, pod name, and pod namespace for topology-aware routing.
+// If the endpoint includes locality information (region/zone), it is included in the endpoint.
 func LocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint) *endpointv3.LocalityLbEndpoints {
 	var locality *core.Locality
 	if endpoint.GetLocality() != nil && endpoint.GetLocality().GetRegion() != "" && endpoint.GetLocality().GetZone() != "" {

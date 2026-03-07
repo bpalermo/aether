@@ -11,10 +11,17 @@ import (
 )
 
 const (
+	// SpireAgentClusterName is the Envoy cluster name for the local SPIRE agent
+	// used to retrieve SVIDs for mTLS.
 	SpireAgentClusterName = "spire_sds"
-	spireAgentSocketFile  = "/run/secrets/workload-spiffe-uds/socket"
+	// spireAgentSocketFile is the path to the SPIRE agent's Unix domain socket
+	// for secret discovery service requests.
+	spireAgentSocketFile = "/run/secrets/workload-spiffe-uds/socket"
 )
 
+// NewLocalSpireCluster creates an Envoy cluster that connects to the local SPIRE agent
+// via Unix domain socket for retrieving SVIDs. The cluster uses EDS for dynamic endpoint
+// discovery and HTTP/2 for protocol communication.
 func NewLocalSpireCluster() *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name:           SpireAgentClusterName,
@@ -31,6 +38,8 @@ func NewLocalSpireCluster() *clusterv3.Cluster {
 	}
 }
 
+// NewLocalSpireClusterLoadAssignment creates an endpoint assignment for the SPIRE agent cluster,
+// pointing to the Unix domain socket where the SPIRE agent listens.
 func NewLocalSpireClusterLoadAssignment() *endpointv3.ClusterLoadAssignment {
 	return &endpointv3.ClusterLoadAssignment{
 		ClusterName: SpireAgentClusterName,

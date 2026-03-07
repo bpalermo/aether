@@ -1,6 +1,6 @@
 package constants
 
 const (
-	// DefaultDynamoDBServiceTableName the default service table name
+	// DefaultDynamoDBServiceTableName is the default DynamoDB table name for storing service information
 	DefaultDynamoDBServiceTableName = "AetherService"
 )

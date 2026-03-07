@@ -1,3 +1,7 @@
+// Package file provides atomic file write utilities and platform-specific optimizations.
+// Atomic writes ensure that files are either fully written or not modified, preventing corruption
+// from partial writes or concurrent access. Large files are marked as not needed to optimize
+// page cache behavior on Linux systems.
 package file
 
 import (
@@ -12,6 +16,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
+// WriteFileAtomic writes data to a file atomically using a temporary file and rename.
+// It ensures that the file is either fully written with the new data or left unchanged.
+// Data is flushed to disk before the rename operation to ensure durability.
 func WriteFileAtomic(filePath string, data []byte) error {
 	dir := filepath.Dir(filePath)
 	base := filepath.Base(filePath)
@@ -54,6 +61,8 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	return nil
 }
 
+// Exists checks if a file or directory exists at the given path.
+// It returns false only if the file does not exist; other errors (such as permission denied) return true.
 func Exists(name string) bool {
 	// We must explicitly check if the error is due to the file not existing (as opposed to a
 	// permissions error).
@@ -61,11 +70,14 @@ func Exists(name string) bool {
 	return !errors.Is(err, fs.ErrNotExist)
 }
 
-// AtomicWrite writes atomically by writing to a temporary file in the same directory then renaming
+// AtomicWrite writes data atomically to a file with the specified permissions.
+// It uses a temporary file in the same directory and atomically renames it to the target path.
 func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 	return AtomicWriteReader(path, bytes.NewReader(data), mode)
 }
 
+// AtomicWriteReader writes data from a reader atomically to a file with the specified permissions.
+// It uses a temporary file and atomically renames it, marking large files as not needed for cache optimization.
 func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
 	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
 	if err != nil {
@@ -102,6 +114,9 @@ func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
 	return os.Rename(tmpFile.Name(), path)
 }
 
+// tryMarkLargeFileAsNotNeeded attempts to mark a file as not needed in the page cache.
+// This is a performance optimization for large files to free up memory.
+// It only applies to files larger than a threshold and silently ignores errors.
 func tryMarkLargeFileAsNotNeeded(size int64, in *os.File) {
 	// Somewhat arbitrary value to doesn't bother with this on small files
 	const largeFileThreshold = 16 * 1024
