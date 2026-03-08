@@ -93,7 +93,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 
 	// Remove listener from xDS first
-	if err = s.listenerCache.RemovePod(ctx, storedPod.GetNetworkNamespace()); err != nil {
+	if err = s.snapshotCache.RemovePod(ctx, storedPod.GetNetworkNamespace()); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove listener: %v", err)
 	}
 

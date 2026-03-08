@@ -212,6 +212,134 @@ func TestSnapshotCache_RemoveCluster_ExistingCluster(t *testing.T) {
 	}
 }
 
+// TestSnapshotCache_RemoveEndpoint_NoOp verifies that RemoveEndpoint is a no-op
+// when the cluster does not exist or the IP is not in the endpoint map.
+func TestSnapshotCache_RemoveEndpoint_NoOp(t *testing.T) {
+	tests := []struct {
+		name        string
+		setupFunc   func(c *SnapshotCache)
+		clusterName string
+		ip          string
+	}{
+		{
+			name:        "cluster does not exist",
+			setupFunc:   func(_ *SnapshotCache) {},
+			clusterName: "nonexistent",
+			ip:          "10.0.0.1",
+		},
+		{
+			name: "IP not in endpoint map",
+			setupFunc: func(c *SnapshotCache) {
+				c.clusters = map[string]clusterEntry{
+					"my-svc": {
+						loadAssignment: &endpointv3.ClusterLoadAssignment{ClusterName: "my-svc"},
+						endpoints: map[string]*endpointv3.LocalityLbEndpoints{
+							"10.0.0.1": {},
+						},
+					},
+				}
+			},
+			clusterName: "my-svc",
+			ip:          "10.0.0.99",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestCache("node-1")
+			tt.setupFunc(c)
+			versionBefore := c.version.Load()
+
+			err := c.RemoveEndpoint(context.Background(), tt.clusterName, tt.ip)
+
+			require.NoError(t, err)
+			assert.Equal(t, versionBefore, c.version.Load(), "version should not change on no-op")
+		})
+	}
+}
+
+// TestSnapshotCache_RemoveEndpoint_RemovesIP verifies that RemoveEndpoint deletes the
+// IP from the endpoint map and rebuilds the load assignment. The cluster entry is kept
+// even when the last endpoint is removed.
+func TestSnapshotCache_RemoveEndpoint_RemovesIP(t *testing.T) {
+	tests := []struct {
+		name              string
+		setupFunc         func(c *SnapshotCache)
+		clusterName       string
+		ip                string
+		wantEndpointCount int
+		wantCLAEndpoints  int
+	}{
+		{
+			name: "remove one of two endpoints",
+			setupFunc: func(c *SnapshotCache) {
+				ep1 := &endpointv3.LocalityLbEndpoints{}
+				ep2 := &endpointv3.LocalityLbEndpoints{}
+				c.clusters = map[string]clusterEntry{
+					"my-svc": {
+						cluster: &clusterv3.Cluster{Name: "my-svc"},
+						loadAssignment: &endpointv3.ClusterLoadAssignment{
+							ClusterName: "my-svc",
+							Endpoints:   []*endpointv3.LocalityLbEndpoints{ep1, ep2},
+						},
+						endpoints: map[string]*endpointv3.LocalityLbEndpoints{
+							"10.0.0.1": ep1,
+							"10.0.0.2": ep2,
+						},
+						vhost: &routev3.VirtualHost{Name: "my-svc"},
+					},
+				}
+			},
+			clusterName:       "my-svc",
+			ip:                "10.0.0.1",
+			wantEndpointCount: 1,
+			wantCLAEndpoints:  1,
+		},
+		{
+			name: "remove last endpoint keeps cluster with empty load assignment",
+			setupFunc: func(c *SnapshotCache) {
+				ep1 := &endpointv3.LocalityLbEndpoints{}
+				c.clusters = map[string]clusterEntry{
+					"my-svc": {
+						cluster: &clusterv3.Cluster{Name: "my-svc"},
+						loadAssignment: &endpointv3.ClusterLoadAssignment{
+							ClusterName: "my-svc",
+							Endpoints:   []*endpointv3.LocalityLbEndpoints{ep1},
+						},
+						endpoints: map[string]*endpointv3.LocalityLbEndpoints{
+							"10.0.0.1": ep1,
+						},
+						vhost: &routev3.VirtualHost{Name: "my-svc"},
+					},
+				}
+			},
+			clusterName:       "my-svc",
+			ip:                "10.0.0.1",
+			wantEndpointCount: 0,
+			wantCLAEndpoints:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestCache("node-1")
+			tt.setupFunc(c)
+
+			// RemoveEndpoint triggers generateClusterSnapshot which returns a
+			// snapshot inconsistency error (same as RemoveCluster tests).
+			_ = c.RemoveEndpoint(context.Background(), tt.clusterName, tt.ip)
+
+			entry, ok := c.clusters[tt.clusterName]
+			require.True(t, ok, "cluster should still exist after endpoint removal")
+			assert.Len(t, entry.endpoints, tt.wantEndpointCount)
+			assert.Len(t, entry.loadAssignment.Endpoints, tt.wantCLAEndpoints)
+
+			_, ipStillPresent := entry.endpoints[tt.ip]
+			assert.False(t, ipStillPresent, "removed IP should not be in endpoint map")
+		})
+	}
+}
+
 // TestIsLocal verifies the isLocal helper with all combinations of matching and
 // non-matching cluster name, node name, and endpoint metadata.
 func TestIsLocal(t *testing.T) {

@@ -25,6 +25,39 @@ const (
 	vhostVersionLabel = "vhost"
 )
 
+// RemoveEndpoint removes a single endpoint by IP from the given cluster's
+// load assignment and regenerates the cluster snapshot. If the cluster does
+// not exist or the IP is not found in the endpoint map, it returns nil
+// without regenerating the snapshot. The cluster itself is kept even if
+// the endpoint map becomes empty.
+func (c *SnapshotCache) RemoveEndpoint(ctx context.Context, clusterName string, ip string) error {
+	c.clusterMu.Lock()
+	entry, exists := c.clusters[clusterName]
+	if !exists {
+		c.clusterMu.Unlock()
+		return nil
+	}
+
+	if _, ok := entry.endpoints[ip]; !ok {
+		c.clusterMu.Unlock()
+		return nil
+	}
+
+	delete(entry.endpoints, ip)
+
+	// Rebuild the load assignment endpoints slice from the map.
+	endpoints := make([]*endpointv3.LocalityLbEndpoints, 0, len(entry.endpoints))
+	for _, ep := range entry.endpoints {
+		endpoints = append(endpoints, ep)
+	}
+	entry.loadAssignment.Endpoints = endpoints
+
+	c.clusters[clusterName] = entry
+	c.clusterMu.Unlock()
+
+	return c.generateClusterSnapshot(ctx)
+}
+
 // RemoveCluster removes the cluster, its endpoints, and its virtual host
 // associated with the given name, then regenerates the snapshot.
 func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) error {

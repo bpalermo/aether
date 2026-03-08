@@ -14,10 +14,20 @@ import (
 // MockStorage bridges that gap by living in package storage while exposing
 // configurable behaviour via exported function fields.
 type MockStorage[T proto.Message] struct {
-	// GetAllFunc is called by GetAll. If nil, GetAll returns an empty slice.
+	// GetAllFunc is called by GetAll. If nil, GetAll iterates the resources map.
 	GetAllFunc func(ctx context.Context) ([]T, error)
 
-	// resources holds items added via AddResource.
+	// AddResourceFunc is called by AddResource. If nil, the resource is stored in the map.
+	AddResourceFunc func(ctx context.Context, key types.ContainerID, resource T) error
+
+	// GetResourceFunc is called by GetResource. If nil, the resource is looked up in the map.
+	// Return os.ErrNotExist (or any error satisfying os.IsNotExist) to simulate a missing file.
+	GetResourceFunc func(ctx context.Context, key types.ContainerID) (T, error)
+
+	// RemoveResourceFunc is called by RemoveResource. If nil, the resource is deleted from the map.
+	RemoveResourceFunc func(ctx context.Context, key types.ContainerID) error
+
+	// resources holds items added via AddResource when no AddResourceFunc is set.
 	resources map[types.ContainerID]T
 }
 
@@ -45,17 +55,26 @@ func (m *MockStorage[T]) Initialize(_ context.Context) error { return nil }
 
 func (m *MockStorage[T]) WaitUntilReady(_ context.Context) error { return nil }
 
-func (m *MockStorage[T]) AddResource(_ context.Context, key types.ContainerID, resource T) error {
+func (m *MockStorage[T]) AddResource(ctx context.Context, key types.ContainerID, resource T) error {
+	if m.AddResourceFunc != nil {
+		return m.AddResourceFunc(ctx, key, resource)
+	}
 	m.resources[key] = resource
 	return nil
 }
 
-func (m *MockStorage[T]) RemoveResource(_ context.Context, key types.ContainerID) error {
+func (m *MockStorage[T]) RemoveResource(ctx context.Context, key types.ContainerID) error {
+	if m.RemoveResourceFunc != nil {
+		return m.RemoveResourceFunc(ctx, key)
+	}
 	delete(m.resources, key)
 	return nil
 }
 
-func (m *MockStorage[T]) GetResource(_ context.Context, key types.ContainerID) (T, error) {
+func (m *MockStorage[T]) GetResource(ctx context.Context, key types.ContainerID) (T, error) {
+	if m.GetResourceFunc != nil {
+		return m.GetResourceFunc(ctx, key)
+	}
 	r, ok := m.resources[key]
 	if !ok {
 		var zero T
