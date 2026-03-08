@@ -107,7 +107,7 @@ func runAgent(ctx context.Context) error {
 
 func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, registry, localStorage, snapshotCache, l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, registry, localStorage, snapshotCache, l)
 	if err != nil {
 		return err
 	}
