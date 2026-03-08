@@ -5,26 +5,14 @@ package server
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/xds"
-	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
-	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/go-logr/logr"
-	"go.uber.org/atomic"
 )
 
 // AgentXdsServer is an xDS server that generates Envoy configuration from local pod storage
@@ -44,9 +32,7 @@ type AgentXdsServer struct {
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
 
-	cache cachev3.SnapshotCache
-
-	version *atomic.Uint64
+	cache *cache.SnapshotCache
 }
 
 // NewXdsServer creates a new AgentXdsServer.
@@ -58,17 +44,16 @@ func NewXdsServer(ctx context.Context, clusterName string, nodeName string, regi
 		xds.WithUDS(constants.DefaultXdsSocketPath),
 	)
 
-	cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
+	snapshotCache := cache.NewSnapshotCache(nodeName, log)
 
 	aXdsServer := &AgentXdsServer{
-		XdsServer:   xds.NewXdsServer(ctx, cfg, cache, nil, log),
+		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, nil, log),
 		log:         log.WithName("agent-xds"),
 		clusterName: clusterName,
 		nodeName:    nodeName,
 		registry:    registry,
 		storage:     storage,
-		cache:       cache,
-		version:     atomic.NewUint64(0),
+		cache:       snapshotCache,
 	}
 
 	aXdsServer.AddCallback(aXdsServer)
@@ -82,38 +67,14 @@ func NewXdsServer(ctx context.Context, clusterName string, nodeName string, regi
 func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	s.log.V(1).Info("generating initial snapshot")
 
-	listeners, err := generateListeners(ctx, s.storage, s.log)
-	if err != nil {
-		return err
-	}
-	s.log.V(1).Info("generated listeners", "count", len(listeners))
-
-	clusters, endpoints, err := generateClustersAndEndpoints(ctx, s.clusterName, s.nodeName, s.registry, s.log)
-	if err != nil {
+	if err := s.cache.LoadListenersFromStorage(ctx, s.storage); err != nil {
+		s.log.Error(err, "failed to load listeners from storage")
 		return err
 	}
 	s.log.V(1).Info("generated clusters and endpoints", "clusters", len(clusters), "endpoints", len(endpoints))
 
-	routes, err := generateRoutes(clusters, s.log)
-	if err != nil {
-		return err
-	}
-	s.log.V(1).Info("generated routes", "count", len(routes))
-
-	v := s.generateSnapshotVersion()
-	snapshot, err := cachev3.NewSnapshot(v, map[resource.Type][]types.Resource{
-		resource.ListenerType:    listeners,
-		resource.EndpointType:    endpoints,
-		resource.ClusterType:     clusters,
-		resource.RouteType:       routes,
-		resource.VirtualHostType: make([]types.Resource, 0),
-	})
-	if err != nil {
-		return err
-	}
-
-	s.log.V(1).Info("setting snapshot", "node", s.nodeName, "version", v)
-	if err = s.cache.SetSnapshot(ctx, s.nodeName, snapshot); err != nil {
+	if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
+		s.log.Error(err, "failed to load clusters, endpoints and virtual hosts from registry")
 		return err
 	}
 

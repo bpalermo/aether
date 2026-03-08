@@ -92,6 +92,11 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
 	}
 
+	// Remove listener from xDS first
+	if err = s.listenerCache.RemovePod(ctx, storedPod.GetNetworkNamespace()); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to remove listener: %v", err)
+	}
+
 	// Remove from the local storage
 	if err = s.storage.RemoveResource(ctx, containerID); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
