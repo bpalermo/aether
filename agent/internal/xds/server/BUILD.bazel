@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "server",
@@ -6,9 +6,27 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/xds/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/xds/cache",
+        "//agent/pkg/constants",
+        "//agent/pkg/storage",
+        "//api/aether/cni/v1:cni",
+        "//registry",
+        "//xds",
+        "@com_github_go_logr_logr//:logr",
+    ],
+)
+
+go_test(
+    name = "server_test",
+    srcs = [
+        "server_integration_test.go",
+        "server_test.go",
+    ],
+    embed = [":server"],
+    deps = [
+        "//agent/internal/xds/cache",
         "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
-        "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
@@ -17,10 +35,46 @@ go_library(
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
-        "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_go_logr_logr//:logr",
-        "@org_uber_go_atomic//:atomic",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+    ],
+)
+
+# keep
+go_test(
+    name = "server_integration_test",
+    size = "medium",
+    srcs = [
+        "server_integration_test.go",
+        "server_test.go",  # needed for mockRegistry defined in unit test file
+    ],
+    embed = [":server"],
+    tags = ["integration"],
+    deps = [
+        "//agent/internal/xds/cache",
+        "//agent/internal/xds/config",
+        "//agent/internal/xds/proxy",
+        "//agent/pkg/storage",
+        "//api/aether/cni/v1:cni",
+        "//api/aether/registry/v1:registry",
+        "//registry",
+        "//xds",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
     ],
 )

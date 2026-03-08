@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"buf.build/go/protovalidate"
+	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/constants"
@@ -40,6 +41,8 @@ type CNIServer struct {
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
 
+	snapshotCache *cache.SnapshotCache
+
 	k8sClient client.Client
 }
 
@@ -48,7 +51,7 @@ var _ xds.ServerCallback = (*CNIServer)(nil)
 // NewCNIServer creates a new CNI gRPC server.
 // The server listens on a Unix domain socket and registers the CNI service with
 // protovalidate middleware for request validation.
-func NewCNIServer(clusterName string, nodeName string, proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
+func NewCNIServer(clusterName string, nodeName string, proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -56,14 +59,15 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, localStor
 	)
 
 	cniSrv := &CNIServer{
-		Server:      xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
-		log:         log.WithName("cni"),
-		clusterName: clusterName,
-		nodeName:    nodeName,
-		proxyID:     proxyID,
-		storage:     localStorage,
-		registry:    registry,
-		k8sClient:   k8sClient,
+		Server:        xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
+		log:           log.WithName("cni"),
+		clusterName:   clusterName,
+		nodeName:      nodeName,
+		proxyID:       proxyID,
+		storage:       localStorage,
+		registry:      registry,
+		k8sClient:     k8sClient,
+		snapshotCache: snapshotCache,
 	}
 
 	cniSrv.AddCallback(cniSrv)

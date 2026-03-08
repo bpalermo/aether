@@ -6,6 +6,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/awsconfig"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
@@ -85,11 +86,13 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 
-	if err = setXDSServer(ctx, m, ddbRegistry, localStorage); err != nil {
+	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
+
+	if err = setXDSServer(ctx, m, ddbRegistry, localStorage, snapshotCache); err != nil {
 		return err
 	}
 
-	if err = setupCNIServer(m, localStorage, ddbRegistry); err != nil {
+	if err = setupCNIServer(m, localStorage, ddbRegistry, snapshotCache); err != nil {
 		return err
 	}
 
@@ -102,9 +105,9 @@ func runAgent(ctx context.Context) error {
 	return m.Start(ctx)
 }
 
-func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod]) error {
+func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, registry, localStorage, l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, registry, localStorage, snapshotCache, l)
 	if err != nil {
 		return err
 	}
@@ -115,7 +118,7 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 	return nil
 }
 
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
@@ -123,6 +126,7 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 		cfg.ProxyServiceNodeID,
 		localStorage,
 		registry,
+		snapshotCache,
 		l,
 		m.GetClient(),
 		cfg.CNIServerConfig,

@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "xds",
@@ -23,5 +23,25 @@ go_library(
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//keepalive",
         "@org_uber_go_atomic//:atomic",
+    ],
+)
+
+go_test(
+    name = "xds_test",
+    srcs = [
+        "callbacks_test.go",
+        "config_test.go",
+        "readiness_test.go",
+        "server_test.go",
+        "xds_test.go",
+    ],
+    embed = [":xds"],
+    deps = [
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
+        "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
     ],
 )

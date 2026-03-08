@@ -1,0 +1,55 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cache",
+    srcs = [
+        "cache.go",
+        "cluster.go",
+        "listener.go",
+        "version.go",
+    ],
+    importpath = "github.com/bpalermo/aether/agent/internal/xds/cache",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//agent/internal/xds/config",
+        "//agent/internal/xds/proxy",
+        "//agent/pkg/storage",
+        "//api/aether/cni/v1:cni",
+        "//api/aether/registry/v1:registry",
+        "//registry",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_go_logr_logr//:logr",
+        "@org_uber_go_atomic//:atomic",
+    ],
+)
+
+go_test(
+    name = "cache_test",
+    srcs = [
+        "cache_test.go",
+        "cluster_test.go",
+        "listener_test.go",
+        "version_test.go",
+    ],
+    embed = [":cache"],
+    deps = [
+        "//agent/internal/xds/config",
+        "//agent/pkg/storage",
+        "//api/aether/cni/v1:cni",
+        "//api/aether/registry/v1:registry",
+        "//registry",
+        "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_uber_go_atomic//:atomic",
+    ],
+)

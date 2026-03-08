@@ -4,6 +4,7 @@ go_library(
     name = "storage",
     srcs = [
         "local.go",
+        "mock.go",
         "storage.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/pkg/storage",
