@@ -17,8 +17,12 @@ import (
 )
 
 const (
+	// clusterVersionLabel is used in snapshot version strings to identify
+	// cluster and endpoint resource snapshots.
 	clusterVersionLabel = "cluster"
-	vhostVersionLabel   = "vhost"
+	// vhostVersionLabel is used in snapshot version strings to identify
+	// virtual host resource snapshots.
+	vhostVersionLabel = "vhost"
 )
 
 // RemoveCluster removes the cluster, its endpoints, and its virtual host
@@ -38,58 +42,61 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 	return c.generateClusterSnapshot(ctx)
 }
 
-// ClustersAndEndpointsAndVhosts returns all cached cluster resources as a flat slice.
-func (c *SnapshotCache) ClustersAndEndpointsAndVhosts() ([]types.Resource, []types.Resource, []types.Resource) {
+// clustersEndpointsAndVhosts returns all cached cluster, endpoint, and virtual host
+// resources as separate slices. It returns concrete vhost type to avoid boxing/unboxing
+// at the caller. Must be called with clusterMu held.
+func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
 	c.clusterMu.RLock()
-	c.vhostMu.RLock()
 	defer c.clusterMu.RUnlock()
-	defer c.vhostMu.RUnlock()
 
 	clusters := make([]types.Resource, 0, len(c.clusters))
 	clas := make([]types.Resource, 0, len(c.clusters))
-	vhosts := make([]types.Resource, 0, len(c.clusters))
-	for clusterName, entry := range c.clusters {
+	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
+	for _, entry := range c.clusters {
 		clusters = append(clusters, entry.cluster)
-
 		if entry.loadAssignment != nil {
 			clas = append(clas, entry.loadAssignment)
 		}
-
-		vhosts = append(vhosts, c.vhosts[clusterName])
+		if entry.vhost != nil {
+			vhosts = append(vhosts, entry.vhost)
+		}
 	}
 	return clusters, clas, vhosts
 }
 
-// Endpoints return all cached endpoint resources as a flat slice.
-func (c *SnapshotCache) Endpoints() []types.Resource {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+// Endpoints returns the pre-built load assignment (cluster endpoints) for the given
+// cluster name as a resource slice. Returns nil if the cluster does not exist or
+// has no load assignment. Thread-safe.
+func (c *SnapshotCache) Endpoints(clusterName string) []types.Resource {
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
 
-	resources := make([]types.Resource, 0, len(c.entries))
-	for _, entry := range c.entries {
-		if entry.loadAssignment != nil {
-			resources = append(resources, entry.loadAssignment)
-		}
+	entry, ok := c.clusters[clusterName]
+	if !ok || entry.loadAssignment == nil {
+		return nil
 	}
-	return resources
+	return []types.Resource{entry.loadAssignment}
 }
 
 // VirtualHosts returns all cached virtual host resources as a flat slice.
+// Virtual hosts define routing rules for outbound traffic to services. Thread-safe.
 func (c *SnapshotCache) VirtualHosts() []types.Resource {
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
 	resources := make([]types.Resource, 0, len(c.clusters))
 	for _, entry := range c.clusters {
-		if entry.vhost != nil {
-			resources = append(resources, entry.vhost)
-		}
+		resources = append(resources, entry.vhost)
 	}
 	return resources
 }
 
-// LoadClustersFromRegistry fetches all service endpoints from the registry,
-// generates clusters and load assignments, populates the cache, and generates a snapshot.
+// LoadClustersFromRegistry fetches all HTTP service endpoints from the registry,
+// generates Envoy clusters and load assignments for each service, and populates
+// the cache. It also creates a local cluster for each service with endpoints
+// on the same node, and adds a local SPIRE cluster for mTLS configuration.
+// After populating the cache, it generates and sets a new cluster snapshot.
+// Returns an error if registry listing fails or snapshot generation fails.
 func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterName string, nodeName string, reg registry.Registry) error {
 	c.log.V(2).Info("generating clusters and endpoints from registry")
 
@@ -99,75 +106,78 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 	c.log.V(1).Info("found service endpoints in registry", "count", len(serviceEndpoints))
 
-	c.mu.Lock()
+	c.clusterMu.Lock()
+	if c.clusters == nil {
+		c.clusters = make(map[string]clusterEntry)
+	}
 	for serviceName, endpoints := range serviceEndpoints {
 		cluster := proxy.NewClusterForService(serviceName)
 		cla := proxy.NewClusterLoadAssignment(serviceName)
 		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName)
+		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
 
 		var localCluster *clusterv3.Cluster
 		var localCla *endpointv3.ClusterLoadAssignment
+		var localEpMap map[string]*endpointv3.LocalityLbEndpoints
 		for _, endpoint := range endpoints {
-			cla.Endpoints = append(cla.Endpoints, proxy.LocalityLbEndpointFromRegistryEndpoint(endpoint))
+			lbEp := proxy.LocalityLbEndpointFromRegistryEndpoint(endpoint)
+			cla.Endpoints = append(cla.Endpoints, lbEp)
+			epMap[endpoint.GetIp()] = lbEp
 
 			if isLocal(clusterName, nodeName, endpoint) {
 				localClusterName := fmt.Sprintf("local_%s", serviceName)
 
 				if localCluster == nil {
 					localCluster = proxy.NewLocalClusterForService(localClusterName, endpoint)
-				}
-
-				if localCla == nil {
 					localCla = proxy.NewClusterLoadAssignment(localClusterName)
+					localEpMap = make(map[string]*endpointv3.LocalityLbEndpoints)
 				}
 
-				localCla.Endpoints = append(localCla.Endpoints, proxy.LocalLocalityLbEndpointFromRegistryEndpoint(endpoint))
+				localLbEp := proxy.LocalLocalityLbEndpointFromRegistryEndpoint(endpoint)
+				localCla.Endpoints = append(localCla.Endpoints, localLbEp)
+				localEpMap[endpoint.GetIp()] = localLbEp
 			}
 		}
 
-		c.entries[serviceName] = clusterEntry{
+		c.clusters[serviceName] = clusterEntry{
 			cluster:        cluster,
 			loadAssignment: cla,
+			endpoints:      epMap,
+			vhost:          vhost,
 		}
 
 		if localCluster != nil {
 			localName := fmt.Sprintf("local_%s", serviceName)
-			c.entries[localName] = clusterEntry{
+			c.clusters[localName] = clusterEntry{
 				cluster:        localCluster,
 				loadAssignment: localCla,
+				endpoints:      localEpMap,
 			}
 		}
-
-		c.vhosts[serviceName] = vhost
 	}
 
 	// Add the local SPIRE cluster
-	c.entries[config.SpireAgentClusterName] = clusterEntry{
+	spireEntry := clusterEntry{
 		cluster:        config.NewLocalSpireCluster(),
 		loadAssignment: config.NewLocalSpireClusterLoadAssignment(),
 	}
-	c.mu.Unlock()
+	c.clusters[config.SpireAgentClusterName] = spireEntry
+	c.clusterMu.Unlock()
 
-	c.log.V(1).Info("loaded clusters from registry", "count", len(c.entries))
+	c.log.V(1).Info("loaded clusters from registry", "count", len(c.clusters))
 
 	return c.generateClusterSnapshot(ctx)
 }
 
 // generateClusterSnapshot creates a new snapshot with the current clusters, endpoints,
-// and routes, then sets it on the underlying snapshot cache.
+// and routes, validates it for consistency, and sets it on the underlying snapshot cache.
+// The snapshot version is generated using the cluster version label. Returns an error
+// if snapshot creation or validation fails.
 func (c *SnapshotCache) generateClusterSnapshot(ctx context.Context) error {
 	v := generateSnapshotVersion(clusterVersionLabel, c.version)
 
-	clusters, endpoints, vhostResources := c.ClustersAndEndpointsAndVhosts()
-	c.log.V(1).Info("setting snapshot", "version", v, "clusters", len(clusters), "endpoints", len(endpoints), "vhosts", len(vhostResources))
-
-	// Convert []types.Resource back to []*routev3.VirtualHost for route building
-	vhosts := make([]*routev3.VirtualHost, 0, len(vhostResources))
-	for _, r := range vhostResources {
-		if vh, ok := r.(*routev3.VirtualHost); ok {
-			vhosts = append(vhosts, vh)
-		}
-	}
+	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
+	c.log.V(1).Info("setting snapshot", "version", v, "clusters", len(clusters), "endpoints", len(endpoints), "vhosts", len(vhosts))
 
 	snapshot, err := cachev3.NewSnapshot(v, map[resourcev3.Type][]types.Resource{
 		resourcev3.ClusterType:  clusters,
@@ -190,7 +200,9 @@ func (c *SnapshotCache) generateClusterSnapshot(ctx context.Context) error {
 }
 
 // generateVhostsSnapshot creates a new snapshot with the current virtual hosts,
-// then sets it on the underlying snapshot cache.
+// validates it for consistency, and sets it on the underlying snapshot cache.
+// The snapshot version is generated using the vhost version label. Returns an error
+// if snapshot creation or validation fails.
 func (c *SnapshotCache) generateVhostsSnapshot(ctx context.Context) error {
 	v := generateSnapshotVersion(vhostVersionLabel, c.version)
 
@@ -215,6 +227,8 @@ func (c *SnapshotCache) generateVhostsSnapshot(ctx context.Context) error {
 	return nil
 }
 
+// isLocal reports whether the given endpoint belongs to the local cluster and node.
+// It is used to identify endpoints that should be included in the local cluster variant.
 func isLocal(clusterName string, nodeName string, endpoint *registryv1.ServiceEndpoint) bool {
 	return clusterName == endpoint.GetClusterName() && nodeName == endpoint.GetKubernetesMetadata().GetNodeName()
 }

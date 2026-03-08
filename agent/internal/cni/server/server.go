@@ -41,7 +41,7 @@ type CNIServer struct {
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
 
-	listenerCache *cache.ListenerCache
+	snapshotCache *cache.SnapshotCache
 
 	k8sClient client.Client
 }
@@ -51,7 +51,7 @@ var _ xds.ServerCallback = (*CNIServer)(nil)
 // NewCNIServer creates a new CNI gRPC server.
 // The server listens on a Unix domain socket and registers the CNI service with
 // protovalidate middleware for request validation.
-func NewCNIServer(clusterName string, nodeName string, proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, listenerCache *cache.ListenerCache, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
+func NewCNIServer(clusterName string, nodeName string, proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -67,7 +67,7 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, localStor
 		storage:       localStorage,
 		registry:      registry,
 		k8sClient:     k8sClient,
-		listenerCache: listenerCache,
+		snapshotCache: snapshotCache,
 	}
 
 	cniSrv.AddCallback(cniSrv)

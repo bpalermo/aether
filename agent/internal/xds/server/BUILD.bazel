@@ -12,8 +12,6 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//registry",
         "//xds",
-        "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_go_logr_logr//:logr",
-        "@org_uber_go_atomic//:atomic",
     ],
 )

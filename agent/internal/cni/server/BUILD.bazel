@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/cni/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/xds/cache",
         "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//agent/pkg/types",

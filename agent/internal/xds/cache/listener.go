@@ -14,11 +14,15 @@ import (
 )
 
 const (
+	// listenerVersionLabel is used in snapshot version strings to identify
+	// listener resource snapshots.
 	listenerVersionLabel = "listener"
 )
 
-// RemovePod removes the listeners associated with the given network namespace
-// and updates the snapshot.
+// RemovePod removes the inbound and outbound listeners for the pod with the
+// given container network namespace, then regenerates the listener snapshot.
+// If the pod does not exist in the cache, it returns nil without error.
+// Returns an error if snapshot generation fails.
 func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 	c.listenerMu.Lock()
 	_, exists := c.listeners[netns]
@@ -34,7 +38,8 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 	return c.generateListenerSnapshot(ctx)
 }
 
-// Listeners return all cached listener resources as a flat slice.
+// Listeners returns all cached listener resources (both inbound and outbound)
+// as a flat slice. Thread-safe.
 func (c *SnapshotCache) Listeners() []types.Resource {
 	c.listenerMu.RLock()
 	defer c.listenerMu.RUnlock()
@@ -46,8 +51,14 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	return resources
 }
 
-// LoadListenersFromStorage populates the cache map from storage, keyed by
-// each pod's container network namespace, then generates a snapshot.
+// LoadListenersFromStorage retrieves all pods from the given storage backend,
+// generates inbound and outbound Envoy listeners for each pod, and populates
+// the cache keyed by container network namespace. After populating the cache,
+// it generates and sets a new listener snapshot.
+//
+// If listener generation fails for any pod, it logs the error and continues
+// processing other pods. Returns an error with all accumulated errors if at
+// least one pod failed, or if snapshot generation fails.
 func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store storage.Storage[*cniv1.CNIPod]) error {
 	c.log.V(2).Info("generating listeners")
 
@@ -88,8 +99,10 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	return c.generateListenerSnapshot(ctx)
 }
 
-// generateListenerSnapshot creates a new snapshot with the current listeners and sets it
-// on the underlying snapshot cache.
+// generateListenerSnapshot creates a new snapshot with the current listeners,
+// validates it for consistency, and sets it on the underlying snapshot cache.
+// The snapshot version is generated using the listener version label. Returns an error
+// if snapshot creation or validation fails.
 func (c *SnapshotCache) generateListenerSnapshot(ctx context.Context) error {
 	v := generateSnapshotVersion(listenerVersionLabel, c.version)
 
