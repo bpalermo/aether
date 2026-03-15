@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "spire",
+    srcs = [
+        "bridge.go",
+        "client.go",
+        "converter.go",
+    ],
+    importpath = "github.com/bpalermo/aether/agent/internal/spire",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_spiffe_spire_api_sdk//proto/spire/api/agent/delegatedidentity/v1:delegatedidentity",
+        "@com_github_spiffe_spire_api_sdk//proto/spire/api/types",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+    ],
+)
+
+go_test(
+    name = "spire_test",
+    srcs = ["converter_test.go"],
+    embed = [":spire"],
+    deps = [
+        "@com_github_spiffe_spire_api_sdk//proto/spire/api/agent/delegatedidentity/v1:delegatedidentity",
+        "@com_github_spiffe_spire_api_sdk//proto/spire/api/types",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

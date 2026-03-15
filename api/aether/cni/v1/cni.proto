@@ -3,6 +3,7 @@ syntax = "proto3";
 package aether.cni.v1;
 
 import "buf/validate/validate.proto";
+import "google/protobuf/wrappers.proto";
 
 option go_package = "github.com/bpalermo/aether/api/aether/cni/v1;cniv1";
 
@@ -31,5 +32,7 @@ message CNIPod {
   map <string, string> labels = 6;
 
   map <string, string> annotations = 7;
+
+  google.protobuf.UInt32Value pid = 8;
 
 }

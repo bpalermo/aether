@@ -12,6 +12,7 @@ import (
 type AetherConf struct {
 	types.PluginConf
 	AgentCNIPath string `json:"agent_cni_path"`
+	CRISocket    string `json:"cri_socket"`
 
 	RuntimeConfig *RuntimeConfig `json:"runtimeConfig,omitempty"`
 }

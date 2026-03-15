@@ -50,7 +50,7 @@ func seedListeners(c *SnapshotCache, pods ...*cniv1.CNIPod) {
 	// check because the outbound listener references the "out_http"
 	// RouteConfiguration via RDS, but that RouteConfiguration is not included
 	// in a listener-only snapshot. Ignore this expected error.
-	_ = c.LoadListenersFromStorage(context.Background(), store)
+	_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
 }
 
 // ─── Listeners() ─────────────────────────────────────────────────────────────
@@ -243,7 +243,7 @@ func TestLoadListenersFromStorage_StorageError(t *testing.T) {
 		return nil, storageErr
 	})
 
-	err := c.LoadListenersFromStorage(context.Background(), store)
+	err := c.LoadListenersFromStorage(context.Background(), store, "example.org")
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, storageErr)
@@ -257,7 +257,7 @@ func TestLoadListenersFromStorage_EmptyStorage(t *testing.T) {
 	initListeners(c)
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 
-	err := c.LoadListenersFromStorage(context.Background(), store)
+	err := c.LoadListenersFromStorage(context.Background(), store, "example.org")
 
 	require.NoError(t, err)
 	assert.Empty(t, c.listeners)
@@ -315,7 +315,7 @@ func TestLoadListenersFromStorage_ValidPodsMapPopulation(t *testing.T) {
 
 			// Snapshot generation fails the consistency check (see function
 			// doc), so we ignore the error and only verify map state.
-			_ = c.LoadListenersFromStorage(context.Background(), store)
+			_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
 
 			assert.Len(t, c.listeners, tt.wantEntries)
 			// Each entry contributes both an inbound and outbound resource.
@@ -336,7 +336,7 @@ func TestLoadListenersFromStorage_ValidPodsSnapshotInconsistency(t *testing.T) {
 		return []*cniv1.CNIPod{makeCNIPod("pod-a", "default", "/proc/100/ns/net")}, nil
 	})
 
-	err := c.LoadListenersFromStorage(context.Background(), store)
+	err := c.LoadListenersFromStorage(context.Background(), store, "example.org")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "snapshot inconsistency")
@@ -356,7 +356,7 @@ func TestLoadListenersFromStorage_ValidPods_NetnsKeyed(t *testing.T) {
 	})
 
 	// Ignore snapshot inconsistency error; focus on map state.
-	_ = c.LoadListenersFromStorage(context.Background(), store)
+	_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
 
 	entry, ok := c.listeners["/proc/42/ns/net"]
 	require.True(t, ok, "listener entry must be keyed by network namespace")
@@ -420,7 +420,7 @@ func TestLoadListenersFromStorage_PodFailsGeneration(t *testing.T) {
 				return tt.pods, nil
 			})
 
-			err := c.LoadListenersFromStorage(context.Background(), store)
+			err := c.LoadListenersFromStorage(context.Background(), store, "example.org")
 
 			// When any pod fails generation the function returns the
 			// accumulated errors immediately (before snapshot generation).

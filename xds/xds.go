@@ -9,6 +9,7 @@ import (
 	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
 	listenerservice "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
 	routeservice "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/go-logr/logr"
@@ -60,6 +61,7 @@ func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.Snapshot
 	endpointservice.RegisterEndpointDiscoveryServiceServer(grpcServer, xdsSrv)
 	routeservice.RegisterRouteDiscoveryServiceServer(grpcServer, xdsSrv)
 
+	secretservice.RegisterSecretDiscoveryServiceServer(grpcServer, xdsSrv)
 	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(grpcServer, xdsSrv)
 
 	return XdsServer{

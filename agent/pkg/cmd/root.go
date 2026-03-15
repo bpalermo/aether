@@ -6,6 +6,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/awsconfig"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/pkg/constants"
@@ -55,6 +56,8 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "dynamodb", "Registry backend (dynamodb, etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "etcd endpoints")
+	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", "ROOTCA", "SPIFFE trust domain for the cluster")
+	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
 	_ = rootCmd.MarkPersistentFlagRequired("node-name")
@@ -88,11 +91,17 @@ func runAgent(ctx context.Context) error {
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 
+	// Create and start the SPIRE bridge for SDS
+	spireBridge := spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, l)
+	if err = m.Add(spireBridge); err != nil {
+		return fmt.Errorf("failed to add SPIRE bridge: %w", err)
+	}
+
 	if err = setXDSServer(ctx, m, ddbRegistry, localStorage, snapshotCache); err != nil {
 		return err
 	}
 
-	if err = setupCNIServer(m, localStorage, ddbRegistry, snapshotCache); err != nil {
+	if err = setupCNIServer(m, localStorage, ddbRegistry, snapshotCache, spireBridge); err != nil {
 		return err
 	}
 
@@ -107,7 +116,7 @@ func runAgent(ctx context.Context) error {
 
 func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, registry, localStorage, snapshotCache, l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, cfg.SpireTrustDomain, registry, localStorage, snapshotCache, l)
 	if err != nil {
 		return err
 	}
@@ -118,15 +127,17 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 	return nil
 }
 
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, spireBridge *spire.Bridge) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
 		cfg.NodeName,
 		cfg.ProxyServiceNodeID,
+		cfg.SpireTrustDomain,
 		localStorage,
 		registry,
 		snapshotCache,
+		spireBridge,
 		l,
 		m.GetClient(),
 		cfg.CNIServerConfig,

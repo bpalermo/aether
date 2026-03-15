@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"
+	typesv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -48,7 +50,15 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
 	}
 
-	// TODO: block until the configuration is actually loaded
+	// Subscribe to SVID for this pod via the SPIRE Delegated Identity API
+	spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
+	selectors := []*typesv1.Selector{
+		{Type: "k8s", Value: fmt.Sprintf("ns:%s", cniPod.GetNamespace())},
+		{Type: "k8s", Value: fmt.Sprintf("pod-name:%s", cniPod.GetName())},
+	}
+	if err = s.spireBridge.SubscribePod(ctx, spiffeID, selectors); err != nil {
+		log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+	}
 
 	return &cniv1.AddPodResponse{
 		Result: cniv1.AddPodResponse_SUCCESS,
@@ -90,6 +100,12 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	serviceName, ips, err := registry.ExtractCNIPodInformation(storedPod)
 	if err = s.registry.UnregisterEndpoints(ctx, serviceName, ips); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
+	}
+
+	// Unsubscribe from SVID for this pod
+	spiffeID := proxy.SpiffeIDFromPod(storedPod, s.trustDomain)
+	if unsubErr := s.spireBridge.UnsubscribePod(ctx, spiffeID); unsubErr != nil {
+		log.Error(unsubErr, "failed to unsubscribe from SVID", "spiffeID", spiffeID)
 	}
 
 	// Remove listener from xDS first

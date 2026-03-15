@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	"github.com/bpalermo/aether/agent/internal/xds/config"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -122,7 +121,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	inbound, outbound, err := proxy.GenerateListenersFromRegistryPod(pod)
+	inbound, outbound, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org")
 	require.NoError(t, err)
 
 	serviceName := "my-service"
@@ -133,15 +132,12 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 	cla.Endpoints = append(cla.Endpoints, lbEp)
 	vhost := proxy.BuildOutboundClusterVirtualHost(serviceName)
 
-	spireCluster := config.NewLocalSpireCluster()
-	spireCla := config.NewLocalSpireClusterLoadAssignment()
-
 	routeCfg := proxy.BuildOutboundRouteConfiguration([]*routev3.VirtualHost{vhost})
 
 	snapshot, err := cachev3.NewSnapshot("1", map[resourcev3.Type][]types.Resource{
 		resourcev3.ListenerType: {inbound, outbound},
-		resourcev3.ClusterType:  {cluster, spireCluster},
-		resourcev3.EndpointType: {cla, spireCla},
+		resourcev3.ClusterType:  {cluster},
+		resourcev3.EndpointType: {cla},
 		resourcev3.RouteType:    {routeCfg},
 	})
 	require.NoError(t, err)
@@ -245,8 +241,8 @@ func TestIntegration_SnapshotServedViaXDS(t *testing.T) {
 	resp, err := stream.Recv()
 	require.NoError(t, err, "failed to receive cluster discovery response")
 	assert.Equal(t, resourcev3.ClusterType, resp.GetTypeUrl())
-	// The snapshot contains the service cluster and the SPIRE agent cluster.
-	assert.Len(t, resp.GetResources(), 2, "expected service cluster and SPIRE agent cluster")
+	// The snapshot contains the service cluster.
+	assert.Len(t, resp.GetResources(), 1, "expected service cluster")
 
 	// Clean up.
 	cancel()
@@ -347,6 +343,7 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 		log:         log.WithName("agent-xds"),
 		clusterName: clusterName,
 		nodeName:    nodeName,
+		trustDomain: "example.org",
 		registry:    reg,
 		storage:     store,
 		cache:       agentCache,

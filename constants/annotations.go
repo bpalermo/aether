@@ -7,6 +7,10 @@ const (
 	annotationAetherPrefix         = "aether.io/"
 	annotationAetherEndpointPrefix = "endpoint." + annotationAetherPrefix
 
+	// AnnotationSpiffeID is the pod annotation key for specifying the workload's SPIFFE ID.
+	// When set, this is used as the SDS secret name for the workload's TLS certificate.
+	AnnotationSpiffeID = annotationAetherPrefix + "spiffe-id"
+
 	// AnnotationEndpointPort is the pod annotation key for specifying the service port
 	AnnotationEndpointPort = annotationAetherEndpointPrefix + "port"
 	// AnnotationEndpointWeight is the pod annotation key for specifying endpoint weight in load balancing

@@ -54,7 +54,7 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inbound, outbound, err := GenerateListenersFromRegistryPod(tt.cniPod)
+			inbound, outbound, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org")
 
 			if tt.expectedError {
 				require.Error(t, err)
@@ -113,7 +113,7 @@ func TestGenerateInboundHTTPListener(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			listener, err := generateInboundHTTPListener(tt.cniPod)
+			listener, err := generateInboundHTTPListener(tt.cniPod, "example.org")
 
 			if tt.expectedError {
 				require.Error(t, err)

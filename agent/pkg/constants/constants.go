@@ -14,4 +14,9 @@ const (
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
 	// DefaultCNISocketPath is the default Unix domain socket path for the CNI server
 	DefaultCNISocketPath = "/run/aether/cni.sock"
+
+	// DefaultSpireAdminSocketPath is the default path to the SPIRE agent admin socket
+	DefaultSpireAdminSocketPath = "/tmp/spire-agent/private/admin.sock"
+	// DefaultSpireTrustDomain is the default SPIFFE trust domain used for SDS secret naming
+	DefaultSpireTrustDomain = "ROOTCA"
 )

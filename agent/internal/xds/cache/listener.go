@@ -56,10 +56,12 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 // the cache keyed by container network namespace. After populating the cache,
 // it generates and sets a new listener snapshot.
 //
+// The trustDomain is the SPIFFE trust domain used for SDS secret naming.
+//
 // If listener generation fails for any pod, it logs the error and continues
 // processing other pods. Returns an error with all accumulated errors if at
 // least one pod failed, or if snapshot generation fails.
-func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store storage.Storage[*cniv1.CNIPod]) error {
+func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store storage.Storage[*cniv1.CNIPod], trustDomain string) error {
 	c.log.V(2).Info("generating listeners")
 
 	pods, err := store.GetAll(ctx)
@@ -75,7 +77,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		netns := pod.GetNetworkNamespace()
 		c.log.V(2).Info("generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
-		inbound, outbound, listenerErr := proxy.GenerateListenersFromRegistryPod(pod)
+		inbound, outbound, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain)
 		if listenerErr != nil {
 			c.log.V(1).Error(listenerErr, "failed to generate listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)

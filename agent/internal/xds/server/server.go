@@ -28,6 +28,7 @@ type AgentXdsServer struct {
 
 	clusterName string
 	nodeName    string
+	trustDomain string
 
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
@@ -39,7 +40,7 @@ type AgentXdsServer struct {
 // It initializes an xDS server with a snapshot cache and registers itself as a callback
 // to generate the initial Envoy snapshot before listening for client connections.
 // The server listens on a Unix domain socket at the default xDS socket path.
-func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, log logr.Logger) (*AgentXdsServer, error) {
+func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, log logr.Logger) (*AgentXdsServer, error) {
 	cfg := xds.NewServerConfig(
 		xds.WithUDS(constants.DefaultXdsSocketPath),
 	)
@@ -49,6 +50,7 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 		log:         log.WithName("agent-xds"),
 		clusterName: clusterName,
 		nodeName:    nodeName,
+		trustDomain: trustDomain,
 		registry:    registry,
 		storage:     storage,
 		cache:       snapshotCache,
@@ -65,7 +67,7 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	s.log.V(1).Info("generating initial snapshot")
 
-	if err := s.cache.LoadListenersFromStorage(ctx, s.storage); err != nil {
+	if err := s.cache.LoadListenersFromStorage(ctx, s.storage, s.trustDomain); err != nil {
 		s.log.Error(err, "failed to load listeners from storage")
 		return err
 	}

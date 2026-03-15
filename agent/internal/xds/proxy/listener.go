@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/constants"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 )
@@ -23,8 +24,9 @@ const (
 // Inbound listeners accept traffic from any interface on the pod's network namespace.
 // Outbound listeners route traffic destined for other services.
 // Both listeners use HTTP protocol and include appropriate filter chains.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, err error) {
-	inbound, err = generateInboundHTTPListener(cniPod)
+// The trustDomain is the SPIFFE trust domain URI used for SDS validation context.
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, err error) {
+	inbound, err = generateInboundHTTPListener(cniPod, trustDomain)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -37,7 +39,20 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (inbound *listenerv3
 	return inbound, outbound, nil
 }
 
-func generateInboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, error) {
+// SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the
+// aether.io/spiffe-id annotation. If not set, it constructs the SPIFFE ID
+// from the trust domain, namespace, and pod name using the standard
+// SPIRE convention: spiffe://<trust-domain>/ns/<namespace>/sa/<name>.
+func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
+	if id, ok := cniPod.GetAnnotations()[constants.AnnotationSpiffeID]; ok && id != "" {
+		return id
+	}
+	// Construct from namespace and pod name as a fallback.
+	// In production, pods should have the aether.io/spiffe-id annotation set.
+	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetName())
+}
+
+func generateInboundHTTPListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -46,8 +61,8 @@ func generateInboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, er
 		return nil, fmt.Errorf("network namespace is required")
 	}
 
-	// TODO: fix to use the correct one
-	tlsCertificateSecretName := "default"
+	tlsCertificateSecretName := SpiffeIDFromPod(cniPod, trustDomain)
+	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
 
 	return &listenerv3.Listener{
 		Name: "inbound_http",
@@ -67,7 +82,7 @@ func generateInboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, er
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultInboundHTTPFilterChain(cniPod.GetName(), tlsCertificateSecretName),
+			buildDefaultInboundHTTPFilterChain(cniPod.GetName(), tlsCertificateSecretName, validationContextName),
 		},
 	}, nil
 }

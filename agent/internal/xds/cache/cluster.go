@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
@@ -189,12 +188,6 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 	}
 
-	// Add the local SPIRE cluster
-	spireEntry := clusterEntry{
-		cluster:        config.NewLocalSpireCluster(),
-		loadAssignment: config.NewLocalSpireClusterLoadAssignment(),
-	}
-	c.clusters[config.SpireAgentClusterName] = spireEntry
 	c.clusterMu.Unlock()
 
 	c.log.V(1).Info("loaded clusters from registry", "count", len(c.clusters))

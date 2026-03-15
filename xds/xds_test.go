@@ -81,7 +81,7 @@ func TestNewXdsServer_DiscoveryServicesRegistered(t *testing.T) {
 			require.NotNil(t, grpcSrv)
 
 			// grpc.Server.GetServiceInfo returns a map of registered service names
-			// to their info.  We verify that all five xDS services are present.
+			// to their info.  We verify that all six xDS services are present.
 			serviceInfo := grpcSrv.GetServiceInfo()
 
 			expectedServices := []string{
@@ -89,6 +89,7 @@ func TestNewXdsServer_DiscoveryServicesRegistered(t *testing.T) {
 				"envoy.service.cluster.v3.ClusterDiscoveryService",
 				"envoy.service.endpoint.v3.EndpointDiscoveryService",
 				"envoy.service.route.v3.RouteDiscoveryService",
+				"envoy.service.secret.v3.SecretDiscoveryService",
 				"envoy.service.discovery.v3.AggregatedDiscoveryService",
 			}
 
@@ -97,7 +98,7 @@ func TestNewXdsServer_DiscoveryServicesRegistered(t *testing.T) {
 				assert.Truef(t, ok, "expected service %q to be registered", svc)
 			}
 
-			// Exactly the five xDS services should be registered (no extras).
+			// Exactly the six xDS services should be registered (no extras).
 			assert.Len(t, serviceInfo, len(expectedServices))
 		})
 	}
