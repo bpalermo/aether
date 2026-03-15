@@ -10,7 +10,6 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"
-	typesv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -52,12 +51,12 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 
 	// Subscribe to SVID for this pod via the SPIRE Delegated Identity API
 	spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
-	selectors := []*typesv1.Selector{
-		{Type: "k8s", Value: fmt.Sprintf("ns:%s", cniPod.GetNamespace())},
-		{Type: "k8s", Value: fmt.Sprintf("pod-name:%s", cniPod.GetName())},
-	}
-	if err = s.spireBridge.SubscribePod(ctx, spiffeID, selectors); err != nil {
-		log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+	if cniPod.GetPid() != nil {
+		if err = s.spireBridge.SubscribePod(ctx, spiffeID, int32(cniPod.GetPid().GetValue())); err != nil {
+			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+		}
+	} else {
+		log.V(1).Info("skipping SVID subscription: PID not available", "spiffeID", spiffeID)
 	}
 
 	return &cniv1.AddPodResponse{

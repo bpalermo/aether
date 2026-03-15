@@ -8,7 +8,6 @@ import (
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/go-logr/logr"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
-	typesv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 )
 
 // SecretStore is the interface for pushing secrets into the xDS snapshot cache.
@@ -88,10 +87,12 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 }
 
-// SubscribePod starts an SVID subscription for the given pod. The selectors
-// identify the workload to the SPIRE agent. The SPIFFE ID is used as the
-// secret name for Envoy. It is a no-op if the bridge has not been started yet.
-func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, selectors []*typesv1.Selector) error {
+// SubscribePod starts an SVID subscription for the given pod using its
+// container PID. The SPIRE agent attests the process via its workload
+// attestor plugins and returns the matching SVIDs. The SPIFFE ID is used
+// as the secret name for Envoy. It is a no-op if the bridge has not been
+// started yet.
+func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, pid int32) error {
 	if b.client == nil {
 		b.log.V(1).Info("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
 		return nil
@@ -107,7 +108,7 @@ func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, selectors []
 	b.subscriptions[spiffeID] = cancel
 	b.subsMu.Unlock()
 
-	svidCh, err := b.client.SubscribeSVIDs(subCtx, selectors)
+	svidCh, err := b.client.SubscribeSVIDsByPID(subCtx, pid)
 	if err != nil {
 		cancel()
 		b.subsMu.Lock()
