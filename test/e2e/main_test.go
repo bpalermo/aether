@@ -25,8 +25,9 @@ var (
 	kindClusterName = "aether-e2e"
 	namespace       = "aether-system"
 
-	agentImage     = envOrDefault("AETHER_AGENT_IMAGE", "palermo/aether-agent:latest")
+	agentImage      = envOrDefault("AETHER_AGENT_IMAGE", "palermo/aether-agent:latest")
 	cniInstallImage = envOrDefault("AETHER_CNI_INSTALL_IMAGE", "palermo/aether-cni-install:latest")
+	etcdImage       = "gcr.io/etcd-development/etcd:v3.5.21"
 )
 
 func envOrDefault(key, fallback string) string {
@@ -45,6 +46,7 @@ func TestMain(m *testing.M) {
 		envfuncs.CreateClusterWithConfig(kindProvider, kindClusterName, "testdata/kind-config.yaml"),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, agentImage),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, cniInstallImage),
+		envfuncs.LoadDockerImageToCluster(kindClusterName, etcdImage),
 		deployAetherSystem(),
 	)
 
@@ -173,8 +175,9 @@ func deployEtcd(ctx context.Context, client klient.Client) error {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "etcd",
-							Image: "quay.io/coreos/etcd:v3.5.21",
+							Name:            "etcd",
+							Image:           etcdImage,
+							ImagePullPolicy: corev1.PullNever,
 							Command: []string{
 								"etcd",
 								"--advertise-client-urls=http://0.0.0.0:2379",
