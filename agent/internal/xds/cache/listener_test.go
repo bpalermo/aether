@@ -35,21 +35,13 @@ func initListeners(c *SnapshotCache) {
 }
 
 // seedListeners pre-populates the cache by calling LoadListenersFromStorage with
-// the given pods. The snapshot generation step is expected to report a consistency
-// error (the outbound listener's RDS reference to the "out_http" RouteConfiguration
-// is not included in a listener-only snapshot), so this helper ignores that
-// specific error and only fails if the map was not populated.
-// This mirrors how cluster_test.go calls LoadClustersFromRegistry.
+// the given pods.
 func seedListeners(c *SnapshotCache, pods ...*cniv1.CNIPod) {
 	initListeners(c)
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	store.GetAllFunc = func(_ context.Context) ([]*cniv1.CNIPod, error) {
 		return pods, nil
 	}
-	// Snapshot generation consistently fails the go-control-plane consistency
-	// check because the outbound listener references the "out_http"
-	// RouteConfiguration via RDS, but that RouteConfiguration is not included
-	// in a listener-only snapshot. Ignore this expected error.
 	_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
 }
 
@@ -158,28 +150,18 @@ func TestSnapshotCache_RemovePod_NonExisting(t *testing.T) {
 }
 
 // TestSnapshotCache_RemovePod_ExistingPod verifies that removing a pod that
-// exists deletes it from the map before snapshot generation. Because the
-// remaining outbound listener still references the "out_http" RouteConfiguration
-// via RDS (not present in a listener-only snapshot), the snapshot consistency
-// check fails. The map mutation happens before that error, so we verify map
-// state and expect the snapshot error.
-//
-// When the last pod is removed the listener list is empty, which produces a
-// valid (empty) snapshot — no error is expected in that case.
+// exists deletes it from the map and generates a valid listener snapshot.
 func TestSnapshotCache_RemovePod_ExistingPod(t *testing.T) {
 	tests := []struct {
-		name             string
-		initialPods      []*cniv1.CNIPod
-		removeNetns      string
-		wantMapLen       int
-		wantGone         string
-		wantRemaining    []string
-		wantErrSubstring string // non-empty when snapshot generation is expected to fail
+		name          string
+		initialPods   []*cniv1.CNIPod
+		removeNetns   string
+		wantMapLen    int
+		wantGone      string
+		wantRemaining []string
 	}{
 		{
-			// After removing the only pod the listener list is empty, so the
-			// snapshot is valid and no error should be returned.
-			name: "remove the only pod results in empty listener map and no error",
+			name: "remove the only pod results in empty listener map",
 			initialPods: []*cniv1.CNIPod{
 				makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
 			},
@@ -188,19 +170,15 @@ func TestSnapshotCache_RemovePod_ExistingPod(t *testing.T) {
 			wantGone:    "/proc/100/ns/net",
 		},
 		{
-			// Removing one of two pods leaves a listener that references the
-			// "out_http" route config via RDS. The listener-only snapshot fails
-			// the consistency check, but the map deletion still completes first.
-			name: "remove one of two pods: map is updated, snapshot consistency fails",
+			name: "remove one of two pods leaves the other intact",
 			initialPods: []*cniv1.CNIPod{
 				makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
 				makeCNIPod("pod-b", "default", "/proc/200/ns/net"),
 			},
-			removeNetns:      "/proc/100/ns/net",
-			wantMapLen:       1,
-			wantGone:         "/proc/100/ns/net",
-			wantRemaining:    []string{"/proc/200/ns/net"},
-			wantErrSubstring: "snapshot inconsistency",
+			removeNetns:   "/proc/100/ns/net",
+			wantMapLen:    1,
+			wantGone:      "/proc/100/ns/net",
+			wantRemaining: []string{"/proc/200/ns/net"},
 		},
 	}
 
@@ -210,8 +188,8 @@ func TestSnapshotCache_RemovePod_ExistingPod(t *testing.T) {
 			seedListeners(c, tt.initialPods...)
 
 			err := c.RemovePod(context.Background(), tt.removeNetns)
+			require.NoError(t, err)
 
-			// Verify the map is updated regardless of the snapshot error.
 			assert.Len(t, c.listeners, tt.wantMapLen)
 			_, stillExists := c.listeners[tt.wantGone]
 			assert.False(t, stillExists, "removed netns %q should be absent from map", tt.wantGone)
@@ -219,13 +197,6 @@ func TestSnapshotCache_RemovePod_ExistingPod(t *testing.T) {
 			for _, key := range tt.wantRemaining {
 				_, ok := c.listeners[key]
 				assert.True(t, ok, "netns %q should still be present in map", key)
-			}
-
-			if tt.wantErrSubstring != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErrSubstring)
-			} else {
-				require.NoError(t, err)
 			}
 		})
 	}
@@ -313,9 +284,8 @@ func TestLoadListenersFromStorage_ValidPodsMapPopulation(t *testing.T) {
 				return tt.pods, nil
 			})
 
-			// Snapshot generation fails the consistency check (see function
-			// doc), so we ignore the error and only verify map state.
-			_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
+			err := c.LoadListenersFromStorage(context.Background(), store, "example.org")
+			require.NoError(t, err)
 
 			assert.Len(t, c.listeners, tt.wantEntries)
 			// Each entry contributes both an inbound and outbound resource.
@@ -325,11 +295,9 @@ func TestLoadListenersFromStorage_ValidPodsMapPopulation(t *testing.T) {
 }
 
 // TestLoadListenersFromStorage_ValidPodsSnapshotInconsistency verifies that
-// LoadListenersFromStorage returns a "snapshot inconsistency" error when valid
-// pods are loaded. This is expected because the outbound listener references the
-// "out_http" RouteConfiguration via RDS, which is not present in a listener-only
-// snapshot.
-func TestLoadListenersFromStorage_ValidPodsSnapshotInconsistency(t *testing.T) {
+// TestLoadListenersFromStorage_ValidPodsSucceeds verifies that loading valid pods
+// produces a successful snapshot.
+func TestLoadListenersFromStorage_ValidPodsSucceeds(t *testing.T) {
 	c := newTestCache("node-1")
 	initListeners(c)
 	store := storage.NewMockStorageWithGetAll[*cniv1.CNIPod](func(_ context.Context) ([]*cniv1.CNIPod, error) {
@@ -338,9 +306,7 @@ func TestLoadListenersFromStorage_ValidPodsSnapshotInconsistency(t *testing.T) {
 
 	err := c.LoadListenersFromStorage(context.Background(), store, "example.org")
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "snapshot inconsistency")
-	// Despite the snapshot error, the map was populated.
+	require.NoError(t, err)
 	assert.Len(t, c.listeners, 1)
 }
 
@@ -355,8 +321,7 @@ func TestLoadListenersFromStorage_ValidPods_NetnsKeyed(t *testing.T) {
 		return []*cniv1.CNIPod{pod}, nil
 	})
 
-	// Ignore snapshot inconsistency error; focus on map state.
-	_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
+	require.NoError(t, c.LoadListenersFromStorage(context.Background(), store, "example.org"))
 
 	entry, ok := c.listeners["/proc/42/ns/net"]
 	require.True(t, ok, "listener entry must be keyed by network namespace")

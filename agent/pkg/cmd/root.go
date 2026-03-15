@@ -56,7 +56,8 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "kubernetes", "Registry backend (kubernetes, dynamodb, etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "etcd endpoints")
-	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", "ROOTCA", "SPIFFE trust domain for the cluster")
+	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Enable SPIRE integration for mTLS via SDS")
+	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
@@ -91,10 +92,15 @@ func runAgent(ctx context.Context) error {
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 
-	// Create and start the SPIRE bridge for SDS
-	spireBridge := spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, l)
-	if err = m.Add(spireBridge); err != nil {
-		return fmt.Errorf("failed to add SPIRE bridge: %w", err)
+	// Optionally create and start the SPIRE bridge for SDS
+	var spireBridge *spire.Bridge
+	if cfg.SpireEnabled {
+		spireBridge = spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, l)
+		if err = m.Add(spireBridge); err != nil {
+			return fmt.Errorf("failed to add SPIRE bridge: %w", err)
+		}
+	} else {
+		l.Info("SPIRE integration disabled")
 	}
 
 	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache); err != nil {

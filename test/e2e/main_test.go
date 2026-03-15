@@ -262,6 +262,7 @@ func deployAgent(ctx context.Context, client klient.Client) error {
 								"--node-name=$(NODE_NAME)",
 								"--registry-backend=etcd",
 								"--etcd-endpoints=etcd.aether-system.svc.cluster.local:2379",
+								"--spire-enabled=false",
 							},
 							Env: []corev1.EnvVar{
 								{

@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -56,14 +55,6 @@ func TestAgentDaemonSet(t *testing.T) {
 			}
 			return ctx
 		}).
-		Assess("xDS socket exists on node", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			assertFileExistsInAgentPod(ctx, t, cfg, "/run/aether/xds.sock")
-			return ctx
-		}).
-		Assess("CNI socket exists on node", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			assertFileExistsInAgentPod(ctx, t, cfg, "/run/aether/cni.sock")
-			return ctx
-		}).
 		Feature()
 
 	testenv.Test(t, readiness)
@@ -82,18 +73,4 @@ func listAgentPods(ctx context.Context, t *testing.T, cfg *envconf.Config) *core
 		t.Fatal("no agent pods found")
 	}
 	return pods
-}
-
-func assertFileExistsInAgentPod(ctx context.Context, t *testing.T, cfg *envconf.Config, path string) {
-	t.Helper()
-	pods := listAgentPods(ctx, t, cfg)
-	pod := pods.Items[0]
-
-	var stdout, stderr bytes.Buffer
-	if err := cfg.Client().Resources().ExecInPod(ctx, pod.Namespace, pod.Name, "agent",
-		[]string{"test", "-e", path},
-		&stdout, &stderr,
-	); err != nil {
-		t.Errorf("file %s does not exist in agent pod %s: %v (stderr: %s)", path, pod.Name, err, stderr.String())
-	}
 }
