@@ -13,55 +13,25 @@ const (
 	tlsTransportSocketName = "envoy.transport_sockets.tls"
 )
 
+// sdsSecretConfig creates an SDS secret config that fetches secrets via ADS.
+func sdsSecretConfig(secretName string) *transport_sockets_v3.SdsSecretConfig {
+	return &transport_sockets_v3.SdsSecretConfig{
+		Name:      secretName,
+		SdsConfig: config.XDSConfigSourceADS(),
+	}
+}
+
 // DownstreamTransportSocket creates a TLS transport socket for downstream (inbound) connections.
-// It requires mutual TLS and retrieves certificates and validation context from SPIRE via SDS.
+// It requires mutual TLS and retrieves certificates and validation context via ADS-served SDS.
 func DownstreamTransportSocket(tlsCertificateSecretName string, validationContextName string) *corev3.TransportSocket {
 	downstreamTlsContext := &transport_sockets_v3.DownstreamTlsContext{
 		RequireClientCertificate: wrapperspb.Bool(true),
 		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
 			TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
-				{
-					Name: tlsCertificateSecretName,
-					SdsConfig: &corev3.ConfigSource{
-						ResourceApiVersion: corev3.ApiVersion_V3,
-						ConfigSourceSpecifier: &corev3.ConfigSource_ApiConfigSource{
-							ApiConfigSource: &corev3.ApiConfigSource{
-								ApiType: corev3.ApiConfigSource_GRPC,
-								GrpcServices: []*corev3.GrpcService{
-									{
-										TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-											EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
-												ClusterName: config.SpireAgentClusterName,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
+				sdsSecretConfig(tlsCertificateSecretName),
 			},
 			ValidationContextType: &transport_sockets_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
-				ValidationContextSdsSecretConfig: &transport_sockets_v3.SdsSecretConfig{
-					Name: validationContextName,
-					SdsConfig: &corev3.ConfigSource{
-						ResourceApiVersion: corev3.ApiVersion_V3,
-						ConfigSourceSpecifier: &corev3.ConfigSource_ApiConfigSource{
-							ApiConfigSource: &corev3.ApiConfigSource{
-								ApiType: corev3.ApiConfigSource_GRPC,
-								GrpcServices: []*corev3.GrpcService{
-									{
-										TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-											EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
-												ClusterName: config.SpireAgentClusterName,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
+				ValidationContextSdsSecretConfig: sdsSecretConfig(validationContextName),
 			},
 		},
 	}
@@ -70,32 +40,15 @@ func DownstreamTransportSocket(tlsCertificateSecretName string, validationContex
 }
 
 // UpstreamTransportSocket creates a TLS transport socket for upstream (outbound) connections.
-// It requires mutual TLS and retrieves validation context from SPIRE via SDS.
-func UpstreamTransportSocket(validationContextName string) *corev3.TransportSocket {
-	upstreamTlsContext := &transport_sockets_v3.DownstreamTlsContext{
-		RequireClientCertificate: wrapperspb.Bool(true),
+// It uses mTLS with both a client certificate and validation context fetched via ADS-served SDS.
+func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string) *corev3.TransportSocket {
+	upstreamTlsContext := &transport_sockets_v3.UpstreamTlsContext{
 		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
+			TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
+				sdsSecretConfig(tlsCertificateSecretName),
+			},
 			ValidationContextType: &transport_sockets_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
-				ValidationContextSdsSecretConfig: &transport_sockets_v3.SdsSecretConfig{
-					Name: validationContextName,
-					SdsConfig: &corev3.ConfigSource{
-						ResourceApiVersion: corev3.ApiVersion_V3,
-						ConfigSourceSpecifier: &corev3.ConfigSource_ApiConfigSource{
-							ApiConfigSource: &corev3.ApiConfigSource{
-								ApiType: corev3.ApiConfigSource_GRPC,
-								GrpcServices: []*corev3.GrpcService{
-									{
-										TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-											EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
-												ClusterName: config.SpireAgentClusterName,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
+				ValidationContextSdsSecretConfig: sdsSecretConfig(validationContextName),
 			},
 		},
 	}

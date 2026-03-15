@@ -9,14 +9,11 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-const (
-	// spiffeDefaultBundleName is the SPIRE default bundle name used for root CA trust
-	spiffeDefaultBundleName = "ROOTCA"
-)
-
 // buildDefaultInboundHTTPFilterChain creates a filter chain for inbound HTTP traffic.
 // It includes TLS configuration, client certificate forwarding, and an HTTP connection manager.
-func buildDefaultInboundHTTPFilterChain(name string, tlsCertificateSecretName string) *listenerv3.FilterChain {
+// The tlsCertificateSecretName is the SPIFFE ID used to fetch the workload's SVID via SDS.
+// The validationContextName is the trust domain used to fetch the CA bundle via SDS.
+func buildDefaultInboundHTTPFilterChain(name string, tlsCertificateSecretName string, validationContextName string) *listenerv3.FilterChain {
 	routeConfig := buildInboundRouteConfiguration()
 
 	hcm := buildHTTPConnectionManager(name, routeConfig)
@@ -31,7 +28,7 @@ func buildDefaultInboundHTTPFilterChain(name string, tlsCertificateSecretName st
 	return &listenerv3.FilterChain{
 		Name:            fmt.Sprintf("in_http_%s", name),
 		Filters:         networkFilters,
-		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, spiffeDefaultBundleName),
+		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
 	}
 }
 

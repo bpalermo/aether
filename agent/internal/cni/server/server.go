@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"buf.build/go/protovalidate"
+	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -35,6 +36,7 @@ type CNIServer struct {
 	clusterName string
 	proxyID     string
 	nodeName    string
+	trustDomain string
 	nodeRegion  string
 	nodeZone    string
 
@@ -42,6 +44,7 @@ type CNIServer struct {
 	registry registry.Registry
 
 	snapshotCache *cache.SnapshotCache
+	spireBridge   *spire.Bridge
 
 	k8sClient client.Client
 }
@@ -51,7 +54,7 @@ var _ xds.ServerCallback = (*CNIServer)(nil)
 // NewCNIServer creates a new CNI gRPC server.
 // The server listens on a Unix domain socket and registers the CNI service with
 // protovalidate middleware for request validation.
-func NewCNIServer(clusterName string, nodeName string, proxyID string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
+func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDomain string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, spireBridge *spire.Bridge, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -64,10 +67,12 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, localStor
 		clusterName:   clusterName,
 		nodeName:      nodeName,
 		proxyID:       proxyID,
+		trustDomain:   trustDomain,
 		storage:       localStorage,
 		registry:      registry,
 		k8sClient:     k8sClient,
 		snapshotCache: snapshotCache,
+		spireBridge:   spireBridge,
 	}
 
 	cniSrv.AddCallback(cniSrv)

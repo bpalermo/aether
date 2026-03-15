@@ -22,6 +22,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/go-logr/logr"
@@ -49,6 +50,9 @@ type SnapshotCache struct {
 
 	clusterMu sync.RWMutex
 	clusters  map[string]clusterEntry // keyed by cluster name
+
+	secretMu sync.RWMutex
+	secrets  map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
 
 	version *atomic.Uint64
 }

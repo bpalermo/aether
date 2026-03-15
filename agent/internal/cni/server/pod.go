@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/constants"
@@ -48,7 +49,15 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
 	}
 
-	// TODO: block until the configuration is actually loaded
+	// Subscribe to SVID for this pod via the SPIRE Delegated Identity API
+	spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
+	if cniPod.GetPid() != nil {
+		if err = s.spireBridge.SubscribePod(ctx, spiffeID, int32(cniPod.GetPid().GetValue())); err != nil {
+			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+		}
+	} else {
+		log.V(1).Info("skipping SVID subscription: PID not available", "spiffeID", spiffeID)
+	}
 
 	return &cniv1.AddPodResponse{
 		Result: cniv1.AddPodResponse_SUCCESS,
@@ -92,6 +101,12 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
 	}
 
+	// Unsubscribe from SVID for this pod
+	spiffeID := proxy.SpiffeIDFromPod(storedPod, s.trustDomain)
+	if unsubErr := s.spireBridge.UnsubscribePod(ctx, spiffeID); unsubErr != nil {
+		log.Error(unsubErr, "failed to unsubscribe from SVID", "spiffeID", spiffeID)
+	}
+
 	// Remove listener from xDS first
 	if err = s.snapshotCache.RemovePod(ctx, storedPod.GetNetworkNamespace()); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to remove listener: %v", err)
@@ -124,6 +139,7 @@ func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) err
 
 	cniPod.Annotations = k8sPod.Annotations
 	cniPod.Labels = k8sPod.Labels
+	cniPod.ServiceAccount = k8sPod.Spec.ServiceAccountName
 
 	return nil
 }
@@ -138,8 +154,8 @@ func validateAndCheckIgnorable(cniPod *cniv1.CNIPod) (bool, error) {
 }
 
 // isIgnorablePod determines if a pod should be ignored by the service mesh.
-// Pods in kube-system or aether-system namespaces, pods without the aether service label,
-// or pods without IP addresses are considered ignorable.
+// Pods in kube-system or aether-system namespaces, pods without the
+// aether.io/managed=true label, or pods without IP addresses are considered ignorable.
 func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
 	if cniPod.GetNamespace() == "kube-system" || cniPod.GetNamespace() == "aether-system" {
 		return true
@@ -150,12 +166,12 @@ func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
 		return true
 	}
 
-	_, ok := labels[constants.LabelAetherService]
-	if !ok {
+	managed, ok := labels[constants.LabelAetherManaged]
+	if !ok || managed != "true" {
 		return true
 	}
 
-	if cniPod.GetIps() == nil || len(cniPod.GetIps()) == 0 {
+	if len(cniPod.GetIps()) == 0 {
 		return true
 	}
 

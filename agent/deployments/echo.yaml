@@ -17,7 +17,7 @@ spec:
       labels:
         app: svc-a
         app.kubernetes.io/name: svc-a
-        aether.io/service: svc-a
+        aether.io/managed: "true"
     spec:
       securityContext:
         runAsUser: 65534
@@ -71,7 +71,7 @@ spec:
       labels:
         app: svc-b
         app.kubernetes.io/name: svc-b
-        aether.io/service: svc-b
+        aether.io/managed: "true"
     spec:
       securityContext:
         runAsUser: 65534

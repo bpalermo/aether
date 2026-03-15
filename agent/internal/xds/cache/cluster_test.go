@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -96,7 +95,7 @@ func TestSnapshotCache_VirtualHosts(t *testing.T) {
 			name: "includes nil slot for cluster without a vhost",
 			setupFunc: func(c *SnapshotCache) {
 				c.clusters = map[string]clusterEntry{
-					"spire_sds": {vhost: nil},
+					"no-vhost-svc": {vhost: nil},
 				}
 			},
 			wantLen: 1,
@@ -474,13 +473,11 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 		wantAbsentKeys  []string
 	}{
 		{
-			name:          "empty registry populates only SPIRE cluster",
-			cacheNodeName: "node-1",
-			clusterName:   "cluster-1",
-			registryData:  map[string][]*registryv1.ServiceEndpoint{},
-			wantClusterKeys: []string{
-				config.SpireAgentClusterName,
-			},
+			name:            "empty registry populates no clusters",
+			cacheNodeName:   "node-1",
+			clusterName:     "cluster-1",
+			registryData:    map[string][]*registryv1.ServiceEndpoint{},
+			wantClusterKeys: []string{},
 		},
 		{
 			name:          "single remote service creates its cluster entry",
@@ -493,7 +490,6 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			},
 			wantClusterKeys: []string{
 				"frontend",
-				config.SpireAgentClusterName,
 			},
 			wantAbsentKeys: []string{"local_frontend"},
 		},
@@ -509,7 +505,6 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			wantClusterKeys: []string{
 				"backend",
 				"local_backend",
-				config.SpireAgentClusterName,
 			},
 		},
 		{
@@ -525,7 +520,6 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			wantClusterKeys: []string{
 				"api",
 				"local_api",
-				config.SpireAgentClusterName,
 			},
 		},
 		{
@@ -540,7 +534,6 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			},
 			wantClusterKeys: []string{
 				"worker",
-				config.SpireAgentClusterName,
 			},
 			wantAbsentKeys: []string{"local_worker"},
 		},
@@ -555,7 +548,6 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			wantClusterKeys: []string{
 				"svc-a",
 				"svc-b",
-				config.SpireAgentClusterName,
 			},
 		},
 	}
@@ -584,22 +576,6 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestLoadClustersFromRegistry_SpireClusterAlwaysAdded verifies that the SPIRE cluster
-// is always present and correctly configured after loading from registry.
-func TestLoadClustersFromRegistry_SpireClusterAlwaysAdded(t *testing.T) {
-	c := newTestCache("node-1")
-	reg := &mockRegistry{}
-
-	// Map mutation happens before snapshot generation; ignore the snapshot error.
-	_ = c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg)
-
-	spire, ok := c.clusters[config.SpireAgentClusterName]
-	require.True(t, ok, "spire_sds cluster must always be present after loading")
-	assert.NotNil(t, spire.cluster)
-	assert.NotNil(t, spire.loadAssignment)
-	assert.Equal(t, config.SpireAgentClusterName, spire.cluster.GetName())
 }
 
 // TestLoadClustersFromRegistry_IncreasesVersion verifies that loading clusters increments
@@ -690,8 +666,8 @@ func TestSnapshotCache_ClustersEndpointsAndVhosts(t *testing.T) {
 			name: "cluster without load assignment is not counted in endpoints",
 			setupFunc: func(c *SnapshotCache) {
 				c.clusters = map[string]clusterEntry{
-					"spire_sds": {
-						cluster:        &clusterv3.Cluster{Name: "spire_sds"},
+					"no-cla-svc": {
+						cluster:        &clusterv3.Cluster{Name: "no-cla-svc"},
 						loadAssignment: nil,
 					},
 				}

@@ -25,7 +25,6 @@ go_test(
     embed = [":server"],
     deps = [
         "//agent/internal/xds/cache",
-        "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
         "//agent/pkg/storage",
         "//api/aether/cni/v1:cni",

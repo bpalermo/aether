@@ -26,6 +26,11 @@ type AgentConfig struct {
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
 
+	// SpireTrustDomain is the SPIFFE trust domain for the cluster
+	SpireTrustDomain string
+	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
+	SpireAdminSocketPath string
+
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
 }
@@ -39,5 +44,7 @@ func NewAgentConfig() *AgentConfig {
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
 		RegistryBackend:        "dynamodb",
 		EtcdEndpoints:          []string{"localhost:2379"},
+		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
+		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
 	}
 }

@@ -10,7 +10,9 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/cni/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/spire",
         "//agent/internal/xds/cache",
+        "//agent/internal/xds/proxy",
         "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//agent/pkg/types",
@@ -38,7 +40,9 @@ go_test(
     ],
     embed = [":server"],
     deps = [
+        "//agent/internal/spire",
         "//agent/internal/xds/cache",
+        "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//agent/pkg/types",
         "//api/aether/cni/v1:cni",

@@ -172,6 +172,7 @@ require (
 	github.com/klauspost/compress v1.18.4
 	github.com/pquerna/protoc-gen-dynamo v0.11.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spiffe/spire-api-sdk v1.14.1
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.40.0
 	github.com/testcontainers/testcontainers-go/modules/dynamodb v0.40.0
