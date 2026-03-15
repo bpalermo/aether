@@ -189,7 +189,8 @@ func TestIntegration_AddPodEndToEnd(t *testing.T) {
 	assert.Equal(t, "my-pod", storedPod.GetName())
 	assert.Equal(t, "default", storedPod.GetNamespace())
 	// Labels should have been enriched from the k8s pod.
-	assert.Equal(t, "my-service", storedPod.GetLabels()[constants.LabelAetherService])
+	assert.Equal(t, "true", storedPod.GetLabels()[constants.LabelAetherManaged])
+	assert.Equal(t, "default", storedPod.GetServiceAccount())
 
 	cancel()
 	waitForServerShutdown(t, errCh)

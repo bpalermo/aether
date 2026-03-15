@@ -41,15 +41,13 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) 
 
 // SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the
 // aether.io/spiffe-id annotation. If not set, it constructs the SPIFFE ID
-// from the trust domain, namespace, and pod name using the standard
-// SPIRE convention: spiffe://<trust-domain>/ns/<namespace>/sa/<name>.
+// from the trust domain, namespace, and service account using the standard
+// SPIRE convention: spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>.
 func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 	if id, ok := cniPod.GetAnnotations()[constants.AnnotationSpiffeID]; ok && id != "" {
 		return id
 	}
-	// Construct from namespace and pod name as a fallback.
-	// In production, pods should have the aether.io/spiffe-id annotation set.
-	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetName())
+	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetServiceAccount())
 }
 
 func generateInboundHTTPListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.Listener, error) {

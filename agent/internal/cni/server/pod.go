@@ -139,6 +139,7 @@ func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) err
 
 	cniPod.Annotations = k8sPod.Annotations
 	cniPod.Labels = k8sPod.Labels
+	cniPod.ServiceAccount = k8sPod.Spec.ServiceAccountName
 
 	return nil
 }
@@ -153,8 +154,8 @@ func validateAndCheckIgnorable(cniPod *cniv1.CNIPod) (bool, error) {
 }
 
 // isIgnorablePod determines if a pod should be ignored by the service mesh.
-// Pods in kube-system or aether-system namespaces, pods without the aether service label,
-// or pods without IP addresses are considered ignorable.
+// Pods in kube-system or aether-system namespaces, pods without the
+// aether.io/managed=true label, or pods without IP addresses are considered ignorable.
 func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
 	if cniPod.GetNamespace() == "kube-system" || cniPod.GetNamespace() == "aether-system" {
 		return true
@@ -165,12 +166,12 @@ func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
 		return true
 	}
 
-	_, ok := labels[constants.LabelAetherService]
-	if !ok {
+	managed, ok := labels[constants.LabelAetherManaged]
+	if !ok || managed != "true" {
 		return true
 	}
 
-	if cniPod.GetIps() == nil || len(cniPod.GetIps()) == 0 {
+	if len(cniPod.GetIps()) == 0 {
 		return true
 	}
 

@@ -16,7 +16,7 @@ import (
 func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
 	protocol := registryv1.Service_HTTP
 
-	serviceName, err := getServiceNameFromLabels(cniPod.GetLabels())
+	serviceName, err := getServiceName(cniPod)
 	if err != nil {
 		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
 	}
@@ -57,7 +57,7 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 
 // ExtractCNIPodInformation extracts the service name and IP addresses from a CNIPod.
 func ExtractCNIPodInformation(pod *cniv1.CNIPod) (string, []string, error) {
-	serviceName, err := getServiceNameFromLabels(pod.GetLabels())
+	serviceName, err := getServiceName(pod)
 	if err != nil {
 		return "", nil, err
 	}
@@ -65,13 +65,13 @@ func ExtractCNIPodInformation(pod *cniv1.CNIPod) (string, []string, error) {
 	return serviceName, pod.GetIps(), nil
 }
 
-// getServiceNameFromLabels extracts the service name from a pod's labels.
-func getServiceNameFromLabels(labels map[string]string) (string, error) {
-	serviceName, ok := labels[constants.LabelAetherService]
-	if !ok {
-		return "", fmt.Errorf("missing service label")
+// getServiceName extracts the service name from the pod's service account.
+func getServiceName(cniPod *cniv1.CNIPod) (string, error) {
+	sa := cniPod.GetServiceAccount()
+	if sa == "" {
+		return "", fmt.Errorf("missing service account")
 	}
-	return serviceName, nil
+	return sa, nil
 }
 
 // getPortFromAnnotations extracts the endpoint port from pod annotations.

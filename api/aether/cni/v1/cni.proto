@@ -35,4 +35,6 @@ message CNIPod {
 
   google.protobuf.UInt32Value pid = 8;
 
+  string service_account = 9;
+
 }

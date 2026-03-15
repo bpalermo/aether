@@ -3,7 +3,7 @@ package constants
 const (
 	aetherLabelPrefix = "aether.io"
 
-	// LabelAetherService is the Kubernetes label used to mark pods as managed by Aether
-	// and to specify which service they belong to. The value should be the service name.
-	LabelAetherService = aetherLabelPrefix + "/service"
+	// LabelAetherManaged is the Kubernetes label used to opt pods into the Aether
+	// service mesh. The value must be "true" for the pod to be managed.
+	LabelAetherManaged = aetherLabelPrefix + "/managed"
 )
