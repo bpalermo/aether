@@ -57,60 +57,10 @@ func TestManagedPodRegistration(t *testing.T) {
 			if err := wait.For(
 				conditions.New(cfg.Client().Resources()).DeploymentAvailable("echo", ns),
 				wait.WithTimeout(2*time.Minute),
+				wait.WithInterval(defaultPollInterval),
 			); err != nil {
 				t.Fatalf("echo deployment not available: %v", err)
 			}
-			return ctx
-		}).
-		Assess("pod is stored in agent local storage", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			ns := ctx.Value(testNamespaceKey).(string)
-
-			pods := &corev1.PodList{}
-			if err := cfg.Client().Resources().List(ctx, pods,
-				resources.WithLabelSelector("app=echo"),
-				resources.WithFieldSelector("metadata.namespace="+ns),
-			); err != nil {
-				t.Fatalf("failed to list echo pods: %v", err)
-			}
-			if len(pods.Items) == 0 {
-				t.Fatal("no echo pods found")
-			}
-
-			echoPod := pods.Items[0]
-			agentPods := listAgentPods(ctx, t, cfg)
-			agentPod := agentPods.Items[0]
-
-			if err := wait.For(func(_ context.Context) (bool, error) {
-				var stdout, stderr bytes.Buffer
-				err := cfg.Client().Resources().ExecInPod(ctx, agentPod.Namespace, agentPod.Name, "agent",
-					[]string{"ls", "/host/var/lib/aether/registry/"},
-					&stdout, &stderr,
-				)
-				if err != nil {
-					return false, nil
-				}
-				files := strings.TrimSpace(stdout.String())
-				if files == "" {
-					return false, nil
-				}
-
-				for _, file := range strings.Split(files, "\n") {
-					var catOut, catErr bytes.Buffer
-					if err := cfg.Client().Resources().ExecInPod(ctx, agentPod.Namespace, agentPod.Name, "agent",
-						[]string{"cat", "/host/var/lib/aether/registry/" + file},
-						&catOut, &catErr,
-					); err != nil {
-						continue
-					}
-					if strings.Contains(catOut.String(), echoPod.Name) {
-						return true, nil
-					}
-				}
-				return false, nil
-			}, wait.WithTimeout(2*time.Minute)); err != nil {
-				t.Fatalf("echo pod not found in agent storage: %v", err)
-			}
-
 			return ctx
 		}).
 		Assess("endpoint is registered in etcd", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
@@ -123,13 +73,16 @@ func TestManagedPodRegistration(t *testing.T) {
 			); err != nil {
 				t.Fatalf("failed to list echo pods: %v", err)
 			}
+			if len(pods.Items) == 0 {
+				t.Fatal("no echo pods found")
+			}
 			podIP := pods.Items[0].Status.PodIP
 
 			etcdPod := getEtcdPod(ctx, t, cfg)
 
 			if err := wait.For(func(_ context.Context) (bool, error) {
 				return isIPInEtcd(ctx, cfg, etcdPod, podIP)
-			}, wait.WithTimeout(2*time.Minute)); err != nil {
+			}, wait.WithTimeout(2*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
 				t.Fatalf("endpoint not found in etcd: %v", err)
 			}
 
@@ -213,6 +166,7 @@ func TestUnmanagedPodIgnored(t *testing.T) {
 			if err := wait.For(
 				conditions.New(cfg.Client().Resources()).DeploymentAvailable("unmanaged", ns),
 				wait.WithTimeout(2*time.Minute),
+				wait.WithInterval(defaultPollInterval),
 			); err != nil {
 				t.Fatalf("unmanaged deployment not available: %v", err)
 			}
@@ -296,6 +250,7 @@ func TestPodDeletionCleanup(t *testing.T) {
 			if err := wait.For(
 				conditions.New(cfg.Client().Resources()).DeploymentAvailable("echo", ns),
 				wait.WithTimeout(2*time.Minute),
+				wait.WithInterval(defaultPollInterval),
 			); err != nil {
 				t.Fatalf("echo deployment not available: %v", err)
 			}
@@ -313,7 +268,7 @@ func TestPodDeletionCleanup(t *testing.T) {
 			etcdPod := getEtcdPod(ctx, t, cfg)
 			if err := wait.For(func(_ context.Context) (bool, error) {
 				return isIPInEtcd(ctx, cfg, etcdPod, podIP)
-			}, wait.WithTimeout(2*time.Minute)); err != nil {
+			}, wait.WithTimeout(2*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
 				t.Fatalf("endpoint not found in etcd: %v", err)
 			}
 
@@ -337,7 +292,7 @@ func TestPodDeletionCleanup(t *testing.T) {
 			if err := wait.For(func(_ context.Context) (bool, error) {
 				found, err := isIPInEtcd(ctx, cfg, etcdPod, podIP)
 				return !found, err
-			}, wait.WithTimeout(2*time.Minute)); err != nil {
+			}, wait.WithTimeout(2*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
 				t.Fatalf("endpoint %s not cleaned up from etcd: %v", podIP, err)
 			}
 

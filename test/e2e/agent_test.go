@@ -14,12 +14,15 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/features"
 )
 
+const defaultPollInterval = 5 * time.Second
+
 func TestAgentDaemonSet(t *testing.T) {
 	readiness := features.New("Agent DaemonSet becomes ready").
 		Assess("etcd is ready", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			if err := wait.For(
 				conditions.New(cfg.Client().Resources()).DeploymentAvailable("etcd", namespace),
 				wait.WithTimeout(2*time.Minute),
+				wait.WithInterval(defaultPollInterval),
 			); err != nil {
 				t.Fatalf("etcd deployment not available: %v", err)
 			}
@@ -35,7 +38,26 @@ func TestAgentDaemonSet(t *testing.T) {
 				}
 				return ds.Status.DesiredNumberScheduled > 0 &&
 					ds.Status.NumberReady == ds.Status.DesiredNumberScheduled, nil
-			}, wait.WithTimeout(3*time.Minute)); err != nil {
+			}, wait.WithTimeout(3*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
+				// Dump pod status on failure to aid debugging.
+				pods := &corev1.PodList{}
+				if listErr := client.Resources().List(ctx, pods,
+					resources.WithLabelSelector("app=aether-agent"),
+					resources.WithFieldSelector("metadata.namespace="+namespace),
+				); listErr == nil {
+					for _, pod := range pods.Items {
+						t.Logf("agent pod %s: phase=%s", pod.Name, pod.Status.Phase)
+						for _, cs := range pod.Status.ContainerStatuses {
+							t.Logf("  container %s: ready=%v restarts=%d", cs.Name, cs.Ready, cs.RestartCount)
+							if cs.State.Waiting != nil {
+								t.Logf("  waiting: %s - %s", cs.State.Waiting.Reason, cs.State.Waiting.Message)
+							}
+							if cs.State.Terminated != nil {
+								t.Logf("  terminated: %s (exit %d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
+							}
+						}
+					}
+				}
 				t.Fatalf("agent DaemonSet not ready: %v", err)
 			}
 

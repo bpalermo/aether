@@ -138,6 +138,7 @@ func deployAetherSystem() env.Func {
 		if err := wait.For(
 			conditions.New(client.Resources()).DeploymentAvailable("etcd", namespace),
 			wait.WithTimeout(2*time.Minute),
+			wait.WithInterval(5*time.Second),
 		); err != nil {
 			return ctx, fmt.Errorf("waiting for etcd: %w", err)
 		}
