@@ -2,14 +2,18 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient"
+	"sigs.k8s.io/e2e-framework/klient/wait"
+	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
@@ -130,6 +134,14 @@ func deployAetherSystem() env.Func {
 			return ctx, err
 		}
 
+		// Wait for etcd to be ready before deploying the agent
+		if err := wait.For(
+			conditions.New(client.Resources()).DeploymentAvailable("etcd", namespace),
+			wait.WithTimeout(2*time.Minute),
+		); err != nil {
+			return ctx, fmt.Errorf("waiting for etcd: %w", err)
+		}
+
 		// Deploy agent DaemonSet
 		if err := deployAgent(ctx, client); err != nil {
 			return ctx, err
@@ -219,6 +231,7 @@ func deployAgent(ctx context.Context, client klient.Client) error {
 				},
 				Spec: corev1.PodSpec{
 					HostNetwork:        true,
+					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
 					ServiceAccountName: "aether-agent",
 					InitContainers: []corev1.Container{
 						{
