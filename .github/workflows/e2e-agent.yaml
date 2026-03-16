@@ -24,7 +24,6 @@ jobs:
         run: |
           bazel run //agent/cmd/agent:image_load
           bazel run //cni/cmd/cni-install:image_load
-          docker pull gcr.io/etcd-development/etcd:v3.5.21
       - name: Setup kind
         uses: helm/kind-action@v1
         with:
@@ -43,8 +42,6 @@ jobs:
             kubectl --context kind-aether-e2e get pods -n aether-system -o wide 2>/dev/null || true
             echo "=== agent logs ==="
             kubectl --context kind-aether-e2e logs -n aether-system -l app=aether-agent --all-containers --tail=100 2>/dev/null || true
-            echo "=== etcd logs ==="
-            kubectl --context kind-aether-e2e logs -n aether-system -l app=etcd --tail=50 2>/dev/null || true
             echo "=== events ==="
             kubectl --context kind-aether-e2e get events -n aether-system --sort-by='.lastTimestamp' 2>/dev/null || true
           else

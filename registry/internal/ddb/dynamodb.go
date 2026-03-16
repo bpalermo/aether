@@ -54,8 +54,8 @@ func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config, opts ...Option) *Dy
 	return r
 }
 
-// Initialize initializes the DynamoDB registry by verifying that the service table exists.
-func (r *DynamoDBRegistry) Initialize(ctx context.Context) error {
+// Start initializes the DynamoDB registry by verifying that the service table exists.
+func (r *DynamoDBRegistry) Start(ctx context.Context) error {
 	r.log.V(1).Info("starting registry and checking for table existence", "table", r.tableName)
 
 	_, err := r.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
@@ -72,11 +72,6 @@ func (r *DynamoDBRegistry) Initialize(ctx context.Context) error {
 
 	r.log.V(1).Info("registry table exists", "table", r.tableName)
 	r.log.Info("DynamoDB registry started", "table", r.tableName)
-	return nil
-}
-
-// Close is a no-op for DynamoDB since the HTTP client does not require explicit cleanup.
-func (r *DynamoDBRegistry) Close() error {
 	return nil
 }
 

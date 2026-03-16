@@ -2,18 +2,14 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"testing"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient"
-	"sigs.k8s.io/e2e-framework/klient/wait"
-	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
@@ -27,7 +23,6 @@ var (
 
 	agentImage      = envOrDefault("AETHER_AGENT_IMAGE", "palermo/aether-agent:latest")
 	cniInstallImage = envOrDefault("AETHER_CNI_INSTALL_IMAGE", "palermo/aether-cni-install:latest")
-	etcdImage       = "gcr.io/etcd-development/etcd:v3.5.21"
 )
 
 func envOrDefault(key, fallback string) string {
@@ -46,7 +41,6 @@ func TestMain(m *testing.M) {
 		envfuncs.CreateClusterWithConfig(kindProvider, kindClusterName, "testdata/kind-config.yaml"),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, agentImage),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, cniInstallImage),
-		envfuncs.LoadDockerImageToCluster(kindClusterName, etcdImage),
 		deployAetherSystem(),
 	)
 
@@ -131,20 +125,6 @@ func deployAetherSystem() env.Func {
 			return ctx, err
 		}
 
-		// Deploy etcd for registry backend
-		if err := deployEtcd(ctx, client); err != nil {
-			return ctx, err
-		}
-
-		// Wait for etcd to be ready before deploying the agent
-		if err := wait.For(
-			conditions.New(client.Resources()).DeploymentAvailable("etcd", namespace),
-			wait.WithTimeout(2*time.Minute),
-			wait.WithInterval(5*time.Second),
-		); err != nil {
-			return ctx, fmt.Errorf("waiting for etcd: %w", err)
-		}
-
 		// Deploy agent DaemonSet
 		if err := deployAgent(ctx, client); err != nil {
 			return ctx, err
@@ -152,64 +132,6 @@ func deployAetherSystem() env.Func {
 
 		return ctx, nil
 	}
-}
-
-func deployEtcd(ctx context.Context, client klient.Client) error {
-	labels := map[string]string{"app": "etcd"}
-	replicas := int32(1)
-
-	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "etcd",
-			Namespace: namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            "etcd",
-							Image:           etcdImage,
-							ImagePullPolicy: corev1.PullNever,
-							Command: []string{
-								"etcd",
-								"--advertise-client-urls=http://0.0.0.0:2379",
-								"--listen-client-urls=http://0.0.0.0:2379",
-							},
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 2379, Name: "client"},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	if err := client.Resources().Create(ctx, dep); err != nil {
-		return err
-	}
-
-	// Create etcd Service
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "etcd",
-			Namespace: namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: labels,
-			Ports: []corev1.ServicePort{
-				{Port: 2379, Name: "client"},
-			},
-		},
-	}
-	return client.Resources().Create(ctx, svc)
 }
 
 func deployAgent(ctx context.Context, client klient.Client) error {
@@ -264,8 +186,6 @@ func deployAgent(ctx context.Context, client klient.Client) error {
 								"--proxy-id=$(NODE_NAME)",
 								"--cluster-name=aether-e2e",
 								"--node-name=$(NODE_NAME)",
-								"--registry-backend=etcd",
-								"--etcd-endpoints=etcd.aether-system.svc.cluster.local:2379",
 								"--spire-enabled=false",
 							},
 							Env: []corev1.EnvVar{

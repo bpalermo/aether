@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	"sigs.k8s.io/e2e-framework/klient/wait"
-	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 )
@@ -18,16 +17,6 @@ const defaultPollInterval = 5 * time.Second
 
 func TestAgentDaemonSet(t *testing.T) {
 	readiness := features.New("Agent DaemonSet becomes ready").
-		Assess("etcd is ready", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			if err := wait.For(
-				conditions.New(cfg.Client().Resources()).DeploymentAvailable("etcd", namespace),
-				wait.WithTimeout(2*time.Minute),
-				wait.WithInterval(defaultPollInterval),
-			); err != nil {
-				t.Fatalf("etcd deployment not available: %v", err)
-			}
-			return ctx
-		}).
 		Assess("agent DaemonSet has all pods ready", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			client := cfg.Client()
 

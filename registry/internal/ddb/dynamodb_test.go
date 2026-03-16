@@ -84,30 +84,30 @@ func setupRegistry(ctx context.Context, t *testing.T) *ddb.DynamoDBRegistry {
 	createTable(ctx, t, table)
 
 	registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName(table))
-	require.NoError(t, registry.Initialize(ctx))
+	require.NoError(t, registry.Start(ctx))
 
 	return registry
 }
 
-func TestDynamoDBRegistry_Initialize(t *testing.T) {
+func TestDynamoDBRegistry_Start(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
 
 	ctx := context.Background()
 
-	t.Run("successful initialization with existing table", func(t *testing.T) {
+	t.Run("successful start with existing table", func(t *testing.T) {
 		table := tableName(t)
 		createTable(ctx, t, table)
 
 		registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName(table))
-		err := registry.Initialize(ctx)
+		err := registry.Start(ctx)
 		assert.NoError(t, err)
 	})
 
 	t.Run("fails when table does not exist", func(t *testing.T) {
 		registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName("nonexistent"))
-		err := registry.Initialize(ctx)
+		err := registry.Start(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "does not exist")
 	})

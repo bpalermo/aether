@@ -12,10 +12,8 @@ import (
 // Registry manages service endpoint registration, deregistration, and discovery.
 // It maintains a list of service endpoints and supports querying by service name and protocol.
 type Registry interface {
-	// Initialize initializes the registry. This should be called before using other methods.
-	Initialize(ctx context.Context) error
-	// Close releases any resources held by the registry.
-	Close() error
+	// Start initializes the registry. This should be called before using other methods.
+	Start(ctx context.Context) error
 	// RegisterEndpoint registers a single endpoint for a service with a specific protocol.
 	RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error
 	// UnregisterEndpoint unregisters an endpoint for a service by its IP address.

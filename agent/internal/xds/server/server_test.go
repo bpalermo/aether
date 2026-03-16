@@ -22,8 +22,7 @@ type mockRegistry struct {
 
 var _ registry.Registry = (*mockRegistry)(nil)
 
-func (m *mockRegistry) Initialize(_ context.Context) error { return nil }
-func (m *mockRegistry) Close() error                        { return nil }
+func (m *mockRegistry) Start(_ context.Context) error { return nil }
 
 func (m *mockRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, _ *registryv1.ServiceEndpoint) error {
 	return nil

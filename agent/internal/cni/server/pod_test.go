@@ -32,8 +32,7 @@ type testRegistry struct {
 
 var _ registry.Registry = (*testRegistry)(nil)
 
-func (r *testRegistry) Initialize(_ context.Context) error { return nil }
-func (r *testRegistry) Close() error                        { return nil }
+func (r *testRegistry) Start(_ context.Context) error { return nil }
 
 func (r *testRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, _ *registryv1.ServiceEndpoint) error {
 	return r.registerEndpointErr

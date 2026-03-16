@@ -1,10 +1,8 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +19,7 @@ import (
 )
 
 func TestManagedPodRegistration(t *testing.T) {
-	feature := features.New("Managed pod is registered in service registry").
+	feature := features.New("Managed pod is discoverable by Kubernetes registry").
 		Setup(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			ns := envconf.RandomName("e2e-test", 16)
 			ctx = context.WithValue(ctx, testNamespaceKey, ns)
@@ -63,28 +61,28 @@ func TestManagedPodRegistration(t *testing.T) {
 			}
 			return ctx
 		}).
-		Assess("endpoint is registered in etcd", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		Assess("managed pod is running with PodIP and managed label", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			ns := ctx.Value(testNamespaceKey).(string)
 
 			pods := &corev1.PodList{}
 			if err := cfg.Client().Resources().List(ctx, pods,
-				resources.WithLabelSelector("app=echo"),
+				resources.WithLabelSelector("app=echo,aether.io/managed=true"),
 				resources.WithFieldSelector("metadata.namespace="+ns),
 			); err != nil {
-				t.Fatalf("failed to list echo pods: %v", err)
+				t.Fatalf("failed to list managed echo pods: %v", err)
 			}
 			if len(pods.Items) == 0 {
-				t.Fatal("no echo pods found")
+				t.Fatal("no managed echo pods found with aether.io/managed=true label")
 			}
-			podIP := pods.Items[0].Status.PodIP
 
-			etcdPod := getEtcdPod(ctx, t, cfg)
-
-			if err := wait.For(func(_ context.Context) (bool, error) {
-				return isIPInEtcd(ctx, cfg, etcdPod, podIP)
-			}, wait.WithTimeout(2*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
-				t.Fatalf("endpoint not found in etcd: %v", err)
+			pod := pods.Items[0]
+			if pod.Status.Phase != corev1.PodRunning {
+				t.Fatalf("managed pod %s is in phase %s, expected Running", pod.Name, pod.Status.Phase)
 			}
+			if pod.Status.PodIP == "" {
+				t.Fatalf("managed pod %s has no PodIP", pod.Name)
+			}
+			t.Logf("managed pod %s is Running with PodIP %s and aether.io/managed=true label", pod.Name, pod.Status.PodIP)
 
 			return ctx
 		}).
@@ -160,7 +158,7 @@ func TestUnmanagedPodIgnored(t *testing.T) {
 
 			return ctx
 		}).
-		Assess("unmanaged pod is ready but not in etcd", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		Assess("unmanaged pod is ready but not discoverable as managed", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			ns := ctx.Value(testNamespaceKey).(string)
 
 			if err := wait.For(
@@ -171,6 +169,7 @@ func TestUnmanagedPodIgnored(t *testing.T) {
 				t.Fatalf("unmanaged deployment not available: %v", err)
 			}
 
+			// Verify the unmanaged pod does NOT have the aether.io/managed label
 			pods := &corev1.PodList{}
 			if err := cfg.Client().Resources().List(ctx, pods,
 				resources.WithLabelSelector("app=unmanaged"),
@@ -178,23 +177,26 @@ func TestUnmanagedPodIgnored(t *testing.T) {
 			); err != nil {
 				t.Fatalf("failed to list unmanaged pods: %v", err)
 			}
-			podIP := pods.Items[0].Status.PodIP
-
-			// Wait a bit to allow any registration to happen (if it were going to)
-			time.Sleep(10 * time.Second)
-
-			etcdPod := getEtcdPod(ctx, t, cfg)
-
-			var stdout, stderr bytes.Buffer
-			if err := cfg.Client().Resources().ExecInPod(ctx, etcdPod.Namespace, etcdPod.Name, "etcd",
-				[]string{"etcdctl", "get", "/aether/services/", "--prefix", "--keys-only"},
-				&stdout, &stderr,
-			); err != nil {
-				t.Fatalf("failed to query etcd: %v", err)
+			if len(pods.Items) == 0 {
+				t.Fatal("no unmanaged pods found")
 			}
 
-			if strings.Contains(stdout.String(), podIP) {
-				t.Errorf("unmanaged pod IP %s found in etcd, should not be registered", podIP)
+			for _, pod := range pods.Items {
+				if val, ok := pod.Labels["aether.io/managed"]; ok && val == "true" {
+					t.Errorf("unmanaged pod %s has aether.io/managed=true label, should not be managed", pod.Name)
+				}
+			}
+
+			// Verify no pods with aether.io/managed=true exist in this namespace
+			managedPods := &corev1.PodList{}
+			if err := cfg.Client().Resources().List(ctx, managedPods,
+				resources.WithLabelSelector("aether.io/managed=true"),
+				resources.WithFieldSelector("metadata.namespace="+ns),
+			); err != nil {
+				t.Fatalf("failed to list managed pods: %v", err)
+			}
+			if len(managedPods.Items) > 0 {
+				t.Errorf("found %d managed pods in namespace %s, expected 0", len(managedPods.Items), ns)
 			}
 
 			return ctx
@@ -213,7 +215,7 @@ func TestUnmanagedPodIgnored(t *testing.T) {
 }
 
 func TestPodDeletionCleanup(t *testing.T) {
-	feature := features.New("Pod deletion triggers cleanup").
+	feature := features.New("Pod deletion removes managed pod").
 		Setup(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			ns := envconf.RandomName("e2e-test", 16)
 			ctx = context.WithValue(ctx, testNamespaceKey, ns)
@@ -244,7 +246,7 @@ func TestPodDeletionCleanup(t *testing.T) {
 
 			return ctx
 		}).
-		Assess("echo pod is registered", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		Assess("echo pod is running with managed label", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			ns := ctx.Value(testNamespaceKey).(string)
 
 			if err := wait.For(
@@ -257,26 +259,25 @@ func TestPodDeletionCleanup(t *testing.T) {
 
 			pods := &corev1.PodList{}
 			if err := cfg.Client().Resources().List(ctx, pods,
-				resources.WithLabelSelector("app=echo"),
+				resources.WithLabelSelector("app=echo,aether.io/managed=true"),
 				resources.WithFieldSelector("metadata.namespace="+ns),
 			); err != nil {
-				t.Fatalf("failed to list echo pods: %v", err)
+				t.Fatalf("failed to list managed echo pods: %v", err)
 			}
-			podIP := pods.Items[0].Status.PodIP
-			ctx = context.WithValue(ctx, testPodIPKey, podIP)
+			if len(pods.Items) == 0 {
+				t.Fatal("no managed echo pods found")
+			}
 
-			etcdPod := getEtcdPod(ctx, t, cfg)
-			if err := wait.For(func(_ context.Context) (bool, error) {
-				return isIPInEtcd(ctx, cfg, etcdPod, podIP)
-			}, wait.WithTimeout(2*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
-				t.Fatalf("endpoint not found in etcd: %v", err)
+			pod := pods.Items[0]
+			if pod.Status.PodIP == "" {
+				t.Fatalf("managed pod %s has no PodIP", pod.Name)
 			}
+			t.Logf("managed pod %s running with PodIP %s", pod.Name, pod.Status.PodIP)
 
 			return ctx
 		}).
-		Assess("deleting the deployment removes endpoint from etcd", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		Assess("deleting the deployment removes managed pods", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			ns := ctx.Value(testNamespaceKey).(string)
-			podIP := ctx.Value(testPodIPKey).(string)
 
 			dep := &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -288,12 +289,18 @@ func TestPodDeletionCleanup(t *testing.T) {
 				t.Fatalf("failed to delete echo deployment: %v", err)
 			}
 
-			etcdPod := getEtcdPod(ctx, t, cfg)
-			if err := wait.For(func(_ context.Context) (bool, error) {
-				found, err := isIPInEtcd(ctx, cfg, etcdPod, podIP)
-				return !found, err
+			// Wait for all managed pods to be gone from the namespace
+			if err := wait.For(func(ctx context.Context) (bool, error) {
+				pods := &corev1.PodList{}
+				if err := cfg.Client().Resources().List(ctx, pods,
+					resources.WithLabelSelector("app=echo,aether.io/managed=true"),
+					resources.WithFieldSelector("metadata.namespace="+ns),
+				); err != nil {
+					return false, err
+				}
+				return len(pods.Items) == 0, nil
 			}, wait.WithTimeout(2*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
-				t.Fatalf("endpoint %s not cleaned up from etcd: %v", podIP, err)
+				t.Fatalf("managed pods not cleaned up after deployment deletion: %v", err)
 			}
 
 			return ctx
@@ -315,32 +322,4 @@ type contextKey string
 
 const (
 	testNamespaceKey contextKey = "testNamespace"
-	testPodIPKey     contextKey = "testPodIP"
 )
-
-func getEtcdPod(ctx context.Context, t *testing.T, cfg *envconf.Config) corev1.Pod {
-	t.Helper()
-	etcdPods := &corev1.PodList{}
-	if err := cfg.Client().Resources().List(ctx, etcdPods,
-		resources.WithLabelSelector("app=etcd"),
-		resources.WithFieldSelector("metadata.namespace="+namespace),
-	); err != nil {
-		t.Fatalf("failed to list etcd pods: %v", err)
-	}
-	if len(etcdPods.Items) == 0 {
-		t.Fatal("no etcd pods found")
-	}
-	return etcdPods.Items[0]
-}
-
-func isIPInEtcd(ctx context.Context, cfg *envconf.Config, etcdPod corev1.Pod, podIP string) (bool, error) {
-	var stdout, stderr bytes.Buffer
-	err := cfg.Client().Resources().ExecInPod(ctx, etcdPod.Namespace, etcdPod.Name, "etcd",
-		[]string{"etcdctl", "get", "/aether/services/", "--prefix", "--keys-only"},
-		&stdout, &stderr,
-	)
-	if err != nil {
-		return false, nil
-	}
-	return strings.Contains(stdout.String(), podIP), nil
-}

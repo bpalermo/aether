@@ -23,14 +23,14 @@ func TestMain(m *testing.M) {
 
 	container, err := tcetcd.Run(ctx, "gcr.io/etcd-development/etcd:v3.5.21")
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "failed to start etcd container: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to start etcd container: %v\n", err)
 		os.Exit(1)
 	}
 
 	testEndpoint, err = container.ClientEndpoint(ctx)
 	if err != nil {
 		_ = container.Terminate(ctx)
-		_, _ = fmt.Fprintf(os.Stderr, "failed to get endpoint: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to get endpoint: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -39,9 +39,9 @@ func TestMain(m *testing.M) {
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 30 * time.Second,
 	})
-	if err := ready.Initialize(ctx); err != nil {
+	if err := ready.Start(ctx); err != nil {
 		_ = container.Terminate(ctx)
-		_, _ = fmt.Fprintf(os.Stderr, "etcd not ready: %v\n", err)
+		fmt.Fprintf(os.Stderr, "etcd not ready: %v\n", err)
 		os.Exit(1)
 	}
 	_ = ready.Close()
@@ -57,7 +57,7 @@ func keyPrefix(t *testing.T) string {
 	return "/" + strings.ReplaceAll(t.Name(), "/", "_")
 }
 
-// setupRegistry returns an initialized EtcdRegistry with a per-test key prefix.
+// setupRegistry returns a started EtcdRegistry with a per-test key prefix.
 func setupRegistry(ctx context.Context, t *testing.T) *etcd.EtcdRegistry {
 	t.Helper()
 
@@ -66,13 +66,13 @@ func setupRegistry(ctx context.Context, t *testing.T) *etcd.EtcdRegistry {
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   keyPrefix(t),
 	})
-	require.NoError(t, registry.Initialize(ctx))
+	require.NoError(t, registry.Start(ctx))
 	t.Cleanup(func() { _ = registry.Close() })
 
 	return registry
 }
 
-func TestEtcdRegistry_Initialize(t *testing.T) {
+func TestEtcdRegistry_Start(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
@@ -86,7 +86,7 @@ func TestEtcdRegistry_Initialize(t *testing.T) {
 			KeyPrefix:   keyPrefix(t),
 		})
 
-		err := registry.Initialize(ctx)
+		err := registry.Start(ctx)
 		assert.NoError(t, err)
 		_ = registry.Close()
 	})
@@ -97,7 +97,7 @@ func TestEtcdRegistry_Initialize(t *testing.T) {
 			DialTimeout: 1 * time.Second,
 		})
 
-		err := registry.Initialize(ctx)
+		err := registry.Start(ctx)
 		assert.Error(t, err)
 	})
 }
@@ -363,7 +363,7 @@ func TestEtcdRegistry_CustomKeyPrefix(t *testing.T) {
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   "/custom/prefix",
 	})
-	require.NoError(t, registry.Initialize(ctx))
+	require.NoError(t, registry.Start(ctx))
 	t.Cleanup(func() { _ = registry.Close() })
 
 	ep := &registryv1.ServiceEndpoint{
@@ -394,7 +394,7 @@ func TestEtcdRegistry_Close(t *testing.T) {
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   keyPrefix(t),
 	})
-	require.NoError(t, registry.Initialize(ctx))
+	require.NoError(t, registry.Start(ctx))
 
 	err := registry.Close()
 	assert.NoError(t, err)
