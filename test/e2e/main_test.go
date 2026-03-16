@@ -10,6 +10,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient"
+	"sigs.k8s.io/e2e-framework/klient/conf"
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
@@ -39,6 +40,7 @@ func TestMain(m *testing.M) {
 
 	testenv.Setup(
 		envfuncs.CreateClusterWithConfig(kindProvider, kindClusterName, "testdata/kind-config.yaml"),
+		configureClient(),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, agentImage),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, cniInstallImage),
 		deployAetherSystem(),
@@ -49,6 +51,26 @@ func TestMain(m *testing.M) {
 	)
 
 	os.Exit(testenv.Run(m))
+}
+
+// configureClient replaces the default e2e-framework client with one that has
+// higher rate limits to prevent "client rate limiter Wait" timeouts during polling.
+func configureClient() env.Func {
+	return func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
+		restCfg, err := conf.New(cfg.KubeconfigFile())
+		if err != nil {
+			return ctx, err
+		}
+		restCfg.QPS = 50
+		restCfg.Burst = 100
+
+		client, err := klient.New(restCfg)
+		if err != nil {
+			return ctx, err
+		}
+		cfg.WithClient(client)
+		return ctx, nil
+	}
 }
 
 func deployAetherSystem() env.Func {
