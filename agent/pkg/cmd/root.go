@@ -54,7 +54,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
-	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "dynamodb", "Registry backend (dynamodb, etcd)")
+	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "kubernetes", "Registry backend (kubernetes, dynamodb, etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "etcd endpoints")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", "ROOTCA", "SPIFFE trust domain for the cluster")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket")
@@ -84,7 +84,7 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 
-	ddbRegistry, err := setupRegistry(ctx, m)
+	reg, err := setupRegistry(ctx, m)
 	if err != nil {
 		return err
 	}
@@ -97,11 +97,11 @@ func runAgent(ctx context.Context) error {
 		return fmt.Errorf("failed to add SPIRE bridge: %w", err)
 	}
 
-	if err = setXDSServer(ctx, m, ddbRegistry, localStorage, snapshotCache); err != nil {
+	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache); err != nil {
 		return err
 	}
 
-	if err = setupCNIServer(m, localStorage, ddbRegistry, snapshotCache, spireBridge); err != nil {
+	if err = setupCNIServer(m, localStorage, reg, snapshotCache, spireBridge); err != nil {
 		return err
 	}
 
@@ -169,6 +169,10 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 	var reg registry.Registry
 
 	switch cfg.RegistryBackend {
+	case "kubernetes":
+		reg = registry.NewKubernetesRegistry(l, m.GetAPIReader(), registry.KubernetesConfig{
+			ClusterName: cfg.ClusterName,
+		})
 	case "dynamodb":
 		awsCfg, err := awsconfig.LoadConfig(ctx)
 		if err != nil {
