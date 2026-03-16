@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "e2e_test",
+    size = "large",
+    srcs = [
+        "agent_test.go",
+        "cni_test.go",
+        "main_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    tags = [
+        "e2e",
+        "manual",
+    ],
+    deps = [
+        "@io_k8s_api//apps/v1:apps",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//rbac/v1:rbac",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_sigs_e2e_framework//klient",
+        "@io_k8s_sigs_e2e_framework//klient/conf",
+        "@io_k8s_sigs_e2e_framework//klient/decoder",
+        "@io_k8s_sigs_e2e_framework//klient/k8s/resources",
+        "@io_k8s_sigs_e2e_framework//klient/wait",
+        "@io_k8s_sigs_e2e_framework//klient/wait/conditions",
+        "@io_k8s_sigs_e2e_framework//pkg/env",
+        "@io_k8s_sigs_e2e_framework//pkg/envconf",
+        "@io_k8s_sigs_e2e_framework//pkg/envfuncs",
+        "@io_k8s_sigs_e2e_framework//pkg/features",
+        "@io_k8s_sigs_e2e_framework//support/kind",
+    ],
+)

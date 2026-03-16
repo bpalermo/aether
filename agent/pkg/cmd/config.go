@@ -26,6 +26,8 @@ type AgentConfig struct {
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
 
+	// SpireEnabled controls whether the SPIRE bridge is started
+	SpireEnabled bool
 	// SpireTrustDomain is the SPIFFE trust domain for the cluster
 	SpireTrustDomain string
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
@@ -44,6 +46,7 @@ func NewAgentConfig() *AgentConfig {
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
 		RegistryBackend:        "kubernetes",
 		EtcdEndpoints:          []string{"localhost:2379"},
+		SpireEnabled:           true,
 		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
 	}

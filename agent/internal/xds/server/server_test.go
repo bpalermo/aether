@@ -153,18 +153,13 @@ func TestAgentXdsServer_PreListen(t *testing.T) {
 			wantErr: errRegistry,
 		},
 		{
-			// When both the storage and registry calls succeed, generateClusterSnapshot
-			// is called by LoadClustersFromRegistry. Because there are no listeners to
-			// reference the route configuration, the snapshot consistency check fails.
-			// PreListen surfaces this error.
-			name: "both succeed propagates snapshot inconsistency error",
+			name: "both succeed with empty data produces valid snapshot",
 			storageGetAll: func(_ context.Context) ([]*cniv1.CNIPod, error) {
 				return []*cniv1.CNIPod{}, nil
 			},
 			registryListAll: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 				return map[string][]*registryv1.ServiceEndpoint{}, nil
 			},
-			wantErrContains: "snapshot inconsistency",
 		},
 	}
 

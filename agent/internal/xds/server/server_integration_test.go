@@ -302,7 +302,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 }
 
 // TestIntegration_PreListenFailsPreventsServerStart verifies that when
-// PreListen returns an error (e.g., from snapshot inconsistency), Start
+// PreListen returns an error (e.g., from a storage failure), Start
 // propagates the error and the server does not accept connections.
 func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 	if testing.Short() {
@@ -320,17 +320,13 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 	log := logr.Discard()
 	agentCache := cache.NewSnapshotCache(nodeName, log)
 
-	// Empty storage and empty registry leads to a snapshot inconsistency error
-	// in PreListen because the cluster snapshot includes a route config that is
-	// not referenced by any listener.
+	// Storage returns an error, which causes PreListen to fail before
+	// the server starts accepting connections.
+	storageErr := fmt.Errorf("storage unavailable")
 	store := storage.NewMockStorageWithGetAll(func(_ context.Context) ([]*cniv1.CNIPod, error) {
-		return []*cniv1.CNIPod{}, nil
+		return nil, storageErr
 	})
-	reg := &mockRegistry{
-		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-			return map[string][]*registryv1.ServiceEndpoint{}, nil
-		},
-	}
+	reg := &mockRegistry{}
 
 	sockPath := integrationSocketPath(t)
 	cfg := xds.NewServerConfig(
@@ -353,6 +349,5 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 	// Start should return an error because PreListen fails.
 	err := srv.Start(ctx)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "snapshot inconsistency",
-		"expected PreListen snapshot inconsistency error to propagate through Start")
+	assert.ErrorIs(t, err, storageErr)
 }
