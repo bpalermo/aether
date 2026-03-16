@@ -6,6 +6,7 @@ go_library(
         "cni.go",
         "ddb.go",
         "etcd.go",
+        "k8s.go",
         "registry.go",
     ],
     importpath = "github.com/bpalermo/aether/registry",
@@ -16,7 +17,9 @@ go_library(
         "//constants",
         "//registry/internal/ddb",
         "//registry/internal/etcd",
+        "//registry/internal/k8s",
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_go_logr_logr//:logr",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
     ],
 )

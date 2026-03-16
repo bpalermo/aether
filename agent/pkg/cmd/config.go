@@ -21,7 +21,7 @@ type AgentConfig struct {
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
 
-	// RegistryBackend selects the registry backend ("dynamodb" or "etcd")
+	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", or "etcd")
 	RegistryBackend string
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
@@ -42,7 +42,7 @@ func NewAgentConfig() *AgentConfig {
 		ProxyServiceNodeID:     constants.DefaultProxyID,
 		CNIServerConfig:        cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
-		RegistryBackend:        "dynamodb",
+		RegistryBackend:        "kubernetes",
 		EtcdEndpoints:          []string{"localhost:2379"},
 		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
