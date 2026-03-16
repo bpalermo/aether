@@ -2,8 +2,10 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -11,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/klient/conf"
+	"sigs.k8s.io/e2e-framework/klient/wait"
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
@@ -54,15 +57,17 @@ func TestMain(m *testing.M) {
 }
 
 // configureClient replaces the default e2e-framework client with one that has
-// higher rate limits to prevent "client rate limiter Wait" timeouts during polling.
+// client-side rate limiting disabled. The default QPS=5/Burst=10 causes
+// "client rate limiter Wait returned an error: context deadline exceeded"
+// when polling loops exhaust the context deadline while queued in the limiter.
 func configureClient() env.Func {
 	return func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
 		restCfg, err := conf.New(cfg.KubeconfigFile())
 		if err != nil {
 			return ctx, err
 		}
-		restCfg.QPS = 50
-		restCfg.Burst = 100
+		// Disable client-side rate limiting for e2e tests.
+		restCfg.QPS = -1
 
 		client, err := klient.New(restCfg)
 		if err != nil {
@@ -150,6 +155,18 @@ func deployAetherSystem() env.Func {
 		// Deploy agent DaemonSet
 		if err := deployAgent(ctx, client); err != nil {
 			return ctx, err
+		}
+
+		// Wait for agent DaemonSet to be ready before running tests
+		if err := wait.For(func(ctx context.Context) (bool, error) {
+			ds := &appsv1.DaemonSet{}
+			if err := client.Resources().Get(ctx, "aether-agent", namespace, ds); err != nil {
+				return false, nil
+			}
+			return ds.Status.DesiredNumberScheduled > 0 &&
+				ds.Status.NumberReady == ds.Status.DesiredNumberScheduled, nil
+		}, wait.WithTimeout(5*time.Minute), wait.WithInterval(5*time.Second)); err != nil {
+			return ctx, fmt.Errorf("waiting for agent DaemonSet: %w", err)
 		}
 
 		return ctx, nil
