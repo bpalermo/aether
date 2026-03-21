@@ -29,6 +29,8 @@ type AgentConfig struct {
 	// CloudMapNamespace is the AWS Cloud Map HTTP namespace for service discovery
 	CloudMapNamespace string
 
+	// SpireEnabled controls whether the SPIRE bridge is started
+	SpireEnabled bool
 	// SpireTrustDomain is the SPIFFE trust domain for the cluster
 	SpireTrustDomain string
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
@@ -48,6 +50,7 @@ func NewAgentConfig() *AgentConfig {
 		RegistryBackend:        "kubernetes",
 		EtcdEndpoints:          []string{"localhost:2379"},
 		CloudMapNamespace:      constants.DefaultCloudMapNamespace,
+		SpireEnabled:           true,
 		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
 	}

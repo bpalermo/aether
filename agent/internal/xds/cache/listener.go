@@ -118,10 +118,6 @@ func (c *SnapshotCache) generateListenerSnapshot(ctx context.Context) error {
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	if err := snapshot.Consistent(); err != nil {
-		return fmt.Errorf("snapshot inconsistency: %w", err)
-	}
-
 	if err := c.SetSnapshot(ctx, c.nodeName, snapshot); err != nil {
 		return fmt.Errorf("failed to set snapshot: %w", err)
 	}

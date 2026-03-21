@@ -153,18 +153,12 @@ func TestSnapshotCache_RemoveCluster_NonExisting(t *testing.T) {
 }
 
 // TestSnapshotCache_RemoveCluster_ExistingCluster verifies that removing a cluster that
-// exists removes it from the map and calls generateClusterSnapshot. Because the cluster
-// snapshot always includes a RouteConfiguration resource that go-control-plane's
-// Consistent() check expects to be referenced by a listener, the snapshot generation
-// reports a "snapshot inconsistency" error. The map mutation (deletion) still happens
-// before the error is returned.
+// exists removes it from the map and generates a valid cluster snapshot.
 func TestSnapshotCache_RemoveCluster_ExistingCluster(t *testing.T) {
 	tests := []struct {
-		name             string
-		setupFunc        func(c *SnapshotCache)
-		clusterName      string
-		wantClusterGone  bool
-		wantErrSubstring string
+		name        string
+		setupFunc   func(c *SnapshotCache)
+		clusterName string
 	}{
 		{
 			name: "remove existing cluster deletes it from the map",
@@ -173,9 +167,7 @@ func TestSnapshotCache_RemoveCluster_ExistingCluster(t *testing.T) {
 					"target": {},
 				}
 			},
-			clusterName:      "target",
-			wantClusterGone:  true,
-			wantErrSubstring: "snapshot inconsistency",
+			clusterName: "target",
 		},
 		{
 			name: "remove one of several clusters leaves others intact",
@@ -185,9 +177,7 @@ func TestSnapshotCache_RemoveCluster_ExistingCluster(t *testing.T) {
 					"remove": {},
 				}
 			},
-			clusterName:      "remove",
-			wantClusterGone:  true,
-			wantErrSubstring: "snapshot inconsistency",
+			clusterName: "remove",
 		},
 	}
 
@@ -198,15 +188,10 @@ func TestSnapshotCache_RemoveCluster_ExistingCluster(t *testing.T) {
 
 			err := c.RemoveCluster(context.Background(), tt.clusterName)
 
-			// The cluster is removed from the map before snapshot generation is attempted.
 			_, stillExists := c.clusters[tt.clusterName]
-			assert.False(t, stillExists, "cluster %q should be removed from map before snapshot error", tt.clusterName)
+			assert.False(t, stillExists, "cluster %q should be removed from map", tt.clusterName)
 
-			// Snapshot generation fails because go-control-plane's Consistent() check
-			// requires that every named RouteConfiguration be referenced by a Listener,
-			// but the cluster snapshot includes a RouteConfiguration with no matching listener.
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.wantErrSubstring)
+			require.NoError(t, err)
 		})
 	}
 }
@@ -324,9 +309,8 @@ func TestSnapshotCache_RemoveEndpoint_RemovesIP(t *testing.T) {
 			c := newTestCache("node-1")
 			tt.setupFunc(c)
 
-			// RemoveEndpoint triggers generateClusterSnapshot which returns a
-			// snapshot inconsistency error (same as RemoveCluster tests).
-			_ = c.RemoveEndpoint(context.Background(), tt.clusterName, tt.ip)
+			err := c.RemoveEndpoint(context.Background(), tt.clusterName, tt.ip)
+			require.NoError(t, err)
 
 			entry, ok := c.clusters[tt.clusterName]
 			require.True(t, ok, "cluster should still exist after endpoint removal")
@@ -458,11 +442,7 @@ func TestLoadClustersFromRegistry_RegistryError(t *testing.T) {
 }
 
 // TestLoadClustersFromRegistry_MapPopulation verifies that the in-memory cluster map
-// is correctly populated with all expected keys before the snapshot generation step.
-// Note: the snapshot generation itself produces a "snapshot inconsistency" error because
-// go-control-plane requires named RouteConfigurations to be referenced by Listeners,
-// but the cluster snapshot includes a RouteConfiguration with no corresponding Listeners.
-// This test focuses on the map mutation behavior that occurs before that error.
+// is correctly populated with all expected keys after loading from the registry.
 func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -562,8 +542,8 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 				},
 			}
 
-			// Map mutation happens before snapshot generation; ignore the snapshot error.
-			_ = c.LoadClustersFromRegistry(context.Background(), tt.clusterName, tt.cacheNodeName, reg)
+			err := c.LoadClustersFromRegistry(context.Background(), tt.clusterName, tt.cacheNodeName, reg)
+			require.NoError(t, err)
 
 			for _, key := range tt.wantClusterKeys {
 				_, ok := c.clusters[key]
@@ -579,16 +559,15 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 }
 
 // TestLoadClustersFromRegistry_IncreasesVersion verifies that loading clusters increments
-// the snapshot version counter even when snapshot generation fails the consistency check.
+// the snapshot version counter.
 func TestLoadClustersFromRegistry_IncreasesVersion(t *testing.T) {
 	c := newTestCache("node-1")
 	versionBefore := c.version.Load()
 
 	reg := &mockRegistry{}
-	// Ignore the snapshot inconsistency error; verify version incremented.
-	_ = c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg)
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
 
-	assert.Greater(t, c.version.Load(), versionBefore, "version counter should increase even when snapshot consistency check fails")
+	assert.Greater(t, c.version.Load(), versionBefore, "version counter should increase after loading clusters")
 }
 
 // TestLoadClustersFromRegistry_EndpointsReachable verifies that after loading, Endpoints()
@@ -603,8 +582,7 @@ func TestLoadClustersFromRegistry_EndpointsReachable(t *testing.T) {
 		},
 	}
 
-	// Ignore the snapshot inconsistency error; verify the in-memory state.
-	_ = c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg)
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
 
 	eps := c.Endpoints("my-svc")
 	require.NotNil(t, eps)
@@ -623,8 +601,7 @@ func TestLoadClustersFromRegistry_VirtualHostsPopulated(t *testing.T) {
 		},
 	}
 
-	// Ignore the snapshot inconsistency error; verify the in-memory state.
-	_ = c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg)
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
 
 	vhosts := c.VirtualHosts()
 	assert.NotEmpty(t, vhosts)

@@ -41,14 +41,14 @@ func setupRegistry(t *testing.T, fake *fakeClient, clusterName string) *CloudMap
 		WithNamespaceTTL(0),
 	)
 
-	require.NoError(t, reg.Start(context.Background()))
+	require.NoError(t, reg.Initialize(context.Background()))
 	return reg
 }
 
-// --- Test: Start ---
+// --- Test: Initialize ---
 
-func TestCloudMapRegistry_Start(t *testing.T) {
-	t.Run("successful start with existing namespace", func(t *testing.T) {
+func TestCloudMapRegistry_Initialize(t *testing.T) {
+	t.Run("successful initialize with existing namespace", func(t *testing.T) {
 		fake := newTestFake()
 		reg := NewCloudMapRegistry(
 			logr.Discard(),
@@ -58,7 +58,7 @@ func TestCloudMapRegistry_Start(t *testing.T) {
 			WithNamespace(testNamespace),
 		)
 
-		err := reg.Start(context.Background())
+		err := reg.Initialize(context.Background())
 		assert.NoError(t, err)
 	})
 
@@ -72,7 +72,7 @@ func TestCloudMapRegistry_Start(t *testing.T) {
 			WithNamespace("nonexistent-namespace"),
 		)
 
-		err := reg.Start(context.Background())
+		err := reg.Initialize(context.Background())
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "not found")
 	})

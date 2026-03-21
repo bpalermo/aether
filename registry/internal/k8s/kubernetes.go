@@ -43,10 +43,15 @@ func NewKubernetesRegistry(log logr.Logger, reader client.Reader, cfg Config) *K
 	}
 }
 
-// Start is a no-op for the Kubernetes registry.
+// Initialize is a no-op for the Kubernetes registry.
 // The API server connection is managed by the controller-runtime manager.
-func (r *KubernetesRegistry) Start(_ context.Context) error {
-	r.log.Info("kubernetes registry started", "cluster", r.clusterName)
+func (r *KubernetesRegistry) Initialize(_ context.Context) error {
+	r.log.Info("kubernetes registry initialized", "cluster", r.clusterName)
+	return nil
+}
+
+// Close is a no-op for the Kubernetes registry.
+func (r *KubernetesRegistry) Close() error {
 	return nil
 }
 

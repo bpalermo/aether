@@ -205,17 +205,17 @@ func (c *SnapshotCache) generateClusterSnapshot(ctx context.Context) error {
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
 	c.log.V(1).Info("setting snapshot", "version", v, "clusters", len(clusters), "endpoints", len(endpoints), "vhosts", len(vhosts))
 
-	snapshot, err := cachev3.NewSnapshot(v, map[resourcev3.Type][]types.Resource{
+	resources := map[resourcev3.Type][]types.Resource{
 		resourcev3.ClusterType:  clusters,
 		resourcev3.EndpointType: endpoints,
-		resourcev3.RouteType:    {proxy.BuildOutboundRouteConfiguration(vhosts)},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot: %w", err)
+	}
+	if len(vhosts) > 0 {
+		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts)}
 	}
 
-	if err := snapshot.Consistent(); err != nil {
-		return fmt.Errorf("snapshot inconsistency: %w", err)
+	snapshot, err := cachev3.NewSnapshot(v, resources)
+	if err != nil {
+		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
 	if err := c.SnapshotCache.SetSnapshot(ctx, c.nodeName, snapshot); err != nil {

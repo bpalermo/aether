@@ -45,7 +45,7 @@ type EtcdRegistry struct {
 }
 
 // NewEtcdRegistry creates a new etcd-backed Registry.
-// The client connection is not established until Start is called.
+// Call Initialize before using the registry to establish the etcd client connection.
 func NewEtcdRegistry(log logr.Logger, cfg Config) *EtcdRegistry {
 	keyPrefix := cfg.KeyPrefix
 	if keyPrefix == "" {
@@ -65,10 +65,10 @@ func NewEtcdRegistry(log logr.Logger, cfg Config) *EtcdRegistry {
 	}
 }
 
-// Start initializes the etcd registry by establishing a connection to etcd
-// and verifying connectivity.
-func (r *EtcdRegistry) Start(ctx context.Context) error {
-	r.log.V(1).Info("starting registry and connecting to etcd", "endpoints", r.config.Endpoints)
+// Initialize creates the etcd client connection and verifies connectivity.
+// It must be called before any registry operations.
+func (r *EtcdRegistry) Initialize(ctx context.Context) error {
+	r.log.V(1).Info("initializing etcd client", "endpoints", r.config.Endpoints)
 
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   r.config.Endpoints,
@@ -86,12 +86,13 @@ func (r *EtcdRegistry) Start(ctx context.Context) error {
 
 	_, err = r.client.Status(statusCtx, r.config.Endpoints[0])
 	if err != nil {
+		_ = client.Close()
+		r.client = nil
 		r.log.Error(err, "failed to verify etcd connectivity")
 		return fmt.Errorf("failed to verify etcd connectivity: %w", err)
 	}
 
-	r.log.V(1).Info("etcd connectivity verified")
-	r.log.Info("etcd registry started", "endpoints", r.config.Endpoints)
+	r.log.Info("etcd registry initialized", "endpoints", r.config.Endpoints)
 	return nil
 }
 

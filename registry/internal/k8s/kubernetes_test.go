@@ -67,11 +67,11 @@ func topologyNode(name, region, zone string) *corev1.Node {
 	}
 }
 
-// ─── Start ───────────────────────────────────────────────────────────────────
+// ─── Initialize ──────────────────────────────────────────────────────────────
 
-func TestStart(t *testing.T) {
+func TestInitialize(t *testing.T) {
 	r := newTestRegistry("test-cluster")
-	err := r.Start(context.Background())
+	err := r.Initialize(context.Background())
 	require.NoError(t, err)
 }
 

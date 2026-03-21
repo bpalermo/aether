@@ -57,7 +57,8 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "kubernetes", "Registry backend (kubernetes, dynamodb, etcd, cloudmap)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "etcd endpoints")
 	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", constants.DefaultCloudMapNamespace, "AWS Cloud Map HTTP namespace")
-	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", "ROOTCA", "SPIFFE trust domain for the cluster")
+	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Enable SPIRE integration for mTLS via SDS")
+	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket")
 
 	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
@@ -89,13 +90,19 @@ func runAgent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer reg.Close()
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 
-	// Create and start the SPIRE bridge for SDS
-	spireBridge := spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, l)
-	if err = m.Add(spireBridge); err != nil {
-		return fmt.Errorf("failed to add SPIRE bridge: %w", err)
+	// Optionally create and start the SPIRE bridge for SDS
+	var spireBridge *spire.Bridge
+	if cfg.SpireEnabled {
+		spireBridge = spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, l)
+		if err = m.Add(spireBridge); err != nil {
+			return fmt.Errorf("failed to add SPIRE bridge: %w", err)
+		}
+	} else {
+		l.Info("SPIRE integration disabled")
 	}
 
 	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache); err != nil {
@@ -196,8 +203,8 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 		return nil, fmt.Errorf("unknown registry backend: %s", cfg.RegistryBackend)
 	}
 
-	if err := m.Add(reg); err != nil {
-		return nil, err
+	if err := reg.Initialize(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialize registry: %w", err)
 	}
 
 	return reg, nil
