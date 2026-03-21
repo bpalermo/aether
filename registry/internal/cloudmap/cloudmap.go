@@ -56,9 +56,9 @@ func NewCloudMapRegistry(log logr.Logger, awsCfg aws.Config, clusterName string,
 	return r
 }
 
-// Start initializes the Cloud Map registry by resolving the HTTP namespace.
-func (r *CloudMapRegistry) Start(ctx context.Context) error {
-	r.log.V(1).Info("starting registry and resolving namespace", "namespace", r.namespace)
+// Initialize resolves the Cloud Map HTTP namespace.
+func (r *CloudMapRegistry) Initialize(ctx context.Context) error {
+	r.log.V(1).Info("initializing registry and resolving namespace", "namespace", r.namespace)
 
 	nsID, err := r.resolveNamespaceID(ctx)
 	if err != nil {
@@ -66,7 +66,12 @@ func (r *CloudMapRegistry) Start(ctx context.Context) error {
 	}
 	r.namespaceID = nsID
 
-	r.log.Info("Cloud Map registry started", "namespace", r.namespace, "namespaceID", r.namespaceID)
+	r.log.Info("Cloud Map registry initialized", "namespace", r.namespace, "namespaceID", r.namespaceID)
+	return nil
+}
+
+// Close is a no-op for the Cloud Map registry as it uses stateless HTTP clients.
+func (r *CloudMapRegistry) Close() error {
 	return nil
 }
 

@@ -50,13 +50,15 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	}
 
 	// Subscribe to SVID for this pod via the SPIRE Delegated Identity API
-	spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
-	if cniPod.GetPid() != nil {
-		if err = s.spireBridge.SubscribePod(ctx, spiffeID, int32(cniPod.GetPid().GetValue())); err != nil {
-			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+	if s.spireBridge != nil {
+		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
+		if cniPod.GetPid() != nil {
+			if err = s.spireBridge.SubscribePod(ctx, spiffeID, int32(cniPod.GetPid().GetValue())); err != nil {
+				log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+			}
+		} else {
+			log.V(1).Info("skipping SVID subscription: PID not available", "spiffeID", spiffeID)
 		}
-	} else {
-		log.V(1).Info("skipping SVID subscription: PID not available", "spiffeID", spiffeID)
 	}
 
 	return &cniv1.AddPodResponse{
@@ -102,9 +104,11 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 
 	// Unsubscribe from SVID for this pod
-	spiffeID := proxy.SpiffeIDFromPod(storedPod, s.trustDomain)
-	if unsubErr := s.spireBridge.UnsubscribePod(ctx, spiffeID); unsubErr != nil {
-		log.Error(unsubErr, "failed to unsubscribe from SVID", "spiffeID", spiffeID)
+	if s.spireBridge != nil {
+		spiffeID := proxy.SpiffeIDFromPod(storedPod, s.trustDomain)
+		if unsubErr := s.spireBridge.UnsubscribePod(ctx, spiffeID); unsubErr != nil {
+			log.Error(unsubErr, "failed to unsubscribe from SVID", "spiffeID", spiffeID)
+		}
 	}
 
 	// Remove listener from xDS first
