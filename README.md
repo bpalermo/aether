@@ -29,7 +29,7 @@ graph TD
 
 ### Prerequisites
 
-- [Bazelisk](https://github.com/bazelbuild/bazelisk) (Bazel 8.6.0)
+- [Bazelisk](https://github.com/bazelbuild/bazelisk) (Bazel 9.0.1)
 - Go 1.26.0
 - Docker (or Colima) for container images and integration tests
 
