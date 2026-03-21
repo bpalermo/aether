@@ -17,7 +17,7 @@ import (
 // using a poll-based discovery approach inspired by the AWS Cloud Map MCS Controller.
 type CloudMapRegistry struct {
 	log    logr.Logger
-	client *servicediscovery.Client
+	client Client
 
 	namespace   string
 	clusterName string

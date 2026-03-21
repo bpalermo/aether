@@ -50,3 +50,11 @@ func WithEndpointTTL(ttl time.Duration) Option {
 		r.endpointTTL = ttl
 	}
 }
+
+// WithClient overrides the default Cloud Map SDK client.
+// This is primarily useful for testing with fakes.
+func WithClient(client Client) Option {
+	return func(r *CloudMapRegistry) {
+		r.client = client
+	}
+}
