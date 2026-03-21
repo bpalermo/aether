@@ -10,6 +10,9 @@ bazel_dep(name = "gazelle", version = "0.47.0")
 # https://github.com/bazel-contrib/rules_img/pull/431
 bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
 bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+# Transitive dependency pinned for Bazel 9 compatibility.
+# Older version fails to load CcInfo from rules_cc in android_local_test/attrs.bzl.
+bazel_dep(name = "rules_android", version = "0.7.1")
 bazel_dep(name = "rules_img", version = "0.3.4")
 bazel_dep(name = "container_structure_test", version = "1.22.1")
 bazel_dep(name = "protovalidate", version = "1.1.1")
