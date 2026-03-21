@@ -10,13 +10,12 @@ graph TD
         CNI["CNI Plugin<br/><i>traffic interception</i>"]
         Agent["Agent<br/><i>DaemonSet</i>"]
         Envoy["Envoy<br/><i>listeners, clusters, endpoints, routes</i>"]
+        SPIRE["SPIRE Agent<br/><i>workload identity</i>"]
 
         CNI -- "gRPC<br/>Unix socket" --> Agent
         Agent -- "xDS<br/>LDS, CDS, EDS, RDS, SDS" --> Envoy
+        Agent -- "Delegated Identity API" --> SPIRE
     end
-
-    SPIRE["SPIRE Agent<br/><i>workload identity</i>"]
-    Agent -- "Delegated Identity API" --> SPIRE
 
     Registry["Service Registry<br/><i>Kubernetes · DynamoDB · etcd · Cloud Map</i>"]
     Agent -- "endpoint discovery" --> Registry
