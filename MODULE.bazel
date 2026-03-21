@@ -1,12 +1,23 @@
 module(name = "aether")
 
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
-bazel_dep(name = "protobuf", version = "34.0")
+bazel_dep(name = "protobuf", version = "34.1")
 bazel_dep(name = "rules_go", version = "0.60.0")
 bazel_dep(name = "gazelle", version = "0.47.0")
+# Transitive dependencies of rules_img pinned for Bazel 9 compatibility.
+# Older versions use the removed `incompatible_use_toolchain_transition` rule() kwarg.
+# Can be removed once rules_img releases a version with bumped deps:
+# https://github.com/bazel-contrib/rules_img/pull/431
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+# Transitive dependency pinned for Bazel 9 compatibility.
+# Pulled in via protobuf → rules_jvm_external → rules_android
+#              and protobuf → rules_kotlin → rules_android.
+# Older version (0.6.4) fails to load CcInfo from rules_cc in android_local_test/attrs.bzl.
+bazel_dep(name = "rules_android", version = "0.7.1")
 bazel_dep(name = "rules_img", version = "0.3.4")
 bazel_dep(name = "container_structure_test", version = "1.22.1")
-bazel_dep(name = "protovalidate", version = "1.0.0")
+bazel_dep(name = "protovalidate", version = "1.1.1")
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.0")
