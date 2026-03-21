@@ -2,3 +2,8 @@
 build --workspace_status_command=./bazel/workspace_status.sh
 
 run --workspace_status_command=./bazel/workspace_status.sh
+
+# Pass environment variables needed by testcontainers (Colima on macOS)
+test --test_env=HOME
+test --test_env=DOCKER_HOST
+test --test_env=TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE
