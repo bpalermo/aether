@@ -17,6 +17,7 @@ graph TD
         Agent -- "Delegated Identity API" --> SPIRE
     end
 
+
     Registry["Service Registry<br/><i>Kubernetes · DynamoDB · etcd · Cloud Map</i>"]
     Agent -- "endpoint discovery" --> Registry
 ```
