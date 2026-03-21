@@ -178,7 +178,6 @@ require (
 	github.com/testcontainers/testcontainers-go v0.40.0
 	github.com/testcontainers/testcontainers-go/modules/dynamodb v0.40.0
 	github.com/testcontainers/testcontainers-go/modules/etcd v0.40.0
-	github.com/testcontainers/testcontainers-go/modules/localstack v0.40.0
 	go.etcd.io/etcd/client/v3 v3.6.8
 	go.etcd.io/etcd/server/v3 v3.6.8
 	go.uber.org/atomic v1.11.0

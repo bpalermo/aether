@@ -76,7 +76,6 @@ use_repo(
     "com_github_testcontainers_testcontainers_go",
     "com_github_testcontainers_testcontainers_go_modules_dynamodb",
     "com_github_testcontainers_testcontainers_go_modules_etcd",
-    "com_github_testcontainers_testcontainers_go_modules_localstack",
     "in_gopkg_natefinch_lumberjack_v2",
     "io_etcd_go_etcd_client_v3",
     "io_etcd_go_etcd_server_v3",
