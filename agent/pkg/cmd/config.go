@@ -21,10 +21,13 @@ type AgentConfig struct {
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
 
-	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", or "etcd")
+	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", "etcd", or "cloudmap")
 	RegistryBackend string
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
+
+	// CloudMapNamespace is the AWS Cloud Map HTTP namespace for service discovery
+	CloudMapNamespace string
 
 	// SpireTrustDomain is the SPIFFE trust domain for the cluster
 	SpireTrustDomain string
@@ -44,6 +47,7 @@ func NewAgentConfig() *AgentConfig {
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
 		RegistryBackend:        "kubernetes",
 		EtcdEndpoints:          []string{"localhost:2379"},
+		CloudMapNamespace:      constants.DefaultCloudMapNamespace,
 		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
 	}

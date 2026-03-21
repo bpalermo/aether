@@ -19,4 +19,7 @@ const (
 	DefaultSpireAdminSocketPath = "/tmp/spire-agent/private/admin.sock"
 	// DefaultSpireTrustDomain is the default SPIFFE trust domain used for SDS secret naming
 	DefaultSpireTrustDomain = "ROOTCA"
+
+	// DefaultCloudMapNamespace is the default AWS Cloud Map HTTP namespace name
+	DefaultCloudMapNamespace = constants.DefaultCloudMapNamespace
 )

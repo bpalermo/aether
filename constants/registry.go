@@ -6,4 +6,7 @@ const (
 
 	// DefaultEtcdKeyPrefix is the default prefix for all registry keys in etcd
 	DefaultEtcdKeyPrefix = "/aether/services"
+
+	// DefaultCloudMapNamespace is the default AWS Cloud Map HTTP namespace name
+	DefaultCloudMapNamespace = "aether"
 )

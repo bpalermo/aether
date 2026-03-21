@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cloudmap",
+    srcs = [
+        "attrs.go",
+        "cache.go",
+        "client.go",
+        "cloudmap.go",
+        "options.go",
+    ],
+    importpath = "github.com/bpalermo/aether/registry/internal/cloudmap",
+    visibility = ["//registry:__subpackages__"],
+    deps = [
+        "//api/aether/registry/v1:registry",
+        "//constants",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_service_servicediscovery//:servicediscovery",
+        "@com_github_aws_aws_sdk_go_v2_service_servicediscovery//types",
+        "@com_github_go_logr_logr//:logr",
+    ],
+)
+
+go_test(
+    name = "cloudmap_test",
+    srcs = [
+        "attrs_test.go",
+        "cache_test.go",
+        "cloudmap_test.go",
+        "fake_client_test.go",
+    ],
+    embed = [":cloudmap"],
+    deps = [
+        "//api/aether/registry/v1:registry",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_service_servicediscovery//:servicediscovery",
+        "@com_github_aws_aws_sdk_go_v2_service_servicediscovery//types",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
