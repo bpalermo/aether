@@ -54,8 +54,9 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "The xDS proxy ID (service-node)")
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where CNI registry entries are located")
-	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "kubernetes", "Registry backend (kubernetes, dynamodb, etcd)")
+	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "kubernetes", "Registry backend (kubernetes, dynamodb, etcd, cloudmap)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "etcd endpoints")
+	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", constants.DefaultCloudMapNamespace, "AWS Cloud Map HTTP namespace")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", "ROOTCA", "SPIFFE trust domain for the cluster")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket")
 
@@ -183,6 +184,14 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 		reg = registry.NewEtcdRegistry(l, registry.EtcdConfig{
 			Endpoints: cfg.EtcdEndpoints,
 		})
+	case "cloudmap":
+		awsCfg, err := awsconfig.LoadConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		reg = registry.NewCloudMapRegistry(l, awsCfg, cfg.ClusterName,
+			registry.WithCloudMapNamespace(cfg.CloudMapNamespace),
+		)
 	default:
 		return nil, fmt.Errorf("unknown registry backend: %s", cfg.RegistryBackend)
 	}

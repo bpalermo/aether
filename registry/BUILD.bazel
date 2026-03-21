@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "registry",
     srcs = [
+        "cloudmap.go",
         "cni.go",
         "ddb.go",
         "etcd.go",
@@ -15,6 +16,7 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//constants",
+        "//registry/internal/cloudmap",
         "//registry/internal/ddb",
         "//registry/internal/etcd",
         "//registry/internal/k8s",
