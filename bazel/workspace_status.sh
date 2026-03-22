@@ -2,6 +2,7 @@
 # These variables are not included in the cache key.
 # If their values changes, a target may still include
 # a stale value from a previous build.
+echo "STABLE_GIT_VERSION $(git describe --tags --always --long --dirty --abbrev=40 2>/dev/null || echo 'unknown')"
 echo "BUILD_TIMESTAMP $(date +%s)"
 echo "GIT_COMMIT $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 echo "GIT_BRANCH $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"

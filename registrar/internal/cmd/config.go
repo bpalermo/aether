@@ -31,6 +31,15 @@ type RegistrarConfig struct {
 	// GRPCAddress is the address for the registrar gRPC server
 	GRPCAddress string
 
+	// MetricsEnabled enables the controller-runtime Prometheus metrics server
+	MetricsEnabled bool
+	// MetricsBindAddress is the address for the metrics HTTP server
+	MetricsBindAddress string
+	// OTelEnabled enables the OTel MeterProvider with Prometheus exporter bridge
+	OTelEnabled bool
+	// OTLPEndpoint is the OTLP gRPC collector endpoint (e.g. "localhost:4317"); empty disables OTLP export
+	OTLPEndpoint string
+
 	// SpireEnabled controls whether the registrar uses SPIRE for mTLS
 	SpireEnabled bool
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
@@ -45,6 +54,7 @@ const (
 // NewRegistrarConfig creates a RegistrarConfig with default values.
 func NewRegistrarConfig() *RegistrarConfig {
 	return &RegistrarConfig{
+		MetricsBindAddress:      ":8081",
 		RegistryBackend:         "kubernetes",
 		EtcdEndpoints:           []string{"localhost:2379"},
 		CloudMapNamespace:       "aether",

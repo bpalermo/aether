@@ -10,17 +10,20 @@ import (
 	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/registrar/internal/server"
+	"github.com/bpalermo/aether/telemetry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 const (
 	name = "aether-registrar"
 )
+
+// Version is set at build time via -ldflags (Bazel x_defs).
+var Version = "dev"
 
 var (
 	cfg = NewRegistrarConfig()
@@ -55,6 +58,11 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", cfg.CloudMapNamespace, "AWS Cloud Map HTTP namespace name")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
+	rootCmd.Flags().BoolVar(&cfg.MetricsEnabled, "metrics-enabled", cfg.MetricsEnabled, "Enable the Prometheus metrics HTTP server")
+	rootCmd.Flags().StringVar(&cfg.MetricsBindAddress, "metrics-bind-address", cfg.MetricsBindAddress, "Address for the metrics HTTP server")
+	rootCmd.Flags().BoolVar(&cfg.OTelEnabled, "otel-enabled", cfg.OTelEnabled, "Enable OTel MeterProvider with Prometheus exporter bridge (requires --metrics-enabled)")
+	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", cfg.OTLPEndpoint, "OTLP gRPC collector endpoint (e.g. localhost:4317); empty disables OTLP export")
+
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE mTLS for the gRPC server")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE workload identity directory (contains svid.pem, svid_key.pem, svid_bundle.pem)")
 
@@ -67,14 +75,30 @@ func runRegistrar(ctx context.Context) error {
 		"registryBackend", cfg.RegistryBackend,
 		"syncInterval", cfg.SyncInterval,
 		"grpcAddress", cfg.GRPCAddress,
+		"metricsEnabled", cfg.MetricsEnabled,
+		"otelEnabled", cfg.OTelEnabled,
 		"spireEnabled", cfg.SpireEnabled,
 	)
 
+	if cfg.OTelEnabled {
+		shutdown, otelErr := telemetry.Setup(ctx, telemetry.Config{
+			ServiceName:    name,
+			ServiceVersion: Version,
+			OTLPEndpoint:   cfg.OTLPEndpoint,
+		})
+		if otelErr != nil {
+			return fmt.Errorf("failed to setup telemetry: %w", otelErr)
+		}
+		defer func() {
+			if shutdownErr := shutdown(ctx); shutdownErr != nil {
+				l.Error(shutdownErr, "failed to shutdown telemetry")
+			}
+		}()
+	}
+
 	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		HealthProbeBindAddress: "0", // Disable health probe server
-		Metrics: metricsserver.Options{
-			BindAddress: "0", // Disable metrics server
-		},
+		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create manager: %w", err)
