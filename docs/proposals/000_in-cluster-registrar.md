@@ -70,14 +70,14 @@ Introduce an **in-cluster Registrar** Deployment (or HA pair) that acts as the s
 
 #### 1. Registrar Service (`registrar/`)
 
-A new Kubernetes Deployment running 1-2 replicas with leader election (via controller-runtime `LeaderElection`).
+A new Kubernetes Deployment running 1-2 replicas. Every replica is identical and fully independent -- no leader election or inter-replica coordination is needed.
 
 **Responsibilities:**
 
 - **Inbound registration**: Receives `RegisterEndpoint` / `UnregisterEndpoint` calls from agents and writes them to the external registry in batches.
 - **Outbound sync**: Periodically polls or watches the external registry for all endpoints (including those from other clusters) and maintains an in-memory snapshot.
 - **Change notification**: Streams endpoint change events to subscribed agents via gRPC server-streaming or xDS-style incremental push.
-- **Health and leader status**: Exposes readiness/liveness probes. Only the leader writes to the external registry; followers serve read-only replicas.
+- **Health**: Exposes readiness/liveness probes. All replicas accept writes and serve reads independently.
 
 #### 2. Agent Registrar Client
 
@@ -178,7 +178,7 @@ Agents may register/unregister endpoints in bursts (e.g. during a rolling deploy
 
 | Failure | Impact | Mitigation |
 |---------|--------|------------|
-| Registrar down | Agents cannot register new pods; reads served from local cache | HA with leader election; agents retry with backoff; optional fallback to direct registry |
+| Registrar replica down | Agents on that replica lose their watch stream; Kubernetes Service routes new connections to surviving replicas | Multiple replicas behind Service; agents retry with backoff; optional fallback to direct registry |
 | External registry down | Registrar cannot persist writes or poll updates | Registrar queues writes in memory; agents unaffected for reads (local cache) |
 | Network partition (agent ↔ Registrar) | Agent's watch stream disconnects | Agent serves stale cache; reconnects with `last_version` to resume without full snapshot |
 | Network partition (Registrar ↔ external) | Registrar's sync stalls | Agents continue with last-known-good data; Registrar retries; alerts via metrics |
@@ -205,7 +205,6 @@ spec:
         - --cluster-name=cluster-a
         - --sync-interval=5s
         - --write-batch-interval=100ms
-        - --leader-elect=true
         ports:
         - name: grpc
           containerPort: 9443
@@ -271,7 +270,7 @@ Agents add:
 
 ## Open Questions
 
-1. ~~**Leader election scope**~~: **Resolved** -- Both leader and followers accept writes. Followers forward writes to the leader internally for external registry persistence and broadcast ordering. This prioritizes write availability: agents always have a local write target even during leader transitions. The trade-off (one extra hop of latency on follower writes) is negligible compared to the external registry round-trip that follows.
+1. ~~**Leader election scope**~~: **Resolved** -- No leader election needed. Every replica is identical and fully independent: accepts writes, persists to the external registry, maintains its own snapshot, and broadcasts to its connected agents. HA is achieved by running multiple replicas behind a Kubernetes Service. This works because broadcast ordering is guaranteed per-stream (not per-cluster), pod lifecycle writes are node-local and serialized by the caller, agents use eventual consistency, and N=2-3 replicas polling every 5s is negligible load on any backend.
 
 2. ~~**Scope filtering**~~: **Resolved** -- No scope filtering. All agents receive the full endpoint set. The volume of endpoint data in a mesh is bounded and small enough that filtering adds unnecessary complexity without meaningful savings. Agents already process all endpoints to build xDS snapshots with cross-service routing.
 
