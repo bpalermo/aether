@@ -54,15 +54,36 @@ def go_multi_arch_image(name, binary, repository, registry = "docker.io", base =
         entrypoint = [entrypoint],
     )
 
+    image_index(
+        name = "image_index",
+        manifests = [":image_manifest"],
+        platforms = [
+            "@rules_go//go/toolchain:linux_amd64",
+            "@rules_go//go/toolchain:linux_arm64",
+        ],
+        visibility = ["//visibility:private"],
+    )
+
+    # image_load uses image_index so the platform transition builds the Go
+    # binary for Linux even when run from a macOS host.
     image_load(
         name = "image_load",
-        image = ":image_manifest",
+        image = ":image_index",
         tag = "{}:{}".format(repository, "latest"),
+    )
+
+    # Separate single-manifest load for the container structure test, which
+    # requires a single-file tarball output group.
+    image_load(
+        name = "_image_load_test",
+        image = ":image_manifest",
+        tag = "{}:{}".format(repository, "test"),
+        visibility = ["//visibility:private"],
     )
 
     native.filegroup(
         name = "image_tarball",
-        srcs = [":image_load"],
+        srcs = [":_image_load_test"],
         output_group = "tarball",
     )
 
@@ -71,16 +92,6 @@ def go_multi_arch_image(name, binary, repository, registry = "docker.io", base =
         driver = "tar",
         configs = container_test_configs,
         image = ":image_tarball",
-        visibility = ["//visibility:private"],
-    )
-
-    image_index(
-        name = "image_index",
-        manifests = [":image_manifest"],
-        platforms = [
-            "@rules_go//go/toolchain:linux_amd64",
-            "@rules_go//go/toolchain:linux_arm64",
-        ],
         visibility = ["//visibility:private"],
     )
 

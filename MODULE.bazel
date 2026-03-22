@@ -4,12 +4,14 @@ bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "protobuf", version = "34.1")
 bazel_dep(name = "rules_go", version = "0.60.0")
 bazel_dep(name = "gazelle", version = "0.47.0")
+
 # Transitive dependencies of rules_img pinned for Bazel 9 compatibility.
 # Older versions use the removed `incompatible_use_toolchain_transition` rule() kwarg.
 # Can be removed once rules_img releases a version with bumped deps:
 # https://github.com/bazel-contrib/rules_img/pull/431
 bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
 bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+
 # Transitive dependency pinned for Bazel 9 compatibility.
 # Pulled in via protobuf → rules_jvm_external → rules_android
 #              and protobuf → rules_kotlin → rules_android.
@@ -72,6 +74,7 @@ use_repo(
     "com_github_aws_aws_sdk_go_v2_feature_dynamodb_attributevalue",
     "com_github_aws_aws_sdk_go_v2_service_dynamodb",
     "com_github_aws_aws_sdk_go_v2_service_servicediscovery",
+    "com_github_blang_semver_v4",
     "com_github_containernetworking_cni",
     "com_github_envoyproxy_go_control_plane",
     "com_github_envoyproxy_go_control_plane_envoy",
@@ -80,6 +83,8 @@ use_repo(
     "com_github_google_renameio_v2",
     "com_github_grpc_ecosystem_go_grpc_middleware_v2",
     "com_github_klauspost_compress",
+    "com_github_moby_spdystream",
+    "com_github_mxk_go_flowrate",
     "com_github_pquerna_protoc_gen_dynamo",
     "com_github_spf13_cobra",
     "com_github_spiffe_spire_api_sdk",
@@ -87,13 +92,16 @@ use_repo(
     "com_github_testcontainers_testcontainers_go",
     "com_github_testcontainers_testcontainers_go_modules_dynamodb",
     "com_github_testcontainers_testcontainers_go_modules_etcd",
+    "com_github_vladimirvivien_gexe",
     "in_gopkg_natefinch_lumberjack_v2",
     "io_etcd_go_etcd_client_v3",
     "io_etcd_go_etcd_server_v3",
     "io_k8s_api",
     "io_k8s_apimachinery",
+    "io_k8s_component_base",
     "io_k8s_cri_api",
     "io_k8s_sigs_controller_runtime",
+    "io_k8s_sigs_e2e_framework",
     "org_golang_google_grpc",
     "org_golang_google_protobuf",
     "org_golang_x_sys",
