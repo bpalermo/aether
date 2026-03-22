@@ -1,56 +1,42 @@
 package admin
 
 import (
-	"encoding/json"
 	"fmt"
+
+	adminv3 "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// configDump represents the relevant structure of the Envoy config_dump response
-// for dynamic listeners.
-type configDump struct {
-	Configs []configEntry `json:"configs"`
-}
-
-type configEntry struct {
-	DynamicListeners []dynamicListener `json:"dynamic_listeners"`
-}
-
-type dynamicListener struct {
-	ActiveState *activeState `json:"active_state"`
-}
-
-type activeState struct {
-	Listener listenerConfig `json:"listener"`
-}
-
-type listenerConfig struct {
-	Address *addressConfig `json:"address"`
-}
-
-type addressConfig struct {
-	SocketAddress *socketAddress `json:"socket_address"`
-}
-
-type socketAddress struct {
-	NetworkNamespaceFilepath string `json:"network_namespace_filepath"`
-}
-
 func parseConfigDumpForNetns(data []byte, netns string) (bool, error) {
-	var dump configDump
-	if err := json.Unmarshal(data, &dump); err != nil {
+	var dump adminv3.ConfigDump
+	if err := protojson.Unmarshal(data, &dump); err != nil {
 		return false, fmt.Errorf("failed to parse config dump: %w", err)
 	}
 
-	for _, cfg := range dump.Configs {
-		for _, dl := range cfg.DynamicListeners {
-			if dl.ActiveState == nil {
+	for _, anyConfig := range dump.GetConfigs() {
+		msg, err := anyConfig.UnmarshalNew()
+		if err != nil {
+			continue
+		}
+		listenersDump, ok := msg.(*adminv3.ListenersConfigDump)
+		if !ok {
+			continue
+		}
+		for _, dl := range listenersDump.GetDynamicListeners() {
+			if dl.GetActiveState() == nil || dl.GetActiveState().GetListener() == nil {
 				continue
 			}
-			addr := dl.ActiveState.Listener.Address
-			if addr == nil || addr.SocketAddress == nil {
+			listenerMsg, err := dl.GetActiveState().GetListener().UnmarshalNew()
+			if err != nil {
 				continue
 			}
-			if addr.SocketAddress.NetworkNamespaceFilepath == netns {
+			listener, ok := listenerMsg.(*listenerv3.Listener)
+			if !ok {
+				continue
+			}
+			sa := listener.GetAddress().GetSocketAddress()
+			if sa != nil && sa.GetNetworkNamespaceFilepath() == netns {
 				return true, nil
 			}
 		}
