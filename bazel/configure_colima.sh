@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generates .bazelrc.colima with the resolved Colima Docker socket path.
+# Generates colima.bazelrc with the resolved Colima Docker socket path.
 # Run this once after cloning or when your Colima setup changes.
 #
 # Usage: ./bazel/configure_colima.sh
@@ -7,7 +7,7 @@
 set -euo pipefail
 
 COLIMA_SOCK="$HOME/.colima/default/docker.sock"
-OUTPUT=".bazelrc.colima"
+OUTPUT="colima.bazelrc"
 
 if [[ ! -S "$COLIMA_SOCK" ]]; then
     echo "WARNING: Colima socket not found at $COLIMA_SOCK"

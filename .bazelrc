@@ -10,9 +10,9 @@ run --workspace_status_command=./bazel/workspace_status.sh
 test --test_env=HOME
 
 # Colima Docker socket config for macOS integration tests.
-# Run ./bazel/configure_colima.sh to generate .bazelrc.colima with your socket path.
+# Run ./bazel/configure_colima.sh to generate colima.bazelrc with your socket path.
 # Auto-enabled on macOS via the :macos platform config below.
-try-import %workspace%/.bazelrc.colima
+try-import %workspace%/colima.bazelrc
 test:macos --config=colima
 
 # Race detector (usage: --config=race)
@@ -25,3 +25,6 @@ build:llm --verbose_failures
 build:llm --show_result=10
 test:llm --test_output=errors
 test:llm --test_summary=detailed
+
+# User-specific overrides (gitignored, not checked in)
+try-import %workspace%/user.bazelrc
