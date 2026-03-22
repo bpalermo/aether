@@ -11,7 +11,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	"github.com/bpalermo/aether/agent/pkg/storage"
+	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/xds"

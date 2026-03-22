@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "cmd",
     srcs = ["root.go"],
-    importpath = "github.com/bpalermo/aether/cni/pkg/cmd",
+    importpath = "github.com/bpalermo/aether/cni/internal/cmd",
     visibility = ["//visibility:public"],
     deps = [
         "//cni/internal/constants",

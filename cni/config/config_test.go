@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	agentConstans "github.com/bpalermo/aether/agent/pkg/constants"
+	agentConstans "github.com/bpalermo/aether/agent/constants"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

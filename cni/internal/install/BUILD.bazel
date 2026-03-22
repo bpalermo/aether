@@ -10,10 +10,10 @@ go_library(
     importpath = "github.com/bpalermo/aether/cni/internal/install",
     visibility = ["//cni:__subpackages__"],
     deps = [
-        "//agent/pkg/constants",
+        "//agent/constants",
+        "//cni/config",
         "//cni/internal/constants",
         "//cni/internal/util",
-        "//cni/pkg/config",
         "//common/file",
         "@com_github_containernetworking_cni//libcni",
         "@com_github_go_logr_logr//:logr",

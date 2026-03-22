@@ -7,7 +7,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/cmd/agent",
     visibility = ["//visibility:private"],
     deps = [
-        "//agent/pkg/cmd",
+        "//agent/internal/cmd",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
     ],
 )

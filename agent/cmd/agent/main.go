@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/bpalermo/aether/agent/pkg/cmd"
+	"github.com/bpalermo/aether/agent/internal/cmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 

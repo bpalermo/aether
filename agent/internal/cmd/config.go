@@ -3,7 +3,7 @@ package cmd
 
 import (
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
-	"github.com/bpalermo/aether/agent/pkg/constants"
+	"github.com/bpalermo/aether/agent/constants"
 )
 
 // AgentConfig holds configuration for the Aether agent.

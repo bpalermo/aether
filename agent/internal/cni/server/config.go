@@ -3,7 +3,7 @@
 // stores pod data locally, and registers endpoints in the service registry.
 package server
 
-import "github.com/bpalermo/aether/agent/pkg/constants"
+import "github.com/bpalermo/aether/agent/constants"
 
 // CNIServerConfig holds configuration for the CNIServer.
 type CNIServerConfig struct {

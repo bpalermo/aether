@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/bpalermo/aether/agent/pkg/types"
+	"github.com/bpalermo/aether/agent/types"
 	"github.com/bpalermo/aether/common/file"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"

@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "constants",
     srcs = ["constants.go"],
-    importpath = "github.com/bpalermo/aether/agent/pkg/constants",
+    importpath = "github.com/bpalermo/aether/agent/constants",
     visibility = ["//visibility:public"],
     deps = ["//constants"],
 )

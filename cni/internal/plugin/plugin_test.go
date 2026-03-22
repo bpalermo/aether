@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/bpalermo/aether/cni/pkg/config"
+	"github.com/bpalermo/aether/cni/config"
 	"github.com/containernetworking/cni/pkg/skel"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/stretchr/testify/assert"

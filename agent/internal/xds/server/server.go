@@ -7,8 +7,8 @@ import (
 	"context"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	"github.com/bpalermo/aether/agent/pkg/constants"
-	"github.com/bpalermo/aether/agent/pkg/storage"
+	"github.com/bpalermo/aether/agent/constants"
+	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/xds"

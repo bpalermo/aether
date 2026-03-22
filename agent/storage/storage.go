@@ -6,7 +6,7 @@ package storage
 import (
 	"context"
 
-	"github.com/bpalermo/aether/agent/pkg/types"
+	"github.com/bpalermo/aether/agent/types"
 	"google.golang.org/protobuf/proto"
 )
 
