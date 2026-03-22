@@ -28,7 +28,10 @@ func GetContainerPID(ctx context.Context, criSocket, containerID string) (uint32
 		return 0, fmt.Errorf("failed to create CRI client: %w", err)
 	}
 	defer func(conn *grpc.ClientConn) {
-		_ = conn.Close()
+		// Best-effort close; nothing actionable if it fails on a read-only connection.
+		if closeErr := conn.Close(); closeErr != nil {
+			_ = closeErr // intentionally ignored: transient gRPC connection close error
+		}
 	}(conn)
 
 	client := runtimeapi.NewRuntimeServiceClient(conn)

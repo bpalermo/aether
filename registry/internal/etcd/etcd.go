@@ -86,7 +86,9 @@ func (r *EtcdRegistry) Initialize(ctx context.Context) error {
 
 	_, err = r.client.Status(statusCtx, r.config.Endpoints[0])
 	if err != nil {
-		_ = client.Close()
+		if closeErr := client.Close(); closeErr != nil {
+			r.log.V(1).Info("failed to close etcd client during cleanup", "error", closeErr)
+		}
 		r.client = nil
 		r.log.Error(err, "failed to verify etcd connectivity")
 		return fmt.Errorf("failed to verify etcd connectivity: %w", err)

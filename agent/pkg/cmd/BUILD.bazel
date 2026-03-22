@@ -17,6 +17,7 @@ go_library(
         "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//api/aether/cni/v1:cni",
+        "//common/must",
         "//log",
         "//registry",
         "@com_github_go_logr_logr//:logr",

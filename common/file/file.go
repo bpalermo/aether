@@ -30,22 +30,30 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	}
 	tempPath := tempFile.Name()
 
+	log := ctrl.Log.WithName("file")
+
 	// Clean up temp file on error
 	defer func() {
 		if err != nil {
-			_ = os.Remove(tempPath)
+			if rmErr := os.Remove(tempPath); rmErr != nil {
+				log.V(1).Info("failed to remove temp file during cleanup", "path", tempPath, "error", rmErr)
+			}
 		}
 	}()
 
 	// Write data to the temp file
 	if _, err = tempFile.Write(data); err != nil {
-		_ = tempFile.Close()
+		if closeErr := tempFile.Close(); closeErr != nil {
+			log.V(1).Info("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
+		}
 		return fmt.Errorf("failed to write to temp file: %w", err)
 	}
 
 	// Ensure data is flushed to the disk
 	if err = tempFile.Sync(); err != nil {
-		_ = tempFile.Close()
+		if closeErr := tempFile.Close(); closeErr != nil {
+			log.V(1).Info("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
+		}
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 

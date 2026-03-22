@@ -29,6 +29,7 @@ import (
 	"fmt"
 
 	"github.com/bpalermo/aether/agent/internal/awsconfig"
+	"github.com/bpalermo/aether/common/must"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -95,12 +96,10 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 
-	// Mark required flags
-	_ = rootCmd.MarkPersistentFlagRequired("cluster-name")
-	_ = rootCmd.MarkPersistentFlagRequired("node-name")
-	_ = rootCmd.MarkPersistentFlagRequired("proxy-id")
-	_ = rootCmd.MarkPersistentFlagRequired("proxy-region")
-	_ = rootCmd.MarkPersistentFlagRequired("proxy-zone")
+	// These calls only fail if the flag name is not registered, which would be a programming error.
+	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
+	must.NoError(rootCmd.MarkFlagRequired("node-name"))
+	must.NoError(rootCmd.MarkFlagRequired("proxy-id"))
 }
 
 // runAgent initializes and runs the Aether agent. It sets up the controller-runtime Manager,
@@ -263,3 +262,5 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 
 	return reg, nil
 }
+
+// must panics if err is non-nil. Use only for programming errors that should never occur at runtime.
