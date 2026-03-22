@@ -1,3 +1,24 @@
+// Package cloudmap implements the Registry interface using AWS Cloud Map service discovery.
+//
+// Cloud Map is AWS's managed service discovery service. This implementation stores
+// service endpoints as Cloud Map instances within an HTTP namespace. Endpoints are
+// registered as instances with attributes encoding the protocol and cluster information.
+//
+// The registry uses Cloud Map's instance attributes to store endpoint metadata:
+//   - protocol: The protocol of the endpoint (e.g., TCP, UDP)
+//   - cluster_name: The cluster where the endpoint is located
+//   - Other endpoint fields from the ServiceEndpoint protobuf
+//
+// Service operations (create, lookup) and endpoint discovery use Cloud Map APIs
+// with internal caching (TTL-based) to reduce API calls. The cache is evicted when
+// endpoints are registered or deregistered.
+//
+// Key features:
+//   - Resolves the HTTP namespace ID during Initialize
+//   - Automatically creates Cloud Map services as needed
+//   - Uses Cloud Map's DiscoverInstances API with protocol filtering
+//   - Maintains separate caches for service IDs and endpoints with configurable TTLs
+//   - No-op Close (Cloud Map is stateless HTTP)
 package cloudmap
 
 import (

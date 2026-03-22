@@ -1,3 +1,21 @@
+// Package plugin implements the Aether CNI plugin, which is invoked by the container runtime
+// (e.g., containerd) during pod lifecycle transitions.
+//
+// The plugin implements the Container Networking Interface (CNI) specification (v1.0.0)
+// and is chained after other CNI plugins. It delegates actual networking setup to the Aether
+// agent (running as a DaemonSet) via a gRPC client, enabling transparent traffic interception
+// and service mesh integration.
+//
+// The plugin supports these CNI operations:
+//   - Add: Called when a pod is created. Collects pod metadata, resolves the container PID,
+//     and sends the pod info to the agent for registration.
+//   - Del: Called when a pod is deleted. Sends the pod removal request to the agent.
+//   - Check: Called to verify the plugin is functional (currently a no-op).
+//   - GC and Status: Garbage collection and status reporting (currently no-ops).
+//
+// The plugin extracts pod information from CNI arguments and the previous result from
+// chained plugins, including pod IPs, network namespace, and Kubernetes metadata
+// (pod name, namespace, container ID).
 package plugin
 
 import (
@@ -19,16 +37,23 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
+// AetherPlugin implements the CNI plugin interface for Aether service mesh integration.
+// It is invoked by the container runtime during pod lifecycle transitions.
 type AetherPlugin struct {
 	logger *zap.Logger
 }
 
+// NewAetherPlugin creates a new AetherPlugin instance with the given logger.
 func NewAetherPlugin(logger *zap.Logger) *AetherPlugin {
 	return &AetherPlugin{
 		logger,
 	}
 }
 
+// CmdAdd handles the CNI Add operation, called when a pod is created.
+// It parses the CNI configuration and Kubernetes arguments, extracts pod networking info,
+// resolves the container PID, and sends the pod registration request to the agent.
+// Returns the previous plugin's CNI result on success.
 func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI add command")
 
@@ -61,11 +86,16 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	return p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
 }
 
+// CmdCheck handles the CNI Check operation for plugin health verification.
+// Currently a no-op; returns nil to indicate the plugin is functional.
 func (p *AetherPlugin) CmdCheck(_ *skel.CmdArgs) error {
 	p.logger.Debug("running CNI check command")
 	return nil
 }
 
+// CmdDel handles the CNI Del operation, called when a pod is deleted.
+// It parses the CNI configuration and Kubernetes arguments, then sends the pod
+// removal request to the agent for cleanup.
 func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI del command")
 
@@ -92,11 +122,15 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	return p.sendRemovePod(context.Background(), conf, podName, namespace, containerID)
 }
 
+// CmdGC handles the CNI GC (garbage collection) operation.
+// Currently a no-op; returns nil. Garbage collection is handled by the agent.
 func (p *AetherPlugin) CmdGC(_ *skel.CmdArgs) error {
 	p.logger.Debug("running CNI GC command")
 	return nil
 }
 
+// CmdStatus handles the CNI Status operation for plugin status reporting.
+// Currently a no-op; returns nil.
 func (p *AetherPlugin) CmdStatus(_ *skel.CmdArgs) error {
 	p.logger.Debug("running CNI status command")
 	return nil

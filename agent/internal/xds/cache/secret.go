@@ -13,7 +13,7 @@ import (
 const (
 	// secretVersionLabel is used in snapshot version strings to identify
 	// secret resource snapshots.
-	secretVersionLabel = "secret"
+	secretVersionLabel = "sds"
 )
 
 // SetSecrets replaces all cached secrets and regenerates the secret snapshot.

@@ -18,10 +18,10 @@ import (
 const (
 	// clusterVersionLabel is used in snapshot version strings to identify
 	// cluster and endpoint resource snapshots.
-	clusterVersionLabel = "cluster"
+	clusterVersionLabel = "cds"
 	// vhostVersionLabel is used in snapshot version strings to identify
 	// virtual host resource snapshots.
-	vhostVersionLabel = "vhost"
+	vhostVersionLabel = "vhds"
 )
 
 // RemoveEndpoint removes a single endpoint by IP from the given cluster's

@@ -1,19 +1,31 @@
+// Package install provides configuration and utilities for the CNI plugin installer.
+// The cni-install binary is an init container that copies the Aether CNI plugin binary
+// and configuration files to the host filesystem before the main agent starts.
 package install
 
 import "github.com/bpalermo/aether/cni/internal/constants"
 
+// InstallerConfig holds configuration for the CNI plugin installer.
+// It specifies where to find the plugin binary and config files in the container,
+// and where to install them on the host filesystem.
 type InstallerConfig struct {
+	// Debug enables debug-level logging
 	Debug bool
-	// Location of the CNI config files in the container's filesystem (mount location of the CNINetDir)
+	// MountedCNINetDir is the location of the CNI config directory in the container
+	// (typically the mount point for the host's /etc/cni/net.d)
 	MountedCNINetDir string
-	// Name of the CNI config file
+	// CNIConfName is the name of the CNI network configuration file (e.g., "aether.conflist")
 	CNIConfName string
-	// Directory from where the CNI binaries should be copied
+	// CNIBinSourceDir is the directory inside the container where the CNI plugin binary is located
+	// (typically /app/bin or similar)
 	CNIBinSourceDir string
-	// Directory into which to copy the CNI binaries
+	// CNIBinTargetDir is the directory on the host where the CNI plugin binary should be copied
+	// (typically /opt/cni/bin)
 	CNIBinTargetDir string
 }
 
+// NewInstallerConfig creates a new InstallerConfig with default values.
+// The defaults use standard Kubernetes CNI directory paths and the package constants.
 func NewInstallerConfig() *InstallerConfig {
 	return &InstallerConfig{
 		CNIBinSourceDir:  constants.DefaultCNIBinDir,

@@ -16,7 +16,7 @@ import (
 const (
 	// listenerVersionLabel is used in snapshot version strings to identify
 	// listener resource snapshots.
-	listenerVersionLabel = "listener"
+	listenerVersionLabel = "lds"
 )
 
 // RemovePod removes the inbound and outbound listeners for the pod with the

@@ -1,3 +1,16 @@
+// Package spire provides integration with SPIRE for X.509 SVID management.
+//
+// The SPIRE bridge connects the SPIRE Delegated Identity API to the Aether agent's
+// xDS snapshot cache. It subscribes to X.509 SVIDs (Secure Workload Identity Documents)
+// and trust bundles from a SPIRE agent and converts them to Envoy Secret resources.
+// These secrets are pushed to the xDS cache and delivered to Envoy proxies for mTLS.
+//
+// The bridge implements controller-runtime's Runnable interface for lifecycle management
+// within the agent's Manager. It uses goroutines to handle asynchronous SVID and bundle
+// subscription streams from SPIRE.
+//
+// SPIRE integration is optional and can be disabled via the spire-enabled flag.
+// If disabled, the agent skips the SPIRE bridge but still functions normally.
 package spire
 
 import (

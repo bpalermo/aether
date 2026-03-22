@@ -9,7 +9,6 @@ go_library(
     importpath = "github.com/bpalermo/aether/cni/internal/util",
     visibility = ["//cni:__subpackages__"],
     deps = [
-        "//common/file",
         "@com_github_fsnotify_fsnotify//:fsnotify",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
     ],
