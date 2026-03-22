@@ -1,4 +1,4 @@
-name: e2e-cni-server
+name: integration-cni-server
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  e2e-cni-server:
+  integration-cni-server:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

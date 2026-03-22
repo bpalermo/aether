@@ -58,8 +58,20 @@ load-cni-install-image:
 push-cni-install-image:
 	@bazel run //cni/cmd/cni-install:image_push
 
+.PHONY: build-registrar
+build-registrar:
+	@bazel build //registrar/cmd/registrar/...
+
+.PHONY: load-registrar-image
+load-registrar-image:
+	@bazel run //registrar/cmd/registrar:image_load
+
+.PHONY: push-registrar-image
+push-registrar-image:
+	@bazel run //registrar/cmd/registrar:image_push
+
 .PHONY: load-all
-load-all: load-agent-image load-cni-install-image
+load-all: load-agent-image load-cni-install-image load-registrar-image
 
 .PHONY: push-all
-push-all: push-agent-image push-cni-install-image
+push-all: push-agent-image push-cni-install-image push-registrar-image

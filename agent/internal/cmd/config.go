@@ -21,13 +21,8 @@ type AgentConfig struct {
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
 
-	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", "etcd", or "cloudmap")
-	RegistryBackend string
-	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
-	EtcdEndpoints []string
-
-	// CloudMapNamespace is the AWS Cloud Map HTTP namespace for service discovery
-	CloudMapNamespace string
+	// RegistrarAddress is the gRPC address of the in-cluster Registrar service
+	RegistrarAddress string
 
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
@@ -35,6 +30,8 @@ type AgentConfig struct {
 	SpireTrustDomain string
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
 	SpireAdminSocketPath string
+	// SpireWorkloadCertDir is the directory containing SPIRE SVID certificates (svid.pem, svid_key.pem, svid_bundle.pem)
+	SpireWorkloadCertDir string
 
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
@@ -47,11 +44,10 @@ func NewAgentConfig() *AgentConfig {
 		ProxyServiceNodeID:     constants.DefaultProxyID,
 		CNIServerConfig:        cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
-		RegistryBackend:        "kubernetes",
-		EtcdEndpoints:          []string{"localhost:2379"},
-		CloudMapNamespace:      constants.DefaultCloudMapNamespace,
+		RegistrarAddress:       "aether-registrar.aether-system.svc:443",
 		SpireEnabled:           true,
 		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
+		SpireWorkloadCertDir:   constants.DefaultSpireWorkloadCertDir,
 	}
 }

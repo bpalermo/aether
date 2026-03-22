@@ -16,6 +16,7 @@ go_test(
         "KUBECONFIG",
         "AETHER_AGENT_IMAGE",
         "AETHER_CNI_INSTALL_IMAGE",
+        "AETHER_REGISTRAR_IMAGE",
     ],
     local = True,
     tags = [
@@ -28,6 +29,7 @@ go_test(
         "@io_k8s_api//rbac/v1:rbac",
         "@io_k8s_apimachinery//pkg/api/resource",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/util/intstr",
         "@io_k8s_sigs_e2e_framework//klient",
         "@io_k8s_sigs_e2e_framework//klient/conf",
         "@io_k8s_sigs_e2e_framework//klient/decoder",

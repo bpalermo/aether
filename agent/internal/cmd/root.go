@@ -2,7 +2,7 @@
 //
 // The agent is a Kubernetes DaemonSet component that runs on each node to manage
 // an Envoy xDS control plane and a CNI plugin for transparent traffic interception.
-// It registers services in a pluggable registry backend (kubernetes, dynamodb, etcd, or cloudmap)
+// It connects to the in-cluster Registrar service for endpoint registration and discovery,
 // and generates Envoy configuration (listeners, clusters, endpoints, routes) for local pods.
 //
 // Command-line flags control the agent's initialization:
@@ -11,9 +11,7 @@
 //   - cluster-name: Kubernetes cluster name (required)
 //   - proxy-id: xDS node identifier for the Envoy proxy instance (required)
 //   - mounted-registry-dir: Directory where pod data is stored locally
-//   - registry-backend: Registry backend selection (kubernetes, dynamodb, etcd, cloudmap)
-//   - etcd-endpoints: etcd connection endpoints for etcd backend
-//   - cloudmap-namespace: AWS Cloud Map HTTP namespace name
+//   - registrar-address: gRPC address of the in-cluster Registrar service
 //   - spire-enabled: Whether to enable SPIRE integration for mTLS via SDS
 //   - spire-trust-domain: SPIFFE trust domain for the cluster
 //   - spire-admin-socket: Path to SPIRE agent admin socket
@@ -28,10 +26,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/internal/awsconfig"
 	"github.com/bpalermo/aether/common/must"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/spire"
+	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/constants"
@@ -41,6 +39,8 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -86,10 +86,8 @@ func init() {
 	// Local storage configuration
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
 
-	// Service registry configuration
-	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "kubernetes", "Registry backend for service discovery (kubernetes, dynamodb, etcd, or cloudmap)")
-	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "Comma-separated etcd endpoints, used when registry-backend is 'etcd'")
-	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", constants.DefaultCloudMapNamespace, "AWS Cloud Map HTTP namespace name, used when registry-backend is 'cloudmap'")
+	// Registrar configuration
+	rootCmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
 
 	// Envoy admin configuration
 	rootCmd.Flags().StringVar(&cfg.CNIServerConfig.EnvoyAdminAddress, "envoy-admin-address", cfg.CNIServerConfig.EnvoyAdminAddress, "Envoy admin interface address (host:port) for listener verification")
@@ -98,6 +96,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
+	rootCmd.Flags().StringVar(&cfg.SpireWorkloadCertDir, "spire-workload-cert-dir", constants.DefaultSpireWorkloadCertDir, "Directory containing SPIRE workload identity certificates for registrar mTLS")
 
 	// These calls only fail if the flag name is not registered, which would be a programming error.
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
@@ -127,7 +126,7 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 
-	reg, err := setupRegistry(ctx, m)
+	reg, err := setupRegistrarClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -223,41 +222,28 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 	return s, nil
 }
 
-// setupRegistry creates and initializes a registry backend based on the configured registry-backend flag.
-// Supported backends are:
-//   - kubernetes: Uses Kubernetes API for service discovery
-//   - dynamodb: Uses AWS DynamoDB for service endpoint storage
-//   - etcd: Uses etcd for service endpoint storage
-//   - cloudmap: Uses AWS Cloud Map for service discovery
-func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
-	var reg registry.Registry
-
-	switch cfg.RegistryBackend {
-	case "kubernetes":
-		reg = registry.NewKubernetesRegistry(l, m.GetAPIReader(), registry.KubernetesConfig{
-			ClusterName: cfg.ClusterName,
-		})
-	case "dynamodb":
-		awsCfg, err := awsconfig.LoadConfig(ctx)
-		if err != nil {
-			return nil, err
-		}
-		reg = registry.NewDynamoDBRegistry(l, awsCfg)
-	case "etcd":
-		reg = registry.NewEtcdRegistry(l, registry.EtcdConfig{
-			Endpoints: cfg.EtcdEndpoints,
-		})
-	case "cloudmap":
-		awsCfg, err := awsconfig.LoadConfig(ctx)
-		if err != nil {
-			return nil, err
-		}
-		reg = registry.NewCloudMapRegistry(l, awsCfg, cfg.ClusterName,
-			registry.WithCloudMapNamespace(cfg.CloudMapNamespace),
-		)
-	default:
-		return nil, fmt.Errorf("unknown registry backend: %s", cfg.RegistryBackend)
+// setupRegistrarClient creates and initializes a registrar-backed registry.
+// The agent connects to the in-cluster Registrar service for all endpoint
+// registration and discovery operations. When SPIRE is enabled, the connection
+// uses mTLS with SVID certificates from the SPIRE CSI mount; otherwise,
+// insecure transport is used.
+func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
+	regCfg := registry.RegistrarConfig{
+		Address: cfg.RegistrarAddress,
 	}
+
+	if cfg.SpireEnabled {
+		tlsCfg, err := commonspire.ClientTLSConfig(cfg.SpireWorkloadCertDir)
+		if err != nil {
+			return nil, err
+		}
+		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
+		l.Info("registrar client using SPIRE mTLS", "certDir", cfg.SpireWorkloadCertDir)
+	} else {
+		l.Info("registrar client using insecure transport")
+	}
+
+	reg := registry.NewRegistrarRegistry(l, regCfg)
 
 	if err := reg.Initialize(ctx); err != nil {
 		return nil, fmt.Errorf("failed to initialize registry: %w", err)
@@ -265,5 +251,6 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 
 	return reg, nil
 }
+
 
 // must panics if err is non-nil. Use only for programming errors that should never occur at runtime.

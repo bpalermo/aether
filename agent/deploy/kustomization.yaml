@@ -8,4 +8,3 @@ resources:
   - cm.yaml
   - agent.yaml
   - proxy.yaml
-  - secretes.yaml

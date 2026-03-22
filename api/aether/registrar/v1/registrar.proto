@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package aether.registrar.v1;
+
+import "api/aether/registry/v1/endpoint.proto";
+import "api/aether/registry/v1/service.proto";
+
+option go_package = "github.com/bpalermo/aether/api/aether/registrar/v1;registrarv1";
+
+service RegistrarService {
+  // RegisterEndpoint registers a single endpoint for a service.
+  rpc RegisterEndpoint(RegisterEndpointRequest) returns (RegisterEndpointResponse);
+
+  // UnregisterEndpoint unregisters an endpoint for a service.
+  rpc UnregisterEndpoint(UnregisterEndpointRequest) returns (UnregisterEndpointResponse);
+
+  // WatchEndpoints streams endpoint change events to agents.
+  rpc WatchEndpoints(WatchEndpointsRequest) returns (stream EndpointEvent);
+
+  // ListAllEndpoints returns all endpoints from the registrar's snapshot.
+  rpc ListAllEndpoints(ListAllEndpointsRequest) returns (ListAllEndpointsResponse);
+}
+
+message RegisterEndpointRequest {
+  string service_name = 1;
+  aether.registry.v1.Service.Protocol protocol = 2;
+  aether.registry.v1.ServiceEndpoint endpoint = 3;
+}
+
+message RegisterEndpointResponse {}
+
+message UnregisterEndpointRequest {
+  string service_name = 1;
+  repeated string ips = 2;
+}
+
+message UnregisterEndpointResponse {}
+
+message WatchEndpointsRequest {
+  string cluster_name = 1;
+  string node_name = 2;
+  string last_version = 3;
+}
+
+message EndpointEvent {
+  enum EventType {
+    FULL_SNAPSHOT = 0;
+    ENDPOINT_ADDED = 1;
+    ENDPOINT_REMOVED = 2;
+    ENDPOINT_UPDATED = 3;
+  }
+
+  EventType type = 1;
+  string service_name = 2;
+  aether.registry.v1.Service.Protocol protocol = 3;
+  aether.registry.v1.ServiceEndpoint endpoint = 4;
+  string version = 5;
+}
+
+message ListAllEndpointsRequest {
+  aether.registry.v1.Service.Protocol protocol = 1;
+}
+
+message ListAllEndpointsResponse {
+  map<string, ServiceEndpoints> services = 1;
+  string version = 2;
+}
+
+message ServiceEndpoints {
+  repeated aether.registry.v1.ServiceEndpoint endpoints = 1;
+}

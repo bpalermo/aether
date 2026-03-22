@@ -41,6 +41,16 @@ func TestAgentConfig_DefaultValues(t *testing.T) {
 			got:      c.CNIServerConfig,
 			expected: cniServer.NewCNIServerConfig(),
 		},
+		{
+			name:     "registrar address uses default",
+			got:      c.RegistrarAddress,
+			expected: "aether-registrar.aether-system.svc:443",
+		},
+		{
+			name:     "SPIRE is enabled by default",
+			got:      c.SpireEnabled,
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -53,18 +63,18 @@ func TestAgentConfig_DefaultValues(t *testing.T) {
 func TestAgentConfig_ConfigurableFields(t *testing.T) {
 	c := NewAgentConfig()
 
-	// Test that fields can be modified
 	c.Debug = true
 	c.ProxyServiceNodeID = "custom-proxy-id"
+	c.RegistrarAddress = "custom-registrar:9443"
 
 	assert.True(t, c.Debug)
 	assert.Equal(t, "custom-proxy-id", c.ProxyServiceNodeID)
+	assert.Equal(t, "custom-registrar:9443", c.RegistrarAddress)
 }
 
 func TestAgentConfig_SubConfigsAreIndependent(t *testing.T) {
 	cfg1 := NewAgentConfig()
 	cfg2 := NewAgentConfig()
 
-	// Verify that configs are independent instances
 	assert.NotSame(t, cfg1.CNIServerConfig, cfg2.CNIServerConfig)
 }

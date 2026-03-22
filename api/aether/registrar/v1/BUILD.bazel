@@ -1,0 +1,33 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+
+proto_library(
+    name = "registrarv1_proto",
+    srcs = [
+        "registrar.proto",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/aether/registry/v1:registryv1_proto",
+    ],
+)
+
+go_proto_library(
+    name = "registrarv1_go_proto",
+    compilers = [
+        "@rules_go//proto:go_grpc_v2",
+        "@rules_go//proto:go_proto",
+    ],
+    importpath = "github.com/bpalermo/aether/api/aether/registrar/v1",
+    proto = ":registrarv1_proto",
+    visibility = ["//visibility:public"],
+    deps = ["//api/aether/registry/v1:registry"],
+)
+
+go_library(
+    name = "registrar",
+    embed = [":registrarv1_go_proto"],
+    importpath = "github.com/bpalermo/aether/api/aether/registrar/v1",
+    visibility = ["//visibility:public"],
+)

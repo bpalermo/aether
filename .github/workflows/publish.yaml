@@ -36,3 +36,4 @@ jobs:
       - name: Push
         run: |
           bazel run --stamp //agent/cmd/agent:image_push
+          bazel run --stamp //registrar/cmd/registrar:image_push

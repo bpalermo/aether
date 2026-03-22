@@ -10,7 +10,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/klient/conf"
 	"sigs.k8s.io/e2e-framework/klient/wait"
@@ -27,6 +29,7 @@ var (
 
 	agentImage      = envOrDefault("AETHER_AGENT_IMAGE", "palermo/aether-agent:latest")
 	cniInstallImage = envOrDefault("AETHER_CNI_INSTALL_IMAGE", "palermo/aether-cni-install:latest")
+	registrarImage  = envOrDefault("AETHER_REGISTRAR_IMAGE", "palermo/aether-registrar:latest")
 )
 
 func envOrDefault(key, fallback string) string {
@@ -46,6 +49,7 @@ func TestMain(m *testing.M) {
 		configureClient(),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, agentImage),
 		envfuncs.LoadDockerImageToCluster(kindClusterName, cniInstallImage),
+		envfuncs.LoadDockerImageToCluster(kindClusterName, registrarImage),
 		deployAetherSystem(),
 	)
 
@@ -97,59 +101,25 @@ func deployAetherSystem() env.Func {
 			return ctx, err
 		}
 
-		// Create ServiceAccount
-		sa := &corev1.ServiceAccount{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "aether-agent",
-				Namespace: namespace,
-			},
-		}
-		if err := client.Resources().Create(ctx, sa); err != nil {
+		// Create RBAC for agent and registrar
+		if err := createRBAC(ctx, client); err != nil {
 			return ctx, err
 		}
 
-		// Create ClusterRole
-		cr := &rbacv1.ClusterRole{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "aether-agent",
-			},
-			Rules: []rbacv1.PolicyRule{
-				{
-					APIGroups: []string{""},
-					Resources: []string{"pods"},
-					Verbs:     []string{"list", "get", "watch"},
-				},
-				{
-					APIGroups: []string{""},
-					Resources: []string{"nodes"},
-					Verbs:     []string{"list", "get", "watch"},
-				},
-			},
-		}
-		if err := client.Resources().Create(ctx, cr); err != nil {
+		// Deploy registrar (uses kubernetes registry backend)
+		if err := deployRegistrar(ctx, client); err != nil {
 			return ctx, err
 		}
 
-		// Create ClusterRoleBinding
-		crb := &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "aether-agent",
-			},
-			RoleRef: rbacv1.RoleRef{
-				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "ClusterRole",
-				Name:     "aether-agent",
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      "aether-agent",
-					Namespace: namespace,
-				},
-			},
-		}
-		if err := client.Resources().Create(ctx, crb); err != nil {
-			return ctx, err
+		// Wait for registrar to be ready
+		if err := wait.For(func(ctx context.Context) (bool, error) {
+			dep := &appsv1.Deployment{}
+			if err := client.Resources().Get(ctx, "aether-registrar", namespace, dep); err != nil {
+				return false, nil
+			}
+			return dep.Status.ReadyReplicas > 0, nil
+		}, wait.WithTimeout(3*time.Minute), wait.WithInterval(5*time.Second)); err != nil {
+			return ctx, fmt.Errorf("waiting for registrar: %w", err)
 		}
 
 		// Deploy agent DaemonSet
@@ -171,6 +141,142 @@ func deployAetherSystem() env.Func {
 
 		return ctx, nil
 	}
+}
+
+func createRBAC(ctx context.Context, client klient.Client) error {
+	// ServiceAccounts
+	for _, name := range []string{"aether-agent", "aether-registrar"} {
+		sa := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+			},
+		}
+		if err := client.Resources().Create(ctx, sa); err != nil {
+			return err
+		}
+	}
+
+	// ClusterRole shared by agent and registrar (pods + nodes read access)
+	cr := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "aether",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods"},
+				Verbs:     []string{"list", "get", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"nodes"},
+				Verbs:     []string{"list", "get", "watch"},
+			},
+		},
+	}
+	if err := client.Resources().Create(ctx, cr); err != nil {
+		return err
+	}
+
+	// Bind to both service accounts
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "aether",
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "aether",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "aether-agent",
+				Namespace: namespace,
+			},
+			{
+				Kind:      "ServiceAccount",
+				Name:      "aether-registrar",
+				Namespace: namespace,
+			},
+		},
+	}
+	return client.Resources().Create(ctx, crb)
+}
+
+func deployRegistrar(ctx context.Context, client klient.Client) error {
+	labels := map[string]string{
+		"app":                    "aether-registrar",
+		"app.kubernetes.io/name": "aether-registrar",
+	}
+	replicas := int32(1)
+
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "aether-registrar",
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "aether-registrar",
+					Containers: []corev1.Container{
+						{
+							Name:            "registrar",
+							Image:           registrarImage,
+							ImagePullPolicy: corev1.PullNever,
+							Args: []string{
+								"--debug=true",
+								"--cluster-name=aether-e2e",
+								"--registry-backend=kubernetes",
+								"--grpc-address=:8443",
+								"--spire-enabled=false",
+							},
+							Ports: []corev1.ContainerPort{
+								{Name: "grpc", ContainerPort: 8443},
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("10m"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := client.Resources().Create(ctx, dep); err != nil {
+		return err
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "aether-registrar",
+			Namespace: namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "grpc",
+					Port:       443,
+					TargetPort: intstr.FromInt32(8443),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+	return client.Resources().Create(ctx, svc)
 }
 
 func deployAgent(ctx context.Context, client klient.Client) error {
@@ -225,6 +331,7 @@ func deployAgent(ctx context.Context, client klient.Client) error {
 								"--proxy-id=$(NODE_NAME)",
 								"--cluster-name=aether-e2e",
 								"--node-name=$(NODE_NAME)",
+								"--registrar-address=aether-registrar.aether-system.svc:443",
 								"--spire-enabled=false",
 							},
 							Env: []corev1.EnvVar{

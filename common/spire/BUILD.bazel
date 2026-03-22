@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "spire",
+    srcs = ["tls.go"],
+    importpath = "github.com/bpalermo/aether/common/spire",
+    visibility = ["//visibility:public"],
+)
