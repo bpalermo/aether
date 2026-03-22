@@ -3,12 +3,15 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "telemetry",
     srcs = [
+        "healthz.go",
         "options.go",
         "telemetry.go",
     ],
     importpath = "github.com/bpalermo/aether/telemetry",
     visibility = ["//visibility:public"],
     deps = [
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+        "@io_k8s_sigs_controller_runtime//pkg/healthz",
         "@io_k8s_sigs_controller_runtime//pkg/metrics",
         "@io_k8s_sigs_controller_runtime//pkg/metrics/server",
         "@io_opentelemetry_go_contrib_instrumentation_runtime//:runtime",

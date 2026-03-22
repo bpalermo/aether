@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
 const (
@@ -97,11 +98,21 @@ func runRegistrar(ctx context.Context) error {
 	}
 
 	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		HealthProbeBindAddress: "0", // Disable health probe server
+		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
 		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create manager: %w", err)
+	}
+
+	if err = m.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to set up health check: %w", err)
+	}
+	if err = m.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to set up ready check: %w", err)
+	}
+	if err = m.AddReadyzCheck("cache-sync", telemetry.CacheSyncChecker(m)); err != nil {
+		return fmt.Errorf("failed to set up cache sync ready check: %w", err)
 	}
 
 	reg, err := setupRegistry(ctx, m)

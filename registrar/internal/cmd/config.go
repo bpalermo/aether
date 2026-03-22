@@ -31,6 +31,9 @@ type RegistrarConfig struct {
 	// GRPCAddress is the address for the registrar gRPC server
 	GRPCAddress string
 
+	// HealthProbeBindAddress is the address for the health probe HTTP server
+	HealthProbeBindAddress string
+
 	// MetricsEnabled enables the controller-runtime Prometheus metrics server
 	MetricsEnabled bool
 	// MetricsBindAddress is the address for the metrics HTTP server
@@ -54,6 +57,7 @@ const (
 // NewRegistrarConfig creates a RegistrarConfig with default values.
 func NewRegistrarConfig() *RegistrarConfig {
 	return &RegistrarConfig{
+		HealthProbeBindAddress:  ":8082",
 		MetricsBindAddress:      ":8081",
 		RegistryBackend:         "kubernetes",
 		EtcdEndpoints:           []string{"localhost:2379"},

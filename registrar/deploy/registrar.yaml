@@ -32,6 +32,24 @@ spec:
             - name: grpc
               containerPort: 8443
               protocol: TCP
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           env:
             - name: GOMEMLIMIT
               valueFrom:

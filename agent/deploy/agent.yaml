@@ -53,6 +53,25 @@ spec:
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name=talos-main"
             - "--node-name=$(NODE_NAME)"
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           env:
             - name: NODE_NAME
               valueFrom:
