@@ -242,7 +242,29 @@ func deployRegistrar(ctx context.Context, client klient.Client) error {
 								"--spire-enabled=false",
 							},
 							Ports: []corev1.ContainerPort{
-								{Name: "grpc", ContainerPort: 8443},
+								{Name: "grpc", ContainerPort: 8443, Protocol: corev1.ProtocolTCP},
+								{Name: "metrics", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
+								{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromString("health"),
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/readyz",
+										Port: intstr.FromString("health"),
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -333,6 +355,30 @@ func deployAgent(ctx context.Context, client klient.Client) error {
 								"--node-name=$(NODE_NAME)",
 								"--registrar-address=aether-registrar.aether-system.svc:443",
 								"--spire-enabled=false",
+							},
+							Ports: []corev1.ContainerPort{
+								{Name: "metrics", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+								{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromString("health"),
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/readyz",
+										Port: intstr.FromString("health"),
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
 							},
 							Env: []corev1.EnvVar{
 								{
