@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "server",
+    srcs = [
+        "broadcaster.go",
+        "server.go",
+        "snapshot.go",
+        "sync.go",
+    ],
+    importpath = "github.com/bpalermo/aether/registrar/internal/server",
+    visibility = ["//registrar:__subpackages__"],
+    deps = [
+        "//api/aether/registrar/v1:registrar",
+        "//api/aether/registry/v1:registry",
+        "//registry",
+        "//xds",
+        "@com_github_go_logr_logr//:logr",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_protobuf//proto",
+    ],
+)
+
+go_test(
+    name = "server_test",
+    srcs = [
+        "broadcaster_test.go",
+        "snapshot_test.go",
+        "sync_test.go",
+    ],
+    embed = [":server"],
+    deps = [
+        "//api/aether/registrar/v1:registrar",
+        "//api/aether/registry/v1:registry",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

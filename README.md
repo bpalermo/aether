@@ -1,6 +1,6 @@
 # Aether
 
-A Kubernetes service mesh data plane built in Go. Aether runs a per-node agent (DaemonSet) that manages an Envoy xDS control plane and a CNI plugin for transparent traffic interception. It supports pluggable service registries (Kubernetes, DynamoDB, etcd, AWS Cloud Map) for endpoint discovery and integrates with SPIRE for workload identity and mTLS.
+A Kubernetes service mesh data plane built in Go. Aether runs a per-node agent (DaemonSet) that manages an Envoy xDS control plane and a CNI plugin for transparent traffic interception. An in-cluster Registrar service proxies all registry operations, caches an endpoint snapshot, and streams changes to agents. It supports pluggable external registry backends (DynamoDB, etcd, AWS Cloud Map) and integrates with SPIRE for workload identity and mTLS.
 
 ## Architecture
 
@@ -17,18 +17,22 @@ graph TD
         Agent -- "Delegated Identity API" --> SPIRE
     end
 
-    Registry["Service Registry<br/><i>Kubernetes · DynamoDB · etcd · Cloud Map</i>"]
-    Agent -- "endpoint discovery" --> Registry
+    Registrar["Registrar<br/><i>in-cluster Deployment</i>"]
+    Agent -- "gRPC<br/>register, watch, list" --> Registrar
+
+    Registry["External Registry<br/><i>DynamoDB · etcd · Cloud Map</i>"]
+    Registrar -- "sync + persist" --> Registry
 ```
 
-**Agent** — Runs on each node via `controller-runtime`. Manages the xDS server, CNI gRPC server, SPIRE bridge, and registry connection as runnables. Generates Envoy configuration (listeners, clusters, endpoints, routes) from local pod data and the service registry.
+**Agent** — Runs on each node via `controller-runtime`. Manages the xDS server, CNI gRPC server, SPIRE bridge, and registrar client as runnables. Generates Envoy configuration (listeners, clusters, endpoints, routes) from local pod data and the endpoint cache populated by the Registrar's push stream.
+
+**Registrar** — In-cluster Deployment that acts as the sole bridge between agents and the external registry. Receives endpoint registrations from agents, persists them externally, maintains a versioned in-memory snapshot via periodic sync, and streams changes to all agents via gRPC server-streaming. Reduces external connections from N (one per node) to 1 per cluster.
 
 **CNI Plugin** — Implements the CNI spec (Add/Del/Check/GC/Status) for transparent traffic interception. Communicates with the agent over a Unix domain socket for pod registration.
 
 **SPIRE Bridge** — Connects to the SPIRE agent via the Delegated Identity API to obtain X.509 SVIDs and trust bundles. Converts them into Envoy SDS (Secret Discovery Service) resources for automatic mTLS between workloads.
 
-**Service Registry** — Pluggable backend for endpoint discovery, selected at runtime via `--registry-backend`:
-- **Kubernetes** (default) — discovers endpoints directly from the Kubernetes API server
+**External Registry** — Pluggable backend for durable endpoint storage, selected on the Registrar via `--registry-backend`:
 - **DynamoDB** — single-table design for AWS-native deployments
 - **etcd** — hierarchical key structure with protobuf serialization
 - **AWS Cloud Map** — multi-cluster service discovery via AWS Cloud Map
@@ -55,6 +59,7 @@ This generates `.bazelrc.colima` (gitignored) with your socket path. The config 
 
 ```bash
 make build-agent           # Build the node agent
+make build-registrar       # Build the registrar service
 make build-cni-install     # Build the CNI installer
 ```
 

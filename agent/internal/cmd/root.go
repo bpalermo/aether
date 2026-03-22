@@ -2,7 +2,7 @@
 //
 // The agent is a Kubernetes DaemonSet component that runs on each node to manage
 // an Envoy xDS control plane and a CNI plugin for transparent traffic interception.
-// It registers services in a pluggable registry backend (kubernetes, dynamodb, etcd, or cloudmap)
+// It connects to the in-cluster Registrar service for endpoint registration and discovery,
 // and generates Envoy configuration (listeners, clusters, endpoints, routes) for local pods.
 //
 // Command-line flags control the agent's initialization:
@@ -11,9 +11,7 @@
 //   - cluster-name: Kubernetes cluster name (required)
 //   - proxy-id: xDS node identifier for the Envoy proxy instance (required)
 //   - mounted-registry-dir: Directory where pod data is stored locally
-//   - registry-backend: Registry backend selection (kubernetes, dynamodb, etcd, cloudmap)
-//   - etcd-endpoints: etcd connection endpoints for etcd backend
-//   - cloudmap-namespace: AWS Cloud Map HTTP namespace name
+//   - registrar-address: gRPC address of the in-cluster Registrar service
 //   - spire-enabled: Whether to enable SPIRE integration for mTLS via SDS
 //   - spire-trust-domain: SPIFFE trust domain for the cluster
 //   - spire-admin-socket: Path to SPIRE agent admin socket
@@ -28,7 +26,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/internal/awsconfig"
 	"github.com/bpalermo/aether/common/must"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/spire"
@@ -86,10 +83,8 @@ func init() {
 	// Local storage configuration
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
 
-	// Service registry configuration
-	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", "kubernetes", "Registry backend for service discovery (kubernetes, dynamodb, etcd, or cloudmap)")
-	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "Comma-separated etcd endpoints, used when registry-backend is 'etcd'")
-	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", constants.DefaultCloudMapNamespace, "AWS Cloud Map HTTP namespace name, used when registry-backend is 'cloudmap'")
+	// Registrar configuration
+	rootCmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
 
 	// Envoy admin configuration
 	rootCmd.Flags().StringVar(&cfg.CNIServerConfig.EnvoyAdminAddress, "envoy-admin-address", cfg.CNIServerConfig.EnvoyAdminAddress, "Envoy admin interface address (host:port) for listener verification")
@@ -127,7 +122,7 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 
-	reg, err := setupRegistry(ctx, m)
+	reg, err := setupRegistry(ctx)
 	if err != nil {
 		return err
 	}
@@ -223,41 +218,13 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 	return s, nil
 }
 
-// setupRegistry creates and initializes a registry backend based on the configured registry-backend flag.
-// Supported backends are:
-//   - kubernetes: Uses Kubernetes API for service discovery
-//   - dynamodb: Uses AWS DynamoDB for service endpoint storage
-//   - etcd: Uses etcd for service endpoint storage
-//   - cloudmap: Uses AWS Cloud Map for service discovery
-func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
-	var reg registry.Registry
-
-	switch cfg.RegistryBackend {
-	case "kubernetes":
-		reg = registry.NewKubernetesRegistry(l, m.GetAPIReader(), registry.KubernetesConfig{
-			ClusterName: cfg.ClusterName,
-		})
-	case "dynamodb":
-		awsCfg, err := awsconfig.LoadConfig(ctx)
-		if err != nil {
-			return nil, err
-		}
-		reg = registry.NewDynamoDBRegistry(l, awsCfg)
-	case "etcd":
-		reg = registry.NewEtcdRegistry(l, registry.EtcdConfig{
-			Endpoints: cfg.EtcdEndpoints,
-		})
-	case "cloudmap":
-		awsCfg, err := awsconfig.LoadConfig(ctx)
-		if err != nil {
-			return nil, err
-		}
-		reg = registry.NewCloudMapRegistry(l, awsCfg, cfg.ClusterName,
-			registry.WithCloudMapNamespace(cfg.CloudMapNamespace),
-		)
-	default:
-		return nil, fmt.Errorf("unknown registry backend: %s", cfg.RegistryBackend)
-	}
+// setupRegistry creates and initializes a registrar-backed registry.
+// The agent connects to the in-cluster Registrar service for all endpoint
+// registration and discovery operations.
+func setupRegistry(ctx context.Context) (registry.Registry, error) {
+	reg := registry.NewRegistrarRegistry(l, registry.RegistrarConfig{
+		Address: cfg.RegistrarAddress,
+	})
 
 	if err := reg.Initialize(ctx); err != nil {
 		return nil, fmt.Errorf("failed to initialize registry: %w", err)

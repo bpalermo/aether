@@ -19,7 +19,7 @@ import (
 )
 
 func TestManagedPodRegistration(t *testing.T) {
-	feature := features.New("Managed pod is discoverable by Kubernetes registry").
+	feature := features.New("Managed pod is registered via registrar").
 		Setup(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			ns := envconf.RandomName("e2e-test", 16)
 			ctx = context.WithValue(ctx, testNamespaceKey, ns)

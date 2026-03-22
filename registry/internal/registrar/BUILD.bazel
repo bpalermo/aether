@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "registrar",
+    srcs = ["registrar.go"],
+    importpath = "github.com/bpalermo/aether/registry/internal/registrar",
+    visibility = ["//registry:__subpackages__"],
+    deps = [
+        "//api/aether/registrar/v1:registrar",
+        "//api/aether/registry/v1:registry",
+        "@com_github_go_logr_logr//:logr",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+    ],
+)
+
+go_test(
+    name = "registrar_test",
+    srcs = ["registrar_test.go"],
+    embed = [":registrar"],
+    deps = [
+        "//api/aether/registrar/v1:registrar",
+        "//api/aether/registry/v1:registry",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

@@ -22,6 +22,7 @@ bazel test //agent/internal/xds/config:config_test
 # Build
 make build-agent             # or: bazel build //agent/cmd/agent/...
 make build-cni-install       # or: bazel build //cni/cmd/cni-install/...
+make build-registrar         # or: bazel build //registrar/cmd/registrar/...
 
 # Regenerate BUILD.bazel files after adding/changing Go files
 make gazelle                 # or: bazel run //:gazelle
@@ -35,6 +36,7 @@ bazel run @rules_go//go get <package>
 # Container images
 make load-agent-image        # Load agent image into local Docker
 make load-cni-install-image  # Load cni-install image into local Docker
+make load-registrar-image    # Load registrar image into local Docker
 make load-all                # Load all images
 make push-all                # Push all images
 ```
@@ -44,6 +46,7 @@ make push-all                # Push all images
 ### Binaries (under `cmd/`)
 
 - **`agent/cmd/agent`** - Node agent DaemonSet. Uses `controller-runtime` manager to run the xDS server and CNI gRPC server as runnables. CLI built with Cobra.
+- **`registrar/cmd/registrar`** - In-cluster Registrar Deployment. Proxies registry operations, caches an endpoint snapshot, and streams changes to agents via gRPC. Uses `controller-runtime` manager with leader election.
 - **`cni/cmd/cni`** - CNI plugin binary invoked by the container runtime. Implements the CNI spec (Add/Del/Check/GC/Status) via `containernetworking/cni`.
 - **`cni/cmd/cni-install`** - Init container that installs the CNI plugin binary and config onto the host.
 
@@ -52,9 +55,10 @@ make push-all                # Push all images
 - **`xds/`** - Base gRPC server infrastructure and Envoy xDS server wrapping `go-control-plane`. `Server` provides lifecycle management (start, graceful shutdown, liveness/readiness) over Unix domain sockets or TCP. `XdsServer` embeds `Server` and registers Envoy discovery services (LDS, CDS, EDS, RDS, ADS).
 - **`agent/internal/xds/`** - Agent-specific xDS logic. `server/` builds Envoy snapshots from local pod storage + registry. `proxy/` generates Envoy resource types (listeners, clusters, endpoints, routes, filter chains). `config/` has shared Envoy config helpers (SPIRE mTLS, HTTP connection manager).
 - **`agent/internal/cni/server/`** - CNI gRPC server handling pod registration/deregistration. Uses protovalidate for request validation. Queries Kubernetes node metadata for topology-aware routing.
-- **`registry/`** - Service registry interface with DynamoDB (`internal/ddb/`) and etcd (`internal/etcd/`) implementations. The agent selects the backend via `--registry-backend` flag. Manages service endpoint registration and discovery.
+- **`registry/`** - Service registry interface with DynamoDB (`internal/ddb/`), etcd (`internal/etcd/`), Cloud Map (`internal/cloudmap/`), and registrar (`internal/registrar/`) implementations. The agent selects the backend via `--registry-backend` flag. Manages service endpoint registration and discovery.
+- **`registrar/internal/server/`** - Registrar server: versioned endpoint snapshot, broadcaster for fan-out to agent watch streams, sync loop polling the external registry for changes.
 - **`agent/pkg/storage/`** - Local file-based storage with in-memory caching and fsnotify file watching. Stores protobuf-serialized CNI pod data.
-- **`api/`** - Protobuf definitions under `aether/cni/v1/` and `aether/registry/v1/`. Uses `buf/validate` for proto validation and `protoc-gen-dynamo` for DynamoDB marshaling.
+- **`api/`** - Protobuf definitions under `aether/cni/v1/`, `aether/registry/v1/`, and `aether/registrar/v1/`. Uses `buf/validate` for proto validation and `protoc-gen-dynamo` for DynamoDB marshaling.
 - **`constants/`** - Shared Kubernetes labels, annotations, and registry constants.
 - **`common/file/`** - Atomic file write utilities with platform-specific fadvise support.
 
