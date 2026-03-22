@@ -4,12 +4,13 @@ package cmd
 import (
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/constants"
+	"github.com/bpalermo/aether/common/manager"
 )
 
 // AgentConfig holds configuration for the Aether agent.
 type AgentConfig struct {
-	// Debug enables debug logging
-	Debug bool
+	manager.Config
+
 	// ProxyServiceNodeID is the xDS node ID for identifying the Envoy proxy instance
 	ProxyServiceNodeID string
 
@@ -33,18 +34,6 @@ type AgentConfig struct {
 	// SpireWorkloadCertDir is the directory containing SPIRE SVID certificates (svid.pem, svid_key.pem, svid_bundle.pem)
 	SpireWorkloadCertDir string
 
-	// HealthProbeBindAddress is the address for the health probe HTTP server
-	HealthProbeBindAddress string
-
-	// MetricsEnabled enables the controller-runtime Prometheus metrics server
-	MetricsEnabled bool
-	// MetricsBindAddress is the address for the metrics HTTP server
-	MetricsBindAddress string
-	// OTelEnabled enables the OTel MeterProvider with Prometheus exporter bridge
-	OTelEnabled bool
-	// OTLPEndpoint is the OTLP gRPC collector endpoint (e.g. "localhost:4317"); empty disables OTLP export
-	OTLPEndpoint string
-
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
 }
@@ -52,10 +41,11 @@ type AgentConfig struct {
 // NewAgentConfig creates a new AgentConfig with default values.
 func NewAgentConfig() *AgentConfig {
 	return &AgentConfig{
-		Debug:                  false,
-		HealthProbeBindAddress: ":8082",
-		MetricsEnabled:         true,
-		MetricsBindAddress:     ":8080",
+		Config: manager.Config{
+			HealthProbeBindAddress: ":8082",
+			MetricsEnabled:         true,
+			MetricsBindAddress:     ":8080",
+		},
 		ProxyServiceNodeID:     constants.DefaultProxyID,
 		CNIServerConfig:        cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
