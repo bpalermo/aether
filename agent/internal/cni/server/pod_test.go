@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/envoy"
+	"github.com/bpalermo/aether/agent/internal/envoy/admin"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/pkg/storage"
@@ -81,7 +81,7 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		registry:      reg,
 		snapshotCache: sc,
 		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, logr.Discard()),
-		envoyAdmin:    envoy.NewAdminClient(envoyAdminAddr),
+		envoyAdmin:    admin.NewClient(envoyAdminAddr),
 		k8sClient:     k8sClient,
 	}
 }

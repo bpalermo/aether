@@ -1,9 +1,8 @@
-// Package envoy provides a client for interacting with the Envoy proxy admin interface.
-package envoy
+// Package admin provides a client for interacting with the Envoy proxy admin interface.
+package admin
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,17 +13,17 @@ const (
 	pollInterval = 100 * time.Millisecond
 )
 
-// AdminClient communicates with the Envoy admin interface to query
+// Client communicates with the Envoy admin interface to query
 // listener configuration state.
-type AdminClient struct {
+type Client struct {
 	address    string
 	httpClient *http.Client
 }
 
-// NewAdminClient creates a new AdminClient that connects to the Envoy admin
+// NewClient creates a new Client that connects to the Envoy admin
 // interface at the given address (host:port).
-func NewAdminClient(address string) *AdminClient {
-	return &AdminClient{
+func NewClient(address string) *Client {
+	return &Client{
 		address: address,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -36,7 +35,7 @@ func NewAdminClient(address string) *AdminClient {
 // matching the given network namespace appears, or the context deadline expires.
 // This is best-effort: a timeout returns an error but callers should treat it
 // as non-fatal.
-func (c *AdminClient) WaitForListenerPresent(ctx context.Context, netns string) error {
+func (c *Client) WaitForListenerPresent(ctx context.Context, netns string) error {
 	return c.poll(ctx, netns, true)
 }
 
@@ -44,11 +43,11 @@ func (c *AdminClient) WaitForListenerPresent(ctx context.Context, netns string) 
 // matching the given network namespace remains, or the context deadline expires.
 // This is best-effort: a timeout returns an error but callers should treat it
 // as non-fatal.
-func (c *AdminClient) WaitForListenerRemoval(ctx context.Context, netns string) error {
+func (c *Client) WaitForListenerRemoval(ctx context.Context, netns string) error {
 	return c.poll(ctx, netns, false)
 }
 
-func (c *AdminClient) poll(ctx context.Context, netns string, wantPresent bool) error {
+func (c *Client) poll(ctx context.Context, netns string, wantPresent bool) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -74,7 +73,7 @@ func (c *AdminClient) poll(ctx context.Context, netns string, wantPresent bool) 
 	}
 }
 
-func (c *AdminClient) hasListenerForNetns(ctx context.Context, netns string) (bool, error) {
+func (c *Client) hasListenerForNetns(ctx context.Context, netns string) (bool, error) {
 	url := fmt.Sprintf("http://%s/config_dump?resource=dynamic_listeners&name_regex=inbound_http", c.address)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -98,58 +97,4 @@ func (c *AdminClient) hasListenerForNetns(ctx context.Context, netns string) (bo
 	}
 
 	return parseConfigDumpForNetns(body, netns)
-}
-
-// configDump represents the relevant structure of the Envoy config_dump response
-// for dynamic listeners.
-type configDump struct {
-	Configs []configEntry `json:"configs"`
-}
-
-type configEntry struct {
-	DynamicListeners []dynamicListener `json:"dynamic_listeners"`
-}
-
-type dynamicListener struct {
-	ActiveState *activeState `json:"active_state"`
-}
-
-type activeState struct {
-	Listener listenerConfig `json:"listener"`
-}
-
-type listenerConfig struct {
-	Address *addressConfig `json:"address"`
-}
-
-type addressConfig struct {
-	SocketAddress *socketAddress `json:"socket_address"`
-}
-
-type socketAddress struct {
-	NetworkNamespaceFilepath string `json:"network_namespace_filepath"`
-}
-
-func parseConfigDumpForNetns(data []byte, netns string) (bool, error) {
-	var dump configDump
-	if err := json.Unmarshal(data, &dump); err != nil {
-		return false, fmt.Errorf("failed to parse config dump: %w", err)
-	}
-
-	for _, cfg := range dump.Configs {
-		for _, dl := range cfg.DynamicListeners {
-			if dl.ActiveState == nil {
-				continue
-			}
-			addr := dl.ActiveState.Listener.Address
-			if addr == nil || addr.SocketAddress == nil {
-				continue
-			}
-			if addr.SocketAddress.NetworkNamespaceFilepath == netns {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
 }

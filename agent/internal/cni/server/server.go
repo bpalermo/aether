@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"buf.build/go/protovalidate"
-	"github.com/bpalermo/aether/agent/internal/envoy"
+	"github.com/bpalermo/aether/agent/internal/envoy/admin"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/pkg/storage"
@@ -46,7 +46,7 @@ type CNIServer struct {
 
 	snapshotCache *cache.SnapshotCache
 	spireBridge   *spire.Bridge
-	envoyAdmin    *envoy.AdminClient
+	envoyAdmin    *admin.Client
 
 	k8sClient client.Client
 }
@@ -75,7 +75,7 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 		k8sClient:     k8sClient,
 		snapshotCache: snapshotCache,
 		spireBridge:   spireBridge,
-		envoyAdmin:    envoy.NewAdminClient(cfg.EnvoyAdminAddress),
+		envoyAdmin:    admin.NewClient(cfg.EnvoyAdminAddress),
 	}
 
 	cniSrv.AddCallback(cniSrv)

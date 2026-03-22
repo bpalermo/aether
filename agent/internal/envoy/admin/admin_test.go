@@ -1,4 +1,4 @@
-package envoy
+package admin
 
 import (
 	"context"
@@ -114,7 +114,7 @@ func TestWaitForListenerPresent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		client := NewAdminClient(srv.Listener.Addr().String())
+		client := NewClient(srv.Listener.Addr().String())
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
@@ -129,7 +129,7 @@ func TestWaitForListenerPresent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		client := NewAdminClient(srv.Listener.Addr().String())
+		client := NewClient(srv.Listener.Addr().String())
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 
@@ -147,7 +147,7 @@ func TestWaitForListenerRemoval(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		client := NewAdminClient(srv.Listener.Addr().String())
+		client := NewClient(srv.Listener.Addr().String())
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
@@ -176,7 +176,7 @@ func TestWaitForListenerRemoval(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		client := NewAdminClient(srv.Listener.Addr().String())
+		client := NewClient(srv.Listener.Addr().String())
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 
