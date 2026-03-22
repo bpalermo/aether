@@ -96,6 +96,14 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 
+	// Cluster configuration flags
+	rootCmd.Flags().StringVar(&cfg.ClusterConfig.LocalClusterBindAddress, "local-cluster-bind-address", cfg.ClusterConfig.LocalClusterBindAddress, "Source address for local cluster upstream connections")
+	rootCmd.Flags().Uint32Var(&cfg.ClusterConfig.HealthCheckHealthyThreshold, "health-check-healthy-threshold", cfg.ClusterConfig.HealthCheckHealthyThreshold, "Healthy threshold for endpoint health checks")
+	rootCmd.Flags().Uint32Var(&cfg.ClusterConfig.HealthCheckUnhealthyThreshold, "health-check-unhealthy-threshold", cfg.ClusterConfig.HealthCheckUnhealthyThreshold, "Unhealthy threshold for endpoint health checks")
+	rootCmd.Flags().DurationVar(&cfg.ClusterConfig.HealthCheckInterval, "health-check-interval", cfg.ClusterConfig.HealthCheckInterval, "Interval between endpoint health checks")
+	rootCmd.Flags().DurationVar(&cfg.ClusterConfig.HealthCheckTimeout, "health-check-timeout", cfg.ClusterConfig.HealthCheckTimeout, "Timeout for endpoint health checks")
+	rootCmd.Flags().StringVar(&cfg.ClusterConfig.UpstreamProtocol, "upstream-protocol", cfg.ClusterConfig.UpstreamProtocol, "HTTP protocol for upstream clusters (h2 or http1)")
+
 	// These calls only fail if the flag name is not registered, which would be a programming error.
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 	must.NoError(rootCmd.MarkFlagRequired("node-name"))
@@ -165,7 +173,7 @@ func runAgent(ctx context.Context) error {
 // (LDS, CDS, EDS, RDS, ADS) with resource snapshots generated from local pod storage and the registry.
 func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, cfg.SpireTrustDomain, registry, localStorage, snapshotCache, l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, cfg.SpireTrustDomain, registry, localStorage, snapshotCache, cfg.ClusterConfig, l)
 	if err != nil {
 		return err
 	}

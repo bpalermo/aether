@@ -129,7 +129,7 @@ func (c *SnapshotCache) VirtualHosts() []types.Resource {
 // on the same node, and adds a local SPIRE cluster for mTLS configuration.
 // After populating the cache, it generates and sets a new cluster snapshot.
 // Returns an error if registry listing fails or snapshot generation fails.
-func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterName string, nodeName string, reg registry.Registry) error {
+func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterName string, nodeName string, reg registry.Registry, cc *proxy.ClusterConfig) error {
 	c.log.V(2).Info("generating clusters and endpoints from registry")
 
 	serviceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_HTTP)
@@ -143,7 +143,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		c.clusters = make(map[string]clusterEntry)
 	}
 	for serviceName, endpoints := range serviceEndpoints {
-		cluster := proxy.NewClusterForService(serviceName)
+		cluster := proxy.NewClusterForService(serviceName, cc)
 		cla := proxy.NewClusterLoadAssignment(serviceName)
 		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
@@ -160,7 +160,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 				localClusterName := fmt.Sprintf("local_%s", serviceName)
 
 				if localCluster == nil {
-					localCluster = proxy.NewLocalClusterForService(localClusterName, endpoint)
+					localCluster = proxy.NewLocalClusterForService(localClusterName, endpoint, cc)
 					localCla = proxy.NewClusterLoadAssignment(localClusterName)
 					localEpMap = make(map[string]*endpointv3.LocalityLbEndpoints)
 				}
