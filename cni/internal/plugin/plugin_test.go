@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -169,4 +170,69 @@ func TestNewPodFromArgs(t *testing.T) {
 		assert.Equal(t, "my-pod", pod.GetName())
 		assert.Nil(t, pod.GetPid())
 	})
+}
+
+func TestVerifyNetns(t *testing.T) {
+	t.Run("empty path", func(t *testing.T) {
+		err := verifyNetns("")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty")
+	})
+
+	t.Run("non-existent path", func(t *testing.T) {
+		err := verifyNetns("/nonexistent/netns/path")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no longer exists")
+	})
+
+	t.Run("existing path", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "fake-netns")
+		require.NoError(t, os.WriteFile(tmpFile, nil, 0o644))
+
+		err := verifyNetns(tmpFile)
+		assert.NoError(t, err)
+	})
+}
+
+func TestVerifyInterface(t *testing.T) {
+	t.Run("empty interface name", func(t *testing.T) {
+		err := verifyInterface("/proc/1/ns/net", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "interface name is empty")
+	})
+
+	t.Run("non-proc netns path skips check", func(t *testing.T) {
+		// If the netns path isn't /proc-based, the check is skipped gracefully.
+		err := verifyInterface("/var/run/netns/test", "eth0")
+		assert.NoError(t, err)
+	})
+
+	t.Run("interface found in net/dev", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("requires /proc on Linux")
+		}
+		// Use the current process's PID — "lo" should always exist.
+		netnsPath := fmt.Sprintf("/proc/%d/ns/net", os.Getpid())
+		err := verifyInterface(netnsPath, "lo")
+		assert.NoError(t, err)
+	})
+
+	t.Run("interface not found in net/dev", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("requires /proc on Linux")
+		}
+		netnsPath := fmt.Sprintf("/proc/%d/ns/net", os.Getpid())
+		err := verifyInterface(netnsPath, "nonexistent0")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+}
+
+func TestIgnorableNamespace(t *testing.T) {
+	assert.True(t, ignorableNamespace("kube-system"))
+	assert.True(t, ignorableNamespace("Kube-System"))
+	assert.True(t, ignorableNamespace("aether-system"))
+	assert.True(t, ignorableNamespace("Aether-System"))
+	assert.False(t, ignorableNamespace("default"))
+	assert.False(t, ignorableNamespace("my-namespace"))
 }

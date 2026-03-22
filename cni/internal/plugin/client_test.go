@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -44,6 +48,65 @@ func (m *mockCNIService) RemovePod(_ context.Context, req *cniv1.RemovePodReques
 	}, nil
 }
 
+// failingCNIService returns a configurable error on AddPod calls.
+type failingCNIService struct {
+	cniv1.UnimplementedCNIServiceServer
+	addPodErr    error
+	addPodCalls  atomic.Int32
+	removePodErr error
+}
+
+func (f *failingCNIService) AddPod(_ context.Context, _ *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
+	f.addPodCalls.Add(1)
+	if f.addPodErr != nil {
+		return nil, f.addPodErr
+	}
+	return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_SUCCESS}, nil
+}
+
+func (f *failingCNIService) RemovePod(_ context.Context, _ *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
+	if f.removePodErr != nil {
+		return nil, f.removePodErr
+	}
+	return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS}, nil
+}
+
+// newBufconnClient creates a CNIClient backed by a bufconn listener for testing.
+func newBufconnClient(t *testing.T, lis *bufconn.Listener) *CNIClient {
+	t.Helper()
+	conn, err := grpc.NewClient("passthrough://bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return lis.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	return &CNIClient{
+		logger: zap.NewNop(),
+		conn:   conn,
+		client: cniv1.NewCNIServiceClient(conn),
+	}
+}
+
+// startMockServer starts a gRPC server with the given service implementation on a bufconn listener.
+func startMockServer(t *testing.T, svc cniv1.CNIServiceServer) *bufconn.Listener {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	cniv1.RegisterCNIServiceServer(server, svc)
+
+	go func() {
+		if err := server.Serve(lis); err != nil {
+			t.Logf("Server exited with error: %v", err)
+		}
+	}()
+	t.Cleanup(server.Stop)
+
+	return lis
+}
+
 func TestNewCNIClient(t *testing.T) {
 	// Test with a non-existent socket
 	logger := zap.NewNop()
@@ -63,40 +126,10 @@ func TestNewCNIClient(t *testing.T) {
 }
 
 func TestCNIClient_AddPod(t *testing.T) {
-	// Setup mock server
-	lis := bufconn.Listen(1024 * 1024)
 	mockService := &mockCNIService{}
+	lis := startMockServer(t, mockService)
+	client := newBufconnClient(t, lis)
 
-	server := grpc.NewServer()
-	cniv1.RegisterCNIServiceServer(server, mockService)
-
-	go func() {
-		if err := server.Serve(lis); err != nil {
-			t.Logf("Server exited with error: %v", err)
-		}
-	}()
-	defer server.Stop()
-
-	// Create a client with bufconn
-	ctx := context.Background()
-	conn, err := grpc.NewClient("passthrough://bufnet",
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-			return lis.Dial()
-		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	require.NoError(t, err)
-	defer func(conn *grpc.ClientConn) {
-		_ = conn.Close()
-	}(conn)
-
-	client := &CNIClient{
-		logger: zap.NewNop(),
-		conn:   conn,
-		client: cniv1.NewCNIServiceClient(conn),
-	}
-
-	// Test AddPod
 	pod := &cniv1.CNIPod{
 		Name:             "test-pod",
 		Namespace:        "default",
@@ -104,7 +137,7 @@ func TestCNIClient_AddPod(t *testing.T) {
 		ContainerId:      "container-123",
 	}
 
-	resp, err := client.AddPod(ctx, pod)
+	resp, err := client.AddPod(context.Background(), pod)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, resp.Result)
@@ -112,47 +145,144 @@ func TestCNIClient_AddPod(t *testing.T) {
 	assert.Equal(t, pod.Name, mockService.lastAddedPod.Name)
 }
 
-func TestCNIClient_RemovePod(t *testing.T) {
-	// Setup mock server
-	lis := bufconn.Listen(1024 * 1024)
+func TestCNIClient_AddPod_Timeout(t *testing.T) {
+	// Use a cancelled context to simulate timeout behavior.
 	mockService := &mockCNIService{}
+	lis := startMockServer(t, mockService)
+	client := newBufconnClient(t, lis)
 
-	server := grpc.NewServer()
-	cniv1.RegisterCNIServiceServer(server, mockService)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
 
-	go func() {
-		if err := server.Serve(lis); err != nil {
-			t.Logf("Server exited with error: %v", err)
-		}
-	}()
-	defer server.Stop()
-
-	// Create a client with bufconn
-	ctx := context.Background()
-	conn, err := grpc.NewClient("passthrough://bufnet",
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-			return lis.Dial()
-		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	require.NoError(t, err)
-	defer func(conn *grpc.ClientConn) {
-		_ = conn.Close()
-	}(conn)
-
-	client := &CNIClient{
-		logger: zap.NewNop(),
-		conn:   conn,
-		client: cniv1.NewCNIServiceClient(conn),
+	pod := &cniv1.CNIPod{
+		Name:      "test-pod",
+		Namespace: "default",
 	}
 
-	// Test RemovePod
-	resp, err := client.RemovePod(ctx, "test-pod", "default", "container-1234")
+	_, err := client.AddPod(ctx, pod)
+	assert.Error(t, err)
+}
+
+func TestCNIClient_AddPod_RetryOnTransient(t *testing.T) {
+	// Service that always returns Unavailable — should be retried maxRetries times.
+	svc := &failingCNIService{
+		addPodErr: status.Error(codes.Unavailable, "service unavailable"),
+	}
+	lis := startMockServer(t, svc)
+	client := newBufconnClient(t, lis)
+
+	pod := &cniv1.CNIPod{
+		Name:      "retry-pod",
+		Namespace: "default",
+	}
+
+	_, err := client.AddPod(context.Background(), pod)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed after 3 attempts")
+	assert.Equal(t, int32(maxRetries), svc.addPodCalls.Load())
+}
+
+func TestCNIClient_AddPod_NoRetryOnNonTransient(t *testing.T) {
+	// Non-transient error should not be retried.
+	svc := &failingCNIService{
+		addPodErr: status.Error(codes.InvalidArgument, "bad request"),
+	}
+	lis := startMockServer(t, svc)
+	client := newBufconnClient(t, lis)
+
+	pod := &cniv1.CNIPod{
+		Name:      "no-retry-pod",
+		Namespace: "default",
+	}
+
+	_, err := client.AddPod(context.Background(), pod)
+	assert.Error(t, err)
+	assert.Equal(t, int32(1), svc.addPodCalls.Load())
+}
+
+func TestCNIClient_RemovePod(t *testing.T) {
+	mockService := &mockCNIService{}
+	lis := startMockServer(t, mockService)
+	client := newBufconnClient(t, lis)
+
+	resp, err := client.RemovePod(context.Background(), "test-pod", "default", "container-1234")
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, resp.Result)
 	assert.True(t, mockService.removePodCalled)
 	assert.Equal(t, "test-pod", mockService.lastRemovedName)
+}
+
+func TestCNIClient_RemovePod_NoRetry(t *testing.T) {
+	// RemovePod should not retry, even on transient errors.
+	svc := &failingCNIService{
+		removePodErr: status.Error(codes.Unavailable, "service unavailable"),
+	}
+	lis := startMockServer(t, svc)
+	client := newBufconnClient(t, lis)
+
+	_, err := client.RemovePod(context.Background(), "pod", "ns", "ctr")
+	assert.Error(t, err)
+}
+
+func TestCNIClient_VerifyPodRegistered(t *testing.T) {
+	mockService := &mockCNIService{}
+	lis := startMockServer(t, mockService)
+	client := newBufconnClient(t, lis)
+
+	pod := &cniv1.CNIPod{
+		Name:             "test-pod",
+		Namespace:        "default",
+		ContainerId:      "container-123",
+		NetworkNamespace: "/proc/1234/ns/net",
+	}
+
+	err := client.VerifyPodRegistered(context.Background(), pod)
+	assert.NoError(t, err)
+	assert.True(t, mockService.addPodCalled)
+}
+
+func TestCNIClient_VerifyPodRegistered_Error(t *testing.T) {
+	svc := &failingCNIService{
+		addPodErr: status.Error(codes.Internal, "internal error"),
+	}
+	lis := startMockServer(t, svc)
+	client := newBufconnClient(t, lis)
+
+	pod := &cniv1.CNIPod{
+		Name:      "test-pod",
+		Namespace: "default",
+	}
+
+	err := client.VerifyPodRegistered(context.Background(), pod)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to verify pod registration")
+}
+
+func TestCNIClient_CheckAgentConnection(t *testing.T) {
+	mockService := &mockCNIService{}
+	lis := startMockServer(t, mockService)
+	client := newBufconnClient(t, lis)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.CheckAgentConnection(ctx)
+	assert.NoError(t, err)
+}
+
+func TestCNIClient_CheckAgentConnection_Timeout(t *testing.T) {
+	// Client pointing to a non-existent socket — connection will not become ready.
+	logger := zap.NewNop()
+	client, err := NewCNIClient(logger, "/tmp/nonexistent-cni-test.sock")
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err = client.CheckAgentConnection(ctx)
+	assert.Error(t, err)
 }
 
 func TestCNIClient_Close(t *testing.T) {
@@ -229,3 +359,4 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, removeResp.Result)
 }
+
