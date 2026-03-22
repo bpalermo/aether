@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/types"
@@ -15,6 +16,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+const envoyAdminTimeout = 2 * time.Second
 
 // AddPod handles CNI ADD requests for a pod.
 // It enriches the pod data with Kubernetes annotations and labels, validates that the pod
@@ -59,6 +62,18 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		} else {
 			log.V(1).Info("skipping SVID subscription: PID not available", "spiffeID", spiffeID)
 		}
+	}
+
+	// Update the xDS listener snapshot with the new pod
+	if err = s.snapshotCache.AddPod(ctx, cniPod, s.trustDomain); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to add listener: %v", err)
+	}
+
+	// Best-effort: wait for Envoy to apply the listener configuration
+	adminCtx, adminCancel := context.WithTimeout(ctx, envoyAdminTimeout)
+	defer adminCancel()
+	if waitErr := s.envoyAdmin.WaitForListenerPresent(adminCtx, cniPod.GetNetworkNamespace()); waitErr != nil {
+		log.V(1).Info("timed out waiting for Envoy to apply listener", "netns", cniPod.GetNetworkNamespace(), "error", waitErr)
 	}
 
 	return &cniv1.AddPodResponse{
@@ -121,7 +136,12 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
 
-	// TODO: block until the configuration is actually removed
+	// Best-effort: wait for Envoy to remove the listener configuration
+	adminCtx, adminCancel := context.WithTimeout(ctx, envoyAdminTimeout)
+	defer adminCancel()
+	if waitErr := s.envoyAdmin.WaitForListenerRemoval(adminCtx, storedPod.GetNetworkNamespace()); waitErr != nil {
+		log.V(1).Info("timed out waiting for Envoy to remove listener", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
+	}
 
 	return &cniv1.RemovePodResponse{
 		Result: cniv1.RemovePodResponse_SUCCESS,

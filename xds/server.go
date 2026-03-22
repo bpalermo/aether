@@ -70,6 +70,8 @@ func (s *Server) AddCallback(callback ServerCallback) {
 func (s *Server) Start(ctx context.Context) error {
 	s.Log.V(1).Info("starting server", "network", s.cfg.Network, "address", s.cfg.Address)
 
+	s.liveness.Store(true)
+
 	if s.callback != nil {
 		s.Log.V(1).Info("invoking pre listen callback")
 		if err := s.callback.PreListen(ctx); err != nil {
@@ -101,8 +103,6 @@ func (s *Server) Start(ctx context.Context) error {
 		close(errCh)
 	}()
 
-	s.liveness.Store(true)
-	// TODO: fix
 	s.readiness.Store(true)
 
 	select {

@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/cni/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/envoy/admin",
         "//agent/internal/spire",
         "//agent/internal/xds/cache",
         "//agent/internal/xds/proxy",
@@ -40,6 +41,7 @@ go_test(
     ],
     embed = [":server"],
     deps = [
+        "//agent/internal/envoy/admin",
         "//agent/internal/spire",
         "//agent/internal/xds/cache",
         "//agent/pkg/constants",
@@ -49,6 +51,7 @@ go_test(
         "//api/aether/registry/v1:registry",
         "//constants",
         "//registry",
+        "@com_github_envoyproxy_go_control_plane_envoy//admin/v3:admin",
         "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
@@ -60,10 +63,11 @@ go_test(
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//types/known/anypb",
     ],
 )
 
-# keep
 go_test(
     name = "server_integration_test",
     size = "medium",
@@ -74,13 +78,17 @@ go_test(
     embed = [":server"],
     tags = ["integration"],
     deps = [
+        "//agent/internal/envoy/admin",
+        "//agent/internal/spire",
         "//agent/internal/xds/cache",
+        "//agent/pkg/constants",
         "//agent/pkg/storage",
         "//agent/pkg/types",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//constants",
         "//registry",
+        "@com_github_envoyproxy_go_control_plane_envoy//admin/v3:admin",
         "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
@@ -92,5 +100,7 @@ go_test(
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//types/known/anypb",
     ],
 )

@@ -3,21 +3,27 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
+	"github.com/bpalermo/aether/agent/internal/envoy/admin"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	agentconstants "github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	"github.com/bpalermo/aether/agent/pkg/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	agentconstants "github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"
+	adminv3 "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/anypb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,9 +61,26 @@ func (r *testRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_
 	return map[string][]*registryv1.ServiceEndpoint{}, nil
 }
 
+// fakeEnvoyAdminServer starts an HTTP server that returns an empty Envoy config dump.
+// Callers must defer srv.Close().
+func fakeEnvoyAdminServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	emptyListenersDump := &adminv3.ListenersConfigDump{}
+	anyDump, err := anypb.New(emptyListenersDump)
+	require.NoError(t, err)
+	dump := &adminv3.ConfigDump{Configs: []*anypb.Any{anyDump}}
+	body, err := protojson.Marshal(dump)
+	require.NoError(t, err)
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+}
+
 // newTestCNIServer constructs a bare CNIServer without the gRPC/socket machinery, suitable
 // for unit-testing the AddPod and RemovePod methods directly.
-func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache) *CNIServer {
+func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache, envoyAdminAddr string) *CNIServer {
 	return &CNIServer{
 		log:           logr.Discard(),
 		clusterName:   "test-cluster",
@@ -69,6 +92,7 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		registry:      reg,
 		snapshotCache: sc,
 		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, logr.Discard()),
+		envoyAdmin:    admin.NewClient(envoyAdminAddr),
 		k8sClient:     k8sClient,
 	}
 }
@@ -375,7 +399,9 @@ func TestAddPod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := cache.NewSnapshotCache("test-node", logr.Discard())
-			srv := newTestCNIServer(tt.setupK8s(), tt.setupStorage(), tt.setupRegistry(), sc)
+			fakeSrv := fakeEnvoyAdminServer(t)
+			defer fakeSrv.Close()
+			srv := newTestCNIServer(tt.setupK8s(), tt.setupStorage(), tt.setupRegistry(), sc, fakeSrv.Listener.Addr().String())
 
 			got, err := srv.AddPod(context.Background(), tt.req)
 
@@ -534,7 +560,9 @@ func TestRemovePod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := cache.NewSnapshotCache("test-node", logr.Discard())
 			k8sClient := fake.NewClientBuilder().Build()
-			srv := newTestCNIServer(k8sClient, tt.setupStorage(), tt.setupRegistry(), sc)
+			fakeSrv := fakeEnvoyAdminServer(t)
+			defer fakeSrv.Close()
+			srv := newTestCNIServer(k8sClient, tt.setupStorage(), tt.setupRegistry(), sc, fakeSrv.Listener.Addr().String())
 
 			got, err := srv.RemovePod(context.Background(), tt.req)
 
