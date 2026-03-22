@@ -16,11 +16,11 @@ import (
 
 const (
 	// addTimeout is the context timeout for AddPod gRPC calls.
-	addTimeout = 30 * time.Second
+	addTimeout = 5 * time.Second
 	// delTimeout is the context timeout for RemovePod gRPC calls.
-	delTimeout = 30 * time.Second
+	delTimeout = 5 * time.Second
 	// checkTimeout is the context timeout for check-related gRPC calls.
-	checkTimeout = 10 * time.Second
+	checkTimeout = 1 * time.Second
 
 	// maxRetries is the maximum number of retries for transient failures.
 	maxRetries = 3
