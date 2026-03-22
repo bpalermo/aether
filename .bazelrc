@@ -6,10 +6,14 @@ build --workspace_status_command=./bazel/workspace_status.sh
 
 run --workspace_status_command=./bazel/workspace_status.sh
 
-# Pass environment variables needed by testcontainers (Colima on macOS)
+# Pass HOME for testcontainers config resolution
 test --test_env=HOME
-test --test_env=DOCKER_HOST
-test --test_env=TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE
+
+# Colima Docker socket config for macOS integration tests.
+# Run ./bazel/configure_colima.sh to generate .bazelrc.colima with your socket path.
+# Auto-enabled on macOS via the :macos platform config below.
+try-import %workspace%/.bazelrc.colima
+test:macos --config=colima
 
 # Race detector (usage: --config=race)
 test:race --@rules_go//go/config:race
@@ -21,4 +25,3 @@ build:llm --verbose_failures
 build:llm --show_result=10
 test:llm --test_output=errors
 test:llm --test_summary=detailed
-    

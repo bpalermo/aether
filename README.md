@@ -41,6 +41,16 @@ graph TD
 - Go 1.26.0
 - Docker (or Colima) for container images and integration tests
 
+### Setup (macOS with Colima)
+
+If you use Colima for Docker on macOS, run this once to configure the Docker socket for Bazel sandboxed tests:
+
+```bash
+./bazel/configure_colima.sh
+```
+
+This generates `.bazelrc.colima` (gitignored) with your socket path. The config is auto-enabled on macOS via `--config=colima`.
+
 ### Build
 
 ```bash
