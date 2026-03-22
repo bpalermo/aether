@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -435,7 +436,7 @@ func TestLoadClustersFromRegistry_RegistryError(t *testing.T) {
 		},
 	}
 
-	err := c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg)
+	err := c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg, proxy.DefaultClusterConfig())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to list endpoints from registry")
@@ -542,7 +543,7 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 				},
 			}
 
-			err := c.LoadClustersFromRegistry(context.Background(), tt.clusterName, tt.cacheNodeName, reg)
+			err := c.LoadClustersFromRegistry(context.Background(), tt.clusterName, tt.cacheNodeName, reg, proxy.DefaultClusterConfig())
 			require.NoError(t, err)
 
 			for _, key := range tt.wantClusterKeys {
@@ -565,7 +566,7 @@ func TestLoadClustersFromRegistry_IncreasesVersion(t *testing.T) {
 	versionBefore := c.version.Load()
 
 	reg := &mockRegistry{}
-	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg, proxy.DefaultClusterConfig()))
 
 	assert.Greater(t, c.version.Load(), versionBefore, "version counter should increase after loading clusters")
 }
@@ -582,7 +583,7 @@ func TestLoadClustersFromRegistry_EndpointsReachable(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg, proxy.DefaultClusterConfig()))
 
 	eps := c.Endpoints("my-svc")
 	require.NotNil(t, eps)
@@ -601,7 +602,7 @@ func TestLoadClustersFromRegistry_VirtualHostsPopulated(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg, proxy.DefaultClusterConfig()))
 
 	vhosts := c.VirtualHosts()
 	assert.NotEmpty(t, vhosts)

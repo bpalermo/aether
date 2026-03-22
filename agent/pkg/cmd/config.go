@@ -3,6 +3,7 @@ package cmd
 
 import (
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 )
 
@@ -38,6 +39,9 @@ type AgentConfig struct {
 
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
+
+	// ClusterConfig holds Envoy cluster generation configuration
+	ClusterConfig *proxy.ClusterConfig
 }
 
 // NewAgentConfig creates a new AgentConfig with default values.
@@ -46,6 +50,7 @@ func NewAgentConfig() *AgentConfig {
 		Debug:                  false,
 		ProxyServiceNodeID:     constants.DefaultProxyID,
 		CNIServerConfig:        cniServer.NewCNIServerConfig(),
+		ClusterConfig:          proxy.DefaultClusterConfig(),
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
 		RegistryBackend:        "kubernetes",
 		EtcdEndpoints:          []string{"localhost:2379"},

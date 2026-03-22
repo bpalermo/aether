@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,7 @@ func TestNewAgentConfig(t *testing.T) {
 	assert.False(t, c.Debug)
 	assert.Equal(t, constants.DefaultProxyID, c.ProxyServiceNodeID)
 	assert.NotNil(t, c.CNIServerConfig)
+	assert.NotNil(t, c.ClusterConfig)
 }
 
 func TestAgentConfig_DefaultValues(t *testing.T) {
@@ -40,6 +42,11 @@ func TestAgentConfig_DefaultValues(t *testing.T) {
 			name:     "CNI server config is initialized",
 			got:      c.CNIServerConfig,
 			expected: cniServer.NewCNIServerConfig(),
+		},
+		{
+			name:     "cluster config uses defaults",
+			got:      c.ClusterConfig,
+			expected: proxy.DefaultClusterConfig(),
 		},
 	}
 
@@ -67,4 +74,5 @@ func TestAgentConfig_SubConfigsAreIndependent(t *testing.T) {
 
 	// Verify that configs are independent instances
 	assert.NotSame(t, cfg1.CNIServerConfig, cfg2.CNIServerConfig)
+	assert.NotSame(t, cfg1.ClusterConfig, cfg2.ClusterConfig)
 }

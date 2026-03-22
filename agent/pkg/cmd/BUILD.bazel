@@ -13,6 +13,7 @@ go_library(
         "//agent/internal/cni/server",
         "//agent/internal/spire",
         "//agent/internal/xds/cache",
+        "//agent/internal/xds/proxy",
         "//agent/internal/xds/server",
         "//agent/pkg/constants",
         "//agent/pkg/storage",
@@ -32,6 +33,7 @@ go_test(
     embed = [":cmd"],
     deps = [
         "//agent/internal/cni/server",
+        "//agent/internal/xds/proxy",
         "//agent/pkg/constants",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

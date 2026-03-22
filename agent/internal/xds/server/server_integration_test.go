@@ -126,7 +126,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 
 	serviceName := "my-service"
 	endpoint := newServiceEndpoint("10.0.0.2", "cluster-1", "remote-pod", "node-2", 8080)
-	cluster := proxy.NewClusterForService(serviceName)
+	cluster := proxy.NewClusterForService(serviceName, proxy.DefaultClusterConfig())
 	cla := proxy.NewClusterLoadAssignment(serviceName)
 	lbEp := proxy.LocalityLbEndpointFromRegistryEndpoint(endpoint)
 	cla.Endpoints = append(cla.Endpoints, lbEp)
@@ -335,14 +335,15 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 	)
 
 	srv := &AgentXdsServer{
-		XdsServer:   xds.NewXdsServer(ctx, cfg, agentCache, nil, log),
-		log:         log.WithName("agent-xds"),
-		clusterName: clusterName,
-		nodeName:    nodeName,
-		trustDomain: "example.org",
-		registry:    reg,
-		storage:     store,
-		cache:       agentCache,
+		XdsServer:     xds.NewXdsServer(ctx, cfg, agentCache, nil, log),
+		log:           log.WithName("agent-xds"),
+		clusterName:   clusterName,
+		nodeName:      nodeName,
+		trustDomain:   "example.org",
+		registry:      reg,
+		storage:       store,
+		cache:         agentCache,
+		clusterConfig: proxy.DefaultClusterConfig(),
 	}
 	srv.AddCallback(srv)
 

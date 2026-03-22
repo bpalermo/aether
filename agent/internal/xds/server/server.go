@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/pkg/constants"
 	"github.com/bpalermo/aether/agent/pkg/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -33,27 +34,29 @@ type AgentXdsServer struct {
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
 
-	cache *cache.SnapshotCache
+	cache         *cache.SnapshotCache
+	clusterConfig *proxy.ClusterConfig
 }
 
 // NewAgentXdsServer creates a new AgentXdsServer.
 // It initializes an xDS server with a snapshot cache and registers itself as a callback
 // to generate the initial Envoy snapshot before listening for client connections.
 // The server listens on a Unix domain socket at the default xDS socket path.
-func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, log logr.Logger) (*AgentXdsServer, error) {
+func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, clusterConfig *proxy.ClusterConfig, log logr.Logger) (*AgentXdsServer, error) {
 	cfg := xds.NewServerConfig(
 		xds.WithUDS(constants.DefaultXdsSocketPath),
 	)
 
 	aXdsServer := &AgentXdsServer{
-		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, nil, log),
-		log:         log.WithName("agent-xds"),
-		clusterName: clusterName,
-		nodeName:    nodeName,
-		trustDomain: trustDomain,
-		registry:    registry,
-		storage:     storage,
-		cache:       snapshotCache,
+		XdsServer:     xds.NewXdsServer(ctx, cfg, snapshotCache, nil, log),
+		log:           log.WithName("agent-xds"),
+		clusterName:   clusterName,
+		nodeName:      nodeName,
+		trustDomain:   trustDomain,
+		registry:      registry,
+		storage:       storage,
+		cache:         snapshotCache,
+		clusterConfig: clusterConfig,
 	}
 
 	aXdsServer.AddCallback(aXdsServer)
@@ -72,7 +75,7 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 		return err
 	}
 
-	if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
+	if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry, s.clusterConfig); err != nil {
 		s.log.Error(err, "failed to load clusters, endpoints and virtual hosts from registry")
 		return err
 	}
