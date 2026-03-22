@@ -30,7 +30,9 @@ func (w *Watcher) Wait(ctx context.Context) error {
 }
 
 func (w *Watcher) Close() {
-	_ = w.watcher.Close()
+	if err := w.watcher.Close(); err != nil {
+		utilLog.V(1).Info("failed to close file watcher", "error", err)
+	}
 }
 
 // CreateFileWatcher creates a file watcher that watches for any changes to the directory

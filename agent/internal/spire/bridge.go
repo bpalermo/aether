@@ -72,7 +72,9 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 	b.client = client
 	defer func() {
-		_ = client.Close()
+		if closeErr := client.Close(); closeErr != nil {
+			b.log.V(1).Info("failed to close SPIRE client", "error", closeErr)
+		}
 	}()
 
 	b.log.Info("connected to SPIRE agent", "socket", b.socketPath)

@@ -85,7 +85,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	if s.cfg.Network == "unix" {
 		if err := os.Chmod(s.cfg.Address, os.ModePerm); err != nil {
-			_ = listener.Close()
+			if closeErr := listener.Close(); closeErr != nil {
+				s.Log.V(1).Error(closeErr, "failed to close listener during cleanup")
+			}
 			return fmt.Errorf("failed to set socket file permissions: %w", err)
 		}
 	}
