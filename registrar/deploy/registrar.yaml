@@ -51,6 +51,10 @@ spec:
             capabilities:
               drop:
                 - ALL
+          volumeMounts:
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -58,3 +62,8 @@ spec:
             limits:
               cpu: 100m
               memory: 64Mi
+      volumes:
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
