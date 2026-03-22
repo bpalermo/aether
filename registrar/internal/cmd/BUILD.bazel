@@ -10,6 +10,7 @@ go_library(
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//common/must",
+        "//common/spire",
         "//log",
         "//registrar/internal/server",
         "//registry",

@@ -17,6 +17,7 @@ go_library(
         "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//common/must",
+        "//common/spire",
         "//log",
         "//registry",
         "@com_github_go_logr_logr//:logr",
