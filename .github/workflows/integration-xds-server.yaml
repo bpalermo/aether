@@ -1,4 +1,4 @@
-name: e2e-cloudmap
+name: integration-xds-server
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  e2e-cloudmap:
+  e2e-xds-server:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,4 +22,4 @@ jobs:
           repository-cache: true
       - name: Test
         run: |
-          bazel test --test_output=errors //registry/internal/cloudmap:cloudmap_test
+          bazel test --test_output=errors //agent/internal/xds/server:server_integration_test
