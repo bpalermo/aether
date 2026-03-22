@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "log",
@@ -9,5 +9,15 @@ go_library(
         "@com_github_go_logr_logr//:logr",
         "@io_k8s_sigs_controller_runtime//pkg/log/zap",
         "@org_uber_go_zap//zapcore",
+    ],
+)
+
+go_test(
+    name = "log_test",
+    srcs = ["log_test.go"],
+    embed = [":log"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )
