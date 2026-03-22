@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -177,7 +178,7 @@ func TestCNIClient_AddPod_RetryOnTransient(t *testing.T) {
 
 	_, err := client.AddPod(context.Background(), pod)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed after 3 retries")
+	assert.Contains(t, err.Error(), "failed after 3 attempts")
 	assert.Equal(t, int32(maxRetries), svc.addPodCalls.Load())
 }
 
@@ -359,47 +360,3 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, removeResp.Result)
 }
 
-func TestIsTransientError(t *testing.T) {
-	tests := []struct {
-		name      string
-		err       error
-		transient bool
-	}{
-		{
-			name:      "Unavailable is transient",
-			err:       status.Error(codes.Unavailable, "service unavailable"),
-			transient: true,
-		},
-		{
-			name:      "DeadlineExceeded is transient",
-			err:       status.Error(codes.DeadlineExceeded, "deadline exceeded"),
-			transient: true,
-		},
-		{
-			name:      "InvalidArgument is not transient",
-			err:       status.Error(codes.InvalidArgument, "bad argument"),
-			transient: false,
-		},
-		{
-			name:      "Internal is not transient",
-			err:       status.Error(codes.Internal, "internal error"),
-			transient: false,
-		},
-		{
-			name:      "nil error is not transient",
-			err:       nil,
-			transient: false,
-		},
-		{
-			name:      "non-gRPC error is not transient",
-			err:       assert.AnError,
-			transient: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.transient, isTransientError(tt.err))
-		})
-	}
-}

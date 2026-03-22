@@ -6,12 +6,11 @@ import (
 	"time"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/retry"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -67,33 +66,24 @@ func (c *CNIClient) AddPod(ctx context.Context, pod *cniv1.CNIPod) (*cniv1.AddPo
 		Pod: pod,
 	}
 
-	var lastErr error
-	for attempt := range maxRetries {
+	var resp *cniv1.AddPodResponse
+	err := retry.Do(ctx, retry.Config{
+		MaxAttempts: maxRetries,
+		BaseBackoff: baseBackoff,
+		IsRetryable: retry.GRPCTransient,
+	}, func(ctx context.Context) error {
 		callCtx, cancel := context.WithTimeout(ctx, addTimeout)
-		resp, err := c.client.AddPod(callCtx, req)
-		cancel()
+		defer cancel()
 
-		if err == nil {
-			return resp, nil
-		}
+		var callErr error
+		resp, callErr = c.client.AddPod(callCtx, req)
+		return callErr
+	})
 
-		lastErr = err
-		if !isTransientError(err) {
-			return nil, err
-		}
-
-		c.logger.Warn("transient error adding pod, retrying",
-			zap.Int("attempt", attempt+1),
-			zap.Int("max_retries", maxRetries),
-			zap.Error(err))
-
-		if attempt < maxRetries-1 {
-			backoff := baseBackoff * time.Duration(1<<uint(attempt))
-			time.Sleep(backoff)
-		}
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
+	return resp, nil
 }
 
 // RemovePod removes a pod from the registry with a timeout. Del operations
@@ -173,19 +163,4 @@ func (c *CNIClient) Close() error {
 		return c.conn.Close()
 	}
 	return nil
-}
-
-// isTransientError returns true if the gRPC error is a transient failure
-// that may succeed on retry.
-func isTransientError(err error) bool {
-	st, ok := status.FromError(err)
-	if !ok {
-		return false
-	}
-	switch st.Code() {
-	case codes.Unavailable, codes.DeadlineExceeded:
-		return true
-	default:
-		return false
-	}
 }
