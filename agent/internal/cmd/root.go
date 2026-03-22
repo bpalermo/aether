@@ -126,7 +126,7 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 
-	reg, err := setupRegistry(ctx)
+	reg, err := setupRegistrarClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -222,12 +222,12 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 	return s, nil
 }
 
-// setupRegistry creates and initializes a registrar-backed registry.
+// setupRegistrarClient creates and initializes a registrar-backed registry.
 // The agent connects to the in-cluster Registrar service for all endpoint
 // registration and discovery operations. When SPIRE is enabled, the connection
 // uses mTLS with SVID certificates from the SPIRE CSI mount; otherwise,
 // insecure transport is used.
-func setupRegistry(ctx context.Context) (registry.Registry, error) {
+func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
 	regCfg := registry.RegistrarConfig{
 		Address: cfg.RegistrarAddress,
 	}
