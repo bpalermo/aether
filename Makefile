@@ -10,6 +10,30 @@ tidy:
 test:
 	@bazel test --test_output=errors //...
 
+.PHONY: test-unit
+test-unit:
+	@bazel test --test_output=errors --test_tag_filters=-integration //...
+
+.PHONY: test-integration
+test-integration:
+	@bazel test --test_output=errors --test_tag_filters=integration //...
+
+.PHONY: test-race
+test-race:
+	@bazel test --test_output=errors --@rules_go//go/config:race //...
+
+.PHONY: fmt
+fmt:
+	@gofmt -w -s .
+
+.PHONY: fmt-check
+fmt-check:
+	@test -z "$$(gofmt -l -s .)" || (echo "Files need formatting:"; gofmt -l -s .; exit 1)
+
+.PHONY: vet
+vet:
+	@go vet ./...
+
 .PHONY: build-agent
 build-agent:
 	@bazel build //agent/cmd/agent/...

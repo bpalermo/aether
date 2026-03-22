@@ -11,6 +11,9 @@ test --test_env=HOME
 test --test_env=DOCKER_HOST
 test --test_env=TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE
 
+# Race detector (usage: --config=race)
+test:race --@rules_go//go/config:race
+
 # LLM-friendly output (usage: --config=llm)
 common:llm --color=no
 common:llm --curses=no
