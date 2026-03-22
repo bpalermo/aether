@@ -13,6 +13,10 @@
 /.aswb/
 /.clwb/
 
+# User-specific bazelrc files
+colima.bazelrc
+user.bazelrc
+
 .volumes
 
 certs

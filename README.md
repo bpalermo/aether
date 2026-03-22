@@ -41,6 +41,16 @@ graph TD
 - Go 1.26.0
 - Docker (or Colima) for container images and integration tests
 
+### Setup (macOS with Colima)
+
+If you use Colima for Docker on macOS, run this once to configure the Docker socket for Bazel sandboxed tests:
+
+```bash
+./bazel/configure_colima.sh
+```
+
+This generates `.bazelrc.colima` (gitignored) with your socket path. The config is auto-enabled on macOS via `--config=colima`.
+
 ### Build
 
 ```bash
@@ -52,13 +62,17 @@ make build-cni-install     # Build the CNI installer
 
 ```bash
 make test                  # Run all tests (requires Docker for integration tests)
+make test-unit             # Run unit tests only (no Docker required)
+make test-integration      # Run integration tests only (requires Docker)
+make test-race             # Run all tests with Go race detector
+```
 
-# Unit tests only
-bazel test --test_output=errors --test_tag_filters=-integration //...
+### Code Quality
 
-# Integration tests (testcontainers)
-bazel test --test_output=errors //registry/internal/ddb:ddb_test
-bazel test --test_output=errors //registry/internal/etcd:etcd_test
+```bash
+make fmt                   # Format Go code with gofmt
+make fmt-check             # Check formatting (CI-friendly, fails on drift)
+make vet                   # Run go vet
 ```
 
 ### Container Images
