@@ -6,6 +6,8 @@ go_library(
     importpath = "github.com/bpalermo/aether/registry/internal/k8s",
     visibility = ["//registry:__subpackages__"],
     deps = [
+        "//api/aether/registry/v1:registry",
+        "//constants",
         "@com_github_go_logr_logr//:logr",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_sigs_controller_runtime//pkg/client",
@@ -17,6 +19,8 @@ go_test(
     srcs = ["kubernetes_test.go"],
     embed = [":k8s"],
     deps = [
+        "//api/aether/registry/v1:registry",
+        "//constants",
         "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

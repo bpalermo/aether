@@ -6,6 +6,8 @@ go_library(
     importpath = "github.com/bpalermo/aether/cni/cmd/cni",
     visibility = ["//visibility:private"],
     deps = [
+        "//cni/internal/log",
+        "//cni/internal/plugin",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/version",
         "@org_uber_go_zap//:zap",

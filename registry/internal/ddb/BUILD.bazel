@@ -6,6 +6,8 @@ go_library(
     importpath = "github.com/bpalermo/aether/registry/internal/ddb",
     visibility = ["//registry:__subpackages__"],
     deps = [
+        "//api/aether/registry/v1:registry",
+        "//constants",
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_aws_aws_sdk_go_v2_feature_dynamodb_attributevalue//:attributevalue",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
@@ -20,6 +22,8 @@ go_test(
     srcs = ["dynamodb_test.go"],
     tags = ["integration"],
     deps = [
+        ":ddb",
+        "//api/aether/registry/v1:registry",
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_aws_aws_sdk_go_v2_credentials//:credentials",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
