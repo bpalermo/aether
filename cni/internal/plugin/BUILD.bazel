@@ -9,9 +9,9 @@ go_library(
     importpath = "github.com/bpalermo/aether/cni/internal/plugin",
     visibility = ["//cni:__subpackages__"],
     deps = [
-        "//api/aether/cni/v1:cni",  # keep
-        "//cni/internal/cri",  # keep
-        "//cni/pkg/config",  # keep
+        "//api/aether/cni/v1:cni",
+        "//cni/internal/cri",
+        "//cni/pkg/config",
         "//common/retry",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
@@ -32,8 +32,8 @@ go_test(
     ],
     embed = [":plugin"],
     deps = [
-        "//api/aether/cni/v1:cni",  # keep
-        "//cni/pkg/config",  # keep
+        "//api/aether/cni/v1:cni",
+        "//cni/pkg/config",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_stretchr_testify//assert",
