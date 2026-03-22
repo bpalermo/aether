@@ -42,7 +42,7 @@ func NewAgentConfig() *AgentConfig {
 		ProxyServiceNodeID:     constants.DefaultProxyID,
 		CNIServerConfig:        cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
-		RegistrarAddress:       "aether-registrar.aether-system.svc:8443",
+		RegistrarAddress:       "aether-registrar.aether-system.svc:443",
 		SpireEnabled:           true,
 		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,

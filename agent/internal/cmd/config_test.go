@@ -44,7 +44,7 @@ func TestAgentConfig_DefaultValues(t *testing.T) {
 		{
 			name:     "registrar address uses default",
 			got:      c.RegistrarAddress,
-			expected: "aether-registrar.aether-system.svc:8443",
+			expected: "aether-registrar.aether-system.svc:443",
 		},
 		{
 			name:     "SPIRE is enabled by default",

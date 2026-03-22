@@ -27,10 +27,10 @@ spec:
             - "--debug=true"
             - "--cluster-name=talos-main"
             - "--registry-backend=kubernetes"
-            - "--grpc-address=:8443"
+            - "--grpc-address=:443"
           ports:
             - name: grpc
-              containerPort: 8443
+              containerPort: 443
               protocol: TCP
           env:
             - name: GOMEMLIMIT

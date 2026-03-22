@@ -238,7 +238,7 @@ func deployRegistrar(ctx context.Context, client klient.Client) error {
 								"--debug=true",
 								"--cluster-name=aether-e2e",
 								"--registry-backend=kubernetes",
-								"--grpc-address=:8443",
+								"--grpc-address=:443",
 							},
 							Ports: []corev1.ContainerPort{
 								{Name: "grpc", ContainerPort: 443},
@@ -330,7 +330,7 @@ func deployAgent(ctx context.Context, client klient.Client) error {
 								"--proxy-id=$(NODE_NAME)",
 								"--cluster-name=aether-e2e",
 								"--node-name=$(NODE_NAME)",
-								"--registrar-address=aether-registrar.aether-system.svc:8443",
+								"--registrar-address=aether-registrar.aether-system.svc:443",
 								"--spire-enabled=false",
 							},
 							Env: []corev1.EnvVar{

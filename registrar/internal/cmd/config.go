@@ -5,7 +5,7 @@ import "time"
 
 const (
 	defaultSyncInterval = 5 * time.Second
-	defaultGRPCAddress  = ":8443"
+	defaultGRPCAddress  = ":443"
 )
 
 // RegistrarConfig holds configuration for the Aether registrar.

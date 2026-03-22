@@ -12,6 +12,6 @@ spec:
     app.kubernetes.io/name: aether-registrar
   ports:
     - name: grpc
-      port: 8443
-      targetPort: 8443
+      port: 443
+      targetPort: 443
       protocol: TCP

@@ -78,10 +78,10 @@ go_test(
     embed = [":server"],
     tags = ["integration"],
     deps = [
+        "//agent/constants",
         "//agent/internal/envoy/admin",
         "//agent/internal/spire",
         "//agent/internal/xds/cache",
-        "//agent/constants",
         "//agent/storage",
         "//agent/types",
         "//api/aether/cni/v1:cni",
