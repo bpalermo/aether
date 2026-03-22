@@ -238,10 +238,11 @@ func deployRegistrar(ctx context.Context, client klient.Client) error {
 								"--debug=true",
 								"--cluster-name=aether-e2e",
 								"--registry-backend=kubernetes",
-								"--grpc-address=:443",
+								"--grpc-address=:8443",
+								"--spire-enabled=false",
 							},
 							Ports: []corev1.ContainerPort{
-								{Name: "grpc", ContainerPort: 443},
+								{Name: "grpc", ContainerPort: 8443},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -269,7 +270,7 @@ func deployRegistrar(ctx context.Context, client klient.Client) error {
 				{
 					Name:       "grpc",
 					Port:       443,
-					TargetPort: intstr.FromInt32(443),
+					TargetPort: intstr.FromInt32(8443),
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},
