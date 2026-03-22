@@ -102,7 +102,6 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	s.liveness.Store(true)
-	// TODO: fix
 	s.readiness.Store(true)
 
 	select {

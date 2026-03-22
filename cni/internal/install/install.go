@@ -51,7 +51,8 @@ func (in *Installer) installAll(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	// TODO: write kubeconfig file
+	// No kubeconfig is needed: the Aether CNI plugin delegates Kubernetes API
+	// access to the node agent via gRPC over Unix domain socket.
 
 	_, err = createCNIConfigFile(ctx, in.cfg)
 	if err != nil {

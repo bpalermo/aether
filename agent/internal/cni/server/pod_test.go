@@ -3,9 +3,12 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
+	"github.com/bpalermo/aether/agent/internal/envoy"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/pkg/storage"
@@ -55,9 +58,18 @@ func (r *testRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_
 	return map[string][]*registryv1.ServiceEndpoint{}, nil
 }
 
+// fakeEnvoyAdminServer starts an HTTP server that returns empty dynamic listeners.
+// Callers must defer srv.Close().
+func fakeEnvoyAdminServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"configs": [{"dynamic_listeners": []}]}`))
+	}))
+}
+
 // newTestCNIServer constructs a bare CNIServer without the gRPC/socket machinery, suitable
 // for unit-testing the AddPod and RemovePod methods directly.
-func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache) *CNIServer {
+func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache, envoyAdminAddr string) *CNIServer {
 	return &CNIServer{
 		log:           logr.Discard(),
 		clusterName:   "test-cluster",
@@ -69,6 +81,7 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		registry:      reg,
 		snapshotCache: sc,
 		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, logr.Discard()),
+		envoyAdmin:    envoy.NewAdminClient(envoyAdminAddr),
 		k8sClient:     k8sClient,
 	}
 }
@@ -375,7 +388,9 @@ func TestAddPod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := cache.NewSnapshotCache("test-node", logr.Discard())
-			srv := newTestCNIServer(tt.setupK8s(), tt.setupStorage(), tt.setupRegistry(), sc)
+			fakeSrv := fakeEnvoyAdminServer()
+			defer fakeSrv.Close()
+			srv := newTestCNIServer(tt.setupK8s(), tt.setupStorage(), tt.setupRegistry(), sc, fakeSrv.Listener.Addr().String())
 
 			got, err := srv.AddPod(context.Background(), tt.req)
 
@@ -534,7 +549,9 @@ func TestRemovePod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := cache.NewSnapshotCache("test-node", logr.Discard())
 			k8sClient := fake.NewClientBuilder().Build()
-			srv := newTestCNIServer(k8sClient, tt.setupStorage(), tt.setupRegistry(), sc)
+			fakeSrv := fakeEnvoyAdminServer()
+			defer fakeSrv.Close()
+			srv := newTestCNIServer(k8sClient, tt.setupStorage(), tt.setupRegistry(), sc, fakeSrv.Listener.Addr().String())
 
 			got, err := srv.RemovePod(context.Background(), tt.req)
 

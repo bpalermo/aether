@@ -91,6 +91,9 @@ func init() {
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", []string{"localhost:2379"}, "Comma-separated etcd endpoints, used when registry-backend is 'etcd'")
 	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", constants.DefaultCloudMapNamespace, "AWS Cloud Map HTTP namespace name, used when registry-backend is 'cloudmap'")
 
+	// Envoy admin configuration
+	rootCmd.Flags().StringVar(&cfg.CNIServerConfig.EnvoyAdminAddress, "envoy-admin-address", cfg.CNIServerConfig.EnvoyAdminAddress, "Envoy admin interface address (host:port) for listener verification")
+
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")

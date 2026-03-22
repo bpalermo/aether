@@ -19,6 +19,32 @@ const (
 	listenerVersionLabel = "listener"
 )
 
+// AddPod generates inbound and outbound listeners for the given pod and adds
+// them to the cache keyed by the pod's network namespace, then regenerates the
+// listener snapshot. Returns an error if listener generation or snapshot
+// generation fails.
+func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
+	netns := cniPod.GetNetworkNamespace()
+	c.log.V(2).Info("adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
+
+	inbound, outbound, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain)
+	if err != nil {
+		return err
+	}
+
+	c.listenerMu.Lock()
+	if c.listeners == nil {
+		c.listeners = make(map[string]listenerEntry)
+	}
+	c.listeners[netns] = listenerEntry{
+		inbound:  inbound,
+		outbound: outbound,
+	}
+	c.listenerMu.Unlock()
+
+	return c.generateListenerSnapshot(ctx)
+}
+
 // RemovePod removes the inbound and outbound listeners for the pod with the
 // given container network namespace, then regenerates the listener snapshot.
 // If the pod does not exist in the cache, it returns nil without error.

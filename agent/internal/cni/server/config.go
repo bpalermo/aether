@@ -9,12 +9,16 @@ import "github.com/bpalermo/aether/agent/pkg/constants"
 type CNIServerConfig struct {
 	// SocketPath is the Unix domain socket path where the CNI gRPC server listens.
 	SocketPath string
+	// EnvoyAdminAddress is the host:port of the Envoy admin interface used to
+	// verify that listener configuration has been applied.
+	EnvoyAdminAddress string
 }
 
 // NewCNIServerConfig creates a new CNIServerConfig with default values.
 // The default socket path is the standard CNI socket path.
 func NewCNIServerConfig() *CNIServerConfig {
 	return &CNIServerConfig{
-		SocketPath: constants.DefaultCNISocketPath,
+		SocketPath:        constants.DefaultCNISocketPath,
+		EnvoyAdminAddress: "127.0.0.1:9901",
 	}
 }

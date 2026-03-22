@@ -19,12 +19,21 @@ func newTestRequest(t *testing.T) *http.Request {
 
 func TestHealthzCheck(t *testing.T) {
 	tests := []struct {
-		name    string
-		wantErr bool
+		name     string
+		setLive  bool
+		wantErr  bool
+		wantMsg  string
 	}{
 		{
-			name:    "returns nil when server is running",
+			name:    "returns nil when server is live",
+			setLive: true,
 			wantErr: false,
+		},
+		{
+			name:    "returns error when server is not live",
+			setLive: false,
+			wantErr: true,
+			wantMsg: "server is not live",
 		},
 	}
 
@@ -32,11 +41,13 @@ func TestHealthzCheck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewServerConfig()
 			srv := NewServer(cfg, logr.Discard())
+			srv.liveness.Store(tt.setLive)
 
 			err := srv.HealthzCheck(newTestRequest(t))
 
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
+				assert.Equal(t, tt.wantMsg, err.Error())
 			} else {
 				assert.NoError(t, err)
 			}
@@ -46,12 +57,21 @@ func TestHealthzCheck(t *testing.T) {
 
 func TestReadyzCheck(t *testing.T) {
 	tests := []struct {
-		name    string
-		wantErr bool
+		name      string
+		setReady  bool
+		wantErr   bool
+		wantMsg   string
 	}{
 		{
-			name:    "returns nil when server is running",
-			wantErr: false,
+			name:     "returns nil when server is ready",
+			setReady: true,
+			wantErr:  false,
+		},
+		{
+			name:     "returns error when server is not ready",
+			setReady: false,
+			wantErr:  true,
+			wantMsg:  "server is not ready",
 		},
 	}
 
@@ -59,11 +79,13 @@ func TestReadyzCheck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewServerConfig()
 			srv := NewServer(cfg, logr.Discard())
+			srv.readiness.Store(tt.setReady)
 
 			err := srv.ReadyzCheck(newTestRequest(t))
 
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
+				assert.Equal(t, tt.wantMsg, err.Error())
 			} else {
 				assert.NoError(t, err)
 			}

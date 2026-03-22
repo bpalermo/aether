@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "envoy",
+    srcs = ["admin.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/envoy",
+    visibility = ["//agent:__subpackages__"],
+)
+
+go_test(
+    name = "envoy_test",
+    srcs = ["admin_test.go"],
+    embed = [":envoy"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

@@ -398,6 +398,88 @@ func TestLoadListenersFromStorage_PodFailsGeneration(t *testing.T) {
 	}
 }
 
+// ─── AddPod() ────────────────────────────────────────────────────────────────
+
+// TestSnapshotCache_AddPod verifies the behaviour of AddPod under various
+// initial cache states and input conditions.
+func TestSnapshotCache_AddPod(t *testing.T) {
+	tests := []struct {
+		name        string
+		setupFunc   func(c *SnapshotCache)
+		pod         *cniv1.CNIPod
+		trustDomain string
+		wantErr     bool
+		wantMapLen  int
+		// wantNetns is the key that must be present after AddPod succeeds.
+		wantNetns string
+	}{
+		{
+			name:        "adding a pod to empty cache creates one listener entry with non-nil inbound and outbound",
+			setupFunc:   func(_ *SnapshotCache) {},
+			pod:         makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
+			trustDomain: "example.org",
+			wantErr:     false,
+			wantMapLen:  1,
+			wantNetns:   "/proc/100/ns/net",
+		},
+		{
+			name: "adding a second pod to a cache with one existing pod yields two entries",
+			setupFunc: func(c *SnapshotCache) {
+				seedListeners(c, makeCNIPod("pod-a", "default", "/proc/100/ns/net"))
+			},
+			pod:         makeCNIPod("pod-b", "default", "/proc/200/ns/net"),
+			trustDomain: "example.org",
+			wantErr:     false,
+			wantMapLen:  2,
+			wantNetns:   "/proc/200/ns/net",
+		},
+		{
+			name:        "adding a pod with empty network namespace returns an error",
+			setupFunc:   func(_ *SnapshotCache) {},
+			pod:         &cniv1.CNIPod{Name: "bad-pod", Namespace: "default", NetworkNamespace: "", ContainerId: "ctr-bad"},
+			trustDomain: "example.org",
+			wantErr:     true,
+			wantMapLen:  0,
+		},
+		{
+			name: "adding a pod with the same netns as an existing one replaces the entry (count stays 1)",
+			setupFunc: func(c *SnapshotCache) {
+				seedListeners(c, makeCNIPod("pod-a", "default", "/proc/100/ns/net"))
+			},
+			pod:         makeCNIPod("pod-a-replacement", "default", "/proc/100/ns/net"),
+			trustDomain: "example.org",
+			wantErr:     false,
+			wantMapLen:  1,
+			wantNetns:   "/proc/100/ns/net",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestCache("node-1")
+			tt.setupFunc(c)
+
+			err := c.AddPod(context.Background(), tt.pod, tt.trustDomain)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Len(t, c.listeners, tt.wantMapLen)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Len(t, c.listeners, tt.wantMapLen)
+
+			if tt.wantNetns != "" {
+				entry, ok := c.listeners[tt.wantNetns]
+				require.True(t, ok, "listener entry must be keyed by network namespace %q", tt.wantNetns)
+				assert.NotNil(t, entry.inbound, "inbound listener must be non-nil")
+				assert.NotNil(t, entry.outbound, "outbound listener must be non-nil")
+			}
+		})
+	}
+}
+
 // ─── Thread safety ────────────────────────────────────────────────────────────
 
 // TestSnapshotCache_Listeners_ThreadSafety exercises concurrent reads on
