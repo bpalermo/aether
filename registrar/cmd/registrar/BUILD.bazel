@@ -16,6 +16,9 @@ go_binary(
     name = "registrar",
     embed = [":registrar_lib"],
     visibility = ["//visibility:public"],
+    x_defs = {
+        "github.com/bpalermo/aether/registrar/internal/cmd.Version": "{STABLE_GIT_VERSION}",
+    },
 )
 
 go_multi_arch_image(

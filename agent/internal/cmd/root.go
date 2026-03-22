@@ -26,28 +26,33 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/common/must"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/spire"
-	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/must"
+	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registry"
+	"github.com/bpalermo/aether/telemetry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
 const (
 	// name is the controller name used for logging
 	name = "aether-agent"
 )
+
+// Version is set at build time via -ldflags (Bazel x_defs).
+var Version = "dev"
 
 var (
 	cfg = NewAgentConfig()
@@ -92,6 +97,12 @@ func init() {
 	// Envoy admin configuration
 	rootCmd.Flags().StringVar(&cfg.CNIServerConfig.EnvoyAdminAddress, "envoy-admin-address", cfg.CNIServerConfig.EnvoyAdminAddress, "Envoy admin interface address (host:port) for listener verification")
 
+	// Metrics and telemetry
+	rootCmd.Flags().BoolVar(&cfg.MetricsEnabled, "metrics-enabled", cfg.MetricsEnabled, "Enable the Prometheus metrics HTTP server")
+	rootCmd.Flags().StringVar(&cfg.MetricsBindAddress, "metrics-bind-address", cfg.MetricsBindAddress, "Address for the metrics HTTP server")
+	rootCmd.Flags().BoolVar(&cfg.OTelEnabled, "otel-enabled", cfg.OTelEnabled, "Enable OTel MeterProvider with Prometheus exporter bridge (requires --metrics-enabled)")
+	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", cfg.OTLPEndpoint, "OTLP gRPC collector endpoint (e.g. localhost:4317); empty disables OTLP export")
+
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
@@ -113,12 +124,43 @@ func runAgent(ctx context.Context) error {
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,
+		"metricsEnabled", cfg.MetricsEnabled,
+		"otelEnabled", cfg.OTelEnabled,
 	)
 
+	if cfg.OTelEnabled {
+		shutdown, otelErr := telemetry.Setup(ctx, telemetry.Config{
+			ServiceName:    name,
+			ServiceVersion: Version,
+			OTLPEndpoint:   cfg.OTLPEndpoint,
+		})
+		if otelErr != nil {
+			return fmt.Errorf("failed to setup telemetry: %w", otelErr)
+		}
+		defer func() {
+			if shutdownErr := shutdown(ctx); shutdownErr != nil {
+				l.Error(shutdownErr, "failed to shutdown telemetry")
+			}
+		}()
+	}
+
 	// Create a controller manager
-	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{})
+	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
+		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
+	})
 	if err != nil {
 		return err
+	}
+
+	if err = m.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to set up health check: %w", err)
+	}
+	if err = m.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to set up ready check: %w", err)
+	}
+	if err = m.AddReadyzCheck("cache-sync", telemetry.CacheSyncChecker(m)); err != nil {
+		return fmt.Errorf("failed to set up cache sync ready check: %w", err)
 	}
 
 	localStorage, err := setupStorage(ctx, cfg.MountedLocalStorageDir)

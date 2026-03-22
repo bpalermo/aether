@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "telemetry",
+    srcs = [
+        "healthz.go",
+        "options.go",
+        "telemetry.go",
+    ],
+    importpath = "github.com/bpalermo/aether/telemetry",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+        "@io_k8s_sigs_controller_runtime//pkg/healthz",
+        "@io_k8s_sigs_controller_runtime//pkg/metrics",
+        "@io_k8s_sigs_controller_runtime//pkg/metrics/server",
+        "@io_opentelemetry_go_contrib_instrumentation_runtime//:runtime",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//semconv/v1.30.0:v1_30_0",
+        "@io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetricgrpc//:otlpmetricgrpc",
+        "@io_opentelemetry_go_otel_exporters_prometheus//:prometheus",
+        "@io_opentelemetry_go_otel_sdk//resource",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+    ],
+)
+
+go_test(
+    name = "telemetry_test",
+    srcs = ["telemetry_test.go"],
+    embed = [":telemetry"],
+    deps = [
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+    ],
+)
