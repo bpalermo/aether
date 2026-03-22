@@ -175,7 +175,11 @@ func (p *AetherPlugin) CmdStatus(args *skel.CmdArgs) error {
 	if err != nil {
 		return fmt.Errorf("plugin not ready: failed to create agent client: %w", err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			p.logger.Warn("failed to close CNI client", zap.Error(cerr))
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
 	defer cancel()
@@ -260,7 +264,11 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 	if err != nil {
 		return fmt.Errorf("failed to create CNI client: %w", err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			p.logger.Warn("failed to close CNI client", zap.Error(cerr))
+		}
+	}()
 
 	res, err := client.AddPod(ctx, pod)
 	if err != nil {
@@ -280,7 +288,11 @@ func (p *AetherPlugin) sendRemovePod(ctx context.Context, conf config.AetherConf
 	if err != nil {
 		return fmt.Errorf("failed to create CNI client: %w", err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			p.logger.Warn("failed to close CNI client", zap.Error(cerr))
+		}
+	}()
 
 	res, err := client.RemovePod(ctx, podName, namespace, containerID)
 	if err != nil {
@@ -435,7 +447,11 @@ func (p *AetherPlugin) verifyPodRegistration(args *skel.CmdArgs, k8sArgs config.
 	if err != nil {
 		return fmt.Errorf("failed to create CNI client: %w", err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			p.logger.Warn("failed to close CNI client", zap.Error(cerr))
+		}
+	}()
 
 	pod := &cniv1.CNIPod{
 		ContainerId:      args.ContainerID,
