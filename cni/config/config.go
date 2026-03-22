@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	agentConstans "github.com/bpalermo/aether/agent/pkg/constants"
+	agentConstans "github.com/bpalermo/aether/agent/constants"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
 )

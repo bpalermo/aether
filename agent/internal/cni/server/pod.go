@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	"github.com/bpalermo/aether/agent/pkg/types"
+	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"

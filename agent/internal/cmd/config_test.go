@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
-	"github.com/bpalermo/aether/agent/pkg/constants"
+	"github.com/bpalermo/aether/agent/constants"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

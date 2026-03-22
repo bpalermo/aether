@@ -7,7 +7,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/cni/cmd/cni-install",
     visibility = ["//visibility:private"],
     deps = [
-        "//cni/pkg/cmd",
+        "//cni/internal/cmd",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
     ],
 )

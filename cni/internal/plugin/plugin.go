@@ -29,7 +29,7 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/cni/internal/cri"
-	"github.com/bpalermo/aether/cni/pkg/config"
+	"github.com/bpalermo/aether/cni/config"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"

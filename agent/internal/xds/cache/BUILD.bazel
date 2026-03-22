@@ -13,7 +13,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/xds/proxy",
-        "//agent/pkg/storage",
+        "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//registry",
@@ -39,7 +39,7 @@ go_test(
     ],
     embed = [":cache"],
     deps = [
-        "//agent/pkg/storage",
+        "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//registry",

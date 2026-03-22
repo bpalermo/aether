@@ -10,8 +10,8 @@ go_library(
     visibility = ["//cni:__subpackages__"],
     deps = [
         "//api/aether/cni/v1:cni",
+        "//cni/config",
         "//cni/internal/cri",
-        "//cni/pkg/config",
         "//common/retry",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
@@ -33,7 +33,7 @@ go_test(
     embed = [":plugin"],
     deps = [
         "//api/aether/cni/v1:cni",
-        "//cni/pkg/config",
+        "//cni/config",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_stretchr_testify//assert",

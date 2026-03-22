@@ -8,7 +8,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/envoy/admin"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	"github.com/bpalermo/aether/agent/pkg/storage"
+	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/constants"
 	"github.com/bpalermo/aether/registry"

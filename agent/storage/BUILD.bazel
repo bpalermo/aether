@@ -7,10 +7,10 @@ go_library(
         "mock.go",
         "storage.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/pkg/storage",
+    importpath = "github.com/bpalermo/aether/agent/storage",
     visibility = ["//visibility:public"],
     deps = [
-        "//agent/pkg/types",
+        "//agent/types",
         "//common/file",
         "@org_golang_google_protobuf//encoding/protojson",
         "@org_golang_google_protobuf//proto",
@@ -22,7 +22,7 @@ go_test(
     srcs = ["local_test.go"],
     embed = [":storage"],
     deps = [
-        "//agent/pkg/types",
+        "//agent/types",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_protobuf//encoding/protojson",

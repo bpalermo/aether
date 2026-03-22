@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/pkg/storage"
+	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/stretchr/testify/assert"
