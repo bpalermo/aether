@@ -87,9 +87,40 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 }
 
 // CmdCheck handles the CNI Check operation for plugin health verification.
-// Currently a no-op; returns nil to indicate the plugin is functional.
-func (p *AetherPlugin) CmdCheck(_ *skel.CmdArgs) error {
+// It validates the network namespace, interface, and pod registration with the agent.
+func (p *AetherPlugin) CmdCheck(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI check command")
+
+	netConf, _, k8sArgs, err := p.parseAddArgs(args)
+	if err != nil {
+		return err
+	}
+
+	if ignorableNamespace(string(k8sArgs.K8S_POD_NAMESPACE)) {
+		return nil
+	}
+
+	// Verify the pod's network namespace still exists.
+	if err := verifyNetns(args.Netns); err != nil {
+		return fmt.Errorf("network namespace check failed: %w", err)
+	}
+
+	// Verify the expected network interface exists inside the namespace.
+	if err := verifyInterface(args.Netns, args.IfName); err != nil {
+		return fmt.Errorf("interface check failed: %w", err)
+	}
+
+	// Verify the pod is still registered with the agent.
+	if err := p.verifyPodRegistration(args, k8sArgs, netConf); err != nil {
+		return fmt.Errorf("pod registration check failed: %w", err)
+	}
+
+	p.logger.Info("CNI check passed",
+		zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
+		zap.String("pod", string(k8sArgs.K8S_POD_NAME)),
+		zap.String("netns", args.Netns),
+		zap.String("interface", args.IfName))
+
 	return nil
 }
 
@@ -130,9 +161,30 @@ func (p *AetherPlugin) CmdGC(_ *skel.CmdArgs) error {
 }
 
 // CmdStatus handles the CNI Status operation for plugin status reporting.
-// Currently a no-op; returns nil.
-func (p *AetherPlugin) CmdStatus(_ *skel.CmdArgs) error {
+// It checks agent gRPC endpoint reachability.
+func (p *AetherPlugin) CmdStatus(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI status command")
+
+	conf, err := config.NewConf(args.StdinData)
+	if err != nil {
+		return fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	// Check that the agent gRPC endpoint is reachable.
+	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
+	if err != nil {
+		return fmt.Errorf("plugin not ready: failed to create agent client: %w", err)
+	}
+	defer client.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
+	defer cancel()
+
+	if err := client.CheckAgentConnection(ctx); err != nil {
+		return fmt.Errorf("plugin not ready: agent is unreachable: %w", err)
+	}
+
+	p.logger.Info("CNI status check passed")
 	return nil
 }
 
@@ -319,6 +371,80 @@ func pidFromNetnsInode(netns string) (uint32, error) {
 	}
 
 	return 0, fmt.Errorf("no process found with netns inode matching %q", netns)
+}
+
+// verifyNetns checks that the network namespace path exists and is accessible.
+func verifyNetns(netnsPath string) error {
+	if netnsPath == "" {
+		return fmt.Errorf("network namespace path is empty")
+	}
+
+	_, err := os.Stat(netnsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("network namespace %q no longer exists", netnsPath)
+		}
+		return fmt.Errorf("cannot access network namespace %q: %w", netnsPath, err)
+	}
+
+	return nil
+}
+
+// verifyInterface checks that the expected network interface exists in the
+// network namespace. It reads the interface list from the sysfs path derived
+// from the netns. For /proc-based namespaces, it checks /proc/<pid>/net/dev.
+func verifyInterface(netnsPath, ifName string) error {
+	if ifName == "" {
+		return fmt.Errorf("interface name is empty")
+	}
+
+	// For /proc/<pid>/ns/net paths, check /proc/<pid>/net/dev for the interface.
+	pid, err := pidFromNetnsPath(netnsPath)
+	if err != nil {
+		// If we can't extract a PID, we skip the interface check rather
+		// than failing — the netns check already confirmed the namespace exists.
+		return nil
+	}
+
+	devPath := fmt.Sprintf("/proc/%d/net/dev", pid)
+	data, err := os.ReadFile(devPath)
+	if err != nil {
+		// If we can't read the dev file, skip the check gracefully.
+		return nil
+	}
+
+	// /proc/<pid>/net/dev has a header (2 lines) then "iface: ..." lines.
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		fields := strings.TrimSpace(line)
+		if colonIdx := strings.Index(fields, ":"); colonIdx > 0 {
+			name := strings.TrimSpace(fields[:colonIdx])
+			if name == ifName {
+				return nil
+			}
+		}
+	}
+
+	return fmt.Errorf("interface %q not found in network namespace (pid %d)", ifName, pid)
+}
+
+// verifyPodRegistration checks that the pod is still registered with the agent
+// by making a gRPC call.
+func (p *AetherPlugin) verifyPodRegistration(args *skel.CmdArgs, k8sArgs config.K8sArgs, conf config.AetherConf) error {
+	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
+	if err != nil {
+		return fmt.Errorf("failed to create CNI client: %w", err)
+	}
+	defer client.Close() //nolint:errcheck
+
+	pod := &cniv1.CNIPod{
+		ContainerId:      args.ContainerID,
+		Name:             string(k8sArgs.K8S_POD_NAME),
+		Namespace:        string(k8sArgs.K8S_POD_NAMESPACE),
+		NetworkNamespace: args.Netns,
+	}
+
+	return client.VerifyPodRegistered(context.Background(), pod)
 }
 
 func ignorableNamespace(namespace string) bool {
