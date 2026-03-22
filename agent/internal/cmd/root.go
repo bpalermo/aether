@@ -24,18 +24,19 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
-	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
-	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
@@ -109,7 +110,7 @@ func init() {
 // initializes local storage and registry backends, creates and registers the xDS server,
 // CNI gRPC server, and optionally the SPIRE bridge as runnables. The agent then waits
 // for local storage to become ready before starting the manager's event loop.
-func runAgent(ctx context.Context) error {
+func runAgent(ctx context.Context) (retErr error) {
 	l.Info("starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug,
@@ -141,7 +142,7 @@ func runAgent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer reg.Close()
+	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 
@@ -257,11 +258,10 @@ func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
 	reg := registry.NewRegistrarRegistry(l, regCfg)
 
 	if err := reg.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize registry: %w", err)
+		return nil, errors.Join(fmt.Errorf("failed to initialize registry: %w", err), reg.Close())
 	}
 
 	return reg, nil
 }
-
 
 // must panics if err is non-nil. Use only for programming errors that should never occur at runtime.

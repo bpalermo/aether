@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -64,7 +65,7 @@ func init() {
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 }
 
-func runRegistrar(ctx context.Context) error {
+func runRegistrar(ctx context.Context) (retErr error) {
 	l.Info("starting aether registrar",
 		"clusterName", cfg.ClusterName,
 		"registryBackend", cfg.RegistryBackend,
@@ -93,7 +94,7 @@ func runRegistrar(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer reg.Close()
+	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
 	snapshot := server.NewSnapshot()
 	broadcaster := server.NewBroadcaster(l)
@@ -154,7 +155,7 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 	}
 
 	if err := reg.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize registry: %w", err)
+		return nil, errors.Join(fmt.Errorf("failed to initialize registry: %w", err), reg.Close())
 	}
 
 	return reg, nil
