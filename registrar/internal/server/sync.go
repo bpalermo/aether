@@ -95,6 +95,11 @@ func (s *Syncer) sync(ctx context.Context) {
 	}
 }
 
+// NeedLeaderElection returns false so the syncer runs on all replicas,
+// not just the leader. Each replica independently polls the external
+// registry and broadcasts changes to its connected agents.
+func (s *Syncer) NeedLeaderElection() bool { return false }
+
 // countEndpoints counts total endpoints across all services and protocols.
 func countEndpoints(state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) int {
 	count := 0

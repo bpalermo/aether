@@ -115,6 +115,11 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// NeedLeaderElection returns false so the server runs on all replicas,
+// not just the leader. This is required for HA deployments where every
+// replica must serve gRPC traffic independently.
+func (s *Server) NeedLeaderElection() bool { return false }
+
 // shutdown performs graceful shutdown of the gRPC server.
 // It first sets readiness to false, then waits for the server to gracefully stop.
 // If graceful stop takes longer than the configured ShutdownTimeout, the server
