@@ -2,7 +2,11 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/bpalermo/aether/common/must"
@@ -11,6 +15,8 @@ import (
 	"github.com/bpalermo/aether/registrar/internal/server"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -52,6 +58,8 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", cfg.CloudMapNamespace, "AWS Cloud Map HTTP namespace name")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
+	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE mTLS for the gRPC server")
+	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE workload identity directory (contains svid.pem, svid_key.pem, svid_bundle.pem)")
 
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 }
@@ -62,6 +70,7 @@ func runRegistrar(ctx context.Context) error {
 		"registryBackend", cfg.RegistryBackend,
 		"syncInterval", cfg.SyncInterval,
 		"grpcAddress", cfg.GRPCAddress,
+		"spireEnabled", cfg.SpireEnabled,
 	)
 
 	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -88,12 +97,54 @@ func runRegistrar(ctx context.Context) error {
 		return fmt.Errorf("failed to add syncer: %w", err)
 	}
 
-	grpcSrv := server.NewRegistrarServer(reg, snapshot, broadcaster, cfg.GRPCAddress, l)
+	var grpcOpts []grpc.ServerOption
+	if cfg.SpireEnabled {
+		tlsCfg, tlsErr := loadSpireTLSConfig(cfg.SpireWorkloadSocketPath)
+		if tlsErr != nil {
+			return tlsErr
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		l.Info("SPIRE mTLS enabled for gRPC server", "certDir", cfg.SpireWorkloadSocketPath)
+	} else {
+		l.Info("SPIRE disabled, gRPC server will use insecure transport")
+	}
+
+	grpcSrv := server.NewRegistrarServer(reg, snapshot, broadcaster, cfg.GRPCAddress, l, grpcOpts...)
 	if err = m.Add(grpcSrv); err != nil {
 		return fmt.Errorf("failed to add gRPC server: %w", err)
 	}
 
 	return m.Start(ctx)
+}
+
+// loadSpireTLSConfig loads the SPIRE X.509 SVID certificate, key, and CA bundle
+// from the CSI-mounted directory and returns a tls.Config for the gRPC server.
+func loadSpireTLSConfig(certDir string) (*tls.Config, error) {
+	certFile := filepath.Join(certDir, "svid.pem")
+	keyFile := filepath.Join(certDir, "svid_key.pem")
+	bundleFile := filepath.Join(certDir, "svid_bundle.pem")
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load SPIRE SVID keypair: %w", err)
+	}
+
+	bundlePEM, err := os.ReadFile(bundleFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read SPIRE bundle: %w", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(bundlePEM) {
+		return nil, fmt.Errorf("failed to parse SPIRE bundle certificates")
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientCAs:    pool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {

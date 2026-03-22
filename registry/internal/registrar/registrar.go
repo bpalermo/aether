@@ -31,6 +31,9 @@ const (
 type Config struct {
 	// Address is the gRPC address of the Registrar service.
 	Address string
+	// DialOptions are additional gRPC dial options (e.g., TLS credentials).
+	// When empty, insecure credentials are used.
+	DialOptions []grpc.DialOption
 }
 
 // RegistrarRegistry implements the Registry interface by communicating with a
@@ -60,9 +63,11 @@ func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
 
 // Initialize connects to the Registrar and starts the background watch stream.
 func (r *RegistrarRegistry) Initialize(ctx context.Context) error {
-	conn, err := grpc.NewClient(r.config.Address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	opts := r.config.DialOptions
+	if len(opts) == 0 {
+		opts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	}
+	conn, err := grpc.NewClient(r.config.Address, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to registrar at %s: %w", r.config.Address, err)
 	}

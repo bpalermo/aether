@@ -30,6 +30,8 @@ type AgentConfig struct {
 	SpireTrustDomain string
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
 	SpireAdminSocketPath string
+	// SpireWorkloadCertDir is the directory containing SPIRE SVID certificates (svid.pem, svid_key.pem, svid_bundle.pem)
+	SpireWorkloadCertDir string
 
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
@@ -46,5 +48,6 @@ func NewAgentConfig() *AgentConfig {
 		SpireEnabled:           true,
 		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
+		SpireWorkloadCertDir:   constants.DefaultSpireWorkloadCertDir,
 	}
 }

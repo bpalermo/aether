@@ -28,18 +28,20 @@ type RegistrarServer struct {
 }
 
 // NewRegistrarServer creates a RegistrarServer and registers it on the gRPC server.
+// Additional gRPC server options (e.g., TLS credentials) can be passed via grpcOpts.
 func NewRegistrarServer(
 	reg registry.Registry,
 	snapshot *Snapshot,
 	broadcaster *Broadcaster,
 	address string,
 	log logr.Logger,
+	grpcOpts ...grpc.ServerOption,
 ) *RegistrarServer {
 	cfg := xds.NewServerConfig()
 	cfg.Network = "tcp"
 	cfg.Address = address
 
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(grpcOpts...)
 
 	srv := &RegistrarServer{
 		registry:    reg,

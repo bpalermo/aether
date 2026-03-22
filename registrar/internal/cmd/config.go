@@ -30,15 +30,27 @@ type RegistrarConfig struct {
 
 	// GRPCAddress is the address for the registrar gRPC server
 	GRPCAddress string
+
+	// SpireEnabled controls whether the registrar uses SPIRE for mTLS
+	SpireEnabled bool
+	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
+	SpireWorkloadSocketPath string
 }
+
+const (
+	// DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
+	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
+)
 
 // NewRegistrarConfig creates a RegistrarConfig with default values.
 func NewRegistrarConfig() *RegistrarConfig {
 	return &RegistrarConfig{
-		RegistryBackend: "kubernetes",
-		EtcdEndpoints:   []string{"localhost:2379"},
-		CloudMapNamespace: "aether",
-		SyncInterval:    defaultSyncInterval,
-		GRPCAddress:     defaultGRPCAddress,
+		RegistryBackend:         "kubernetes",
+		EtcdEndpoints:           []string{"localhost:2379"},
+		CloudMapNamespace:       "aether",
+		SyncInterval:            defaultSyncInterval,
+		GRPCAddress:             defaultGRPCAddress,
+		SpireEnabled:            true,
+		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
 	}
 }

@@ -24,7 +24,11 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/bpalermo/aether/common/must"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
@@ -38,6 +42,8 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -93,6 +99,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
+	rootCmd.Flags().StringVar(&cfg.SpireWorkloadCertDir, "spire-workload-cert-dir", constants.DefaultSpireWorkloadCertDir, "Directory containing SPIRE workload identity certificates for registrar mTLS")
 
 	// These calls only fail if the flag name is not registered, which would be a programming error.
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
@@ -220,17 +227,61 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 
 // setupRegistry creates and initializes a registrar-backed registry.
 // The agent connects to the in-cluster Registrar service for all endpoint
-// registration and discovery operations.
+// registration and discovery operations. When SPIRE is enabled, the connection
+// uses mTLS with SVID certificates from the SPIRE CSI mount; otherwise,
+// insecure transport is used.
 func setupRegistry(ctx context.Context) (registry.Registry, error) {
-	reg := registry.NewRegistrarRegistry(l, registry.RegistrarConfig{
+	regCfg := registry.RegistrarConfig{
 		Address: cfg.RegistrarAddress,
-	})
+	}
+
+	if cfg.SpireEnabled {
+		tlsCfg, err := loadSpireClientTLS(cfg.SpireWorkloadCertDir)
+		if err != nil {
+			return nil, err
+		}
+		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
+		l.Info("registrar client using SPIRE mTLS", "certDir", cfg.SpireWorkloadCertDir)
+	} else {
+		l.Info("registrar client using insecure transport")
+	}
+
+	reg := registry.NewRegistrarRegistry(l, regCfg)
 
 	if err := reg.Initialize(ctx); err != nil {
 		return nil, fmt.Errorf("failed to initialize registry: %w", err)
 	}
 
 	return reg, nil
+}
+
+// loadSpireClientTLS loads the SPIRE X.509 SVID certificate, key, and CA bundle
+// from the CSI-mounted directory and returns a tls.Config for the gRPC client.
+func loadSpireClientTLS(certDir string) (*tls.Config, error) {
+	certFile := filepath.Join(certDir, "svid.pem")
+	keyFile := filepath.Join(certDir, "svid_key.pem")
+	bundleFile := filepath.Join(certDir, "svid_bundle.pem")
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load SPIRE SVID keypair: %w", err)
+	}
+
+	bundlePEM, err := os.ReadFile(bundleFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read SPIRE bundle: %w", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(bundlePEM) {
+		return nil, fmt.Errorf("failed to parse SPIRE bundle certificates")
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 // must panics if err is non-nil. Use only for programming errors that should never occur at runtime.
