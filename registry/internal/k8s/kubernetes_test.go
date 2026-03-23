@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/common/constants"
 )
 
 // newTestRegistry constructs a KubernetesRegistry wired to a fake client built

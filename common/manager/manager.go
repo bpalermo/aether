@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/telemetry"
+	"github.com/bpalermo/aether/common/telemetry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )

@@ -6,7 +6,7 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/common/constants"
 )
 
 // NewServiceEndpointFromCNIPod creates a ServiceEndpoint from a CNIPod.

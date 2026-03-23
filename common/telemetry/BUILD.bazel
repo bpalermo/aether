@@ -7,7 +7,7 @@ go_library(
         "options.go",
         "telemetry.go",
     ],
-    importpath = "github.com/bpalermo/aether/telemetry",
+    importpath = "github.com/bpalermo/aether/common/telemetry",
     visibility = ["//visibility:public"],
     deps = [
         "@io_k8s_sigs_controller_runtime//:controller-runtime",

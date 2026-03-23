@@ -3,7 +3,7 @@ package cloudmap
 import (
 	"time"
 
-	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/common/constants"
 )
 
 const (

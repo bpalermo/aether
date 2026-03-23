@@ -16,7 +16,7 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/registry"
 	adminv3 "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 	"github.com/go-logr/logr"

@@ -9,7 +9,7 @@ go_library(
         "server.go",
         "xds.go",
     ],
-    importpath = "github.com/bpalermo/aether/xds",
+    importpath = "github.com/bpalermo/aether/common/xds",
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",

@@ -13,8 +13,8 @@ go_library(
     deps = [
         "//api/aether/registrar/v1:registrar",
         "//api/aether/registry/v1:registry",
+        "//common/xds",
         "//registry",
-        "//xds",
         "@com_github_go_logr_logr//:logr",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_protobuf//proto",
