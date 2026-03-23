@@ -24,26 +24,25 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
-	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
-	"github.com/bpalermo/aether/log"
 	"github.com/bpalermo/aether/registry"
-	"github.com/bpalermo/aether/telemetry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
 const (
@@ -66,8 +65,7 @@ var rootCmd = &cobra.Command{
 	Long:         "Runs the Aether agent on a Kubernetes node to manage an Envoy xDS control plane and transparent traffic interception via CNI.",
 	SilenceUsage: true,
 	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-		l = log.NewLogger(cfg.Debug).WithName(cmd.Name())
-		ctrl.SetLogger(l)
+		l = manager.SetupLogging(cfg.Debug, cmd.Name())
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runAgent(cmd.Context())
@@ -80,8 +78,7 @@ func GetCommand() *cobra.Command {
 }
 
 func init() {
-	// Logging and debugging
-	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug-level logging for troubleshooting")
+	manager.RegisterFlags(rootCmd, &cfg.Config)
 
 	// Kubernetes and cluster identity (required)
 	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", constants.DefaultProxyID, "Kubernetes node name where the agent runs (required)")
@@ -96,12 +93,6 @@ func init() {
 
 	// Envoy admin configuration
 	rootCmd.Flags().StringVar(&cfg.CNIServerConfig.EnvoyAdminAddress, "envoy-admin-address", cfg.CNIServerConfig.EnvoyAdminAddress, "Envoy admin interface address (host:port) for listener verification")
-
-	// Metrics and telemetry
-	rootCmd.Flags().BoolVar(&cfg.MetricsEnabled, "metrics-enabled", cfg.MetricsEnabled, "Enable the Prometheus metrics HTTP server")
-	rootCmd.Flags().StringVar(&cfg.MetricsBindAddress, "metrics-bind-address", cfg.MetricsBindAddress, "Address for the metrics HTTP server")
-	rootCmd.Flags().BoolVar(&cfg.OTelEnabled, "otel-enabled", cfg.OTelEnabled, "Enable OTel MeterProvider with Prometheus exporter bridge (requires --metrics-enabled)")
-	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", cfg.OTLPEndpoint, "OTLP gRPC collector endpoint (e.g. localhost:4317); empty disables OTLP export")
 
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
@@ -119,7 +110,7 @@ func init() {
 // initializes local storage and registry backends, creates and registers the xDS server,
 // CNI gRPC server, and optionally the SPIRE bridge as runnables. The agent then waits
 // for local storage to become ready before starting the manager's event loop.
-func runAgent(ctx context.Context) error {
+func runAgent(ctx context.Context) (retErr error) {
 	l.Info("starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug,
@@ -128,40 +119,19 @@ func runAgent(ctx context.Context) error {
 		"otelEnabled", cfg.OTelEnabled,
 	)
 
-	if cfg.OTelEnabled {
-		shutdown, otelErr := telemetry.Setup(ctx, telemetry.Config{
-			ServiceName:    name,
-			ServiceVersion: Version,
-			OTLPEndpoint:   cfg.OTLPEndpoint,
-		})
-		if otelErr != nil {
-			return fmt.Errorf("failed to setup telemetry: %w", otelErr)
-		}
+	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version)
+	if err != nil {
+		return err
+	}
+	if result.Shutdown != nil {
 		defer func() {
-			if shutdownErr := shutdown(ctx); shutdownErr != nil {
+			if shutdownErr := result.Shutdown(ctx); shutdownErr != nil {
 				l.Error(shutdownErr, "failed to shutdown telemetry")
 			}
 		}()
 	}
 
-	// Create a controller manager
-	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
-		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
-	})
-	if err != nil {
-		return err
-	}
-
-	if err = m.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		return fmt.Errorf("failed to set up health check: %w", err)
-	}
-	if err = m.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		return fmt.Errorf("failed to set up ready check: %w", err)
-	}
-	if err = m.AddReadyzCheck("cache-sync", telemetry.CacheSyncChecker(m)); err != nil {
-		return fmt.Errorf("failed to set up cache sync ready check: %w", err)
-	}
+	m := result.Manager
 
 	localStorage, err := setupStorage(ctx, cfg.MountedLocalStorageDir)
 	if err != nil {
@@ -172,7 +142,7 @@ func runAgent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer reg.Close()
+	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 
@@ -288,11 +258,10 @@ func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
 	reg := registry.NewRegistrarRegistry(l, regCfg)
 
 	if err := reg.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize registry: %w", err)
+		return nil, errors.Join(fmt.Errorf("failed to initialize registry: %w", err), reg.Close())
 	}
 
 	return reg, nil
 }
-
 
 // must panics if err is non-nil. Use only for programming errors that should never occur at runtime.

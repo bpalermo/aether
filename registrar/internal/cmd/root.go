@@ -2,21 +2,20 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/bpalermo/aether/common/must"
 	"github.com/bpalermo/aether/common/spire"
-	"github.com/bpalermo/aether/log"
+	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/registrar/internal/server"
-	"github.com/bpalermo/aether/telemetry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
 const (
@@ -38,8 +37,7 @@ var rootCmd = &cobra.Command{
 	Long:         "Runs the Aether registrar that proxies registry operations, caches endpoints, and streams changes to agents.",
 	SilenceUsage: true,
 	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-		l = log.NewLogger(cfg.Debug).WithName(cmd.Name())
-		ctrl.SetLogger(l)
+		l = manager.SetupLogging(cfg.Debug, cmd.Name())
 	},
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runRegistrar(cmd.Context())
@@ -52,17 +50,14 @@ func GetCommand() *cobra.Command {
 }
 
 func init() {
-	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debug-level logging")
+	manager.RegisterFlags(rootCmd, &cfg.Config)
+
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, etcd, or cloudmap)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", cfg.CloudMapNamespace, "AWS Cloud Map HTTP namespace name")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
-	rootCmd.Flags().BoolVar(&cfg.MetricsEnabled, "metrics-enabled", cfg.MetricsEnabled, "Enable the Prometheus metrics HTTP server")
-	rootCmd.Flags().StringVar(&cfg.MetricsBindAddress, "metrics-bind-address", cfg.MetricsBindAddress, "Address for the metrics HTTP server")
-	rootCmd.Flags().BoolVar(&cfg.OTelEnabled, "otel-enabled", cfg.OTelEnabled, "Enable OTel MeterProvider with Prometheus exporter bridge (requires --metrics-enabled)")
-	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", cfg.OTLPEndpoint, "OTLP gRPC collector endpoint (e.g. localhost:4317); empty disables OTLP export")
 
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE mTLS for the gRPC server")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE workload identity directory (contains svid.pem, svid_key.pem, svid_bundle.pem)")
@@ -70,7 +65,7 @@ func init() {
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 }
 
-func runRegistrar(ctx context.Context) error {
+func runRegistrar(ctx context.Context) (retErr error) {
 	l.Info("starting aether registrar",
 		"clusterName", cfg.ClusterName,
 		"registryBackend", cfg.RegistryBackend,
@@ -81,45 +76,25 @@ func runRegistrar(ctx context.Context) error {
 		"spireEnabled", cfg.SpireEnabled,
 	)
 
-	if cfg.OTelEnabled {
-		shutdown, otelErr := telemetry.Setup(ctx, telemetry.Config{
-			ServiceName:    name,
-			ServiceVersion: Version,
-			OTLPEndpoint:   cfg.OTLPEndpoint,
-		})
-		if otelErr != nil {
-			return fmt.Errorf("failed to setup telemetry: %w", otelErr)
-		}
+	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version)
+	if err != nil {
+		return err
+	}
+	if result.Shutdown != nil {
 		defer func() {
-			if shutdownErr := shutdown(ctx); shutdownErr != nil {
+			if shutdownErr := result.Shutdown(ctx); shutdownErr != nil {
 				l.Error(shutdownErr, "failed to shutdown telemetry")
 			}
 		}()
 	}
 
-	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
-		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create manager: %w", err)
-	}
-
-	if err = m.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		return fmt.Errorf("failed to set up health check: %w", err)
-	}
-	if err = m.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		return fmt.Errorf("failed to set up ready check: %w", err)
-	}
-	if err = m.AddReadyzCheck("cache-sync", telemetry.CacheSyncChecker(m)); err != nil {
-		return fmt.Errorf("failed to set up cache sync ready check: %w", err)
-	}
+	m := result.Manager
 
 	reg, err := setupRegistry(ctx, m)
 	if err != nil {
 		return err
 	}
-	defer reg.Close()
+	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
 	snapshot := server.NewSnapshot()
 	broadcaster := server.NewBroadcaster(l)
@@ -180,7 +155,7 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 	}
 
 	if err := reg.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize registry: %w", err)
+		return nil, errors.Join(fmt.Errorf("failed to initialize registry: %w", err), reg.Close())
 	}
 
 	return reg, nil
