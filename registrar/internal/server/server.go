@@ -7,7 +7,7 @@ import (
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	"github.com/bpalermo/aether/xds"
+	"github.com/bpalermo/aether/common/xds"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 )

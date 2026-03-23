@@ -1,7 +1,7 @@
 package manager
 
 import (
-	"github.com/bpalermo/aether/log"
+	"github.com/bpalermo/aether/common/log"
 	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 )

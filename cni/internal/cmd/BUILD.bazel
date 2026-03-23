@@ -8,7 +8,7 @@ go_library(
     deps = [
         "//cni/internal/constants",
         "//cni/internal/install",
-        "//log",
+        "//common/log",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",
     ],

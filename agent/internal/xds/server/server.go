@@ -11,7 +11,7 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/registry"
-	"github.com/bpalermo/aether/xds"
+	"github.com/bpalermo/aether/common/xds"
 	"github.com/go-logr/logr"
 )
 

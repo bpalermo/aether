@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/stretchr/testify/assert"
 )
 

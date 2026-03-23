@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "log",
     srcs = ["log.go"],
-    importpath = "github.com/bpalermo/aether/log",
+    importpath = "github.com/bpalermo/aether/common/log",
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_go_logr_logr//:logr",

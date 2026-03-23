@@ -16,7 +16,7 @@ go_library(
     deps = [
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
-        "//constants",
+        "//common/constants",
         "//registry/internal/cloudmap",
         "//registry/internal/ddb",
         "//registry/internal/etcd",

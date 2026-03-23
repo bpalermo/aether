@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/common/constants"
 )
 
 // Config holds the configuration for the Kubernetes registry backend.

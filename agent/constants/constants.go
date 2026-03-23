@@ -1,7 +1,7 @@
 // Package constants defines agent-specific constants for socket paths and directory defaults.
 package constants
 
-import "github.com/bpalermo/aether/constants"
+import "github.com/bpalermo/aether/common/constants"
 
 const (
 	// DefaultProxyID is the default xDS node ID for the Envoy proxy

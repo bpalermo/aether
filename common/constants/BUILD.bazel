@@ -9,6 +9,6 @@ go_library(
         "labels.go",
         "registry.go",
     ],
-    importpath = "github.com/bpalermo/aether/constants",
+    importpath = "github.com/bpalermo/aether/common/constants",
     visibility = ["//visibility:public"],
 )

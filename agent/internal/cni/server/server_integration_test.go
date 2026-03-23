@@ -15,7 +15,7 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/constants"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

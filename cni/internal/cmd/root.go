@@ -5,7 +5,7 @@ import (
 
 	"github.com/bpalermo/aether/cni/internal/constants"
 	"github.com/bpalermo/aether/cni/internal/install"
-	"github.com/bpalermo/aether/log"
+	"github.com/bpalermo/aether/common/log"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 )
