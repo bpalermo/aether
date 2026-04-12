@@ -6,12 +6,12 @@ package server
 import (
 	"context"
 
-	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/constants"
+	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/common/xds"
+	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 )
 

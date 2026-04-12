@@ -70,9 +70,9 @@ func TestNewLocalClusterForService(t *testing.T) {
 			expectedBindAddr: "127.0.0.1",
 		},
 		{
-			name:        "endpoint with empty metadata",
-			serviceName: "svc",
-			endpoint:    &registryv1.ServiceEndpoint{},
+			name:             "endpoint with empty metadata",
+			serviceName:      "svc",
+			endpoint:         &registryv1.ServiceEndpoint{},
 			expectedBindAddr: "127.0.0.1",
 		},
 	}

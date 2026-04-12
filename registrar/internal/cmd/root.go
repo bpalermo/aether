@@ -6,11 +6,11 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	"github.com/bpalermo/aether/common/spire"
-	"github.com/bpalermo/aether/common/manager"
-	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/registrar/internal/server"
+	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"

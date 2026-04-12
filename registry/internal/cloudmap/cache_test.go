@@ -12,12 +12,12 @@ import (
 
 func TestTTLCacheSetAndGet(t *testing.T) {
 	tests := []struct {
-		name       string
-		ttl        time.Duration
-		key        string
-		value      string
-		wantValue  string
-		wantFound  bool
+		name      string
+		ttl       time.Duration
+		key       string
+		value     string
+		wantValue string
+		wantFound bool
 	}{
 		{
 			name:      "get existing key returns value",

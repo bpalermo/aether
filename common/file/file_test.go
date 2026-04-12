@@ -27,7 +27,7 @@ func TestWriteFileAtomic(t *testing.T) {
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				path := filepath.Join(dir, "existing.txt")
-				if err := os.WriteFile(path, []byte("old content"), 0644); err != nil {
+				if err := os.WriteFile(path, []byte("old content"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 				return path
@@ -58,7 +58,7 @@ func TestWriteFileAtomic(t *testing.T) {
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				readOnlyDir := filepath.Join(dir, "readonly")
-				if err := os.Mkdir(readOnlyDir, 0555); err != nil {
+				if err := os.Mkdir(readOnlyDir, 0o555); err != nil {
 					t.Fatal(err)
 				}
 				return filepath.Join(readOnlyDir, "file.txt")

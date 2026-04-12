@@ -81,7 +81,7 @@ func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key types.Contain
 	}
 
 	// Ensure directory exists
-	if err := os.MkdirAll(f.basePath, 0755); err != nil {
+	if err := os.MkdirAll(f.basePath, 0o755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
