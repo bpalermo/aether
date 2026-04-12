@@ -42,7 +42,7 @@ graph TD
 ### Prerequisites
 
 - [Bazelisk](https://github.com/bazelbuild/bazelisk) (Bazel 9.0.1)
-- Go 1.26.0
+- Go 1.26.2
 - Docker (or Colima) for container images and integration tests
 
 ### Setup (macOS with Colima)
