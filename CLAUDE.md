@@ -30,6 +30,13 @@ make gazelle                 # or: bazel run //:gazelle
 # Tidy module dependencies
 make tidy                    # or: bazel mod tidy
 
+# Format code (Go, protobuf, Starlark, shell)
+make format                  # or: bazel run //:format
+make format-check            # Check only, no modifications
+
+# Lint (buf, buildifier, shellcheck)
+make lint                    # or: bazel build --config=lint //...
+
 # Add a Go dependency
 bazel run @rules_go//go get <package>
 
@@ -71,6 +78,7 @@ make push-all                # Push all images
 - Proto files use `buf/validate` annotations and `protoc-gen-dynamo` for DynamoDB attribute mapping.
 - Gazelle manages BUILD.bazel files. Run `make gazelle` after modifying Go imports or adding files.
 - Container images use distroless base (`gcr.io/distroless/static-debian12:nonroot`) and multi-arch builds (amd64/arm64).
+- Formatting and linting use `aspect_rules_lint`. Formatters (gofumpt, buildifier, shfmt, buf) are configured in `bazel/format/BUILD.bazel`. Lint aspects (buf, buildifier, shellcheck) are defined in `bazel/lint/linters.bzl`. Use `--config=lint` to run lints, `--config=ci` to fail on violations.
 
 ## Testing
 

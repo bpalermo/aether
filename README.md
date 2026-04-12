@@ -75,10 +75,14 @@ make test-race             # Run all tests with Go race detector
 ### Code Quality
 
 ```bash
+make format                # Format all code (Go, protobuf, Starlark, shell)
+make format-check          # Check formatting (CI-friendly, fails on drift)
+make lint                  # Run linters (buf, buildifier, shellcheck)
 make fmt                   # Format Go code with gofmt
-make fmt-check             # Check formatting (CI-friendly, fails on drift)
 make vet                   # Run go vet
 ```
+
+Formatting uses [gofumpt](https://github.com/mvdan/gofumpt), [buildifier](https://github.com/bazelbuild/buildtools), [shfmt](https://github.com/mvdan/sh), and [buf](https://buf.build) via [`aspect_rules_lint`](https://github.com/aspect-build/rules_lint). Linting runs buf (protobuf), buildifier (Starlark), and shellcheck (shell) as Bazel aspects. CI enforces lint violations with `--config=ci`.
 
 ### Container Images
 
