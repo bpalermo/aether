@@ -113,6 +113,7 @@ use_repo(
     "org_golang_google_grpc",
     "org_golang_google_protobuf",
     "org_golang_x_sys",
+    "org_golang_x_time",
     "org_uber_go_atomic",
     "org_uber_go_zap",
 )
