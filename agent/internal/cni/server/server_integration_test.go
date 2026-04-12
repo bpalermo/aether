@@ -149,7 +149,7 @@ func TestIntegration_ServerStartsAndAcceptsGRPCConnections(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.GetResult())
 
 	cancel()
 	waitForServerShutdown(t, errCh)
@@ -181,7 +181,7 @@ func TestIntegration_AddPodEndToEnd(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.GetResult())
 
 	// Verify the pod was stored (MockStorage default implementation stores in map).
 	storedPod, err := stor.GetResource(ctx, types.ContainerID("container-1"))
@@ -239,7 +239,7 @@ func TestIntegration_AddPodIgnorableNamespace(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.GetResult())
 
 	// Storage and registry should not have been called for an ignorable pod.
 	assert.False(t, addCalled, "storage should not be called for ignorable pod")
@@ -283,7 +283,7 @@ func TestIntegration_RemovePodEndToEnd(t *testing.T) {
 		ContainerId: "container-1",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, resp.GetResult())
 	assert.True(t, removeCalled, "storage.RemoveResource should have been called")
 
 	cancel()
@@ -316,7 +316,7 @@ func TestIntegration_RemovePodNonExistent(t *testing.T) {
 		ContainerId: "nonexistent-container",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, resp.GetResult())
 
 	cancel()
 	waitForServerShutdown(t, errCh)

@@ -104,7 +104,7 @@ func TestBroadcaster_Unsubscribe(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			b := NewBroadcaster(logr.Discard())
 
-			var targetCh <-chan *registrarv1.EndpointEvent
+			var targetCh <-chan *registrarv1.WatchEndpointsResponse
 			for _, id := range tt.subscribeIDs {
 				ch := b.Subscribe(id)
 				if id == tt.unsubscribeID {
@@ -153,36 +153,36 @@ func TestBroadcaster_Broadcast_DeliveredToAll(t *testing.T) {
 	tests := []struct {
 		name       string
 		watcherIDs []string
-		events     []*registrarv1.EndpointEvent
+		events     []*registrarv1.WatchEndpointsResponse
 	}{
 		{
 			name:       "single event delivered to single watcher",
 			watcherIDs: []string{"node-1"},
-			events: []*registrarv1.EndpointEvent{
-				{Type: registrarv1.EndpointEvent_ENDPOINT_ADDED, ServiceName: "svc-a"},
+			events: []*registrarv1.WatchEndpointsResponse{
+				{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "svc-a"},
 			},
 		},
 		{
 			name:       "single event delivered to multiple watchers",
 			watcherIDs: []string{"node-1", "node-2", "node-3"},
-			events: []*registrarv1.EndpointEvent{
-				{Type: registrarv1.EndpointEvent_ENDPOINT_ADDED, ServiceName: "svc-a"},
+			events: []*registrarv1.WatchEndpointsResponse{
+				{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "svc-a"},
 			},
 		},
 		{
 			name:       "multiple events delivered in order to all watchers",
 			watcherIDs: []string{"node-1", "node-2"},
-			events: []*registrarv1.EndpointEvent{
-				{Type: registrarv1.EndpointEvent_ENDPOINT_ADDED, ServiceName: "svc-a"},
-				{Type: registrarv1.EndpointEvent_ENDPOINT_REMOVED, ServiceName: "svc-b"},
-				{Type: registrarv1.EndpointEvent_ENDPOINT_UPDATED, ServiceName: "svc-c"},
+			events: []*registrarv1.WatchEndpointsResponse{
+				{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "svc-a"},
+				{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED, ServiceName: "svc-b"},
+				{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED, ServiceName: "svc-c"},
 			},
 		},
 		{
 			name:       "full snapshot event delivered to all watchers",
 			watcherIDs: []string{"node-1", "node-2"},
-			events: []*registrarv1.EndpointEvent{
-				{Type: registrarv1.EndpointEvent_FULL_SNAPSHOT, ServiceName: "svc-a"},
+			events: []*registrarv1.WatchEndpointsResponse{
+				{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT, ServiceName: "svc-a"},
 			},
 		},
 	}
@@ -191,7 +191,7 @@ func TestBroadcaster_Broadcast_DeliveredToAll(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			b := NewBroadcaster(logr.Discard())
 
-			channels := make(map[string]<-chan *registrarv1.EndpointEvent, len(tt.watcherIDs))
+			channels := make(map[string]<-chan *registrarv1.WatchEndpointsResponse, len(tt.watcherIDs))
 			for _, id := range tt.watcherIDs {
 				channels[id] = b.Subscribe(id)
 			}
@@ -220,8 +220,8 @@ func TestBroadcaster_Broadcast_NoWatchers(t *testing.T) {
 	b := NewBroadcaster(logr.Discard())
 
 	// Must not panic.
-	b.Broadcast([]*registrarv1.EndpointEvent{
-		{Type: registrarv1.EndpointEvent_ENDPOINT_ADDED, ServiceName: "svc-a"},
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{
+		{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "svc-a"},
 	})
 }
 
@@ -232,7 +232,7 @@ func TestBroadcaster_Broadcast_EmptyEventList(t *testing.T) {
 	b.Subscribe("node-1")
 
 	// Must not panic.
-	b.Broadcast([]*registrarv1.EndpointEvent{})
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{})
 
 	assert.Equal(t, 1, b.WatcherCount())
 }
@@ -248,23 +248,23 @@ func TestBroadcaster_Broadcast_DropsEventsForSlowConsumer(t *testing.T) {
 
 	// Fill the watcher's channel to capacity by broadcasting one event at a time.
 	// No goroutine drains the channel so after defaultChannelBuffer calls it is full.
-	fillEvent := &registrarv1.EndpointEvent{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+	fillEvent := &registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-fill",
 	}
 	for i := 0; i < defaultChannelBuffer; i++ {
-		b.Broadcast([]*registrarv1.EndpointEvent{fillEvent})
+		b.Broadcast([]*registrarv1.WatchEndpointsResponse{fillEvent})
 	}
 	require.Equal(t, defaultChannelBuffer, len(ch), "channel must be full before overflow test")
 
 	// Broadcasting onto a full channel must be a non-blocking no-op (the event is
 	// dropped via the default branch in Broadcast). Verify this by checking that
 	// the channel length is unchanged after the extra call.
-	overflowEvent := &registrarv1.EndpointEvent{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+	overflowEvent := &registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-overflow",
 	}
-	b.Broadcast([]*registrarv1.EndpointEvent{overflowEvent})
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{overflowEvent})
 
 	// Channel must still hold exactly defaultChannelBuffer events; overflow dropped.
 	assert.Equal(t, defaultChannelBuffer, len(ch))

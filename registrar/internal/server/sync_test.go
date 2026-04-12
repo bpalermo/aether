@@ -28,9 +28,11 @@ func (m *mockRegistry) UnregisterEndpoint(_ context.Context, _ string, _ string)
 func (m *mockRegistry) UnregisterEndpoints(_ context.Context, _ string, _ []string) error {
 	return nil
 }
+
 func (m *mockRegistry) ListEndpoints(_ context.Context, _ string, _ registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	return nil, nil
 }
+
 func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	if m.listAllEndpointsFunc != nil {
 		return m.listAllEndpointsFunc(ctx, protocol)
@@ -79,7 +81,7 @@ func TestSyncer_Start_InitialSync(t *testing.T) {
 	require.NoError(t, <-done)
 
 	// Snapshot must contain the endpoint that was returned by the registry.
-	result := snap.GetAll(registryv1.Service_HTTP)
+	result := snap.GetAll(registryv1.Service_PROTOCOL_HTTP)
 	require.Len(t, result, 1)
 	require.Len(t, result["frontend"], 1)
 	assert.Equal(t, "10.0.0.1", result["frontend"][0].GetIp())
@@ -186,7 +188,7 @@ func TestSyncer_Start_EmptyRegistryPopulatesEmptySnapshot(t *testing.T) {
 
 	require.NoError(t, <-done)
 
-	result := snap.GetAll(registryv1.Service_HTTP)
+	result := snap.GetAll(registryv1.Service_PROTOCOL_HTTP)
 	assert.Empty(t, result)
 	// Version is still bumped even for an empty sync.
 	assert.NotEqual(t, "0", snap.Version())
@@ -217,7 +219,7 @@ func TestSyncer_Start_RegistryErrorDoesNotCrash(t *testing.T) {
 	require.NoError(t, <-done)
 
 	// Snapshot should remain empty since the sync was skipped on error.
-	result := snap.GetAll(registryv1.Service_HTTP)
+	result := snap.GetAll(registryv1.Service_PROTOCOL_HTTP)
 	assert.Empty(t, result)
 }
 
@@ -254,7 +256,7 @@ func TestSyncer_Start_RegistryErrorOnSubsequentSyncDoesNotCrash(t *testing.T) {
 	require.NoError(t, <-done)
 
 	// Snapshot should still contain the endpoint from the first successful sync.
-	result := snap.GetAll(registryv1.Service_HTTP)
+	result := snap.GetAll(registryv1.Service_PROTOCOL_HTTP)
 	require.Len(t, result["svc"], 1)
 	assert.Equal(t, "10.0.2.1", result["svc"][0].GetIp())
 }
@@ -319,7 +321,7 @@ func TestSyncer_Start_MultipleEndpointsAcrossServices(t *testing.T) {
 
 	require.NoError(t, <-done)
 
-	result := snap.GetAll(registryv1.Service_HTTP)
+	result := snap.GetAll(registryv1.Service_PROTOCOL_HTTP)
 	assert.Len(t, result, 2)
 	assert.Len(t, result["frontend"], 2)
 	assert.Len(t, result["backend"], 1)

@@ -17,21 +17,21 @@ const (
 // events on a buffered channel. Events are dropped for slow consumers.
 type Broadcaster struct {
 	mu       sync.RWMutex
-	watchers map[string]chan *registrarv1.EndpointEvent
+	watchers map[string]chan *registrarv1.WatchEndpointsResponse
 	log      logr.Logger
 }
 
 // NewBroadcaster creates a Broadcaster.
 func NewBroadcaster(log logr.Logger) *Broadcaster {
 	return &Broadcaster{
-		watchers: make(map[string]chan *registrarv1.EndpointEvent),
+		watchers: make(map[string]chan *registrarv1.WatchEndpointsResponse),
 		log:      log.WithName("broadcaster"),
 	}
 }
 
 // Subscribe registers a new watcher and returns a channel that will receive
 // endpoint events. The caller must call Unsubscribe when done.
-func (b *Broadcaster) Subscribe(id string) <-chan *registrarv1.EndpointEvent {
+func (b *Broadcaster) Subscribe(id string) <-chan *registrarv1.WatchEndpointsResponse {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -40,7 +40,7 @@ func (b *Broadcaster) Subscribe(id string) <-chan *registrarv1.EndpointEvent {
 		close(ch)
 	}
 
-	ch := make(chan *registrarv1.EndpointEvent, defaultChannelBuffer)
+	ch := make(chan *registrarv1.WatchEndpointsResponse, defaultChannelBuffer)
 	b.watchers[id] = ch
 	b.log.V(1).Info("watcher subscribed", "id", id)
 	return ch
@@ -60,7 +60,7 @@ func (b *Broadcaster) Unsubscribe(id string) {
 
 // Broadcast sends events to all watchers. Events are sent non-blocking;
 // if a watcher's channel is full the event is dropped for that watcher.
-func (b *Broadcaster) Broadcast(events []*registrarv1.EndpointEvent) {
+func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 

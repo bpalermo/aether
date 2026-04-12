@@ -8,8 +8,8 @@ import "buf/validate/validate.proto";
 option go_package = "github.com/bpalermo/aether/api/aether/cni/v1;cniv1";
 
 service CNIService {
-  rpc AddPod (AddPodRequest) returns (AddPodResponse) {}
-  rpc RemovePod (RemovePodRequest) returns (RemovePodResponse) {}
+  rpc AddPod(AddPodRequest) returns (AddPodResponse) {}
+  rpc RemovePod(RemovePodRequest) returns (RemovePodResponse) {}
 }
 
 message AddPodRequest {
@@ -19,8 +19,8 @@ message AddPodRequest {
 message AddPodResponse {
   enum Result {
     RESULT_UNSPECIFIED = 0;
-    SUCCESS = 1;
-    ERROR = 2;
+    RESULT_SUCCESS = 1;
+    RESULT_ERROR = 2;
   }
 
   Result result = 1;
@@ -46,8 +46,8 @@ message RemovePodRequest {
 message RemovePodResponse {
   enum Result {
     RESULT_UNSPECIFIED = 0;
-    SUCCESS = 1;
-    ERROR = 2;
+    RESULT_SUCCESS = 1;
+    RESULT_ERROR = 2;
   }
 
   Result result = 1;

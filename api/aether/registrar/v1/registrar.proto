@@ -15,7 +15,7 @@ service RegistrarService {
   rpc UnregisterEndpoint(UnregisterEndpointRequest) returns (UnregisterEndpointResponse);
 
   // WatchEndpoints streams endpoint change events to agents.
-  rpc WatchEndpoints(WatchEndpointsRequest) returns (stream EndpointEvent);
+  rpc WatchEndpoints(WatchEndpointsRequest) returns (stream WatchEndpointsResponse);
 
   // ListAllEndpoints returns all endpoints from the registrar's snapshot.
   rpc ListAllEndpoints(ListAllEndpointsRequest) returns (ListAllEndpointsResponse);
@@ -42,12 +42,13 @@ message WatchEndpointsRequest {
   string last_version = 3;
 }
 
-message EndpointEvent {
+message WatchEndpointsResponse {
   enum EventType {
-    FULL_SNAPSHOT = 0;
-    ENDPOINT_ADDED = 1;
-    ENDPOINT_REMOVED = 2;
-    ENDPOINT_UPDATED = 3;
+    EVENT_TYPE_UNSPECIFIED = 0;
+    EVENT_TYPE_FULL_SNAPSHOT = 1;
+    EVENT_TYPE_ENDPOINT_ADDED = 2;
+    EVENT_TYPE_ENDPOINT_REMOVED = 3;
+    EVENT_TYPE_ENDPOINT_UPDATED = 4;
   }
 
   EventType type = 1;

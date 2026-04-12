@@ -10,23 +10,18 @@ option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv
 
 message Service {
   option (dynamo.v1.msg).key = {
-    pk_fields: [
-      "name"
-    ]
-    sk_fields: [
-      "protocol"
-    ]
+    pk_fields: ["name"]
+    sk_fields: ["protocol"]
   };
 
   string name = 1 [(buf.validate.field).string.min_len = 1];
 
   enum Protocol {
     PROTOCOL_UNSPECIFIED = 0;
-    HTTP = 1;
+    PROTOCOL_HTTP = 1;
   }
 
   Protocol protocol = 2 [(buf.validate.field).enum.defined_only = true];
 
-  map <string, ServiceEndpoint> endpoints = 3;
-
+  map<string, ServiceEndpoint> endpoints = 3;
 }

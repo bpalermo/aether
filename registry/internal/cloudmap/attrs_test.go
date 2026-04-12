@@ -48,7 +48,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 	}{
 		{
 			name:     "full endpoint with HTTP protocol",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: fullEndpoint(),
 		},
 		{
@@ -58,7 +58,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "minimal endpoint — only required fields",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "192.168.1.1",
 				ClusterName: "my-cluster",
@@ -68,7 +68,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "zero weight and zero port",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "172.16.0.1",
 				ClusterName: "cluster-b",
@@ -78,7 +78,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "nil locality — locality omitted from attrs",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.1.2.3",
 				ClusterName: "cluster-c",
@@ -89,7 +89,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "nil metadata map — no metadata attr",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.2.3.4",
 				ClusterName: "cluster-d",
@@ -100,18 +100,18 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "nil container metadata — no container attrs",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
-				Ip:               "10.3.4.5",
-				ClusterName:      "cluster-e",
-				Port:             80,
-				Weight:           1,
+				Ip:                "10.3.4.5",
+				ClusterName:       "cluster-e",
+				Port:              80,
+				Weight:            1,
 				ContainerMetadata: nil,
 			},
 		},
 		{
 			name:     "nil kubernetes metadata — no k8s attrs",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:                 "10.4.5.6",
 				ClusterName:        "cluster-f",
@@ -122,7 +122,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "locality with only region",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.5.6.7",
 				ClusterName: "cluster-g",
@@ -148,7 +148,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "locality with only zone",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.6.7.8",
 				ClusterName: "cluster-h",
@@ -172,7 +172,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "locality with both region and zone empty — locality not restored",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.7.8.9",
 				ClusterName: "cluster-i",
@@ -195,7 +195,7 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		},
 		{
 			name:     "empty metadata map — no metadata attr",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.8.9.10",
 				ClusterName: "cluster-j",
@@ -238,12 +238,12 @@ func TestMarshalAttrsContainsRequiredKeys(t *testing.T) {
 		Weight:      1,
 	}
 
-	attrs := marshalAttrs(registryv1.Service_HTTP, ep)
+	attrs := marshalAttrs(registryv1.Service_PROTOCOL_HTTP, ep)
 
 	assert.Equal(t, "1.2.3.4", attrs[attrIPv4])
 	assert.Equal(t, "8080", attrs[attrPort])
 	assert.Equal(t, "my-cluster", attrs[attrCluster])
-	assert.Equal(t, registryv1.Service_HTTP.String(), attrs[attrProtocol])
+	assert.Equal(t, registryv1.Service_PROTOCOL_HTTP.String(), attrs[attrProtocol])
 	assert.Equal(t, "1", attrs[attrWeight])
 	assert.Equal(t, controllerName, attrs[attrController])
 }
@@ -258,7 +258,7 @@ func TestMarshalAttrsLocalityKeys(t *testing.T) {
 		},
 	}
 
-	attrs := marshalAttrs(registryv1.Service_HTTP, ep)
+	attrs := marshalAttrs(registryv1.Service_PROTOCOL_HTTP, ep)
 
 	assert.Equal(t, "us-west-2", attrs[attrRegion])
 	assert.Equal(t, "us-west-2b", attrs[attrZone])
@@ -271,7 +271,7 @@ func TestMarshalAttrsNilLocalityOmitsKeys(t *testing.T) {
 		Locality:    nil,
 	}
 
-	attrs := marshalAttrs(registryv1.Service_HTTP, ep)
+	attrs := marshalAttrs(registryv1.Service_PROTOCOL_HTTP, ep)
 
 	_, hasRegion := attrs[attrRegion]
 	_, hasZone := attrs[attrZone]
@@ -290,7 +290,7 @@ func TestMarshalAttrsKubernetesMetadataKeys(t *testing.T) {
 		},
 	}
 
-	attrs := marshalAttrs(registryv1.Service_HTTP, ep)
+	attrs := marshalAttrs(registryv1.Service_PROTOCOL_HTTP, ep)
 
 	assert.Equal(t, "kube-system", attrs[attrK8sNamespace])
 	assert.Equal(t, "coredns-abc", attrs[attrK8sPod])
@@ -307,7 +307,7 @@ func TestMarshalAttrsContainerMetadataKeys(t *testing.T) {
 		},
 	}
 
-	attrs := marshalAttrs(registryv1.Service_HTTP, ep)
+	attrs := marshalAttrs(registryv1.Service_PROTOCOL_HTTP, ep)
 
 	assert.Equal(t, "ctr-xyz", attrs[attrContainerID])
 	assert.Equal(t, "/var/run/netns/xyz", attrs[attrNetworkNS])
@@ -322,7 +322,7 @@ func TestMarshalAttrsMetadataJSON(t *testing.T) {
 		},
 	}
 
-	attrs := marshalAttrs(registryv1.Service_HTTP, ep)
+	attrs := marshalAttrs(registryv1.Service_PROTOCOL_HTTP, ep)
 
 	assert.NotEmpty(t, attrs[attrMetadata], "metadata attr should be present")
 	// Verify the JSON round-trips to the original map via unmarshal.
@@ -375,7 +375,7 @@ func TestUnmarshalEndpointErrors(t *testing.T) {
 		{
 			name: "invalid metadata JSON is silently ignored",
 			attrs: map[string]string{
-				attrIPv4:    "10.0.0.1",
+				attrIPv4:     "10.0.0.1",
 				attrMetadata: "{invalid json}",
 			},
 			wantErr: false,
@@ -460,11 +460,11 @@ func TestProtocolFromAttrs(t *testing.T) {
 		expected registryv1.Service_Protocol
 	}{
 		{
-			name: "HTTP protocol string resolves to Service_HTTP",
+			name: "HTTP protocol string resolves to Service_PROTOCOL_HTTP",
 			attrs: map[string]string{
-				attrProtocol: registryv1.Service_HTTP.String(),
+				attrProtocol: registryv1.Service_PROTOCOL_HTTP.String(),
 			},
-			expected: registryv1.Service_HTTP,
+			expected: registryv1.Service_PROTOCOL_HTTP,
 		},
 		{
 			name: "PROTOCOL_UNSPECIFIED string resolves to Service_PROTOCOL_UNSPECIFIED",

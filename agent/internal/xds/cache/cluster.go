@@ -132,7 +132,7 @@ func (c *SnapshotCache) VirtualHosts() []types.Resource {
 func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterName string, nodeName string, reg registry.Registry) error {
 	c.log.V(2).Info("generating clusters and endpoints from registry")
 
-	serviceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_HTTP)
+	serviceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
 		return fmt.Errorf("failed to list endpoints from registry: %w", err)
 	}

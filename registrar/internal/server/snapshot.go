@@ -85,11 +85,11 @@ func (s *Snapshot) GetAllWithVersion(protocol registryv1.Service_Protocol) (map[
 // Diff compares a new set of endpoints against the current snapshot and returns
 // the events needed to transition from the current state to the new state.
 // It does not modify the snapshot.
-func (s *Snapshot) Diff(newEndpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) []*registrarv1.EndpointEvent {
+func (s *Snapshot) Diff(newEndpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) []*registrarv1.WatchEndpointsResponse {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var events []*registrarv1.EndpointEvent
+	var events []*registrarv1.WatchEndpointsResponse
 
 	// Build a set of new keys for efficient lookup.
 	newKeys := make(map[serviceKey]*snapshotEntry)
@@ -110,15 +110,15 @@ func (s *Snapshot) Diff(newEndpoints map[string]map[registryv1.Service_Protocol]
 	for key, oldEntry := range s.entries {
 		newEntry, exists := newKeys[key]
 		if !exists {
-			events = append(events, &registrarv1.EndpointEvent{
-				Type:        registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+			events = append(events, &registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 				ServiceName: oldEntry.ServiceName,
 				Protocol:    oldEntry.Protocol,
 				Endpoint:    oldEntry.Endpoint,
 			})
 		} else if !proto.Equal(oldEntry.Endpoint, newEntry.Endpoint) {
-			events = append(events, &registrarv1.EndpointEvent{
-				Type:        registrarv1.EndpointEvent_ENDPOINT_UPDATED,
+			events = append(events, &registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED,
 				ServiceName: newEntry.ServiceName,
 				Protocol:    newEntry.Protocol,
 				Endpoint:    newEntry.Endpoint,
@@ -129,8 +129,8 @@ func (s *Snapshot) Diff(newEndpoints map[string]map[registryv1.Service_Protocol]
 	// Detect added endpoints.
 	for key, newEntry := range newKeys {
 		if _, exists := s.entries[key]; !exists {
-			events = append(events, &registrarv1.EndpointEvent{
-				Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+			events = append(events, &registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 				ServiceName: newEntry.ServiceName,
 				Protocol:    newEntry.Protocol,
 				Endpoint:    newEntry.Endpoint,
@@ -166,7 +166,7 @@ func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol]
 
 // Apply applies a set of events to the snapshot, updating it in place.
 // It returns the new version string.
-func (s *Snapshot) Apply(events []*registrarv1.EndpointEvent) string {
+func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) string {
 	if len(events) == 0 {
 		return s.Version()
 	}
@@ -182,13 +182,13 @@ func (s *Snapshot) Apply(events []*registrarv1.EndpointEvent) string {
 		}
 
 		switch event.GetType() {
-		case registrarv1.EndpointEvent_ENDPOINT_ADDED, registrarv1.EndpointEvent_ENDPOINT_UPDATED:
+		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
 			s.entries[key] = &snapshotEntry{
 				ServiceName: event.GetServiceName(),
 				Protocol:    event.GetProtocol(),
 				Endpoint:    event.GetEndpoint(),
 			}
-		case registrarv1.EndpointEvent_ENDPOINT_REMOVED:
+		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
 			delete(s.entries, key)
 		}
 	}
@@ -198,16 +198,16 @@ func (s *Snapshot) Apply(events []*registrarv1.EndpointEvent) string {
 
 // FullSnapshotEvents returns the current contents of the snapshot as a slice of
 // FULL_SNAPSHOT events. This is used to send the initial state to a new watcher.
-func (s *Snapshot) FullSnapshotEvents() ([]*registrarv1.EndpointEvent, string) {
+func (s *Snapshot) FullSnapshotEvents() ([]*registrarv1.WatchEndpointsResponse, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	events := make([]*registrarv1.EndpointEvent, 0, len(s.entries))
+	events := make([]*registrarv1.WatchEndpointsResponse, 0, len(s.entries))
 	version := s.Version()
 
 	for _, entry := range s.entries {
-		events = append(events, &registrarv1.EndpointEvent{
-			Type:        registrarv1.EndpointEvent_FULL_SNAPSHOT,
+		events = append(events, &registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 			ServiceName: entry.ServiceName,
 			Protocol:    entry.Protocol,
 			Endpoint:    entry.Endpoint,

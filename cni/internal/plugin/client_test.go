@@ -34,7 +34,7 @@ func (m *mockCNIService) AddPod(_ context.Context, req *cniv1.AddPodRequest) (*c
 	m.addPodCalled = true
 	m.lastAddedPod = req.Pod
 	return &cniv1.AddPodResponse{
-		Result: cniv1.AddPodResponse_SUCCESS,
+		Result: cniv1.AddPodResponse_RESULT_SUCCESS,
 	}, nil
 }
 
@@ -44,7 +44,7 @@ func (m *mockCNIService) RemovePod(_ context.Context, req *cniv1.RemovePodReques
 		m.lastRemovedName = req.GetName()
 	}
 	return &cniv1.RemovePodResponse{
-		Result: cniv1.RemovePodResponse_SUCCESS,
+		Result: cniv1.RemovePodResponse_RESULT_SUCCESS,
 	}, nil
 }
 
@@ -61,14 +61,14 @@ func (f *failingCNIService) AddPod(_ context.Context, _ *cniv1.AddPodRequest) (*
 	if f.addPodErr != nil {
 		return nil, f.addPodErr
 	}
-	return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_SUCCESS}, nil
+	return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS}, nil
 }
 
 func (f *failingCNIService) RemovePod(_ context.Context, _ *cniv1.RemovePodRequest) (*cniv1.RemovePodResponse, error) {
 	if f.removePodErr != nil {
 		return nil, f.removePodErr
 	}
-	return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS}, nil
+	return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS}, nil
 }
 
 // newBufconnClient creates a CNIClient backed by a bufconn listener for testing.
@@ -140,7 +140,7 @@ func TestCNIClient_AddPod(t *testing.T) {
 	resp, err := client.AddPod(context.Background(), pod)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
-	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, resp.Result)
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.Result)
 	assert.True(t, mockService.addPodCalled)
 	assert.Equal(t, pod.Name, mockService.lastAddedPod.Name)
 }
@@ -208,7 +208,7 @@ func TestCNIClient_RemovePod(t *testing.T) {
 	resp, err := client.RemovePod(context.Background(), "test-pod", "default", "container-1234")
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
-	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, resp.Result)
+	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, resp.Result)
 	assert.True(t, mockService.removePodCalled)
 	assert.Equal(t, "test-pod", mockService.lastRemovedName)
 }
@@ -353,10 +353,9 @@ func TestCNIClient_UnixSocketIntegration(t *testing.T) {
 
 	addResp, err := client.AddPod(ctx, pod)
 	assert.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_SUCCESS, addResp.Result)
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, addResp.Result)
 
 	removeResp, err := client.RemovePod(ctx, "integration-pod", "test", "container-456")
 	assert.NoError(t, err)
-	assert.Equal(t, cniv1.RemovePodResponse_SUCCESS, removeResp.Result)
+	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, removeResp.Result)
 }
-

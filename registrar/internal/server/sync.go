@@ -60,7 +60,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 func (s *Syncer) sync(ctx context.Context) {
 	s.log.V(1).Info("starting sync cycle")
 
-	endpoints, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_HTTP)
+	endpoints, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
 		s.log.Error(err, "failed to list endpoints from registry")
 		return
@@ -72,7 +72,7 @@ func (s *Syncer) sync(ctx context.Context) {
 		if newState[svcName] == nil {
 			newState[svcName] = make(map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
 		}
-		newState[svcName][registryv1.Service_HTTP] = eps
+		newState[svcName][registryv1.Service_PROTOCOL_HTTP] = eps
 	}
 
 	// Compute diff and apply.

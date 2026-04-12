@@ -79,7 +79,6 @@ func (c *CNIClient) AddPod(ctx context.Context, pod *cniv1.CNIPod) (*cniv1.AddPo
 		resp, callErr = c.client.AddPod(callCtx, req)
 		return callErr
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +127,7 @@ func (c *CNIClient) VerifyPodRegistered(ctx context.Context, pod *cniv1.CNIPod) 
 		return fmt.Errorf("failed to verify pod registration: %w", err)
 	}
 
-	if res.Result != cniv1.AddPodResponse_SUCCESS {
+	if res.Result != cniv1.AddPodResponse_RESULT_SUCCESS {
 		return fmt.Errorf("pod verification failed: agent returned %v", res.Result)
 	}
 

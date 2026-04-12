@@ -22,6 +22,18 @@ test-integration:
 test-race:
 	@bazel test --test_output=errors --@rules_go//go/config:race //...
 
+.PHONY: format
+format:
+	@bazel run //:format
+
+.PHONY: format-check
+format-check:
+	@bazel run //:format.check
+
+.PHONY: lint
+lint:
+	@bazel build --config=lint //...
+
 .PHONY: fmt
 fmt:
 	@gofmt -w -s .

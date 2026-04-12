@@ -15,6 +15,13 @@ test --test_env=HOME
 try-import %workspace%/colima.bazelrc
 test:macos --config=colima
 
+# Lint (usage: --config=lint or: bazel build --config=lint //...)
+build:lint --aspects=//bazel/lint:linters.bzl%buf,//bazel/lint:linters.bzl%buildifier,//bazel/lint:linters.bzl%shellcheck
+
+# CI lint (usage: --config=ci — fails build on lint violations)
+build:ci --config=lint
+build:ci --@aspect_rules_lint//lint:fail_on_violation
+
 # Race detector (usage: --config=race)
 test:race --@rules_go//go/config:race
 

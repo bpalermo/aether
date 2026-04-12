@@ -49,8 +49,8 @@ func TestApplyEvent_FullSnapshot_AddsToCache(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.applyEvent(&registrarv1.EndpointEvent{
-				Type:        registrarv1.EndpointEvent_FULL_SNAPSHOT,
+			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
@@ -106,8 +106,8 @@ func TestApplyEvent_EndpointAdded(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
 			r.cache = tt.initialCache
-			r.applyEvent(&registrarv1.EndpointEvent{
-				Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
@@ -170,8 +170,8 @@ func TestApplyEvent_EndpointUpdated(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
 			r.cache = tt.initialCache
-			r.applyEvent(&registrarv1.EndpointEvent{
-				Type:        registrarv1.EndpointEvent_ENDPOINT_UPDATED,
+			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
@@ -235,8 +235,8 @@ func TestApplyEvent_EndpointRemoved(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
 			r.cache = tt.initialCache
-			r.applyEvent(&registrarv1.EndpointEvent{
-				Type:        registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
@@ -351,18 +351,18 @@ func TestCache_MultipleServices(t *testing.T) {
 	ep3 := makeEndpoint("10.0.0.3", 9090)
 
 	// Add endpoints across two services.
-	r.applyEvent(&registrarv1.EndpointEvent{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-a",
 		Endpoint:    ep1,
 	})
-	r.applyEvent(&registrarv1.EndpointEvent{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-b",
 		Endpoint:    ep2,
 	})
-	r.applyEvent(&registrarv1.EndpointEvent{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-a",
 		Endpoint:    ep3,
 	})
@@ -373,13 +373,13 @@ func TestCache_MultipleServices(t *testing.T) {
 	}, r.cache)
 
 	// Remove svc-a entirely.
-	r.applyEvent(&registrarv1.EndpointEvent{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 		ServiceName: "svc-a",
 		Endpoint:    ep1,
 	})
-	r.applyEvent(&registrarv1.EndpointEvent{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 		ServiceName: "svc-a",
 		Endpoint:    ep3,
 	})
