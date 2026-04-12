@@ -2,8 +2,8 @@
 package cmd
 
 import (
-	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/constants"
+	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/common/manager"
 )
 

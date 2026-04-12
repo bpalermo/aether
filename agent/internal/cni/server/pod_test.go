@@ -8,10 +8,10 @@ import (
 	"os"
 	"testing"
 
+	agentconstants "github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/envoy/admin"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	agentconstants "github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/storage"
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -39,7 +39,7 @@ type testRegistry struct {
 var _ registry.Registry = (*testRegistry)(nil)
 
 func (r *testRegistry) Initialize(_ context.Context) error { return nil }
-func (r *testRegistry) Close() error                        { return nil }
+func (r *testRegistry) Close() error                       { return nil }
 
 func (r *testRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, _ *registryv1.ServiceEndpoint) error {
 	return r.registerEndpointErr
@@ -340,7 +340,7 @@ func TestAddPod(t *testing.T) {
 					Ips:              []string{"10.0.0.1"},
 				},
 			},
-			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_SUCCESS},
+			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS},
 			wantErr: false,
 		},
 		{
@@ -391,7 +391,7 @@ func TestAddPod(t *testing.T) {
 			req: &cniv1.AddPodRequest{
 				Pod: validCNIPod("my-pod", "default", containerID),
 			},
-			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_SUCCESS},
+			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS},
 			wantErr: false,
 		},
 	}
@@ -456,7 +456,7 @@ func TestRemovePod(t *testing.T) {
 				Namespace:   "default",
 				ContainerId: containerID,
 			},
-			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS},
+			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS},
 			wantErr: false,
 		},
 		{
@@ -492,7 +492,7 @@ func TestRemovePod(t *testing.T) {
 				Namespace:   ignorableStoredPod.GetNamespace(),
 				ContainerId: containerID,
 			},
-			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS},
+			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS},
 			wantErr: false,
 		},
 		{
@@ -551,7 +551,7 @@ func TestRemovePod(t *testing.T) {
 				Namespace:   storedPod.GetNamespace(),
 				ContainerId: containerID,
 			},
-			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS},
+			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS},
 			wantErr: false,
 		},
 	}

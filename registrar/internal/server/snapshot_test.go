@@ -24,7 +24,7 @@ func TestNewSnapshot(t *testing.T) {
 	s := NewSnapshot()
 	require.NotNil(t, s)
 	assert.Equal(t, "0", s.Version())
-	assert.Empty(t, s.GetAll(registryv1.Service_HTTP))
+	assert.Empty(t, s.GetAll(registryv1.Service_PROTOCOL_HTTP))
 }
 
 func TestVersion(t *testing.T) {
@@ -48,11 +48,11 @@ func TestVersion(t *testing.T) {
 		{
 			name: "version increments after Apply with events",
 			applyOperations: func(s *Snapshot) {
-				s.Apply([]*registrarv1.EndpointEvent{
+				s.Apply([]*registrarv1.WatchEndpointsResponse{
 					{
-						Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+						Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 						ServiceName: "svc",
-						Protocol:    registryv1.Service_HTTP,
+						Protocol:    registryv1.Service_PROTOCOL_HTTP,
 						Endpoint:    makeEndpoint("10.0.0.1"),
 					},
 				})
@@ -62,7 +62,7 @@ func TestVersion(t *testing.T) {
 		{
 			name: "version does not increment after Apply with empty events",
 			applyOperations: func(s *Snapshot) {
-				s.Apply([]*registrarv1.EndpointEvent{})
+				s.Apply([]*registrarv1.WatchEndpointsResponse{})
 			},
 			expectedVersion: "0",
 		},
@@ -100,20 +100,20 @@ func TestGetAll(t *testing.T) {
 		{
 			name:     "empty snapshot returns empty map",
 			seed:     map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{},
 		},
 		{
 			name: "returns only endpoints matching the requested protocol",
 			seed: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1, ep2},
+					registryv1.Service_PROTOCOL_HTTP: {ep1, ep2},
 				},
 				"svc-b": {
 					registryv1.Service_PROTOCOL_UNSPECIFIED: {ep3},
 				},
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
 				"svc-a": {ep1, ep2},
 			},
@@ -122,7 +122,7 @@ func TestGetAll(t *testing.T) {
 			name: "returns nothing when no endpoints match protocol",
 			seed: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			protocol: registryv1.Service_PROTOCOL_UNSPECIFIED,
@@ -132,13 +132,13 @@ func TestGetAll(t *testing.T) {
 			name: "returns endpoints from multiple services for matching protocol",
 			seed: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 				"svc-b": {
-					registryv1.Service_HTTP: {ep2},
+					registryv1.Service_PROTOCOL_HTTP: {ep2},
 				},
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
 				"svc-a": {ep1},
 				"svc-b": {ep2},
@@ -176,7 +176,7 @@ func TestGetAllWithVersion(t *testing.T) {
 		{
 			name:            "empty snapshot returns empty map and version 1",
 			seed:            map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			protocol:        registryv1.Service_HTTP,
+			protocol:        registryv1.Service_PROTOCOL_HTTP,
 			expectedVersion: "1",
 			expectedKeys:    nil,
 		},
@@ -184,10 +184,10 @@ func TestGetAllWithVersion(t *testing.T) {
 			name: "returns endpoints and current version",
 			seed: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
-			protocol:        registryv1.Service_HTTP,
+			protocol:        registryv1.Service_PROTOCOL_HTTP,
 			expectedVersion: "1",
 			expectedKeys:    []string{"svc-a"},
 		},
@@ -221,64 +221,64 @@ func TestDiff(t *testing.T) {
 		name         string
 		initial      map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint
 		newEndpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint
-		wantTypes    []registrarv1.EndpointEvent_EventType
+		wantTypes    []registrarv1.WatchEndpointsResponse_EventType
 	}{
 		{
-			name:    "empty snapshot diff with empty new returns no events",
-			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
+			name:         "empty snapshot diff with empty new returns no events",
+			initial:      map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			newEndpoints: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			wantTypes: nil,
+			wantTypes:    nil,
 		},
 		{
 			name:    "adding endpoint to empty snapshot produces ADDED event",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			newEndpoints: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
-			wantTypes: []registrarv1.EndpointEvent_EventType{
-				registrarv1.EndpointEvent_ENDPOINT_ADDED,
+			wantTypes: []registrarv1.WatchEndpointsResponse_EventType{
+				registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 			},
 		},
 		{
 			name: "removing all endpoints produces REMOVED event",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			newEndpoints: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			wantTypes: []registrarv1.EndpointEvent_EventType{
-				registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+			wantTypes: []registrarv1.WatchEndpointsResponse_EventType{
+				registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 			},
 		},
 		{
 			name: "updating endpoint produces UPDATED event",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			newEndpoints: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1Updated},
+					registryv1.Service_PROTOCOL_HTTP: {ep1Updated},
 				},
 			},
-			wantTypes: []registrarv1.EndpointEvent_EventType{
-				registrarv1.EndpointEvent_ENDPOINT_UPDATED,
+			wantTypes: []registrarv1.WatchEndpointsResponse_EventType{
+				registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED,
 			},
 		},
 		{
 			name: "identical endpoint produces no events",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			newEndpoints: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			wantTypes: nil,
@@ -287,35 +287,35 @@ func TestDiff(t *testing.T) {
 			name: "mixed ADDED and REMOVED events",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			newEndpoints: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep2},
+					registryv1.Service_PROTOCOL_HTTP: {ep2},
 				},
 			},
-			wantTypes: []registrarv1.EndpointEvent_EventType{
-				registrarv1.EndpointEvent_ENDPOINT_REMOVED,
-				registrarv1.EndpointEvent_ENDPOINT_ADDED,
+			wantTypes: []registrarv1.WatchEndpointsResponse_EventType{
+				registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
+				registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 			},
 		},
 		{
 			name: "Diff does not modify snapshot version",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			newEndpoints: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep2},
+					registryv1.Service_PROTOCOL_HTTP: {ep2},
 				},
 			},
 			// Version stays at 1 from the initial Replace call.
-			wantTypes: []registrarv1.EndpointEvent_EventType{
-				registrarv1.EndpointEvent_ENDPOINT_REMOVED,
-				registrarv1.EndpointEvent_ENDPOINT_ADDED,
+			wantTypes: []registrarv1.WatchEndpointsResponse_EventType{
+				registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
+				registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 			},
 		},
 	}
@@ -338,7 +338,7 @@ func TestDiff(t *testing.T) {
 			}
 
 			require.Len(t, events, len(tt.wantTypes))
-			gotTypes := make([]registrarv1.EndpointEvent_EventType, len(events))
+			gotTypes := make([]registrarv1.WatchEndpointsResponse_EventType, len(events))
 			for i, ev := range events {
 				gotTypes[i] = ev.GetType()
 			}
@@ -361,10 +361,10 @@ func TestReplace(t *testing.T) {
 		expectedEmpty   bool
 	}{
 		{
-			name:    "replace on empty snapshot bumps version",
-			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			replacement: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			protocol:        registryv1.Service_HTTP,
+			name:            "replace on empty snapshot bumps version",
+			initial:         map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
+			replacement:     map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
+			protocol:        registryv1.Service_PROTOCOL_HTTP,
 			expectedVersion: "2",
 			expectedEmpty:   true,
 		},
@@ -373,10 +373,10 @@ func TestReplace(t *testing.T) {
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			replacement: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
-			protocol:        registryv1.Service_HTTP,
+			protocol:        registryv1.Service_PROTOCOL_HTTP,
 			expectedVersion: "2",
 			expectedKeys:    []string{"svc-a"},
 		},
@@ -384,15 +384,15 @@ func TestReplace(t *testing.T) {
 			name: "replace removes previous entries not in the new set",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-old": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			replacement: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-new": {
-					registryv1.Service_HTTP: {ep2},
+					registryv1.Service_PROTOCOL_HTTP: {ep2},
 				},
 			},
-			protocol:        registryv1.Service_HTTP,
+			protocol:        registryv1.Service_PROTOCOL_HTTP,
 			expectedVersion: "2",
 			expectedKeys:    []string{"svc-new"},
 		},
@@ -442,40 +442,40 @@ func TestApply(t *testing.T) {
 	tests := []struct {
 		name            string
 		initial         map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint
-		events          []*registrarv1.EndpointEvent
+		events          []*registrarv1.WatchEndpointsResponse
 		expectedVersion string
 		checkSnapshot   func(t *testing.T, s *Snapshot)
 	}{
 		{
 			name:    "empty events returns current version without bump",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			events:  []*registrarv1.EndpointEvent{},
+			events:  []*registrarv1.WatchEndpointsResponse{},
 			// No Replace was called; version stays at 0.
 			expectedVersion: "0",
 			checkSnapshot:   func(t *testing.T, s *Snapshot) {},
 		},
 		{
-			name:    "nil events returns current version without bump",
-			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			events:  nil,
+			name:            "nil events returns current version without bump",
+			initial:         map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
+			events:          nil,
 			expectedVersion: "0",
 			checkSnapshot:   func(t *testing.T, s *Snapshot) {},
 		},
 		{
 			name:    "ENDPOINT_ADDED event inserts endpoint",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			events: []*registrarv1.EndpointEvent{
+			events: []*registrarv1.WatchEndpointsResponse{
 				{
-					Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+					Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 					ServiceName: "svc-a",
-					Protocol:    registryv1.Service_HTTP,
+					Protocol:    registryv1.Service_PROTOCOL_HTTP,
 					Endpoint:    ep1,
 				},
 			},
 			// No prior Replace; version starts at 0, Apply bumps to 1.
 			expectedVersion: "1",
 			checkSnapshot: func(t *testing.T, s *Snapshot) {
-				got := s.GetAll(registryv1.Service_HTTP)
+				got := s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 				require.Contains(t, got, "svc-a")
 				assert.ElementsMatch(t, []*registryv1.ServiceEndpoint{ep1}, got["svc-a"])
 			},
@@ -484,21 +484,21 @@ func TestApply(t *testing.T) {
 			name: "ENDPOINT_REMOVED event deletes endpoint",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
-			events: []*registrarv1.EndpointEvent{
+			events: []*registrarv1.WatchEndpointsResponse{
 				{
-					Type:        registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+					Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 					ServiceName: "svc-a",
-					Protocol:    registryv1.Service_HTTP,
+					Protocol:    registryv1.Service_PROTOCOL_HTTP,
 					Endpoint:    ep1,
 				},
 			},
 			// Replace bumps to 1, Apply bumps to 2.
 			expectedVersion: "2",
 			checkSnapshot: func(t *testing.T, s *Snapshot) {
-				got := s.GetAll(registryv1.Service_HTTP)
+				got := s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 				assert.Empty(t, got)
 			},
 		},
@@ -506,20 +506,20 @@ func TestApply(t *testing.T) {
 			name: "ENDPOINT_UPDATED event replaces endpoint in place",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
-			events: []*registrarv1.EndpointEvent{
+			events: []*registrarv1.WatchEndpointsResponse{
 				{
-					Type:        registrarv1.EndpointEvent_ENDPOINT_UPDATED,
+					Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED,
 					ServiceName: "svc-a",
-					Protocol:    registryv1.Service_HTTP,
+					Protocol:    registryv1.Service_PROTOCOL_HTTP,
 					Endpoint:    ep1Updated,
 				},
 			},
 			expectedVersion: "2",
 			checkSnapshot: func(t *testing.T, s *Snapshot) {
-				got := s.GetAll(registryv1.Service_HTTP)
+				got := s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 				require.Contains(t, got, "svc-a")
 				assert.ElementsMatch(t, []*registryv1.ServiceEndpoint{ep1Updated}, got["svc-a"])
 			},
@@ -527,24 +527,24 @@ func TestApply(t *testing.T) {
 		{
 			name:    "multiple events processed in order",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
-			events: []*registrarv1.EndpointEvent{
+			events: []*registrarv1.WatchEndpointsResponse{
 				{
-					Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+					Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 					ServiceName: "svc-a",
-					Protocol:    registryv1.Service_HTTP,
+					Protocol:    registryv1.Service_PROTOCOL_HTTP,
 					Endpoint:    ep1,
 				},
 				{
-					Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+					Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 					ServiceName: "svc-a",
-					Protocol:    registryv1.Service_HTTP,
+					Protocol:    registryv1.Service_PROTOCOL_HTTP,
 					Endpoint:    ep2,
 				},
 			},
 			// No prior Replace; Apply bumps from 0 to 1.
 			expectedVersion: "1",
 			checkSnapshot: func(t *testing.T, s *Snapshot) {
-				got := s.GetAll(registryv1.Service_HTTP)
+				got := s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 				require.Contains(t, got, "svc-a")
 				assert.ElementsMatch(t, []*registryv1.ServiceEndpoint{ep1, ep2}, got["svc-a"])
 			},
@@ -553,20 +553,20 @@ func TestApply(t *testing.T) {
 			name: "ENDPOINT_REMOVED for nonexistent key is a no-op",
 			initial: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
-			events: []*registrarv1.EndpointEvent{
+			events: []*registrarv1.WatchEndpointsResponse{
 				{
-					Type:        registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+					Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 					ServiceName: "svc-a",
-					Protocol:    registryv1.Service_HTTP,
+					Protocol:    registryv1.Service_PROTOCOL_HTTP,
 					Endpoint:    ep2, // ep2 was never added
 				},
 			},
 			expectedVersion: "2",
 			checkSnapshot: func(t *testing.T, s *Snapshot) {
-				got := s.GetAll(registryv1.Service_HTTP)
+				got := s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 				require.Contains(t, got, "svc-a")
 				assert.ElementsMatch(t, []*registryv1.ServiceEndpoint{ep1}, got["svc-a"])
 			},
@@ -598,36 +598,36 @@ func TestFullSnapshotEvents(t *testing.T) {
 		seed          map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint
 		wantCount     int
 		wantVersion   string
-		wantEventType registrarv1.EndpointEvent_EventType
+		wantEventType registrarv1.WatchEndpointsResponse_EventType
 	}{
 		{
 			name:          "empty snapshot returns empty slice",
 			seed:          map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{},
 			wantCount:     0,
 			wantVersion:   "1",
-			wantEventType: registrarv1.EndpointEvent_FULL_SNAPSHOT,
+			wantEventType: registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 		},
 		{
 			name: "single endpoint produces one FULL_SNAPSHOT event",
 			seed: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1},
+					registryv1.Service_PROTOCOL_HTTP: {ep1},
 				},
 			},
 			wantCount:     1,
 			wantVersion:   "1",
-			wantEventType: registrarv1.EndpointEvent_FULL_SNAPSHOT,
+			wantEventType: registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 		},
 		{
 			name: "multiple endpoints each produce a FULL_SNAPSHOT event",
 			seed: map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				"svc-a": {
-					registryv1.Service_HTTP: {ep1, ep2},
+					registryv1.Service_PROTOCOL_HTTP: {ep1, ep2},
 				},
 			},
 			wantCount:     2,
 			wantVersion:   "1",
-			wantEventType: registrarv1.EndpointEvent_FULL_SNAPSHOT,
+			wantEventType: registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 		},
 	}
 
@@ -657,15 +657,15 @@ func TestSnapshotThreadSafety(t *testing.T) {
 
 	seed := map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 		"svc-a": {
-			registryv1.Service_HTTP: {ep},
+			registryv1.Service_PROTOCOL_HTTP: {ep},
 		},
 	}
 
-	addEvent := []*registrarv1.EndpointEvent{
+	addEvent := []*registrarv1.WatchEndpointsResponse{
 		{
-			Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 			ServiceName: "svc-b",
-			Protocol:    registryv1.Service_HTTP,
+			Protocol:    registryv1.Service_PROTOCOL_HTTP,
 			Endpoint:    makeEndpoint("10.0.0.2"),
 		},
 	}
@@ -683,9 +683,9 @@ func TestSnapshotThreadSafety(t *testing.T) {
 			case 1:
 				s.Apply(addEvent)
 			case 2:
-				s.GetAll(registryv1.Service_HTTP)
+				s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 			case 3:
-				s.GetAllWithVersion(registryv1.Service_HTTP)
+				s.GetAllWithVersion(registryv1.Service_PROTOCOL_HTTP)
 			case 4:
 				s.FullSnapshotEvents()
 			}

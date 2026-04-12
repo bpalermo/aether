@@ -95,11 +95,13 @@ func TestGenerateInboundHTTPListener(t *testing.T) {
 				NetworkNamespace: "",
 			},
 			expectedError: true,
-		}, {
+		},
+		{
 			name:          "nil pod",
 			cniPod:        nil,
 			expectedError: true,
-		}, {
+		},
+		{
 			name: "custom validation context name",
 			cniPod: &cniv1.CNIPod{
 				Name:             "secure-pod",

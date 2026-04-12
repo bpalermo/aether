@@ -50,7 +50,7 @@ func NewRegistrarConfig() *RegistrarConfig {
 	return &RegistrarConfig{
 		Config: manager.Config{
 			HealthProbeBindAddress: ":8082",
-			MetricsBindAddress:    ":8081",
+			MetricsBindAddress:     ":8081",
 		},
 		RegistryBackend:         "kubernetes",
 		EtcdEndpoints:           []string{"localhost:2379"},

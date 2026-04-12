@@ -21,4 +21,6 @@ user.bazelrc
 
 certs
 
-secretes.yaml
+secrets.yaml
+
+.claude/settings.local.json

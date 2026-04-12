@@ -240,7 +240,7 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 		}
 
 		// Clear cache before the first FULL_SNAPSHOT event to replace stale data.
-		if event.GetType() == registrarv1.EndpointEvent_FULL_SNAPSHOT && !snapshotCleared {
+		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT && !snapshotCleared {
 			r.mu.Lock()
 			r.cache = make(map[string][]*registryv1.ServiceEndpoint)
 			r.mu.Unlock()
@@ -256,7 +256,7 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 }
 
 // applyEvent updates the local cache based on an endpoint event.
-func (r *RegistrarRegistry) applyEvent(event *registrarv1.EndpointEvent) {
+func (r *RegistrarRegistry) applyEvent(event *registrarv1.WatchEndpointsResponse) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -264,14 +264,14 @@ func (r *RegistrarRegistry) applyEvent(event *registrarv1.EndpointEvent) {
 	ep := event.GetEndpoint()
 
 	switch event.GetType() {
-	case registrarv1.EndpointEvent_FULL_SNAPSHOT:
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT:
 		// Upsert for full snapshot events.
 		r.upsertLocked(svcName, ep)
 
-	case registrarv1.EndpointEvent_ENDPOINT_ADDED, registrarv1.EndpointEvent_ENDPOINT_UPDATED:
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
 		r.upsertLocked(svcName, ep)
 
-	case registrarv1.EndpointEvent_ENDPOINT_REMOVED:
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
 		r.removeLocked(svcName, ep.GetIp())
 	}
 }

@@ -140,7 +140,7 @@ func TestCachedFileStorage_GetResourceFromDisk(t *testing.T) {
 	require.NoError(t, err)
 
 	filePath := filepath.Join(dir, "disk_key.json")
-	err = os.WriteFile(filePath, data, 0644)
+	err = os.WriteFile(filePath, data, 0o644)
 	require.NoError(t, err)
 
 	// Create storage after the file exists
@@ -201,12 +201,12 @@ func TestCachedFileStorage_LoadAll(t *testing.T) {
 		require.NoError(t, err)
 
 		filePath := filepath.Join(dir, key+".json")
-		err = os.WriteFile(filePath, data, 0644)
+		err = os.WriteFile(filePath, data, 0o644)
 		require.NoError(t, err)
 	}
 
 	// Create a non-pb file that should be ignored
-	err := os.WriteFile(filepath.Join(dir, "ignore.txt"), []byte("ignore"), 0644)
+	err := os.WriteFile(filepath.Join(dir, "ignore.txt"), []byte("ignore"), 0o644)
 	require.NoError(t, err)
 
 	// Create storage and load all

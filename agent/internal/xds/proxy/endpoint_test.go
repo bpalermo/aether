@@ -131,9 +131,9 @@ func TestLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
 					"env":     "staging",
 				},
 			},
-			expectedIP:      "10.0.0.3",
-			expectedCluster: "cluster-c",
-			expectUserMeta:  true,
+			expectedIP:       "10.0.0.3",
+			expectedCluster:  "cluster-c",
+			expectUserMeta:   true,
 			expectedMetaKeys: []string{"version", "env"},
 		},
 		{

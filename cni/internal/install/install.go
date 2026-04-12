@@ -20,7 +20,6 @@ type Installer struct {
 }
 
 func init() {
-
 }
 
 // NewInstaller returns an instance of Installer with the given config
@@ -82,7 +81,7 @@ func (in *Installer) copyBinaries(srcDir string, targetDir string) ([]string, er
 		srcPath := filepath.Join(srcDir, entry.Name())
 
 		// Ensure target directory exists
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create target directory %s: %w", targetDir, err)
 		}
 
@@ -161,6 +160,5 @@ func (in *Installer) copyFileAtomic(src, dst string) error {
 // from the primary CNI config file if using an Istio owned CNI config is enabled. The value is unset on the
 // first call of checkValidCNIConfig
 func checkValidCNIConfig(ctx context.Context, cfg *InstallerConfig, cniConfigFilepath string) error {
-
 	return nil
 }

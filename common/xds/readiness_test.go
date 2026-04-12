@@ -19,10 +19,10 @@ func newTestRequest(t *testing.T) *http.Request {
 
 func TestHealthzCheck(t *testing.T) {
 	tests := []struct {
-		name     string
-		setLive  bool
-		wantErr  bool
-		wantMsg  string
+		name    string
+		setLive bool
+		wantErr bool
+		wantMsg string
 	}{
 		{
 			name:    "returns nil when server is live",
@@ -57,10 +57,10 @@ func TestHealthzCheck(t *testing.T) {
 
 func TestReadyzCheck(t *testing.T) {
 	tests := []struct {
-		name      string
-		setReady  bool
-		wantErr   bool
-		wantMsg   string
+		name     string
+		setReady bool
+		wantErr  bool
+		wantMsg  string
 	}{
 		{
 			name:     "returns nil when server is ready",

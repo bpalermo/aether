@@ -6,8 +6,8 @@ import (
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/registry"
 	"github.com/bpalermo/aether/common/xds"
+	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 )
@@ -65,8 +65,8 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 	}
 
 	// Optimistic broadcast: notify watchers immediately.
-	events := []*registrarv1.EndpointEvent{{
-		Type:        registrarv1.EndpointEvent_ENDPOINT_ADDED,
+	events := []*registrarv1.WatchEndpointsResponse{{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: req.GetServiceName(),
 		Protocol:    req.GetProtocol(),
 		Endpoint:    req.GetEndpoint(),
@@ -96,10 +96,10 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 	}
 
 	// Build removal events.
-	events := make([]*registrarv1.EndpointEvent, 0, len(ips))
+	events := make([]*registrarv1.WatchEndpointsResponse, 0, len(ips))
 	for _, ip := range ips {
-		events = append(events, &registrarv1.EndpointEvent{
-			Type:        registrarv1.EndpointEvent_ENDPOINT_REMOVED,
+		events = append(events, &registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 			ServiceName: req.GetServiceName(),
 			Endpoint:    &registryv1.ServiceEndpoint{Ip: ip},
 		})
@@ -116,7 +116,7 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 // WatchEndpoints streams endpoint events to the agent. It first sends a full
 // snapshot (unless the client's last_version matches the current version), then
 // forwards incremental events from the broadcaster.
-func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.EndpointEvent]) error {
+func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse]) error {
 	watcherID := fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
 	s.log.V(1).Info("WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion())
 

@@ -3,8 +3,8 @@ package cmd
 import (
 	"testing"
 
-	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/constants"
+	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

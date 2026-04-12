@@ -14,7 +14,7 @@ import (
 // The service protocol is always HTTP. Container and Kubernetes metadata are included
 // along with node locality information.
 func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
-	protocol := registryv1.Service_HTTP
+	protocol := registryv1.Service_PROTOCOL_HTTP
 
 	serviceName, err := getServiceName(cniPod)
 	if err != nil {

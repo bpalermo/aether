@@ -7,7 +7,6 @@ import "buf/validate/validate.proto";
 option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
 
 message ServiceEndpoint {
-
   string ip = 1 [(buf.validate.field).string.min_len = 1];
 
   string cluster_name = 2 [(buf.validate.field).string.min_len = 1];
@@ -23,7 +22,7 @@ message ServiceEndpoint {
 
   Locality locality = 5;
 
-  map <string, string> metadata = 6;
+  map<string, string> metadata = 6;
 
   message ContainerMetadata {
     string container_id = 1 [(buf.validate.field).string.min_len = 1];

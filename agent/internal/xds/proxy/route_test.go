@@ -28,9 +28,9 @@ func TestBuildInboundRouteConfiguration(t *testing.T) {
 
 func TestBuildOutboundRouteConfiguration(t *testing.T) {
 	tests := []struct {
-		name       string
-		vhosts     []*routev3.VirtualHost
-		expectLen  int
+		name      string
+		vhosts    []*routev3.VirtualHost
+		expectLen int
 	}{
 		{
 			name:      "no virtual hosts",

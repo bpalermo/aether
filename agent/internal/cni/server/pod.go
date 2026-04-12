@@ -37,7 +37,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	}
 	if ignorable {
 		log.V(1).Info("ignoring pod")
-		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_SUCCESS}, nil
+		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS}, nil
 	}
 
 	// Store in the local storage
@@ -77,7 +77,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	}
 
 	return &cniv1.AddPodResponse{
-		Result: cniv1.AddPodResponse_SUCCESS,
+		Result: cniv1.AddPodResponse_RESULT_SUCCESS,
 	}, nil
 }
 
@@ -98,7 +98,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		if os.IsNotExist(err) {
 			log.V(1).Info("resource was not found locally. we assume it was either already removed or ignored during registration")
 			return &cniv1.RemovePodResponse{
-				Result: cniv1.RemovePodResponse_SUCCESS,
+				Result: cniv1.RemovePodResponse_RESULT_SUCCESS,
 			}, nil
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get pod from storage: %v", err)
@@ -110,7 +110,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 	if ignorable {
 		log.V(1).Info("ignoring pod")
-		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_SUCCESS}, nil
+		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS}, nil
 	}
 
 	serviceName, ips, err := registry.ExtractCNIPodInformation(storedPod)
@@ -144,7 +144,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 
 	return &cniv1.RemovePodResponse{
-		Result: cniv1.RemovePodResponse_SUCCESS,
+		Result: cniv1.RemovePodResponse_RESULT_SUCCESS,
 	}, nil
 }
 

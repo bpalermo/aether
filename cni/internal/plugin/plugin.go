@@ -28,8 +28,8 @@ import (
 	"syscall"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/cni/internal/cri"
 	"github.com/bpalermo/aether/cni/config"
+	"github.com/bpalermo/aether/cni/internal/cri"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -275,7 +275,7 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 		return fmt.Errorf("failed to add pod to agent: %w", err)
 	}
 
-	if res.Result != cniv1.AddPodResponse_SUCCESS {
+	if res.Result != cniv1.AddPodResponse_RESULT_SUCCESS {
 		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
 
@@ -299,7 +299,7 @@ func (p *AetherPlugin) sendRemovePod(ctx context.Context, conf config.AetherConf
 		return fmt.Errorf("failed to remove pod from agent: %w", err)
 	}
 
-	if res.Result != cniv1.RemovePodResponse_SUCCESS {
+	if res.Result != cniv1.RemovePodResponse_RESULT_SUCCESS {
 		return fmt.Errorf("removing pod from agent was not successful: %v", res.Result)
 	}
 

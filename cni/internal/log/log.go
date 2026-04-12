@@ -14,7 +14,7 @@ const defaultOutputPath = "/var/log/aether-cni/plugin.log"
 func NewLogger() (*zap.Logger, error) {
 	// Ensure the log directory exists
 	logDir := filepath.Dir(defaultOutputPath)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		// Fallback to stderr if we can't create the log directory
 		return zap.NewProduction()
 	}

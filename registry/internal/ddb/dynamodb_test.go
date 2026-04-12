@@ -144,11 +144,11 @@ func TestDynamoDBRegistry_RegisterEndpoint(t *testing.T) {
 		},
 	}
 
-	err := registry.RegisterEndpoint(ctx, "frontend", registryv1.Service_HTTP, ep)
+	err := registry.RegisterEndpoint(ctx, "frontend", registryv1.Service_PROTOCOL_HTTP, ep)
 	assert.NoError(t, err)
 
 	// Verify endpoint was registered by listing
-	endpoints, err := registry.ListEndpoints(ctx, "frontend", registryv1.Service_HTTP)
+	endpoints, err := registry.ListEndpoints(ctx, "frontend", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 1)
 
@@ -178,11 +178,11 @@ func TestDynamoDBRegistry_RegisterMultipleEndpoints(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		err := registry.RegisterEndpoint(ctx, "api-service", registryv1.Service_HTTP, ep)
+		err := registry.RegisterEndpoint(ctx, "api-service", registryv1.Service_PROTOCOL_HTTP, ep)
 		require.NoError(t, err)
 	}
 
-	listed, err := registry.ListEndpoints(ctx, "api-service", registryv1.Service_HTTP)
+	listed, err := registry.ListEndpoints(ctx, "api-service", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	assert.Len(t, listed, 3)
 
@@ -209,14 +209,14 @@ func TestDynamoDBRegistry_UnregisterEndpoint(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		err := registry.RegisterEndpoint(ctx, "backend", registryv1.Service_HTTP, ep)
+		err := registry.RegisterEndpoint(ctx, "backend", registryv1.Service_PROTOCOL_HTTP, ep)
 		require.NoError(t, err)
 	}
 
 	err := registry.UnregisterEndpoint(ctx, "backend", "10.0.1.1")
 	require.NoError(t, err)
 
-	listed, err := registry.ListEndpoints(ctx, "backend", registryv1.Service_HTTP)
+	listed, err := registry.ListEndpoints(ctx, "backend", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	assert.Len(t, listed, 1)
 	assert.Equal(t, "10.0.1.2", listed[0].Ip)
@@ -237,14 +237,14 @@ func TestDynamoDBRegistry_UnregisterEndpoints(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		err := registry.RegisterEndpoint(ctx, "workers", registryv1.Service_HTTP, ep)
+		err := registry.RegisterEndpoint(ctx, "workers", registryv1.Service_PROTOCOL_HTTP, ep)
 		require.NoError(t, err)
 	}
 
 	err := registry.UnregisterEndpoints(ctx, "workers", []string{"10.0.1.1", "10.0.1.3"})
 	require.NoError(t, err)
 
-	listed, err := registry.ListEndpoints(ctx, "workers", registryv1.Service_HTTP)
+	listed, err := registry.ListEndpoints(ctx, "workers", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	assert.Len(t, listed, 1)
 	assert.Equal(t, "10.0.1.2", listed[0].Ip)
@@ -270,7 +270,7 @@ func TestDynamoDBRegistry_ListEndpoints_Empty(t *testing.T) {
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
 
-	endpoints, err := registry.ListEndpoints(ctx, "nonexistent", registryv1.Service_HTTP)
+	endpoints, err := registry.ListEndpoints(ctx, "nonexistent", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	assert.Empty(t, endpoints)
 }
@@ -300,12 +300,12 @@ func TestDynamoDBRegistry_ListAllEndpoints(t *testing.T) {
 
 	for service, endpoints := range services {
 		for _, ep := range endpoints {
-			err := registry.RegisterEndpoint(ctx, service, registryv1.Service_HTTP, ep)
+			err := registry.RegisterEndpoint(ctx, service, registryv1.Service_PROTOCOL_HTTP, ep)
 			require.NoError(t, err)
 		}
 	}
 
-	allEndpoints, err := registry.ListAllEndpoints(ctx, registryv1.Service_HTTP)
+	allEndpoints, err := registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 
 	assert.Len(t, allEndpoints, 3)
@@ -322,7 +322,7 @@ func TestDynamoDBRegistry_ListAllEndpoints_Empty(t *testing.T) {
 	ctx := context.Background()
 	registry := setupRegistry(ctx, t)
 
-	allEndpoints, err := registry.ListAllEndpoints(ctx, registryv1.Service_HTTP)
+	allEndpoints, err := registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	assert.Empty(t, allEndpoints)
 }
@@ -341,7 +341,7 @@ func TestDynamoDBRegistry_OverwriteEndpoint(t *testing.T) {
 		Port:        8080,
 		Weight:      100,
 	}
-	err := registry.RegisterEndpoint(ctx, "service", registryv1.Service_HTTP, ep1)
+	err := registry.RegisterEndpoint(ctx, "service", registryv1.Service_PROTOCOL_HTTP, ep1)
 	require.NoError(t, err)
 
 	ep2 := &registryv1.ServiceEndpoint{
@@ -350,10 +350,10 @@ func TestDynamoDBRegistry_OverwriteEndpoint(t *testing.T) {
 		Port:        9090,
 		Weight:      200,
 	}
-	err = registry.RegisterEndpoint(ctx, "service", registryv1.Service_HTTP, ep2)
+	err = registry.RegisterEndpoint(ctx, "service", registryv1.Service_PROTOCOL_HTTP, ep2)
 	require.NoError(t, err)
 
-	endpoints, err := registry.ListEndpoints(ctx, "service", registryv1.Service_HTTP)
+	endpoints, err := registry.ListEndpoints(ctx, "service", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 1)
 

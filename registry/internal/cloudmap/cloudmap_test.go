@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	testNamespace  = "aether-test"
+	testNamespace   = "aether-test"
 	testNamespaceID = "ns-test-001"
-	testClusterPri = "cluster-primary"
-	testClusterSec = "cluster-secondary"
+	testClusterPri  = "cluster-primary"
+	testClusterSec  = "cluster-secondary"
 )
 
 // newTestFake creates a fakeClient with a pre-seeded namespace.
@@ -108,10 +108,10 @@ func TestCloudMapRegistry_RegisterEndpoint(t *testing.T) {
 		},
 	}
 
-	err := reg.RegisterEndpoint(ctx, "frontend-reg", registryv1.Service_HTTP, ep)
+	err := reg.RegisterEndpoint(ctx, "frontend-reg", registryv1.Service_PROTOCOL_HTTP, ep)
 	require.NoError(t, err)
 
-	endpoints, err := reg.ListEndpoints(ctx, "frontend-reg", registryv1.Service_HTTP)
+	endpoints, err := reg.ListEndpoints(ctx, "frontend-reg", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 1)
 
@@ -143,7 +143,7 @@ func TestCloudMapRegistry_RegisterEndpoint_Upsert(t *testing.T) {
 		Port:        8080,
 		Weight:      100,
 	}
-	require.NoError(t, reg.RegisterEndpoint(ctx, "svc-upsert", registryv1.Service_HTTP, ep1))
+	require.NoError(t, reg.RegisterEndpoint(ctx, "svc-upsert", registryv1.Service_PROTOCOL_HTTP, ep1))
 
 	// Re-register the same IP with different attributes (upsert).
 	ep2 := &registryv1.ServiceEndpoint{
@@ -152,9 +152,9 @@ func TestCloudMapRegistry_RegisterEndpoint_Upsert(t *testing.T) {
 		Port:        9090,
 		Weight:      200,
 	}
-	require.NoError(t, reg.RegisterEndpoint(ctx, "svc-upsert", registryv1.Service_HTTP, ep2))
+	require.NoError(t, reg.RegisterEndpoint(ctx, "svc-upsert", registryv1.Service_PROTOCOL_HTTP, ep2))
 
-	endpoints, err := reg.ListEndpoints(ctx, "svc-upsert", registryv1.Service_HTTP)
+	endpoints, err := reg.ListEndpoints(ctx, "svc-upsert", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 1)
 
@@ -175,13 +175,13 @@ func TestCloudMapRegistry_UnregisterEndpoint(t *testing.T) {
 		{Ip: "10.0.3.2", ClusterName: testClusterPri, Port: 8080, Weight: 100},
 	}
 	for _, ep := range eps {
-		require.NoError(t, reg.RegisterEndpoint(ctx, "svc-unreg", registryv1.Service_HTTP, ep))
+		require.NoError(t, reg.RegisterEndpoint(ctx, "svc-unreg", registryv1.Service_PROTOCOL_HTTP, ep))
 	}
 
 	err := reg.UnregisterEndpoint(ctx, "svc-unreg", "10.0.3.1")
 	require.NoError(t, err)
 
-	listed, err := reg.ListEndpoints(ctx, "svc-unreg", registryv1.Service_HTTP)
+	listed, err := reg.ListEndpoints(ctx, "svc-unreg", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, listed, 1)
 	assert.Equal(t, "10.0.3.2", listed[0].Ip)
@@ -201,13 +201,13 @@ func TestCloudMapRegistry_UnregisterEndpoints(t *testing.T) {
 			{Ip: "10.0.4.3", ClusterName: testClusterPri, Port: 8080, Weight: 100},
 		}
 		for _, ep := range eps {
-			require.NoError(t, reg.RegisterEndpoint(ctx, "svc-unregs", registryv1.Service_HTTP, ep))
+			require.NoError(t, reg.RegisterEndpoint(ctx, "svc-unregs", registryv1.Service_PROTOCOL_HTTP, ep))
 		}
 
 		err := reg.UnregisterEndpoints(ctx, "svc-unregs", []string{"10.0.4.1", "10.0.4.3"})
 		require.NoError(t, err)
 
-		listed, err := reg.ListEndpoints(ctx, "svc-unregs", registryv1.Service_HTTP)
+		listed, err := reg.ListEndpoints(ctx, "svc-unregs", registryv1.Service_PROTOCOL_HTTP)
 		require.NoError(t, err)
 		require.Len(t, listed, 1)
 		assert.Equal(t, "10.0.4.2", listed[0].Ip)
@@ -237,10 +237,10 @@ func TestCloudMapRegistry_ListEndpoints_ByProtocol(t *testing.T) {
 		Port:        8080,
 		Weight:      100,
 	}
-	require.NoError(t, reg.RegisterEndpoint(ctx, "svc-proto", registryv1.Service_HTTP, httpEP))
+	require.NoError(t, reg.RegisterEndpoint(ctx, "svc-proto", registryv1.Service_PROTOCOL_HTTP, httpEP))
 
 	// Listing with the correct protocol returns the endpoint.
-	httpEndpoints, err := reg.ListEndpoints(ctx, "svc-proto", registryv1.Service_HTTP)
+	httpEndpoints, err := reg.ListEndpoints(ctx, "svc-proto", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, httpEndpoints, 1)
 	assert.Equal(t, "10.0.5.1", httpEndpoints[0].Ip)
@@ -273,12 +273,12 @@ func TestCloudMapRegistry_ListEndpoints_MultiCluster(t *testing.T) {
 		Weight:      100,
 	}
 
-	require.NoError(t, regA.RegisterEndpoint(ctx, "svc-multi", registryv1.Service_HTTP, epA))
-	require.NoError(t, regB.RegisterEndpoint(ctx, "svc-multi", registryv1.Service_HTTP, epB))
+	require.NoError(t, regA.RegisterEndpoint(ctx, "svc-multi", registryv1.Service_PROTOCOL_HTTP, epA))
+	require.NoError(t, regB.RegisterEndpoint(ctx, "svc-multi", registryv1.Service_PROTOCOL_HTTP, epB))
 
 	// Either registry should see both endpoints because DiscoverInstances
 	// returns all instances in the service regardless of cluster.
-	endpoints, err := regA.ListEndpoints(ctx, "svc-multi", registryv1.Service_HTTP)
+	endpoints, err := regA.ListEndpoints(ctx, "svc-multi", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 2)
 
@@ -314,11 +314,11 @@ func TestCloudMapRegistry_ListAllEndpoints(t *testing.T) {
 
 	for svcName, eps := range services {
 		for _, ep := range eps {
-			require.NoError(t, reg.RegisterEndpoint(ctx, svcName, registryv1.Service_HTTP, ep))
+			require.NoError(t, reg.RegisterEndpoint(ctx, svcName, registryv1.Service_PROTOCOL_HTTP, ep))
 		}
 	}
 
-	allEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_HTTP)
+	allEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 
 	assert.Len(t, allEndpoints, 3)

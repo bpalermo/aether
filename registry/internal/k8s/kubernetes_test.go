@@ -88,7 +88,7 @@ func TestRegisterEndpoint(t *testing.T) {
 		{
 			name:     "no-op returns nil",
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.0.0.1",
 				ClusterName: "test-cluster",
@@ -214,7 +214,7 @@ func TestListEndpoints(t *testing.T) {
 			clusterName: "test-cluster",
 			objects:     nil,
 			service:     "my-service",
-			protocol:    registryv1.Service_HTTP,
+			protocol:    registryv1.Service_PROTOCOL_HTTP,
 			expected:    nil,
 			wantErr:     false,
 		},
@@ -226,7 +226,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
 					Ip:          "10.0.0.1",
@@ -255,7 +255,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
 		},
@@ -271,7 +271,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
 		},
@@ -283,7 +283,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
 		},
@@ -299,7 +299,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
 		},
@@ -315,7 +315,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
 					Ip:          "10.0.0.1",
@@ -348,7 +348,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
 					Ip:          "10.0.0.1",
@@ -382,7 +382,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
 					Ip:          "10.0.0.1",
@@ -418,7 +418,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			// The pod is skipped (error logged, not propagated), so no endpoints are returned.
 			expected: nil,
 			wantErr:  false,
@@ -435,7 +435,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
 		},
@@ -447,7 +447,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  true,
 		},
@@ -465,7 +465,7 @@ func TestListEndpoints(t *testing.T) {
 				},
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
 					Ip:          "10.0.0.1",
@@ -496,7 +496,7 @@ func TestListEndpoints(t *testing.T) {
 				topologyNode("node-1", "eu-west-1", "eu-west-1b"),
 			},
 			service:  "my-service",
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
 					Ip:          "10.0.0.1",
@@ -565,7 +565,7 @@ func TestListAllEndpoints(t *testing.T) {
 			name:        "no pods returns empty map",
 			clusterName: "test-cluster",
 			objects:     nil,
-			protocol:    registryv1.Service_HTTP,
+			protocol:    registryv1.Service_PROTOCOL_HTTP,
 			expected:    map[string][]*registryv1.ServiceEndpoint{},
 			wantErr:     false,
 		},
@@ -576,7 +576,7 @@ func TestListAllEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
 				"svc-a": {
 					{
@@ -608,7 +608,7 @@ func TestListAllEndpoints(t *testing.T) {
 				managedPod("pod-c", "default", "svc-a", "10.0.0.3", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
 				"svc-a": {
 					{
@@ -675,7 +675,7 @@ func TestListAllEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{},
 			wantErr:  false,
 		},
@@ -690,7 +690,7 @@ func TestListAllEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{},
 			wantErr:  false,
 		},
@@ -701,7 +701,7 @@ func TestListAllEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "svc-a", "", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{},
 			wantErr:  false,
 		},
@@ -716,7 +716,7 @@ func TestListAllEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{},
 			wantErr:  false,
 		},
@@ -726,7 +726,7 @@ func TestListAllEndpoints(t *testing.T) {
 			objects: []any{
 				managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-missing"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  true,
 		},
@@ -739,7 +739,7 @@ func TestListAllEndpoints(t *testing.T) {
 				topologyNode("node-west", "us-west-2", "us-west-2a"),
 				topologyNode("node-east", "us-east-1", "us-east-1b"),
 			},
-			protocol: registryv1.Service_HTTP,
+			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
 				"svc-a": {
 					{
@@ -950,7 +950,7 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 		{
 			name: "non-metadata annotations are ignored",
 			annotations: map[string]string{
-				"some.other.annotation/key": "value",
+				"some.other.annotation/key":      "value",
 				constants.AnnotationEndpointPort: "8080",
 			},
 			expected: map[string]string{},
@@ -988,8 +988,8 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 			name: "metadata annotations mixed with non-metadata annotations extracts only metadata",
 			annotations: map[string]string{
 				constants.AnnotationAetherEndpointMetadataPrefix + "canary": "true",
-				constants.AnnotationEndpointPort:   "9090",
-				constants.AnnotationEndpointWeight: "256",
+				constants.AnnotationEndpointPort:                            "9090",
+				constants.AnnotationEndpointWeight:                          "256",
 			},
 			expected: map[string]string{
 				"canary": "true",
