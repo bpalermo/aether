@@ -192,7 +192,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.42.0
 	go.uber.org/atomic v1.11.0
 	golang.org/x/sys v0.41.0
-	google.golang.org/grpc v1.79.2
+	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	k8s.io/api v0.35.2
