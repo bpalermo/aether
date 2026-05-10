@@ -6,6 +6,10 @@ gazelle:
 tidy:
 	@bazel mod tidy
 
+.PHONY: build
+build:
+	@bazel build //...
+
 .PHONY: test
 test:
 	@bazel test --test_output=errors //...
@@ -33,18 +37,6 @@ format-check:
 .PHONY: lint
 lint:
 	@bazel build --config=lint //...
-
-.PHONY: fmt
-fmt:
-	@gofmt -w -s .
-
-.PHONY: fmt-check
-fmt-check:
-	@test -z "$$(gofmt -l -s .)" || (echo "Files need formatting:"; gofmt -l -s .; exit 1)
-
-.PHONY: vet
-vet:
-	@go vet ./...
 
 .PHONY: build-agent
 build-agent:
