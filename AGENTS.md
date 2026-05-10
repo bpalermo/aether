@@ -65,3 +65,10 @@ make tidy        # Update go.mod dependencies
 - Formatting uses `gofumpt`, `buildifier`, `shfmt`, `buf`.
 - Lint violations fail with `--config=lint` (aspect-based).
 - SPIRE integration enabled by default; use `--spire-enabled=false` to disable.
+
+## Git Workflow
+
+- **Never commit directly to `main`.** Always create a feature branch (`feat/`, `fix/`, `deps/`, etc.) and open a PR.
+- **Never push to `main` directly.** Use `git push -u origin <branch>` for feature branches only.
+- After merging a PR, delete the feature branch locally (`git branch -d <branch>`) and remotely (`git fetch --prune origin` or `git push origin --delete <branch>`).
+- When updating an existing PR branch, use `git commit --amend` and `git push --force-with-lease` (never force push without `--force-with-lease`).
