@@ -31,8 +31,8 @@ type AgentConfig struct {
 	SpireTrustDomain string
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
 	SpireAdminSocketPath string
-	// SpireWorkloadCertDir is the directory containing SPIRE SVID certificates (svid.pem, svid_key.pem, svid_bundle.pem)
-	SpireWorkloadCertDir string
+	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
+	SpireWorkloadSocketPath string
 
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
@@ -46,13 +46,13 @@ func NewAgentConfig() *AgentConfig {
 			MetricsEnabled:         true,
 			MetricsBindAddress:     ":8080",
 		},
-		ProxyServiceNodeID:     constants.DefaultProxyID,
-		CNIServerConfig:        cniServer.NewCNIServerConfig(),
-		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
-		RegistrarAddress:       "aether-registrar.aether-system.svc:443",
-		SpireEnabled:           true,
-		SpireTrustDomain:       constants.DefaultSpireTrustDomain,
-		SpireAdminSocketPath:   constants.DefaultSpireAdminSocketPath,
-		SpireWorkloadCertDir:   constants.DefaultSpireWorkloadCertDir,
+		ProxyServiceNodeID:      constants.DefaultProxyID,
+		CNIServerConfig:         cniServer.NewCNIServerConfig(),
+		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
+		SpireEnabled:            true,
+		SpireTrustDomain:        constants.DefaultSpireTrustDomain,
+		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
+		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
 	}
 }

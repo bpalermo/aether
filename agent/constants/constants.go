@@ -19,8 +19,8 @@ const (
 	DefaultSpireAdminSocketPath = "/tmp/spire-agent/private/admin.sock"
 	// DefaultSpireTrustDomain is the default SPIFFE trust domain used for SDS secret naming
 	DefaultSpireTrustDomain = "ROOTCA"
-	// DefaultSpireWorkloadCertDir is the default directory for SPIRE CSI-mounted workload identity certificates
-	DefaultSpireWorkloadCertDir = "/run/secrets/workload-spiffe-uds"
+	// DefaultSpireWorkloadSocketPath is the default SPIRE Workload API UDS socket (csi.spiffe.io mount)
+	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
 
 	// DefaultCloudMapNamespace is the default AWS Cloud Map HTTP namespace name
 	DefaultCloudMapNamespace = constants.DefaultCloudMapNamespace

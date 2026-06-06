@@ -13,6 +13,7 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -60,7 +61,8 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
 
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE mTLS for the gRPC server")
-	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE workload identity directory (contains svid.pem, svid_key.pem, svid_bundle.pem)")
+	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
+	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", cfg.SpireTrustDomain, "SPIFFE trust domain authorized for mTLS peers")
 
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 }
@@ -106,12 +108,17 @@ func runRegistrar(ctx context.Context) (retErr error) {
 
 	var grpcOpts []grpc.ServerOption
 	if cfg.SpireEnabled {
-		tlsCfg, tlsErr := spire.ServerTLSConfig(cfg.SpireWorkloadSocketPath)
-		if tlsErr != nil {
-			return tlsErr
+		trustDomain, tdErr := spiffeid.TrustDomainFromString(cfg.SpireTrustDomain)
+		if tdErr != nil {
+			return fmt.Errorf("invalid SPIRE trust domain %q: %w", cfg.SpireTrustDomain, tdErr)
 		}
-		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
-		l.Info("SPIRE mTLS enabled for gRPC server", "certDir", cfg.SpireWorkloadSocketPath)
+		src, srcErr := spire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
+		if srcErr != nil {
+			return srcErr
+		}
+		defer func() { retErr = errors.Join(retErr, src.Close()) }()
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(spire.ServerTLSConfig(src, trustDomain))))
+		l.Info("SPIRE mTLS enabled for gRPC server", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
 	} else {
 		l.Info("SPIRE disabled, gRPC server will use insecure transport")
 	}
