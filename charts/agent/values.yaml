@@ -71,3 +71,25 @@ awsCredentials:
   secretName: ""
   accessKeyId: ""
   secretAccessKey: ""
+
+# SPIRE integration. When enabled, the agent:
+#   * fetches its own X.509 SVID over the csi.spiffe.io Workload API socket for
+#     mTLS to the registrar (workloadSocketPath), and
+#   * connects to the SPIRE agent admin socket and uses the Delegated Identity
+#     API to mint SVIDs for the local Envoy proxies, serving them over SDS.
+spire:
+  enabled: true
+  # SPIFFE trust domain authorized for mTLS peers. Leave empty to omit the flag
+  # and let the binary default (ROOTCA) authorize any peer chaining to the SPIRE
+  # root CA; set e.g. "aether.internal" to restrict peers to that trust domain.
+  trustDomain: ""
+  # Workload API socket (the csi.spiffe.io mount + socket filename).
+  workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
+  # SPIRE agent admin socket (Delegated Identity API). Requires the SPIRE agent
+  # to expose its admin socket on the host and to authorize the agent's SVID as a
+  # delegate. `hostPath` is the node directory exposing the admin socket; it is
+  # bind-mounted at `mountPath`, and the socket file is `mountPath/socketName`.
+  adminSocket:
+    hostPath: /run/spire/admin-sockets
+    mountPath: /run/spire/admin-sockets
+    socketName: admin.sock

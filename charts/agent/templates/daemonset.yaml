@@ -45,6 +45,14 @@ spec:
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
+            - "--spire-enabled={{ .Values.spire.enabled }}"
+            {{- if .Values.spire.enabled }}
+            {{- with .Values.spire.trustDomain }}
+            - "--spire-trust-domain={{ . }}"
+            {{- end }}
+            - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
+            - "--spire-admin-socket={{ .Values.spire.adminSocket.mountPath }}/{{ .Values.spire.adminSocket.socketName }}"
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080
@@ -122,6 +130,14 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.spire.enabled }}
+            - name: spire-workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            - name: spire-admin-socket
+              mountPath: {{ .Values.spire.adminSocket.mountPath }}
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
       volumes:
@@ -157,3 +173,13 @@ spec:
             type: Socket
         - name: tmp
           emptyDir: {}
+        {{- if .Values.spire.enabled }}
+        - name: spire-workload-socket
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        - name: spire-admin-socket
+          hostPath:
+            path: {{ .Values.spire.adminSocket.hostPath }}
+            type: DirectoryOrCreate
+        {{- end }}
