@@ -69,7 +69,10 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
     image_load(
         name = "image_load",
         image = ":image_index",
-        tag = "{}:{}".format(repository, "latest"),
+        # Registry-qualified tag so the locally loaded image matches its pushed
+        # reference (e.g. ghcr.io/bpalermo/aether/agent:latest) — the e2e suite
+        # kind-loads images by that full ref.
+        tag = "{}/{}:{}".format(registry, repository, "latest"),
     )
 
     # Separate single-manifest load for the container structure test, which
