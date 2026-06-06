@@ -72,9 +72,16 @@ All objects carry the [recommended `app.kubernetes.io/*` labels](https://kuberne
 
 ## Publish to GitHub Container Registry (OCI)
 
-Charts publish as OCI artifacts to `oci://ghcr.io/bpalermo`. (Container images
-themselves still publish to Docker Hub under `docker.io/palermo` — only the Helm
-charts live on GHCR.)
+Charts and images both publish to GitHub Container Registry under the `aether/`
+path namespace:
+
+| Artifact | Reference |
+| --- | --- |
+| agent chart | `ghcr.io/bpalermo/aether/charts/agent` |
+| registrar chart | `ghcr.io/bpalermo/aether/charts/registrar` |
+| agent image | `ghcr.io/bpalermo/aether/agent` |
+| registrar image | `ghcr.io/bpalermo/aether/registrar` |
+| cni-install image | `ghcr.io/bpalermo/aether/cni-install` |
 
 ```bash
 export HELM_REGISTRY_USERNAME=<github-user>

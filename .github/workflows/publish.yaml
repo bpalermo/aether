@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_REGISTRY: index.docker.io/palermo
+  IMAGE_REGISTRY: ghcr.io/bpalermo/aether
 
 jobs:
   publish:
@@ -26,12 +26,7 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
-      - name: Log in to Docker Hub (images)
-        uses: docker/login-action@v4
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Log in to GHCR (charts)
+      - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -40,14 +35,13 @@ jobs:
       - name: Build
         run: |
           bazel build --stamp //...
-      - name: Push images
-        run: |
-          bazel run --stamp //agent/cmd/agent:image_push
-          bazel run --stamp //registrar/cmd/registrar:image_push
-      - name: Push charts
+      # `*.push` publishes each chart together with the images it references
+      # (agent.push -> agent + cni-install images; registrar.push -> registrar
+      # image), so a single GHCR login covers both images and charts.
+      - name: Push charts + images
         env:
           HELM_REGISTRY_USERNAME: ${{ github.actor }}
           HELM_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          bazel run --stamp //charts/agent:agent.push_registry
-          bazel run --stamp //charts/registrar:registrar.push_registry
+          bazel run --stamp //charts/agent:agent.push
+          bazel run --stamp //charts/registrar:registrar.push

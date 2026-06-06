@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_REGISTRY: index.docker.io/palermo
+  IMAGE_REGISTRY: ghcr.io/bpalermo/aether
 
 jobs:
   ci:

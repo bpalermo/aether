@@ -27,9 +27,9 @@ var (
 	kindClusterName = "aether-e2e"
 	namespace       = "aether-system"
 
-	agentImage      = envOrDefault("AETHER_AGENT_IMAGE", "palermo/aether-agent:latest")
-	cniInstallImage = envOrDefault("AETHER_CNI_INSTALL_IMAGE", "palermo/aether-cni-install:latest")
-	registrarImage  = envOrDefault("AETHER_REGISTRAR_IMAGE", "palermo/aether-registrar:latest")
+	agentImage      = envOrDefault("AETHER_AGENT_IMAGE", "ghcr.io/bpalermo/aether/agent:latest")
+	cniInstallImage = envOrDefault("AETHER_CNI_INSTALL_IMAGE", "ghcr.io/bpalermo/aether/cni-install:latest")
+	registrarImage  = envOrDefault("AETHER_REGISTRAR_IMAGE", "ghcr.io/bpalermo/aether/registrar:latest")
 )
 
 func envOrDefault(key, fallback string) string {
