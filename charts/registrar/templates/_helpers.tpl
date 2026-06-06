@@ -1,7 +1,7 @@
 {{/*
 Chart name, optionally overridden via nameOverride.
 */}}
-{{- define "aether-registrar.name" -}}
+{{- define "registrar.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
@@ -9,7 +9,7 @@ Chart name, optionally overridden via nameOverride.
 Fully qualified, release-prefixed name. Used for namespaced resource names so
 multiple releases can coexist. Honours fullnameOverride / nameOverride.
 */}}
-{{- define "aether-registrar.fullname" -}}
+{{- define "registrar.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -25,7 +25,7 @@ multiple releases can coexist. Honours fullnameOverride / nameOverride.
 {{/*
 Namespace the chart deploys into. Defaults to the release namespace.
 */}}
-{{- define "aether-registrar.namespace" -}}
+{{- define "registrar.namespace" -}}
 {{- default .Release.Namespace .Values.namespace.name -}}
 {{- end -}}
 
@@ -33,29 +33,29 @@ Namespace the chart deploys into. Defaults to the release namespace.
 Name for cluster-scoped resources (ClusterRole/ClusterRoleBinding). Includes the
 namespace so two releases of the same name in different namespaces don't collide.
 */}}
-{{- define "aether-registrar.clusterScopedName" -}}
-{{- printf "%s-%s" (include "aether-registrar.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
+{{- define "registrar.clusterScopedName" -}}
+{{- printf "%s-%s" (include "registrar.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 ServiceAccount name.
 */}}
-{{- define "aether-registrar.serviceAccountName" -}}
-{{- include "aether-registrar.fullname" . -}}
+{{- define "registrar.serviceAccountName" -}}
+{{- include "registrar.fullname" . -}}
 {{- end -}}
 
 {{/*
 Chart label value (name-version).
 */}}
-{{- define "aether-registrar.chart" -}}
+{{- define "registrar.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 Selector labels (immutable subset).
 */}}
-{{- define "aether-registrar.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "aether-registrar.name" . }}
+{{- define "registrar.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "registrar.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: registrar
 {{- end -}}
@@ -63,9 +63,9 @@ app.kubernetes.io/component: registrar
 {{/*
 Common labels.
 */}}
-{{- define "aether-registrar.labels" -}}
-helm.sh/chart: {{ include "aether-registrar.chart" . }}
-{{ include "aether-registrar.selectorLabels" . }}
+{{- define "registrar.labels" -}}
+helm.sh/chart: {{ include "registrar.chart" . }}
+{{ include "registrar.selectorLabels" . }}
 app.kubernetes.io/part-of: aether
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- with .Chart.AppVersion }}

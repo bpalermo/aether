@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "aether-registrar.fullname" . }}
-  namespace: {{ include "aether-registrar.namespace" . }}
+  name: {{ include "registrar.fullname" . }}
+  namespace: {{ include "registrar.namespace" . }}
   labels:
-    {{- include "aether-registrar.labels" . | nindent 4 }}
+    {{- include "registrar.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "aether-registrar.selectorLabels" . | nindent 6 }}
+      {{- include "registrar.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "aether-registrar.labels" . | nindent 8 }}
+        {{- include "registrar.labels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "aether-registrar.serviceAccountName" . }}
+      serviceAccountName: {{ include "registrar.serviceAccountName" . }}
       containers:
         - name: registrar
           image: {{ .Values.image.ref | quote }}

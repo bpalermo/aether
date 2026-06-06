@@ -1,6 +1,6 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 
-# aether-agent Helm chart.
+# agent Helm chart (published as ghcr.io/bpalermo/aether/charts/agent).
 #
 # `images` wires the in-repo image_push targets into the chart so that:
 #   * the `{@//...:image_push}` placeholders in values.yaml are substituted with

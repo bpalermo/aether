@@ -2,24 +2,24 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "aether-agent.proxy.fullname" . }}
-  namespace: {{ include "aether-agent.namespace" . }}
+  name: {{ include "agent.proxy.fullname" . }}
+  namespace: {{ include "agent.namespace" . }}
   labels:
-    {{- include "aether-agent.proxy.labels" . | nindent 4 }}
+    {{- include "agent.proxy.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "aether-agent.proxy.selectorLabels" . | nindent 6 }}
+      {{- include "agent.proxy.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
   template:
     metadata:
       labels:
-        {{- include "aether-agent.proxy.labels" . | nindent 8 }}
+        {{- include "agent.proxy.labels" . | nindent 8 }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      serviceAccountName: {{ include "aether-agent.proxy.serviceAccountName" . }}
+      serviceAccountName: {{ include "agent.proxy.serviceAccountName" . }}
       priorityClassName: system-node-critical
       containers:
         - name: proxy
@@ -82,7 +82,7 @@ spec:
       volumes:
         - name: proxy-config
           configMap:
-            name: {{ include "aether-agent.proxy.configMapName" . }}
+            name: {{ include "agent.proxy.configMapName" . }}
             items:
               - key: envoy.yaml
                 path: envoy.yaml

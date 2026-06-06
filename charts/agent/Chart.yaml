@@ -1,15 +1,16 @@
 apiVersion: v2
-name: aether-agent
+name: agent
 description: |
   Aether service mesh node agent. Deploys the agent DaemonSet (which manages
   the Envoy xDS control plane and installs the CNI plugin) and, optionally, the
   per-node Envoy proxy DaemonSet.
 type: application
 # Stamped at package time when built with `--stamp`:
-#   version    -> 0.1.0+<git-commit> (SemVer build metadata)
+#   version    -> 0.1.0-<git-commit> (SemVer pre-release; yields a dash-separated
+#                 OCI tag, unlike `+build` metadata which helm rewrites to `_`)
 #   appVersion -> the `git describe` version, matching the binary's embedded Version
 # Without `--stamp` the braces are stripped, yielding literal placeholder text.
-version: "0.1.0+{GIT_COMMIT}"
+version: "0.1.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

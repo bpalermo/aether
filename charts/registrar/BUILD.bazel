@@ -1,6 +1,6 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 
-# aether-registrar Helm chart.
+# registrar Helm chart (published as ghcr.io/bpalermo/aether/charts/registrar).
 #
 # Publish targets (GitHub Container Registry, OCI):
 #   bazel run //charts/registrar:registrar.push           # chart + image
