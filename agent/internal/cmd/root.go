@@ -40,7 +40,6 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -246,16 +245,16 @@ func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
 	}
 
 	if cfg.SpireEnabled {
-		trustDomain, err := spiffeid.TrustDomainFromString(cfg.SpireTrustDomain)
-		if err != nil {
-			return nil, fmt.Errorf("invalid SPIRE trust domain %q: %w", cfg.SpireTrustDomain, err)
-		}
 		src, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
 		if err != nil {
 			return nil, err
 		}
 		context.AfterFunc(ctx, func() { _ = src.Close() })
-		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(commonspire.ClientTLSConfig(src, trustDomain)))}
+		tlsCfg, err := commonspire.ClientTLSConfig(src, cfg.SpireTrustDomain)
+		if err != nil {
+			return nil, err
+		}
+		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
 		l.Info("registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
 	} else {
 		l.Info("registrar client using insecure transport")

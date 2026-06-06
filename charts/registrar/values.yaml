@@ -46,7 +46,9 @@ service:
 # (no certificate files / sidecar needed).
 spire:
   enabled: true
-  # SPIFFE trust domain authorized for mTLS peers.
-  trustDomain: aether.internal
+  # SPIFFE trust domain authorized for mTLS peers. Leave empty to omit the flag
+  # and let the binary default (ROOTCA) authorize any peer chaining to the SPIRE
+  # root CA; set e.g. "aether.internal" to restrict peers to that trust domain.
+  trustDomain: ""
   # Workload API socket path (the csi.spiffe.io mount + socket filename).
   workloadSocketPath: /run/secrets/workload-spiffe-uds/socket

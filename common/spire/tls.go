@@ -32,16 +32,46 @@ func NewSource(ctx context.Context, socketPath string) (*Source, error) {
 	return src, nil
 }
 
+// RootCATrustDomain is the sentinel trust-domain value meaning "authorize any
+// peer presenting an SVID that chains to the SPIRE root CA bundle", without
+// restricting the SPIFFE ID's trust domain. An empty trust domain is treated the
+// same way.
+const RootCATrustDomain = "ROOTCA"
+
 // ServerTLSConfig returns a mutual-TLS server config that presents the workload
-// SVID from src and authorizes peers belonging to trustDomain.
-func ServerTLSConfig(src *Source, trustDomain spiffeid.TrustDomain) *tls.Config {
-	return tlsconfig.MTLSServerConfig(src, src, tlsconfig.AuthorizeMemberOf(trustDomain))
+// SVID from src and authorizes peers belonging to trustDomain (or any valid peer
+// when trustDomain is empty / RootCATrustDomain).
+func ServerTLSConfig(src *Source, trustDomain string) (*tls.Config, error) {
+	auth, err := authorizer(trustDomain)
+	if err != nil {
+		return nil, err
+	}
+	return tlsconfig.MTLSServerConfig(src, src, auth), nil
 }
 
 // ClientTLSConfig returns a mutual-TLS client config that presents the workload
-// SVID from src and authorizes peers belonging to trustDomain.
-func ClientTLSConfig(src *Source, trustDomain spiffeid.TrustDomain) *tls.Config {
-	return tlsconfig.MTLSClientConfig(src, src, tlsconfig.AuthorizeMemberOf(trustDomain))
+// SVID from src and authorizes peers belonging to trustDomain (or any valid peer
+// when trustDomain is empty / RootCATrustDomain).
+func ClientTLSConfig(src *Source, trustDomain string) (*tls.Config, error) {
+	auth, err := authorizer(trustDomain)
+	if err != nil {
+		return nil, err
+	}
+	return tlsconfig.MTLSClientConfig(src, src, auth), nil
+}
+
+// authorizer builds the peer authorizer for the given trust domain. The empty
+// string and RootCATrustDomain both authorize any valid SVID; otherwise the peer
+// must belong to the named trust domain.
+func authorizer(trustDomain string) (tlsconfig.Authorizer, error) {
+	if trustDomain == "" || trustDomain == RootCATrustDomain {
+		return tlsconfig.AuthorizeAny(), nil
+	}
+	td, err := spiffeid.TrustDomainFromString(trustDomain)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SPIRE trust domain %q: %w", trustDomain, err)
+	}
+	return tlsconfig.AuthorizeMemberOf(td), nil
 }
 
 // socketAddr normalises a Workload API endpoint, defaulting a bare filesystem

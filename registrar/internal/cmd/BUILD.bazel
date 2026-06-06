@@ -17,7 +17,6 @@ go_library(
         "@com_github_aws_aws_sdk_go_v2_config//:config",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",
-        "@com_github_spiffe_go_spiffe_v2//spiffeid",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//credentials",

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/common/manager"
+	"github.com/bpalermo/aether/common/spire"
 )
 
 const (
@@ -45,8 +46,9 @@ type RegistrarConfig struct {
 const (
 	// DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
 	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
-	// DefaultSpireTrustDomain is the default SPIFFE trust domain.
-	DefaultSpireTrustDomain = "aether.internal"
+	// DefaultSpireTrustDomain defaults to the ROOTCA sentinel, authorizing any
+	// peer that chains to the SPIRE root CA (no trust-domain restriction).
+	DefaultSpireTrustDomain = spire.RootCATrustDomain
 )
 
 // NewRegistrarConfig creates a RegistrarConfig with default values.
