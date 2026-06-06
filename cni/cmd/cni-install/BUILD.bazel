@@ -21,7 +21,7 @@ go_binary(
 go_multi_arch_image(
     name = "cni-install_image",
     binary = ":cni-install",
-    repository = "palermo/aether-cni-install",
+    repository = "bpalermo/aether/cni-install",
     tars_layer = {
         "/opt/cni/bin/aether-cni": "//cni/cmd/cni:cni",
     },

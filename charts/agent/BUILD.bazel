@@ -19,7 +19,7 @@ helm_chart(
         "//cni/cmd/cni-install:image_push",
     ],
     login_url = "ghcr.io",
-    registry_url = "oci://ghcr.io/bpalermo",
+    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
     values = "values.yaml",
     visibility = ["//visibility:public"],
 )

@@ -5,7 +5,7 @@ load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
 
-def go_multi_arch_image(name, binary, repository, registry = "docker.io", base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None):
+def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None):
     """
     Creates a containerized binary from Go sources.
     Parameters:

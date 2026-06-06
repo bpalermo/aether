@@ -28,7 +28,7 @@ agent:
   image:
     # Substituted at package time with the digest-pinned reference produced by
     # the in-repo `//agent/cmd/agent:image_push` target, e.g.
-    # docker.io/palermo/aether-agent@sha256:...
+    # ghcr.io/bpalermo/aether/agent@sha256:...
     ref: "{@//agent/cmd/agent:image_push}"
     pullPolicy: Always
   resources:
