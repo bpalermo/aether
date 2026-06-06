@@ -1,0 +1,46 @@
+# Default values for the aether-registrar chart.
+
+# Override the chart name / fully-qualified resource name. Resource names are
+# release-prefixed so multiple releases can coexist; use these to customize that.
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace the registrar resources are deployed into. Defaults to the release
+# namespace when `name` is empty. The agent chart owns the namespace by default,
+# so creation is off here; enable it for a standalone registrar install.
+namespace:
+  create: false
+  name: ""
+
+# Cluster name passed to the registrar (`--cluster-name`).
+clusterName: talos-main
+
+# Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd, cloudmap.
+registryBackend: kubernetes
+
+# Enable verbose logging (`--debug`).
+debug: true
+
+replicaCount: 1
+
+image:
+  # Substituted at package time with the digest-pinned reference produced by
+  # the in-repo `//registrar/cmd/registrar:image_push` target.
+  ref: "{@//registrar/cmd/registrar:image_push}"
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+service:
+  port: 443
+  targetPort: 8443
+
+# Mount the SPIFFE workload API socket (CSI driver) into the registrar.
+spire:
+  enabled: true

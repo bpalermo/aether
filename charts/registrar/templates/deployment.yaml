@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aether-registrar.fullname" . }}
+  namespace: {{ include "aether-registrar.namespace" . }}
+  labels:
+    {{- include "aether-registrar.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aether-registrar.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aether-registrar.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "aether-registrar.serviceAccountName" . }}
+      containers:
+        - name: registrar
+          image: {{ .Values.image.ref | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--debug={{ .Values.debug }}"
+            - "--cluster-name={{ .Values.clusterName }}"
+            - "--registry-backend={{ .Values.registryBackend }}"
+            - "--grpc-address=:{{ .Values.service.targetPort }}"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+                  divisor: "1"
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.cpu
+                  divisor: "1"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+          {{- if .Values.spire.enabled }}
+          volumeMounts:
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.spire.enabled }}
+      volumes:
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+      {{- end }}

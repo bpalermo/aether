@@ -21,6 +21,7 @@ bazel_dep(name = "protovalidate", version = "1.2.0")
 bazel_dep(name = "aspect_rules_lint", version = "2.5.2")
 bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
+bazel_dep(name = "rules_helm", version = "0.29.0")
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.2")
@@ -120,6 +121,14 @@ use_repo(
 buf = use_extension("@rules_buf//buf:extensions.bzl", "buf")
 buf.toolchains(version = "v1.67.0")
 use_repo(buf, "rules_buf_toolchains")
+
+# Hermetic Helm toolchain (downloads helm) plus a @helm//:helm host alias for
+# `bazel run @helm//:helm -- ...`.
+helm = use_extension("@rules_helm//helm:extensions.bzl", "helm")
+helm.host_tools()
+use_repo(helm, "helm", "helm_toolchains")
+
+register_toolchains("@helm_toolchains//:all")
 
 pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
 

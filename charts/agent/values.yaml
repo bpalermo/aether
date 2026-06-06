@@ -1,0 +1,73 @@
+# Default values for the aether-agent chart.
+
+# Override the chart name / fully-qualified resource name. Resource names are
+# release-prefixed so multiple releases can coexist; use these to customize that.
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace the agent resources are deployed into. Defaults to the release
+# namespace when `name` is empty. When `create` is true the chart renders the
+# namespace (with privileged pod-security labels, required by the agent's
+# hostNetwork + NET_ADMIN privileges).
+#
+# NOTE: the agent DaemonSet is effectively singleton-per-node — it owns host
+# paths (/run/aether, /opt/cni/bin, /etc/cni/net.d, ...) and the CNI plugin, so
+# only one agent release should target a given set of nodes regardless of the
+# release-aware templating below.
+namespace:
+  create: true
+  name: ""
+
+# Cluster name passed to the agent (`--cluster-name`).
+clusterName: talos-main
+
+# Enable verbose logging on the agent and cni-install containers (`--debug`).
+debug: true
+
+agent:
+  image:
+    # Substituted at package time with the digest-pinned reference produced by
+    # the in-repo `//agent/cmd/agent:image_push` target, e.g.
+    # docker.io/palermo/aether-agent@sha256:...
+    ref: "{@//agent/cmd/agent:image_push}"
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 200m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+cniInstall:
+  image:
+    ref: "{@//cni/cmd/cni-install:image_push}"
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 100m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 32Mi
+
+# Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
+proxy:
+  enabled: true
+  image:
+    # Envoy is an upstream image; pin it explicitly (not built by this repo).
+    repository: docker.io/envoyproxy/envoy
+    # envoyproxy/envoy:distroless-v1.37.0
+    digest: sha256:92fdb97b9fdb47da82fbe3651b83bd1419e544966d264632af4864004652685f
+  logLevel: info
+
+# AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
+# The chart never bakes credentials into the image. By default it references an
+# existing secret; set `create: true` and supply the keys to have the chart
+# render the Secret instead.
+awsCredentials:
+  create: false
+  # Defaults to "<release>-aether-agent-aws-credentials" when empty.
+  secretName: ""
+  accessKeyId: ""
+  secretAccessKey: ""
