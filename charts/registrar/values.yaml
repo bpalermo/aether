@@ -1,4 +1,4 @@
-# Default values for the aether-registrar chart.
+# Default values for the registrar chart.
 
 # Override the chart name / fully-qualified resource name. Resource names are
 # release-prefixed so multiple releases can coexist; use these to customize that.

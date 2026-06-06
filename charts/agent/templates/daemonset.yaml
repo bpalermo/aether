@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "aether-agent.fullname" . }}
-  namespace: {{ include "aether-agent.namespace" . }}
+  name: {{ include "agent.fullname" . }}
+  namespace: {{ include "agent.namespace" . }}
   labels:
-    {{- include "aether-agent.labels" . | nindent 4 }}
+    {{- include "agent.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "aether-agent.selectorLabels" . | nindent 6 }}
+      {{- include "agent.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
   template:
     metadata:
       labels:
-        {{- include "aether-agent.labels" . | nindent 8 }}
+        {{- include "agent.labels" . | nindent 8 }}
     spec:
       hostNetwork: true
-      serviceAccountName: {{ include "aether-agent.serviceAccountName" . }}
+      serviceAccountName: {{ include "agent.serviceAccountName" . }}
       priorityClassName: system-node-critical
       initContainers:
         - name: cni-install
@@ -91,12 +91,12 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "aether-agent.awsSecretName" . }}
+                  name: {{ include "agent.awsSecretName" . }}
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "aether-agent.awsSecretName" . }}
+                  name: {{ include "agent.awsSecretName" . }}
                   key: AWS_SECRET_ACCESS_KEY
           securityContext:
             readOnlyRootFilesystem: true

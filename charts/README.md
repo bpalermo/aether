@@ -5,8 +5,13 @@ Bazel-built Helm charts for Aether, using
 
 | Chart | Path | Deploys |
 | --- | --- | --- |
-| `aether-agent` | [`charts/agent`](./agent) | Agent DaemonSet (xDS + CNI install) and, optionally, the per-node Envoy proxy DaemonSet. Owns the `aether-system` namespace and RBAC. |
-| `aether-registrar` | [`charts/registrar`](./registrar) | Registrar Deployment, Service and RBAC. |
+| `agent` | [`charts/agent`](./agent) | Agent DaemonSet (xDS + CNI install) and, optionally, the per-node Envoy proxy DaemonSet. Owns the `aether-system` namespace and RBAC. |
+| `registrar` | [`charts/registrar`](./registrar) | Registrar Deployment, Service and RBAC. |
+
+The chart `name` (`agent` / `registrar`) is the trailing path segment of the
+published OCI artifact (`ghcr.io/bpalermo/aether/charts/<name>`). Resource names
+are derived from the **release** name, so install with `helm install aether …`
+to get `aether-agent`, `aether-registrar`, etc.
 
 The container image references in each `values.yaml` are written as
 `{@//path/to:image_push}` placeholders. At package time `rules_helm` substitutes
@@ -17,7 +22,7 @@ image, so packaged charts are always pinned to a concrete image digest.
 
 | Field | Value | Notes |
 | --- | --- | --- |
-| Chart `version` | `0.1.0+{GIT_COMMIT}` | SemVer; commit becomes build metadata. |
+| Chart `version` | `0.1.0-{GIT_COMMIT}` | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). |
 | Chart `appVersion` | `{STABLE_GIT_VERSION}` | `git describe` value — matches the binaries' embedded `Version`. |
 | Image refs | `repo@sha256:…` | Pinned to the exact built digest (strongest form). |
 
@@ -29,7 +34,7 @@ bazel build --stamp //charts/agent //charts/registrar   # embed git version
 bazel run   --stamp //charts/agent:agent.push           # publish a stamped chart
 ```
 
-Without `--stamp` the braces are stripped (e.g. `0.1.0+GIT_COMMIT`) so the chart
+Without `--stamp` the braces are stripped (e.g. `0.1.0-GIT_COMMIT`) so the chart
 still lints/templates — but release builds should pass `--stamp`. Image digests
 are stamped independently of this flag (they always reflect the built image), and
 the published image tags themselves already embed the git commit.
@@ -46,15 +51,27 @@ bazel test //charts/...
 
 ## Install
 
+From the local Bazel build:
+
 ```bash
 bazel run //charts/agent:agent.install
 bazel run //charts/registrar:registrar.install
 # Counterparts: .upgrade, .uninstall
 ```
 
+From the published OCI registry (use the semver `+`/`-` form for `--version`;
+helm maps it to the dash-separated tag):
+
+```bash
+helm install aether oci://ghcr.io/bpalermo/aether/charts/agent \
+  --version 0.1.0-<git-commit> -n aether-system
+helm install aether-registrar oci://ghcr.io/bpalermo/aether/charts/registrar \
+  --version 0.1.0-<git-commit> -n aether-system
+```
+
 ## Multiple instances & labels
 
-Resource names are release-prefixed (`<release>-aether-agent`, …) and
+Resource names are release-prefixed (`<release>-agent`, …) and
 cluster-scoped resources (ClusterRole/ClusterRoleBinding) additionally include
 the namespace, so several releases coexist without collisions. Customize naming
 with `nameOverride` / `fullnameOverride`, and target a namespace with
