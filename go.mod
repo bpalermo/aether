@@ -170,6 +170,7 @@ require (
 	github.com/envoyproxy/go-control-plane v0.14.0
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
 	github.com/fsnotify/fsnotify v1.10.1
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-logr/logr v1.4.3
 	github.com/google/renameio/v2 v2.0.2
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3
@@ -178,12 +179,14 @@ require (
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f
 	github.com/pquerna/protoc-gen-dynamo v0.12.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spiffe/go-spiffe/v2 v2.7.0
 	github.com/spiffe/spire-api-sdk v1.15.1
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/dynamodb v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/etcd v0.42.0
 	github.com/vladimirvivien/gexe v0.5.0
+	github.com/zeebo/errs v1.4.0
 	go.etcd.io/etcd/client/v3 v3.6.12
 	go.etcd.io/etcd/server/v3 v3.6.12
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0

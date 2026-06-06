@@ -5,4 +5,9 @@ go_library(
     srcs = ["tls.go"],
     importpath = "github.com/bpalermo/aether/common/spire",
     visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_spiffe_go_spiffe_v2//spiffeid",
+        "@com_github_spiffe_go_spiffe_v2//spiffetls/tlsconfig",
+        "@com_github_spiffe_go_spiffe_v2//workloadapi",
+    ],
 )

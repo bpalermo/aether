@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/common/manager"
+	"github.com/bpalermo/aether/common/spire"
 )
 
 const (
@@ -38,11 +39,16 @@ type RegistrarConfig struct {
 	SpireEnabled bool
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
 	SpireWorkloadSocketPath string
+	// SpireTrustDomain is the SPIFFE trust domain authorized for mTLS peers
+	SpireTrustDomain string
 }
 
 const (
 	// DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
 	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
+	// DefaultSpireTrustDomain defaults to the ROOTCA sentinel, authorizing any
+	// peer that chains to the SPIRE root CA (no trust-domain restriction).
+	DefaultSpireTrustDomain = spire.RootCATrustDomain
 )
 
 // NewRegistrarConfig creates a RegistrarConfig with default values.
@@ -59,5 +65,6 @@ func NewRegistrarConfig() *RegistrarConfig {
 		GRPCAddress:             defaultGRPCAddress,
 		SpireEnabled:            true,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
+		SpireTrustDomain:        DefaultSpireTrustDomain,
 	}
 }

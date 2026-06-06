@@ -98,7 +98,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
-	rootCmd.Flags().StringVar(&cfg.SpireWorkloadCertDir, "spire-workload-cert-dir", constants.DefaultSpireWorkloadCertDir, "Directory containing SPIRE workload identity certificates for registrar mTLS")
+	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
 
 	// These calls only fail if the flag name is not registered, which would be a programming error.
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
@@ -237,20 +237,25 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 // setupRegistrarClient creates and initializes a registrar-backed registry.
 // The agent connects to the in-cluster Registrar service for all endpoint
 // registration and discovery operations. When SPIRE is enabled, the connection
-// uses mTLS with SVID certificates from the SPIRE CSI mount; otherwise,
-// insecure transport is used.
+// uses mTLS with an X.509 SVID fetched over the SPIRE Workload API socket;
+// otherwise, insecure transport is used.
 func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
 	regCfg := registry.RegistrarConfig{
 		Address: cfg.RegistrarAddress,
 	}
 
 	if cfg.SpireEnabled {
-		tlsCfg, err := commonspire.ClientTLSConfig(cfg.SpireWorkloadCertDir)
+		src, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
+		if err != nil {
+			return nil, err
+		}
+		context.AfterFunc(ctx, func() { _ = src.Close() })
+		tlsCfg, err := commonspire.ClientTLSConfig(src, cfg.SpireTrustDomain)
 		if err != nil {
 			return nil, err
 		}
 		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
-		l.Info("registrar client using SPIRE mTLS", "certDir", cfg.SpireWorkloadCertDir)
+		l.Info("registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
 	} else {
 		l.Info("registrar client using insecure transport")
 	}

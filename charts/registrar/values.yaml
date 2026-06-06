@@ -41,6 +41,14 @@ service:
   port: 443
   targetPort: 8443
 
-# Mount the SPIFFE workload API socket (CSI driver) into the registrar.
+# SPIRE mTLS for the registrar gRPC server. When enabled, the csi.spiffe.io
+# Workload API socket is mounted and the registrar fetches its X.509 SVID over it
+# (no certificate files / sidecar needed).
 spire:
   enabled: true
+  # SPIFFE trust domain authorized for mTLS peers. Leave empty to omit the flag
+  # and let the binary default (ROOTCA) authorize any peer chaining to the SPIRE
+  # root CA; set e.g. "aether.internal" to restrict peers to that trust domain.
+  trustDomain: ""
+  # Workload API socket path (the csi.spiffe.io mount + socket filename).
+  workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
