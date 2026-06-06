@@ -1,0 +1,35 @@
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+
+# aether-agent Helm chart.
+#
+# `images` wires the in-repo image_push targets into the chart so that:
+#   * the `{@//...:image_push}` placeholders in values.yaml are substituted with
+#     digest-pinned references at package time, and
+#   * `:agent.push` publishes those images alongside the chart.
+#
+# Publish targets (GitHub Container Registry, OCI):
+#   bazel run //charts/agent:agent.push           # chart + images
+#   bazel run //charts/agent:agent.push_registry  # chart only
+# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+helm_chart(
+    name = "agent",
+    chart = "Chart.yaml",
+    images = [
+        "//agent/cmd/agent:image_push",
+        "//cni/cmd/cni-install:image_push",
+    ],
+    login_url = "ghcr.io",
+    registry_url = "oci://ghcr.io/bpalermo",
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+)
+
+helm_lint_test(
+    name = "agent_lint_test",
+    chart = ":agent",
+)
+
+helm_template_test(
+    name = "agent_template_test",
+    chart = ":agent",
+)

@@ -98,6 +98,9 @@ def go_multi_arch_image(name, binary, repository, registry = "docker.io", base =
     image_push(
         name = "image_push",
         image = ":image_index",
+        # Public so the Helm charts under //charts can reference the push targets
+        # for image substitution and chart-with-images publishing.
+        visibility = ["//visibility:public"],
         registry = registry,
         repository = repository,
         tag_list = [
