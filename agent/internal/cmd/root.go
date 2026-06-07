@@ -138,7 +138,29 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	reg, err := setupRegistrarClient(ctx)
+	// When SPIRE is enabled, open the Workload API source and resolve the real
+	// trust domain SPIRE issues into (e.g. "aether.internal"). That trust domain
+	// names the SDS resources / SPIFFE IDs the agent programs into Envoy so they
+	// match the secrets the SPIRE bridge delivers. The configured
+	// --spire-trust-domain governs only peer authorization and may be the
+	// RootCATrustDomain "authorize any" sentinel, which is not a real trust domain.
+	var spireSource *commonspire.Source
+	identityTrustDomain := cfg.SpireTrustDomain
+	if cfg.SpireEnabled {
+		spireSource, err = commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
+		if err != nil {
+			return err
+		}
+		defer func() { retErr = errors.Join(retErr, spireSource.Close()) }()
+
+		identityTrustDomain, err = commonspire.TrustDomainFromSource(spireSource)
+		if err != nil {
+			return fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
+		}
+		l.Info("resolved workload trust domain from SPIRE", "trustDomain", identityTrustDomain)
+	}
+
+	reg, err := setupRegistrarClient(ctx, spireSource)
 	if err != nil {
 		return err
 	}
@@ -157,11 +179,11 @@ func runAgent(ctx context.Context) (retErr error) {
 		l.Info("SPIRE integration disabled")
 	}
 
-	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache); err != nil {
+	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, identityTrustDomain); err != nil {
 		return err
 	}
 
-	if err = setupCNIServer(m, localStorage, reg, snapshotCache, spireBridge); err != nil {
+	if err = setupCNIServer(m, localStorage, reg, snapshotCache, spireBridge, identityTrustDomain); err != nil {
 		return err
 	}
 
@@ -185,9 +207,9 @@ func runAgent(ctx context.Context) (retErr error) {
 // setXDSServer creates and registers an Agent xDS server as a runnable with the Manager.
 // The server listens on a Unix domain socket and serves Envoy discovery service requests
 // (LDS, CDS, EDS, RDS, ADS) with resource snapshots generated from local pod storage and the registry.
-func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache) error {
+func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, trustDomain string) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, cfg.SpireTrustDomain, registry, localStorage, snapshotCache, l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, trustDomain, registry, localStorage, snapshotCache, l)
 	if err != nil {
 		return err
 	}
@@ -201,13 +223,13 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 // setupCNIServer creates and registers a CNI gRPC server as a runnable with the Manager.
 // The server listens on a Unix domain socket and handles pod registration/deregistration
 // requests from the CNI plugin binary. It stores pod data locally and triggers xDS snapshot updates.
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, spireBridge *spire.Bridge) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, spireBridge *spire.Bridge, trustDomain string) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
 		cfg.NodeName,
 		cfg.ProxyServiceNodeID,
-		cfg.SpireTrustDomain,
+		trustDomain,
 		localStorage,
 		registry,
 		snapshotCache,
@@ -247,7 +269,7 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 // registration and discovery operations. When SPIRE is enabled, the connection
 // uses mTLS with an X.509 SVID fetched over the SPIRE Workload API socket;
 // otherwise, insecure transport is used.
-func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
+func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registry.Registry, error) {
 	regCfg := registry.RegistrarConfig{
 		Address:     cfg.RegistrarAddress,
 		ClusterName: cfg.ClusterName,
@@ -255,11 +277,9 @@ func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
 	}
 
 	if cfg.SpireEnabled {
-		src, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-		if err != nil {
-			return nil, err
-		}
-		context.AfterFunc(ctx, func() { _ = src.Close() })
+		// Peer authorization uses the configured trust domain (which may be the
+		// RootCATrustDomain "authorize any" sentinel), independent of the workload
+		// trust domain used for SDS resource naming.
 		tlsCfg, err := commonspire.ClientTLSConfig(src, cfg.SpireTrustDomain)
 		if err != nil {
 			return nil, err

@@ -38,6 +38,19 @@ func NewSource(ctx context.Context, socketPath string) (*Source, error) {
 // same way.
 const RootCATrustDomain = "ROOTCA"
 
+// TrustDomainFromSource returns the SPIFFE trust domain name of the workload SVID
+// served by src (e.g. "example.org"). Use it to construct SPIFFE IDs and SDS
+// resource names from the real trust domain SPIRE issues into, rather than from a
+// configured value (which may be the RootCATrustDomain authorization sentinel).
+// The source has already fetched its first SVID by the time NewSource returns.
+func TrustDomainFromSource(src *Source) (string, error) {
+	svid, err := src.GetX509SVID()
+	if err != nil {
+		return "", fmt.Errorf("fetching workload SVID for trust domain: %w", err)
+	}
+	return svid.ID.TrustDomain().Name(), nil
+}
+
 // ServerTLSConfig returns a mutual-TLS server config that presents the workload
 // SVID from src and authorizes peers belonging to trustDomain (or any valid peer
 // when trustDomain is empty / RootCATrustDomain).
