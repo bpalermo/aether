@@ -55,6 +55,11 @@ type RegistrarRegistry struct {
 	mu    sync.RWMutex
 	cache map[string][]*registryv1.ServiceEndpoint // keyed by serviceName
 
+	// notify coalesces endpoint-change signals for consumers (e.g. the agent
+	// xDS cache). It is buffered with capacity 1 and written non-blocking, so a
+	// burst of watch events collapses into a single pending signal.
+	notify chan struct{}
+
 	cancel context.CancelFunc
 }
 
@@ -64,6 +69,25 @@ func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
 		log:    log.WithName("registrar-registry"),
 		config: cfg,
 		cache:  make(map[string][]*registryv1.ServiceEndpoint),
+		notify: make(chan struct{}, 1),
+	}
+}
+
+// Changes returns a channel that receives a signal whenever the cached set of
+// endpoints changes (an endpoint is added, updated, or removed). Signals are
+// coalesced: consumers should treat each receive as "something changed, re-read
+// the registry" rather than a per-event notification. It satisfies the
+// registry.ChangeNotifier capability.
+func (r *RegistrarRegistry) Changes() <-chan struct{} {
+	return r.notify
+}
+
+// signalChange performs a non-blocking send on the notify channel, coalescing
+// bursts of events into a single pending signal.
+func (r *RegistrarRegistry) signalChange() {
+	select {
+	case r.notify <- struct{}{}:
+	default:
 	}
 }
 
@@ -282,6 +306,10 @@ func (r *RegistrarRegistry) applyEvent(event *registrarv1.WatchEndpointsResponse
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
 		r.removeLocked(svcName, ep.GetIp())
 	}
+
+	// Wake consumers (e.g. the agent xDS cache) so they re-read the registry and
+	// rebuild derived state. Coalesced and non-blocking.
+	r.signalChange()
 }
 
 // upsertLocked adds or updates an endpoint in the cache. Caller must hold mu.

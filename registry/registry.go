@@ -28,3 +28,17 @@ type Registry interface {
 	// organized in a map keyed by service name.
 	ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error)
 }
+
+// ChangeNotifier is an optional capability for Registry implementations that can
+// push change notifications. Backends that maintain a live view of the registry
+// (e.g. the registrar watch stream) implement it so consumers can rebuild derived
+// state — such as the agent's xDS cluster/endpoint/route snapshot — when endpoints
+// change, instead of only at startup.
+//
+// Signals are coalesced: each receive means "the endpoint set changed, re-read the
+// registry", not a per-event notification.
+type ChangeNotifier interface {
+	// Changes returns a channel that receives a signal whenever the set of
+	// endpoints changes.
+	Changes() <-chan struct{}
+}

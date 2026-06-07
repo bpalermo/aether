@@ -165,6 +165,14 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
+	// Rebuild the cluster/endpoint/route snapshot when the registry reports
+	// endpoint changes, so services registered after startup become routable
+	// without restarting the agent. No-op if the registry can't notify.
+	refresher := xdsServer.NewRegistryRefresher(cfg.ClusterName, cfg.NodeName, snapshotCache, reg, l)
+	if err = m.Add(refresher); err != nil {
+		return fmt.Errorf("failed to add registry refresher: %w", err)
+	}
+
 	l.V(1).Info("waiting for local storage to be ready")
 	if err = localStorage.WaitUntilReady(ctx); err != nil {
 		return err

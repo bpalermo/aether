@@ -589,6 +589,35 @@ func TestLoadClustersFromRegistry_EndpointsReachable(t *testing.T) {
 	assert.Len(t, eps, 1)
 }
 
+// TestLoadClustersFromRegistry_RebuildPrunesStale verifies that reloading is a
+// full rebuild: a service that disappears from the registry between loads is
+// pruned from the cache rather than retained.
+func TestLoadClustersFromRegistry_RebuildPrunesStale(t *testing.T) {
+	c := newTestCache("node-1")
+	data := map[string][]*registryv1.ServiceEndpoint{
+		"keep":   {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+		"remove": {makeEndpoint("10.0.0.2", "cluster-1", "node-2", 8080)},
+	}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return data, nil
+		},
+	}
+
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	require.NotNil(t, c.Endpoints("keep"))
+	require.NotNil(t, c.Endpoints("remove"))
+
+	// The registry now reports only "keep"; a reload must drop "remove".
+	data = map[string][]*registryv1.ServiceEndpoint{
+		"keep": {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+
+	assert.NotNil(t, c.Endpoints("keep"))
+	assert.Nil(t, c.Endpoints("remove"), "stale cluster should be pruned on reload")
+}
+
 // TestLoadClustersFromRegistry_VirtualHostsPopulated verifies that after loading, VirtualHosts()
 // returns non-empty results for registered services.
 func TestLoadClustersFromRegistry_VirtualHostsPopulated(t *testing.T) {
