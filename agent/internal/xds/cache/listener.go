@@ -3,20 +3,11 @@ package cache
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-)
-
-const (
-	// listenerVersionLabel is used in snapshot version strings to identify
-	// listener resource snapshots.
-	listenerVersionLabel = "listener"
 )
 
 // AddPod generates inbound and outbound listeners for the given pod and adds
@@ -127,26 +118,9 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	return c.generateListenerSnapshot(ctx)
 }
 
-// generateListenerSnapshot creates a new snapshot with the current listeners,
-// validates it for consistency, and sets it on the underlying snapshot cache.
-// The snapshot version is generated using the listener version label. Returns an error
-// if snapshot creation or validation fails.
+// generateListenerSnapshot regenerates the node snapshot after a listener change.
+// It delegates to generateSnapshot, which emits a complete snapshot of all
+// resource types so listener updates do not clobber clusters, routes or secrets.
 func (c *SnapshotCache) generateListenerSnapshot(ctx context.Context) error {
-	v := generateSnapshotVersion(listenerVersionLabel, c.version)
-
-	listeners := c.Listeners()
-	c.log.V(1).Info("setting snapshot", "version", v, "listeners", len(listeners))
-
-	snapshot, err := cachev3.NewSnapshot(v, map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: listeners,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot: %w", err)
-	}
-
-	if err := c.SetSnapshot(ctx, c.nodeName, snapshot); err != nil {
-		return fmt.Errorf("failed to set snapshot: %w", err)
-	}
-
-	return nil
+	return c.generateSnapshot(ctx)
 }
