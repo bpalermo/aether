@@ -54,6 +54,15 @@ type SnapshotCache struct {
 	secretMu sync.RWMutex
 	secrets  map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
 
+	localMu sync.RWMutex
+	// localWorkloads maps a local pod's network namespace to its SPIFFE ID. It
+	// drives the outbound clusters' transport-socket matcher so each upstream
+	// connection presents the originating pod's client certificate.
+	localWorkloads map[string]string
+	// trustDomain is the workload trust domain captured from listener loads,
+	// used to name the upstream mTLS validation context.
+	trustDomain string
+
 	version *atomic.Uint64
 }
 
@@ -86,9 +95,27 @@ func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
 		// Initialize the resource maps up front so callers never assign to a nil
 		// map. LoadListenersFromStorage assigns directly (no lazy init), which
 		// panics on agent restart when pods already exist in local storage.
-		listeners: make(map[string]listenerEntry),
-		clusters:  make(map[string]clusterEntry),
-		secrets:   make(map[string]*tlsv3.Secret),
-		version:   atomic.NewUint64(0),
+		listeners:      make(map[string]listenerEntry),
+		clusters:       make(map[string]clusterEntry),
+		secrets:        make(map[string]*tlsv3.Secret),
+		localWorkloads: make(map[string]string),
+		version:        atomic.NewUint64(0),
 	}
+}
+
+// setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping
+// and the workload trust domain, used to build the outbound mTLS transport
+// socket matcher.
+func (c *SnapshotCache) setLocalWorkload(netns, spiffeID, trustDomain string) {
+	c.localMu.Lock()
+	c.localWorkloads[netns] = spiffeID
+	c.trustDomain = trustDomain
+	c.localMu.Unlock()
+}
+
+// removeLocalWorkload drops a local pod's network namespace mapping.
+func (c *SnapshotCache) removeLocalWorkload(netns string) {
+	c.localMu.Lock()
+	delete(c.localWorkloads, netns)
+	c.localMu.Unlock()
 }

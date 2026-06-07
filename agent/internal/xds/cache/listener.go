@@ -33,6 +33,8 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	}
 	c.listenerMu.Unlock()
 
+	c.setLocalWorkload(netns, proxy.SpiffeIDFromPod(cniPod, trustDomain), trustDomain)
+
 	return c.generateListenerSnapshot(ctx)
 }
 
@@ -51,6 +53,8 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 	if !exists {
 		return nil
 	}
+
+	c.removeLocalWorkload(netns)
 
 	return c.generateListenerSnapshot(ctx)
 }
@@ -88,6 +92,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	c.log.V(1).Info("found pods in local storage", "count", len(pods))
 
 	var errs []error
+	local := make(map[string]string, len(pods))
 
 	c.listenerMu.Lock()
 	for _, pod := range pods {
@@ -105,8 +110,14 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			inbound:  inbound,
 			outbound: outbound,
 		}
+		local[netns] = proxy.SpiffeIDFromPod(pod, trustDomain)
 	}
 	c.listenerMu.Unlock()
+
+	c.localMu.Lock()
+	c.localWorkloads = local
+	c.trustDomain = trustDomain
+	c.localMu.Unlock()
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)

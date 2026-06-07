@@ -18,6 +18,7 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//registry",
+        "@com_github_cncf_xds_go//xds/type/matcher/v3:matcher",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
@@ -26,6 +27,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
         "@com_github_go_logr_logr//:logr",
+        "@org_golang_google_protobuf//proto",
         "@org_uber_go_atomic//:atomic",
     ],
 )
@@ -36,6 +38,7 @@ go_test(
         "cache_test.go",
         "cluster_test.go",
         "listener_test.go",
+        "outbound_mtls_test.go",
         "snapshot_test.go",
         "version_test.go",
     ],
