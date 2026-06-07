@@ -310,6 +310,20 @@ func TestLoadListenersFromStorage_ValidPodsSucceeds(t *testing.T) {
 	assert.Len(t, c.listeners, 1)
 }
 
+// TestLoadListenersFromStorage_FreshCacheNoPanic loads pods from storage into a
+// freshly constructed cache without pre-initializing its maps. This reproduces
+// agent restart with pods already in local storage: NewSnapshotCache must
+// initialize the listeners map, otherwise the direct assignment panics.
+func TestLoadListenersFromStorage_FreshCacheNoPanic(t *testing.T) {
+	c := newTestCache("node-1")
+	store := storage.NewMockStorageWithGetAll[*cniv1.CNIPod](func(_ context.Context) ([]*cniv1.CNIPod, error) {
+		return []*cniv1.CNIPod{makeCNIPod("pod-a", "default", "/proc/100/ns/net")}, nil
+	})
+
+	require.NoError(t, c.LoadListenersFromStorage(context.Background(), store, "example.org"))
+	assert.Len(t, c.listeners, 1)
+}
+
 // TestLoadListenersFromStorage_ValidPods_NetnsKeyed verifies that the listener
 // entries are stored under the pod's network namespace key, and that both
 // inbound and outbound listeners are non-nil.

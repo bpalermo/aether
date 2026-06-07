@@ -83,6 +83,12 @@ func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
 		SnapshotCache: cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),
 		log:           log.WithName("cache"),
 		nodeName:      nodeName,
-		version:       atomic.NewUint64(0),
+		// Initialize the resource maps up front so callers never assign to a nil
+		// map. LoadListenersFromStorage assigns directly (no lazy init), which
+		// panics on agent restart when pods already exist in local storage.
+		listeners: make(map[string]listenerEntry),
+		clusters:  make(map[string]clusterEntry),
+		secrets:   make(map[string]*tlsv3.Secret),
+		version:   atomic.NewUint64(0),
 	}
 }
