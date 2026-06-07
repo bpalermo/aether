@@ -17,6 +17,11 @@ spec:
         {{- include "agent.labels" . | nindent 8 }}
     spec:
       hostNetwork: true
+      # Share the host PID namespace so the agent can resolve a pod's sandbox PID
+      # from its network namespace (inode match against /proc/<pid>/ns/net) to
+      # subscribe the workload's SPIRE SVID — the CNI plugin cannot supply the PID
+      # because the runtime starts the sandbox process only after CNI ADD returns.
+      hostPID: true
       # Resolve in-cluster Service names (e.g. the registrar) while on hostNetwork;
       # plain ClusterFirst is ignored for hostNetwork pods.
       dnsPolicy: ClusterFirstWithHostNet

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -18,6 +19,49 @@ import (
 )
 
 const envoyAdminTimeout = 2 * time.Second
+
+const (
+	// defaultPIDResolveTimeout bounds how long the agent waits for a pod's
+	// sandbox process (and thus its PID) to appear after CNI ADD.
+	defaultPIDResolveTimeout = 15 * time.Second
+	// defaultPIDResolveInterval is the poll interval while resolving the PID.
+	defaultPIDResolveInterval = 200 * time.Millisecond
+)
+
+// subscribePodWhenPIDResolves resolves the workload PID from its network
+// namespace (retrying until the sandbox process exists) and then subscribes to
+// the pod's SVID over the SPIRE Delegated Identity API. It runs in its own
+// goroutine because resolution outlives the CNI ADD request, and uses a
+// background context so the subscription is not cancelled when ADD returns.
+func (s *CNIServer) subscribePodWhenPIDResolves(spiffeID, netns string) {
+	log := s.log.WithValues("spiffeID", spiffeID, "netns", netns)
+	if netns == "" {
+		log.V(1).Info("cannot resolve SVID PID: empty network namespace")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.pidResolveTimeout)
+	defer cancel()
+
+	hostNetns := netns
+	if s.hostMountPrefix != "" {
+		hostNetns = filepath.Join(s.hostMountPrefix, netns)
+	}
+
+	pid, err := resolvePIDWithRetry(ctx, func() (int32, error) {
+		return resolvePIDFromNetns(hostNetns)
+	}, s.pidResolveInterval)
+	if err != nil {
+		log.Error(err, "failed to resolve workload PID for SVID subscription")
+		return
+	}
+
+	if err := s.spireBridge.SubscribePod(context.Background(), spiffeID, pid); err != nil {
+		log.Error(err, "failed to subscribe to SVID", "pid", pid)
+		return
+	}
+	log.Info("subscribed to SVID after resolving workload PID", "pid", pid)
+}
 
 // AddPod handles CNI ADD requests for a pod.
 // It enriches the pod data with Kubernetes annotations and labels, validates that the pod
@@ -52,7 +96,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
 	}
 
-	// Subscribe to SVID for this pod via the SPIRE Delegated Identity API
+	// Subscribe to SVID for this pod via the SPIRE Delegated Identity API.
 	if s.spireBridge != nil {
 		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
 		if cniPod.GetPid() != nil {
@@ -60,7 +104,10 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 				log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
 			}
 		} else {
-			log.V(1).Info("skipping SVID subscription: PID not available", "spiffeID", spiffeID)
+			// The container runtime starts the sandbox process only after CNI ADD
+			// returns, so the PID is not yet known. Resolve it from the pod's netns
+			// in the background and subscribe once it appears.
+			go s.subscribePodWhenPIDResolves(spiffeID, cniPod.GetNetworkNamespace())
 		}
 	}
 

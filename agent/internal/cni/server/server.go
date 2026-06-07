@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"buf.build/go/protovalidate"
 	"github.com/bpalermo/aether/agent/internal/envoy/admin"
@@ -49,6 +50,15 @@ type CNIServer struct {
 	envoyAdmin    *admin.Client
 
 	k8sClient client.Client
+
+	// hostMountPrefix is prepended to a pod's host netns path to read it from
+	// inside the agent container when resolving the workload PID.
+	hostMountPrefix string
+	// pidResolveTimeout/pidResolveInterval bound the background netns->PID
+	// resolution used to subscribe a pod's SPIRE SVID when the CNI plugin could
+	// not supply a PID at ADD time.
+	pidResolveTimeout  time.Duration
+	pidResolveInterval time.Duration
 }
 
 var _ xds.ServerCallback = (*CNIServer)(nil)
@@ -64,18 +74,21 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 	)
 
 	cniSrv := &CNIServer{
-		Server:        xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
-		log:           log.WithName("cni"),
-		clusterName:   clusterName,
-		nodeName:      nodeName,
-		proxyID:       proxyID,
-		trustDomain:   trustDomain,
-		storage:       localStorage,
-		registry:      registry,
-		k8sClient:     k8sClient,
-		snapshotCache: snapshotCache,
-		spireBridge:   spireBridge,
-		envoyAdmin:    admin.NewClient(cfg.EnvoyAdminAddress),
+		Server:             xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
+		log:                log.WithName("cni"),
+		clusterName:        clusterName,
+		nodeName:           nodeName,
+		proxyID:            proxyID,
+		trustDomain:        trustDomain,
+		storage:            localStorage,
+		registry:           registry,
+		k8sClient:          k8sClient,
+		snapshotCache:      snapshotCache,
+		spireBridge:        spireBridge,
+		envoyAdmin:         admin.NewClient(cfg.EnvoyAdminAddress),
+		hostMountPrefix:    cfg.HostMountPrefix,
+		pidResolveTimeout:  defaultPIDResolveTimeout,
+		pidResolveInterval: defaultPIDResolveInterval,
 	}
 
 	cniSrv.AddCallback(cniSrv)
