@@ -6,11 +6,11 @@ description: |
   node agents over gRPC.
 type: application
 # Stamped at package time when built with `--stamp`:
-#   version    -> 0.1.0-<git-commit> (SemVer pre-release; yields a dash-separated
+#   version    -> 0.2.0-<git-commit> (SemVer pre-release; yields a dash-separated
 #                 OCI tag, unlike `+build` metadata which helm rewrites to `_`)
 #   appVersion -> the `git describe` version, matching the binary's embedded Version
 # Without `--stamp` the braces are stripped, yielding literal placeholder text.
-version: "0.1.0-{GIT_COMMIT}"
+version: "0.2.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

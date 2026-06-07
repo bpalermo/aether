@@ -50,28 +50,15 @@ func (f *fakeClient) addNamespace(name, id string) {
 	}
 }
 
-func (f *fakeClient) ListNamespaces(_ context.Context, input *servicediscovery.ListNamespacesInput, _ ...func(*servicediscovery.Options)) (*servicediscovery.ListNamespacesOutput, error) {
+func (f *fakeClient) ListNamespaces(_ context.Context, _ *servicediscovery.ListNamespacesInput, _ ...func(*servicediscovery.Options)) (*servicediscovery.ListNamespacesOutput, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	var nsList []types.NamespaceSummary
+	// Cloud Map's ListNamespaces only supports a TYPE filter (no name filter), so
+	// the registry lists unfiltered and matches by name client-side. Mirror that
+	// here by returning every namespace regardless of any filters on the input.
+	nsList := make([]types.NamespaceSummary, 0, len(f.namespaces))
 	for name, id := range f.namespaces {
-		// Apply filter if present
-		if len(input.Filters) > 0 {
-			match := false
-			for _, filter := range input.Filters {
-				if filter.Name == types.NamespaceFilterNameType {
-					for _, v := range filter.Values {
-						if v == name {
-							match = true
-						}
-					}
-				}
-			}
-			if !match {
-				continue
-			}
-		}
 		nsList = append(nsList, types.NamespaceSummary{
 			Name: aws.String(name),
 			Id:   aws.String(id),

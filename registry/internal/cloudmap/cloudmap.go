@@ -231,16 +231,13 @@ func (r *CloudMapRegistry) ListAllEndpoints(ctx context.Context, protocol regist
 }
 
 // resolveNamespaceID finds the Cloud Map namespace ID for the configured namespace name.
+//
+// We list namespaces unfiltered and match by name client-side rather than using a
+// server-side NamespaceFilter. The only ListNamespaces filter is TYPE
+// (DNS_PUBLIC/DNS_PRIVATE/HTTP) — there is no name filter — so filtering by the
+// namespace name server-side matches nothing and the lookup silently fails.
 func (r *CloudMapRegistry) resolveNamespaceID(ctx context.Context) (string, error) {
-	paginator := servicediscovery.NewListNamespacesPaginator(r.client, &servicediscovery.ListNamespacesInput{
-		Filters: []types.NamespaceFilter{
-			{
-				Name:      types.NamespaceFilterNameType,
-				Values:    []string{r.namespace},
-				Condition: types.FilterConditionEq,
-			},
-		},
-	})
+	paginator := servicediscovery.NewListNamespacesPaginator(r.client, &servicediscovery.ListNamespacesInput{})
 
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
