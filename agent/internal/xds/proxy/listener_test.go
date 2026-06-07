@@ -23,8 +23,8 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 				Name:             "test-pod",
 				NetworkNamespace: "/var/run/netns/test",
 			},
-			expectedInboundName:  "inbound_http",
-			expectedOutboundName: "outbound_http",
+			expectedInboundName:  "inbound_http_test-pod",
+			expectedOutboundName: "outbound_http_test-pod",
 			expectedError:        false,
 		},
 		{
@@ -46,8 +46,8 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 				Name:             "test-pod",
 				NetworkNamespace: "/var/run/netns/test",
 			},
-			expectedInboundName:  "inbound_http",
-			expectedOutboundName: "outbound_http",
+			expectedInboundName:  "inbound_http_test-pod",
+			expectedOutboundName: "outbound_http_test-pod",
 			expectedError:        false,
 		},
 	}
@@ -124,7 +124,7 @@ func TestGenerateInboundHTTPListener(t *testing.T) {
 
 			require.NoError(t, err)
 			require.NotNil(t, listener)
-			assert.Equal(t, "inbound_http", listener.GetName())
+			assert.Equal(t, "inbound_http_"+tt.cniPod.GetName(), listener.GetName())
 			assert.Equal(t, tt.expectedStatPrefix, listener.GetStatPrefix())
 			assert.Equal(t, corev3.TrafficDirection_INBOUND, listener.GetTrafficDirection())
 
@@ -188,7 +188,7 @@ func TestGenerateOutboundHTTPListener(t *testing.T) {
 
 			require.NoError(t, err)
 			require.NotNil(t, listener)
-			assert.Equal(t, "outbound_http", listener.GetName())
+			assert.Equal(t, "outbound_http_"+tt.cniPod.GetName(), listener.GetName())
 			assert.Equal(t, tt.expectedStatPrefix, listener.GetStatPrefix())
 			assert.Equal(t, corev3.TrafficDirection_OUTBOUND, listener.GetTrafficDirection())
 
