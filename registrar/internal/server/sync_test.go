@@ -157,7 +157,7 @@ func TestSyncer_Start_BroadcastsChangesOnSubsequentSync(t *testing.T) {
 	cancel()
 
 	require.NoError(t, <-done)
-	bc.Unsubscribe("test-watcher")
+	bc.Unsubscribe("test-watcher", eventCh)
 
 	// Count buffered events. Use len() rather than ranging over the channel to
 	// avoid blocking; the broadcaster channel is buffered so events already
@@ -357,7 +357,7 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 	cancel()
 
 	require.NoError(t, <-done)
-	bc.Unsubscribe("no-change-watcher")
+	bc.Unsubscribe("no-change-watcher", eventCh)
 
 	// Because the state never changed after the first sync, no events should
 	// have been broadcast to the watcher.

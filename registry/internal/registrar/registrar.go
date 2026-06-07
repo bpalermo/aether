@@ -31,6 +31,12 @@ const (
 type Config struct {
 	// Address is the gRPC address of the Registrar service.
 	Address string
+	// ClusterName identifies this agent's cluster to the Registrar. Together with
+	// NodeName it forms the unique watcher id; without it every agent collides on
+	// the same id and the Registrar evicts their watch streams in a reconnect loop.
+	ClusterName string
+	// NodeName identifies this agent's node to the Registrar. See ClusterName.
+	NodeName string
 	// DialOptions are additional gRPC dial options (e.g., TLS credentials).
 	// When empty, insecure credentials are used.
 	DialOptions []grpc.DialOption
@@ -202,6 +208,8 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		}
 
 		stream, err := r.client.WatchEndpoints(ctx, &registrarv1.WatchEndpointsRequest{
+			ClusterName: r.config.ClusterName,
+			NodeName:    r.config.NodeName,
 			LastVersion: lastVersion,
 		})
 		if err != nil {

@@ -81,8 +81,8 @@ func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
 	// Kubernetes and cluster identity (required)
-	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", constants.DefaultProxyID, "Kubernetes node name where the agent runs (required)")
-	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", constants.DefaultProxyID, "Kubernetes cluster name, used for service discovery (required)")
+	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name where the agent runs (required)")
+	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name, used for service discovery (required)")
 	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "Unique identifier for this Envoy proxy instance in the xDS server (required)")
 
 	// Local storage configuration
@@ -241,7 +241,9 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 // otherwise, insecure transport is used.
 func setupRegistrarClient(ctx context.Context) (registry.Registry, error) {
 	regCfg := registry.RegistrarConfig{
-		Address: cfg.RegistrarAddress,
+		Address:     cfg.RegistrarAddress,
+		ClusterName: cfg.ClusterName,
+		NodeName:    cfg.NodeName,
 	}
 
 	if cfg.SpireEnabled {
