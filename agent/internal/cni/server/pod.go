@@ -61,7 +61,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	if s.spireBridge != nil {
 		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
 		selectors := spire.PodSelectors(cniPod.GetNamespace(), cniPod.GetServiceAccount(), cniPod.GetName(), podUID)
-		if err = s.spireBridge.SubscribePod(spiffeID, selectors); err != nil {
+		if err = s.spireBridge.SubscribePod(cniPod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
 			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
 		}
 	}
@@ -120,11 +120,10 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
 	}
 
-	// Unsubscribe from SVID for this pod
+	// Unsubscribe from SVID for this pod (keyed by its network namespace).
 	if s.spireBridge != nil {
-		spiffeID := proxy.SpiffeIDFromPod(storedPod, s.trustDomain)
-		if unsubErr := s.spireBridge.UnsubscribePod(ctx, spiffeID); unsubErr != nil {
-			log.Error(unsubErr, "failed to unsubscribe from SVID", "spiffeID", spiffeID)
+		if unsubErr := s.spireBridge.UnsubscribePod(ctx, storedPod.GetNetworkNamespace()); unsubErr != nil {
+			log.Error(unsubErr, "failed to unsubscribe from SVID", "netns", storedPod.GetNetworkNamespace())
 		}
 	}
 
