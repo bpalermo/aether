@@ -14,6 +14,7 @@ import (
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 )
 
@@ -57,20 +58,26 @@ func SVIDToTLSCertificateSecret(svid *delegatedidentityv1.X509SVIDWithKey) (*tls
 	}, nil
 }
 
-// BundleToValidationContextSecret converts a trust domain's CA certificates
-// to an Envoy validation context Secret. trustDomain is the bare SPIFFE trust
-// domain (e.g., "example.org", as keyed in the SPIRE bundle response); the
-// secret name is its SPIFFE URI form (e.g., "spiffe://example.org") to match
-// the validation context name referenced by inbound listeners and the URI
-// naming used for SVID certificate secrets. The DER-encoded CA certs are PEM-encoded.
+// BundleToValidationContextSecret converts a trust domain's CA certificates to
+// an Envoy validation context Secret. trustDomain may be a bare trust domain
+// name ("example.org") or a SPIFFE URI ("spiffe://example.org") — the SPIRE
+// Delegated Identity bundle map is keyed by the latter. Either way the secret is
+// named with the canonical SPIFFE URI (e.g. "spiffe://example.org") to match the
+// validation context name referenced by inbound listeners and the SVID secret
+// naming. The DER-encoded CA certs are PEM-encoded.
 func BundleToValidationContextSecret(trustDomain string, derCACerts []byte) (*tlsv3.Secret, error) {
+	td, err := spiffeid.TrustDomainFromString(trustDomain)
+	if err != nil {
+		return nil, fmt.Errorf("invalid trust domain %q: %w", trustDomain, err)
+	}
+
 	caPEM, err := derBundleToPEM(derCACerts)
 	if err != nil {
 		return nil, fmt.Errorf("converting CA bundle to PEM for %s: %w", trustDomain, err)
 	}
 
 	return &tlsv3.Secret{
-		Name: fmt.Sprintf("spiffe://%s", trustDomain),
+		Name: td.IDString(),
 		Type: &tlsv3.Secret_ValidationContext{
 			ValidationContext: &tlsv3.CertificateValidationContext{
 				TrustedCa: &corev3.DataSource{
