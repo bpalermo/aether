@@ -44,6 +44,9 @@ func DownstreamTransportSocket(tlsCertificateSecretName string, validationContex
 func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string) *corev3.TransportSocket {
 	upstreamTlsContext := &transport_sockets_v3.UpstreamTlsContext{
 		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
+			// Clusters speak HTTP/2 upstream; advertise it so the mTLS handshake
+			// negotiates h2 (matches the inbound listener's codec).
+			AlpnProtocols: []string{"h2"},
 			TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
 				sdsSecretConfig(tlsCertificateSecretName),
 			},

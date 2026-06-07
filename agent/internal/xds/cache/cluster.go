@@ -3,14 +3,17 @@ package cache
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
+	matcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // RemoveEndpoint removes a single endpoint by IP from the given cluster's
@@ -63,10 +66,22 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 	return c.generateClusterSnapshot(ctx)
 }
 
+// localClusterPrefix marks the same-node ("local_<service>") cluster variants,
+// which are excluded from upstream mTLS matcher injection.
+const localClusterPrefix = "local_"
+
 // clustersEndpointsAndVhosts returns all cached cluster, endpoint, and virtual host
 // resources as separate slices. It returns concrete vhost type to avoid boxing/unboxing
-// at the caller. Must be called with clusterMu held.
+// at the caller.
+//
+// Each regular (non-local) service cluster is cloned and given the upstream mTLS
+// transport-socket matcher/matches derived from the current local workloads, so
+// the cloned cluster presents the originating pod's client certificate. Cloning
+// avoids mutating the cached cluster pointer, which is rebuilt wholesale on
+// registry reloads.
 func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
+	matcher, matches := c.upstreamMTLS()
+
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
@@ -74,7 +89,14 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
 	for _, entry := range c.clusters {
-		clusters = append(clusters, entry.cluster)
+		cluster := entry.cluster
+		if matcher != nil && !strings.HasPrefix(cluster.GetName(), localClusterPrefix) {
+			cloned, _ := proto.Clone(cluster).(*clusterv3.Cluster)
+			cloned.TransportSocketMatcher = matcher
+			cloned.TransportSocketMatches = matches
+			cluster = cloned
+		}
+		clusters = append(clusters, cluster)
 		if entry.loadAssignment != nil {
 			clas = append(clas, entry.loadAssignment)
 		}
@@ -83,6 +105,29 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		}
 	}
 	return clusters, clas, vhosts
+}
+
+// upstreamMTLS builds the transport-socket matcher and matches for outbound
+// mTLS from the current local workload identities. Returns (nil, nil) when no
+// local workloads are known, leaving clusters without an upstream transport
+// socket (the pre-mTLS behavior).
+func (c *SnapshotCache) upstreamMTLS() (*matcherv3.Matcher, []*clusterv3.Cluster_TransportSocketMatch) {
+	c.localMu.RLock()
+	netnsToID := make(map[string]string, len(c.localWorkloads))
+	ids := make([]string, 0, len(c.localWorkloads))
+	for netns, id := range c.localWorkloads {
+		netnsToID[netns] = id
+		ids = append(ids, id)
+	}
+	trustDomain := c.trustDomain
+	c.localMu.RUnlock()
+
+	if len(netnsToID) == 0 {
+		return nil, nil
+	}
+
+	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
+	return proxy.UpstreamTransportSocketMatcher(netnsToID), proxy.UpstreamTransportSocketMatches(ids, validationContextName)
 }
 
 // Endpoints returns the pre-built load assignment (cluster endpoints) for the given

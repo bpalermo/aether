@@ -77,6 +77,7 @@ use_repo(
     "com_github_aws_aws_sdk_go_v2_service_dynamodb",
     "com_github_aws_aws_sdk_go_v2_service_servicediscovery",
     "com_github_blang_semver_v4",
+    "com_github_cncf_xds_go",
     "com_github_containernetworking_cni",
     "com_github_envoyproxy_go_control_plane",
     "com_github_envoyproxy_go_control_plane_envoy",
