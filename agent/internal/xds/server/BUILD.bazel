@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "server",
-    srcs = ["server.go"],
+    srcs = [
+        "refresh.go",
+        "server.go",
+    ],
     importpath = "github.com/bpalermo/aether/agent/internal/xds/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
@@ -19,6 +22,7 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "refresh_test.go",
         "server_integration_test.go",
         "server_test.go",
     ],

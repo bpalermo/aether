@@ -391,3 +391,40 @@ func TestCache_MultipleServices(t *testing.T) {
 	_, exists := r.cache["svc-a"]
 	assert.False(t, exists, "svc-a key should be absent after all endpoints removed")
 }
+
+func TestApplyEvent_SignalsChange(t *testing.T) {
+	r := newTestRegistry()
+
+	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+		ServiceName: "svc-a",
+		Endpoint:    makeEndpoint("10.0.0.1", 8080),
+	})
+
+	select {
+	case <-r.Changes():
+	default:
+		t.Fatal("expected a change signal after applyEvent")
+	}
+}
+
+func TestSignalChange_Coalesces(t *testing.T) {
+	r := newTestRegistry()
+
+	// A burst of events must collapse into a single pending signal (the notify
+	// channel is buffered with capacity 1 and written non-blocking).
+	for range 5 {
+		r.applyEvent(&registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+			ServiceName: "svc-a",
+			Endpoint:    makeEndpoint("10.0.0.1", 8080),
+		})
+	}
+
+	<-r.Changes() // exactly one signal is pending
+	select {
+	case <-r.Changes():
+		t.Fatal("expected change signals to coalesce into one")
+	default:
+	}
+}

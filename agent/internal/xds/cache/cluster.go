@@ -139,9 +139,10 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.log.V(1).Info("found service endpoints in registry", "count", len(serviceEndpoints))
 
 	c.clusterMu.Lock()
-	if c.clusters == nil {
-		c.clusters = make(map[string]clusterEntry)
-	}
+	// Rebuild the cluster set from scratch so this method is idempotent and safe
+	// to call repeatedly (on registry changes, not just at startup): services and
+	// endpoints that disappeared from the registry are pruned rather than retained.
+	c.clusters = make(map[string]clusterEntry, len(serviceEndpoints))
 	for serviceName, endpoints := range serviceEndpoints {
 		cluster := proxy.NewClusterForService(serviceName)
 		cla := proxy.NewClusterLoadAssignment(serviceName)
