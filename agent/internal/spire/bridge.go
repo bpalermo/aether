@@ -21,6 +21,7 @@ import (
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/go-logr/logr"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
+	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 )
 
 // SecretStore is the interface for pushing secrets into the xDS snapshot cache.
@@ -102,12 +103,34 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 }
 
+// PodSelectors builds the SPIRE k8s workload selectors that identify a pod by
+// its namespace, service account, name and UID. SPIRE issues the SVID of any
+// registration entry whose selectors are a subset of these; the
+// spire-controller-manager binds entries by k8s:pod-uid, which is unique per pod.
+func PodSelectors(namespace, serviceAccount, podName, uid string) []*apitypes.Selector {
+	sel := make([]*apitypes.Selector, 0, 4)
+	if namespace != "" {
+		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "ns:" + namespace})
+	}
+	if serviceAccount != "" {
+		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "sa:" + serviceAccount})
+	}
+	if podName != "" {
+		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "pod-name:" + podName})
+	}
+	if uid != "" {
+		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "pod-uid:" + uid})
+	}
+	return sel
+}
+
 // SubscribePod starts an SVID subscription for the given pod using its
-// container PID. The SPIRE agent attests the process via its workload
-// attestor plugins and returns the matching SVIDs. The SPIFFE ID is used
-// as the secret name for Envoy. It is a no-op if the bridge has not been
-// started yet.
-func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, pid int32) error {
+// Kubernetes workload selectors (namespace, service account, pod name and UID).
+// The SPIRE agent returns the SVIDs of every registration entry whose selectors
+// are satisfied — no process attestation, so no container PID is required. The
+// SPIFFE ID is used as the secret name for Envoy. It is a no-op if the bridge
+// has not been started yet.
+func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, selectors []*apitypes.Selector) error {
 	if b.client == nil {
 		b.log.V(1).Info("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
 		return nil
@@ -123,7 +146,7 @@ func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, pid int32) e
 	b.subscriptions[spiffeID] = cancel
 	b.subsMu.Unlock()
 
-	svidCh, err := b.client.SubscribeSVIDsByPID(subCtx, pid)
+	svidCh, err := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
 	if err != nil {
 		cancel()
 		b.subsMu.Lock()

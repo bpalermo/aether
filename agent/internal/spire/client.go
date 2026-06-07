@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-logr/logr"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
+	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -39,12 +40,13 @@ func NewClient(ctx context.Context, socketPath string, log logr.Logger) (*Client
 	}, nil
 }
 
-// SubscribeSVIDsByPID opens a SubscribeToX509SVIDs stream for the given
-// container PID. The SPIRE agent attests the process and returns its SVIDs.
-// The channel is closed when the stream ends or the context is cancelled.
-func (c *Client) SubscribeSVIDsByPID(ctx context.Context, pid int32) (<-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, error) {
+// SubscribeSVIDsBySelectors opens a SubscribeToX509SVIDs stream for the given
+// workload selectors. The SPIRE agent returns the SVIDs of every registration
+// entry whose selectors are a subset of those provided, without attesting a
+// process. The channel is closed when the stream ends or the context is cancelled.
+func (c *Client) SubscribeSVIDsBySelectors(ctx context.Context, selectors []*apitypes.Selector) (<-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, error) {
 	stream, err := c.client.SubscribeToX509SVIDs(ctx, &delegatedidentityv1.SubscribeToX509SVIDsRequest{
-		Pid: pid,
+		Selectors: selectors,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("subscribing to X509 SVIDs: %w", err)
