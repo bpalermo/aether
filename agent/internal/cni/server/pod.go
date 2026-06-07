@@ -178,10 +178,10 @@ func validateAndCheckIgnorable(cniPod *cniv1.CNIPod) (bool, error) {
 }
 
 // isIgnorablePod determines if a pod should be ignored by the service mesh.
-// Pods in kube-system or aether-system namespaces, pods without the
-// aether.io/managed=true label, or pods without IP addresses are considered ignorable.
+// Pods in mesh-ignored namespaces (control plane, Aether, SPIRE), pods without
+// the aether.io/managed=true label, or pods without IP addresses are ignorable.
 func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
-	if cniPod.GetNamespace() == "kube-system" || cniPod.GetNamespace() == "aether-system" {
+	if constants.IsIgnoredNamespace(cniPod.GetNamespace()) {
 		return true
 	}
 

@@ -12,6 +12,7 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//cni/config",
         "//cni/internal/cri",
+        "//common/constants",
         "//common/retry",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",

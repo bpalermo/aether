@@ -90,6 +90,9 @@ spire:
   # delegate. `hostPath` is the node directory exposing the admin socket; it is
   # bind-mounted at `mountPath`, and the socket file is `mountPath/socketName`.
   adminSocket:
-    hostPath: /run/spire/admin-sockets
+    # Host path where the SPIRE agent exposes its admin socket. With the spiffe
+    # spire chart this is sockets.hostBasePath + "/csi.spiffe.io/admin" when
+    # spire-agent.sockets.admin.mountOnHost=true.
+    hostPath: /run/spire/agent/sockets/csi.spiffe.io/admin
     mountPath: /run/spire/admin-sockets
     socketName: admin.sock
