@@ -58,8 +58,11 @@ func SVIDToTLSCertificateSecret(svid *delegatedidentityv1.X509SVIDWithKey) (*tls
 }
 
 // BundleToValidationContextSecret converts a trust domain's CA certificates
-// to an Envoy validation context Secret. The secret name is the trust domain
-// URI (e.g., "spiffe://example.org"). The DER-encoded CA certs are PEM-encoded.
+// to an Envoy validation context Secret. trustDomain is the bare SPIFFE trust
+// domain (e.g., "example.org", as keyed in the SPIRE bundle response); the
+// secret name is its SPIFFE URI form (e.g., "spiffe://example.org") to match
+// the validation context name referenced by inbound listeners and the URI
+// naming used for SVID certificate secrets. The DER-encoded CA certs are PEM-encoded.
 func BundleToValidationContextSecret(trustDomain string, derCACerts []byte) (*tlsv3.Secret, error) {
 	caPEM, err := derBundleToPEM(derCACerts)
 	if err != nil {
@@ -67,7 +70,7 @@ func BundleToValidationContextSecret(trustDomain string, derCACerts []byte) (*tl
 	}
 
 	return &tlsv3.Secret{
-		Name: trustDomain,
+		Name: fmt.Sprintf("spiffe://%s", trustDomain),
 		Type: &tlsv3.Secret_ValidationContext{
 			ValidationContext: &tlsv3.CertificateValidationContext{
 				TrustedCa: &corev3.DataSource{
