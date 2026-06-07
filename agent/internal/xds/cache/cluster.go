@@ -11,17 +11,6 @@ import (
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-)
-
-const (
-	// clusterVersionLabel is used in snapshot version strings to identify
-	// cluster and endpoint resource snapshots.
-	clusterVersionLabel = "cluster"
-	// vhostVersionLabel is used in snapshot version strings to identify
-	// virtual host resource snapshots.
-	vhostVersionLabel = "vhost"
 )
 
 // RemoveEndpoint removes a single endpoint by IP from the given cluster's
@@ -196,62 +185,12 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	return c.generateClusterSnapshot(ctx)
 }
 
-// generateClusterSnapshot creates a new snapshot with the current clusters, endpoints,
-// and routes, validates it for consistency, and sets it on the underlying snapshot cache.
-// The snapshot version is generated using the cluster version label. Returns an error
-// if snapshot creation or validation fails.
+// generateClusterSnapshot regenerates the node snapshot after a cluster,
+// endpoint or route change. It delegates to generateSnapshot, which emits a
+// complete snapshot of all resource types so cluster updates do not clobber
+// listeners or secrets.
 func (c *SnapshotCache) generateClusterSnapshot(ctx context.Context) error {
-	v := generateSnapshotVersion(clusterVersionLabel, c.version)
-
-	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
-	c.log.V(1).Info("setting snapshot", "version", v, "clusters", len(clusters), "endpoints", len(endpoints), "vhosts", len(vhosts))
-
-	resources := map[resourcev3.Type][]types.Resource{
-		resourcev3.ClusterType:  clusters,
-		resourcev3.EndpointType: endpoints,
-	}
-	if len(vhosts) > 0 {
-		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts)}
-	}
-
-	snapshot, err := cachev3.NewSnapshot(v, resources)
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot: %w", err)
-	}
-
-	if err := c.SnapshotCache.SetSnapshot(ctx, c.nodeName, snapshot); err != nil {
-		return fmt.Errorf("failed to set snapshot: %w", err)
-	}
-
-	return nil
-}
-
-// generateVhostsSnapshot creates a new snapshot with the current virtual hosts,
-// validates it for consistency, and sets it on the underlying snapshot cache.
-// The snapshot version is generated using the vhost version label. Returns an error
-// if snapshot creation or validation fails.
-func (c *SnapshotCache) generateVhostsSnapshot(ctx context.Context) error {
-	v := generateSnapshotVersion(vhostVersionLabel, c.version)
-
-	vhosts := c.VirtualHosts()
-	c.log.V(1).Info("setting vhosts snapshot", "version", v, "vhosts", len(vhosts))
-
-	snapshot, err := cachev3.NewSnapshot(v, map[resourcev3.Type][]types.Resource{
-		resourcev3.VirtualHostType: vhosts,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create vhosts snapshot: %w", err)
-	}
-
-	if err := snapshot.Consistent(); err != nil {
-		return fmt.Errorf("vhosts snapshot inconsistency: %w", err)
-	}
-
-	if err := c.SnapshotCache.SetSnapshot(ctx, c.nodeName, snapshot); err != nil {
-		return fmt.Errorf("failed to set vhosts snapshot: %w", err)
-	}
-
-	return nil
+	return c.generateSnapshot(ctx)
 }
 
 // isLocal reports whether the given endpoint belongs to the local cluster and node.
