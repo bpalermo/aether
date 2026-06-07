@@ -129,8 +129,9 @@ func PodSelectors(namespace, serviceAccount, podName, uid string) []*apitypes.Se
 // The SPIRE agent returns the SVIDs of every registration entry whose selectors
 // are satisfied — no process attestation, so no container PID is required. The
 // SPIFFE ID is used as the secret name for Envoy. It is a no-op if the bridge
-// has not been started yet.
-func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, selectors []*apitypes.Selector) error {
+// has not been started yet. The subscription is bound to the bridge's lifetime,
+// not any request context.
+func (b *Bridge) SubscribePod(spiffeID string, selectors []*apitypes.Selector) error {
 	if b.client == nil {
 		b.log.V(1).Info("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
 		return nil
@@ -167,7 +168,11 @@ func (b *Bridge) SubscribePod(ctx context.Context, spiffeID string, selectors []
 					b.log.Info("SVID subscription stream closed", "spiffeID", spiffeID)
 					return
 				}
-				if handleErr := b.handleSVIDUpdate(ctx, resp); handleErr != nil {
+				// Use subCtx (tied to the bridge/subscription lifetime), not the
+				// caller's request context: SubscribePod is called synchronously
+				// from CmdAdd, whose context is cancelled as soon as it returns —
+				// pushing the SVID into the snapshot must outlive that request.
+				if handleErr := b.handleSVIDUpdate(subCtx, resp); handleErr != nil {
 					b.log.Error(handleErr, "handling SVID update", "spiffeID", spiffeID)
 				}
 			}

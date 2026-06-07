@@ -61,7 +61,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	if s.spireBridge != nil {
 		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
 		selectors := spire.PodSelectors(cniPod.GetNamespace(), cniPod.GetServiceAccount(), cniPod.GetName(), podUID)
-		if err = s.spireBridge.SubscribePod(ctx, spiffeID, selectors); err != nil {
+		if err = s.spireBridge.SubscribePod(spiffeID, selectors); err != nil {
 			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
 		}
 	}

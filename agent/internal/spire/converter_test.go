@@ -280,6 +280,15 @@ func TestBundleToValidationContextSecret(t *testing.T) {
 			wantName:    "spiffe://cluster.local",
 		},
 		{
+			// The Delegated Identity bundle map is keyed by the SPIFFE URI
+			// (td.IDString()); it must not be double-prefixed.
+			name:        "accepts an already-prefixed SPIFFE URI without doubling it",
+			trustDomain: "spiffe://aether.internal",
+			derCACerts:  validDERCert,
+			wantErr:     false,
+			wantName:    "spiffe://aether.internal",
+		},
+		{
 			name:        "returns error when CA bundle is empty",
 			trustDomain: "example.org",
 			derCACerts:  []byte{},
