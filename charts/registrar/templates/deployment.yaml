@@ -24,6 +24,9 @@ spec:
             - "--debug={{ .Values.debug }}"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--registry-backend={{ .Values.registryBackend }}"
+            {{- if eq .Values.registryBackend "cloudmap" }}
+            - "--cloudmap-namespace={{ .Values.cloudMap.namespace }}"
+            {{- end }}
             - "--grpc-address=:{{ .Values.service.targetPort }}"
             - "--spire-enabled={{ .Values.spire.enabled }}"
             {{- if .Values.spire.enabled }}
@@ -54,7 +57,16 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
+          {{- with .Values.aws.credentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
           env:
+            {{- with .Values.aws.region }}
+            - name: AWS_REGION
+              value: {{ . | quote }}
+            {{- end }}
             - name: GOMEMLIMIT
               valueFrom:
                 resourceFieldRef:
