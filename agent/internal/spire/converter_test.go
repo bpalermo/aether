@@ -266,46 +266,46 @@ func TestBundleToValidationContextSecret(t *testing.T) {
 		wantName    string
 	}{
 		{
-			name:        "converts valid DER CA bundle to validation context secret",
-			trustDomain: "spiffe://example.org",
+			name:        "names the secret with the SPIFFE URI form of the trust domain",
+			trustDomain: "example.org",
 			derCACerts:  validDERCert,
 			wantErr:     false,
 			wantName:    "spiffe://example.org",
 		},
 		{
-			name:        "uses trust domain as secret name verbatim",
-			trustDomain: "example.org",
+			name:        "names a dotted trust domain with the spiffe:// scheme",
+			trustDomain: "cluster.local",
 			derCACerts:  validDERCert,
 			wantErr:     false,
-			wantName:    "example.org",
+			wantName:    "spiffe://cluster.local",
 		},
 		{
 			name:        "returns error when CA bundle is empty",
-			trustDomain: "spiffe://example.org",
+			trustDomain: "example.org",
 			derCACerts:  []byte{},
 			wantErr:     true,
 			wantErrMsg:  "converting CA bundle to PEM",
 		},
 		{
 			name:        "returns error when CA bundle is nil",
-			trustDomain: "spiffe://example.org",
+			trustDomain: "example.org",
 			derCACerts:  nil,
 			wantErr:     true,
 			wantErrMsg:  "converting CA bundle to PEM",
 		},
 		{
 			name:        "returns error when CA bundle contains malformed DER data",
-			trustDomain: "spiffe://example.org",
+			trustDomain: "example.org",
 			derCACerts:  []byte("not-valid-der-data"),
 			wantErr:     true,
 			wantErrMsg:  "converting CA bundle to PEM",
 		},
 		{
 			name:        "includes trust domain in error message on failure",
-			trustDomain: "spiffe://bad-domain.io",
+			trustDomain: "bad-domain.io",
 			derCACerts:  []byte("garbage"),
 			wantErr:     true,
-			wantErrMsg:  "spiffe://bad-domain.io",
+			wantErrMsg:  "bad-domain.io",
 		},
 	}
 
