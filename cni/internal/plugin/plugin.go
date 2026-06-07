@@ -30,6 +30,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/cni/config"
 	"github.com/bpalermo/aether/cni/internal/cri"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -464,5 +465,5 @@ func (p *AetherPlugin) verifyPodRegistration(args *skel.CmdArgs, k8sArgs config.
 }
 
 func ignorableNamespace(namespace string) bool {
-	return strings.EqualFold(namespace, "kube-system") || strings.EqualFold(namespace, "aether-system")
+	return constants.IsIgnoredNamespace(namespace)
 }

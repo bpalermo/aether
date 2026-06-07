@@ -17,6 +17,9 @@ spec:
         {{- include "agent.labels" . | nindent 8 }}
     spec:
       hostNetwork: true
+      # Resolve in-cluster Service names (e.g. the registrar) while on hostNetwork;
+      # plain ClusterFirst is ignored for hostNetwork pods.
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "agent.serviceAccountName" . }}
       priorityClassName: system-node-critical
       initContainers:
@@ -115,6 +118,11 @@ spec:
                 - ALL
               add:
                 - NET_ADMIN
+                {{- if .Values.spire.enabled }}
+                # Access the SPIRE agent admin socket (owned by the spire-agent
+                # uid) from this root-but-capability-dropped container.
+                - DAC_OVERRIDE
+                {{- end }}
           volumeMounts:
             - name: run-dir
               mountPath: /run/aether
