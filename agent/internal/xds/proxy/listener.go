@@ -63,7 +63,7 @@ func generateInboundHTTPListener(cniPod *cniv1.CNIPod, trustDomain string) (*lis
 	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
 
 	return &listenerv3.Listener{
-		Name: "inbound_http",
+		Name: fmt.Sprintf("inbound_http_%s", cniPod.GetName()),
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
@@ -95,7 +95,7 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, e
 	}
 
 	return &listenerv3.Listener{
-		Name: "outbound_http",
+		Name: fmt.Sprintf("outbound_http_%s", cniPod.GetName()),
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
