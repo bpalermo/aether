@@ -42,13 +42,23 @@ type Bridge struct {
 	mu      sync.RWMutex
 	secrets map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
 
-	// subscriptions tracks active SVID subscriptions keyed by SPIFFE ID.
-	// Each entry holds a cancel function to stop the subscription.
+	// subscriptions tracks active SVID subscriptions keyed by the pod's network
+	// namespace (unique per pod), not its SPIFFE ID: pods sharing a service
+	// account share a SPIFFE ID, and keying by it would let a terminating pod's
+	// unsubscribe cancel a newer same-identity pod's subscription during a rolling
+	// restart. The SVID secret (named by SPIFFE ID) is kept until the last
+	// subscription referencing it goes away.
 	subsMu        sync.Mutex
-	subscriptions map[string]context.CancelFunc
+	subscriptions map[string]podSubscription // keyed by network namespace
 
 	// ctx is the bridge's root context, set during Start.
 	ctx context.Context
+}
+
+// podSubscription is an active delegated-identity subscription for one pod.
+type podSubscription struct {
+	cancel   context.CancelFunc
+	spiffeID string
 }
 
 // NewBridge creates a new SPIRE bridge.
@@ -58,7 +68,7 @@ func NewBridge(socketPath string, store SecretStore, log logr.Logger) *Bridge {
 		store:         store,
 		log:           log.WithName("spire-bridge"),
 		secrets:       make(map[string]*tlsv3.Secret),
-		subscriptions: make(map[string]context.CancelFunc),
+		subscriptions: make(map[string]podSubscription),
 	}
 }
 
@@ -124,34 +134,34 @@ func PodSelectors(namespace, serviceAccount, podName, uid string) []*apitypes.Se
 	return sel
 }
 
-// SubscribePod starts an SVID subscription for the given pod using its
-// Kubernetes workload selectors (namespace, service account, pod name and UID).
-// The SPIRE agent returns the SVIDs of every registration entry whose selectors
-// are satisfied — no process attestation, so no container PID is required. The
-// SPIFFE ID is used as the secret name for Envoy. It is a no-op if the bridge
-// has not been started yet. The subscription is bound to the bridge's lifetime,
-// not any request context.
-func (b *Bridge) SubscribePod(spiffeID string, selectors []*apitypes.Selector) error {
+// SubscribePod starts an SVID subscription for the pod in the given network
+// namespace using its Kubernetes workload selectors (namespace, service account,
+// pod name and UID). The SPIRE agent returns the SVIDs of every registration
+// entry whose selectors are satisfied — no process attestation, so no container
+// PID is required. spiffeID is used as the secret name for Envoy. It is a no-op
+// if the bridge has not been started yet or the netns is already subscribed. The
+// subscription is bound to the bridge's lifetime, not any request context.
+func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Selector) error {
 	if b.client == nil {
 		b.log.V(1).Info("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
 		return nil
 	}
 
 	b.subsMu.Lock()
-	if _, exists := b.subscriptions[spiffeID]; exists {
+	if _, exists := b.subscriptions[netns]; exists {
 		b.subsMu.Unlock()
-		return nil // already subscribed
+		return nil // already subscribed for this pod
 	}
 
 	subCtx, cancel := context.WithCancel(b.ctx)
-	b.subscriptions[spiffeID] = cancel
+	b.subscriptions[netns] = podSubscription{cancel: cancel, spiffeID: spiffeID}
 	b.subsMu.Unlock()
 
 	svidCh, err := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
 	if err != nil {
 		cancel()
 		b.subsMu.Lock()
-		delete(b.subscriptions, spiffeID)
+		delete(b.subscriptions, netns)
 		b.subsMu.Unlock()
 		return fmt.Errorf("subscribing to SVIDs for %s: %w", spiffeID, err)
 	}
@@ -182,25 +192,40 @@ func (b *Bridge) SubscribePod(spiffeID string, selectors []*apitypes.Selector) e
 	return nil
 }
 
-// UnsubscribePod stops the SVID subscription for the given SPIFFE ID and
-// removes its secret from the cache. It is a no-op if the bridge has not
-// been started yet.
-func (b *Bridge) UnsubscribePod(ctx context.Context, spiffeID string) error {
+// UnsubscribePod stops the SVID subscription for the pod in the given network
+// namespace. The pod's SVID secret is removed only when no other subscribed pod
+// shares the same SPIFFE ID (service account), so a rolling restart that briefly
+// runs two same-identity pods never drops the live SVID. No-op if the bridge has
+// not been started or the netns is not subscribed.
+func (b *Bridge) UnsubscribePod(ctx context.Context, netns string) error {
 	if b.client == nil {
 		return nil
 	}
 
 	b.subsMu.Lock()
-	cancel, exists := b.subscriptions[spiffeID]
-	if exists {
-		cancel()
-		delete(b.subscriptions, spiffeID)
+	sub, exists := b.subscriptions[netns]
+	if !exists {
+		b.subsMu.Unlock()
+		return nil
+	}
+	sub.cancel()
+	delete(b.subscriptions, netns)
+
+	// Keep the secret while another pod still references the same SPIFFE ID.
+	stillReferenced := false
+	for _, other := range b.subscriptions {
+		if other.spiffeID == sub.spiffeID {
+			stillReferenced = true
+			break
+		}
 	}
 	b.subsMu.Unlock()
 
-	b.mu.Lock()
-	delete(b.secrets, spiffeID)
-	b.mu.Unlock()
+	if !stillReferenced {
+		b.mu.Lock()
+		delete(b.secrets, sub.spiffeID)
+		b.mu.Unlock()
+	}
 
 	return b.pushSecrets(ctx)
 }
