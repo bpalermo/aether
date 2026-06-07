@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -20,49 +20,6 @@ import (
 
 const envoyAdminTimeout = 2 * time.Second
 
-const (
-	// defaultPIDResolveTimeout bounds how long the agent waits for a pod's
-	// sandbox process (and thus its PID) to appear after CNI ADD.
-	defaultPIDResolveTimeout = 15 * time.Second
-	// defaultPIDResolveInterval is the poll interval while resolving the PID.
-	defaultPIDResolveInterval = 200 * time.Millisecond
-)
-
-// subscribePodWhenPIDResolves resolves the workload PID from its network
-// namespace (retrying until the sandbox process exists) and then subscribes to
-// the pod's SVID over the SPIRE Delegated Identity API. It runs in its own
-// goroutine because resolution outlives the CNI ADD request, and uses a
-// background context so the subscription is not cancelled when ADD returns.
-func (s *CNIServer) subscribePodWhenPIDResolves(spiffeID, netns string) {
-	log := s.log.WithValues("spiffeID", spiffeID, "netns", netns)
-	if netns == "" {
-		log.V(1).Info("cannot resolve SVID PID: empty network namespace")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), s.pidResolveTimeout)
-	defer cancel()
-
-	hostNetns := netns
-	if s.hostMountPrefix != "" {
-		hostNetns = filepath.Join(s.hostMountPrefix, netns)
-	}
-
-	pid, err := resolvePIDWithRetry(ctx, func() (int32, error) {
-		return resolvePIDFromNetns(hostNetns)
-	}, s.pidResolveInterval)
-	if err != nil {
-		log.Error(err, "failed to resolve workload PID for SVID subscription")
-		return
-	}
-
-	if err := s.spireBridge.SubscribePod(context.Background(), spiffeID, pid); err != nil {
-		log.Error(err, "failed to subscribe to SVID", "pid", pid)
-		return
-	}
-	log.Info("subscribed to SVID after resolving workload PID", "pid", pid)
-}
-
 // AddPod handles CNI ADD requests for a pod.
 // It enriches the pod data with Kubernetes annotations and labels, validates that the pod
 // should be managed (not in system namespaces or lacking the aether service label),
@@ -71,7 +28,8 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	cniPod := req.GetPod()
 	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
 
-	if err := s.enhanceCNIPod(ctx, cniPod); err != nil {
+	podUID, err := s.enhanceCNIPod(ctx, cniPod)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to retrieve endpoint data: %v", err)
 	}
 
@@ -96,18 +54,15 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
 	}
 
-	// Subscribe to SVID for this pod via the SPIRE Delegated Identity API.
+	// Subscribe to the pod's SVID via the SPIRE Delegated Identity API using its
+	// Kubernetes selectors. No container PID is needed: the agent already knows
+	// the pod's identity from the API server, and SPIRE matches the entry the
+	// controller-manager binds by k8s:pod-uid.
 	if s.spireBridge != nil {
 		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
-		if cniPod.GetPid() != nil {
-			if err = s.spireBridge.SubscribePod(ctx, spiffeID, int32(cniPod.GetPid().GetValue())); err != nil {
-				log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
-			}
-		} else {
-			// The container runtime starts the sandbox process only after CNI ADD
-			// returns, so the PID is not yet known. Resolve it from the pod's netns
-			// in the background and subscribe once it appears.
-			go s.subscribePodWhenPIDResolves(spiffeID, cniPod.GetNetworkNamespace())
+		selectors := spire.PodSelectors(cniPod.GetNamespace(), cniPod.GetServiceAccount(), cniPod.GetName(), podUID)
+		if err = s.spireBridge.SubscribePod(ctx, spiffeID, selectors); err != nil {
+			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
 		}
 	}
 
@@ -199,20 +154,21 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 // All annotations and labels are collected and stored; the registry implementation decides which to use.
 // This allows changing the registry implementation without modifying the CNI plugin,
 // since the local stored file contains all relevant information.
-func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) error {
+// It returns the pod's Kubernetes UID, used to build SPIRE workload selectors.
+func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) (string, error) {
 	var k8sPod corev1.Pod
 	if err := s.k8sClient.Get(ctx, client.ObjectKey{
 		Namespace: cniPod.GetNamespace(),
 		Name:      cniPod.GetName(),
 	}, &k8sPod); err != nil {
-		return fmt.Errorf("failed to get pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), err)
+		return "", fmt.Errorf("failed to get pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), err)
 	}
 
 	cniPod.Annotations = k8sPod.Annotations
 	cniPod.Labels = k8sPod.Labels
 	cniPod.ServiceAccount = k8sPod.Spec.ServiceAccountName
 
-	return nil
+	return string(k8sPod.UID), nil
 }
 
 // validateAndCheckIgnorable validates a CNIPod and determines if it should be ignored.

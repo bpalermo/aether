@@ -4,7 +4,6 @@ go_library(
     name = "server",
     srcs = [
         "config.go",
-        "pid.go",
         "pod.go",
         "server.go",
     ],
@@ -37,7 +36,6 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
-        "pid_test.go",
         "pod_test.go",
         "server_integration_test.go",
     ],
