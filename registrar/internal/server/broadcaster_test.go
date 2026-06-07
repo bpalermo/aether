@@ -112,7 +112,7 @@ func TestBroadcaster_Unsubscribe(t *testing.T) {
 				}
 			}
 
-			b.Unsubscribe(tt.unsubscribeID)
+			b.Unsubscribe(tt.unsubscribeID, targetCh)
 
 			assert.Equal(t, tt.wantCount, b.WatcherCount())
 
@@ -131,7 +131,7 @@ func TestBroadcaster_Unsubscribe_UnknownID(t *testing.T) {
 	b.Subscribe("node-1")
 
 	// Must not panic.
-	b.Unsubscribe("does-not-exist")
+	b.Unsubscribe("does-not-exist", nil)
 
 	assert.Equal(t, 1, b.WatcherCount())
 }
@@ -142,8 +142,35 @@ func TestBroadcaster_Unsubscribe_EmptyBroadcaster(t *testing.T) {
 	b := NewBroadcaster(logr.Discard())
 
 	// Must not panic.
-	b.Unsubscribe("node-1")
+	b.Unsubscribe("node-1", nil)
 
+	assert.Equal(t, 0, b.WatcherCount())
+}
+
+// TestBroadcaster_Unsubscribe_StaleChannel verifies that a stale caller (whose
+// subscription was already replaced by a reconnect with the same id) cannot close
+// or remove the newer subscription's channel. This guards against a same-id
+// reconnect race that would otherwise drop the live watcher and double-close.
+func TestBroadcaster_Unsubscribe_StaleChannel(t *testing.T) {
+	b := NewBroadcaster(logr.Discard())
+
+	ch1 := b.Subscribe("node-1") // first connection; channel closed by re-Subscribe below
+	ch2 := b.Subscribe("node-1") // reconnect with the same id replaces ch1
+
+	// The stale caller unsubscribing with its old channel must be a no-op: ch2 is
+	// still the live subscription and must remain registered.
+	b.Unsubscribe("node-1", ch1)
+	assert.Equal(t, 1, b.WatcherCount(), "live subscription must survive a stale unsubscribe")
+
+	// ch2 must still be open (not closed by the stale unsubscribe).
+	select {
+	case _, open := <-ch2:
+		assert.True(t, open, "live channel must not be closed by a stale unsubscribe")
+	default:
+	}
+
+	// The live caller unsubscribing with the current channel removes it.
+	b.Unsubscribe("node-1", ch2)
 	assert.Equal(t, 0, b.WatcherCount())
 }
 
@@ -294,9 +321,9 @@ func TestBroadcaster_WatcherCount(t *testing.T) {
 		{
 			name: "count reflects unsubscriptions",
 			actions: func(b *Broadcaster) {
-				b.Subscribe("node-1")
+				ch1 := b.Subscribe("node-1")
 				b.Subscribe("node-2")
-				b.Unsubscribe("node-1")
+				b.Unsubscribe("node-1", ch1)
 			},
 			wantCount: 1,
 		},
@@ -312,17 +339,17 @@ func TestBroadcaster_WatcherCount(t *testing.T) {
 			name: "unsubscribe of unknown ID does not decrement count",
 			actions: func(b *Broadcaster) {
 				b.Subscribe("node-1")
-				b.Unsubscribe("node-99")
+				b.Unsubscribe("node-99", nil)
 			},
 			wantCount: 1,
 		},
 		{
 			name: "subscribe then unsubscribe all returns to zero",
 			actions: func(b *Broadcaster) {
-				b.Subscribe("node-1")
-				b.Subscribe("node-2")
-				b.Unsubscribe("node-1")
-				b.Unsubscribe("node-2")
+				ch1 := b.Subscribe("node-1")
+				ch2 := b.Subscribe("node-2")
+				b.Unsubscribe("node-1", ch1)
+				b.Unsubscribe("node-2", ch2)
 			},
 			wantCount: 0,
 		},

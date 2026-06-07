@@ -46,16 +46,22 @@ func (b *Broadcaster) Subscribe(id string) <-chan *registrarv1.WatchEndpointsRes
 	return ch
 }
 
-// Unsubscribe removes a watcher and closes its channel.
-func (b *Broadcaster) Unsubscribe(id string) {
+// Unsubscribe removes a watcher and closes its channel. The channel returned by
+// the matching Subscribe call must be passed so that a stale caller (whose
+// subscription was already replaced by a reconnect with the same id) does not
+// close or delete the newer subscription's channel.
+func (b *Broadcaster) Unsubscribe(id string, ch <-chan *registrarv1.WatchEndpointsResponse) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if ch, exists := b.watchers[id]; exists {
-		close(ch)
-		delete(b.watchers, id)
-		b.log.V(1).Info("watcher unsubscribed", "id", id)
+	existing, exists := b.watchers[id]
+	if !exists || (<-chan *registrarv1.WatchEndpointsResponse)(existing) != ch {
+		return
 	}
+
+	close(existing)
+	delete(b.watchers, id)
+	b.log.V(1).Info("watcher unsubscribed", "id", id)
 }
 
 // Broadcast sends events to all watchers. Events are sent non-blocking;

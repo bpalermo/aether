@@ -132,7 +132,7 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 
 	// Subscribe and stream incremental events.
 	ch := s.broadcaster.Subscribe(watcherID)
-	defer s.broadcaster.Unsubscribe(watcherID)
+	defer s.broadcaster.Unsubscribe(watcherID, ch)
 
 	for {
 		select {
