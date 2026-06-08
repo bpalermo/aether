@@ -4,6 +4,7 @@ go_library(
     name = "admin",
     srcs = [
         "admin.go",
+        "clusters.go",
         "config_dump.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/envoy/admin",
@@ -17,7 +18,10 @@ go_library(
 
 go_test(
     name = "admin_test",
-    srcs = ["admin_test.go"],
+    srcs = [
+        "admin_test.go",
+        "clusters_test.go",
+    ],
     embed = [":admin"],
     deps = [
         "@com_github_envoyproxy_go_control_plane_envoy//admin/v3:admin",

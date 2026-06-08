@@ -31,7 +31,20 @@ const (
 	// appLoopbackAddress is the loopback address the application listens on inside
 	// the pod's network namespace.
 	appLoopbackAddress = "127.0.0.1"
+	// defaultAppHealthPath is the readiness path the app cluster health-checks when
+	// the pod does not specify one.
+	defaultAppHealthPath = "/"
 )
+
+// AppHealthPathFromPod returns the HTTP path used to health-check the pod's
+// application, taken from the endpoint.aether.io/health-path annotation, defaulting
+// to "/" when unset.
+func AppHealthPathFromPod(cniPod *cniv1.CNIPod) string {
+	if p, ok := cniPod.GetAnnotations()[constants.AnnotationEndpointHealthPath]; ok && p != "" {
+		return p
+	}
+	return defaultAppHealthPath
+}
 
 // AppClusterName returns the name of the per-pod application cluster that the
 // pod's inbound listener forwards decrypted traffic to. It is unique per pod so
@@ -61,11 +74,29 @@ func AppPortFromPod(cniPod *cniv1.CNIPod) uint16 {
 // application container, not the agent. This is the only cleartext hop in the
 // mesh: it is intra-pod (Envoy -> app on loopback), never pod-to-pod. The app
 // is assumed to speak HTTP/1.1, so no explicit HTTP/2 protocol options are set.
-func NewAppCluster(name, netns string, port uint16) *clusterv3.Cluster {
+func NewAppCluster(name, netns string, port uint16, healthPath string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name: name,
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_STATIC,
+		},
+		// Active health check of the pod's application (delegated liveness): the
+		// node-local agent scrapes this cluster's host health from the proxy admin
+		// and reflects it into the registry so the endpoint is marked unhealthy in
+		// every client's EDS while the app is not serving.
+		HealthChecks: []*corev3.HealthCheck{
+			{
+				Timeout:            durationpb.New(1 * time.Second),
+				Interval:           durationpb.New(5 * time.Second),
+				HealthyThreshold:   wrapperspb.UInt32(1),
+				UnhealthyThreshold: wrapperspb.UInt32(2),
+				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
+					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
+						Path:            healthPath,
+						CodecClientType: typev3.CodecClientType_HTTP1,
+					},
+				},
+			},
 		},
 		LoadAssignment: &endpointv3.ClusterLoadAssignment{
 			ClusterName: name,

@@ -27,6 +27,7 @@ const (
 	attrK8sPod       = "AETHER_K8S_POD"
 	attrK8sNode      = "AETHER_K8S_NODE"
 	attrK8sNodeIP    = "AETHER_K8S_NODE_IP"
+	attrHealth       = "AETHER_HEALTH"
 	attrContainerID  = "AETHER_CONTAINER_ID"
 	attrNetworkNS    = "AETHER_NETWORK_NS"
 	attrMetadata     = "AETHER_METADATA"
@@ -92,6 +93,11 @@ func marshalAttrs(protocol registryv1.Service_Protocol, ep *registryv1.ServiceEn
 		}
 	}
 
+	// Only persist an explicit health verdict; absence means "unknown" (healthy).
+	if h := ep.GetHealth(); h != registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED {
+		attrs[attrHealth] = h.String()
+	}
+
 	return attrs
 }
 
@@ -143,6 +149,10 @@ func unmarshalEndpoint(attrs map[string]string) (*registryv1.ServiceEndpoint, er
 		if err := json.Unmarshal([]byte(mdStr), &md); err == nil {
 			ep.Metadata = md
 		}
+	}
+
+	if h, ok := registryv1.ServiceEndpoint_Health_value[attrs[attrHealth]]; ok {
+		ep.Health = registryv1.ServiceEndpoint_Health(h)
 	}
 
 	return ep, nil

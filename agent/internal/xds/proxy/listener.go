@@ -39,7 +39,7 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) 
 		return nil, nil, nil, err
 	}
 
-	appCluster = NewAppCluster(AppClusterName(cniPod), cniPod.GetNetworkNamespace(), AppPortFromPod(cniPod))
+	appCluster = NewAppCluster(AppClusterName(cniPod), cniPod.GetNetworkNamespace(), AppPortFromPod(cniPod), AppHealthPathFromPod(cniPod))
 
 	return inbound, outbound, appCluster, nil
 }

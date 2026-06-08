@@ -43,4 +43,16 @@ message ServiceEndpoint {
   }
 
   KubernetesMetadata kubernetes_metadata = 8;
+
+  // Health reflects whether the endpoint's application is serving, as actively
+  // health-checked by the node-local agent (delegated liveness). The default
+  // (HEALTH_UNSPECIFIED) is treated as healthy so endpoints from older agents and
+  // freshly registered endpoints route normally until proven otherwise.
+  enum Health {
+    HEALTH_UNSPECIFIED = 0;
+    HEALTH_HEALTHY = 1;
+    HEALTH_UNHEALTHY = 2;
+  }
+
+  Health health = 9;
 }
