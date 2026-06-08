@@ -40,6 +40,7 @@ type CNIServer struct {
 	trustDomain string
 	nodeRegion  string
 	nodeZone    string
+	nodeIP      string
 
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
@@ -89,26 +90,40 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 // It retrieves the region and zone labels from the node object.
 func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.log.V(2).Info("querying node metadata")
-	region, zone, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
+	region, zone, nodeIP, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
 	if err != nil {
 		return err
 	}
 
 	s.nodeRegion = region
 	s.nodeZone = zone
+	s.nodeIP = nodeIP
 
-	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone)
+	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone, "nodeIP", nodeIP)
 	return nil
 }
 
-// queryNodeMetadata retrieves the region and zone labels from a Kubernetes node.
-// It returns the topology.kubernetes.io/region and topology.kubernetes.io/zone labels,
-// or empty strings if the labels are not present.
-func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (string, string, error) {
+// queryNodeMetadata retrieves the region and zone labels and the InternalIP from
+// a Kubernetes node. It returns the topology.kubernetes.io/region and
+// topology.kubernetes.io/zone labels (empty if absent) and the node's InternalIP
+// address, used as the HBONE tunnel target for endpoints on this node.
+func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone, nodeIP string, err error) {
 	node := &corev1.Node{}
 	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {
-		return "", "", fmt.Errorf("failed to get node: %w", err)
+		return "", "", "", fmt.Errorf("failed to get node: %w", err)
 	}
 
-	return node.Labels[constants.AnnotationKubernetesNodeTopologyRegion], node.Labels[constants.AnnotationKubernetesNodeTopologyZone], nil
+	return node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
+		node.Labels[constants.AnnotationKubernetesNodeTopologyZone],
+		nodeInternalIP(node), nil
+}
+
+// nodeInternalIP returns the node's InternalIP address, or "" if none is present.
+func nodeInternalIP(node *corev1.Node) string {
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			return addr.Address
+		}
+	}
+	return ""
 }
