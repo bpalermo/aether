@@ -58,10 +58,14 @@ func (c *Client) AppClusterHealth(ctx context.Context) (map[string]bool, error) 
 }
 
 // appHostsHealthy reports whether the app cluster's host passes the active health
-// check. With no hosts reported yet, it is optimistically healthy.
+// check. A host is unhealthy only once it has actually failed a check — a host
+// still pending its first check (pending_active_hc) is reported healthy, so a
+// freshly added pod is not transiently marked down during health-check warm-up.
+// With no hosts reported yet, it is likewise optimistically healthy.
 func appHostsHealthy(cs *adminv3.ClusterStatus) bool {
 	for _, h := range cs.GetHostStatuses() {
-		if h.GetHealthStatus().GetFailedActiveHealthCheck() {
+		hs := h.GetHealthStatus()
+		if hs.GetFailedActiveHealthCheck() && !hs.GetPendingActiveHc() {
 			return false
 		}
 	}

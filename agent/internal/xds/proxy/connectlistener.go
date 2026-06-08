@@ -16,6 +16,7 @@ import (
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const (
@@ -216,8 +217,16 @@ func buildNodeConnectRouteConfiguration(localPods []*cniv1.CNIPod) *routev3.Rout
 	}
 
 	return &routev3.RouteConfiguration{
-		Name:         NodeConnectListenerName,
-		VirtualHosts: []*routev3.VirtualHost{{Name: "tunnel", Domains: []string{"*"}, Routes: routes}},
+		Name: NodeConnectListenerName,
+		// Per-pod inner-demux clusters churn on every pod restart (their names are
+		// pod-scoped). Without this, Envoy validates the inline route's cluster
+		// references at listener-load time and rejects the whole node_connect
+		// listener if a referenced cluster is momentarily not yet known (the
+		// delta-xDS make-before-break window) — wedging the node's tunnel ingress
+		// until a proxy restart. Disabling validation makes only the affected route
+		// transiently return 503 until its cluster arrives, leaving the listener up.
+		ValidateClusters: wrapperspb.Bool(false),
+		VirtualHosts:     []*routev3.VirtualHost{{Name: "tunnel", Domains: []string{"*"}, Routes: routes}},
 	}
 }
 
