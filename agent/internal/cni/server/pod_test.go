@@ -91,7 +91,7 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		storage:       stor,
 		registry:      reg,
 		snapshotCache: sc,
-		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, logr.Discard()),
+		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()),
 		envoyAdmin:    admin.NewClient(envoyAdminAddr),
 		k8sClient:     k8sClient,
 	}

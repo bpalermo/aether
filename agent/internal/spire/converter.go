@@ -15,6 +15,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 )
 
@@ -49,6 +50,36 @@ func SVIDToTLSCertificateSecret(svid *delegatedidentityv1.X509SVIDWithKey) (*tls
 			TlsCertificate: &tlsv3.TlsCertificate{
 				CertificateChain: &corev3.DataSource{
 					Specifier: &corev3.DataSource_InlineBytes{InlineBytes: certChainPEM},
+				},
+				PrivateKey: &corev3.DataSource{
+					Specifier: &corev3.DataSource_InlineBytes{InlineBytes: keyPEM},
+				},
+			},
+		},
+	}, nil
+}
+
+// X509SVIDToTLSCertificateSecret converts a go-spiffe X.509 SVID (as returned by
+// the Workload API source) to an Envoy TLS certificate Secret. The secret name is
+// the full SPIFFE ID URI. This is used to serve the agent's own node identity to
+// the proxy for node-to-node tunnel mTLS and the node-health listener, distinct
+// from the per-pod workload SVIDs served via the Delegated Identity API.
+func X509SVIDToTLSCertificateSecret(svid *x509svid.SVID) (*tlsv3.Secret, error) {
+	if svid == nil {
+		return nil, fmt.Errorf("svid is nil")
+	}
+
+	certPEM, keyPEM, err := svid.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("marshaling X.509 SVID: %w", err)
+	}
+
+	return &tlsv3.Secret{
+		Name: svid.ID.String(),
+		Type: &tlsv3.Secret_TlsCertificate{
+			TlsCertificate: &tlsv3.TlsCertificate{
+				CertificateChain: &corev3.DataSource{
+					Specifier: &corev3.DataSource_InlineBytes{InlineBytes: certPEM},
 				},
 				PrivateKey: &corev3.DataSource{
 					Specifier: &corev3.DataSource_InlineBytes{InlineBytes: keyPEM},

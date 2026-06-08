@@ -171,7 +171,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	// Optionally create and start the SPIRE bridge for SDS
 	var spireBridge *spire.Bridge
 	if cfg.SpireEnabled {
-		spireBridge = spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, l)
+		spireBridge = spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, spireSource, l)
 		if err = m.Add(spireBridge); err != nil {
 			return fmt.Errorf("failed to add SPIRE bridge: %w", err)
 		}
