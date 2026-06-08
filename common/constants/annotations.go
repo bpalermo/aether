@@ -15,6 +15,9 @@ const (
 	AnnotationEndpointPort = annotationAetherEndpointPrefix + "port"
 	// AnnotationEndpointWeight is the pod annotation key for specifying endpoint weight in load balancing
 	AnnotationEndpointWeight = annotationAetherEndpointPrefix + "weight"
+	// AnnotationEndpointHealthPath is the pod annotation key for the HTTP path the
+	// agent active-health-checks on the pod's application (delegated liveness).
+	AnnotationEndpointHealthPath = annotationAetherEndpointPrefix + "health-path"
 
 	// AnnotationAetherEndpointMetadataPrefix is the prefix for endpoint metadata annotations
 	AnnotationAetherEndpointMetadataPrefix = "metadata." + annotationAetherEndpointPrefix

@@ -100,6 +100,11 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.nodeIP = nodeIP
 
 	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone, "nodeIP", nodeIP)
+
+	// Delegated liveness: reflect each local pod's app health (from the proxy's
+	// active health check) into the registry so it is marked unhealthy in every
+	// client's EDS while the app is not serving.
+	go s.runLivenessLoop(ctx)
 	return nil
 }
 

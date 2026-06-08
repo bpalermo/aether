@@ -4,6 +4,7 @@ go_library(
     name = "server",
     srcs = [
         "config.go",
+        "liveness.go",
         "pod.go",
         "server.go",
     ],
@@ -18,6 +19,7 @@ go_library(
         "//agent/storage",
         "//agent/types",
         "//api/aether/cni/v1:cni",
+        "//api/aether/registry/v1:registry",
         "//common/constants",
         "//common/xds",
         "//registry",

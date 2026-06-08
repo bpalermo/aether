@@ -3,7 +3,9 @@ package proxy
 import (
 	"testing"
 
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	tcpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	internalupstreamv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/internal_upstream/v3"
 	"github.com/stretchr/testify/assert"
@@ -19,6 +21,16 @@ func TestTunnelEndpointMetadata(t *testing.T) {
 
 	lb := md.GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
 	assert.Equal(t, "p1", lb["pod"].GetStringValue())
+}
+
+func TestEndpointHealthStatus(t *testing.T) {
+	assert.Equal(t, corev3.HealthStatus_UNHEALTHY,
+		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY}))
+	// Unspecified (older agents / fresh endpoints) and explicit healthy both route.
+	assert.Equal(t, corev3.HealthStatus_HEALTHY,
+		endpointHealthStatus(&registryv1.ServiceEndpoint{}))
+	assert.Equal(t, corev3.HealthStatus_HEALTHY,
+		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY}))
 }
 
 func TestNewTunnelInternalListener(t *testing.T) {

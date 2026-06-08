@@ -142,11 +142,22 @@ func TunnelLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEn
 						},
 					},
 				},
-				Metadata: md,
+				Metadata:     md,
+				HealthStatus: endpointHealthStatus(endpoint),
 			},
 		},
 		Locality: locality,
 	}
+}
+
+// endpointHealthStatus maps the registry endpoint's delegated-liveness health to
+// the Envoy EDS health status. Unknown/unspecified defaults to HEALTHY so older
+// agents and freshly registered endpoints route until proven unhealthy.
+func endpointHealthStatus(endpoint *registryv1.ServiceEndpoint) corev3.HealthStatus {
+	if endpoint.GetHealth() == registryv1.ServiceEndpoint_HEALTH_UNHEALTHY {
+		return corev3.HealthStatus_UNHEALTHY
+	}
+	return corev3.HealthStatus_HEALTHY
 }
 
 // NewTunnelInternalListener builds the internal listener that encapsulates a
