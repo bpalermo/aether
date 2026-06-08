@@ -248,6 +248,48 @@ func TestListEndpoints(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:        "node InternalIP and pod readiness are derived (parity with cloudmap)",
+			clusterName: "test-cluster",
+			objects: []any{
+				func() *corev1.Pod {
+					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
+					p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+					return p
+				}(),
+				func() *corev1.Node {
+					n := topologyNode("node-1", "us-east-1", "us-east-1a")
+					n.Status.Addresses = []corev1.NodeAddress{
+						{Type: corev1.NodeHostName, Address: "node-1"},
+						{Type: corev1.NodeInternalIP, Address: "192.168.0.7"},
+					}
+					return n
+				}(),
+			},
+			service:  "my-service",
+			protocol: registryv1.Service_PROTOCOL_HTTP,
+			expected: []*registryv1.ServiceEndpoint{
+				{
+					Ip:          "10.0.0.1",
+					ClusterName: "test-cluster",
+					Port:        uint32(constants.DefaultEndpointPort),
+					Weight:      constants.DefaultEndpointWeight,
+					Metadata:    map[string]string{},
+					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
+						Namespace: "default",
+						PodName:   "pod-a",
+						NodeName:  "node-1",
+						NodeIp:    "192.168.0.7",
+					},
+					Locality: &registryv1.ServiceEndpoint_Locality{
+						Region: "us-east-1",
+						Zone:   "us-east-1a",
+					},
+					Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY,
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name:        "pod with different service account is filtered out",
 			clusterName: "test-cluster",
 			objects: []any{
