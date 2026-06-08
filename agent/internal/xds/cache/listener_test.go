@@ -61,24 +61,24 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 			wantLen:   0,
 		},
 		{
-			name: "single pod yields two resources (inbound + outbound)",
+			name: "single pod yields one resource (outbound)",
 			setupFunc: func(c *SnapshotCache) {
 				seedListeners(c, makeCNIPod("pod-a", "default", "/proc/100/ns/net"))
 			},
-			wantLen: 2,
+			wantLen: 1,
 		},
 		{
-			name: "two pods yield four resources",
+			name: "two pods yield two resources",
 			setupFunc: func(c *SnapshotCache) {
 				seedListeners(c,
 					makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
 					makeCNIPod("pod-b", "default", "/proc/200/ns/net"),
 				)
 			},
-			wantLen: 4,
+			wantLen: 2,
 		},
 		{
-			name: "three pods yield six resources",
+			name: "three pods yield three resources",
 			setupFunc: func(c *SnapshotCache) {
 				seedListeners(c,
 					makeCNIPod("pod-a", "ns-a", "/proc/100/ns/net"),
@@ -86,16 +86,16 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 					makeCNIPod("pod-c", "ns-c", "/proc/300/ns/net"),
 				)
 			},
-			wantLen: 6,
+			wantLen: 3,
 		},
 		{
-			name: "direct map injection also returns two resources per entry",
+			name: "direct map injection returns one resource per entry",
 			setupFunc: func(c *SnapshotCache) {
 				c.listeners = map[string]listenerEntry{
-					"/proc/1/ns/net": {inbound: nil, outbound: nil},
+					"/proc/1/ns/net": {outbound: nil},
 				}
 			},
-			wantLen: 2,
+			wantLen: 1,
 		},
 	}
 
@@ -288,8 +288,8 @@ func TestLoadListenersFromStorage_ValidPodsMapPopulation(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Len(t, c.listeners, tt.wantEntries)
-			// Each entry contributes both an inbound and outbound resource.
-			assert.Len(t, c.Listeners(), tt.wantEntries*2)
+			// Each entry contributes a single outbound listener resource.
+			assert.Len(t, c.Listeners(), tt.wantEntries)
 		})
 	}
 }
@@ -325,8 +325,8 @@ func TestLoadListenersFromStorage_FreshCacheNoPanic(t *testing.T) {
 }
 
 // TestLoadListenersFromStorage_ValidPods_NetnsKeyed verifies that the listener
-// entries are stored under the pod's network namespace key, and that both
-// inbound and outbound listeners are non-nil.
+// entries are stored under the pod's network namespace key, and that the
+// outbound listener is non-nil.
 func TestLoadListenersFromStorage_ValidPods_NetnsKeyed(t *testing.T) {
 	c := newTestCache("node-1")
 	initListeners(c)
@@ -339,7 +339,6 @@ func TestLoadListenersFromStorage_ValidPods_NetnsKeyed(t *testing.T) {
 
 	entry, ok := c.listeners["/proc/42/ns/net"]
 	require.True(t, ok, "listener entry must be keyed by network namespace")
-	assert.NotNil(t, entry.inbound)
 	assert.NotNil(t, entry.outbound)
 }
 
@@ -428,7 +427,7 @@ func TestSnapshotCache_AddPod(t *testing.T) {
 		wantNetns string
 	}{
 		{
-			name:        "adding a pod to empty cache creates one listener entry with non-nil inbound and outbound",
+			name:        "adding a pod to empty cache creates one listener entry with non-nil outbound",
 			setupFunc:   func(_ *SnapshotCache) {},
 			pod:         makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
 			trustDomain: "example.org",
@@ -487,7 +486,6 @@ func TestSnapshotCache_AddPod(t *testing.T) {
 			if tt.wantNetns != "" {
 				entry, ok := c.listeners[tt.wantNetns]
 				require.True(t, ok, "listener entry must be keyed by network namespace %q", tt.wantNetns)
-				assert.NotNil(t, entry.inbound, "inbound listener must be non-nil")
 				assert.NotNil(t, entry.outbound, "outbound listener must be non-nil")
 			}
 		})
@@ -501,8 +499,8 @@ func TestSnapshotCache_AddPod(t *testing.T) {
 func TestSnapshotCache_Listeners_ThreadSafety(t *testing.T) {
 	c := newTestCache("node-1")
 	c.listeners = map[string]listenerEntry{
-		"/proc/100/ns/net": {inbound: nil, outbound: nil},
-		"/proc/200/ns/net": {inbound: nil, outbound: nil},
+		"/proc/100/ns/net": {outbound: nil},
+		"/proc/200/ns/net": {outbound: nil},
 	}
 
 	const goroutines = 20
@@ -512,7 +510,7 @@ func TestSnapshotCache_Listeners_ThreadSafety(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			result := c.Listeners()
-			assert.Len(t, result, 4)
+			assert.Len(t, result, 2)
 		}()
 	}
 	wg.Wait()
@@ -553,7 +551,10 @@ func TestSnapshotCache_Listeners_ConcurrentReadWrite(t *testing.T) {
 // the returned slice does not affect the internal cache state.
 func TestSnapshotCache_Listeners_ResultIsIndependentSlice(t *testing.T) {
 	c := newTestCache("node-1")
-	seedListeners(c, makeCNIPod("pod-a", "default", "/proc/100/ns/net"))
+	seedListeners(c,
+		makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
+		makeCNIPod("pod-b", "default", "/proc/200/ns/net"),
+	)
 
 	first := c.Listeners()
 	require.Len(t, first, 2)

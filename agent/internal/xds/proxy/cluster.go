@@ -9,22 +9,17 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
-	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const (
-	// defaultLocalClusterUpstreamBindConfigAddress is the default bind address for local cluster upstreams
-	defaultLocalClusterUpstreamBindConfigAddress = "127.0.0.1"
 	// appClusterPrefix marks the per-pod cluster that forwards decrypted inbound
 	// traffic to the pod's own application on loopback.
 	appClusterPrefix = "app_"
@@ -53,8 +48,8 @@ func AppHealthPathFromPod(cniPod *cniv1.CNIPod) string {
 }
 
 // AppClusterName returns the name of the per-pod application cluster that the
-// pod's inbound listener forwards decrypted traffic to. It is unique per pod so
-// each inbound listener routes to its own application on loopback.
+// pod's inner tunnel listener forwards decrypted traffic to. It is unique per pod
+// so each inner listener routes to its own application on loopback.
 func AppClusterName(cniPod *cniv1.CNIPod) string {
 	return fmt.Sprintf("%s%s", appClusterPrefix, cniPod.GetName())
 }
@@ -154,68 +149,4 @@ func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string
 		},
 	}
 	return c
-}
-
-// NewClusterForService creates an Envoy cluster for a service.
-// The cluster uses EDS for dynamic endpoint discovery via ADS.
-// Upstream connections use HTTP/2 protocol.
-func NewClusterForService(serviceName string) *clusterv3.Cluster {
-	protocolOptions := config.Http2ProtocolOptions()
-
-	return &clusterv3.Cluster{
-		Name: serviceName,
-		ClusterDiscoveryType: &clusterv3.Cluster_Type{
-			Type: clusterv3.Cluster_EDS,
-		},
-		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
-			EdsConfig: config.XDSConfigSourceADS(),
-		},
-		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(protocolOptions),
-		},
-	}
-}
-
-// NewLocalClusterForService creates an Envoy cluster for a local service endpoint.
-// The cluster binds to 127.0.0.1 and uses the target pod's network namespace.
-// It includes health checks and uses HTTP/2 for upstream connections.
-func NewLocalClusterForService(serviceName string, endpoint *registryv1.ServiceEndpoint) *clusterv3.Cluster {
-	protocolOptions := config.Http2ProtocolOptions()
-
-	return &clusterv3.Cluster{
-		Name: serviceName,
-		ClusterDiscoveryType: &clusterv3.Cluster_Type{
-			Type: clusterv3.Cluster_EDS,
-		},
-		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
-			EdsConfig: config.XDSConfigSourceADS(),
-		},
-		TypedExtensionProtocolOptions: map[string]*anypb.Any{
-			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(protocolOptions),
-		},
-		UpstreamBindConfig: &corev3.BindConfig{
-			SourceAddress: &corev3.SocketAddress{
-				Address: defaultLocalClusterUpstreamBindConfigAddress,
-				PortSpecifier: &corev3.SocketAddress_PortValue{
-					PortValue: 0,
-				},
-				NetworkNamespaceFilepath: endpoint.GetContainerMetadata().GetNetworkNamespace(),
-			},
-		},
-		HealthChecks: []*corev3.HealthCheck{
-			{
-				HealthyThreshold:   wrapperspb.UInt32(1),
-				UnhealthyThreshold: wrapperspb.UInt32(1),
-				Interval:           durationpb.New(5 * time.Second),
-				Timeout:            durationpb.New(1 * time.Second),
-				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
-					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
-						Host:            endpoint.GetKubernetesMetadata().GetPodName(),
-						Path:            "/",
-						CodecClientType: typev3.CodecClientType_HTTP2,
-					},
-				},
-			},
-		},
-	}
 }

@@ -74,7 +74,7 @@ func (c *Client) poll(ctx context.Context, netns string, wantPresent bool) error
 }
 
 func (c *Client) hasListenerForNetns(ctx context.Context, netns string) (bool, error) {
-	url := fmt.Sprintf("http://%s/config_dump?resource=dynamic_listeners&name_regex=inbound_http", c.address)
+	url := fmt.Sprintf("http://%s/config_dump?resource=dynamic_listeners&name_regex=outbound_http", c.address)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

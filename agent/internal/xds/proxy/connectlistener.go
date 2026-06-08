@@ -23,10 +23,12 @@ const (
 	// NodeConnectListenerName is the name of the node-level CONNECT-terminating
 	// listener that receives HBONE-style tunnels from peer node proxies.
 	NodeConnectListenerName = "node_connect"
+	// defaultInboundAddress is the bind address for the node CONNECT listener
+	// (all interfaces); peer node proxies dial it across the node network.
+	defaultInboundAddress = "0.0.0.0"
 	// defaultNodeConnectPort is the host port the node CONNECT listener binds.
-	// It is node-level (host network namespace), distinct from the per-pod
-	// inbound listeners on 18080, so the R2 tunnel data path can be introduced
-	// without disturbing the existing R1 inbound path.
+	// It is node-level (host network namespace): all inbound mesh traffic arrives
+	// here over the HBONE tunnel and is demuxed to the per-pod inner listeners.
 	defaultNodeConnectPort = 15008
 	// NodeLivePath is the readiness path a peer proxy's reachability health check
 	// hits on the node CONNECT listener; it is answered locally, never tunneled.
