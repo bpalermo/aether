@@ -141,7 +141,9 @@ func TestDynamoDBRegistry_RegisterEndpoint(t *testing.T) {
 			Namespace: "default",
 			PodName:   "test-pod",
 			NodeName:  "node-1",
+			NodeIp:    "192.168.0.5",
 		},
+		Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY,
 	}
 
 	err := registry.RegisterEndpoint(ctx, "frontend", registryv1.Service_PROTOCOL_HTTP, ep)
@@ -161,6 +163,9 @@ func TestDynamoDBRegistry_RegisterEndpoint(t *testing.T) {
 	assert.Equal(t, ep.Metadata["version"], endpoints[0].Metadata["version"])
 	assert.Equal(t, ep.ContainerMetadata.ContainerId, endpoints[0].ContainerMetadata.ContainerId)
 	assert.Equal(t, ep.KubernetesMetadata.Namespace, endpoints[0].KubernetesMetadata.Namespace)
+	// Feature parity with cloudmap: node_ip + health round-trip.
+	assert.Equal(t, ep.KubernetesMetadata.NodeIp, endpoints[0].KubernetesMetadata.NodeIp)
+	assert.Equal(t, ep.Health, endpoints[0].Health)
 }
 
 func TestDynamoDBRegistry_RegisterMultipleEndpoints(t *testing.T) {

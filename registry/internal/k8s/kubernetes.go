@@ -143,6 +143,9 @@ func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, _ registryv1.
 type locality struct {
 	region string
 	zone   string
+	// ip is the node's InternalIP, used as the HBONE tunnel target
+	// (node_ip:15008) — feature parity with the write-based backends.
+	ip string
 }
 
 // listManagedPods lists all running pods with the aether.io/managed=true label that have a PodIP.
@@ -189,6 +192,7 @@ func (r *KubernetesRegistry) buildNodeLocalities(ctx context.Context, pods []cor
 		localities[nodeName] = locality{
 			region: node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
 			zone:   node.Labels[constants.AnnotationKubernetesNodeTopologyZone],
+			ip:     nodeInternalIP(&node),
 		}
 	}
 
@@ -218,6 +222,10 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 			PodName:   pod.Name,
 			NodeName:  pod.Spec.NodeName,
 		},
+		// This backend derives endpoints from the API server rather than receiving
+		// agent registrations, so health comes from the pod's readiness condition
+		// (the delegated active-HC path applies only to the write-based backends).
+		Health: podHealth(pod),
 	}
 
 	if loc, ok := nodeLocalities[pod.Spec.NodeName]; ok {
@@ -225,9 +233,34 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 			Region: loc.region,
 			Zone:   loc.zone,
 		}
+		ep.KubernetesMetadata.NodeIp = loc.ip
 	}
 
 	return ep, nil
+}
+
+// nodeInternalIP returns the node's InternalIP address, or "" if none is present.
+func nodeInternalIP(node *corev1.Node) string {
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			return addr.Address
+		}
+	}
+	return ""
+}
+
+// podHealth maps a pod's readiness condition to the endpoint health: ready pods
+// are healthy, otherwise unhealthy.
+func podHealth(pod *corev1.Pod) registryv1.ServiceEndpoint_Health {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			if c.Status == corev1.ConditionTrue {
+				return registryv1.ServiceEndpoint_HEALTH_HEALTHY
+			}
+			return registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+		}
+	}
+	return registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED
 }
 
 // getPortFromAnnotations extracts the endpoint port from pod annotations.
