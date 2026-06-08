@@ -57,8 +57,8 @@ proxy:
   image:
     # Envoy is an upstream image; pin it explicitly (not built by this repo).
     repository: docker.io/envoyproxy/envoy
-    # envoyproxy/envoy:distroless-v1.37.0
-    digest: sha256:92fdb97b9fdb47da82fbe3651b83bd1419e544966d264632af4864004652685f
+    # envoyproxy/envoy:distroless-v1.38.0
+    digest: sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6
   logLevel: info
 
 # AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
