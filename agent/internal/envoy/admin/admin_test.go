@@ -72,7 +72,7 @@ func TestParseConfigDumpForNetns(t *testing.T) {
 			name:  "finds matching netns",
 			netns: "/proc/100/ns/net",
 			data: func(t *testing.T) []byte {
-				return marshalConfigDump(t, listenerWithNetns("inbound_http", "/proc/100/ns/net"))
+				return marshalConfigDump(t, listenerWithNetns("outbound_http", "/proc/100/ns/net"))
 			},
 			want: true,
 		},
@@ -80,7 +80,7 @@ func TestParseConfigDumpForNetns(t *testing.T) {
 			name:  "no matching netns",
 			netns: "/proc/999/ns/net",
 			data: func(t *testing.T) []byte {
-				return marshalConfigDump(t, listenerWithNetns("inbound_http", "/proc/100/ns/net"))
+				return marshalConfigDump(t, listenerWithNetns("outbound_http", "/proc/100/ns/net"))
 			},
 			want: false,
 		},
@@ -115,7 +115,7 @@ func TestParseConfigDumpForNetns(t *testing.T) {
 
 func TestWaitForListenerPresent(t *testing.T) {
 	t.Run("returns immediately when listener present", func(t *testing.T) {
-		body := marshalConfigDump(t, listenerWithNetns("inbound_http", "/proc/100/ns/net"))
+		body := marshalConfigDump(t, listenerWithNetns("outbound_http", "/proc/100/ns/net"))
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(body)
@@ -166,7 +166,7 @@ func TestWaitForListenerRemoval(t *testing.T) {
 	})
 
 	t.Run("times out when listener never removed", func(t *testing.T) {
-		body := marshalConfigDump(t, listenerWithNetns("inbound_http", "/proc/100/ns/net"))
+		body := marshalConfigDump(t, listenerWithNetns("outbound_http", "/proc/100/ns/net"))
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(body)

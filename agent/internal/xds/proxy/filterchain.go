@@ -6,35 +6,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 )
-
-// buildDefaultInboundHTTPFilterChain creates a filter chain for inbound HTTP traffic.
-// It includes TLS configuration, client certificate forwarding, and an HTTP connection manager.
-// The tlsCertificateSecretName is the SPIFFE ID used to fetch the workload's SVID via SDS.
-// The validationContextName is the trust domain used to fetch the CA bundle via SDS.
-func buildDefaultInboundHTTPFilterChain(name string, appClusterName string, tlsCertificateSecretName string, validationContextName string) *listenerv3.FilterChain {
-	routeConfig := buildInboundRouteConfiguration(appClusterName)
-
-	hcm := buildHTTPConnectionManager(name, routeConfig)
-	// SANITIZE_SET replaces any client-supplied XFCC header with details derived
-	// from the verified peer certificate, exposing the caller's SPIFFE ID (URI SAN)
-	// and subject to the application.
-	hcm.ForwardClientCertDetails = http_connection_managerv3.HttpConnectionManager_SANITIZE_SET
-	hcm.SetCurrentClientCertDetails = &http_connection_managerv3.HttpConnectionManager_SetCurrentClientCertDetails{
-		Subject: wrapperspb.Bool(true),
-		Uri:     true,
-	}
-
-	var networkFilters []*listenerv3.Filter
-	networkFilters = append(networkFilters, buildHTTPConnectionManagerFilter(hcm))
-
-	return &listenerv3.FilterChain{
-		Name:            fmt.Sprintf("in_http_%s", name),
-		Filters:         networkFilters,
-		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
-	}
-}
 
 // buildDefaultOutboundHTTPFilterChain creates a filter chain for outbound HTTP traffic.
 // It uses RDS (Route Discovery Service) to dynamically fetch routes and includes
