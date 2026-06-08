@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tcpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	internalupstreamv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/internal_upstream/v3"
@@ -66,6 +69,83 @@ func TunnelEndpointMetadata(authority, nodeAddr string, subsetKeys map[string]st
 			tunnelMetadataNamespace:            tunnel,
 			envoyFilterMetadataSubsetNamespace: lb,
 		},
+	}
+}
+
+// NewTunnelServiceCluster builds the outbound service cluster for the tunnel data
+// path. Its endpoints (delivered via EDS) are internal-listener addresses carrying
+// per-endpoint tunnel metadata; the internal_upstream transport socket passes that
+// metadata across the internal-listener boundary. lb_subset_config enables per-pod
+// affinity (selection by endpoint IP) while defaulting to load balancing across all
+// endpoints. The cluster itself is not mTLS — the tunnel's mTLS is at the originate
+// cluster, presenting the originating pod's identity.
+func NewTunnelServiceCluster(serviceName string) *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:           serviceName,
+		ConnectTimeout: durationpb.New(2 * time.Second),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_EDS,
+		},
+		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			EdsConfig: config.XDSConfigSourceADS(),
+		},
+		TransportSocket: InternalUpstreamTransportSocket(),
+		LbSubsetConfig: &clusterv3.Cluster_LbSubsetConfig{
+			FallbackPolicy: clusterv3.Cluster_LbSubsetConfig_ANY_ENDPOINT,
+			SubsetSelectors: []*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector{
+				{Keys: []string{subsetIPKey}},
+			},
+		},
+	}
+}
+
+// TunnelLocalityLbEndpointFromRegistryEndpoint builds a tunnel endpoint: its
+// address is the internal tunnel listener, and its host metadata carries both the
+// envoy.lb subset keys (for affinity selection) and the tunnel coordinates — the
+// destination pod IP as the CONNECT authority and node_ip:15008 as the tunnel
+// target. The internal_upstream transport socket on the service cluster passes
+// this host metadata through to the tunnel.
+func TunnelLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint) *endpointv3.LocalityLbEndpoints {
+	subsetKeys := map[string]string{
+		subsetClusterKey: endpoint.GetClusterName(),
+		subsetIPKey:      endpoint.GetIp(),
+	}
+	if endpoint.GetKubernetesMetadata() != nil {
+		subsetKeys[subsetPodNamespaceKey] = endpoint.GetKubernetesMetadata().GetNamespace()
+		subsetKeys[subsetPodNameKey] = endpoint.GetKubernetesMetadata().GetPodName()
+	}
+	for k, v := range endpoint.GetMetadata() {
+		subsetKeys[k] = v
+	}
+
+	nodeAddr := fmt.Sprintf("%s:%d", endpoint.GetKubernetesMetadata().GetNodeIp(), defaultNodeConnectPort)
+	md := TunnelEndpointMetadata(endpoint.GetIp(), nodeAddr, subsetKeys)
+
+	var locality *corev3.Locality
+	if loc := endpoint.GetLocality(); loc != nil && loc.GetRegion() != "" && loc.GetZone() != "" {
+		locality = &corev3.Locality{Region: loc.GetRegion(), Zone: loc.GetZone()}
+	}
+
+	return &endpointv3.LocalityLbEndpoints{
+		LbEndpoints: []*endpointv3.LbEndpoint{
+			{
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+					Endpoint: &endpointv3.Endpoint{
+						Address: &corev3.Address{
+							Address: &corev3.Address_EnvoyInternalAddress{
+								EnvoyInternalAddress: &corev3.EnvoyInternalAddress{
+									AddressNameSpecifier: &corev3.EnvoyInternalAddress_ServerListenerName{
+										ServerListenerName: TunnelInternalListenerName,
+									},
+								},
+							},
+						},
+					},
+				},
+				Metadata: md,
+			},
+		},
+		Locality: locality,
 	}
 }
 

@@ -31,7 +31,18 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
 	if nodeConnect := c.nodeConnectListener(); nodeConnect != nil {
 		listeners = append(listeners, nodeConnect)
 	}
+	// The internal listener that encapsulates outbound streams into CONNECT
+	// tunnels (R2 tunnel egress); nil until the node SVID is served.
+	if tunnelInternal := c.tunnelInternalListener(); tunnelInternal != nil {
+		listeners = append(listeners, tunnelInternal)
+	}
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
+
+	// The shared ORIGINAL_DST cluster the tunnels dial (carries the per-source
+	// mTLS); nil until the node SVID is served.
+	if tunnelOriginate := c.tunnelOriginateCluster(); tunnelOriginate != nil {
+		clusters = append(clusters, tunnelOriginate)
+	}
 
 	// Per-pod application clusters live alongside listeners (not in the
 	// registry-driven cluster map) so registry reloads never drop them. STATIC
