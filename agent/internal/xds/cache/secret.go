@@ -20,6 +20,22 @@ func (c *SnapshotCache) SetSecrets(ctx context.Context, secrets []*tlsv3.Secret)
 	return c.generateSecretSnapshot(ctx)
 }
 
+// SetNodeIdentity records the agent's node SPIFFE ID (served by the SPIRE bridge
+// as the node SVID) and regenerates the snapshot. The node CONNECT listener uses
+// it as its downstream server-certificate secret name; until it is set, that
+// listener is omitted. Idempotent: a no-op when the value is unchanged.
+func (c *SnapshotCache) SetNodeIdentity(ctx context.Context, nodeSpiffeID string) error {
+	c.localMu.Lock()
+	if c.nodeSpiffeID == nodeSpiffeID {
+		c.localMu.Unlock()
+		return nil
+	}
+	c.nodeSpiffeID = nodeSpiffeID
+	c.localMu.Unlock()
+
+	return c.generateSnapshot(ctx)
+}
+
 // generateSecretSnapshot regenerates the node snapshot after a secret change.
 // It delegates to generateSnapshot, which emits a complete snapshot of all
 // resource types so secret updates do not clobber listeners or clusters.

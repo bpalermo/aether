@@ -19,6 +19,7 @@ package cache
 import (
 	"sync"
 
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -62,6 +63,10 @@ type SnapshotCache struct {
 	// trustDomain is the workload trust domain captured from listener loads,
 	// used to name the upstream mTLS validation context.
 	trustDomain string
+	// nodeSpiffeID is the agent's node identity (set by the SPIRE bridge once the
+	// node SVID is served). It is the downstream server-cert secret name for the
+	// node CONNECT listener; while empty, that listener is not generated.
+	nodeSpiffeID string
 
 	version *atomic.Uint64
 }
@@ -76,6 +81,9 @@ type listenerEntry struct {
 	inbound    types.Resource
 	outbound   types.Resource
 	appCluster types.Resource
+	// pod is retained so the node-level CONNECT listener can be (re)built with a
+	// route per local pod (keyed on the pod IP) to its app cluster.
+	pod *cniv1.CNIPod
 }
 
 // clusterEntry holds a cluster definition, its pre-built load assignment,

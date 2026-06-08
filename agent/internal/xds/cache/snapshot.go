@@ -26,6 +26,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
 	v := generateSnapshotVersion(snapshotVersionLabel, c.version)
 
 	listeners := c.Listeners()
+	// The node-level CONNECT listener (R2 tunnel ingress) is built from the
+	// current local pods + node identity; nil until the node SVID is served.
+	if nodeConnect := c.nodeConnectListener(); nodeConnect != nil {
+		listeners = append(listeners, nodeConnect)
+	}
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
 
 	// Per-pod application clusters live alongside listeners (not in the

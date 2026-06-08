@@ -36,6 +36,14 @@ type SecretStore interface {
 	SetSecrets(ctx context.Context, secrets []*tlsv3.Secret) error
 }
 
+// NodeIdentitySink receives the agent's node SPIFFE ID when the node SVID is
+// served, so resources that reference it (the node CONNECT listener) can be
+// generated. The xDS snapshot cache satisfies it; the bridge calls it only when
+// its store also implements this interface.
+type NodeIdentitySink interface {
+	SetNodeIdentity(ctx context.Context, nodeSpiffeID string) error
+}
+
 // X509SVIDSource provides the agent's own node SVID. It is satisfied by the
 // go-spiffe Workload API X509Source the agent already uses for registrar mTLS.
 type X509SVIDSource interface {
@@ -356,8 +364,20 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 		return nil // unchanged; avoid a no-op snapshot bump
 	}
 	b.secrets[secret.GetName()] = secret
+	firstServe := b.nodeSpiffeID == ""
 	b.nodeSpiffeID = secret.GetName()
 	b.mu.Unlock()
+
+	// Inform the cache of the node identity so the node CONNECT listener (which
+	// references it as its server cert) is generated. Only needed once: the
+	// SPIFFE ID is stable across rotations.
+	if firstServe {
+		if sink, ok := b.store.(NodeIdentitySink); ok {
+			if err := sink.SetNodeIdentity(ctx, secret.GetName()); err != nil {
+				b.log.Error(err, "setting node identity on cache", "spiffeID", secret.GetName())
+			}
+		}
+	}
 
 	b.log.V(1).Info("served node SVID", "spiffeID", secret.GetName())
 	return b.pushSecrets(ctx)
