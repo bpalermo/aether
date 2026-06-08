@@ -28,6 +28,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
 	listeners := c.Listeners()
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
 
+	// Per-pod application clusters live alongside listeners (not in the
+	// registry-driven cluster map) so registry reloads never drop them. STATIC
+	// clusters carry their endpoints inline, so they need no EDS resources.
+	clusters = append(clusters, c.appClusters()...)
+
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
 	for _, s := range c.secrets {

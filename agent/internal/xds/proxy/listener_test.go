@@ -54,7 +54,7 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inbound, outbound, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org")
+			inbound, outbound, appCluster, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org")
 
 			if tt.expectedError {
 				require.Error(t, err)
@@ -64,6 +64,7 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, inbound)
 			require.NotNil(t, outbound)
+			require.NotNil(t, appCluster)
 			assert.Equal(t, tt.expectedInboundName, inbound.GetName())
 			assert.Equal(t, tt.expectedOutboundName, outbound.GetName())
 		})

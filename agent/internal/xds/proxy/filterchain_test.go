@@ -33,7 +33,7 @@ func TestBuildDefaultInboundHTTPFilterChain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := buildDefaultInboundHTTPFilterChain(tt.podName, tt.tlsCertificateSecretName, tt.validationContextName)
+			fc := buildDefaultInboundHTTPFilterChain(tt.podName, "app_"+tt.podName, tt.tlsCertificateSecretName, tt.validationContextName)
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())

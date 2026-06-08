@@ -18,7 +18,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	netns := cniPod.GetNetworkNamespace()
 	c.log.V(2).Info("adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
 
-	inbound, outbound, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain)
+	inbound, outbound, appCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain)
 	if err != nil {
 		return err
 	}
@@ -28,8 +28,9 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		c.listeners = make(map[string]listenerEntry)
 	}
 	c.listeners[netns] = listenerEntry{
-		inbound:  inbound,
-		outbound: outbound,
+		inbound:    inbound,
+		outbound:   outbound,
+		appCluster: appCluster,
 	}
 	c.listenerMu.Unlock()
 
@@ -72,6 +73,24 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	return resources
 }
 
+// appClusters returns the per-pod application clusters (one per managed pod)
+// as a resource slice. These STATIC clusters forward decrypted inbound traffic
+// to each pod's own application on loopback. They are kept alongside listeners
+// rather than in the registry-driven cluster map so registry reloads never drop
+// them. Thread-safe.
+func (c *SnapshotCache) appClusters() []types.Resource {
+	c.listenerMu.RLock()
+	defer c.listenerMu.RUnlock()
+
+	resources := make([]types.Resource, 0, len(c.listeners))
+	for _, entry := range c.listeners {
+		if entry.appCluster != nil {
+			resources = append(resources, entry.appCluster)
+		}
+	}
+	return resources
+}
+
 // LoadListenersFromStorage retrieves all pods from the given storage backend,
 // generates inbound and outbound Envoy listeners for each pod, and populates
 // the cache keyed by container network namespace. After populating the cache,
@@ -99,7 +118,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		netns := pod.GetNetworkNamespace()
 		c.log.V(2).Info("generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
-		inbound, outbound, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain)
+		inbound, outbound, appCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain)
 		if listenerErr != nil {
 			c.log.V(1).Error(listenerErr, "failed to generate listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)
@@ -107,8 +126,9 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		}
 
 		c.listeners[netns] = listenerEntry{
-			inbound:  inbound,
-			outbound: outbound,
+			inbound:    inbound,
+			outbound:   outbound,
+			appCluster: appCluster,
 		}
 		local[netns] = proxy.SpiffeIDFromPod(pod, trustDomain)
 	}

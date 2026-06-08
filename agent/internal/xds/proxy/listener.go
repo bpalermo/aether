@@ -5,6 +5,7 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 )
@@ -20,23 +21,27 @@ const (
 	defaultHTTPOutboundPort = 18081
 )
 
-// GenerateListenersFromRegistryPod generates inbound and outbound HTTP listeners for a pod.
-// Inbound listeners accept traffic from any interface on the pod's network namespace.
-// Outbound listeners route traffic destined for other services.
+// GenerateListenersFromRegistryPod generates inbound and outbound HTTP listeners
+// and the per-pod application cluster for a pod.
+// Inbound listeners accept traffic from any interface on the pod's network namespace
+// and forward decrypted traffic to the application cluster (the pod's own app on
+// loopback). Outbound listeners route traffic destined for other services.
 // Both listeners use HTTP protocol and include appropriate filter chains.
 // The trustDomain is the SPIFFE trust domain URI used for SDS validation context.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, err error) {
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appCluster *clusterv3.Cluster, err error) {
 	inbound, err = generateInboundHTTPListener(cniPod, trustDomain)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	outbound, err = generateOutboundHTTPListener(cniPod)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return inbound, outbound, nil
+	appCluster = NewAppCluster(AppClusterName(cniPod), cniPod.GetNetworkNamespace(), AppPortFromPod(cniPod))
+
+	return inbound, outbound, appCluster, nil
 }
 
 // SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the
@@ -80,7 +85,7 @@ func generateInboundHTTPListener(cniPod *cniv1.CNIPod, trustDomain string) (*lis
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultInboundHTTPFilterChain(cniPod.GetName(), tlsCertificateSecretName, validationContextName),
+			buildDefaultInboundHTTPFilterChain(cniPod.GetName(), AppClusterName(cniPod), tlsCertificateSecretName, validationContextName),
 		},
 	}, nil
 }

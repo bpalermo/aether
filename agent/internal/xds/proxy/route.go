@@ -3,7 +3,6 @@ package proxy
 import (
 	"fmt"
 
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 )
 
@@ -13,8 +12,9 @@ const (
 )
 
 // buildInboundRouteConfiguration creates a route configuration for inbound traffic.
-// It includes a catch-all virtual host that returns 404 for all requests.
-func buildInboundRouteConfiguration() *routev3.RouteConfiguration {
+// It routes all requests to the per-pod application cluster, which forwards the
+// decrypted traffic to the pod's own application on loopback.
+func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name: "in_http",
 		VirtualHosts: []*routev3.VirtualHost{
@@ -28,13 +28,10 @@ func buildInboundRouteConfiguration() *routev3.RouteConfiguration {
 								Prefix: "/",
 							},
 						},
-						Action: &routev3.Route_DirectResponse{
-							DirectResponse: &routev3.DirectResponseAction{
-								Status: 404,
-								Body: &corev3.DataSource{
-									Specifier: &corev3.DataSource_InlineString{
-										InlineString: "Ops! Probably something wrong. You shouldn´t reach here.\n",
-									},
+						Action: &routev3.Route_Route{
+							Route: &routev3.RouteAction{
+								ClusterSpecifier: &routev3.RouteAction_Cluster{
+									Cluster: appClusterName,
 								},
 							},
 						},
