@@ -3,17 +3,13 @@ package cache
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	matcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
-	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	"google.golang.org/protobuf/proto"
 )
 
 // RemoveEndpoint removes a single endpoint by IP from the given cluster's
@@ -66,22 +62,12 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 	return c.generateClusterSnapshot(ctx)
 }
 
-// localClusterPrefix marks the same-node ("local_<service>") cluster variants,
-// which are excluded from upstream mTLS matcher injection.
-const localClusterPrefix = "local_"
-
-// clustersEndpointsAndVhosts returns all cached cluster, endpoint, and virtual host
-// resources as separate slices. It returns concrete vhost type to avoid boxing/unboxing
-// at the caller.
-//
-// Each regular (non-local) service cluster is cloned and given the upstream mTLS
-// transport-socket matcher/matches derived from the current local workloads, so
-// the cloned cluster presents the originating pod's client certificate. Cloning
-// avoids mutating the cached cluster pointer, which is rebuilt wholesale on
-// registry reloads.
+// clustersEndpointsAndVhosts returns all cached cluster, endpoint, and virtual
+// host resources as separate slices. It returns the concrete vhost type to avoid
+// boxing/unboxing at the caller. Service clusters tunnel via the internal_upstream
+// transport socket (set at build time); the per-source mTLS now lives on the
+// shared tunnel_originate cluster, so no per-cluster matcher injection is needed.
 func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
-	matcher, matches := c.upstreamMTLS()
-
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
@@ -89,14 +75,7 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
 	for _, entry := range c.clusters {
-		cluster := entry.cluster
-		if matcher != nil && !strings.HasPrefix(cluster.GetName(), localClusterPrefix) {
-			cloned, _ := proto.Clone(cluster).(*clusterv3.Cluster)
-			cloned.TransportSocketMatcher = matcher
-			cloned.TransportSocketMatches = matches
-			cluster = cloned
-		}
-		clusters = append(clusters, cluster)
+		clusters = append(clusters, entry.cluster)
 		if entry.loadAssignment != nil {
 			clas = append(clas, entry.loadAssignment)
 		}
@@ -107,11 +86,12 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	return clusters, clas, vhosts
 }
 
-// upstreamMTLS builds the transport-socket matcher and matches for outbound
-// mTLS from the current local workload identities. Returns (nil, nil) when no
-// local workloads are known, leaving clusters without an upstream transport
-// socket (the pre-mTLS behavior).
-func (c *SnapshotCache) upstreamMTLS() (*matcherv3.Matcher, []*clusterv3.Cluster_TransportSocketMatch) {
+// tunnelOriginateCluster builds the shared ORIGINAL_DST cluster the HBONE tunnels
+// dial, with the per-source transport-socket matcher derived from the current
+// local workloads (each source pod presents its own SVID; on-no-match presents
+// the node identity for health-check tunnels). Returns nil before the node SVID
+// is served, since the matcher's on-no-match references it.
+func (c *SnapshotCache) tunnelOriginateCluster() types.Resource {
 	c.localMu.RLock()
 	netnsToID := make(map[string]string, len(c.localWorkloads))
 	ids := make([]string, 0, len(c.localWorkloads))
@@ -119,15 +99,30 @@ func (c *SnapshotCache) upstreamMTLS() (*matcherv3.Matcher, []*clusterv3.Cluster
 		netnsToID[netns] = id
 		ids = append(ids, id)
 	}
+	nodeSpiffeID := c.nodeSpiffeID
 	trustDomain := c.trustDomain
 	c.localMu.RUnlock()
 
-	if len(netnsToID) == 0 {
-		return nil, nil
+	if nodeSpiffeID == "" {
+		return nil
 	}
 
 	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
-	return proxy.UpstreamTransportSocketMatcher(netnsToID), proxy.UpstreamTransportSocketMatches(ids, validationContextName)
+	return proxy.NewTunnelOriginateCluster(netnsToID, ids, nodeSpiffeID, validationContextName)
+}
+
+// tunnelInternalListener returns the internal listener that encapsulates outbound
+// streams into CONNECT tunnels. It is emitted alongside the originate cluster
+// (both gated on the node identity being available).
+func (c *SnapshotCache) tunnelInternalListener() types.Resource {
+	c.localMu.RLock()
+	nodeSpiffeID := c.nodeSpiffeID
+	c.localMu.RUnlock()
+
+	if nodeSpiffeID == "" {
+		return nil
+	}
+	return proxy.NewTunnelInternalListener()
 }
 
 // Endpoints returns the pre-built load assignment (cluster endpoints) for the given
@@ -178,32 +173,19 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// endpoints that disappeared from the registry are pruned rather than retained.
 	c.clusters = make(map[string]clusterEntry, len(serviceEndpoints))
 	for serviceName, endpoints := range serviceEndpoints {
-		cluster := proxy.NewClusterForService(serviceName)
+		// The outbound service cluster tunnels (HBONE-style): its endpoints are
+		// internal-listener addresses carrying per-endpoint tunnel metadata, and
+		// the tunnel's mTLS (presenting the originating pod identity) is at the
+		// shared tunnel_originate cluster.
+		cluster := proxy.NewTunnelServiceCluster(serviceName)
 		cla := proxy.NewClusterLoadAssignment(serviceName)
 		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
 
-		var localCluster *clusterv3.Cluster
-		var localCla *endpointv3.ClusterLoadAssignment
-		var localEpMap map[string]*endpointv3.LocalityLbEndpoints
 		for _, endpoint := range endpoints {
-			lbEp := proxy.LocalityLbEndpointFromRegistryEndpoint(endpoint)
+			lbEp := proxy.TunnelLocalityLbEndpointFromRegistryEndpoint(endpoint)
 			cla.Endpoints = append(cla.Endpoints, lbEp)
 			epMap[endpoint.GetIp()] = lbEp
-
-			if isLocal(clusterName, nodeName, endpoint) {
-				localClusterName := fmt.Sprintf("local_%s", serviceName)
-
-				if localCluster == nil {
-					localCluster = proxy.NewLocalClusterForService(localClusterName, endpoint)
-					localCla = proxy.NewClusterLoadAssignment(localClusterName)
-					localEpMap = make(map[string]*endpointv3.LocalityLbEndpoints)
-				}
-
-				localLbEp := proxy.LocalLocalityLbEndpointFromRegistryEndpoint(endpoint)
-				localCla.Endpoints = append(localCla.Endpoints, localLbEp)
-				localEpMap[endpoint.GetIp()] = localLbEp
-			}
 		}
 
 		c.clusters[serviceName] = clusterEntry{
@@ -211,15 +193,6 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			loadAssignment: cla,
 			endpoints:      epMap,
 			vhost:          vhost,
-		}
-
-		if localCluster != nil {
-			localName := fmt.Sprintf("local_%s", serviceName)
-			c.clusters[localName] = clusterEntry{
-				cluster:        localCluster,
-				loadAssignment: localCla,
-				endpoints:      localEpMap,
-			}
 		}
 	}
 
@@ -236,10 +209,4 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 // listeners or secrets.
 func (c *SnapshotCache) generateClusterSnapshot(ctx context.Context) error {
 	return c.generateSnapshot(ctx)
-}
-
-// isLocal reports whether the given endpoint belongs to the local cluster and node.
-// It is used to identify endpoints that should be included in the local cluster variant.
-func isLocal(clusterName string, nodeName string, endpoint *registryv1.ServiceEndpoint) bool {
-	return clusterName == endpoint.GetClusterName() && nodeName == endpoint.GetKubernetesMetadata().GetNodeName()
 }

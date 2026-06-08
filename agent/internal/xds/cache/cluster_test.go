@@ -323,108 +323,6 @@ func TestSnapshotCache_RemoveEndpoint_RemovesIP(t *testing.T) {
 	}
 }
 
-// TestIsLocal verifies the isLocal helper with all combinations of matching and
-// non-matching cluster name, node name, and endpoint metadata.
-func TestIsLocal(t *testing.T) {
-	tests := []struct {
-		name        string
-		clusterName string
-		nodeName    string
-		endpoint    *registryv1.ServiceEndpoint
-		want        bool
-	}{
-		{
-			name:        "returns true when cluster and node both match",
-			clusterName: "my-cluster",
-			nodeName:    "my-node",
-			endpoint: &registryv1.ServiceEndpoint{
-				ClusterName: "my-cluster",
-				KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
-					NodeName: "my-node",
-				},
-			},
-			want: true,
-		},
-		{
-			name:        "returns false when cluster name does not match",
-			clusterName: "other-cluster",
-			nodeName:    "my-node",
-			endpoint: &registryv1.ServiceEndpoint{
-				ClusterName: "my-cluster",
-				KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
-					NodeName: "my-node",
-				},
-			},
-			want: false,
-		},
-		{
-			name:        "returns false when node name does not match",
-			clusterName: "my-cluster",
-			nodeName:    "other-node",
-			endpoint: &registryv1.ServiceEndpoint{
-				ClusterName: "my-cluster",
-				KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
-					NodeName: "my-node",
-				},
-			},
-			want: false,
-		},
-		{
-			name:        "returns false when neither cluster nor node match",
-			clusterName: "other-cluster",
-			nodeName:    "other-node",
-			endpoint: &registryv1.ServiceEndpoint{
-				ClusterName: "my-cluster",
-				KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
-					NodeName: "my-node",
-				},
-			},
-			want: false,
-		},
-		{
-			name:        "returns false when kubernetes metadata is nil",
-			clusterName: "my-cluster",
-			nodeName:    "my-node",
-			endpoint: &registryv1.ServiceEndpoint{
-				ClusterName:        "my-cluster",
-				KubernetesMetadata: nil,
-			},
-			want: false,
-		},
-		{
-			name:        "returns false when args are empty but endpoint has non-empty values",
-			clusterName: "",
-			nodeName:    "",
-			endpoint: &registryv1.ServiceEndpoint{
-				ClusterName: "some-cluster",
-				KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
-					NodeName: "some-node",
-				},
-			},
-			want: false,
-		},
-		{
-			name:        "returns true when all values are empty strings",
-			clusterName: "",
-			nodeName:    "",
-			endpoint: &registryv1.ServiceEndpoint{
-				ClusterName: "",
-				KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
-					NodeName: "",
-				},
-			},
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isLocal(tt.clusterName, tt.nodeName, tt.endpoint)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 // TestLoadClustersFromRegistry_RegistryError verifies that a registry error is
 // propagated before any snapshot operation occurs.
 func TestLoadClustersFromRegistry_RegistryError(t *testing.T) {
@@ -474,7 +372,7 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			wantAbsentKeys: []string{"local_frontend"},
 		},
 		{
-			name:          "local endpoint creates both regular and local_ cluster variants",
+			name:          "local endpoint creates a single tunnel service cluster (no local_ variant)",
 			cacheNodeName: "node-1",
 			clusterName:   "cluster-1",
 			registryData: map[string][]*registryv1.ServiceEndpoint{
@@ -484,11 +382,11 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			},
 			wantClusterKeys: []string{
 				"backend",
-				"local_backend",
 			},
+			wantAbsentKeys: []string{"local_backend"},
 		},
 		{
-			name:          "mixed local and remote endpoints creates both cluster variants",
+			name:          "mixed local and remote endpoints still create a single tunnel cluster",
 			cacheNodeName: "node-1",
 			clusterName:   "cluster-1",
 			registryData: map[string][]*registryv1.ServiceEndpoint{
@@ -499,8 +397,8 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 			},
 			wantClusterKeys: []string{
 				"api",
-				"local_api",
 			},
+			wantAbsentKeys: []string{"local_api"},
 		},
 		{
 			name:          "all-remote endpoints do not produce a local_ variant",
