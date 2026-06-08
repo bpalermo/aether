@@ -28,20 +28,25 @@ const (
 // loopback). Outbound listeners route traffic destined for other services.
 // Both listeners use HTTP protocol and include appropriate filter chains.
 // The trustDomain is the SPIFFE trust domain URI used for SDS validation context.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appCluster *clusterv3.Cluster, err error) {
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appCluster *clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
 	inbound, err = generateInboundHTTPListener(cniPod, trustDomain)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	outbound, err = generateOutboundHTTPListener(cniPod)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
-	appCluster = NewAppCluster(AppClusterName(cniPod), cniPod.GetNetworkNamespace(), AppPortFromPod(cniPod), AppHealthPathFromPod(cniPod))
+	netns := cniPod.GetNetworkNamespace()
+	port := AppPortFromPod(cniPod)
+	appCluster = NewAppCluster(AppClusterName(cniPod), netns, port)
+	// Separate, unrouted cluster carrying the active app health check (delegated
+	// liveness); keeping the HC off app_<pod> avoids gating the delivery path.
+	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, port, AppHealthPathFromPod(cniPod))
 
-	return inbound, outbound, appCluster, nil
+	return inbound, outbound, appCluster, healthCluster, nil
 }
 
 // SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the

@@ -54,7 +54,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 		if isIgnorablePod(pod) {
 			continue
 		}
-		healthy, known := appHealth[proxy.AppClusterName(pod)]
+		healthy, known := appHealth[proxy.HealthProbeClusterName(pod)]
 		if !known {
 			continue // app cluster not yet programmed / health-checked
 		}

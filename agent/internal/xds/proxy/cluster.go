@@ -34,6 +34,12 @@ const (
 	// defaultAppHealthPath is the readiness path the app cluster health-checks when
 	// the pod does not specify one.
 	defaultAppHealthPath = "/"
+	// healthProbeClusterPrefix marks the per-pod health-probe clusters (active HC
+	// of the app, separate from the app_<pod> delivery cluster).
+	healthProbeClusterPrefix = "health_"
+	// appHealthCheckHost is the Host header sent on the app readiness HTTP health
+	// check (HTTP/1.1 requires a Host).
+	appHealthCheckHost = "localhost"
 )
 
 // AppHealthPathFromPod returns the HTTP path used to health-check the pod's
@@ -74,29 +80,11 @@ func AppPortFromPod(cniPod *cniv1.CNIPod) uint16 {
 // application container, not the agent. This is the only cleartext hop in the
 // mesh: it is intra-pod (Envoy -> app on loopback), never pod-to-pod. The app
 // is assumed to speak HTTP/1.1, so no explicit HTTP/2 protocol options are set.
-func NewAppCluster(name, netns string, port uint16, healthPath string) *clusterv3.Cluster {
+func NewAppCluster(name, netns string, port uint16) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name: name,
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_STATIC,
-		},
-		// Active health check of the pod's application (delegated liveness): the
-		// node-local agent scrapes this cluster's host health from the proxy admin
-		// and reflects it into the registry so the endpoint is marked unhealthy in
-		// every client's EDS while the app is not serving.
-		HealthChecks: []*corev3.HealthCheck{
-			{
-				Timeout:            durationpb.New(1 * time.Second),
-				Interval:           durationpb.New(5 * time.Second),
-				HealthyThreshold:   wrapperspb.UInt32(1),
-				UnhealthyThreshold: wrapperspb.UInt32(2),
-				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
-					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
-						Path:            healthPath,
-						CodecClientType: typev3.CodecClientType_HTTP1,
-					},
-				},
-			},
 		},
 		LoadAssignment: &endpointv3.ClusterLoadAssignment{
 			ClusterName: name,
@@ -134,6 +122,38 @@ func NewAppCluster(name, netns string, port uint16, healthPath string) *clusterv
 			},
 		},
 	}
+}
+
+// HealthProbeClusterName returns the name of the per-pod health-probe cluster.
+func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
+	return fmt.Sprintf("%s%s", healthProbeClusterPrefix, cniPod.GetName())
+}
+
+// NewAppHealthProbeCluster builds a per-pod cluster that only exists to actively
+// health-check the pod's application at 127.0.0.1:<port> (delegated liveness). It
+// is NOT referenced by any route — the agent scrapes its host health from the
+// proxy admin and reflects it into the registry. The active HC must live on this
+// separate cluster, not on app_<pod>: an active HC removes failing/pending hosts
+// from load balancing, which would gate (break) the real delivery path through
+// app_<pod> at startup and whenever the probe fails.
+func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string) *clusterv3.Cluster {
+	c := NewAppCluster(name, netns, port)
+	c.HealthChecks = []*corev3.HealthCheck{
+		{
+			Timeout:            durationpb.New(1 * time.Second),
+			Interval:           durationpb.New(5 * time.Second),
+			HealthyThreshold:   wrapperspb.UInt32(1),
+			UnhealthyThreshold: wrapperspb.UInt32(2),
+			HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
+				HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
+					Host:            appHealthCheckHost,
+					Path:            healthPath,
+					CodecClientType: typev3.CodecClientType_HTTP1,
+				},
+			},
+		},
+	}
+	return c
 }
 
 // NewClusterForService creates an Envoy cluster for a service.

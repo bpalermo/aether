@@ -11,15 +11,15 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// appClusterPrefix marks the per-pod application clusters whose active health
-// check reflects the pod's app readiness (delegated liveness).
-const appClusterPrefix = "app_"
+// healthProbeClusterPrefix marks the per-pod health-probe clusters whose active
+// health check reflects the pod's app readiness (delegated liveness).
+const healthProbeClusterPrefix = "health_"
 
 // AppClusterHealth queries the Envoy admin /clusters endpoint and returns, for
-// each per-pod application cluster (app_<pod>), whether its host currently passes
-// the active health check. The map is keyed by the app cluster name. A cluster
-// whose host has not yet been health-checked is reported healthy (optimistic) so
-// freshly added pods are not transiently marked down.
+// each per-pod health-probe cluster (health_<pod>), whether its host currently
+// passes the active health check. The map is keyed by the probe cluster name. A
+// cluster whose host has not yet been health-checked is reported healthy
+// (optimistic) so freshly added pods are not transiently marked down.
 func (c *Client) AppClusterHealth(ctx context.Context) (map[string]bool, error) {
 	url := fmt.Sprintf("http://%s/clusters?format=json", c.address)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -49,7 +49,7 @@ func (c *Client) AppClusterHealth(ctx context.Context) (map[string]bool, error) 
 
 	health := make(map[string]bool)
 	for _, cs := range clusters.GetClusterStatuses() {
-		if !strings.HasPrefix(cs.GetName(), appClusterPrefix) {
+		if !strings.HasPrefix(cs.GetName(), healthProbeClusterPrefix) {
 			continue
 		}
 		health[cs.GetName()] = appHostsHealthy(cs)
