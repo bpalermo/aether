@@ -10,7 +10,7 @@ import (
 )
 
 func TestBuildInboundRouteConfiguration(t *testing.T) {
-	routeConfig := buildInboundRouteConfiguration()
+	routeConfig := buildInboundRouteConfiguration("app_my-pod")
 
 	require.NotNil(t, routeConfig)
 	assert.Equal(t, "in_http", routeConfig.GetName())
@@ -23,7 +23,7 @@ func TestBuildInboundRouteConfiguration(t *testing.T) {
 
 	route := vhost.GetRoutes()[0]
 	assert.Equal(t, "/", route.GetMatch().GetPrefix())
-	assert.Equal(t, uint32(404), route.GetDirectResponse().GetStatus())
+	assert.Equal(t, "app_my-pod", route.GetRoute().GetCluster())
 }
 
 func TestBuildOutboundRouteConfiguration(t *testing.T) {

@@ -13,13 +13,17 @@ import (
 // It includes TLS configuration, client certificate forwarding, and an HTTP connection manager.
 // The tlsCertificateSecretName is the SPIFFE ID used to fetch the workload's SVID via SDS.
 // The validationContextName is the trust domain used to fetch the CA bundle via SDS.
-func buildDefaultInboundHTTPFilterChain(name string, tlsCertificateSecretName string, validationContextName string) *listenerv3.FilterChain {
-	routeConfig := buildInboundRouteConfiguration()
+func buildDefaultInboundHTTPFilterChain(name string, appClusterName string, tlsCertificateSecretName string, validationContextName string) *listenerv3.FilterChain {
+	routeConfig := buildInboundRouteConfiguration(appClusterName)
 
 	hcm := buildHTTPConnectionManager(name, routeConfig)
-	hcm.ForwardClientCertDetails = http_connection_managerv3.HttpConnectionManager_SANITIZE
+	// SANITIZE_SET replaces any client-supplied XFCC header with details derived
+	// from the verified peer certificate, exposing the caller's SPIFFE ID (URI SAN)
+	// and subject to the application.
+	hcm.ForwardClientCertDetails = http_connection_managerv3.HttpConnectionManager_SANITIZE_SET
 	hcm.SetCurrentClientCertDetails = &http_connection_managerv3.HttpConnectionManager_SetCurrentClientCertDetails{
 		Subject: wrapperspb.Bool(true),
+		Uri:     true,
 	}
 
 	var networkFilters []*listenerv3.Filter

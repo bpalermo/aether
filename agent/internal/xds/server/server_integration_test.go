@@ -121,7 +121,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	inbound, outbound, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org")
+	inbound, outbound, appCluster, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org")
 	require.NoError(t, err)
 
 	serviceName := "my-service"
@@ -136,7 +136,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 
 	snapshot, err := cachev3.NewSnapshot("1", map[resourcev3.Type][]types.Resource{
 		resourcev3.ListenerType: {inbound, outbound},
-		resourcev3.ClusterType:  {cluster},
+		resourcev3.ClusterType:  {cluster, appCluster},
 		resourcev3.EndpointType: {cla},
 		resourcev3.RouteType:    {routeCfg},
 	})
@@ -241,8 +241,8 @@ func TestIntegration_SnapshotServedViaXDS(t *testing.T) {
 	resp, err := stream.Recv()
 	require.NoError(t, err, "failed to receive cluster discovery response")
 	assert.Equal(t, resourcev3.ClusterType, resp.GetTypeUrl())
-	// The snapshot contains the service cluster.
-	assert.Len(t, resp.GetResources(), 1, "expected service cluster")
+	// The snapshot contains the service cluster and the per-pod app cluster.
+	assert.Len(t, resp.GetResources(), 2, "expected service and app clusters")
 
 	// Clean up.
 	cancel()
