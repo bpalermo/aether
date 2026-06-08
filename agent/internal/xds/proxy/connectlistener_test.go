@@ -6,7 +6,6 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
-	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,14 +39,15 @@ func TestGenerateNodeConnectResources(t *testing.T) {
 	assert.True(t, hcm.GetHttp2ProtocolOptions().GetAllowConnect(), "must allow CONNECT")
 	// Captures the verified peer identity into filter state for the inner HCM.
 	assert.Equal(t, "envoy.filters.http.set_filter_state", hcm.GetHttpFilters()[0].GetName())
+	// The reachability probe is answered by the health_check filter, not a route.
+	assert.Equal(t, "envoy.filters.http.health_check", hcm.GetHttpFilters()[1].GetName())
 
 	routes := hcm.GetRouteConfig().GetVirtualHosts()[0].GetRoutes()
-	require.Len(t, routes, 3) // node-live + 2 pods
-	assert.Equal(t, NodeLivePath, routes[0].GetMatch().GetPath())
+	require.Len(t, routes, 2) // one CONNECT route per pod; node-live is on the filter
 
 	// Each pod's CONNECT route (keyed on its IP) targets its inner-demux cluster.
 	byCluster := map[string]string{}
-	for _, r := range routes[1:] {
+	for _, r := range routes {
 		require.NotNil(t, r.GetMatch().GetConnectMatcher())
 		authority := r.GetMatch().GetHeaders()[0].GetStringMatch().GetExact()
 		require.Equal(t, "CONNECT", r.GetRoute().GetUpgradeConfigs()[0].GetUpgradeType())
@@ -77,10 +77,7 @@ func TestBuildNodeConnectRouteConfiguration_Empty(t *testing.T) {
 	rc := buildNodeConnectRouteConfiguration(nil)
 	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so churn doesn't wedge node_connect")
 	routes := rc.GetVirtualHosts()[0].GetRoutes()
-	require.Len(t, routes, 1, "only the node-live route when there are no pods")
-	assert.Equal(t, NodeLivePath, routes[0].GetMatch().GetPath())
-	_, ok := routes[0].GetAction().(*routev3.Route_DirectResponse)
-	assert.True(t, ok)
+	require.Empty(t, routes, "no routes when there are no pods; node-live is on the health_check filter")
 }
 
 func findListener(ls []*listenerv3.Listener, name string) *listenerv3.Listener {

@@ -12,6 +12,7 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	commonsetfsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
+	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	httpsetfsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/set_filter_state/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
@@ -33,6 +34,9 @@ const (
 	// NodeLivePath is the readiness path a peer proxy's reachability health check
 	// hits on the node CONNECT listener; it is answered locally, never tunneled.
 	NodeLivePath = "/-/-/node/live"
+	// nodeLiveHealthCheckFilterName is the HTTP health-check filter that answers
+	// NodeLivePath locally (non-pass-through), short-circuiting it before the router.
+	nodeLiveHealthCheckFilterName = "envoy.filters.http.health_check"
 
 	// peerURIFilterStateKey carries the verified tunnel peer (the originating
 	// client pod) SPIFFE ID from the CONNECT-terminating listener across the
@@ -98,6 +102,9 @@ func buildNodeConnectListener(localPods []*cniv1.CNIPod, nodeSpiffeID, validatio
 		HttpFilters: []*http_connection_managerv3.HttpFilter{
 			// Capture the verified peer (client pod) SPIFFE ID for the inner HCM.
 			buildPeerURICaptureFilter(),
+			// Answer the peer reachability probe (NodeLivePath) locally; CONNECT
+			// tunnels carry no :path and pass straight through to the router.
+			buildNodeLiveHealthCheckFilter(),
 			routerHttpFilter(),
 		},
 		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{
@@ -161,27 +168,35 @@ func buildPeerURICaptureFilter() *http_connection_managerv3.HttpFilter {
 	}
 }
 
-// buildNodeConnectRouteConfiguration builds the route table for the node CONNECT
-// listener: a local-only readiness route, then one CONNECT route per local pod
-// keyed on the destination pod's IP (:authority) that terminates the tunnel and
-// forwards to that pod's inner HCM listener.
-func buildNodeConnectRouteConfiguration(localPods []*cniv1.CNIPod) *routev3.RouteConfiguration {
-	routes := make([]*routev3.Route, 0, len(localPods)+1)
-
-	// Reachability health check, answered locally (never tunneled to an app).
-	routes = append(routes, &routev3.Route{
-		Match: &routev3.RouteMatch{
-			PathSpecifier: &routev3.RouteMatch_Path{Path: NodeLivePath},
-		},
-		Action: &routev3.Route_DirectResponse{
-			DirectResponse: &routev3.DirectResponseAction{
-				Status: 200,
-				Body: &corev3.DataSource{
-					Specifier: &corev3.DataSource_InlineString{InlineString: "node-alive\n"},
+// buildNodeLiveHealthCheckFilter answers the peer reachability probe (a GET on
+// NodeLivePath) locally with 200, short-circuiting it before the router so it
+// needs no route. Non-pass-through mode also wires up the proxy admin
+// /healthcheck/fail|ok toggles, letting a node be drained gracefully (peers' HCs
+// then see 503 and shift traffic off this node). CONNECT requests carry no :path
+// pseudo-header, so they never match and fall through to the router.
+func buildNodeLiveHealthCheckFilter() *http_connection_managerv3.HttpFilter {
+	return httpFilter(nodeLiveHealthCheckFilterName, &healthcheckv3.HealthCheck{
+		PassThroughMode: wrapperspb.Bool(false),
+		Headers: []*routev3.HeaderMatcher{
+			{
+				Name: ":path",
+				HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
+					StringMatch: &matcherv3.StringMatcher{
+						MatchPattern: &matcherv3.StringMatcher_Exact{Exact: NodeLivePath},
+					},
 				},
 			},
 		},
 	})
+}
+
+// buildNodeConnectRouteConfiguration builds the route table for the node CONNECT
+// listener: one CONNECT route per local pod keyed on the destination pod's IP
+// (:authority) that terminates the tunnel and forwards to that pod's inner HCM
+// listener. The reachability probe (NodeLivePath) is handled by the health_check
+// HTTP filter, not a route here.
+func buildNodeConnectRouteConfiguration(localPods []*cniv1.CNIPod) *routev3.RouteConfiguration {
+	routes := make([]*routev3.Route, 0, len(localPods))
 
 	for _, pod := range localPods {
 		ips := pod.GetIps()
