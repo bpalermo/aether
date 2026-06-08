@@ -14,19 +14,32 @@
 package spire
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/go-logr/logr"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 )
 
+// nodeSVIDRefreshInterval is how often the bridge re-reads its node SVID from
+// the Workload API source to pick up rotations and push the refreshed secret.
+const nodeSVIDRefreshInterval = 30 * time.Second
+
 // SecretStore is the interface for pushing secrets into the xDS snapshot cache.
 type SecretStore interface {
 	SetSecrets(ctx context.Context, secrets []*tlsv3.Secret) error
+}
+
+// X509SVIDSource provides the agent's own node SVID. It is satisfied by the
+// go-spiffe Workload API X509Source the agent already uses for registrar mTLS.
+type X509SVIDSource interface {
+	GetX509SVID() (*x509svid.SVID, error)
 }
 
 // Bridge connects the SPIRE Delegated Identity API to the xDS snapshot cache.
@@ -38,6 +51,12 @@ type Bridge struct {
 	client     *Client
 	store      SecretStore
 	log        logr.Logger
+
+	// nodeSource provides the agent's own SVID (the node identity). When set,
+	// the bridge serves it as an SDS secret named by its SPIFFE ID and refreshes
+	// it on rotation. nodeSpiffeID caches that name for config references.
+	nodeSource   X509SVIDSource
+	nodeSpiffeID string
 
 	mu      sync.RWMutex
 	secrets map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
@@ -61,15 +80,27 @@ type podSubscription struct {
 	spiffeID string
 }
 
-// NewBridge creates a new SPIRE bridge.
-func NewBridge(socketPath string, store SecretStore, log logr.Logger) *Bridge {
+// NewBridge creates a new SPIRE bridge. nodeSource is the agent's own Workload
+// API SVID source used to serve the node identity; it may be nil to disable
+// node-SVID serving.
+func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, log logr.Logger) *Bridge {
 	return &Bridge{
 		socketPath:    socketPath,
 		store:         store,
+		nodeSource:    nodeSource,
 		log:           log.WithName("spire-bridge"),
 		secrets:       make(map[string]*tlsv3.Secret),
 		subscriptions: make(map[string]podSubscription),
 	}
+}
+
+// NodeSpiffeID returns the SPIFFE ID of the agent's node identity once the node
+// SVID has been served, or "" if node-SVID serving is disabled or not yet ready.
+// It is the SDS secret name proxies reference for node-to-node tunnel mTLS.
+func (b *Bridge) NodeSpiffeID() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.nodeSpiffeID
 }
 
 // Start connects to the SPIRE agent and begins subscribing to trust bundles.
@@ -96,6 +127,15 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 
 	b.log.Info("subscribed to X.509 bundles")
+
+	// Serve the agent's own node SVID (for node-to-node tunnel mTLS and the
+	// node-health listener) and keep it refreshed on rotation.
+	if b.nodeSource != nil {
+		if err := b.refreshNodeSVID(ctx); err != nil {
+			b.log.Error(err, "serving initial node SVID")
+		}
+		go b.runNodeSVIDRefresh(ctx)
+	}
 
 	for {
 		select {
@@ -273,6 +313,65 @@ func (b *Bridge) handleSVIDUpdate(ctx context.Context, resp *delegatedidentityv1
 	b.log.V(1).Info("processed SVID update", "svids", len(resp.GetX509Svids()))
 
 	return b.pushSecrets(ctx)
+}
+
+// runNodeSVIDRefresh periodically re-reads and re-serves the node SVID so
+// rotations are pushed to Envoy. It returns when the context is cancelled.
+func (b *Bridge) runNodeSVIDRefresh(ctx context.Context) {
+	ticker := time.NewTicker(nodeSVIDRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := b.refreshNodeSVID(ctx); err != nil {
+				b.log.V(1).Info("refreshing node SVID", "error", err)
+			}
+		}
+	}
+}
+
+// refreshNodeSVID reads the current node SVID from the Workload API source and,
+// if it changed, updates the cached secret and pushes it. It is a no-op when the
+// node source is unset.
+func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
+	if b.nodeSource == nil {
+		return nil
+	}
+
+	svid, err := b.nodeSource.GetX509SVID()
+	if err != nil {
+		return fmt.Errorf("fetching node SVID: %w", err)
+	}
+
+	secret, err := X509SVIDToTLSCertificateSecret(svid)
+	if err != nil {
+		return fmt.Errorf("converting node SVID: %w", err)
+	}
+
+	b.mu.Lock()
+	if existing, ok := b.secrets[secret.GetName()]; ok && secretsEqual(existing, secret) {
+		b.mu.Unlock()
+		return nil // unchanged; avoid a no-op snapshot bump
+	}
+	b.secrets[secret.GetName()] = secret
+	b.nodeSpiffeID = secret.GetName()
+	b.mu.Unlock()
+
+	b.log.V(1).Info("served node SVID", "spiffeID", secret.GetName())
+	return b.pushSecrets(ctx)
+}
+
+// secretsEqual reports whether two TLS-certificate secrets carry the same cert
+// chain and key, used to skip pushing an unchanged node SVID.
+func secretsEqual(a, b *tlsv3.Secret) bool {
+	ac, bc := a.GetTlsCertificate(), b.GetTlsCertificate()
+	if ac == nil || bc == nil {
+		return false
+	}
+	return bytes.Equal(ac.GetCertificateChain().GetInlineBytes(), bc.GetCertificateChain().GetInlineBytes()) &&
+		bytes.Equal(ac.GetPrivateKey().GetInlineBytes(), bc.GetPrivateKey().GetInlineBytes())
 }
 
 // pushSecrets collects all current secrets and pushes them to the snapshot cache.
