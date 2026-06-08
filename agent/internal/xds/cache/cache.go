@@ -81,6 +81,10 @@ type listenerEntry struct {
 	inbound    types.Resource
 	outbound   types.Resource
 	appCluster types.Resource
+	// healthCluster is the unrouted per-pod cluster carrying the app's active
+	// health check (delegated liveness), kept separate from appCluster so the HC
+	// does not gate the delivery path.
+	healthCluster types.Resource
 	// pod is retained so the node-level CONNECT listener can be (re)built with a
 	// route per local pod (keyed on the pod IP) to its app cluster.
 	pod *cniv1.CNIPod

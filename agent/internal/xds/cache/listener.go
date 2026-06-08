@@ -19,7 +19,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	netns := cniPod.GetNetworkNamespace()
 	c.log.V(2).Info("adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
 
-	inbound, outbound, appCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain)
+	inbound, outbound, appCluster, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain)
 	if err != nil {
 		return err
 	}
@@ -29,10 +29,11 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		c.listeners = make(map[string]listenerEntry)
 	}
 	c.listeners[netns] = listenerEntry{
-		inbound:    inbound,
-		outbound:   outbound,
-		appCluster: appCluster,
-		pod:        cniPod,
+		inbound:       inbound,
+		outbound:      outbound,
+		appCluster:    appCluster,
+		healthCluster: healthCluster,
+		pod:           cniPod,
 	}
 	c.listenerMu.Unlock()
 
@@ -125,10 +126,13 @@ func (c *SnapshotCache) appClusters() []types.Resource {
 	c.listenerMu.RLock()
 	defer c.listenerMu.RUnlock()
 
-	resources := make([]types.Resource, 0, len(c.listeners))
+	resources := make([]types.Resource, 0, 2*len(c.listeners))
 	for _, entry := range c.listeners {
 		if entry.appCluster != nil {
 			resources = append(resources, entry.appCluster)
+		}
+		if entry.healthCluster != nil {
+			resources = append(resources, entry.healthCluster)
 		}
 	}
 	return resources
@@ -161,7 +165,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		netns := pod.GetNetworkNamespace()
 		c.log.V(2).Info("generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
-		inbound, outbound, appCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain)
+		inbound, outbound, appCluster, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain)
 		if listenerErr != nil {
 			c.log.V(1).Error(listenerErr, "failed to generate listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)
@@ -169,10 +173,11 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		}
 
 		c.listeners[netns] = listenerEntry{
-			inbound:    inbound,
-			outbound:   outbound,
-			appCluster: appCluster,
-			pod:        pod,
+			inbound:       inbound,
+			outbound:      outbound,
+			appCluster:    appCluster,
+			healthCluster: healthCluster,
+			pod:           pod,
 		}
 		local[netns] = proxy.SpiffeIDFromPod(pod, trustDomain)
 	}
