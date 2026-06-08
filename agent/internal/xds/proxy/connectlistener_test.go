@@ -1,65 +1,76 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestGenerateNodeConnectListener_NoNodeIdentity(t *testing.T) {
-	l := GenerateNodeConnectListener(nil, "", "spiffe://example.org")
-	assert.Nil(t, l, "no listener without a node identity")
+const testNodeID = "spiffe://example.org/ns/aether-system/sa/aether-agent"
+
+func TestGenerateNodeConnectResources_NoNodeIdentity(t *testing.T) {
+	assert.Nil(t, GenerateNodeConnectResources(nil, "", "spiffe://example.org"), "nothing without a node identity")
 }
 
-func TestGenerateNodeConnectListener(t *testing.T) {
+func TestGenerateNodeConnectResources(t *testing.T) {
 	pods := []*cniv1.CNIPod{
 		{Name: "pod-a", Ips: []string{"10.0.0.1"}},
 		{Name: "pod-b", Ips: []string{"10.0.0.2"}},
 		{Name: "no-ip"}, // skipped: no IP
 	}
 
-	l := GenerateNodeConnectListener(pods, "spiffe://example.org/ns/aether-system/sa/aether-agent", "spiffe://example.org")
-	require.NotNil(t, l)
-	assert.Equal(t, NodeConnectListenerName, l.GetName())
-	assert.Equal(t, uint32(defaultNodeConnectPort), l.GetAddress().GetSocketAddress().GetPortValue())
+	res := GenerateNodeConnectResources(pods, testNodeID, "spiffe://example.org")
+	require.NotNil(t, res)
 
-	fc := l.GetFilterChains()
-	require.Len(t, fc, 1)
-	assert.NotNil(t, fc[0].GetTransportSocket(), "node CONNECT listener must have downstream mTLS")
+	// node_connect listener + one inner listener per pod-with-IP (2).
+	require.Len(t, res.Listeners, 3)
+	require.Len(t, res.Clusters, 2)
 
-	// Decode the HCM and assert CONNECT + routing.
-	require.Len(t, fc[0].GetFilters(), 1)
-	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	require.NoError(t, fc[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	nc := findListener(res.Listeners, NodeConnectListenerName)
+	require.NotNil(t, nc)
+	assert.NotNil(t, nc.GetFilterChains()[0].GetTransportSocket(), "node CONNECT listener needs downstream mTLS")
+
+	hcm := decodeHCM(t, nc)
 	assert.True(t, hcm.GetHttp2ProtocolOptions().GetAllowConnect(), "must allow CONNECT")
-	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_SANITIZE_SET, hcm.GetForwardClientCertDetails())
-	assert.True(t, hcm.GetSetCurrentClientCertDetails().GetUri(), "must forward caller URI SAN")
+	// Captures the verified peer identity into filter state for the inner HCM.
+	assert.Equal(t, "envoy.filters.http.set_filter_state", hcm.GetHttpFilters()[0].GetName())
 
 	routes := hcm.GetRouteConfig().GetVirtualHosts()[0].GetRoutes()
-	// node-live + one route per pod with an IP (2 of 3 pods).
-	require.Len(t, routes, 3)
+	require.Len(t, routes, 3) // node-live + 2 pods
 	assert.Equal(t, NodeLivePath, routes[0].GetMatch().GetPath())
-	assert.Equal(t, uint32(200), routes[0].GetDirectResponse().GetStatus())
 
-	// Each pod route is a CONNECT match on the pod IP -> its app cluster.
-	byCluster := map[string]string{} // cluster -> authority match
+	// Each pod's CONNECT route (keyed on its IP) targets its inner-demux cluster.
+	byCluster := map[string]string{}
 	for _, r := range routes[1:] {
 		require.NotNil(t, r.GetMatch().GetConnectMatcher())
-		require.Len(t, r.GetMatch().GetHeaders(), 1)
 		authority := r.GetMatch().GetHeaders()[0].GetStringMatch().GetExact()
-		ra := r.GetRoute()
-		require.NotNil(t, ra)
-		require.Len(t, ra.GetUpgradeConfigs(), 1)
-		assert.Equal(t, "CONNECT", ra.GetUpgradeConfigs()[0].GetUpgradeType())
-		assert.NotNil(t, ra.GetUpgradeConfigs()[0].GetConnectConfig())
-		byCluster[ra.GetCluster()] = authority
+		require.Equal(t, "CONNECT", r.GetRoute().GetUpgradeConfigs()[0].GetUpgradeType())
+		byCluster[r.GetRoute().GetCluster()] = authority
 	}
-	assert.Equal(t, "10.0.0.1", byCluster[AppClusterName(pods[0])])
-	assert.Equal(t, "10.0.0.2", byCluster[AppClusterName(pods[1])])
+	assert.Equal(t, "10.0.0.1", byCluster[innerDemuxClusterName(pods[0])])
+	assert.Equal(t, "10.0.0.2", byCluster[innerDemuxClusterName(pods[1])])
+
+	// The inner listener rebuilds XFCC from the captured peer identity and routes
+	// to the pod's app cluster.
+	inner := findListener(res.Listeners, innerListenerName(pods[0]))
+	require.NotNil(t, inner)
+	require.NotNil(t, inner.GetInternalListener(), "inner listener must be internal")
+	innerHCM := decodeHCM(t, inner)
+	vh := innerHCM.GetRouteConfig().GetVirtualHosts()[0]
+	assert.Equal(t, AppClusterName(pods[0]), vh.GetRoutes()[0].GetRoute().GetCluster())
+	require.Len(t, vh.GetRequestHeadersToAdd(), 1)
+	xfcc := vh.GetRequestHeadersToAdd()[0].GetHeader()
+	assert.Equal(t, xfccHeader, xfcc.GetKey())
+	assert.True(t, strings.Contains(xfcc.GetValue(), "%FILTER_STATE("+peerURIFilterStateKey), "XFCC built from peer filter state")
+
+	// The inner-demux cluster carries the filter state across via internal_upstream.
+	require.Equal(t, internalUpstreamTransportSocketName, res.Clusters[0].GetTransportSocket().GetName())
 }
 
 func TestBuildNodeConnectRouteConfiguration_Empty(t *testing.T) {
@@ -69,4 +80,20 @@ func TestBuildNodeConnectRouteConfiguration_Empty(t *testing.T) {
 	assert.Equal(t, NodeLivePath, routes[0].GetMatch().GetPath())
 	_, ok := routes[0].GetAction().(*routev3.Route_DirectResponse)
 	assert.True(t, ok)
+}
+
+func findListener(ls []*listenerv3.Listener, name string) *listenerv3.Listener {
+	for _, l := range ls {
+		if l.GetName() == name {
+			return l
+		}
+	}
+	return nil
+}
+
+func decodeHCM(t *testing.T, l *listenerv3.Listener) *http_connection_managerv3.HttpConnectionManager {
+	t.Helper()
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	return hcm
 }

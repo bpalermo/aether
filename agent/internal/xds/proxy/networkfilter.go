@@ -42,7 +42,11 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 						},
 					},
 				},
-				SharedWithUpstream: setFilterStatev3.FilterStateValue_ONCE,
+				// TRANSITIVE (not ONCE): the outbound stream now traverses an extra
+				// internal-listener hop (tunnel_internal) before the tunnel_originate
+				// cluster selects the per-source client certificate, so the namespace
+				// filter state must propagate across more than one upstream boundary.
+				SharedWithUpstream: setFilterStatev3.FilterStateValue_TRANSITIVE,
 			},
 		},
 	}

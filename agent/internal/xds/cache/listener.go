@@ -75,19 +75,22 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	return resources
 }
 
-// nodeConnectListener builds the node-level CONNECT-terminating listener from the
-// current local pods and the node identity. It returns nil when no node SVID has
-// been served yet (the listener references it as its server certificate). Building
-// it from the cached pods keeps the R2 tunnel ingress in sync with pod adds and
-// removes without disturbing the per-pod R1 inbound listeners. Thread-safe.
-func (c *SnapshotCache) nodeConnectListener() types.Resource {
+// nodeConnectResources builds the node-level tunnel ingress from the current local
+// pods and the node identity: the CONNECT-terminating listener, one inner HCM
+// listener per local pod (rebuilds XFCC and forwards to app_<pod>), and the
+// internal_upstream clusters wiring them. It returns nil slices when no node SVID
+// has been served yet (the CONNECT listener references it as its server
+// certificate). Building from the cached pods keeps the R2 tunnel ingress in sync
+// with pod adds and removes without disturbing the per-pod R1 inbound listeners.
+// Thread-safe.
+func (c *SnapshotCache) nodeConnectResources() (listeners []types.Resource, clusters []types.Resource) {
 	c.localMu.RLock()
 	nodeSpiffeID := c.nodeSpiffeID
 	trustDomain := c.trustDomain
 	c.localMu.RUnlock()
 
 	if nodeSpiffeID == "" {
-		return nil
+		return nil, nil
 	}
 
 	c.listenerMu.RLock()
@@ -100,11 +103,17 @@ func (c *SnapshotCache) nodeConnectListener() types.Resource {
 	c.listenerMu.RUnlock()
 
 	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
-	l := proxy.GenerateNodeConnectListener(pods, nodeSpiffeID, validationContextName)
-	if l == nil {
-		return nil
+	res := proxy.GenerateNodeConnectResources(pods, nodeSpiffeID, validationContextName)
+	if res == nil {
+		return nil, nil
 	}
-	return l
+	for _, l := range res.Listeners {
+		listeners = append(listeners, l)
+	}
+	for _, cl := range res.Clusters {
+		clusters = append(clusters, cl)
+	}
+	return listeners, clusters
 }
 
 // appClusters returns the per-pod application clusters (one per managed pod)
