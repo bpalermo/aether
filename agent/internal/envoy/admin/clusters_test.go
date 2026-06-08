@@ -14,6 +14,7 @@ func TestAppClusterHealth(t *testing.T) {
 	const body = `{"cluster_statuses":[
 		{"name":"health_pod-a","host_statuses":[{"health_status":{"failed_active_health_check":false}}]},
 		{"name":"health_pod-b","host_statuses":[{"health_status":{"failed_active_health_check":true}}]},
+		{"name":"health_pod-c","host_statuses":[{"health_status":{"failed_active_health_check":true,"pending_active_hc":true}}]},
 		{"name":"echo","host_statuses":[{"health_status":{"failed_active_health_check":true}}]}
 	]}`
 
@@ -29,6 +30,7 @@ func TestAppClusterHealth(t *testing.T) {
 
 	assert.True(t, health["health_pod-a"], "pod-a passes its HC")
 	assert.False(t, health["health_pod-b"], "pod-b fails its HC")
+	assert.True(t, health["health_pod-c"], "pod-c is pending its first HC -> healthy")
 	_, ok := health["echo"]
 	assert.False(t, ok, "non-app clusters are excluded")
 }

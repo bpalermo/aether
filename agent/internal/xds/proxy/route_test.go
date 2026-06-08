@@ -14,6 +14,7 @@ func TestBuildInboundRouteConfiguration(t *testing.T) {
 
 	require.NotNil(t, routeConfig)
 	assert.Equal(t, "in_http", routeConfig.GetName())
+	assert.False(t, routeConfig.GetValidateClusters().GetValue(), "validation off so app_<pod> churn doesn't wedge the inner listener")
 	require.Len(t, routeConfig.GetVirtualHosts(), 1)
 
 	vhost := routeConfig.GetVirtualHosts()[0]

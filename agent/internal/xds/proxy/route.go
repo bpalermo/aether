@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const (
@@ -17,6 +18,10 @@ const (
 func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name: "in_http",
+		// The per-pod app_<pod> cluster churns on pod restart; don't let the inline
+		// route's cluster reference wedge the listener if it is momentarily unknown
+		// during the delta-xDS make-before-break window (see node_connect).
+		ValidateClusters: wrapperspb.Bool(false),
 		VirtualHosts: []*routev3.VirtualHost{
 			{
 				Name:    "catch_all",

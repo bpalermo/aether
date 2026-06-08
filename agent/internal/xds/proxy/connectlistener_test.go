@@ -75,6 +75,7 @@ func TestGenerateNodeConnectResources(t *testing.T) {
 
 func TestBuildNodeConnectRouteConfiguration_Empty(t *testing.T) {
 	rc := buildNodeConnectRouteConfiguration(nil)
+	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so churn doesn't wedge node_connect")
 	routes := rc.GetVirtualHosts()[0].GetRoutes()
 	require.Len(t, routes, 1, "only the node-live route when there are no pods")
 	assert.Equal(t, NodeLivePath, routes[0].GetMatch().GetPath())
