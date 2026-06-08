@@ -33,6 +33,7 @@ func fullEndpoint() *registryv1.ServiceEndpoint {
 			Namespace: "default",
 			PodName:   "my-pod-xyz",
 			NodeName:  "node-1",
+			NodeIp:    "192.168.0.60",
 		},
 	}
 }
