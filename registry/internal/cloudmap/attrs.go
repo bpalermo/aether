@@ -26,6 +26,7 @@ const (
 	attrK8sNamespace = "AETHER_K8S_NAMESPACE"
 	attrK8sPod       = "AETHER_K8S_POD"
 	attrK8sNode      = "AETHER_K8S_NODE"
+	attrK8sNodeIP    = "AETHER_K8S_NODE_IP"
 	attrContainerID  = "AETHER_CONTAINER_ID"
 	attrNetworkNS    = "AETHER_NETWORK_NS"
 	attrMetadata     = "AETHER_METADATA"
@@ -70,6 +71,9 @@ func marshalAttrs(protocol registryv1.Service_Protocol, ep *registryv1.ServiceEn
 		}
 		if km.GetNodeName() != "" {
 			attrs[attrK8sNode] = km.GetNodeName()
+		}
+		if km.GetNodeIp() != "" {
+			attrs[attrK8sNodeIP] = km.GetNodeIp()
 		}
 	}
 
@@ -116,12 +120,13 @@ func unmarshalEndpoint(attrs map[string]string) (*registryv1.ServiceEndpoint, er
 		}
 	}
 
-	k8sNs, k8sPod, k8sNode := attrs[attrK8sNamespace], attrs[attrK8sPod], attrs[attrK8sNode]
-	if k8sNs != "" || k8sPod != "" || k8sNode != "" {
+	k8sNs, k8sPod, k8sNode, k8sNodeIP := attrs[attrK8sNamespace], attrs[attrK8sPod], attrs[attrK8sNode], attrs[attrK8sNodeIP]
+	if k8sNs != "" || k8sPod != "" || k8sNode != "" || k8sNodeIP != "" {
 		ep.KubernetesMetadata = &registryv1.ServiceEndpoint_KubernetesMetadata{
 			Namespace: k8sNs,
 			PodName:   k8sPod,
 			NodeName:  k8sNode,
+			NodeIp:    k8sNodeIP,
 		}
 	}
 
