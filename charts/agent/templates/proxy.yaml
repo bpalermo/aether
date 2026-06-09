@@ -21,9 +21,41 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "agent.proxy.serviceAccountName" . }}
       priorityClassName: system-node-critical
+      {{- if .Values.proxy.hotRestart.enabled }}
+      initContainers:
+        # SPIKE (Strategy A): the runtime container is the Envoy image (it carries
+        # Envoy and its shared libraries); inject the statically linked supervisor
+        # from the agent image by having it self-copy onto a shared volume.
+        - name: install-supervisor
+          image: {{ .Values.agent.image.ref | quote }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          args: ["proxy-supervisor", "--install-path=/opt/aether/supervisor"]
+          volumeMounts:
+            - name: supervisor-bin
+              mountPath: /opt/aether
+      {{- end }}
       containers:
         - name: proxy
           image: "{{ .Values.proxy.image.repository }}@{{ .Values.proxy.image.digest }}"
+          {{- if .Values.proxy.hotRestart.enabled }}
+          command:
+            - "/opt/aether/supervisor"
+            - "proxy-supervisor"
+            - "--config=/etc/envoy/envoy.yaml"
+            - "--envoy-path=/usr/local/bin/envoy"
+            - "--watch-config=true"
+            - "--base-id={{ .Values.proxy.hotRestart.baseId }}"
+            - "--drain-time={{ .Values.proxy.hotRestart.drainTime }}"
+            - "--parent-shutdown-time={{ .Values.proxy.hotRestart.parentShutdownTime }}"
+            - "--envoy-arg=-l"
+            - "--envoy-arg={{ .Values.proxy.logLevel }}"
+            - "--envoy-arg=--service-cluster"
+            - "--envoy-arg=aether-proxy"
+            - "--envoy-arg=--service-node"
+            - "--envoy-arg=$(NODE_NAME)"
+            - "--envoy-arg=--service-zone"
+            - "--envoy-arg=$(ZONE)"
+          {{- else }}
           command:
             - "/usr/local/bin/envoy"
             - "-c"
@@ -36,6 +68,7 @@ spec:
             - "$(NODE_NAME)"
             - "--service-zone"
             - "$(ZONE)"
+          {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -79,7 +112,22 @@ spec:
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
+            {{- if .Values.proxy.hotRestart.enabled }}
+            - name: supervisor-bin
+              mountPath: /opt/aether
+              readOnly: true
+            - name: dev-shm
+              mountPath: /dev/shm
+            {{- end }}
       volumes:
+        {{- if .Values.proxy.hotRestart.enabled }}
+        - name: supervisor-bin
+          emptyDir: {}
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.proxy.hotRestart.shmSizeLimit }}
+        {{- end }}
         - name: proxy-config
           configMap:
             name: {{ include "agent.proxy.configMapName" . }}

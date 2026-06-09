@@ -5,12 +5,14 @@ go_library(
     srcs = [
         "config.go",
         "root.go",
+        "supervisor.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/cmd",
     visibility = ["//visibility:public"],
     deps = [
         "//agent/constants",
         "//agent/internal/cni/server",
+        "//agent/internal/proxy/hotrestart",
         "//agent/internal/spire",
         "//agent/internal/xds/cache",
         "//agent/internal/xds/server",

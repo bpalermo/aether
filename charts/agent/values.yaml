@@ -60,6 +60,19 @@ proxy:
     # envoyproxy/envoy:distroless-v1.38.0
     digest: sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6
   logLevel: info
+  # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
+  # proxy-supervisor) as the proxy entrypoint instead of launching Envoy
+  # directly, so bootstrap-config changes hot-restart in place without dropping
+  # connections. See docs/proposals/001_proxy-hot-restart.md. Off by default.
+  hotRestart:
+    enabled: false
+    # Envoy --base-id, pinned so successive epochs share one shared-memory segment.
+    baseId: 0
+    # Envoy --drain-time-s / --parent-shutdown-time-s (parent must exceed drain).
+    drainTime: 45s
+    parentShutdownTime: 60s
+    # /dev/shm size for the hot-restart shared-memory segment (gauges/counters).
+    shmSizeLimit: 64Mi
 
 # AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
 # The chart never bakes credentials into the image. By default it references an
