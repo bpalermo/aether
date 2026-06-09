@@ -8,9 +8,11 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // NewServiceCluster builds the outbound service cluster. Endpoints (delivered via
@@ -40,6 +42,30 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 			SubsetSelectors: []*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector{
 				{Keys: []string{subsetIPKey}},
 			},
+		},
+		// Every client proxy actively health-checks each endpoint's mesh readiness
+		// path over the cluster's mTLS (the HC connection has no source filter state,
+		// so the transport-socket matcher's on-no-match presents the node identity).
+		// A 200 means the destination pod is ready (config + mTLS up and the app
+		// passes its readiness probe); a 503 or failure drops it from load balancing.
+		HealthChecks: []*corev3.HealthCheck{
+			{
+				Timeout:            durationpb.New(2 * time.Second),
+				Interval:           durationpb.New(5 * time.Second),
+				HealthyThreshold:   wrapperspb.UInt32(1),
+				UnhealthyThreshold: wrapperspb.UInt32(2),
+				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
+					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
+						Path:            MeshReadyPath,
+						CodecClientType: typev3.CodecClientType_HTTP2,
+					},
+				},
+			},
+		},
+		// Don't route to a newly discovered endpoint until its first readiness check
+		// passes, so traffic never lands on a not-yet-ready pod.
+		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
+			IgnoreNewHostsUntilFirstHc: true,
 		},
 	}
 }

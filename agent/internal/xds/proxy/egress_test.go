@@ -25,6 +25,11 @@ func TestNewServiceCluster(t *testing.T) {
 	assert.Equal(t, []string{subsetIPKey}, c.GetLbSubsetConfig().GetSubsetSelectors()[0].GetKeys())
 	// mTLS is injected at snapshot time, not at build time.
 	assert.Nil(t, c.GetTransportSocketMatcher(), "matcher injected later via InjectUpstreamMTLS")
+
+	// Active readiness health check against each endpoint's mesh readiness path.
+	require.Len(t, c.GetHealthChecks(), 1)
+	assert.Equal(t, MeshReadyPath, c.GetHealthChecks()[0].GetHttpHealthCheck().GetPath())
+	assert.True(t, c.GetCommonLbConfig().GetIgnoreNewHostsUntilFirstHc(), "don't route to a pod until its first readiness check passes")
 }
 
 func TestInjectUpstreamMTLS(t *testing.T) {
