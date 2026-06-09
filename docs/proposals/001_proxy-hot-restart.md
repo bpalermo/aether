@@ -1,6 +1,6 @@
 # Proposal: Hot Restart for the aether-proxy Envoy (Spike)
 
-**Status:** Spike — implementing Strategy A; **target is Strategy B**
+**Status:** Spike — Strategy A **validated GREEN on talos-main**; target is Strategy B
 **Author:** Bruno Palermo
 **Date:** 2026-06-09
 
@@ -131,6 +131,17 @@ C is the end state once an Istio-grade proxy-upgrade operator is justified — n
 - **Binary-upgrade proof (A):** swap the Envoy binary on the shared volume and trigger; new epoch serves, old drains.
 - **Image-upgrade proof (B):** roll the DaemonSet image with `maxSurge=1`; confirm overlap + handoff + zero drop.
 - **Crash proof:** `kill -9` the child; supervisor exits non-zero and Kubernetes recreates the pod.
+
+## Spike Findings (talos-main, 2026-06-09)
+
+First on-cluster run (rev 29, `proxy.hotRestart.enabled=true` fleet-wide):
+
+- Supervisor deploys cleanly as the proxy entrypoint via the self-install initContainer; Envoy comes up at **epoch 0**, `hot_restart_generation: 1`, 4 listeners, watching `/etc/envoy`.
+- A ConfigMap edit propagated (~2 min) and the supervisor performed a hot restart: **epoch 0 → 1**, **`hot_restart_generation` 1 → 2**, listeners/sockets handed over, `server.live` stayed 1 — all in-place (`restartCount` was still 0 at that point).
+- **Bug found:** ~70s later the *new* epoch crashed with `hot restart sendmsg() ... errno 111 (connection refused)` → `assert ... Aborted`, and the container restarted (epoch reset to 0). Root cause: the supervisor was externally SIGTERMing the old epoch at `parent-shutdown-time`, racing Envoy's own hot-restart IPC. **Fix:** remove the supervisor's parent-kill; Envoy terminates the old epoch itself via `--parent-shutdown-time-s` and the supervisor only reaps it. (Matches `hot-restarter.py`, which never signals the parent.)
+- **Re-validated GREEN (rev 30, fixed image):** hot restart epoch 0 → 1, `hot_restart_generation` 1 → 2, 4 listeners preserved, `server.live` held. The old epoch was terminated by Envoy's own parent-shutdown (~76s) and reaped cleanly — **no external SIGTERM, no crash, `restartCount` stayed 0** through ~104s past the restart (the window that previously crashed). Strategy A's exit criterion is met.
+
+**Caveat (test workloads):** the `aether-test` `client`/`echo`/`svc-a` pods were not exercising the mesh data path on their app port during this run (`client→echo:8080` showed zero delta on the `echo`/`app_echo` clusters — direct pod-to-pod, no XFCC), so an application-level zero-dropped-request assertion could not be made here. The hot-restart guarantees were instead proven via Envoy's own signals (listener/socket handover, `server.live` continuity, in-place `restartCount: 0`). A follow-up should restore a known mesh-intercepted request path for an end-to-end zero-drop assertion.
 
 ## Risks / Open Questions
 
