@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "hotrestart",
+    srcs = ["supervisor.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/proxy/hotrestart",
+    visibility = ["//agent:__subpackages__"],
+    deps = ["@com_github_go_logr_logr//:logr"],
+)
