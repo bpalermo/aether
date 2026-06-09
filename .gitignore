@@ -26,3 +26,6 @@ secrets.yaml
 .claude/settings.local.json
 # Claude Code per-project memory store — local only, must never be committed.
 .claude/projects/
+
+# Local Claude Code scheduler state — never commit.
+.claude/scheduled_tasks.lock
