@@ -14,15 +14,6 @@ data:
           address: 127.0.0.1
           port_value: 9901
 
-    # Required for the HBONE-style tunnel egress: the outbound service clusters
-    # route to an internal listener (tunnel_internal) that encapsulates the
-    # stream into a CONNECT tunnel. Internal listeners need this bootstrap
-    # extension registered, even when the listener itself is delivered via LDS.
-    bootstrap_extensions:
-      - name: envoy.bootstrap.internal_listener
-        typed_config:
-          "@type": type.googleapis.com/envoy.extensions.bootstrap.internal_listener.v3.InternalListener
-
     dynamic_resources:
       ads_config:
         api_type: DELTA_GRPC

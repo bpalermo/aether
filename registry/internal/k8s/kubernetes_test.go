@@ -248,7 +248,7 @@ func TestListEndpoints(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:        "node InternalIP and pod readiness are derived (parity with cloudmap)",
+			name:        "pod readiness is derived (parity with cloudmap)",
 			clusterName: "test-cluster",
 			objects: []any{
 				func() *corev1.Pod {
@@ -256,14 +256,7 @@ func TestListEndpoints(t *testing.T) {
 					p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 					return p
 				}(),
-				func() *corev1.Node {
-					n := topologyNode("node-1", "us-east-1", "us-east-1a")
-					n.Status.Addresses = []corev1.NodeAddress{
-						{Type: corev1.NodeHostName, Address: "node-1"},
-						{Type: corev1.NodeInternalIP, Address: "192.168.0.7"},
-					}
-					return n
-				}(),
+				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
 			service:  "my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
@@ -278,7 +271,6 @@ func TestListEndpoints(t *testing.T) {
 						Namespace: "default",
 						PodName:   "pod-a",
 						NodeName:  "node-1",
-						NodeIp:    "192.168.0.7",
 					},
 					Locality: &registryv1.ServiceEndpoint_Locality{
 						Region: "us-east-1",

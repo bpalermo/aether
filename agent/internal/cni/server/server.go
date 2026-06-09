@@ -40,7 +40,6 @@ type CNIServer struct {
 	trustDomain string
 	nodeRegion  string
 	nodeZone    string
-	nodeIP      string
 
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
@@ -90,16 +89,15 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 // It retrieves the region and zone labels from the node object.
 func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.log.V(2).Info("querying node metadata")
-	region, zone, nodeIP, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
+	region, zone, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
 	if err != nil {
 		return err
 	}
 
 	s.nodeRegion = region
 	s.nodeZone = zone
-	s.nodeIP = nodeIP
 
-	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone, "nodeIP", nodeIP)
+	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone)
 
 	// Delegated liveness: reflect each local pod's app health (from the proxy's
 	// active health check) into the registry so it is marked unhealthy in every
@@ -108,28 +106,14 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	return nil
 }
 
-// queryNodeMetadata retrieves the region and zone labels and the InternalIP from
-// a Kubernetes node. It returns the topology.kubernetes.io/region and
-// topology.kubernetes.io/zone labels (empty if absent) and the node's InternalIP
-// address. (The plain per-pod transport routes to pod IPs directly, so node_ip is
-// retained for topology/future use rather than as a routing target.)
-func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone, nodeIP string, err error) {
+// queryNodeMetadata retrieves the topology.kubernetes.io/region and
+// topology.kubernetes.io/zone labels from a Kubernetes node (empty if absent).
+func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone string, err error) {
 	node := &corev1.Node{}
 	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {
-		return "", "", "", fmt.Errorf("failed to get node: %w", err)
+		return "", "", fmt.Errorf("failed to get node: %w", err)
 	}
 
 	return node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
-		node.Labels[constants.AnnotationKubernetesNodeTopologyZone],
-		nodeInternalIP(node), nil
-}
-
-// nodeInternalIP returns the node's InternalIP address, or "" if none is present.
-func nodeInternalIP(node *corev1.Node) string {
-	for _, addr := range node.Status.Addresses {
-		if addr.Type == corev1.NodeInternalIP {
-			return addr.Address
-		}
-	}
-	return ""
+		node.Labels[constants.AnnotationKubernetesNodeTopologyZone], nil
 }
