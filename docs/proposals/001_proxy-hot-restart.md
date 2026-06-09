@@ -132,6 +132,14 @@ C is the end state once an Istio-grade proxy-upgrade operator is justified — n
 - **Image-upgrade proof (B):** roll the DaemonSet image with `maxSurge=1`; confirm overlap + handoff + zero drop.
 - **Crash proof:** `kill -9` the child; supervisor exits non-zero and Kubernetes recreates the pod.
 
+## Spike Findings (talos-main, 2026-06-09)
+
+First on-cluster run (rev 29, `proxy.hotRestart.enabled=true` fleet-wide):
+
+- Supervisor deploys cleanly as the proxy entrypoint via the self-install initContainer; Envoy comes up at **epoch 0**, `hot_restart_generation: 1`, 4 listeners, watching `/etc/envoy`.
+- A ConfigMap edit propagated (~2 min) and the supervisor performed a hot restart: **epoch 0 → 1**, **`hot_restart_generation` 1 → 2**, listeners/sockets handed over, `server.live` stayed 1 — all in-place (`restartCount` was still 0 at that point).
+- **Bug found:** ~70s later the *new* epoch crashed with `hot restart sendmsg() ... errno 111 (connection refused)` → `assert ... Aborted`, and the container restarted (epoch reset to 0). Root cause: the supervisor was externally SIGTERMing the old epoch at `parent-shutdown-time`, racing Envoy's own hot-restart IPC. **Fix:** remove the supervisor's parent-kill; Envoy terminates the old epoch itself via `--parent-shutdown-time-s` and the supervisor only reaps it. (Matches `hot-restarter.py`, which never signals the parent.)
+
 ## Risks / Open Questions
 
 - **`/dev/shm` capacity** — container default is 64Mi tmpfs; Envoy's hot-restart shmem holds all gauges/counters. The spike sizes the memory `emptyDir` from measured usage.

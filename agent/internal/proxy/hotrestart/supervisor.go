@@ -194,23 +194,12 @@ func (s *Supervisor) hotRestart() error {
 		}
 	}()
 
-	if epoch > 0 {
-		go s.scheduleParentShutdown(epoch - 1)
-	}
+	// Do NOT externally terminate the previous epoch: Envoy coordinates parent
+	// shutdown itself over the hot-restart IPC socket, driven by the new epoch's
+	// --parent-shutdown-time-s. Killing the parent out from under that protocol
+	// makes the new epoch's sendmsg to the parent fail (errno 111) and Envoy
+	// aborts. The old epoch exits on its own; Run reaps it as a non-newest exit.
 	return nil
-}
-
-// scheduleParentShutdown SIGTERMs the given (draining) epoch after
-// ParentShutdownTime, unless the supervisor is shutting down first.
-func (s *Supervisor) scheduleParentShutdown(epoch int) {
-	t := time.NewTimer(s.cfg.ParentShutdownTime)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		s.log.Info("parent shutdown timer elapsed, terminating drained epoch", "epoch", epoch)
-		s.signalEpoch(epoch, syscall.SIGTERM)
-	case <-s.done:
-	}
 }
 
 // watchConfig watches the directory holding ConfigPath and emits a trigger on any
