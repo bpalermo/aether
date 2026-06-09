@@ -60,7 +60,6 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
 		KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
 			Namespace: "default",
 			PodName:   "svc-a-1",
-			NodeIp:    "192.168.1.10",
 		},
 		Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY,
 	}

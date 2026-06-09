@@ -13,7 +13,7 @@ import (
 // It extracts the service name from the pod's labels and the port and weight from annotations.
 // The service protocol is always HTTP. Container and Kubernetes metadata are included
 // along with node locality information.
-func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeIP string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
+func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
 	protocol := registryv1.Service_PROTOCOL_HTTP
 
 	serviceName, err := getServiceName(cniPod)
@@ -46,7 +46,6 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeIP st
 			Namespace: cniPod.GetNamespace(),
 			PodName:   cniPod.GetName(),
 			NodeName:  nodeName,
-			NodeIp:    nodeIP,
 		},
 		Locality: &registryv1.ServiceEndpoint_Locality{
 			Region: nodeRegion,

@@ -75,7 +75,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 			continue
 		}
 
-		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeIP, s.nodeRegion, s.nodeZone, pod)
+		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, pod)
 		if err != nil {
 			s.log.V(1).Info("liveness: failed to build endpoint", "pod", pod.GetName(), "error", err)
 			continue

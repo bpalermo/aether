@@ -33,7 +33,6 @@ func fullEndpoint() *registryv1.ServiceEndpoint {
 			Namespace: "default",
 			PodName:   "my-pod-xyz",
 			NodeName:  "node-1",
-			NodeIp:    "192.168.0.60",
 		},
 		Health:          registryv1.ServiceEndpoint_HEALTH_UNHEALTHY,
 		HealthCheckMode: registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS,

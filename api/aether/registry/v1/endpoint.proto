@@ -35,11 +35,10 @@ message ServiceEndpoint {
     string namespace = 1 [(buf.validate.field).string.min_len = 1];
     string pod_name = 2 [(buf.validate.field).string.min_len = 1];
     string node_name = 3 [(buf.validate.field).string.min_len = 1];
-    // node_ip is the InternalIP of the node hosting this endpoint. Consumers use
-    // it as the HBONE-style tunnel target (node_ip:15008) to reach the node's
-    // CONNECT listener, which forwards to the destination pod. Stamped by the
-    // node-local agent at registration.
-    string node_ip = 4;
+    // 4 was node_ip (the node InternalIP, used as the HBONE tunnel target). The
+    // plain mTLS transport routes to pod IPs directly, so it is no longer needed.
+    reserved 4;
+    reserved "node_ip";
   }
 
   KubernetesMetadata kubernetes_metadata = 8;
