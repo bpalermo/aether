@@ -116,28 +116,36 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 		locality = &corev3.Locality{Region: loc.GetRegion(), Zone: loc.GetZone()}
 	}
 
+	ep := &endpointv3.Endpoint{
+		Address: &corev3.Address{
+			Address: &corev3.Address_SocketAddress{
+				SocketAddress: &corev3.SocketAddress{
+					Protocol: corev3.SocketAddress_TCP,
+					// The destination pod's mesh inbound; reached by the pod's own
+					// netns-bound inbound listener.
+					Address: endpoint.GetIp(),
+					PortSpecifier: &corev3.SocketAddress_PortValue{
+						PortValue: defaultInboundPort,
+					},
+				},
+			},
+		},
+	}
+	// In EDS mode (set per pod by annotation) this endpoint opts out of the cluster's
+	// active readiness health check and relies on the EDS health status pushed by the
+	// node-local agent (delegated liveness) instead.
+	if endpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
+		ep.HealthCheckConfig = &endpointv3.Endpoint_HealthCheckConfig{
+			DisableActiveHealthCheck: true,
+		}
+	}
+
 	return &endpointv3.LocalityLbEndpoints{
 		LbEndpoints: []*endpointv3.LbEndpoint{
 			{
-				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
-					Endpoint: &endpointv3.Endpoint{
-						Address: &corev3.Address{
-							Address: &corev3.Address_SocketAddress{
-								SocketAddress: &corev3.SocketAddress{
-									Protocol: corev3.SocketAddress_TCP,
-									// The destination pod's mesh inbound; reached by the
-									// pod's own netns-bound inbound listener.
-									Address: endpoint.GetIp(),
-									PortSpecifier: &corev3.SocketAddress_PortValue{
-										PortValue: defaultInboundPort,
-									},
-								},
-							},
-						},
-					},
-				},
-				Metadata:     md,
-				HealthStatus: endpointHealthStatus(endpoint),
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{Endpoint: ep},
+				Metadata:       md,
+				HealthStatus:   endpointHealthStatus(endpoint),
 			},
 		},
 		Locality: locality,

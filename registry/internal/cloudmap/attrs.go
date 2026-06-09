@@ -18,20 +18,21 @@ const (
 	attrPort = "AWS_INSTANCE_PORT"
 
 	// Aether-specific attributes
-	attrCluster      = "AETHER_CLUSTER"
-	attrProtocol     = "AETHER_PROTOCOL"
-	attrWeight       = "AETHER_WEIGHT"
-	attrRegion       = "AETHER_REGION"
-	attrZone         = "AETHER_ZONE"
-	attrK8sNamespace = "AETHER_K8S_NAMESPACE"
-	attrK8sPod       = "AETHER_K8S_POD"
-	attrK8sNode      = "AETHER_K8S_NODE"
-	attrK8sNodeIP    = "AETHER_K8S_NODE_IP"
-	attrHealth       = "AETHER_HEALTH"
-	attrContainerID  = "AETHER_CONTAINER_ID"
-	attrNetworkNS    = "AETHER_NETWORK_NS"
-	attrMetadata     = "AETHER_METADATA"
-	attrController   = "AETHER_CONTROLLER"
+	attrCluster         = "AETHER_CLUSTER"
+	attrProtocol        = "AETHER_PROTOCOL"
+	attrWeight          = "AETHER_WEIGHT"
+	attrRegion          = "AETHER_REGION"
+	attrZone            = "AETHER_ZONE"
+	attrK8sNamespace    = "AETHER_K8S_NAMESPACE"
+	attrK8sPod          = "AETHER_K8S_POD"
+	attrK8sNode         = "AETHER_K8S_NODE"
+	attrK8sNodeIP       = "AETHER_K8S_NODE_IP"
+	attrHealth          = "AETHER_HEALTH"
+	attrHealthCheckMode = "AETHER_HEALTH_CHECK_MODE"
+	attrContainerID     = "AETHER_CONTAINER_ID"
+	attrNetworkNS       = "AETHER_NETWORK_NS"
+	attrMetadata        = "AETHER_METADATA"
+	attrController      = "AETHER_CONTROLLER"
 
 	// controllerName identifies instances managed by Aether.
 	controllerName = "aether"
@@ -98,6 +99,11 @@ func marshalAttrs(protocol registryv1.Service_Protocol, ep *registryv1.ServiceEn
 		attrs[attrHealth] = h.String()
 	}
 
+	// Only persist an explicit mode; absence means the default (active).
+	if m := ep.GetHealthCheckMode(); m != registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_UNSPECIFIED {
+		attrs[attrHealthCheckMode] = m.String()
+	}
+
 	return attrs
 }
 
@@ -153,6 +159,10 @@ func unmarshalEndpoint(attrs map[string]string) (*registryv1.ServiceEndpoint, er
 
 	if h, ok := registryv1.ServiceEndpoint_Health_value[attrs[attrHealth]]; ok {
 		ep.Health = registryv1.ServiceEndpoint_Health(h)
+	}
+
+	if m, ok := registryv1.ServiceEndpoint_HealthCheckMode_value[attrs[attrHealthCheckMode]]; ok {
+		ep.HealthCheckMode = registryv1.ServiceEndpoint_HealthCheckMode(m)
 	}
 
 	return ep, nil
