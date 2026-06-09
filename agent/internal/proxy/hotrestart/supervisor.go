@@ -2,18 +2,20 @@
 // process and performs Envoy hot restarts across restart epochs, replicating the
 // behavior of Envoy's hot-restarter.py in Go.
 //
-// SPIKE: this package is a throwaway-quality starting point for the proxy
-// hot-restart spike (see docs/proposals/001_proxy-hot-restart.md). It is not yet
-// wired into production and the edge cases marked TODO are deliberately unhandled.
+// SPIKE: this package is the Strategy-A implementation for the proxy hot-restart
+// spike (see docs/proposals/001_proxy-hot-restart.md). It supervises a single
+// long-lived Envoy in one container and performs an in-place hot restart when the
+// bootstrap config changes (fsnotify) or on SIGHUP. The cross-pod machinery for
+// Strategy B (epoch coordination file, live-predecessor probe) is intentionally
+// not here yet.
 //
 // Model: the supervisor is the proxy container's entrypoint (PID 1). It forks an
 // Envoy child with --restart-epoch 0 and a fixed --base-id. On a hot-restart
-// trigger (SIGHUP, or a watched bootstrap-config change) it forks a new Envoy with
-// the next epoch; Envoy's own shared-memory + abstract-domain-socket IPC transfers
-// the listen-socket FDs and stats to the new process, the old process drains, and
-// after --parent-shutdown-time-s the supervisor terminates it. The supervisor and
-// both epochs share the container's /dev/shm and PID/IPC namespace, which is what
-// makes the FD/stats handoff possible.
+// trigger it forks a new Envoy with the next epoch; Envoy's own shared-memory +
+// abstract-domain-socket IPC transfers the listen-socket FDs and stats to the new
+// process, the old process drains, and after --parent-shutdown-time-s the
+// supervisor terminates it. The supervisor and both epochs share the container's
+// /dev/shm and PID/IPC namespace, which is what makes the FD/stats handoff possible.
 package hotrestart
 
 import (
@@ -22,12 +24,23 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/go-logr/logr"
+)
+
+const (
+	// debounceDelay coalesces a flurry of triggers (config rewrites, repeated
+	// SIGHUPs) into a single hot restart.
+	debounceDelay = 500 * time.Millisecond
+	// shutdownGrace is added to DrainTime as the deadline for children to exit on
+	// SIGTERM before they are SIGKILLed.
+	shutdownGrace = 5 * time.Second
 )
 
 // Config configures the Envoy hot-restart supervisor.
@@ -50,10 +63,9 @@ type Config struct {
 	// --service-node, --service-zone, --concurrency). Concurrency must stay constant
 	// across epochs to avoid dropping accept-queue connections.
 	ExtraArgs []string
-	// WatchConfig enables an fsnotify watch on ConfigPath that self-triggers a hot
-	// restart when the bootstrap config changes.
-	//
-	// TODO(spike): wire the fsnotify watcher; for now restarts are driven by SIGHUP.
+	// WatchConfig enables an fsnotify watch on ConfigPath's directory that
+	// self-triggers a hot restart when the bootstrap config changes (e.g. a
+	// ConfigMap update propagated by the kubelet).
 	WatchConfig bool
 }
 
@@ -82,51 +94,72 @@ func New(cfg Config, log logr.Logger) *Supervisor {
 		cfg:         cfg,
 		log:         log.WithName("proxy-supervisor"),
 		children:    make(map[int]*exec.Cmd),
-		childExited: make(chan childExit, 4),
+		childExited: make(chan childExit, 8),
 		done:        make(chan struct{}),
 	}
 }
 
 // Run starts Envoy at epoch 0 and supervises it until ctx is canceled (SIGTERM/
 // SIGINT, which controller-runtime's signal handler maps to ctx.Done) or the
-// newest epoch exits unexpectedly. SIGHUP triggers a hot restart; SIGUSR1 is
-// forwarded to the current child for log reopen.
+// newest epoch exits unexpectedly. A watched-config change or SIGHUP triggers a
+// hot restart; SIGUSR1 is forwarded to the current child for log reopen.
 func (s *Supervisor) Run(ctx context.Context) error {
+	defer close(s.done)
+
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGUSR1)
 	defer signal.Stop(sigCh)
-	defer close(s.done)
+
+	trigger := make(chan struct{}, 1)
+	if s.cfg.WatchConfig {
+		go s.watchConfig(ctx, trigger)
+	}
 
 	if err := s.hotRestart(); err != nil {
 		return fmt.Errorf("starting initial envoy epoch: %w", err)
 	}
 
-	// TODO(spike): if cfg.WatchConfig, start an fsnotify watcher on ConfigPath and
-	// fan its events into a hot restart (debounced), in addition to SIGHUP.
+	debounce := time.NewTimer(debounceDelay)
+	debounce.Stop()
+	var debounceC <-chan time.Time
+
+	arm := func(reason string) {
+		s.log.V(1).Info("hot restart armed", "reason", reason, "debounce", debounceDelay)
+		debounce.Reset(debounceDelay)
+		debounceC = debounce.C
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			s.log.Info("termination requested, shutting down all envoy epochs")
-			s.terminateAll()
+			s.shutdown()
 			return nil
 
 		case sig := <-sigCh:
 			switch sig {
 			case syscall.SIGHUP:
-				s.log.Info("SIGHUP received, performing hot restart")
-				if err := s.hotRestart(); err != nil {
-					s.log.Error(err, "hot restart failed; keeping current epoch")
-				}
+				arm("SIGHUP")
 			case syscall.SIGUSR1:
 				s.forwardToCurrent(syscall.SIGUSR1)
+			}
+
+		case <-trigger:
+			arm("config change")
+
+		case <-debounceC:
+			debounceC = nil
+			s.log.Info("performing hot restart")
+			if err := s.hotRestart(); err != nil {
+				s.log.Error(err, "hot restart failed; keeping current epoch")
 			}
 
 		case exit := <-s.childExited:
 			if exit.epoch == s.currentEpoch() {
 				// The newest epoch died unexpectedly: nothing left serving traffic.
 				// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).
-				s.terminateAll()
+				s.reap(exit.epoch)
+				s.shutdown()
 				return fmt.Errorf("envoy epoch %d exited unexpectedly: %w", exit.epoch, exit.err)
 			}
 			// An older epoch finished draining after a hot restart: expected. Reap it.
@@ -180,6 +213,48 @@ func (s *Supervisor) scheduleParentShutdown(epoch int) {
 	}
 }
 
+// watchConfig watches the directory holding ConfigPath and emits a trigger on any
+// change. Watching the directory (not the file) survives the atomic symlink swap
+// the kubelet uses to update ConfigMap mounts. Coalescing is handled downstream by
+// the debounce timer.
+func (s *Supervisor) watchConfig(ctx context.Context, trigger chan<- struct{}) {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		s.log.Error(err, "config watcher disabled")
+		return
+	}
+	defer func() { _ = w.Close() }()
+
+	dir := filepath.Dir(s.cfg.ConfigPath)
+	if err := w.Add(dir); err != nil {
+		s.log.Error(err, "failed to watch config dir; watcher disabled", "dir", dir)
+		return
+	}
+	s.log.Info("watching bootstrap config for changes", "dir", dir, "config", s.cfg.ConfigPath)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.done:
+			return
+		case _, ok := <-w.Events:
+			if !ok {
+				return
+			}
+			select {
+			case trigger <- struct{}{}:
+			default: // a trigger is already pending; the debounce will coalesce.
+			}
+		case err, ok := <-w.Errors:
+			if !ok {
+				return
+			}
+			s.log.Error(err, "config watch error")
+		}
+	}
+}
+
 // buildEnvoyCmd constructs the Envoy invocation for a given restart epoch.
 func (s *Supervisor) buildEnvoyCmd(epoch int) *exec.Cmd {
 	args := []string{
@@ -213,7 +288,7 @@ func (s *Supervisor) signalEpoch(epoch int, sig syscall.Signal) {
 		return
 	}
 	if err := cmd.Process.Signal(sig); err != nil {
-		s.log.Error(err, "failed to signal envoy epoch", "epoch", epoch, "signal", sig)
+		s.log.V(1).Error(err, "failed to signal envoy epoch", "epoch", epoch, "signal", sig)
 	}
 }
 
@@ -227,19 +302,42 @@ func (s *Supervisor) reap(epoch int) {
 	s.mu.Lock()
 	delete(s.children, epoch)
 	s.mu.Unlock()
-	s.log.Info("reaped drained envoy epoch", "epoch", epoch)
+	s.log.Info("reaped envoy epoch", "epoch", epoch)
 }
 
-// terminateAll SIGTERMs every tracked epoch. TODO(spike): wait for graceful exit
-// with a deadline, then SIGKILL stragglers.
-func (s *Supervisor) terminateAll() {
+// shutdown SIGTERMs every tracked epoch and waits up to DrainTime+grace for them
+// to exit, SIGKILLing any straggler. It reads childExited directly because the
+// main loop has stopped selecting on it.
+func (s *Supervisor) shutdown() {
 	s.mu.Lock()
-	epochs := make([]int, 0, len(s.children))
+	pending := make(map[int]struct{}, len(s.children))
 	for e := range s.children {
-		epochs = append(epochs, e)
+		pending[e] = struct{}{}
 	}
 	s.mu.Unlock()
-	for _, e := range epochs {
+
+	for e := range pending {
 		s.signalEpoch(e, syscall.SIGTERM)
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	deadline := time.NewTimer(s.cfg.DrainTime + shutdownGrace)
+	defer deadline.Stop()
+
+	for len(pending) > 0 {
+		select {
+		case exit := <-s.childExited:
+			delete(pending, exit.epoch)
+			s.reap(exit.epoch)
+		case <-deadline.C:
+			for e := range pending {
+				s.log.Info("drain deadline elapsed, killing envoy epoch", "epoch", e)
+				s.signalEpoch(e, syscall.SIGKILL)
+				s.reap(e)
+			}
+			return
+		}
 	}
 }

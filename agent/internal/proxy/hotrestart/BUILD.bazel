@@ -1,9 +1,23 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "hotrestart",
     srcs = ["supervisor.go"],
     importpath = "github.com/bpalermo/aether/agent/internal/proxy/hotrestart",
     visibility = ["//agent:__subpackages__"],
-    deps = ["@com_github_go_logr_logr//:logr"],
+    deps = [
+        "@com_github_fsnotify_fsnotify//:fsnotify",
+        "@com_github_go_logr_logr//:logr",
+    ],
+)
+
+go_test(
+    name = "hotrestart_test",
+    srcs = ["supervisor_test.go"],
+    embed = [":hotrestart"],
+    deps = [
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )
