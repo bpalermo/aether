@@ -23,10 +23,13 @@ multiple releases can coexist. Honours fullnameOverride / nameOverride.
 {{- end -}}
 
 {{/*
-Proxy fullname.
+Proxy fullname. The Envoy proxy is a distinct "aether-proxy" component — its
+selector labels and Envoy --service-cluster already use that name — so its
+DaemonSet, ServiceAccount and ConfigMap are named aether-proxy rather than
+"<agent-fullname>-proxy".
 */}}
 {{- define "agent.proxy.fullname" -}}
-{{- printf "%s-proxy" (include "agent.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- "aether-proxy" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
