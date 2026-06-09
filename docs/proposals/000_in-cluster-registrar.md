@@ -1,6 +1,6 @@
 # Proposal: In-Cluster Registrar Service
 
-**Status:** Draft
+**Status:** Implemented
 **Author:** Bruno Palermo
 **Date:** 2026-03-22
 
