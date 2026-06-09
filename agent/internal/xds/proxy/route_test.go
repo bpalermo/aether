@@ -9,24 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildInboundRouteConfiguration(t *testing.T) {
-	routeConfig := buildInboundRouteConfiguration("app_my-pod")
-
-	require.NotNil(t, routeConfig)
-	assert.Equal(t, "in_http", routeConfig.GetName())
-	assert.False(t, routeConfig.GetValidateClusters().GetValue(), "validation off so app_<pod> churn doesn't wedge the inner listener")
-	require.Len(t, routeConfig.GetVirtualHosts(), 1)
-
-	vhost := routeConfig.GetVirtualHosts()[0]
-	assert.Equal(t, "catch_all", vhost.GetName())
-	assert.Equal(t, []string{"*"}, vhost.GetDomains())
-	require.Len(t, vhost.GetRoutes(), 1)
-
-	route := vhost.GetRoutes()[0]
-	assert.Equal(t, "/", route.GetMatch().GetPrefix())
-	assert.Equal(t, "app_my-pod", route.GetRoute().GetCluster())
-}
-
 func TestBuildOutboundRouteConfiguration(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -89,6 +71,7 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 			route := vhost.GetRoutes()[0]
 			assert.Equal(t, "/", route.GetMatch().GetPrefix())
 			assert.Equal(t, tt.clusterName, route.GetRoute().GetCluster())
+			assert.True(t, route.GetRoute().GetAutoHostRewrite().GetValue(), "auto_host_rewrite threads the dest pod IP into :authority")
 		})
 	}
 }

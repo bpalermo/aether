@@ -111,7 +111,7 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 // queryNodeMetadata retrieves the region and zone labels and the InternalIP from
 // a Kubernetes node. It returns the topology.kubernetes.io/region and
 // topology.kubernetes.io/zone labels (empty if absent) and the node's InternalIP
-// address, used as the HBONE tunnel target for endpoints on this node.
+// address, used as the node inbound (mTLS) target for endpoints on this node.
 func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone, nodeIP string, err error) {
 	node := &corev1.Node{}
 	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {

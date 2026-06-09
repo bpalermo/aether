@@ -12,41 +12,6 @@ const (
 	OutboundHTTPRouteName = "out_http"
 )
 
-// buildInboundRouteConfiguration creates a route configuration for inbound traffic.
-// It routes all requests to the per-pod application cluster, which forwards the
-// decrypted traffic to the pod's own application on loopback.
-func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfiguration {
-	return &routev3.RouteConfiguration{
-		Name: "in_http",
-		// The per-pod app_<pod> cluster churns on pod restart; don't let the inline
-		// route's cluster reference wedge the listener if it is momentarily unknown
-		// during the delta-xDS make-before-break window (see node_connect).
-		ValidateClusters: wrapperspb.Bool(false),
-		VirtualHosts: []*routev3.VirtualHost{
-			{
-				Name:    "catch_all",
-				Domains: []string{"*"},
-				Routes: []*routev3.Route{
-					{
-						Match: &routev3.RouteMatch{
-							PathSpecifier: &routev3.RouteMatch_Prefix{
-								Prefix: "/",
-							},
-						},
-						Action: &routev3.Route_Route{
-							Route: &routev3.RouteAction{
-								ClusterSpecifier: &routev3.RouteAction_Cluster{
-									Cluster: appClusterName,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
 // BuildOutboundRouteConfiguration creates a route configuration for outbound traffic.
 // It includes the provided virtual hosts along with a catch-all virtual host that returns 404.
 // Each virtual host matches requests by cluster name and FQDN.
@@ -75,6 +40,11 @@ func BuildOutboundClusterVirtualHost(clusterName string) *routev3.VirtualHost {
 					Route: &routev3.RouteAction{
 						ClusterSpecifier: &routev3.RouteAction_Cluster{
 							Cluster: clusterName,
+						},
+						// Swap :authority for the selected endpoint's hostname (the dest
+						// pod IP) so the destination node demuxes the request to that pod.
+						HostRewriteSpecifier: &routev3.RouteAction_AutoHostRewrite{
+							AutoHostRewrite: wrapperspb.Bool(true),
 						},
 					},
 				},

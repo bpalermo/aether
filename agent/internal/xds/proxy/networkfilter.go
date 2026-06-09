@@ -42,10 +42,9 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 						},
 					},
 				},
-				// TRANSITIVE (not ONCE): the outbound stream now traverses an extra
-				// internal-listener hop (tunnel_internal) before the tunnel_originate
-				// cluster selects the per-source client certificate, so the namespace
-				// filter state must propagate across more than one upstream boundary.
+				// Shared with the upstream connection so the service cluster's
+				// transport-socket matcher can read the source pod's network namespace
+				// and select that pod's client certificate for the outbound mTLS.
 				SharedWithUpstream: setFilterStatev3.FilterStateValue_TRANSITIVE,
 			},
 		},

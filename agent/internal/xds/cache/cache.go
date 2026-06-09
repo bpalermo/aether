@@ -74,7 +74,7 @@ type SnapshotCache struct {
 // listenerEntry holds the outbound Envoy listener for a single pod, plus the
 // per-pod application cluster that decrypted inbound traffic is forwarded to.
 // Outbound listeners handle traffic from the pod to upstream services. Inbound
-// traffic arrives over the node-to-node HBONE tunnel (see nodeConnectResources),
+// traffic arrives mTLS at the single node inbound listener (see nodeInboundListener),
 // not a per-pod listener. The app cluster lives here (not in the registry-driven
 // cluster map) so registry reloads, which rebuild that map wholesale, never drop it.
 type listenerEntry struct {

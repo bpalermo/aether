@@ -26,24 +26,13 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
 	v := generateSnapshotVersion(snapshotVersionLabel, c.version)
 
 	listeners := c.Listeners()
-	// The node-level tunnel ingress (R2): the CONNECT-terminating listener plus a
-	// per-pod inner HCM listener and its internal_upstream cluster; empty until the
-	// node SVID is served.
-	nodeConnectListeners, nodeConnectClusters := c.nodeConnectResources()
-	listeners = append(listeners, nodeConnectListeners...)
-	// The internal listener that encapsulates outbound streams into CONNECT
-	// tunnels (R2 tunnel egress); nil until the node SVID is served.
-	if tunnelInternal := c.tunnelInternalListener(); tunnelInternal != nil {
-		listeners = append(listeners, tunnelInternal)
+	// The single node-level inbound listener: terminates mTLS and routes each
+	// request to the destination pod's app cluster by its authority; nil until the
+	// node SVID is served (it is the listener's server certificate).
+	if nodeInbound := c.nodeInboundListener(); nodeInbound != nil {
+		listeners = append(listeners, nodeInbound)
 	}
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
-	clusters = append(clusters, nodeConnectClusters...)
-
-	// The shared ORIGINAL_DST cluster the tunnels dial (carries the per-source
-	// mTLS); nil until the node SVID is served.
-	if tunnelOriginate := c.tunnelOriginateCluster(); tunnelOriginate != nil {
-		clusters = append(clusters, tunnelOriginate)
-	}
 
 	// Per-pod application clusters live alongside listeners (not in the
 	// registry-driven cluster map) so registry reloads never drop them. STATIC

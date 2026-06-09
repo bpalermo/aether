@@ -20,8 +20,8 @@ const (
 // GenerateListenersFromRegistryPod generates the outbound HTTP listener and the
 // per-pod application and health-probe clusters for a pod.
 // The outbound listener routes traffic destined for other services. Inbound traffic
-// is no longer terminated by a per-pod listener; it arrives over the node-to-node
-// HBONE tunnel (see GenerateNodeConnectResources) and is demuxed to app_<pod>.
+// is not terminated by a per-pod listener; it arrives mTLS at the single node inbound
+// listener (see NewNodeInboundListener) and is demuxed to app_<pod> by authority.
 func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (outbound *listenerv3.Listener, appCluster *clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
 	outbound, err = generateOutboundHTTPListener(cniPod)
 	if err != nil {

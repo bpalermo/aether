@@ -12,17 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	nodeIdentity                  = "spiffe://aether.internal/ns/aether-system/sa/aether-agent"
-	internalUpstreamTransportName = "envoy.transport_sockets.internal_upstream"
-)
+const nodeIdentity = "spiffe://aether.internal/ns/aether-system/sa/aether-agent"
 
-// TestTunnelOriginateClusterMTLSMatcher verifies that once a local pod and the
-// node identity are known, the shared tunnel_originate cluster carries the
-// per-source mTLS matcher/matches (the originating pod's identity plus the node
-// identity for health-check tunnels), while the service cluster itself tunnels via
-// the internal_upstream transport socket rather than carrying a matcher.
-func TestTunnelOriginateClusterMTLSMatcher(t *testing.T) {
+// TestServiceClusterMTLSInjected verifies that once a local pod and the node
+// identity are known, each service cluster carries the per-source mTLS matcher
+// (the originating pod's identity plus the node identity for the on-no-match
+// fallback), injected at snapshot time.
+func TestServiceClusterMTLSInjected(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
 
@@ -34,7 +30,7 @@ func TestTunnelOriginateClusterMTLSMatcher(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-a",
 	}
 	require.NoError(t, c.AddPod(ctx, pod, "aether.internal"))
-	// The node SVID being served gates the tunnel originate cluster.
+	// The node SVID being served gates the upstream mTLS injection.
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 
 	reg := &mockRegistry{
@@ -50,28 +46,21 @@ func TestTunnelOriginateClusterMTLSMatcher(t *testing.T) {
 	require.NoError(t, err)
 	clusters := snap.GetResources(resourcev3.ClusterType)
 
-	// The service cluster tunnels (internal_upstream), no per-cluster matcher.
 	echo, ok := clusters["echo"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
-	assert.Nil(t, echo.GetTransportSocketMatcher(), "service cluster must not carry the matcher")
-	assert.Equal(t, internalUpstreamTransportName, echo.GetTransportSocket().GetName())
-
-	// The shared tunnel_originate cluster carries the per-source matcher.
-	originate, ok := clusters["tunnel_originate"].(*clusterv3.Cluster)
-	require.True(t, ok, "tunnel_originate cluster must be present once the node SVID is served")
-	require.NotNil(t, originate.GetTransportSocketMatcher(), "tunnel_originate must carry the mTLS matcher")
+	require.NotNil(t, echo.GetTransportSocketMatcher(), "service cluster must carry the per-source mTLS matcher")
 	names := map[string]bool{}
-	for _, m := range originate.GetTransportSocketMatches() {
+	for _, m := range echo.GetTransportSocketMatches() {
 		names[m.GetName()] = true
 	}
 	assert.True(t, names["spiffe://aether.internal/ns/aether-test/sa/echo"], "match for the local pod identity")
-	assert.True(t, names[nodeIdentity], "match for the node identity (health-check tunnels)")
+	assert.True(t, names[nodeIdentity], "match for the node identity (on-no-match fallback)")
 }
 
-// TestNoTunnelOriginateWithoutNodeIdentity verifies the tunnel originate cluster is
-// omitted until the node SVID is served (its on-no-match references the node
+// TestServiceClusterNoMTLSWithoutNodeIdentity verifies the upstream mTLS matcher is
+// not injected until the node SVID is served (its on-no-match references the node
 // identity).
-func TestNoTunnelOriginateWithoutNodeIdentity(t *testing.T) {
+func TestServiceClusterNoMTLSWithoutNodeIdentity(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
 
@@ -86,6 +75,7 @@ func TestNoTunnelOriginateWithoutNodeIdentity(t *testing.T) {
 
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
-	_, present := snap.GetResources(resourcev3.ClusterType)["tunnel_originate"]
-	assert.False(t, present, "no tunnel_originate cluster before the node SVID is served")
+	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo"].(*clusterv3.Cluster)
+	require.True(t, ok, "echo cluster must be present")
+	assert.Nil(t, echo.GetTransportSocketMatcher(), "no mTLS matcher before the node SVID is served")
 }

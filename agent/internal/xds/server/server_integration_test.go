@@ -126,9 +126,9 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 
 	serviceName := "my-service"
 	endpoint := newServiceEndpoint("10.0.0.2", "cluster-1", "remote-pod", "node-2", 8080)
-	cluster := proxy.NewTunnelServiceCluster(serviceName)
+	cluster := proxy.NewServiceCluster(serviceName)
 	cla := proxy.NewClusterLoadAssignment(serviceName)
-	lbEp := proxy.TunnelLocalityLbEndpointFromRegistryEndpoint(endpoint)
+	lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint)
 	cla.Endpoints = append(cla.Endpoints, lbEp)
 	vhost := proxy.BuildOutboundClusterVirtualHost(serviceName)
 
