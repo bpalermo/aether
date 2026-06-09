@@ -26,12 +26,6 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
 	v := generateSnapshotVersion(snapshotVersionLabel, c.version)
 
 	listeners := c.Listeners()
-	// The single node-level inbound listener: terminates mTLS and routes each
-	// request to the destination pod's app cluster by its authority; nil until the
-	// node SVID is served (it is the listener's server certificate).
-	if nodeInbound := c.nodeInboundListener(); nodeInbound != nil {
-		listeners = append(listeners, nodeInbound)
-	}
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
 
 	// Per-pod application clusters live alongside listeners (not in the

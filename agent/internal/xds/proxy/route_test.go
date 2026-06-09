@@ -71,7 +71,6 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 			route := vhost.GetRoutes()[0]
 			assert.Equal(t, "/", route.GetMatch().GetPrefix())
 			assert.Equal(t, tt.clusterName, route.GetRoute().GetCluster())
-			assert.True(t, route.GetRoute().GetAutoHostRewrite().GetValue(), "auto_host_rewrite threads the dest pod IP into :authority")
 		})
 	}
 }

@@ -17,15 +17,21 @@ const (
 	defaultHTTPOutboundPort = 18081
 )
 
-// GenerateListenersFromRegistryPod generates the outbound HTTP listener and the
-// per-pod application and health-probe clusters for a pod.
-// The outbound listener routes traffic destined for other services. Inbound traffic
-// is not terminated by a per-pod listener; it arrives mTLS at the single node inbound
-// listener (see NewNodeInboundListener) and is demuxed to app_<pod> by authority.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (outbound *listenerv3.Listener, appCluster *clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+// GenerateListenersFromRegistryPod generates the per-pod inbound and outbound HTTP
+// listeners and the per-pod application and health-probe clusters for a pod.
+// The inbound listener (netns-bound, mTLS) accepts mesh traffic at <pod_ip>:15008
+// and forwards it to the pod's application on loopback; the outbound listener routes
+// the pod's traffic to other services. The trustDomain names the pod's SVID and the
+// SDS validation context for the inbound listener's mTLS.
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appCluster *clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+	inbound, err = NewInboundListener(cniPod, trustDomain)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
 	outbound, err = generateOutboundHTTPListener(cniPod)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	netns := cniPod.GetNetworkNamespace()
@@ -35,7 +41,7 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod) (outbound *listenerv
 	// liveness); keeping the HC off app_<pod> avoids gating the delivery path.
 	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, port, AppHealthPathFromPod(cniPod))
 
-	return outbound, appCluster, healthCluster, nil
+	return inbound, outbound, appCluster, healthCluster, nil
 }
 
 // SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the

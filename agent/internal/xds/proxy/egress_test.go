@@ -64,11 +64,10 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
 	require.Len(t, lle.GetLbEndpoints(), 1)
 	endpoint := lle.GetLbEndpoints()[0].GetEndpoint()
 
-	// Socket address is the dest NODE; hostname is the dest POD IP.
+	// Socket address is the destination pod's mesh inbound (pod_ip:inboundPort).
 	sa := endpoint.GetAddress().GetSocketAddress()
-	assert.Equal(t, "192.168.1.10", sa.GetAddress(), "address is the destination node")
-	assert.Equal(t, uint32(defaultNodeInboundPort), sa.GetPortValue())
-	assert.Equal(t, "10.0.0.5", endpoint.GetHostname(), "hostname is the dest pod IP (for auto_host_rewrite)")
+	assert.Equal(t, "10.0.0.5", sa.GetAddress(), "address is the destination pod IP")
+	assert.Equal(t, uint32(defaultInboundPort), sa.GetPortValue())
 
 	// Subset metadata for affinity.
 	lb := lle.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()

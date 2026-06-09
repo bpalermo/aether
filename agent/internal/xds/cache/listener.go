@@ -3,7 +3,6 @@ package cache
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/storage"
@@ -11,15 +10,15 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
-// AddPod generates the outbound listener and per-pod clusters for the given pod
-// and adds them to the cache keyed by the pod's network namespace, then
+// AddPod generates the inbound and outbound listeners and per-pod clusters for the
+// given pod and adds them to the cache keyed by the pod's network namespace, then
 // regenerates the listener snapshot. Returns an error if listener generation or
 // snapshot generation fails.
 func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
 	netns := cniPod.GetNetworkNamespace()
 	c.log.V(2).Info("adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
 
-	outbound, appCluster, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod)
+	inbound, outbound, appCluster, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain)
 	if err != nil {
 		return err
 	}
@@ -29,6 +28,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		c.listeners = make(map[string]listenerEntry)
 	}
 	c.listeners[netns] = listenerEntry{
+		inbound:       inbound,
 		outbound:      outbound,
 		appCluster:    appCluster,
 		healthCluster: healthCluster,
@@ -62,51 +62,17 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 	return c.generateListenerSnapshot(ctx)
 }
 
-// Listeners returns all cached outbound listener resources as a flat slice.
-// Inbound traffic is served by the node-level inbound listener (nodeInboundListener),
-// not per-pod listeners. Thread-safe.
+// Listeners returns all cached inbound and outbound listener resources as a flat
+// slice. Thread-safe.
 func (c *SnapshotCache) Listeners() []types.Resource {
 	c.listenerMu.RLock()
 	defer c.listenerMu.RUnlock()
 
-	resources := make([]types.Resource, 0, len(c.listeners))
+	resources := make([]types.Resource, 0, 2*len(c.listeners))
 	for _, entry := range c.listeners {
-		resources = append(resources, entry.outbound)
+		resources = append(resources, entry.inbound, entry.outbound)
 	}
 	return resources
-}
-
-// nodeInboundListener builds the single node-level inbound listener from the
-// current local pods and the node identity: it terminates mTLS and routes each
-// request to the destination pod's app cluster by the request authority (the dest
-// pod IP). It returns nil when no node SVID has been served yet (the listener
-// references it as its server certificate). Building from the cached pods keeps the
-// per-pod inbound routes in sync with pod adds and removes. Thread-safe.
-func (c *SnapshotCache) nodeInboundListener() types.Resource {
-	c.localMu.RLock()
-	nodeSpiffeID := c.nodeSpiffeID
-	trustDomain := c.trustDomain
-	c.localMu.RUnlock()
-
-	if nodeSpiffeID == "" {
-		return nil
-	}
-
-	c.listenerMu.RLock()
-	pods := make([]*cniv1.CNIPod, 0, len(c.listeners))
-	for _, entry := range c.listeners {
-		if entry.pod != nil {
-			pods = append(pods, entry.pod)
-		}
-	}
-	c.listenerMu.RUnlock()
-
-	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
-	l := proxy.NewNodeInboundListener(pods, nodeSpiffeID, validationContextName)
-	if l == nil {
-		return nil
-	}
-	return l
 }
 
 // appClusters returns the per-pod application clusters (one per managed pod)
@@ -131,9 +97,9 @@ func (c *SnapshotCache) appClusters() []types.Resource {
 }
 
 // LoadListenersFromStorage retrieves all pods from the given storage backend,
-// generates the outbound Envoy listener and per-pod clusters for each pod, and
-// populates the cache keyed by container network namespace. After populating the
-// cache, it generates and sets a new listener snapshot.
+// generates the inbound and outbound Envoy listeners and per-pod clusters for each
+// pod, and populates the cache keyed by container network namespace. After populating
+// the cache, it generates and sets a new listener snapshot.
 //
 // The trustDomain is the SPIFFE trust domain used for SDS secret naming.
 //
@@ -157,7 +123,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		netns := pod.GetNetworkNamespace()
 		c.log.V(2).Info("generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
-		outbound, appCluster, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod)
+		inbound, outbound, appCluster, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain)
 		if listenerErr != nil {
 			c.log.V(1).Error(listenerErr, "failed to generate listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)
@@ -165,6 +131,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		}
 
 		c.listeners[netns] = listenerEntry{
+			inbound:       inbound,
 			outbound:      outbound,
 			appCluster:    appCluster,
 			healthCluster: healthCluster,

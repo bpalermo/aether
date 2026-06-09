@@ -121,7 +121,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	outbound, appCluster, _, err := proxy.GenerateListenersFromRegistryPod(pod)
+	inbound, outbound, appCluster, _, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org")
 	require.NoError(t, err)
 
 	serviceName := "my-service"
@@ -135,7 +135,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 	routeCfg := proxy.BuildOutboundRouteConfiguration([]*routev3.VirtualHost{vhost})
 
 	snapshot, err := cachev3.NewSnapshot("1", map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: {outbound},
+		resourcev3.ListenerType: {inbound, outbound},
 		resourcev3.ClusterType:  {cluster, appCluster},
 		resourcev3.EndpointType: {cla},
 		resourcev3.RouteType:    {routeCfg},

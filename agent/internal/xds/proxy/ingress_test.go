@@ -4,57 +4,55 @@ import (
 	"testing"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-const testNodeID = "spiffe://example.org/ns/aether-system/sa/aether-agent"
-
-func TestNewNodeInboundListener_NoNodeIdentity(t *testing.T) {
-	assert.Nil(t, NewNodeInboundListener(nil, "", "spiffe://example.org"), "nothing without a node identity")
-}
-
-func TestNewNodeInboundListener(t *testing.T) {
-	pods := []*cniv1.CNIPod{
-		{Name: "pod-a", Ips: []string{"10.0.0.1"}},
-		{Name: "pod-b", Ips: []string{"10.0.0.2"}},
-		{Name: "no-ip"}, // skipped: no IP
+func TestNewInboundListener(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "pod-a",
+		Namespace:        "aether-test",
+		ServiceAccount:   "echo",
+		NetworkNamespace: "/var/run/netns/cni-a",
+		Ips:              []string{"10.0.0.1"},
 	}
 
-	l := NewNodeInboundListener(pods, testNodeID, "spiffe://example.org")
-	require.NotNil(t, l)
-	assert.Equal(t, NodeInboundListenerName, l.GetName())
-	assert.Equal(t, uint32(defaultNodeInboundPort), l.GetAddress().GetSocketAddress().GetPortValue())
-	assert.NotNil(t, l.GetFilterChains()[0].GetTransportSocket(), "node inbound listener needs downstream mTLS")
+	l, err := NewInboundListener(pod, "example.org")
+	require.NoError(t, err)
+	assert.Equal(t, InboundListenerName(pod), l.GetName())
+
+	// Bound into the pod's netns at the mesh inbound port (per-pod lifecycle + netpol).
+	sa := l.GetAddress().GetSocketAddress()
+	assert.Equal(t, uint32(defaultInboundPort), sa.GetPortValue())
+	assert.Equal(t, "/var/run/netns/cni-a", sa.GetNetworkNamespaceFilepath())
+	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
+
+	// mTLS terminating filter chain presenting the pod's own SVID as the server cert.
+	fc := l.GetFilterChains()[0]
+	require.NotNil(t, fc.GetTransportSocket(), "inbound listener must terminate mTLS")
 
 	hcm := decodeHCM(t, l)
-	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_HTTP2, hcm.GetCodecType())
-	// XFCC set natively from the verified peer (no rebuild).
+	// XFCC set natively from the verified peer (the caller's SVID).
 	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_SANITIZE_SET, hcm.GetForwardClientCertDetails())
 	assert.True(t, hcm.GetSetCurrentClientCertDetails().GetUri())
-	// node-live answered by the health_check filter, before the router.
-	assert.Equal(t, "envoy.filters.http.health_check", hcm.GetHttpFilters()[0].GetName())
-	assert.Equal(t, "envoy.filters.http.router", hcm.GetHttpFilters()[1].GetName())
 
-	// One virtual host per pod-with-IP, matched by the pod IP authority -> app_<pod>.
+	// All requests route to the pod's app cluster.
 	rc := hcm.GetRouteConfig()
 	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so app_<pod> churn doesn't wedge the listener")
-	require.Len(t, rc.GetVirtualHosts(), 2)
-	byDomain := map[string]string{}
-	for _, vh := range rc.GetVirtualHosts() {
-		require.Len(t, vh.GetDomains(), 1)
-		byDomain[vh.GetDomains()[0]] = vh.GetRoutes()[0].GetRoute().GetCluster()
-	}
-	assert.Equal(t, AppClusterName(pods[0]), byDomain["10.0.0.1"])
-	assert.Equal(t, AppClusterName(pods[1]), byDomain["10.0.0.2"])
+	vh := rc.GetVirtualHosts()[0]
+	assert.Equal(t, []string{"*"}, vh.GetDomains())
+	assert.Equal(t, AppClusterName(pod), vh.GetRoutes()[0].GetRoute().GetCluster())
 }
 
-func TestBuildNodeInboundRouteConfiguration_Empty(t *testing.T) {
-	rc := buildNodeInboundRouteConfiguration(nil)
-	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so churn doesn't wedge node_inbound")
-	assert.Empty(t, rc.GetVirtualHosts(), "no vhosts when there are no pods; node-live is on the health_check filter")
+func TestNewInboundListener_Errors(t *testing.T) {
+	_, err := NewInboundListener(nil, "example.org")
+	require.Error(t, err)
+
+	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org")
+	require.Error(t, err)
 }
 
 func decodeHCM(t *testing.T, l *listenerv3.Listener) *http_connection_managerv3.HttpConnectionManager {

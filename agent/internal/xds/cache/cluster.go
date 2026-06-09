@@ -155,11 +155,9 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// endpoints that disappeared from the registry are pruned rather than retained.
 	c.clusters = make(map[string]clusterEntry, len(serviceEndpoints))
 	for serviceName, endpoints := range serviceEndpoints {
-		// The outbound service cluster speaks per-source mTLS HTTP/2 to the
-		// destination node; its EDS endpoints are node inbound addresses carrying the
-		// dest pod IP as the endpoint hostname (the outbound route's auto_host_rewrite
-		// puts it on :authority so the dest node demuxes to the pod). The per-source
-		// mTLS transport socket is injected at snapshot time (clustersEndpointsAndVhosts).
+		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
+		// destination pod's mesh inbound (pod_ip:15008). The per-source mTLS transport
+		// socket is injected at snapshot time (clustersEndpointsAndVhosts).
 		cluster := proxy.NewServiceCluster(serviceName)
 		cla := proxy.NewClusterLoadAssignment(serviceName)
 		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName)

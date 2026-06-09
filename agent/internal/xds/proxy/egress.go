@@ -14,14 +14,13 @@ import (
 )
 
 // NewServiceCluster builds the outbound service cluster. Endpoints (delivered via
-// EDS) are the destination node inbound addresses (node_ip:nodeInboundPort) with the
-// destination pod IP carried as the endpoint hostname; the outbound route's
-// auto_host_rewrite swaps the request :authority to that hostname so the destination
-// node demuxes to the right pod. The cluster speaks HTTP/2 mTLS to the destination
-// node, presenting the originating pod's identity. The per-source mTLS transport
-// socket is injected at snapshot time (InjectUpstreamMTLS) from the current local
-// workloads; connection_pool_per_downstream_connection keeps a source pod's
-// connection (and therefore its certificate) from being reused for another source.
+// EDS) are the destination pods' mesh inbound addresses (pod_ip:defaultInboundPort),
+// each reached by the pod's own netns-bound inbound listener. The cluster speaks
+// HTTP/2 mTLS to the destination pod, presenting the originating pod's identity. The
+// per-source mTLS transport socket is injected at snapshot time (InjectUpstreamMTLS)
+// from the current local workloads; connection_pool_per_downstream_connection keeps a
+// source pod's connection (and therefore its certificate) from being reused for
+// another source.
 func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name:                                  serviceName,
@@ -59,10 +58,9 @@ func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]s
 }
 
 // ServiceLocalityLbEndpointFromRegistryEndpoint builds an endpoint for the plain
-// transport: its socket address is the destination node inbound (node_ip:port), its
-// hostname is the destination pod IP (consumed by the outbound route's
-// auto_host_rewrite to set the request :authority, which the destination node
-// demuxes on), and its host metadata carries the envoy.lb subset keys for affinity.
+// transport: its socket address is the destination pod's mesh inbound
+// (<pod_ip>:defaultInboundPort), reached by the pod's own netns-bound inbound
+// listener, and its host metadata carries the envoy.lb subset keys for affinity.
 // The endpoint health reflects the registry's delegated-liveness status.
 func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint) *endpointv3.LocalityLbEndpoints {
 	subsetKeys := map[string]string{
@@ -87,8 +85,6 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 		},
 	}
 
-	nodeAddr := endpoint.GetKubernetesMetadata().GetNodeIp()
-
 	var locality *corev3.Locality
 	if loc := endpoint.GetLocality(); loc != nil && loc.GetRegion() != "" && loc.GetZone() != "" {
 		locality = &corev3.Locality{Region: loc.GetRegion(), Zone: loc.GetZone()}
@@ -99,16 +95,15 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 			{
 				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
 					Endpoint: &endpointv3.Endpoint{
-						// Hostname = destination pod IP; auto_host_rewrite puts it on
-						// the request :authority so the dest node routes to that pod.
-						Hostname: endpoint.GetIp(),
 						Address: &corev3.Address{
 							Address: &corev3.Address_SocketAddress{
 								SocketAddress: &corev3.SocketAddress{
 									Protocol: corev3.SocketAddress_TCP,
-									Address:  nodeAddr,
+									// The destination pod's mesh inbound; reached by the
+									// pod's own netns-bound inbound listener.
+									Address: endpoint.GetIp(),
 									PortSpecifier: &corev3.SocketAddress_PortValue{
-										PortValue: defaultNodeInboundPort,
+										PortValue: defaultInboundPort,
 									},
 								},
 							},

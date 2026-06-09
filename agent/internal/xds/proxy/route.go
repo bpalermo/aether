@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const (
@@ -40,11 +39,6 @@ func BuildOutboundClusterVirtualHost(clusterName string) *routev3.VirtualHost {
 					Route: &routev3.RouteAction{
 						ClusterSpecifier: &routev3.RouteAction_Cluster{
 							Cluster: clusterName,
-						},
-						// Swap :authority for the selected endpoint's hostname (the dest
-						// pod IP) so the destination node demuxes the request to that pod.
-						HostRewriteSpecifier: &routev3.RouteAction_AutoHostRewrite{
-							AutoHostRewrite: wrapperspb.Bool(true),
 						},
 					},
 				},
