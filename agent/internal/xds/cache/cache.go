@@ -19,7 +19,6 @@ package cache
 import (
 	"sync"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -64,8 +63,10 @@ type SnapshotCache struct {
 	// used to name the upstream mTLS validation context.
 	trustDomain string
 	// nodeSpiffeID is the agent's node identity (set by the SPIRE bridge once the
-	// node SVID is served). It is the downstream server-cert secret name for the
-	// node CONNECT listener; while empty, that listener is not generated.
+	// node SVID is served). Outbound clusters present it as the client certificate
+	// on the transport-socket matcher's no-match path (e.g. active health-check
+	// probes, which carry no source-pod filter state); while empty, upstream mTLS
+	// injection is skipped.
 	nodeSpiffeID string
 
 	version *atomic.Uint64
@@ -85,9 +86,6 @@ type listenerEntry struct {
 	// health check (delegated liveness), kept separate from appCluster so the HC
 	// does not gate the delivery path.
 	healthCluster types.Resource
-	// pod is retained so the node-level CONNECT listener can be (re)built with a
-	// route per local pod (keyed on the pod IP) to its app cluster.
-	pod *cniv1.CNIPod
 }
 
 // clusterEntry holds a cluster definition, its pre-built load assignment,

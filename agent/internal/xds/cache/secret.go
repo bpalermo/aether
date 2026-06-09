@@ -21,9 +21,10 @@ func (c *SnapshotCache) SetSecrets(ctx context.Context, secrets []*tlsv3.Secret)
 }
 
 // SetNodeIdentity records the agent's node SPIFFE ID (served by the SPIRE bridge
-// as the node SVID) and regenerates the snapshot. The node CONNECT listener uses
-// it as its downstream server-certificate secret name; until it is set, that
-// listener is omitted. Idempotent: a no-op when the value is unchanged.
+// as the node SVID) and regenerates the snapshot. Outbound clusters reference it
+// as the no-match client-certificate secret for upstream mTLS (used by active
+// health-check probes and other node-originated connections); until it is set,
+// upstream mTLS injection is skipped. Idempotent: a no-op when the value is unchanged.
 func (c *SnapshotCache) SetNodeIdentity(ctx context.Context, nodeSpiffeID string) error {
 	c.localMu.Lock()
 	if c.nodeSpiffeID == nodeSpiffeID {
