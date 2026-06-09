@@ -26,6 +26,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
         "@com_github_go_logr_logr//:logr",
+        "@org_golang_google_protobuf//proto",
         "@org_uber_go_atomic//:atomic",
     ],
 )
