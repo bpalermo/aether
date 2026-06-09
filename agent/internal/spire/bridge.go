@@ -37,9 +37,9 @@ type SecretStore interface {
 }
 
 // NodeIdentitySink receives the agent's node SPIFFE ID when the node SVID is
-// served, so resources that reference it (the node CONNECT listener) can be
-// generated. The xDS snapshot cache satisfies it; the bridge calls it only when
-// its store also implements this interface.
+// served, so resources that reference it (the outbound clusters' no-match upstream
+// client cert) can be generated. The xDS snapshot cache satisfies it; the bridge
+// calls it only when its store also implements this interface.
 type NodeIdentitySink interface {
 	SetNodeIdentity(ctx context.Context, nodeSpiffeID string) error
 }
@@ -104,7 +104,8 @@ func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, 
 
 // NodeSpiffeID returns the SPIFFE ID of the agent's node identity once the node
 // SVID has been served, or "" if node-SVID serving is disabled or not yet ready.
-// It is the SDS secret name proxies reference for node-to-node tunnel mTLS.
+// It is the SDS secret name proxies reference for node-originated upstream mTLS
+// (the outbound clusters' no-match client cert) and the node-health listener.
 func (b *Bridge) NodeSpiffeID() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -136,7 +137,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 
 	b.log.Info("subscribed to X.509 bundles")
 
-	// Serve the agent's own node SVID (for node-to-node tunnel mTLS and the
+	// Serve the agent's own node SVID (for node-originated upstream mTLS and the
 	// node-health listener) and keep it refreshed on rotation.
 	if b.nodeSource != nil {
 		if err := b.refreshNodeSVID(ctx); err != nil {
@@ -368,9 +369,9 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 	b.nodeSpiffeID = secret.GetName()
 	b.mu.Unlock()
 
-	// Inform the cache of the node identity so the node CONNECT listener (which
-	// references it as its server cert) is generated. Only needed once: the
-	// SPIFFE ID is stable across rotations.
+	// Inform the cache of the node identity so outbound clusters (which reference
+	// it as the no-match upstream client cert) can be generated. Only needed once:
+	// the SPIFFE ID is stable across rotations.
 	if firstServe {
 		if sink, ok := b.store.(NodeIdentitySink); ok {
 			if err := sink.SetNodeIdentity(ctx, secret.GetName()); err != nil {

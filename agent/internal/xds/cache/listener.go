@@ -32,7 +32,6 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		outbound:      outbound,
 		appCluster:    appCluster,
 		healthCluster: healthCluster,
-		pod:           cniPod,
 	}
 	c.listenerMu.Unlock()
 
@@ -135,7 +134,6 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			outbound:      outbound,
 			appCluster:    appCluster,
 			healthCluster: healthCluster,
-			pod:           pod,
 		}
 		local[netns] = proxy.SpiffeIDFromPod(pod, trustDomain)
 	}

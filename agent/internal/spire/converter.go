@@ -62,7 +62,7 @@ func SVIDToTLSCertificateSecret(svid *delegatedidentityv1.X509SVIDWithKey) (*tls
 // X509SVIDToTLSCertificateSecret converts a go-spiffe X.509 SVID (as returned by
 // the Workload API source) to an Envoy TLS certificate Secret. The secret name is
 // the full SPIFFE ID URI. This is used to serve the agent's own node identity to
-// the proxy for node-to-node tunnel mTLS and the node-health listener, distinct
+// the proxy for node-originated upstream mTLS and the node-health listener, distinct
 // from the per-pod workload SVIDs served via the Delegated Identity API.
 func X509SVIDToTLSCertificateSecret(svid *x509svid.SVID) (*tlsv3.Secret, error) {
 	if svid == nil {
