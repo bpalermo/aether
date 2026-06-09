@@ -6,6 +6,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,7 +40,24 @@ func TestNewInboundListener(t *testing.T) {
 	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_SANITIZE_SET, hcm.GetForwardClientCertDetails())
 	assert.True(t, hcm.GetSetCurrentClientCertDetails().GetUri())
 
-	// All requests route to the pod's app cluster.
+	// Liveness + readiness health-check filters precede the router.
+	require.Len(t, hcm.GetHttpFilters(), 3)
+	assert.Equal(t, livenessHealthCheckFilterName, hcm.GetHttpFilters()[0].GetName())
+	assert.Equal(t, readinessHealthCheckFilterName, hcm.GetHttpFilters()[1].GetName())
+	assert.Equal(t, "envoy.filters.http.router", hcm.GetHttpFilters()[2].GetName())
+
+	live := decodeHealthCheck(t, hcm.GetHttpFilters()[0])
+	assert.False(t, live.GetPassThroughMode().GetValue())
+	assert.Equal(t, MeshLivePath, live.GetHeaders()[0].GetStringMatch().GetExact())
+	assert.Empty(t, live.GetClusterMinHealthyPercentages(), "liveness must not depend on the app")
+
+	ready := decodeHealthCheck(t, hcm.GetHttpFilters()[1])
+	assert.Equal(t, MeshReadyPath, ready.GetHeaders()[0].GetStringMatch().GetExact())
+	// Readiness gates on the pod's app health-probe cluster being healthy.
+	require.Contains(t, ready.GetClusterMinHealthyPercentages(), HealthProbeClusterName(pod))
+	assert.Equal(t, float64(100), ready.GetClusterMinHealthyPercentages()[HealthProbeClusterName(pod)].GetValue())
+
+	// All other requests route to the pod's app cluster.
 	rc := hcm.GetRouteConfig()
 	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so app_<pod> churn doesn't wedge the listener")
 	vh := rc.GetVirtualHosts()[0]
@@ -60,4 +78,11 @@ func decodeHCM(t *testing.T, l *listenerv3.Listener) *http_connection_managerv3.
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 	return hcm
+}
+
+func decodeHealthCheck(t *testing.T, f *http_connection_managerv3.HttpFilter) *healthcheckv3.HealthCheck {
+	t.Helper()
+	hc := &healthcheckv3.HealthCheck{}
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(hc))
+	return hc
 }
