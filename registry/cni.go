@@ -32,11 +32,12 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeIP st
 	}
 
 	endpoint := &registryv1.ServiceEndpoint{
-		Ip:          cniPod.GetIps()[0],
-		ClusterName: clusterName,
-		Port:        uint32(port),
-		Weight:      weight,
-		Metadata:    getEndpointMetadataFromAnnotations(cniPod.GetAnnotations()),
+		Ip:              cniPod.GetIps()[0],
+		ClusterName:     clusterName,
+		Port:            uint32(port),
+		Weight:          weight,
+		Metadata:        getEndpointMetadataFromAnnotations(cniPod.GetAnnotations()),
+		HealthCheckMode: healthCheckModeFromAnnotations(cniPod.GetAnnotations()),
 		ContainerMetadata: &registryv1.ServiceEndpoint_ContainerMetadata{
 			ContainerId:      cniPod.GetContainerId(),
 			NetworkNamespace: cniPod.GetNetworkNamespace(),
@@ -104,6 +105,21 @@ func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 	}
 
 	return uint32(weight), nil
+}
+
+// healthCheckModeFromAnnotations maps the endpoint.aether.io/health-check-mode
+// annotation to the ServiceEndpoint health-check mode. "eds" yields EDS; "active"
+// yields ACTIVE; unset yields UNSPECIFIED, which consumers treat as active (the
+// default).
+func healthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
+	switch annotations[constants.AnnotationEndpointHealthCheckMode] {
+	case constants.HealthCheckModeEDS:
+		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
+	case constants.HealthCheckModeActive:
+		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_ACTIVE
+	default:
+		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_UNSPECIFIED
+	}
 }
 
 // getEndpointMetadataFromAnnotations extracts endpoint metadata from pod annotations.

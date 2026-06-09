@@ -225,7 +225,8 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 		// This backend derives endpoints from the API server rather than receiving
 		// agent registrations, so health comes from the pod's readiness condition
 		// (the delegated active-HC path applies only to the write-based backends).
-		Health: podHealth(pod),
+		Health:          podHealth(pod),
+		HealthCheckMode: healthCheckModeFromAnnotations(pod.Annotations),
 	}
 
 	if loc, ok := nodeLocalities[pod.Spec.NodeName]; ok {
@@ -261,6 +262,21 @@ func podHealth(pod *corev1.Pod) registryv1.ServiceEndpoint_Health {
 		}
 	}
 	return registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED
+}
+
+// healthCheckModeFromAnnotations maps the endpoint.aether.io/health-check-mode
+// annotation to the ServiceEndpoint health-check mode. "eds" yields EDS; "active"
+// yields ACTIVE; unset yields UNSPECIFIED, which consumers treat as active (the
+// default).
+func healthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
+	switch annotations[constants.AnnotationEndpointHealthCheckMode] {
+	case constants.HealthCheckModeEDS:
+		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
+	case constants.HealthCheckModeActive:
+		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_ACTIVE
+	default:
+		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_UNSPECIFIED
+	}
 }
 
 // getPortFromAnnotations extracts the endpoint port from pod annotations.

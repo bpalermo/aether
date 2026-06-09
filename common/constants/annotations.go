@@ -19,6 +19,16 @@ const (
 	// agent active-health-checks on the pod's application (delegated liveness).
 	AnnotationEndpointHealthPath = annotationAetherEndpointPrefix + "health-path"
 
+	// AnnotationEndpointHealthCheckMode is the pod annotation key selecting how
+	// client proxies determine this endpoint's health. Unset or "active" (default)
+	// makes each client actively health-check the endpoint's mesh readiness path;
+	// "eds" makes clients rely on the EDS health status pushed by the node-local
+	// agent (delegated liveness) instead of probing the endpoint.
+	AnnotationEndpointHealthCheckMode = annotationAetherEndpointPrefix + "health-check-mode"
+	// HealthCheckModeActive / HealthCheckModeEDS are the accepted annotation values.
+	HealthCheckModeActive = "active"
+	HealthCheckModeEDS    = "eds"
+
 	// AnnotationAetherEndpointMetadataPrefix is the prefix for endpoint metadata annotations
 	AnnotationAetherEndpointMetadataPrefix = "metadata." + annotationAetherEndpointPrefix
 

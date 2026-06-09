@@ -449,6 +449,40 @@ func TestListEndpoints(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:        "pod with eds health-check-mode annotation sets EDS mode",
+			clusterName: "test-cluster",
+			objects: []any{
+				func() *corev1.Pod {
+					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
+					p.Annotations[constants.AnnotationEndpointHealthCheckMode] = constants.HealthCheckModeEDS
+					return p
+				}(),
+				topologyNode("node-1", "us-east-1", "us-east-1a"),
+			},
+			service:  "my-service",
+			protocol: registryv1.Service_PROTOCOL_HTTP,
+			expected: []*registryv1.ServiceEndpoint{
+				{
+					Ip:          "10.0.0.1",
+					ClusterName: "test-cluster",
+					Port:        uint32(constants.DefaultEndpointPort),
+					Weight:      constants.DefaultEndpointWeight,
+					Metadata:    map[string]string{},
+					KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
+						Namespace: "default",
+						PodName:   "pod-a",
+						NodeName:  "node-1",
+					},
+					Locality: &registryv1.ServiceEndpoint_Locality{
+						Region: "us-east-1",
+						Zone:   "us-east-1a",
+					},
+					HealthCheckMode: registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS,
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name:        "pod with invalid port annotation is skipped without error",
 			clusterName: "test-cluster",
 			objects: []any{

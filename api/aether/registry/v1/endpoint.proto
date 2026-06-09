@@ -55,4 +55,18 @@ message ServiceEndpoint {
   }
 
   Health health = 9;
+
+  // HealthCheckMode selects how client proxies determine this endpoint's health.
+  // ACTIVE (the default, including UNSPECIFIED): each client proxy actively
+  // HTTP-health-checks the endpoint's mesh readiness path. EDS: clients instead
+  // rely on the EDS health status pushed by the node-local agent (delegated
+  // liveness) and do not probe the endpoint themselves. Set per pod via the
+  // endpoint.aether.io/health-check-mode annotation.
+  enum HealthCheckMode {
+    HEALTH_CHECK_MODE_UNSPECIFIED = 0;
+    HEALTH_CHECK_MODE_ACTIVE = 1;
+    HEALTH_CHECK_MODE_EDS = 2;
+  }
+
+  HealthCheckMode health_check_mode = 10;
 }

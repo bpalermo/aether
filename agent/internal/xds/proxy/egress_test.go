@@ -80,6 +80,19 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
 	assert.Equal(t, "svc-a-1", lb[subsetPodNameKey].GetStringValue())
 
 	assert.Equal(t, corev3.HealthStatus_HEALTHY, lle.GetLbEndpoints()[0].GetHealthStatus())
+	// Default mode (unspecified) keeps the cluster's active readiness HC.
+	assert.False(t, lle.GetLbEndpoints()[0].GetEndpoint().GetHealthCheckConfig().GetDisableActiveHealthCheck(),
+		"default endpoints are actively health-checked")
+}
+
+func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
+	ep := &registryv1.ServiceEndpoint{
+		Ip:              "10.0.0.5",
+		HealthCheckMode: registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS,
+	}
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep)
+	assert.True(t, lle.GetLbEndpoints()[0].GetEndpoint().GetHealthCheckConfig().GetDisableActiveHealthCheck(),
+		"EDS-mode endpoints opt out of active health checking and rely on EDS health")
 }
 
 func TestEndpointHealthStatus(t *testing.T) {
