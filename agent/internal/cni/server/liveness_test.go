@@ -11,6 +11,7 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,6 +45,10 @@ func fakeClustersAdmin(t *testing.T, probeCluster string) *httptest.Server {
 // registry permanently.
 func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 	pod := validCNIPod("pod-a", "default", "container-a")
+	// Pin active mode: in (default) EDS mode the registration health is already
+	// UNHEALTHY, so a failing health check at first observation is not a
+	// transition (covered by TestReconcileLivenessEDSPromotion).
+	pod.Annotations[constants.AnnotationEndpointHealthCheckMode] = constants.HealthCheckModeActive
 
 	srv := fakeClustersAdmin(t, "health_pod-a")
 	defer srv.Close()
@@ -79,4 +84,38 @@ func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 		assert.Equal(t, 1, reg.registered, "healthy->unhealthy transition must re-register")
 		assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY, last[pod.GetContainerId()])
 	})
+}
+
+// healthyClustersAdmin serves an Envoy /clusters dump where the given
+// health-probe cluster passes its active health check.
+func healthyClustersAdmin(t *testing.T, probeCluster string) *httptest.Server {
+	t.Helper()
+	body := `{"cluster_statuses":[{"name":"` + probeCluster + `","host_statuses":[{"health_status":{}}]}]}`
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// TestReconcileLivenessEDSPromotion: a (default) EDS-mode endpoint registers
+// UNHEALTHY; the first healthy observation by the node-local proxy must promote
+// it (re-register HEALTHY) — the absent-state seed has to match the
+// registration health, or the promotion never fires.
+func TestReconcileLivenessEDSPromotion(t *testing.T) {
+	pod := validCNIPod("pod-a", "default", "container-a")
+
+	srv := healthyClustersAdmin(t, "health_pod-a")
+	defer srv.Close()
+
+	store := storage.NewMockStorageWithGetAll[*cniv1.CNIPod](func(_ context.Context) ([]*cniv1.CNIPod, error) {
+		return []*cniv1.CNIPod{pod}, nil
+	})
+	require.NoError(t, store.AddResource(context.Background(), types.ContainerID(pod.GetContainerId()), pod))
+	reg := &recordingRegistry{}
+	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), srv.Listener.Addr().String())
+
+	last := make(map[string]registryv1.ServiceEndpoint_Health)
+	srvr.reconcileLiveness(context.Background(), last)
+
+	assert.Equal(t, 1, reg.registered, "first healthy observation must promote the EDS-mode endpoint")
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_HEALTHY, last[pod.GetContainerId()])
 }
