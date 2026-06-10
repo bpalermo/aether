@@ -30,6 +30,7 @@ func TestNewServiceCluster(t *testing.T) {
 	require.Len(t, c.GetHealthChecks(), 1)
 	assert.Equal(t, MeshReadyPath, c.GetHealthChecks()[0].GetHttpHealthCheck().GetPath())
 	assert.True(t, c.GetCommonLbConfig().GetIgnoreNewHostsUntilFirstHc(), "don't route to a pod until its first readiness check passes")
+	assert.True(t, c.GetIgnoreHealthOnHostRemoval(), "EDS removals (early termination drain) must take effect immediately, not after an HC failure")
 }
 
 func TestInjectUpstreamMTLS(t *testing.T) {

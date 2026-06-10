@@ -67,6 +67,12 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
 			IgnoreNewHostsUntilFirstHc: true,
 		},
+		// With active health checks configured, Envoy by default keeps an
+		// EDS-removed host in rotation until its health check fails — which would
+		// defeat the early termination drain (the agent deregisters an endpoint
+		// the moment its pod's deletion is requested, precisely so clients stop
+		// picking it before the app dies). Honor EDS removals immediately.
+		IgnoreHealthOnHostRemoval: true,
 	}
 }
 
