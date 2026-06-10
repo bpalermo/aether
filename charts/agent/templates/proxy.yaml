@@ -33,6 +33,13 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "agent.proxy.serviceAccountName" . }}
       priorityClassName: system-node-critical
+      {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
+      # The deleted (old) pod must keep its Envoy alive as the successor's
+      # hot-restart parent until the successor's protocol terminates it — the
+      # successor's timers start only after its xDS-gated init. Give the
+      # supervisor room to wait; the kubelet's SIGKILL here is the hard stop.
+      terminationGracePeriodSeconds: 60
+      {{- end }}
       {{- if .Values.proxy.hotRestart.enabled }}
       initContainers:
         # SPIKE (Strategy A): the runtime container is the Envoy image (it carries

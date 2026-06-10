@@ -360,31 +360,22 @@ func (s *Supervisor) reap(epoch int) {
 }
 
 // awaitProtocolTermination waits (without signaling) for the remaining children to
-// exit via the successor's hot-restart parent-shutdown protocol, up to
-// ParentShutdownTime plus grace; any straggler past the deadline gets a normal
-// shutdown. Requires the pod's terminationGracePeriod to exceed that deadline.
+// exit via the successor's hot-restart parent-shutdown protocol. It deliberately
+// imposes NO deadline of its own: the successor's timers start only after its
+// (xDS-gated, unbounded) init completes, and the successor keeps using the parent
+// socket (stat merges) right up to protocol-terminate — killing the parent at any
+// "reasonable" cutoff aborts the successor with errno 111. The kubelet's SIGKILL
+// at the pod's terminationGracePeriod is the real, and only safe, hard stop.
 func (s *Supervisor) awaitProtocolTermination() {
 	s.mu.Lock()
 	pending := len(s.children)
 	s.mu.Unlock()
-	if pending == 0 {
-		return
-	}
-
-	deadline := time.NewTimer(s.cfg.ParentShutdownTime + shutdownGrace)
-	defer deadline.Stop()
 
 	for pending > 0 {
-		select {
-		case exit := <-s.childExited:
-			s.reap(exit.epoch)
-			pending--
-			s.log.Info("envoy epoch terminated by successor", "epoch", exit.epoch)
-		case <-deadline.C:
-			s.log.Info("successor did not terminate our envoy in time; shutting down")
-			s.shutdown()
-			return
-		}
+		exit := <-s.childExited
+		s.reap(exit.epoch)
+		pending--
+		s.log.Info("envoy epoch terminated by successor", "epoch", exit.epoch)
 	}
 }
 
