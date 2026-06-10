@@ -166,6 +166,18 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if s.supersededBySuccessor(s.currentEpoch()) {
+				// A successor pod is mid-handoff with our Envoy as its hot-restart
+				// parent. The DaemonSet may delete this pod the moment it turns
+				// NotReady (it no longer counts against maxUnavailable), so this
+				// SIGTERM arrives while the successor still needs the parent alive.
+				// Do NOT signal Envoy: wait for the successor's parent-shutdown
+				// protocol to terminate it, then exit. Falls back to a normal
+				// shutdown if that doesn't happen in time.
+				s.log.Info("termination requested mid-handoff; waiting for successor to terminate our envoy")
+				s.awaitProtocolTermination()
+				return nil
+			}
 			s.log.Info("termination requested, shutting down all envoy epochs")
 			s.shutdown()
 			return nil
@@ -340,6 +352,35 @@ func (s *Supervisor) reap(epoch int) {
 	delete(s.children, epoch)
 	s.mu.Unlock()
 	s.log.Info("reaped envoy epoch", "epoch", epoch)
+}
+
+// awaitProtocolTermination waits (without signaling) for the remaining children to
+// exit via the successor's hot-restart parent-shutdown protocol, up to
+// ParentShutdownTime plus grace; any straggler past the deadline gets a normal
+// shutdown. Requires the pod's terminationGracePeriod to exceed that deadline.
+func (s *Supervisor) awaitProtocolTermination() {
+	s.mu.Lock()
+	pending := len(s.children)
+	s.mu.Unlock()
+	if pending == 0 {
+		return
+	}
+
+	deadline := time.NewTimer(s.cfg.ParentShutdownTime + shutdownGrace)
+	defer deadline.Stop()
+
+	for pending > 0 {
+		select {
+		case exit := <-s.childExited:
+			s.reap(exit.epoch)
+			pending--
+			s.log.Info("envoy epoch terminated by successor", "epoch", exit.epoch)
+		case <-deadline.C:
+			s.log.Info("successor did not terminate our envoy in time; shutting down")
+			s.shutdown()
+			return
+		}
+	}
 }
 
 // shutdown SIGTERMs every tracked epoch and waits up to DrainTime+grace for them
