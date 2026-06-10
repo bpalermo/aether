@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "ack",
-    srcs = ["tracker.go"],
+    srcs = [
+        "metrics.go",
+        "tracker.go",
+    ],
     importpath = "github.com/bpalermo/aether/agent/internal/xds/ack",
     visibility = ["//agent:__subpackages__"],
     deps = [
@@ -11,12 +14,18 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_go_logr_logr//:logr",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_metric//:metric",
     ],
 )
 
 go_test(
     name = "ack_test",
-    srcs = ["tracker_test.go"],
+    srcs = [
+        "metrics_test.go",
+        "tracker_test.go",
+    ],
     embed = [":ack"],
     deps = [
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
@@ -24,6 +33,9 @@ go_test(
         "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//status",
     ],
