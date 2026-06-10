@@ -119,7 +119,11 @@ func init() {
 	f.DurationVar(&supervisorCfg.HandoffDeadline, "handoff-deadline", 0, "Watchdog: max time a hot-restart epoch may stay not-LIVE after launch before the supervisor exits non-zero (0 = 2m default)")
 	f.DurationVar(&supervisorCfg.AdminUnresponsiveDeadline, "admin-unresponsive-deadline", 0, "Watchdog: max time the Envoy admin may be unreachable (once previously LIVE) before the supervisor exits non-zero (0 = 30s default)")
 	f.BoolVar(&supervisorMetricsEnabled, "metrics-enabled", true, "Enable supervisor hot-restart lifecycle metrics")
-	f.StringVar(&supervisorTelemetryCfg.BindAddress, "metrics-bind-address", ":9902", "Prometheus /metrics address; the supervisor shares the host netns, so a surge predecessor holding the port is retried, not fatal")
+	// Push-first: OTLP export (--otlp-endpoint) is the primary metrics path. The
+	// scrape endpoint stays available for collector-less setups but defaults off:
+	// the supervisor shares the host netns, so a fixed port collides between the
+	// surge predecessor and successor (retried, but avoidable entirely via push).
+	f.StringVar(&supervisorTelemetryCfg.BindAddress, "metrics-bind-address", "", "Optional Prometheus /metrics address (e.g. :9902); empty disables the scrape endpoint in favor of OTLP push (--otlp-endpoint)")
 	f.StringVar(&supervisorTelemetryCfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for metrics push (e.g. collector:4317); empty disables OTLP export")
 
 	rootCmd.AddCommand(proxySupervisorCmd)

@@ -52,6 +52,14 @@ type AetherConf struct {
 	// 0 = 10s default; negative = no delay.
 	NetnsUnpinDelaySeconds int `json:"netns_unpin_delay_seconds"`
 
+	// OTLPEndpoint enables OTel telemetry (traces + metrics) pushed to the
+	// given OTLP gRPC collector (host:port, insecure). The plugin binary is
+	// exec'd by the container runtime, so its environment is the runtime's,
+	// not a pod's — the endpoint travels in the netconf (written by
+	// cni-install) instead. Empty = the standard OTEL_EXPORTER_OTLP_* env
+	// vars, if the runtime happens to set them; otherwise telemetry is off.
+	OTLPEndpoint string `json:"otlp_endpoint,omitempty"`
+
 	// RuntimeConfig holds runtime-provided configuration like pod annotations
 	RuntimeConfig *RuntimeConfig `json:"runtimeConfig,omitempty"`
 }

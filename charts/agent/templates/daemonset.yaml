@@ -28,6 +28,11 @@ spec:
           imagePullPolicy: {{ .Values.cniInstall.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
+            {{- with .Values.telemetry.otlpEndpoint }}
+            # Written into the netconf: the CNI plugin binary runs under the
+            # container runtime, so the endpoint cannot reach it via pod env.
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -48,6 +53,16 @@ spec:
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
+            {{- if .Values.telemetry.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.telemetry.otlpEndpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.telemetry.tracing.enabled }}
+            - "--tracing-enabled=true"
+            - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"
+            {{- end }}
             - "--spire-enabled={{ .Values.spire.enabled }}"
             {{- if .Values.spire.enabled }}
             {{- with .Values.spire.trustDomain }}

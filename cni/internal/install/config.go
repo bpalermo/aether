@@ -22,6 +22,10 @@ type InstallerConfig struct {
 	// CNIBinTargetDir is the directory on the host where the CNI plugin binary should be copied
 	// (typically /opt/cni/bin)
 	CNIBinTargetDir string
+	// OTLPEndpoint, when set, is written into the generated netconf so the CNI
+	// plugin binary pushes traces and metrics to this OTLP gRPC collector.
+	// Empty leaves plugin telemetry disabled.
+	OTLPEndpoint string
 }
 
 // NewInstallerConfig creates a new InstallerConfig with default values.

@@ -44,6 +44,7 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig.Type = "aether-cni"
 	pluginConfig.CNIVersion = "0.0.1"
 	pluginConfig.AgentCNIPath = constants.DefaultCNISocketPath
+	pluginConfig.OTLPEndpoint = cfg.OTLPEndpoint
 
 	marshalledJSON, err := json.MarshalIndent(pluginConfig, "", "  ")
 	if err != nil {

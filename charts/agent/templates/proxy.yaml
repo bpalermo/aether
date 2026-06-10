@@ -73,6 +73,11 @@ spec:
             - "--handoff-deadline={{ .Values.proxy.hotRestart.handoffDeadline }}"
             - "--admin-unresponsive-deadline={{ .Values.proxy.hotRestart.adminUnresponsiveDeadline }}"
             {{- end }}
+            {{- with .Values.telemetry.otlpEndpoint }}
+            # Push-first: the supervisor exports its hot-restart lifecycle
+            # metrics over OTLP; no scrape port to collide on in the host netns.
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
             - "--envoy-arg=-l"
             - "--envoy-arg={{ .Values.proxy.logLevel }}"
             - "--envoy-arg=--service-cluster"
