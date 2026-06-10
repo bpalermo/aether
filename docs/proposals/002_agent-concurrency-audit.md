@@ -1,6 +1,6 @@
 # Agent Concurrency Audit: Config Propagation, Hot Restart, Pod Lifecycle
 
-**Status:** Findings (no fixes applied)
+**Status:** All findings fixed — R1+R3 in #109, R2+R4-R8 in #110, follow-on predecessor re-probe in #111
 **Author:** Bruno Palermo
 **Date:** 2026-06-10
 
