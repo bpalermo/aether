@@ -37,7 +37,7 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 		Port:            uint32(port),
 		Weight:          weight,
 		Metadata:        getEndpointMetadataFromAnnotations(cniPod.GetAnnotations()),
-		HealthCheckMode: healthCheckModeFromAnnotations(cniPod.GetAnnotations()),
+		HealthCheckMode: HealthCheckModeFromAnnotations(cniPod.GetAnnotations()),
 		ContainerMetadata: &registryv1.ServiceEndpoint_ContainerMetadata{
 			ContainerId:      cniPod.GetContainerId(),
 			NetworkNamespace: cniPod.GetNetworkNamespace(),
@@ -106,18 +106,18 @@ func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 	return uint32(weight), nil
 }
 
-// healthCheckModeFromAnnotations maps the endpoint.aether.io/health-check-mode
-// annotation to the ServiceEndpoint health-check mode. "eds" yields EDS; "active"
-// yields ACTIVE; unset yields UNSPECIFIED, which consumers treat as active (the
-// default).
-func healthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
+// HealthCheckModeFromAnnotations maps the endpoint.aether.io/health-check-mode
+// annotation to the ServiceEndpoint health-check mode. "active" yields ACTIVE;
+// "eds" or unset yields EDS — delegated liveness is the default: the node-local
+// agent vets each endpoint once and publishes its health over EDS, so new
+// endpoints enter every client pre-warmed (no per-client first-HC round) and a
+// per-pod annotation opts back into per-client active checking.
+func HealthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
 	switch annotations[constants.AnnotationEndpointHealthCheckMode] {
-	case constants.HealthCheckModeEDS:
-		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
 	case constants.HealthCheckModeActive:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_ACTIVE
 	default:
-		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_UNSPECIFIED
+		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
 	}
 }
 

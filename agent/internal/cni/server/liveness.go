@@ -65,12 +65,18 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 			want = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 		}
 
-		// Absent prior state is treated as healthy (the registration default), so
-		// only a real transition triggers a re-register.
+		// Absent prior state is seeded with the endpoint's registration health so
+		// only a real transition triggers a re-register: EDS-mode endpoints are
+		// registered UNHEALTHY (gated until this proxy vets the app — the first
+		// healthy observation here is the promotion), active-mode endpoints
+		// register HEALTHY.
 		key := pod.GetContainerId()
 		prev, ok := last[key]
 		if !ok {
 			prev = registryv1.ServiceEndpoint_HEALTH_HEALTHY
+			if registry.HealthCheckModeFromAnnotations(pod.GetAnnotations()) == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
+				prev = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+			}
 		}
 		if prev == want {
 			continue

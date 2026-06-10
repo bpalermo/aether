@@ -4,6 +4,7 @@ go_library(
     name = "server",
     srcs = [
         "config.go",
+        "ghostsweep.go",
         "liveness.go",
         "pod.go",
         "resubscribe.go",
@@ -42,6 +43,7 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "ghostsweep_test.go",
         "liveness_test.go",
         "pod_test.go",
         "resubscribe_test.go",

@@ -10,6 +10,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/registry"
 	"google.golang.org/grpc/codes"
@@ -42,8 +43,11 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS}, nil
 	}
 
-	// Store in the local storage
+	// Store in the local storage. Whether this container was already known
+	// distinguishes a fresh CNI ADD from an idempotent re-add (CNI CHECK).
 	containerdID := types.ContainerID(cniPod.GetContainerId())
+	_, getErr := s.storage.GetResource(ctx, containerdID)
+	fresh := getErr != nil
 	log.Info("adding pod to storage", "containerID", containerdID)
 	if err := s.storage.AddResource(ctx, containerdID, cniPod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
@@ -57,6 +61,14 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cniPod)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to build endpoint: %v", err)
+		}
+		// Delegated liveness (EDS mode): a brand-new endpoint enters the registry
+		// UNHEALTHY — clients must not route to it until this node's proxy has
+		// seen the app pass its health check, at which point the liveness loop
+		// promotes it. A re-add of a known pod keeps the registration default
+		// (HEALTHY) so a CHECK can't yank a serving endpoint out of rotation.
+		if fresh && sEndpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
+			sEndpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 		}
 		if err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, sEndpoint); err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)

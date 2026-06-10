@@ -127,6 +127,11 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	// (deletionTimestamp), instead of waiting for CNI DEL after the containers
 	// are already dead.
 	go s.runTerminationWatch(ctx, s.informers)
+
+	// Ghost reconciliation: deregister this node's registry endpoints that no
+	// live local pod accounts for (lost CNI DELs, node churn). Prerequisite for
+	// EDS health-check mode, where a HEALTHY ghost would receive traffic forever.
+	go s.runGhostSweepLoop(ctx)
 	return nil
 }
 
