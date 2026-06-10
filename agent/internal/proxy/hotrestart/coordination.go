@@ -146,6 +146,20 @@ func (s *Supervisor) writeState(epoch int) {
 // file ONLY while LIVE — a launched-but-not-yet-LIVE (or failed) epoch is never
 // recorded, so a crash-restart re-reads the still-current predecessor epoch and
 // retries N+1 rather than climbing N+1, N+2, … against dead parents.
+// It also hosts the two wedge watchdogs (see docs/proposals/001, e2e findings
+// 2026-06-10): Envoy's hot-restart RPCs are blocking recvmsg on a datagram
+// socket with no timeout, so a parent dying between request and reply leaves
+// the successor's main thread blocked forever — child process alive and
+// workers serving, but admin never accepting and LIVE never reached. Nothing
+// inside Envoy recovers from that; the supervisor must diagnose it and exit
+// non-zero so Kubernetes recreates the pod.
+//
+//   - handoff watchdog: a hot-restart epoch (N>0) still not LIVE
+//     HandoffDeadline after launch, child still alive → wedged pre-LIVE.
+//   - admin watchdog: admin unreachable (connect/timeout, NOT "answers with a
+//     different epoch", which is the normal mid-handoff state) for
+//     AdminUnresponsiveDeadline once some epoch has been LIVE → wedged
+//     post-LIVE (parent died mid stats-merge).
 func (s *Supervisor) watchLiveness(ctx context.Context) {
 	if s.cfg.ReadyMarkerPath == "" && s.cfg.StateDir == "" {
 		return
@@ -154,6 +168,8 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 	t := time.NewTicker(readyPollInterval)
 	defer t.Stop()
 	ready := false
+	everLive := false
+	var unreachableSince time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -162,7 +178,15 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			return
 		case <-t.C:
 			epoch := s.currentEpoch()
-			if s.adminLiveAtEpoch(ctx, epoch) {
+			live, reachable := s.adminProbe(ctx, epoch)
+			if reachable {
+				unreachableSince = time.Time{}
+			} else if unreachableSince.IsZero() {
+				unreachableSince = time.Now()
+			}
+			if live {
+				everLive = true
+				s.markEpochLive()
 				s.writeState(epoch) // LIVE-gated heartbeat
 				// Hold readiness until the cross-pod handoff is fully complete (the
 				// predecessor has been terminated by this Envoy's parent-shutdown), so
@@ -172,10 +196,26 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 					ready = true
 					s.log.Info("pod ready: envoy live at newest epoch", "epoch", epoch)
 				}
-			} else if ready {
+				continue
+			}
+			if ready {
 				s.clearReady()
 				ready = false
 				s.log.Info("pod not ready: envoy not live at newest epoch", "epoch", epoch)
+			}
+
+			launched, wasLive := s.epochProgress()
+			if epoch > 0 && !wasLive && s.childTracked(epoch) && time.Since(launched) > s.handoffDeadline() {
+				s.fireWatchdog(fmt.Errorf(
+					"hot-restart handoff watchdog: epoch %d not LIVE within %s of launch (parent likely died mid-handoff)",
+					epoch, s.handoffDeadline()))
+				return
+			}
+			if everLive && !reachable && s.childTracked(epoch) && time.Since(unreachableSince) > s.adminUnresponsiveDeadline() {
+				s.fireWatchdog(fmt.Errorf(
+					"admin watchdog: envoy admin %s unresponsive for %s with child alive at epoch %d",
+					s.cfg.AdminAddress, s.adminUnresponsiveDeadline(), epoch))
+				return
 			}
 		}
 	}
@@ -193,15 +233,24 @@ func (s *Supervisor) clearReady() { _ = os.Remove(s.cfg.ReadyMarkerPath) }
 // reports state LIVE at the given restart epoch. During a cross-pod handoff the
 // predecessor answers admin at the old epoch until the new Envoy takes over.
 func (s *Supervisor) adminLiveAtEpoch(ctx context.Context, epoch int) bool {
+	live, _ := s.adminProbe(ctx, epoch)
+	return live
+}
+
+// adminProbe distinguishes "admin answered but is not LIVE at epoch" (reachable,
+// the normal mid-handoff state) from "admin did not answer at all" (connect
+// failure or timeout — a wedged main thread leaves the admin socket bound but
+// never accepting, so requests time out). The admin watchdog keys off reachable.
+func (s *Supervisor) adminProbe(ctx context.Context, epoch int) (live, reachable bool) {
 	ctx, cancel := context.WithTimeout(ctx, readyPollInterval)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.cfg.AdminAddress+"/server_info", nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var info struct {
@@ -211,7 +260,7 @@ func (s *Supervisor) adminLiveAtEpoch(ctx context.Context, epoch int) bool {
 		} `json:"command_line_options"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&info) != nil {
-		return false
+		return false, true
 	}
-	return info.State == "LIVE" && info.CommandLineOptions.RestartEpoch == epoch
+	return info.State == "LIVE" && info.CommandLineOptions.RestartEpoch == epoch, true
 }

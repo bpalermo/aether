@@ -90,6 +90,8 @@ func init() {
 	f.StringVar(&supervisorCfg.ReadyMarkerPath, "ready-marker", "", "Pod-local path for the readiness marker maintained while Envoy is live at the newest epoch")
 	f.StringVar(&supervisorCfg.AdminAddress, "admin-address", "127.0.0.1:9901", "Envoy admin host:port used for the readiness check")
 	f.BoolVar(&supervisorReadinessCheck, "readiness-check", false, "Exit 0 iff the --ready-marker file exists (exec readiness probe mode)")
+	f.DurationVar(&supervisorCfg.HandoffDeadline, "handoff-deadline", 0, "Watchdog: max time a hot-restart epoch may stay not-LIVE after launch before the supervisor exits non-zero (0 = 2m default)")
+	f.DurationVar(&supervisorCfg.AdminUnresponsiveDeadline, "admin-unresponsive-deadline", 0, "Watchdog: max time the Envoy admin may be unreachable (once previously LIVE) before the supervisor exits non-zero (0 = 30s default)")
 
 	rootCmd.AddCommand(proxySupervisorCmd)
 }

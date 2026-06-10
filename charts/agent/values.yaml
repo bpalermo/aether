@@ -85,6 +85,14 @@ proxy:
     # (until its Envoy terminates the predecessor), so keep these modest.
     drainTime: 10s
     parentShutdownTime: 15s
+    # Watchdogs (Strategy B): a hot-restart epoch that never reaches LIVE within
+    # handoffDeadline of launch, or an admin endpoint unreachable for
+    # adminUnresponsiveDeadline after having been LIVE, means the successor's
+    # main thread is wedged in a blocking hot-restart RPC against a dead parent;
+    # the supervisor exits non-zero so the pod is recreated. 0 = built-in
+    # defaults (2m / 30s).
+    handoffDeadline: 0
+    adminUnresponsiveDeadline: 0
     # /dev/shm size for the hot-restart shared-memory segment (gauges/counters).
     # Strategy A only (emptyDir Memory); Strategy B uses shmHostPath instead.
     shmSizeLimit: 64Mi

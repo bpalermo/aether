@@ -41,6 +41,20 @@ const (
 	// shutdownGrace is added to DrainTime as the deadline for children to exit on
 	// SIGTERM before they are SIGKILLed.
 	shutdownGrace = 5 * time.Second
+	// defaultHandoffDeadline bounds how long a hot-restart epoch (N>0) may stay
+	// not-LIVE after launch before the handoff watchdog declares it wedged. The
+	// observed failure mode (e2e 2026-06-10): the parent Envoy dies between a
+	// hot-restart RPC request and its reply, leaving the successor's main thread
+	// blocked forever in recvmsg on the hot-restart domain socket — admin bound
+	// but never accepting, pod NotReady forever, DaemonSet roll wedged.
+	defaultHandoffDeadline = 2 * time.Minute
+	// defaultAdminUnresponsiveDeadline bounds how long the Envoy admin endpoint
+	// may be unreachable (connect/timeout failures, not "answers with another
+	// epoch") once this supervisor has seen LIVE, before the admin watchdog
+	// fires. Covers the same recvmsg wedge striking after LIVE (a parent dying
+	// mid stats-merge). A reachable admin answering at a different epoch — the
+	// normal mid-handoff state — never trips this.
+	defaultAdminUnresponsiveDeadline = 30 * time.Second
 )
 
 // Config configures the Envoy hot-restart supervisor.
@@ -79,6 +93,12 @@ type Config struct {
 	ReadyMarkerPath string
 	// AdminAddress is the Envoy admin host:port used for the readiness check.
 	AdminAddress string
+	// HandoffDeadline overrides defaultHandoffDeadline (0 = default). Must be
+	// comfortably larger than ParentShutdownTime plus worst-case xDS-gated init.
+	HandoffDeadline time.Duration
+	// AdminUnresponsiveDeadline overrides defaultAdminUnresponsiveDeadline
+	// (0 = default).
+	AdminUnresponsiveDeadline time.Duration
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -95,9 +115,18 @@ type Supervisor struct {
 	mu        sync.Mutex
 	children  map[int]*exec.Cmd // keyed by restart epoch
 	nextEpoch int
+	// epochLaunched / epochLive track the newest epoch's progress toward LIVE,
+	// feeding the handoff watchdog: launched records the fork time, live whether
+	// admin has confirmed LIVE at that epoch at least once.
+	epochLaunched time.Time
+	epochLive     bool
 
 	childExited chan childExit
 	done        chan struct{}
+	// watchdogFired carries a fatal diagnosis from watchLiveness to Run: the
+	// newest Envoy is wedged (handoff never LIVE, or admin unresponsive) and the
+	// container must exit non-zero so Kubernetes recreates the pod.
+	watchdogFired chan error
 
 	// readyGate delays the pod's readiness until after a cross-pod handoff is fully
 	// complete: the successor Envoy terminates the predecessor itself via
@@ -114,11 +143,12 @@ const readyGateBuffer = 3 * time.Second
 // New creates a Supervisor.
 func New(cfg Config, log logr.Logger) *Supervisor {
 	return &Supervisor{
-		cfg:         cfg,
-		log:         log.WithName("proxy-supervisor"),
-		children:    make(map[int]*exec.Cmd),
-		childExited: make(chan childExit, 8),
-		done:        make(chan struct{}),
+		cfg:           cfg,
+		log:           log.WithName("proxy-supervisor"),
+		children:      make(map[int]*exec.Cmd),
+		childExited:   make(chan childExit, 8),
+		done:          make(chan struct{}),
+		watchdogFired: make(chan error, 1),
 	}
 }
 
@@ -213,6 +243,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				s.log.Error(err, "hot restart failed; keeping current epoch")
 			}
 
+		case err := <-s.watchdogFired:
+			// The newest Envoy is wedged (see watchLiveness): kill everything and
+			// exit non-zero. Kubernetes recreates the pod; the fresh supervisor
+			// re-probes the (now dead) predecessor and recovers at epoch 0.
+			s.log.Error(err, "liveness watchdog fired; terminating for container restart")
+			s.shutdown()
+			return err
+
 		case exit := <-s.childExited:
 			if exit.epoch == s.currentEpoch() {
 				if s.cfg.StateDir != "" && exit.err == nil {
@@ -256,6 +294,8 @@ func (s *Supervisor) hotRestart() error {
 
 	s.mu.Lock()
 	s.children[epoch] = cmd
+	s.epochLaunched = time.Now()
+	s.epochLive = false
 	s.mu.Unlock()
 
 	// The node epoch is published to the shared state file only once this Envoy is
@@ -342,6 +382,53 @@ func (s *Supervisor) currentEpoch() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.nextEpoch - 1
+}
+
+// epochProgress returns the newest epoch's launch time and whether it has been
+// confirmed LIVE at least once.
+func (s *Supervisor) epochProgress() (launched time.Time, live bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epochLaunched, s.epochLive
+}
+
+// markEpochLive records that the newest epoch has been confirmed LIVE.
+func (s *Supervisor) markEpochLive() {
+	s.mu.Lock()
+	s.epochLive = true
+	s.mu.Unlock()
+}
+
+// childTracked reports whether the child for the given epoch is still tracked
+// (started and not yet reaped).
+func (s *Supervisor) childTracked(epoch int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.children[epoch]
+	return ok
+}
+
+func (s *Supervisor) handoffDeadline() time.Duration {
+	if s.cfg.HandoffDeadline > 0 {
+		return s.cfg.HandoffDeadline
+	}
+	return defaultHandoffDeadline
+}
+
+func (s *Supervisor) adminUnresponsiveDeadline() time.Duration {
+	if s.cfg.AdminUnresponsiveDeadline > 0 {
+		return s.cfg.AdminUnresponsiveDeadline
+	}
+	return defaultAdminUnresponsiveDeadline
+}
+
+// fireWatchdog delivers a fatal wedge diagnosis to Run (at most one is ever
+// consumed; extra fires are dropped).
+func (s *Supervisor) fireWatchdog(err error) {
+	select {
+	case s.watchdogFired <- err:
+	default:
+	}
 }
 
 // signalEpoch sends sig to the child for the given epoch, if still tracked.
