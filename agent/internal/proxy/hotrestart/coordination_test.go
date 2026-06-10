@@ -104,22 +104,6 @@ func TestInitStartEpoch(t *testing.T) {
 	})
 }
 
-func TestSupersededBySuccessor(t *testing.T) {
-	s := newCoordSupervisor(t)
-	// Our newest epoch is 2.
-	writeRawState(t, s, 3, 0) // a fresh successor at epoch 3
-	assert.True(t, s.supersededBySuccessor(2))
-
-	writeRawState(t, s, 2, 0) // same epoch, not a successor
-	assert.False(t, s.supersededBySuccessor(2))
-
-	writeRawState(t, s, 3, 2*predecessorStale) // stale successor -> treat as crash
-	assert.False(t, s.supersededBySuccessor(2))
-
-	off := New(Config{}, logr.Discard())
-	assert.False(t, off.supersededBySuccessor(2))
-}
-
 func TestReadyMarker(t *testing.T) {
 	dir := t.TempDir()
 	s := New(Config{ReadyMarkerPath: filepath.Join(dir, "ready")}, logr.Discard())

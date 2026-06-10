@@ -153,19 +153,6 @@ func (s *Supervisor) setReady() {
 
 func (s *Supervisor) clearReady() { _ = os.Remove(s.cfg.ReadyMarkerPath) }
 
-// supersededBySuccessor reports whether a successor pod has taken over this node
-// at a higher epoch. When our newest Envoy exits during a cross-pod surge, it was
-// terminated by the successor's takeover (not a crash), so the supervisor should
-// shut down gracefully and let the pod be deleted rather than exit non-zero and
-// restart-loop.
-func (s *Supervisor) supersededBySuccessor(epoch int) bool {
-	if s.cfg.StateDir == "" {
-		return false
-	}
-	cur, hb, ok := s.readState()
-	return ok && cur > epoch && time.Since(hb) < predecessorStale
-}
-
 // adminLiveAtEpoch reports whether the Envoy admin (the shared host-netns port)
 // reports state LIVE at the given restart epoch. During a cross-pod handoff the
 // predecessor answers admin at the old epoch until the new Envoy takes over.

@@ -166,14 +166,16 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			if s.supersededBySuccessor(s.currentEpoch()) {
-				// A successor pod is mid-handoff with our Envoy as its hot-restart
-				// parent. The DaemonSet may delete this pod the moment it turns
-				// NotReady (it no longer counts against maxUnavailable), so this
-				// SIGTERM arrives while the successor still needs the parent alive.
-				// Do NOT signal Envoy: wait for the successor's parent-shutdown
-				// protocol to terminate it, then exit. Falls back to a normal
-				// shutdown if that doesn't happen in time.
+			// Cross-pod mode: if our Envoy no longer answers admin LIVE at our own
+			// epoch, its sockets have (very likely) been transferred to a surging
+			// successor that is still initializing — the DaemonSet deletes this pod
+			// the moment it turns NotReady, which is exactly that window. Do NOT
+			// signal Envoy (the successor still needs its hot-restart parent alive,
+			// even before reaching LIVE — killing it aborts the successor with
+			// errno 111): wait for the successor's parent-shutdown protocol to
+			// terminate it, with a deadline fallback. The check cannot rely on the
+			// successor having published its epoch, since it does so only once LIVE.
+			if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
 				s.log.Info("termination requested mid-handoff; waiting for successor to terminate our envoy")
 				s.awaitProtocolTermination()
 				return nil
@@ -202,12 +204,15 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 		case exit := <-s.childExited:
 			if exit.epoch == s.currentEpoch() {
-				if s.supersededBySuccessor(exit.epoch) {
-					// A successor pod took over this node at a higher epoch and
-					// terminated our Envoy via the hot-restart parent-shutdown. Don't
-					// exit (restartPolicy=Always would relaunch us and climb epochs):
-					// stay alive with no child until the DaemonSet deletes this pod.
-					s.log.Info("newest epoch superseded by a successor pod; awaiting pod deletion", "epoch", exit.epoch)
+				if s.cfg.StateDir != "" && exit.err == nil {
+					// Clean exit (status 0) of our newest epoch in cross-pod mode:
+					// that's the successor's hot-restart parent-shutdown protocol
+					// terminating us (a crash would be non-zero/signaled). The signal
+					// is deliberate process state, not the shared epoch file — the
+					// successor publishes its epoch only once LIVE, which may be
+					// after it terminates us. Don't exit (restartPolicy=Always would
+					// relaunch and collide): await deletion by the DaemonSet.
+					s.log.Info("newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
 					s.reap(exit.epoch)
 					<-ctx.Done()
 					return nil
