@@ -19,6 +19,7 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel"
 )
 
 // resourceState is the last word Envoy gave about one resource.
@@ -49,7 +50,8 @@ type inflightResponse struct {
 // Tracker observes the delta-xDS streams via server callbacks and lets callers
 // wait until Envoy has acknowledged the presence or removal of a named resource.
 type Tracker struct {
-	log logr.Logger
+	log     logr.Logger
+	metrics *trackerMetrics // nil disables instrumentation
 
 	mu       sync.Mutex
 	state    map[string]resourceState // keyed by typeURL + "/" + name
@@ -60,8 +62,16 @@ type Tracker struct {
 
 // NewTracker creates an empty Tracker.
 func NewTracker(log logr.Logger) *Tracker {
+	log = log.WithName("xds-ack")
+	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
+	// a registration failure only disables instrumentation, never the tracker.
+	metrics, err := newTrackerMetrics(otel.Meter(meterName))
+	if err != nil {
+		log.Error(err, "failed to create xds ack metrics; continuing without instrumentation")
+	}
 	return &Tracker{
-		log:      log.WithName("xds-ack"),
+		log:      log,
+		metrics:  metrics,
 		state:    make(map[string]resourceState),
 		inflight: make(map[inflightKey]inflightResponse),
 		changed:  make(chan struct{}),
@@ -107,6 +117,7 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 		t.mu.Unlock()
 
 		if st.nackErr != nil {
+			t.metrics.waitFailed(ctx, wantPresent, "nack")
 			return fmt.Errorf("envoy rejected config for %s: %w", name, st.nackErr)
 		}
 		if st.present == wantPresent {
@@ -115,6 +126,7 @@ func (t *Tracker) wait(ctx context.Context, typeURL, name string, wantPresent bo
 
 		select {
 		case <-ctx.Done():
+			t.metrics.waitFailed(ctx, wantPresent, "timeout")
 			if wantPresent {
 				return fmt.Errorf("timed out waiting for envoy to ack %s", name)
 			}
@@ -183,6 +195,7 @@ func (t *Tracker) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscovery
 	t.mu.Unlock()
 
 	if detail := req.GetErrorDetail(); detail != nil {
+		t.metrics.nacked(context.Background(), entry.typeURL)
 		t.log.Info("envoy NACKed delta response",
 			"typeURL", entry.typeURL, "added", entry.added, "removed", entry.removed, "error", detail.GetMessage())
 	}
