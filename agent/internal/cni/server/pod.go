@@ -49,9 +49,18 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
 
-	serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cniPod)
-	if err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, sEndpoint); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
+	if cniPod.GetTerminating() {
+		// Deletion already requested (CNI CHECK re-add, or ADD racing a delete):
+		// keep storage/xDS for drain, but never (re-)register the endpoint.
+		log.V(1).Info("pod is terminating; skipping endpoint registration")
+	} else {
+		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cniPod)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to build endpoint: %v", err)
+		}
+		if err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, sEndpoint); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
+		}
 	}
 
 	// Subscribe to the pod's SVID via the SPIRE Delegated Identity API using its
@@ -176,6 +185,10 @@ func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) (st
 	cniPod.Annotations = k8sPod.Annotations
 	cniPod.Labels = k8sPod.Labels
 	cniPod.ServiceAccount = k8sPod.Spec.ServiceAccountName
+	// A pod whose deletion has already been requested must never (re-)enter the
+	// registry: CNI CHECK re-sends AddPod for existing pods, which would
+	// otherwise clear the terminating flag and resurrect the endpoint mid-drain.
+	cniPod.Terminating = k8sPod.DeletionTimestamp != nil
 
 	return string(k8sPod.UID), nil
 }

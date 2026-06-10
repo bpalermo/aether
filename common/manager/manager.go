@@ -32,10 +32,14 @@ func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion stri
 		}
 	}
 
-	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	opts := ctrl.Options{
 		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
 		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
-	})
+	}
+	if cfg.CacheOptions != nil {
+		opts.Cache = *cfg.CacheOptions
+	}
+	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %w", err)
 	}

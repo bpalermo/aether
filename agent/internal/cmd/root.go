@@ -42,7 +42,11 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -118,6 +122,16 @@ func runAgent(ctx context.Context) (retErr error) {
 		"metricsEnabled", cfg.MetricsEnabled,
 		"otelEnabled", cfg.OTelEnabled,
 	)
+
+	// Scope the manager's Pod informer to this node: the agent only ever reads
+	// (CNI ADD enrichment) and watches (termination drain) its own node's pods,
+	// and an unscoped Pod cache on a DaemonSet means every agent caching every
+	// pod in the cluster.
+	cfg.CacheOptions = &ctrlcache.Options{
+		ByObject: map[client.Object]ctrlcache.ByObject{
+			&corev1.Pod{}: {Field: fields.OneTermEqualSelector("spec.nodeName", cfg.NodeName)},
+		},
+	}
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version)
 	if err != nil {
@@ -236,6 +250,7 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 		spireBridge,
 		l,
 		m.GetClient(),
+		m.GetCache(),
 		cfg.CNIServerConfig,
 	)
 	if err != nil {
