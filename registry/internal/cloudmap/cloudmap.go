@@ -128,14 +128,22 @@ func (r *CloudMapRegistry) RegisterEndpoint(ctx context.Context, serviceName str
 	// Health lives in Cloud Map's native per-instance status, not an attribute.
 	// AWS_INIT_HEALTH_STATUS only applies to brand-new instances, so an update
 	// is required for re-registrations (liveness transitions, draining marks).
-	// Best-effort: services created before custom health checks reject this
-	// until they are re-created (see resolveOrCreateServiceID).
+	//
+	// The failure MUST propagate: RegisterInstance is asynchronous, so this
+	// update races a brand-new instance's visibility (InstanceNotFound) — if
+	// the failure were tolerated, the caller would consider the health
+	// recorded and never retry, leaving the durable Cloud Map status stale
+	// (observed on talos-main: every re-registered instance stuck UNHEALTHY,
+	// a mesh-wide outage on the next registrar resync). Returning the error
+	// lets the agent liveness loop retry on its next tick, converging as soon
+	// as the registration operation completes.
 	if _, healthErr := r.client.UpdateInstanceCustomHealthStatus(ctx, &servicediscovery.UpdateInstanceCustomHealthStatusInput{
 		ServiceId:  aws.String(svcID),
 		InstanceId: aws.String(instID),
 		Status:     customHealthStatus(endpoint.GetHealth()),
 	}); healthErr != nil {
-		r.log.Error(healthErr, "failed to update instance health status", "service", serviceName, "ip", ip)
+		r.log.Error(healthErr, "failed to update instance health status; caller retries", "service", serviceName, "ip", ip)
+		return fmt.Errorf("failed to update health status for IP %s: %w", ip, healthErr)
 	}
 
 	// Evict endpoint cache for this service (all protocols)
