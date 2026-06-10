@@ -103,6 +103,11 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	// active health check) into the registry so it is marked unhealthy in every
 	// client's EDS while the app is not serving.
 	go s.runLivenessLoop(ctx)
+
+	// Restore SVID subscriptions for pods loaded from storage: subscriptions are
+	// otherwise created only on CNI ADD, so an agent restart would leave existing
+	// pods' workload SVIDs unsubscribed and their mTLS broken until recreation.
+	go s.runResubscribeStoredPods(ctx)
 	return nil
 }
 

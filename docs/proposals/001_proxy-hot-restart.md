@@ -157,7 +157,7 @@ The implementation: per-node epoch heartbeat file on shared hostPath (`--state-d
 
 **Also fixed en route:** the e2e mesh path itself. There is no iptables interception — apps reach the mesh via the outbound listener (`127.0.0.1:18081` + `Host: <service>`); the earlier direct-pod-IP curls were bypassing the proxy entirely.
 
-**Known issue found (pre-existing, agent):** `SubscribePod` (workload SVID subscription) fires only on CNI ADD. After an **agent** restart, listeners are rebuilt from storage but SVIDs are never re-subscribed → existing pods' mTLS breaks ("Secret is not supplied by SDS") until the workload pods are recreated. Needs a re-subscribe-from-storage path in the agent. Unrelated to hot restart.
+**Known issue found (pre-existing, agent) — FIXED:** `SubscribePod` (workload SVID subscription) fired only on CNI ADD. After an **agent** restart, listeners were rebuilt from storage but SVIDs were never re-subscribed → existing pods' mTLS broke ("Secret is not supplied by SDS") until the workload pods were recreated. Fixed by re-subscribing stored pods on agent startup (bridge `Started()` signal + `runResubscribeStoredPods` in the CNI server); validated on talos-main (agent roll → warming NONE, mesh 200 without workload recreation). Unrelated to hot restart.
 
 ## Risks / Open Questions
 

@@ -80,6 +80,10 @@ type Bridge struct {
 
 	// ctx is the bridge's root context, set during Start.
 	ctx context.Context
+
+	// started is closed once Start has connected to the SPIRE agent and the
+	// bridge can accept subscriptions (SubscribePod no-ops before then).
+	started chan struct{}
 }
 
 // podSubscription is an active delegated-identity subscription for one pod.
@@ -99,7 +103,16 @@ func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, 
 		log:           log.WithName("spire-bridge"),
 		secrets:       make(map[string]*tlsv3.Secret),
 		subscriptions: make(map[string]podSubscription),
+		started:       make(chan struct{}),
 	}
+}
+
+// Started returns a channel that is closed once the bridge has connected to the
+// SPIRE agent and can accept subscriptions. Callers re-subscribing stored pods
+// after an agent restart wait on it (selecting on their context as well, since
+// the channel never closes if Start fails before connecting).
+func (b *Bridge) Started() <-chan struct{} {
+	return b.started
 }
 
 // NodeSpiffeID returns the SPIFFE ID of the agent's node identity once the node
@@ -129,6 +142,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}()
 
 	b.log.Info("connected to SPIRE agent", "socket", b.socketPath)
+	close(b.started)
 
 	bundleCh, err := client.SubscribeBundles(ctx)
 	if err != nil {
