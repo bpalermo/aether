@@ -12,9 +12,14 @@ spec:
       {{- include "agent.proxy.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
-    {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
+    {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod .Values.proxy.hotRestart.surge }}
     # Strategy B: surge a new pod onto the node before tearing down the old one so
     # the new Envoy can hot-restart from the old across the pod boundary.
+    #
+    # Only safe once every node already runs a coordinating (Strategy B) Envoy: two
+    # NON-coordinating epoch-0 Envoys with the same --base-id collide on the
+    # hot-restart domain socket in the shared host netns. Bootstrap into B with
+    # surge=false (delete-first) first, then enable surge for B→B upgrades.
     rollingUpdate:
       maxSurge: 1
       maxUnavailable: 0

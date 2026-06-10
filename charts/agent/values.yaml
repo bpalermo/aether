@@ -72,6 +72,12 @@ proxy:
     # coordination, and a readiness gate. When false, hot restart is Strategy A
     # (in-place, bootstrap-config/binary only). See docs/proposals/001.
     crossPod: false
+    # Surge update strategy (maxSurge=1/maxUnavailable=0) for connection-preserving
+    # B→B image upgrades. Keep false for the one-time bootstrap INTO B (delete-first,
+    # brief per-node gap): two non-coordinating epoch-0 Envoys sharing --base-id in
+    # the host netns collide on the hot-restart domain socket. Flip to true once all
+    # nodes run a Strategy B proxy.
+    surge: false
     # Envoy --base-id, pinned so successive epochs share one shared-memory segment.
     baseId: 0
     # Envoy --drain-time-s / --parent-shutdown-time-s (parent must exceed drain).

@@ -143,6 +143,24 @@ First on-cluster run (rev 29, `proxy.hotRestart.enabled=true` fleet-wide):
 
 **Caveat (test workloads):** the `aether-test` `client`/`echo`/`svc-a` pods were not exercising the mesh data path on their app port during this run (`client→echo:8080` showed zero delta on the `echo`/`app_echo` clusters — direct pod-to-pod, no XFCC), so an application-level zero-dropped-request assertion could not be made here. The hot-restart guarantees were instead proven via Envoy's own signals (listener/socket handover, `server.live` continuity, in-place `restartCount: 0`). A follow-up should restore a known mesh-intercepted request path for an end-to-end zero-drop assertion.
 
+## Strategy B Findings (talos-main, 2026-06-10) — PARTIAL / NOT VALIDATED
+
+Implemented cross-pod coordination (epoch heartbeat file on shared hostPath, admin-epoch readiness marker + exec probe, supersession-aware graceful exit, `maxSurge`/`surge` chart gates, shared hostPath `/dev/shm`). Deployed to talos-main.
+
+**What worked:**
+- **Initial-transition collision is real.** Two non-coordinating epoch-0 Envoys with the same `--base-id` in the shared host netns collide on the hot-restart **domain socket** (`unable to bind domain socket ... errno=98`), so surge deadlocks the bootstrap into B. Added a `proxy.hotRestart.surge` gate: bootstrap with `surge=false` (delete-first, brief per-node gap) rolled cleanly to a 5-node B baseline.
+- **Epoch coordination + readiness gate worked.** A fresh node logs "no live predecessor; starting fresh at epoch 0"; a surging successor correctly reads the heartbeat file and logs "live predecessor found … startEpoch: N+1". The pod becomes Ready only once the node's Envoy admin reports LIVE at the newest epoch.
+
+**What failed — the B→B surge handoff itself:**
+- The successor Envoy fails to attach to the predecessor with **`previous envoy process is still initializing`** → `exit status 1`. The supervisor records the epoch in the state file at launch (before the handoff is confirmed), so on the resulting crash-restart it reads the still-fresh state and climbs to epoch N+1 against the now-dead epoch N — an **epoch cascade (0→1→2…)** that only resolves when the heartbeat goes stale and the pod resets to epoch 0 (a fresh start with a gap, **not** connection-preserving).
+
+**Open problems before B can be validated:**
+1. **Don't advance the epoch on an unconfirmed handoff** — record/heartbeat the new epoch only after its Envoy reaches LIVE; on handoff failure, fail the pod cleanly (let the DaemonSet retry) rather than restart-and-increment.
+2. **Guarantee the predecessor is LIVE before the successor attaches** — the "still initializing" error means the cross-pod attach timing is wrong; possibly gate the successor's Envoy launch on the predecessor's admin reporting LIVE.
+3. The initial transition into B must always be delete-first (the `surge` gate handles this).
+
+**Status:** Strategy A remains the validated, shipped path. B is parked on `spike/proxy-hot-restart-b`; the cluster is left at a safe delete-first B baseline (`surge=false`).
+
 ## Risks / Open Questions
 
 - **`/dev/shm` capacity** — container default is 64Mi tmpfs; Envoy's hot-restart shmem holds all gauges/counters. The spike sizes the memory `emptyDir` from measured usage.
