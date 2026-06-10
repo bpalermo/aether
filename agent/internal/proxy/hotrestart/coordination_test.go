@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,12 +79,32 @@ func TestInitStartEpoch(t *testing.T) {
 		s.initStartEpoch(ctx)
 		assert.Equal(t, 4, s.nextEpoch)
 	})
-	t.Run("fresh file but admin NOT live (dead predecessor) -> epoch 0", func(t *testing.T) {
+	t.Run("near-stale file and admin NOT live -> re-probes until stale, then epoch 0", func(t *testing.T) {
 		s := newCoordSupervisor(t)
 		s.cfg.AdminAddress = fakeAdmin(t, "PRE_INITIALIZING", 3)
-		writeRawState(t, s, 3, 0)
+		// Heartbeat about to go stale: the loop re-probes (fresh file must not be
+		// trusted to be dead on one failed probe) and exits to epoch 0 once stale.
+		writeRawState(t, s, 3, predecessorStale-200*time.Millisecond)
 		s.initStartEpoch(ctx)
 		assert.Equal(t, 0, s.nextEpoch)
+	})
+
+	t.Run("fresh file with transiently failing admin -> retries then epoch+1", func(t *testing.T) {
+		s := newCoordSupervisor(t)
+		// Admin fails the first two probes, then confirms LIVE at epoch 3.
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if calls.Add(1) <= 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			fmt.Fprintf(w, `{"state":"LIVE","command_line_options":{"restart_epoch":3}}`)
+		}))
+		t.Cleanup(srv.Close)
+		s.cfg.AdminAddress = srv.Listener.Addr().String()
+		writeRawState(t, s, 3, 0)
+		s.initStartEpoch(ctx)
+		assert.Equal(t, 4, s.nextEpoch, "transient admin failures must not abandon a fresh predecessor")
 	})
 	t.Run("stale predecessor -> epoch 0", func(t *testing.T) {
 		s := newCoordSupervisor(t)
