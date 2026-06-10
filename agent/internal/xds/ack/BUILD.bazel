@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ack",
+    srcs = ["tracker.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/xds/ack",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
+        "@com_github_go_logr_logr//:logr",
+    ],
+)
+
+go_test(
+    name = "ack_test",
+    srcs = ["tracker_test.go"],
+    embed = [":ack"],
+    deps = [
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
+        "@com_github_go_logr_logr//:logr",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
+    ],
+)

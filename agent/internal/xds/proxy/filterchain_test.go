@@ -3,6 +3,9 @@ package proxy
 import (
 	"testing"
 
+	"github.com/bpalermo/aether/common/constants"
+	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,4 +39,28 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 			assert.Nil(t, fc.GetTransportSocket(), "outbound filter chain should not have TLS transport socket")
 		})
 	}
+}
+
+// TestOutboundChainReadinessFilter verifies the outbound HCM carries the
+// non-pass-through health_check readiness filter ahead of the router, matched
+// on the shared readiness path probed by the CNI plugin from inside the netns.
+func TestOutboundChainReadinessFilter(t *testing.T) {
+	fc := buildDefaultOutboundHTTPFilterChain("my-pod")
+	require.Len(t, fc.GetFilters(), 2)
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
+
+	httpFilters := hcm.GetHttpFilters()
+	require.Len(t, httpFilters, 2, "expected health_check + router")
+	assert.Equal(t, httpHealthCheckFilterName, httpFilters[0].GetName())
+	assert.Equal(t, httpRouterFilterName, httpFilters[1].GetName())
+
+	hc := &health_checkv3.HealthCheck{}
+	require.NoError(t, httpFilters[0].GetTypedConfig().UnmarshalTo(hc))
+	assert.False(t, hc.GetPassThroughMode().GetValue(), "readiness filter must answer directly")
+	assert.Empty(t, hc.GetClusterMinHealthyPercentages(), "pure server-state check, no cluster gating")
+	require.Len(t, hc.GetHeaders(), 1)
+	assert.Equal(t, ":path", hc.GetHeaders()[0].GetName())
+	assert.Equal(t, constants.ProxyReadinessPath, hc.GetHeaders()[0].GetStringMatch().GetExact())
 }

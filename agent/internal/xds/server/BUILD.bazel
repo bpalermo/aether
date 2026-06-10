@@ -15,6 +15,7 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//common/xds",
         "//registry",
+        "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_go_logr_logr//:logr",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_metric//:metric",

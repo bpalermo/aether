@@ -52,6 +52,15 @@ type AetherConf struct {
 	// 0 = 10s default; negative = no delay.
 	NetnsUnpinDelaySeconds int `json:"netns_unpin_delay_seconds"`
 
+	// ReadinessProbeDisabled turns off the in-netns data-plane readiness probe
+	// (on by default): after the agent confirms a pod's xDS config, CNI ADD
+	// probes the pod's outbound capture listener from inside its netns until
+	// the proxy's health_check filter answers 200, proving the data plane is
+	// actually serving (socket bound in the netns, workers accepting) before
+	// pod start completes. CNI DEL probes until the listener socket is gone.
+	// Best-effort: a probe timeout is logged, never fails the CNI operation.
+	ReadinessProbeDisabled bool `json:"readiness_probe_disabled"`
+
 	// OTLPEndpoint enables OTel telemetry (traces + metrics) pushed to the
 	// given OTLP gRPC collector (host:port, insecure). The plugin binary is
 	// exec'd by the container runtime, so its environment is the runtime's,

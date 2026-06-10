@@ -11,6 +11,7 @@ import (
 
 	agentconstants "github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/spire"
+	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/storage"
 	"github.com/bpalermo/aether/agent/types"
@@ -64,7 +65,7 @@ func startCNIServer(t *testing.T, ctx context.Context, sockPath string, stor sto
 	sc := cache.NewSnapshotCache("test-node", logr.Discard())
 	cfg := &CNIServerConfig{SocketPath: sockPath}
 
-	srv, err := NewCNIServer("test-cluster", "test-node", "test-node", "example.org", stor, reg, sc, spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()), logr.Discard(), k8sClient, nil, cfg)
+	srv, err := NewCNIServer("test-cluster", "test-node", "test-node", "example.org", stor, reg, sc, ack.NewTracker(logr.Discard()), spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()), logr.Discard(), k8sClient, nil, cfg)
 	require.NoError(t, err)
 
 	errCh := make(chan error, 1)

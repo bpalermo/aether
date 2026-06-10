@@ -176,6 +176,20 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
+	// Confirm the proxy actually closed the pod's listener socket (connection
+	// refused) before scheduling the unpin: the agent's removal-ACK wait is
+	// best-effort and the unpin delay is a heuristic. Best-effort as well.
+	if !conf.ReadinessProbeDisabled {
+		if netns := p.delProbeNetns(conf, args); netns != "" {
+			probeCtx, cancel := context.WithTimeout(context.Background(), readyProbeDelTimeout)
+			if probeErr := newReadinessProber(netns).waitGone(probeCtx); probeErr != nil {
+				p.logger.Warn("proxy listener removal not confirmed; continuing",
+					zap.String("netns", netns), zap.Error(probeErr))
+			}
+			cancel()
+		}
+	}
+
 	if !conf.NetnsPinDisabled {
 		// The agent has deregistered the pod and waited for Envoy to ack the
 		// listener removal; a detached unpinner holds the pin through Envoy's
@@ -326,7 +340,35 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
 
+	// Data-plane proof, before pod start completes: probe the outbound capture
+	// listener from inside the pod's netns until the proxy's health_check
+	// filter answers 200. The agent's ACK wait above only confirmed config
+	// acceptance. Best-effort: a timeout is logged, never fails the ADD.
+	if !conf.ReadinessProbeDisabled {
+		probeCtx, probeSpan := startPodSpan(ctx, "cni.readiness_probe", pod.GetName(), pod.GetNamespace(), pod.GetContainerId())
+		probeCtx, cancel := context.WithTimeout(probeCtx, readyProbeAddTimeout)
+		probeErr := newReadinessProber(pod.GetNetworkNamespace()).waitServing(probeCtx)
+		cancel()
+		commontelemetry.EndSpan(probeSpan, probeErr)
+		if probeErr != nil {
+			p.logger.Warn("data plane not confirmed serving; continuing",
+				zap.String("netns", pod.GetNetworkNamespace()), zap.Error(probeErr))
+		}
+	}
+
 	return types.PrintResult(prevResult, conf.CNIVersion)
+}
+
+// delProbeNetns resolves the netns path to probe during DEL: the pinned path
+// when pinning is enabled and the pin exists (the runtime's path may already
+// be torn down), otherwise the runtime-provided path. Empty = nothing to probe.
+func (p *AetherPlugin) delProbeNetns(conf config.AetherConf, args *skel.CmdArgs) string {
+	if !conf.NetnsPinDisabled {
+		if pinned := conf.NetnsPinPath(args.ContainerID); fileExists(pinned) {
+			return pinned
+		}
+	}
+	return args.Netns
 }
 
 // sendRemovePod sends the pod removal request to the agent.

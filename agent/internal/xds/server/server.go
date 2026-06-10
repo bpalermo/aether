@@ -13,6 +13,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/xds"
 	"github.com/bpalermo/aether/registry"
+	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/go-logr/logr"
 )
 
@@ -41,13 +42,15 @@ type AgentXdsServer struct {
 // It initializes an xDS server with a snapshot cache and registers itself as a callback
 // to generate the initial Envoy snapshot before listening for client connections.
 // The server listens on a Unix domain socket at the default xDS socket path.
-func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, log logr.Logger) (*AgentXdsServer, error) {
+// callbacks (optional, may be nil) observe the discovery streams — the agent
+// passes the ACK tracker's callbacks so pod lifecycle can await Envoy ACKs.
+func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, callbacks serverv3.Callbacks, log logr.Logger) (*AgentXdsServer, error) {
 	cfg := xds.NewServerConfig(
 		xds.WithUDS(constants.DefaultXdsSocketPath),
 	)
 
 	aXdsServer := &AgentXdsServer{
-		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, nil, log),
+		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, callbacks, log),
 		log:         log.WithName("agent-xds"),
 		clusterName: clusterName,
 		nodeName:    nodeName,
