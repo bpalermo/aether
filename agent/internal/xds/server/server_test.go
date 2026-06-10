@@ -144,14 +144,17 @@ func TestAgentXdsServer_PreListen(t *testing.T) {
 			wantErr: errStorage,
 		},
 		{
-			name: "registry error returns error after storage succeeds",
+			// Registry unavailability must not prevent the agent from starting
+			// (a crash-looping agent takes down the node's CNI and xDS; the
+			// load is retried in the background): PreListen succeeds with the
+			// local-only snapshot.
+			name: "registry error starts local-only without error",
 			storageGetAll: func(_ context.Context) ([]*cniv1.CNIPod, error) {
 				return []*cniv1.CNIPod{}, nil
 			},
 			registryListAll: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 				return nil, errRegistry
 			},
-			wantErr: errRegistry,
 		},
 		{
 			name: "both succeed with empty data produces valid snapshot",

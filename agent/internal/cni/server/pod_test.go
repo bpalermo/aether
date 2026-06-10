@@ -363,7 +363,10 @@ func TestAddPod(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "valid pod with registry failure returns error",
+			// Registry unavailability must not block pod creation node-wide:
+			// the pod is stored and the reconciliation sweep registers it once
+			// the registry answers.
+			name: "valid pod with registry failure still succeeds",
 			setupK8s: func() client.Client {
 				return fake.NewClientBuilder().WithObjects(validK8sPod("my-pod", "default")).Build()
 			},
@@ -376,8 +379,8 @@ func TestAddPod(t *testing.T) {
 			req: &cniv1.AddPodRequest{
 				Pod: validCNIPod("my-pod", "default", containerID),
 			},
-			want:    nil,
-			wantErr: true,
+			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS},
+			wantErr: false,
 		},
 		{
 			name: "valid pod with all dependencies succeeds",

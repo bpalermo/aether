@@ -70,8 +70,11 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		if fresh && sEndpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
 			sEndpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 		}
+		// Registry unavailability must not block pod creation node-wide (a
+		// failed ADD fails the sandbox): the pod is already stored, so the
+		// reconciliation sweep registers it as soon as the registry answers.
 		if err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, sEndpoint); err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to register endpoint: %v", err)
+			log.Error(err, "failed to register endpoint; reconciliation sweep will retry", "service", serviceName)
 		}
 	}
 

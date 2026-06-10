@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"time"
 
 	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -72,10 +73,39 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 		return err
 	}
 
+	// Registry unavailability must not prevent the agent from starting: a
+	// crash-looping agent takes down the node's CNI ADD/DEL and xDS entirely,
+	// turning a registrar blip into a node-wide outage (observed cascading
+	// failure on talos-main, 2026-06-10). Serve the local-only snapshot now and
+	// fill in registry-derived clusters/endpoints as soon as the registry
+	// answers; the registry refresher keeps it current afterwards.
 	if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
-		s.log.Error(err, "failed to load clusters, endpoints and virtual hosts from registry")
-		return err
+		s.log.Error(err, "registry unavailable for initial snapshot; starting with local-only config and retrying in background")
+		go s.retryInitialRegistryLoad(ctx)
 	}
 
 	return nil
+}
+
+// retryInitialRegistryLoad retries the registry-derived snapshot load with
+// capped exponential backoff until it succeeds or ctx ends.
+func (s *AgentXdsServer) retryInitialRegistryLoad(ctx context.Context) {
+	const maxBackoff = 30 * time.Second
+	backoff := time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
+			s.log.V(1).Info("registry still unavailable; will retry", "backoff", backoff.String(), "error", err)
+			if backoff < maxBackoff {
+				backoff *= 2
+			}
+			continue
+		}
+		s.log.Info("registry recovered; snapshot now includes registry-derived config")
+		return
+	}
 }
