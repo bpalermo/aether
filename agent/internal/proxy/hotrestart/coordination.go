@@ -128,7 +128,10 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			epoch := s.currentEpoch()
 			if s.adminLiveAtEpoch(ctx, epoch) {
 				s.writeState(epoch) // LIVE-gated heartbeat
-				if !ready {
+				// Hold readiness until the cross-pod handoff is fully complete (the
+				// predecessor has been terminated by this Envoy's parent-shutdown), so
+				// the DaemonSet doesn't delete the old pod while we still need it.
+				if !ready && !time.Now().Before(s.readyGate) {
 					s.setReady()
 					ready = true
 					s.log.Info("pod ready: envoy live at newest epoch", "epoch", epoch)

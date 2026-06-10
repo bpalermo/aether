@@ -98,7 +98,18 @@ type Supervisor struct {
 
 	childExited chan childExit
 	done        chan struct{}
+
+	// readyGate delays the pod's readiness until after a cross-pod handoff is fully
+	// complete: the successor Envoy terminates the predecessor itself via
+	// --parent-shutdown-time-s, so the pod must not report Ready (which lets the
+	// DaemonSet delete the old pod) until that has elapsed — otherwise the old
+	// Envoy is killed out from under the still-attached successor (errno 111).
+	readyGate time.Time
 }
+
+// readyGateBuffer is added to ParentShutdownTime when gating a cross-pod
+// successor's readiness, to ensure the predecessor is fully gone first.
+const readyGateBuffer = 3 * time.Second
 
 // New creates a Supervisor.
 func New(cfg Config, log logr.Logger) *Supervisor {
@@ -131,6 +142,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	// then maintain the readiness marker and the LIVE-gated node epoch heartbeat.
 	// No-ops when StateDir / ReadyMarkerPath are unset (Strategy A).
 	s.initStartEpoch(ctx)
+	if s.cfg.StateDir != "" && s.nextEpoch > 0 {
+		// Cross-pod successor: hold readiness until the predecessor has been
+		// terminated by this Envoy's own parent-shutdown protocol.
+		s.readyGate = time.Now().Add(s.cfg.ParentShutdownTime + readyGateBuffer)
+	}
 	go s.watchLiveness(ctx)
 
 	if err := s.hotRestart(); err != nil {
@@ -176,10 +192,12 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			if exit.epoch == s.currentEpoch() {
 				if s.supersededBySuccessor(exit.epoch) {
 					// A successor pod took over this node at a higher epoch and
-					// terminated our Envoy via the hot-restart parent-shutdown. Exit 0
-					// and let the DaemonSet delete this (now-drained) pod.
-					s.log.Info("newest epoch superseded by a successor pod; shutting down gracefully", "epoch", exit.epoch)
+					// terminated our Envoy via the hot-restart parent-shutdown. Don't
+					// exit (restartPolicy=Always would relaunch us and climb epochs):
+					// stay alive with no child until the DaemonSet deletes this pod.
+					s.log.Info("newest epoch superseded by a successor pod; awaiting pod deletion", "epoch", exit.epoch)
 					s.reap(exit.epoch)
+					<-ctx.Done()
 					return nil
 				}
 				// The newest epoch died unexpectedly: nothing left serving traffic.

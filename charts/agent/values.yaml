@@ -81,8 +81,10 @@ proxy:
     # Envoy --base-id, pinned so successive epochs share one shared-memory segment.
     baseId: 0
     # Envoy --drain-time-s / --parent-shutdown-time-s (parent must exceed drain).
-    drainTime: 45s
-    parentShutdownTime: 60s
+    # For Strategy B the successor pod holds readiness for ~parentShutdownTime
+    # (until its Envoy terminates the predecessor), so keep these modest.
+    drainTime: 10s
+    parentShutdownTime: 15s
     # /dev/shm size for the hot-restart shared-memory segment (gauges/counters).
     # Strategy A only (emptyDir Memory); Strategy B uses shmHostPath instead.
     shmSizeLimit: 64Mi
