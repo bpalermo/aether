@@ -29,26 +29,27 @@ import (
 //     pod-local marker file consumed by an exec readiness probe.
 
 const (
-	heartbeatInterval = 2 * time.Second
 	predecessorStale  = 8 * time.Second
 	readyPollInterval = 1 * time.Second
 	stateFileName     = "epoch"
 )
 
 // initStartEpoch decides the restart epoch for the first Envoy this supervisor
-// launches. With cross-pod coordination (StateDir set), a live predecessor
-// heartbeating epoch E means start at E+1 to hot-restart from it; otherwise start
-// fresh at epoch 0. Without StateDir (Strategy A only) this is a no-op (epoch 0).
-func (s *Supervisor) initStartEpoch() {
+// launches. With cross-pod coordination (StateDir set), it starts at E+1 only when
+// the heartbeat file names epoch E AND the node's Envoy admin actually reports E
+// LIVE — admin is ground truth, so a crashed/initializing predecessor (stale or
+// absent on admin) correctly resets to epoch 0 instead of attaching to a dead
+// parent and climbing epochs. Without StateDir (Strategy A) this is a no-op.
+func (s *Supervisor) initStartEpoch(ctx context.Context) {
 	if s.cfg.StateDir == "" {
 		return
 	}
 	epoch, hb, ok := s.readState()
-	if ok && time.Since(hb) < predecessorStale {
+	if ok && time.Since(hb) < predecessorStale && s.adminLiveAtEpoch(ctx, epoch) {
 		s.mu.Lock()
 		s.nextEpoch = epoch + 1
 		s.mu.Unlock()
-		s.log.Info("live predecessor found; starting cross-pod hot restart",
+		s.log.Info("live predecessor confirmed; starting cross-pod hot restart",
 			"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
 		return
 	}
@@ -103,32 +104,14 @@ func (s *Supervisor) writeState(epoch int) {
 	}
 }
 
-// heartbeat refreshes the coordination file so a surging successor pod can detect
-// this node's live epoch and hot-restart from it.
-func (s *Supervisor) heartbeat(ctx context.Context) {
-	if s.cfg.StateDir == "" {
-		return
-	}
-	t := time.NewTicker(heartbeatInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.done:
-			return
-		case <-t.C:
-			s.writeState(s.currentEpoch())
-		}
-	}
-}
-
-// watchReadiness maintains a pod-local readiness marker: present once the node's
-// Envoy admin reports LIVE at this supervisor's newest epoch (for a cross-pod
-// surge, only after the new Envoy has taken over the listen sockets and admin
-// port). An exec readiness probe checks the marker.
-func (s *Supervisor) watchReadiness(ctx context.Context) {
-	if s.cfg.ReadyMarkerPath == "" {
+// watchLiveness drives both the readiness marker and the node epoch heartbeat off
+// a single ground-truth signal: the node's Envoy admin reporting LIVE at this
+// supervisor's newest epoch. Crucially, the epoch is published to the shared state
+// file ONLY while LIVE — a launched-but-not-yet-LIVE (or failed) epoch is never
+// recorded, so a crash-restart re-reads the still-current predecessor epoch and
+// retries N+1 rather than climbing N+1, N+2, … against dead parents.
+func (s *Supervisor) watchLiveness(ctx context.Context) {
+	if s.cfg.ReadyMarkerPath == "" && s.cfg.StateDir == "" {
 		return
 	}
 	defer s.clearReady()
@@ -142,16 +125,18 @@ func (s *Supervisor) watchReadiness(ctx context.Context) {
 		case <-s.done:
 			return
 		case <-t.C:
-			live := s.adminLiveAtEpoch(ctx, s.currentEpoch())
-			switch {
-			case live && !ready:
-				s.setReady()
-				ready = true
-				s.log.Info("pod ready: envoy live at newest epoch", "epoch", s.currentEpoch())
-			case !live && ready:
+			epoch := s.currentEpoch()
+			if s.adminLiveAtEpoch(ctx, epoch) {
+				s.writeState(epoch) // LIVE-gated heartbeat
+				if !ready {
+					s.setReady()
+					ready = true
+					s.log.Info("pod ready: envoy live at newest epoch", "epoch", epoch)
+				}
+			} else if ready {
 				s.clearReady()
 				ready = false
-				s.log.Info("pod not ready: envoy not live at newest epoch", "epoch", s.currentEpoch())
+				s.log.Info("pod not ready: envoy not live at newest epoch", "epoch", epoch)
 			}
 		}
 	}

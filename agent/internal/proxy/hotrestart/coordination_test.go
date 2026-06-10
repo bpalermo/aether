@@ -1,7 +1,10 @@
 package hotrestart
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,6 +18,17 @@ import (
 func newCoordSupervisor(t *testing.T) *Supervisor {
 	t.Helper()
 	return New(Config{StateDir: t.TempDir()}, logr.Discard())
+}
+
+// fakeAdmin starts an Envoy-admin stub that reports the given state and restart
+// epoch on /server_info, and returns its host:port.
+func fakeAdmin(t *testing.T, state string, epoch int) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d}}`, state, epoch)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
 }
 
 // writeRawState writes the state file directly with a given epoch and heartbeat age.
@@ -56,26 +70,36 @@ func TestWriteStateOverwritesStaleHigherEpoch(t *testing.T) {
 }
 
 func TestInitStartEpoch(t *testing.T) {
-	t.Run("live predecessor -> epoch+1", func(t *testing.T) {
+	ctx := context.Background()
+	t.Run("fresh file + admin LIVE at that epoch -> epoch+1", func(t *testing.T) {
 		s := newCoordSupervisor(t)
+		s.cfg.AdminAddress = fakeAdmin(t, "LIVE", 3)
 		writeRawState(t, s, 3, 0)
-		s.initStartEpoch()
+		s.initStartEpoch(ctx)
 		assert.Equal(t, 4, s.nextEpoch)
+	})
+	t.Run("fresh file but admin NOT live (dead predecessor) -> epoch 0", func(t *testing.T) {
+		s := newCoordSupervisor(t)
+		s.cfg.AdminAddress = fakeAdmin(t, "PRE_INITIALIZING", 3)
+		writeRawState(t, s, 3, 0)
+		s.initStartEpoch(ctx)
+		assert.Equal(t, 0, s.nextEpoch)
 	})
 	t.Run("stale predecessor -> epoch 0", func(t *testing.T) {
 		s := newCoordSupervisor(t)
+		s.cfg.AdminAddress = fakeAdmin(t, "LIVE", 3)
 		writeRawState(t, s, 3, 2*predecessorStale)
-		s.initStartEpoch()
+		s.initStartEpoch(ctx)
 		assert.Equal(t, 0, s.nextEpoch)
 	})
 	t.Run("no state file -> epoch 0", func(t *testing.T) {
 		s := newCoordSupervisor(t)
-		s.initStartEpoch()
+		s.initStartEpoch(ctx)
 		assert.Equal(t, 0, s.nextEpoch)
 	})
 	t.Run("disabled (no StateDir) -> epoch 0", func(t *testing.T) {
 		s := New(Config{}, logr.Discard())
-		s.initStartEpoch()
+		s.initStartEpoch(ctx)
 		assert.Equal(t, 0, s.nextEpoch)
 	})
 }

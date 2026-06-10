@@ -127,12 +127,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		go s.watchConfig(ctx, trigger)
 	}
 
-	// Strategy B: pick the start epoch from a live predecessor (if any), then keep
-	// the node epoch heartbeat and the readiness marker maintained. No-ops when
-	// StateDir / ReadyMarkerPath are unset (Strategy A).
-	s.initStartEpoch()
-	go s.heartbeat(ctx)
-	go s.watchReadiness(ctx)
+	// Strategy B: pick the start epoch from a confirmed-live predecessor (if any),
+	// then maintain the readiness marker and the LIVE-gated node epoch heartbeat.
+	// No-ops when StateDir / ReadyMarkerPath are unset (Strategy A).
+	s.initStartEpoch(ctx)
+	go s.watchLiveness(ctx)
 
 	if err := s.hotRestart(); err != nil {
 		return fmt.Errorf("starting initial envoy epoch: %w", err)
@@ -213,8 +212,9 @@ func (s *Supervisor) hotRestart() error {
 	s.children[epoch] = cmd
 	s.mu.Unlock()
 
-	// Publish the new node epoch so a surging successor pod attaches at epoch+1.
-	s.writeState(epoch)
+	// The node epoch is published to the shared state file only once this Envoy is
+	// confirmed LIVE (by watchLiveness), never at launch — so a failed handoff does
+	// not advance the epoch and cause a restart to climb against a dead parent.
 
 	go func() {
 		err := cmd.Wait()
