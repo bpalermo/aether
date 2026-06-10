@@ -4,6 +4,7 @@ go_library(
     name = "plugin",
     srcs = [
         "client.go",
+        "netnspin.go",
         "plugin.go",
     ],
     importpath = "github.com/bpalermo/aether/cni/internal/plugin",
@@ -29,6 +30,7 @@ go_test(
     name = "plugin_test",
     srcs = [
         "client_test.go",
+        "netnspin_test.go",
         "plugin_test.go",
     ],
     embed = [":plugin"],

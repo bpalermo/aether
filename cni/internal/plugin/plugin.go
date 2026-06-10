@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/cni/config"
@@ -83,6 +84,19 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 
 	pidValue := p.resolvePID(args.Netns, netConf.CRISocket, args.ContainerID)
 	cniPod := newPodFromArgs(args, k8sArgs, podIPs, pidValue)
+
+	// Pin the netns to an aether-owned path and register that path instead of
+	// the runtime's, so Envoy's per-pod dials never race the runtime's netns
+	// teardown (see netnspin.go). Pin failure falls back to the runtime path:
+	// a working mesh with the old crash window beats a failed pod start.
+	if !netConf.NetnsPinDisabled {
+		if pinned, err := p.pinNetns(netConf, args.Netns, args.ContainerID); err != nil {
+			p.logger.Warn("failed to pin netns; falling back to runtime netns path",
+				zap.String("netns", args.Netns), zap.Error(err))
+		} else {
+			cniPod.NetworkNamespace = pinned
+		}
+	}
 
 	return p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
 }
@@ -151,13 +165,38 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		zap.String("namespace", namespace),
 		zap.String("pod", podName))
 
-	return p.sendRemovePod(context.Background(), conf, podName, namespace, containerID)
+	if err := p.sendRemovePod(context.Background(), conf, podName, namespace, containerID); err != nil {
+		// Keep the netns pin: the agent has not confirmed the pod's xDS
+		// resources are gone, and unpinning now reintroduces the deleted-netns
+		// Envoy crash. The runtime retries DEL; CmdGC sweeps true orphans.
+		return err
+	}
+
+	if !conf.NetnsPinDisabled {
+		// The agent has deregistered the pod and waited for Envoy to ack the
+		// listener removal; hold the pin briefly for deferred cluster
+		// destruction / connection-pool dials, then release the netns.
+		time.Sleep(conf.NetnsUnpinDelay())
+		if err := p.unpinNetns(conf, args.ContainerID); err != nil {
+			p.logger.Warn("failed to unpin netns; orphan will be swept by GC",
+				zap.String("containerID", args.ContainerID), zap.Error(err))
+		}
+	}
+	return nil
 }
 
-// CmdGC handles the CNI GC (garbage collection) operation.
-// Currently a no-op; returns nil. Garbage collection is handled by the agent.
-func (p *AetherPlugin) CmdGC(_ *skel.CmdArgs) error {
+// CmdGC handles the CNI GC (garbage collection) operation: it unpins netns
+// pins whose container is no longer a valid attachment (orphans of failed
+// DELs). Registry/xDS garbage collection is handled by the agent.
+func (p *AetherPlugin) CmdGC(args *skel.CmdArgs) error {
 	p.logger.Debug("running CNI GC command")
+	conf, err := config.NewConf(args.StdinData)
+	if err != nil {
+		return fmt.Errorf("failed to parse config: %w", err)
+	}
+	if !conf.NetnsPinDisabled {
+		p.sweepNetnsPins(conf, args.StdinData)
+	}
 	return nil
 }
 
@@ -454,14 +493,29 @@ func (p *AetherPlugin) verifyPodRegistration(args *skel.CmdArgs, k8sArgs config.
 		}
 	}()
 
+	// The verification re-sends AddPod (idempotent by overwrite), so it must
+	// carry the same netns path ADD registered — the pinned one when present —
+	// or the check would silently replace the pinned path with the runtime's.
+	netns := args.Netns
+	if !conf.NetnsPinDisabled {
+		if pinned := conf.NetnsPinPath(args.ContainerID); fileExists(pinned) {
+			netns = pinned
+		}
+	}
+
 	pod := &cniv1.CNIPod{
 		ContainerId:      args.ContainerID,
 		Name:             string(k8sArgs.K8S_POD_NAME),
 		Namespace:        string(k8sArgs.K8S_POD_NAMESPACE),
-		NetworkNamespace: args.Netns,
+		NetworkNamespace: netns,
 	}
 
 	return client.VerifyPodRegistered(context.Background(), pod)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func ignorableNamespace(namespace string) bool {

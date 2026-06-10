@@ -8,6 +8,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"time"
 
 	agentConstans "github.com/bpalermo/aether/agent/constants"
 	"github.com/containernetworking/cni/pkg/types"
@@ -32,8 +34,57 @@ type AetherConf struct {
 	// CRISocket is the path to the container runtime interface socket
 	CRISocket string `json:"cri_socket"`
 
+	// NetnsPinDisabled turns off netns pinning (on by default): Envoy dials
+	// local pods inside their netns by filepath, and a dial racing the
+	// runtime's netns removal segfaults Envoy (upstream bug; e2e findings
+	// 2026-06-10). CNI ADD bind-mounts the netns to an aether-owned path that
+	// stays valid until the agent has confirmed the pod's xDS resources are
+	// gone, so late dials fail gracefully instead of crashing the proxy.
+	NetnsPinDisabled bool `json:"netns_pin_disabled"`
+	// NetnsPinDir is where CNI ADD bind-mounts each pod's netns. Must be a
+	// host path visible to the aether-proxy container (which mounts /run/aether
+	// with HostToContainer propagation). Empty = /run/aether/netns.
+	NetnsPinDir string `json:"netns_pin_dir"`
+	// NetnsUnpinDelaySeconds is how long CNI DEL waits after the agent has
+	// deregistered the pod (and Envoy acked the listener removal) before
+	// unpinning the netns, covering Envoy's deferred cluster destruction and
+	// connection-pool drains that can still dial for a few seconds.
+	// 0 = 10s default; negative = no delay.
+	NetnsUnpinDelaySeconds int `json:"netns_unpin_delay_seconds"`
+
 	// RuntimeConfig holds runtime-provided configuration like pod annotations
 	RuntimeConfig *RuntimeConfig `json:"runtimeConfig,omitempty"`
+}
+
+// defaultNetnsPinDir lives under /run/aether, which the aether-proxy DaemonSet
+// already mounts with HostToContainer propagation, so pinned netns mounts made
+// by the (host-side) plugin become visible to Envoy without chart changes.
+const defaultNetnsPinDir = "/run/aether/netns"
+
+// defaultNetnsUnpinDelay covers the post-removal dial window observed on
+// talos-main (health checkers / connection pools dialing up to ~5-9s after the
+// listener and clusters were removed from the snapshot).
+const defaultNetnsUnpinDelay = 10 * time.Second
+
+// NetnsPinPath returns the pin target for a container (sandbox) ID.
+func (c AetherConf) NetnsPinPath(containerID string) string {
+	dir := c.NetnsPinDir
+	if dir == "" {
+		dir = defaultNetnsPinDir
+	}
+	return filepath.Join(dir, containerID)
+}
+
+// NetnsUnpinDelay returns the effective unpin delay.
+func (c AetherConf) NetnsUnpinDelay() time.Duration {
+	switch {
+	case c.NetnsUnpinDelaySeconds == 0:
+		return defaultNetnsUnpinDelay
+	case c.NetnsUnpinDelaySeconds < 0:
+		return 0
+	default:
+		return time.Duration(c.NetnsUnpinDelaySeconds) * time.Second
+	}
 }
 
 // RuntimeConfig holds container runtime-provided configuration passed to the CNI plugin.
