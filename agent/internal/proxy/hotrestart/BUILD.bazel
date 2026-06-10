@@ -4,13 +4,24 @@ go_library(
     name = "hotrestart",
     srcs = [
         "coordination.go",
+        "metrics.go",
         "supervisor.go",
+        "telemetry.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/proxy/hotrestart",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "@com_github_fsnotify_fsnotify//:fsnotify",
         "@com_github_go_logr_logr//:logr",
+        "@com_github_prometheus_client_golang//prometheus",
+        "@com_github_prometheus_client_golang//prometheus/promhttp",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel//semconv/v1.30.0:v1_30_0",
+        "@io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetricgrpc//:otlpmetricgrpc",
+        "@io_opentelemetry_go_otel_exporters_prometheus//:prometheus",
+        "@io_opentelemetry_go_otel_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk//resource",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
     ],
 )
 
@@ -18,6 +29,7 @@ go_test(
     name = "hotrestart_test",
     srcs = [
         "coordination_test.go",
+        "metrics_test.go",
         "supervisor_test.go",
     ],
     embed = [":hotrestart"],
@@ -25,5 +37,7 @@ go_test(
         "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
 )

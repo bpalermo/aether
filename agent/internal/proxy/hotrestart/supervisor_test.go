@@ -21,7 +21,7 @@ func TestBuildEnvoyCmd(t *testing.T) {
 		DrainTime:          45 * time.Second,
 		ParentShutdownTime: 60 * time.Second,
 		ExtraArgs:          []string{"-l", "info", "--service-cluster", "aether-proxy"},
-	}, logr.Discard())
+	}, logr.Discard(), nil)
 
 	cmd := s.buildEnvoyCmd(3)
 
@@ -96,7 +96,7 @@ func TestSupervisorConfigChangeTriggersHotRestart(t *testing.T) {
 		DrainTime:          1 * time.Second,
 		ParentShutdownTime: 1 * time.Second,
 		WatchConfig:        true,
-	}, logr.Discard())
+	}, logr.Discard(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
@@ -146,7 +146,7 @@ func TestHotRestartDeferredWhileEpochNotLive(t *testing.T) {
 		WatchConfig:        true,
 		// Admin reports the current epoch as still initializing.
 		AdminAddress: fakeAdmin(t, "PRE_INITIALIZING", 0),
-	}, logr.Discard())
+	}, logr.Discard(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

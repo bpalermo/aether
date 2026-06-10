@@ -60,12 +60,14 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 		epoch, hb, ok := s.readState()
 		if !ok || time.Since(hb) >= predecessorStale {
 			s.log.Info("no live predecessor; starting fresh at epoch 0", "statePresent", ok)
+			s.metrics.predecessorFound(false)
 			return
 		}
 		if s.adminLiveAtEpoch(ctx, epoch) {
 			s.mu.Lock()
 			s.nextEpoch = epoch + 1
 			s.mu.Unlock()
+			s.metrics.predecessorFound(true)
 			s.log.Info("live predecessor confirmed; starting cross-pod hot restart",
 				"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
 			return
@@ -186,6 +188,11 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			}
 			if live {
 				everLive = true
+				if launched, wasLive := s.epochProgress(); !wasLive {
+					// First LIVE confirmation for this epoch: the handoff (or
+					// initial start, epoch 0) completed.
+					s.metrics.handoffCompleted(time.Since(launched).Seconds())
+				}
 				s.markEpochLive()
 				s.writeState(epoch) // LIVE-gated heartbeat
 				// Hold readiness until the cross-pod handoff is fully complete (the
@@ -194,6 +201,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 				if !ready && !time.Now().Before(s.readyGate) {
 					s.setReady()
 					ready = true
+					s.metrics.readyTransition(true)
 					s.log.Info("pod ready: envoy live at newest epoch", "epoch", epoch)
 				}
 				continue
@@ -201,17 +209,20 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			if ready {
 				s.clearReady()
 				ready = false
+				s.metrics.readyTransition(false)
 				s.log.Info("pod not ready: envoy not live at newest epoch", "epoch", epoch)
 			}
 
 			launched, wasLive := s.epochProgress()
 			if epoch > 0 && !wasLive && s.childTracked(epoch) && time.Since(launched) > s.handoffDeadline() {
+				s.metrics.wedged(wedgeHandoffTimeout)
 				s.fireWatchdog(fmt.Errorf(
 					"hot-restart handoff watchdog: epoch %d not LIVE within %s of launch (parent likely died mid-handoff)",
 					epoch, s.handoffDeadline()))
 				return
 			}
 			if everLive && !reachable && s.childTracked(epoch) && time.Since(unreachableSince) > s.adminUnresponsiveDeadline() {
+				s.metrics.wedged(wedgeAdminUnresponsive)
 				s.fireWatchdog(fmt.Errorf(
 					"admin watchdog: envoy admin %s unresponsive for %s with child alive at epoch %d",
 					s.cfg.AdminAddress, s.adminUnresponsiveDeadline(), epoch))

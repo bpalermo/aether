@@ -18,7 +18,7 @@ import (
 
 func newCoordSupervisor(t *testing.T) *Supervisor {
 	t.Helper()
-	return New(Config{StateDir: t.TempDir()}, logr.Discard())
+	return New(Config{StateDir: t.TempDir()}, logr.Discard(), nil)
 }
 
 // fakeAdmin starts an Envoy-admin stub that reports the given state and restart
@@ -119,7 +119,7 @@ func TestInitStartEpoch(t *testing.T) {
 		assert.Equal(t, 0, s.nextEpoch)
 	})
 	t.Run("disabled (no StateDir) -> epoch 0", func(t *testing.T) {
-		s := New(Config{}, logr.Discard())
+		s := New(Config{}, logr.Discard(), nil)
 		s.initStartEpoch(ctx)
 		assert.Equal(t, 0, s.nextEpoch)
 	})
@@ -127,7 +127,7 @@ func TestInitStartEpoch(t *testing.T) {
 
 func TestReadyMarker(t *testing.T) {
 	dir := t.TempDir()
-	s := New(Config{ReadyMarkerPath: filepath.Join(dir, "ready")}, logr.Discard())
+	s := New(Config{ReadyMarkerPath: filepath.Join(dir, "ready")}, logr.Discard(), nil)
 	_, err := os.Stat(s.cfg.ReadyMarkerPath)
 	require.True(t, os.IsNotExist(err))
 	s.setReady()
@@ -165,7 +165,7 @@ func TestHandoffWatchdogFiresWhenSuccessorNeverLive(t *testing.T) {
 		// selects epoch 1 — which then never reaches LIVE (the wedge).
 		AdminAddress:    fakeAdmin(t, "LIVE", 0),
 		HandoffDeadline: 1 * time.Second,
-	}, logr.Discard())
+	}, logr.Discard(), nil)
 	writeRawState(t, s, 0, 0)
 
 	runErr := make(chan error, 1)
@@ -212,7 +212,7 @@ func TestAdminWatchdogFiresWhenAdminUnreachableAfterLive(t *testing.T) {
 		ReadyMarkerPath:           marker,
 		AdminAddress:              srv.Listener.Addr().String(),
 		AdminUnresponsiveDeadline: 1 * time.Second,
-	}, logr.Discard())
+	}, logr.Discard(), nil)
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- s.Run(context.Background()) }()
