@@ -139,8 +139,16 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	}
 	c.listenerMu.Unlock()
 
+	// Merge (never replace) into localWorkloads: this load runs concurrently with
+	// the CNI server, and a wholesale replacement would wipe the netns→SPIFFE-ID
+	// mapping of a pod whose AddPod landed between the storage GetAll above and
+	// this write — silently downgrading that pod's outbound mTLS to the node
+	// certificate (the matcher's no-match path). At startup the map is empty, so
+	// merge and replace are otherwise equivalent.
 	c.localMu.Lock()
-	c.localWorkloads = local
+	for netns, id := range local {
+		c.localWorkloads[netns] = id
+	}
 	c.trustDomain = trustDomain
 	c.localMu.Unlock()
 
