@@ -42,4 +42,11 @@ message CNIPod {
   // liveness loop must never re-register it. Local xDS resources stay until the
   // CNI DEL performs final teardown.
   bool terminating = 10;
+
+  // kubernetes_uid is the pod's Kubernetes UID, captured by the agent from the
+  // API server at CNI ADD (not set by the CNI plugin binary). Persisting it
+  // lets an agent restart rebuild SPIRE workload selectors (k8s:pod-uid) from
+  // local storage alone, without re-querying the API server. Empty for pods
+  // stored before this field existed; readers must fall back to an API fetch.
+  string kubernetes_uid = 11;
 }

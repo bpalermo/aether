@@ -53,6 +53,7 @@ go_test(
         "liveness_test.go",
         "metrics_test.go",
         "pod_test.go",
+        "poduid_test.go",
         "resubscribe_test.go",
         "server_integration_test.go",
         "termination_test.go",

@@ -239,6 +239,9 @@ func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) (_ 
 	cniPod.Annotations = k8sPod.Annotations
 	cniPod.Labels = k8sPod.Labels
 	cniPod.ServiceAccount = k8sPod.Spec.ServiceAccountName
+	// Persisted so an agent restart can rebuild SPIRE selectors (k8s:pod-uid)
+	// from storage alone, without an API-server round trip per pod.
+	cniPod.KubernetesUid = string(k8sPod.UID)
 	// A pod whose deletion has already been requested must never (re-)enter the
 	// registry: CNI CHECK re-sends AddPod for existing pods, which would
 	// otherwise clear the terminating flag and resurrect the endpoint mid-drain.

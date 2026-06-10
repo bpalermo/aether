@@ -6,10 +6,12 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Registry reconciliation (e2e findings, 2026-06-10).
@@ -127,6 +129,20 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		}
 	}
 
+	// Divergence signal: count the node's mesh-managed pods per the informer
+	// and record it next to the storage count. Persistent skew between the two
+	// gauges surfaces a storage/informer inconsistency (e.g. a stranded storage
+	// file after a lost CNI DEL) without waiting for it to become a ghost.
+	// Best-effort: the sweep's correctness never depends on the informer.
+	if s.k8sClient != nil {
+		var podList corev1.PodList
+		if listErr := s.k8sClient.List(ctx, &podList); listErr == nil {
+			s.metrics.recordInformerPods(ctx, countManagedPods(podList.Items))
+		} else {
+			s.log.V(1).Info("ghost sweep: failed to list informer pods", "error", listErr)
+		}
+	}
+
 	registered := make(map[string]struct{})
 	for service, endpoints := range all {
 		for _, ep := range endpoints {
@@ -181,4 +197,27 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		s.log.Info("ghost sweep: registered missing endpoint",
 			"service", serviceName, "ip", ip, "pod", pod.GetName())
 	}
+}
+
+// countManagedPods counts pods the mesh would manage — the informer-side
+// equivalent of isIgnorablePod over local storage: not in an ignored
+// namespace, carrying the managed label, and holding an IP. Terminating pods
+// count (their storage entries persist until CNI DEL), so the count is
+// directly comparable to aether.agent.storage.pods.
+func countManagedPods(pods []corev1.Pod) int {
+	n := 0
+	for i := range pods {
+		pod := &pods[i]
+		if constants.IsIgnoredNamespace(pod.Namespace) {
+			continue
+		}
+		if pod.Labels[constants.LabelAetherManaged] != "true" {
+			continue
+		}
+		if pod.Status.PodIP == "" {
+			continue
+		}
+		n++
+	}
+	return n
 }

@@ -17,12 +17,12 @@ import (
 // breaks ("Secret is not supplied by SDS") until the pods are recreated.
 //
 // It waits for the SPIRE bridge to connect (SubscribePod no-ops before then),
-// then re-subscribes every managed stored pod, re-fetching the pod UID from the
-// API server (the UID is needed for the SPIRE k8s:pod-uid selector and is not
-// persisted in storage). Idempotent: SubscribePod no-ops for an
-// already-subscribed network namespace, so racing a concurrent CNI ADD is safe.
-// Pods deleted while the agent was down fail the UID lookup and are skipped;
-// their CNI DEL cleans them up.
+// then re-subscribes every managed stored pod using the persisted Kubernetes
+// UID (needed for the SPIRE k8s:pod-uid selector). Pods stored before the UID
+// was persisted fall back to an API-server fetch; in that path, pods deleted
+// while the agent was down fail the lookup and are skipped (their CNI DEL
+// cleans them up). Idempotent: SubscribePod no-ops for an already-subscribed
+// network namespace, so racing a concurrent CNI ADD is safe.
 func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 	if s.spireBridge == nil {
 		return
@@ -47,14 +47,21 @@ func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 		}
 		log := s.log.WithValues("pod", pod.GetName(), "namespace", pod.GetNamespace())
 
-		var k8sPod corev1.Pod
-		if err := s.k8sClient.Get(ctx, client.ObjectKey{Namespace: pod.GetNamespace(), Name: pod.GetName()}, &k8sPod); err != nil {
-			log.V(1).Info("resubscribe: pod not found in API server; skipping", "error", err)
-			continue
+		uid := pod.GetKubernetesUid()
+		if uid == "" {
+			// Pod stored before the UID was persisted: fall back to the API
+			// server. This path disappears once every stored pod has cycled.
+			var k8sPod corev1.Pod
+			if err := s.k8sClient.Get(ctx, client.ObjectKey{Namespace: pod.GetNamespace(), Name: pod.GetName()}, &k8sPod); err != nil {
+				log.V(1).Info("resubscribe: no stored UID and pod not found in API server; skipping", "error", err)
+				continue
+			}
+			uid = string(k8sPod.UID)
+			log.V(1).Info("resubscribe: no stored UID; fetched from API server")
 		}
 
 		spiffeID := proxy.SpiffeIDFromPod(pod, s.trustDomain)
-		selectors := spire.PodSelectors(pod.GetNamespace(), pod.GetServiceAccount(), pod.GetName(), string(k8sPod.UID))
+		selectors := spire.PodSelectors(pod.GetNamespace(), pod.GetServiceAccount(), pod.GetName(), uid)
 		if err := s.spireBridge.SubscribePod(pod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
 			log.Error(err, "resubscribe: failed to subscribe SVID", "spiffeID", spiffeID)
 			continue

@@ -28,6 +28,7 @@ type cniMetrics struct {
 	missingRegistered metric.Int64Counter
 	sweepErrors       metric.Int64Counter
 	storagePods       metric.Int64Gauge
+	informerPods      metric.Int64Gauge
 	healthTransitions metric.Int64Counter
 }
 
@@ -52,6 +53,10 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		metric.WithDescription("Pods currently tracked in the agent's local file storage")); err != nil {
 		return nil, fmt.Errorf("storage pods: %w", err)
 	}
+	if m.informerPods, err = meter.Int64Gauge("aether.agent.informer.pods",
+		metric.WithDescription("Mesh-managed pods on this node per the API-server informer (compare with aether.agent.storage.pods for skew)")); err != nil {
+		return nil, fmt.Errorf("informer pods: %w", err)
+	}
 	if m.healthTransitions, err = meter.Int64Counter("aether.agent.liveness.health_transitions",
 		metric.WithDescription("Endpoint health transitions reflected into the registry by the liveness loop")); err != nil {
 		return nil, fmt.Errorf("health transitions: %w", err)
@@ -75,6 +80,13 @@ func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingR
 		m.missingRegistered.Add(ctx, int64(missingRegistered))
 	}
 	m.storagePods.Record(ctx, int64(storedPods))
+}
+
+func (m *cniMetrics) recordInformerPods(ctx context.Context, n int) {
+	if m == nil {
+		return
+	}
+	m.informerPods.Record(ctx, int64(n))
 }
 
 func (m *cniMetrics) healthTransition(ctx context.Context, from, to string) {
