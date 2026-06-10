@@ -39,6 +39,10 @@ func (s *CNIServer) runLivenessLoop(ctx context.Context) {
 // reconcileLiveness scrapes the proxy for per-pod app health and re-registers any
 // endpoint whose health changed since the last report.
 func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]registryv1.ServiceEndpoint_Health) {
+	// Drop transition state the reconciler invalidated (re-registered endpoints
+	// sit at the mode-default health; the next observation must re-promote).
+	s.drainLivenessForget(last)
+
 	appHealth, err := s.envoyAdmin.AppClusterHealth(ctx)
 	if err != nil {
 		s.log.V(1).Info("liveness: failed to read app cluster health", "error", err)

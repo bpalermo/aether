@@ -4,25 +4,28 @@ import (
 	"context"
 	"time"
 
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/registry"
 )
 
-// Ghost-endpoint sweep (e2e finding, 2026-06-10).
-//
-// A registry endpoint whose deregistration was lost (agent down at CNI DEL,
-// node-level churn, registry outage mid-roll) is owned by nobody and lives
-// forever: nothing re-lists registry content against reality. Under active
-// health checking ghosts are merely noise (clients pin them at
-// failed_active_hc), but in EDS health-check mode a HEALTHY ghost would
-// receive traffic indefinitely — making this sweep a prerequisite for
-// delegated-liveness EDS mode.
+// Registry reconciliation (e2e findings, 2026-06-10).
 //
 // Each agent owns its node's slice of the registry: endpoints whose
-// KubernetesMetadata.NodeName matches this node. The sweep periodically lists
-// registry endpoints and deregisters any of this node's entries whose IP does
-// not belong to a live, locally stored pod. lifecycleMu serializes the sweep
-// against AddPod/RemovePod/liveness so a registering pod cannot be judged a
-// ghost mid-flight.
+// KubernetesMetadata.NodeName matches this node. The reconciler periodically
+// makes that slice equal to local pod storage, in both directions:
+//
+//   - Ghosts: an endpoint whose deregistration was lost (agent down at CNI
+//     DEL, node churn, registry outage mid-roll) is owned by nobody and lives
+//     forever. Under active health checking ghosts are merely noise (clients
+//     pin them at failed_active_hc), but in EDS health-check mode a HEALTHY
+//     ghost would receive traffic indefinitely.
+//   - Missing: a live local pod whose registration was lost (registry outage
+//     at CNI ADD — AddPod deliberately tolerates that — or registry data
+//     loss) would otherwise never receive traffic.
+//
+// lifecycleMu serializes the sweep against AddPod/RemovePod/liveness so a
+// registering pod cannot be judged a ghost mid-flight.
 
 const ghostSweepInterval = 60 * time.Second
 
@@ -41,8 +44,31 @@ func (s *CNIServer) runGhostSweepLoop(ctx context.Context) {
 	}
 }
 
-// sweepGhostEndpoints deregisters this node's registry endpoints that no live
-// local pod accounts for.
+// forgetLiveness queues a container ID for liveness-state reset (see
+// CNIServer.livenessForget).
+func (s *CNIServer) forgetLiveness(containerID string) {
+	s.livenessForgetMu.Lock()
+	defer s.livenessForgetMu.Unlock()
+	if s.livenessForget == nil {
+		s.livenessForget = map[string]struct{}{}
+	}
+	s.livenessForget[containerID] = struct{}{}
+}
+
+// drainLivenessForget removes queued container IDs from the liveness loop's
+// transition cache.
+func (s *CNIServer) drainLivenessForget(last map[string]registryv1.ServiceEndpoint_Health) {
+	s.livenessForgetMu.Lock()
+	defer s.livenessForgetMu.Unlock()
+	for id := range s.livenessForget {
+		delete(last, id)
+	}
+	s.livenessForget = nil
+}
+
+// sweepGhostEndpoints reconciles this node's registry endpoints with local pod
+// storage: deregisters entries no live local pod accounts for, and re-registers
+// live pods the registry is missing.
 func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	all, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
@@ -60,25 +86,27 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		s.log.V(1).Info("ghost sweep: failed to list local pods", "error", err)
 		return
 	}
-	// Live local IPs. Terminating pods are intentionally excluded: their
+	// Live local pods by IP. Terminating pods are intentionally excluded: their
 	// endpoints were already deregistered, so a ghost re-listing them would be
-	// equally stale.
-	live := make(map[string]struct{}, len(pods))
+	// equally stale (and they must not be re-registered as missing).
+	live := make(map[string]*cniv1.CNIPod, len(pods))
 	for _, p := range pods {
-		if p.GetTerminating() {
+		if p.GetTerminating() || isIgnorablePod(p) {
 			continue
 		}
 		for _, ip := range p.GetIps() {
-			live[ip] = struct{}{}
+			live[ip] = p
 		}
 	}
 
+	registered := make(map[string]struct{})
 	for service, endpoints := range all {
 		for _, ep := range endpoints {
 			if ep.GetKubernetesMetadata().GetNodeName() != s.nodeName {
 				continue // another agent's responsibility
 			}
 			if _, ok := live[ep.GetIp()]; ok {
+				registered[ep.GetIp()] = struct{}{}
 				continue
 			}
 			if err := s.registry.UnregisterEndpoint(ctx, service, ep.GetIp()); err != nil {
@@ -89,5 +117,31 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 			s.log.Info("ghost sweep: deregistered ghost endpoint",
 				"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
 		}
+	}
+
+	// Missing direction: live local pods absent from the registry (lost ADD
+	// registration, registry data loss). Register at the mode-default health
+	// (EDS mode: UNHEALTHY) and reset the liveness transition cache so the next
+	// healthy observation re-promotes.
+	for ip, pod := range live {
+		if _, ok := registered[ip]; ok {
+			continue
+		}
+		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, pod)
+		if err != nil {
+			s.log.V(1).Info("ghost sweep: failed to build endpoint for missing pod", "pod", pod.GetName(), "error", err)
+			continue
+		}
+		if endpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
+			endpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+		}
+		if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
+			s.log.Error(err, "ghost sweep: failed to register missing endpoint",
+				"service", serviceName, "ip", ip, "pod", pod.GetName())
+			continue
+		}
+		s.forgetLiveness(pod.GetContainerId())
+		s.log.Info("ghost sweep: registered missing endpoint",
+			"service", serviceName, "ip", ip, "pod", pod.GetName())
 	}
 }

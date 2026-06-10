@@ -18,7 +18,8 @@ import (
 type sweepRegistry struct {
 	testRegistry
 	listing      map[string][]*registryv1.ServiceEndpoint
-	unregistered map[string][]string // service -> ips
+	unregistered map[string][]string                    // service -> ips
+	registered   map[string]*registryv1.ServiceEndpoint // service/ip -> endpoint
 }
 
 func (r *sweepRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
@@ -30,6 +31,14 @@ func (r *sweepRegistry) UnregisterEndpoint(_ context.Context, service, ip string
 		r.unregistered = map[string][]string{}
 	}
 	r.unregistered[service] = append(r.unregistered[service], ip)
+	return nil
+}
+
+func (r *sweepRegistry) RegisterEndpoint(_ context.Context, service string, _ registryv1.Service_Protocol, ep *registryv1.ServiceEndpoint) error {
+	if r.registered == nil {
+		r.registered = map[string]*registryv1.ServiceEndpoint{}
+	}
+	r.registered[service+"/"+ep.GetIp()] = ep
 	return nil
 }
 
@@ -77,4 +86,32 @@ func TestSweepGhostEndpoints(t *testing.T) {
 		"svc-a": {"10.0.0.9"},
 		"svc-b": {"10.0.0.2"},
 	}, reg.unregistered)
+	assert.Empty(t, reg.registered, "all live pods were present in the registry")
+}
+
+// TestSweepRegistersMissingEndpoint: a live local pod absent from the registry
+// (lost ADD registration, registry data loss) is re-registered at the
+// mode-default health (default EDS mode: UNHEALTHY, pending promotion) and its
+// liveness transition cache is invalidated.
+func TestSweepRegistersMissingEndpoint(t *testing.T) {
+	ctx := context.Background()
+
+	missing := validCNIPod("pod-missing", "default", "container-missing")
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-missing"), missing))
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+
+	s.sweepGhostEndpoints(ctx)
+
+	ep, ok := reg.registered["default/10.0.0.1"]
+	require.True(t, ok, "missing endpoint must be re-registered (service from SA, ip from pod)")
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY, ep.GetHealth(), "EDS-mode re-registration starts UNHEALTHY pending promotion")
+
+	// The liveness loop must treat the next observation as a transition.
+	last := map[string]registryv1.ServiceEndpoint_Health{"container-missing": registryv1.ServiceEndpoint_HEALTH_HEALTHY}
+	s.drainLivenessForget(last)
+	assert.NotContains(t, last, "container-missing")
 }

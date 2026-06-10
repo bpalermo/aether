@@ -53,6 +53,13 @@ type CNIServer struct {
 	// that nothing unregisters again.
 	lifecycleMu sync.Mutex
 
+	// livenessForget collects container IDs whose cached liveness state must be
+	// dropped (the reconciler re-registered their endpoint at the mode-default
+	// health, so the next observation must be treated as a transition).
+	// Consumed at the start of each liveness tick.
+	livenessForgetMu sync.Mutex
+	livenessForget   map[string]struct{}
+
 	snapshotCache *cache.SnapshotCache
 	spireBridge   *spire.Bridge
 	envoyAdmin    *admin.Client
