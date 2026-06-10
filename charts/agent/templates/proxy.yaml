@@ -12,6 +12,13 @@ spec:
       {{- include "agent.proxy.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
+    {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
+    # Strategy B: surge a new pod onto the node before tearing down the old one so
+    # the new Envoy can hot-restart from the old across the pod boundary.
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- end }}
   template:
     metadata:
       labels:
@@ -47,6 +54,11 @@ spec:
             - "--base-id={{ .Values.proxy.hotRestart.baseId }}"
             - "--drain-time={{ .Values.proxy.hotRestart.drainTime }}"
             - "--parent-shutdown-time={{ .Values.proxy.hotRestart.parentShutdownTime }}"
+            {{- if .Values.proxy.hotRestart.crossPod }}
+            - "--state-dir=/run/aether/hotrestart"
+            - "--ready-marker=/var/run/aether-proxy/ready"
+            - "--admin-address=127.0.0.1:9901"
+            {{- end }}
             - "--envoy-arg=-l"
             - "--envoy-arg={{ .Values.proxy.logLevel }}"
             - "--envoy-arg=--service-cluster"
@@ -88,6 +100,23 @@ spec:
               value: "0"
             - name: ENVOY_GID
               value: "0"
+          {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
+          # Ready only once this pod's Envoy is live at the newest epoch (post
+          # handoff), so the DaemonSet (maxUnavailable=0) keeps the old pod until
+          # the new one has taken over. The distroless Envoy image has no shell, so
+          # the probe re-execs the supervisor binary.
+          readinessProbe:
+            exec:
+              command:
+                - "/opt/aether/supervisor"
+                - "proxy-supervisor"
+                - "--readiness-check"
+                - "--ready-marker=/var/run/aether-proxy/ready"
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          {{- end }}
           securityContext:
             privileged: true
             runAsUser: 0
@@ -119,14 +148,31 @@ spec:
             - name: dev-shm
               mountPath: /dev/shm
             {{- end }}
+            {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
+            - name: ready-marker
+              mountPath: /var/run/aether-proxy
+            {{- end }}
       volumes:
         {{- if .Values.proxy.hotRestart.enabled }}
         - name: supervisor-bin
           emptyDir: {}
+        {{- if .Values.proxy.hotRestart.crossPod }}
+        # Strategy B: /dev/shm must be shared across the overlapping pods on the
+        # node, so it is a hostPath (tmpfs under /run) rather than a pod-local
+        # emptyDir. The hot-restart shared-memory segment lives here.
+        - name: dev-shm
+          hostPath:
+            path: {{ .Values.proxy.hotRestart.shmHostPath | quote }}
+            type: DirectoryOrCreate
+        # Pod-local readiness marker (not shared across pods).
+        - name: ready-marker
+          emptyDir: {}
+        {{- else }}
         - name: dev-shm
           emptyDir:
             medium: Memory
             sizeLimit: {{ .Values.proxy.hotRestart.shmSizeLimit }}
+        {{- end }}
         {{- end }}
         - name: proxy-config
           configMap:

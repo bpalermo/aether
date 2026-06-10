@@ -67,6 +67,18 @@ type Config struct {
 	// self-triggers a hot restart when the bootstrap config changes (e.g. a
 	// ConfigMap update propagated by the kubelet).
 	WatchConfig bool
+	// StateDir, when set, enables Strategy B cross-pod coordination: a per-node
+	// epoch heartbeat file on a shared hostPath. A surging successor pod reads it
+	// to start at (live predecessor epoch + 1) and hot-restart across the pod
+	// boundary. Empty = Strategy A only (always start at epoch 0).
+	StateDir string
+	// ReadyMarkerPath, when set, enables the readiness gate: the supervisor keeps a
+	// pod-local marker present only while the node's Envoy admin reports LIVE at
+	// this supervisor's newest epoch. An exec readiness probe checks the marker so
+	// the DaemonSet keeps the old pod until the new one has taken over.
+	ReadyMarkerPath string
+	// AdminAddress is the Envoy admin host:port used for the readiness check.
+	AdminAddress string
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -115,6 +127,13 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		go s.watchConfig(ctx, trigger)
 	}
 
+	// Strategy B: pick the start epoch from a live predecessor (if any), then keep
+	// the node epoch heartbeat and the readiness marker maintained. No-ops when
+	// StateDir / ReadyMarkerPath are unset (Strategy A).
+	s.initStartEpoch()
+	go s.heartbeat(ctx)
+	go s.watchReadiness(ctx)
+
 	if err := s.hotRestart(); err != nil {
 		return fmt.Errorf("starting initial envoy epoch: %w", err)
 	}
@@ -156,6 +175,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 		case exit := <-s.childExited:
 			if exit.epoch == s.currentEpoch() {
+				if s.supersededBySuccessor(exit.epoch) {
+					// A successor pod took over this node at a higher epoch and
+					// terminated our Envoy via the hot-restart parent-shutdown. Exit 0
+					// and let the DaemonSet delete this (now-drained) pod.
+					s.log.Info("newest epoch superseded by a successor pod; shutting down gracefully", "epoch", exit.epoch)
+					s.reap(exit.epoch)
+					return nil
+				}
 				// The newest epoch died unexpectedly: nothing left serving traffic.
 				// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).
 				s.reap(exit.epoch)
@@ -185,6 +212,9 @@ func (s *Supervisor) hotRestart() error {
 	s.mu.Lock()
 	s.children[epoch] = cmd
 	s.mu.Unlock()
+
+	// Publish the new node epoch so a surging successor pod attaches at epoch+1.
+	s.writeState(epoch)
 
 	go func() {
 		err := cmd.Wait()
