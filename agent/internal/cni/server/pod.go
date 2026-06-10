@@ -115,8 +115,15 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS}, nil
 	}
 
+	// Hold lifecycleMu from unregistration through storage removal so the
+	// liveness loop cannot interleave a health re-registration of a pod whose
+	// endpoint was just unregistered (which would resurrect it in the registry
+	// permanently).
+	s.lifecycleMu.Lock()
+
 	serviceName, ips, err := registry.ExtractCNIPodInformation(storedPod)
 	if err = s.registry.UnregisterEndpoints(ctx, serviceName, ips); err != nil {
+		s.lifecycleMu.Unlock()
 		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
 	}
 
@@ -129,13 +136,16 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 
 	// Remove listener from xDS first
 	if err = s.snapshotCache.RemovePod(ctx, storedPod.GetNetworkNamespace()); err != nil {
+		s.lifecycleMu.Unlock()
 		return nil, status.Errorf(codes.Internal, "failed to remove listener: %v", err)
 	}
 
 	// Remove from the local storage
 	if err = s.storage.RemoveResource(ctx, containerID); err != nil {
+		s.lifecycleMu.Unlock()
 		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
+	s.lifecycleMu.Unlock()
 
 	// Best-effort: wait for Envoy to remove the listener configuration
 	adminCtx, adminCancel := context.WithTimeout(ctx, envoyAdminTimeout)

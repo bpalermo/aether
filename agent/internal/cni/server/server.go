@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"buf.build/go/protovalidate"
 	"github.com/bpalermo/aether/agent/internal/envoy/admin"
@@ -43,6 +44,13 @@ type CNIServer struct {
 
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
+
+	// lifecycleMu serializes pod removal (unregister + storage delete) against the
+	// liveness loop's health re-registrations. Without it, the 5s liveness tick can
+	// observe a pod after RemovePod unregistered its endpoint but before the pod
+	// left storage, and re-register it — a permanent ghost endpoint in the registry
+	// that nothing unregisters again.
+	lifecycleMu sync.Mutex
 
 	snapshotCache *cache.SnapshotCache
 	spireBridge   *spire.Bridge

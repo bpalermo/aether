@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -86,11 +87,23 @@ func (s *Supervisor) writeState(epoch int) {
 	if s.cfg.StateDir == "" {
 		return
 	}
-	if cur, hb, ok := s.readState(); ok && epoch < cur && time.Since(hb) < predecessorStale {
-		return
-	}
 	if err := os.MkdirAll(s.cfg.StateDir, 0o755); err != nil {
 		s.log.V(1).Error(err, "creating state dir")
+		return
+	}
+
+	// flock the read-check-write: during a surge overlap the draining pod's
+	// heartbeat and the successor's first write can interleave so the file briefly
+	// regresses to the lower epoch, misleading a third starter. Best-effort — a
+	// lock failure falls back to the unlocked (pre-existing) behavior.
+	if lock, err := os.OpenFile(s.statePath()+".lock", os.O_CREATE|os.O_RDWR, 0o644); err == nil {
+		if flockErr := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); flockErr == nil {
+			defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+		}
+		defer func() { _ = lock.Close() }()
+	}
+
+	if cur, hb, ok := s.readState(); ok && epoch < cur && time.Since(hb) < predecessorStale {
 		return
 	}
 	tmp := s.statePath() + ".tmp"

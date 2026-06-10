@@ -35,6 +35,7 @@ go_test(
     name = "cache_test",
     srcs = [
         "cache_test.go",
+        "cluster_alias_test.go",
         "cluster_test.go",
         "listener_test.go",
         "outbound_mtls_test.go",

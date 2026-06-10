@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"github.com/bpalermo/aether/agent/types"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
 )
@@ -81,7 +82,22 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 			continue
 		}
 		endpoint.Health = want
-		if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
+
+		// Re-check the pod still exists in storage under lifecycleMu before
+		// re-registering: the pods slice is a snapshot from the start of this
+		// tick, and a concurrent RemovePod (which holds lifecycleMu across
+		// unregister + storage delete) may have removed the pod — re-registering
+		// then would resurrect a deleted endpoint in the registry permanently.
+		s.lifecycleMu.Lock()
+		if _, getErr := s.storage.GetResource(ctx, types.ContainerID(pod.GetContainerId())); getErr != nil {
+			s.lifecycleMu.Unlock()
+			delete(last, key)
+			s.log.V(1).Info("liveness: pod no longer in storage; skipping health update", "pod", pod.GetName())
+			continue
+		}
+		err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint)
+		s.lifecycleMu.Unlock()
+		if err != nil {
 			s.log.Error(err, "liveness: failed to re-register endpoint health", "pod", pod.GetName())
 			continue
 		}
