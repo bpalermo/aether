@@ -18,40 +18,71 @@ import (
 // the proxy into the registry.
 const livenessInterval = 5 * time.Second
 
+// livenessWarmupGrace bounds how long a failing health check on a fresh,
+// never-yet-serving active-mode pod is attributed to HC warm-up rather than a
+// real app failure. Envoy starts hosts as failed until their first passing
+// check, and the health gateway's 503 cannot distinguish "pending first check"
+// from "failed checks" (the admin /clusters pending_active_hc flag could).
+// Sized to the probe cluster's HC cadence: interval 5s × unhealthy threshold 2,
+// plus slack. After the grace, a 503 is a genuine UNHEALTHY transition, so a
+// never-serving app still gets gated — just not flapped during startup.
+const livenessWarmupGrace = 15 * time.Second
+
+// livenessState carries the loop's per-container memory between ticks.
+type livenessState struct {
+	// last is the most recent health reported to the registry, to re-register
+	// only on transitions.
+	last map[string]registryv1.ServiceEndpoint_Health
+	// firstSeen is when the loop first observed the container with a programmed
+	// gateway filter, anchoring the warm-up grace.
+	firstSeen map[string]time.Time
+	// sawHealthy marks containers that have passed their health check at least
+	// once; after that, a 503 is never warm-up.
+	sawHealthy map[string]struct{}
+}
+
+func newLivenessState() *livenessState {
+	return &livenessState{
+		last:       make(map[string]registryv1.ServiceEndpoint_Health),
+		firstSeen:  make(map[string]time.Time),
+		sawHealthy: make(map[string]struct{}),
+	}
+}
+
+// forget drops all per-container memory for a container ID.
+func (st *livenessState) forget(containerID string) {
+	delete(st.last, containerID)
+	delete(st.firstSeen, containerID)
+	delete(st.sawHealthy, containerID)
+}
+
 // runLivenessLoop periodically reflects local pod application health (as actively
-// health-checked by the proxy, read from its admin interface) into the registry.
-// When a pod's app stops (or resumes) passing its health check, the agent
-// re-registers the endpoint with the updated health so every consumer marks it
-// unhealthy (or healthy) in their EDS — the delegated-liveness gate. It returns
-// when the context is cancelled.
+// health-checked by the proxy, read from the health gateway listener) into the
+// registry. When a pod's app stops (or resumes) passing its health check, the
+// agent re-registers the endpoint with the updated health so every consumer marks
+// it unhealthy (or healthy) in their EDS — the delegated-liveness gate. It
+// returns when the context is cancelled.
 func (s *CNIServer) runLivenessLoop(ctx context.Context) {
 	ticker := time.NewTicker(livenessInterval)
 	defer ticker.Stop()
 
-	// last reported health per container, to re-register only on transitions.
-	last := make(map[string]registryv1.ServiceEndpoint_Health)
+	state := newLivenessState()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.reconcileLiveness(ctx, last)
+			s.reconcileLiveness(ctx, state)
 		}
 	}
 }
 
-// reconcileLiveness scrapes the proxy for per-pod app health and re-registers any
-// endpoint whose health changed since the last report.
-func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]registryv1.ServiceEndpoint_Health) {
+// reconcileLiveness probes the health gateway for each local pod's app health
+// and re-registers any endpoint whose health changed since the last report.
+func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState) {
 	// Drop transition state the reconciler invalidated (re-registered endpoints
 	// sit at the mode-default health; the next observation must re-promote).
-	s.drainLivenessForget(last)
-
-	appHealth, err := s.envoyAdmin.AppClusterHealth(ctx)
-	if err != nil {
-		s.log.V(1).Info("liveness: failed to read app cluster health", "error", err)
-		return
-	}
+	s.drainLivenessForget(state)
 
 	pods, err := s.storage.GetAll(ctx)
 	if err != nil {
@@ -63,9 +94,24 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 		if isIgnorablePod(pod) || pod.GetTerminating() {
 			continue
 		}
-		healthy, known := appHealth[proxy.HealthProbeClusterName(pod)]
+
+		healthy, known, err := s.healthClient.appHealth(ctx, proxy.HealthProbeClusterName(pod))
+		if err != nil {
+			// The gateway itself is unreachable (proxy down / restarting): no
+			// probe this tick can succeed, abort instead of logging per pod.
+			s.log.V(1).Info("liveness: health gateway unreachable", "error", err)
+			return
+		}
 		if !known {
-			continue // app cluster not yet programmed / health-checked
+			continue // pod's gateway filter not yet programmed / propagated
+		}
+
+		key := pod.GetContainerId()
+		if _, ok := state.firstSeen[key]; !ok {
+			state.firstSeen[key] = time.Now()
+		}
+		if healthy {
+			state.sawHealthy[key] = struct{}{}
 		}
 
 		want := registryv1.ServiceEndpoint_HEALTH_HEALTHY
@@ -73,16 +119,27 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 			want = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 		}
 
+		eds := registry.HealthCheckModeFromAnnotations(pod.GetAnnotations()) == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
+
+		// Warm-up grace (active mode only): hosts start failed until their first
+		// passing check, so a 503 on a never-yet-serving pod inside the grace
+		// window is startup, not an app failure. EDS-mode pods need no grace —
+		// they are registered UNHEALTHY, so warm-up 503s are not transitions.
+		if !healthy && !eds {
+			if _, served := state.sawHealthy[key]; !served && time.Since(state.firstSeen[key]) < livenessWarmupGrace {
+				continue
+			}
+		}
+
 		// Absent prior state is seeded with the endpoint's registration health so
 		// only a real transition triggers a re-register: EDS-mode endpoints are
 		// registered UNHEALTHY (gated until this proxy vets the app — the first
 		// healthy observation here is the promotion), active-mode endpoints
 		// register HEALTHY.
-		key := pod.GetContainerId()
-		prev, ok := last[key]
+		prev, ok := state.last[key]
 		if !ok {
 			prev = registryv1.ServiceEndpoint_HEALTH_HEALTHY
-			if registry.HealthCheckModeFromAnnotations(pod.GetAnnotations()) == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
+			if eds {
 				prev = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 			}
 		}
@@ -117,7 +174,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 		if cur, getErr := s.storage.GetResource(spanCtx, types.ContainerID(pod.GetContainerId())); getErr != nil || cur.GetTerminating() {
 			s.lifecycleMu.Unlock()
 			span.End()
-			delete(last, key)
+			state.forget(key)
 			s.log.V(1).Info("liveness: pod gone or terminating; skipping health update", "pod", pod.GetName())
 			continue
 		}
@@ -129,7 +186,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 			continue
 		}
 		s.metrics.healthTransition(ctx, prev.String(), want.String())
-		last[key] = want
+		state.last[key] = want
 		s.log.V(1).Info("liveness: updated endpoint health", "pod", pod.GetName(), "health", want.String())
 	}
 }

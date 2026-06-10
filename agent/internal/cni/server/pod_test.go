@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	agentconstants "github.com/bpalermo/aether/agent/constants"
-	"github.com/bpalermo/aether/agent/internal/envoy/admin"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -61,7 +60,9 @@ func (r *testRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_
 // for unit-testing the AddPod and RemovePod methods directly. The ACK tracker
 // never sees an Envoy stream in unit tests, so AddPod's best-effort ACK wait
 // runs out its (short) deadline and RemovePod's absent-wait returns instantly.
-func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache, envoyAdminAddr string) *CNIServer {
+// healthSocket is the UDS path of a fake health gateway (empty when the test
+// never reaches the liveness probe).
+func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache, healthSocket string) *CNIServer {
 	return &CNIServer{
 		log:           logr.Discard(),
 		clusterName:   "test-cluster",
@@ -74,7 +75,7 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		snapshotCache: sc,
 		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()),
 		ackTracker:    ack.NewTracker(logr.Discard()),
-		envoyAdmin:    admin.NewClient(envoyAdminAddr),
+		healthClient:  newHealthGatewayClient(healthSocket),
 		k8sClient:     k8sClient,
 	}
 }
