@@ -11,6 +11,8 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // RegistrarServer implements the RegistrarServiceServer gRPC interface.
@@ -149,7 +151,14 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 			return stream.Context().Err()
 		case event, ok := <-ch:
 			if !ok {
-				return nil
+				// Channel closed: either the broadcaster force-resynced this
+				// slow watcher after an overflow, or a reconnect replaced the
+				// subscription. Either way the client must NOT resume from its
+				// last seen version — events within a batch share one version,
+				// so a mid-batch overflow can leave the client's lastVersion
+				// equal to the current version while it still missed events.
+				// DataLoss tells the client to clear its resume token.
+				return status.Error(codes.DataLoss, "watch stream overflowed; reconnect for a full snapshot")
 			}
 			if err := stream.Send(event); err != nil {
 				return fmt.Errorf("failed to send event: %w", err)

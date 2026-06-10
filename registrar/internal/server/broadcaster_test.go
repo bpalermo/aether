@@ -264,12 +264,12 @@ func TestBroadcaster_Broadcast_EmptyEventList(t *testing.T) {
 	assert.Equal(t, 1, b.WatcherCount())
 }
 
-// TestBroadcaster_Broadcast_DropsEventsForSlowConsumer verifies that Broadcast
-// does not block and drops events when a watcher's channel is full.
-//
-// Broadcast uses a non-blocking select internally, so it must return immediately
-// even when the watcher channel is at capacity.
-func TestBroadcaster_Broadcast_DropsEventsForSlowConsumer(t *testing.T) {
+// TestBroadcaster_Broadcast_ForcesResyncOnSlowConsumer verifies that Broadcast
+// does not block when a watcher's channel is full, and that the overflowed
+// watcher is force-resynced: removed from the broadcaster with its channel
+// closed, so its WatchEndpoints stream ends and the agent reconnects for a
+// full snapshot instead of silently missing the event.
+func TestBroadcaster_Broadcast_ForcesResyncOnSlowConsumer(t *testing.T) {
 	b := NewBroadcaster(logr.Discard(), nil)
 	ch := b.Subscribe("slow-node")
 
@@ -284,17 +284,54 @@ func TestBroadcaster_Broadcast_DropsEventsForSlowConsumer(t *testing.T) {
 	}
 	require.Equal(t, defaultChannelBuffer, len(ch), "channel must be full before overflow test")
 
-	// Broadcasting onto a full channel must be a non-blocking no-op (the event is
-	// dropped via the default branch in Broadcast). Verify this by checking that
-	// the channel length is unchanged after the extra call.
+	// Overflow by several events in one batch: the channel must be closed
+	// exactly once (no panic) and the watcher removed.
 	overflowEvent := &registrarv1.WatchEndpointsResponse{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-overflow",
 	}
-	b.Broadcast([]*registrarv1.WatchEndpointsResponse{overflowEvent})
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{overflowEvent, overflowEvent})
 
-	// Channel must still hold exactly defaultChannelBuffer events; overflow dropped.
-	assert.Equal(t, defaultChannelBuffer, len(ch))
+	assert.Equal(t, 0, b.WatcherCount(), "overflowed watcher must be removed")
+
+	// The buffered events remain readable, then the channel reports closed.
+	for i := 0; i < defaultChannelBuffer; i++ {
+		_, ok := <-ch
+		require.True(t, ok, "buffered event %d must still be readable", i)
+	}
+	_, ok := <-ch
+	assert.False(t, ok, "channel must be closed after the buffer drains")
+
+	// The stream handler's deferred Unsubscribe must be a stale no-op.
+	b.Unsubscribe("slow-node", ch)
+	assert.Equal(t, 0, b.WatcherCount())
+}
+
+// TestBroadcaster_Broadcast_ResyncedWatcherCanResubscribe verifies the
+// force-resync recovery path: the agent reconnects under the same watcher ID
+// and receives events normally.
+func TestBroadcaster_Broadcast_ResyncedWatcherCanResubscribe(t *testing.T) {
+	b := NewBroadcaster(logr.Discard(), nil)
+	b.Subscribe("slow-node")
+
+	event := &registrarv1.WatchEndpointsResponse{
+		Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+	}
+	for i := 0; i < defaultChannelBuffer+1; i++ {
+		b.Broadcast([]*registrarv1.WatchEndpointsResponse{event})
+	}
+	require.Equal(t, 0, b.WatcherCount(), "watcher must be force-resynced")
+
+	ch2 := b.Subscribe("slow-node")
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{event})
+	require.Equal(t, 1, b.WatcherCount())
+	select {
+	case got, ok := <-ch2:
+		require.True(t, ok)
+		assert.Equal(t, event.GetType(), got.GetType())
+	default:
+		t.Fatal("resubscribed watcher did not receive the event")
+	}
 }
 
 // TestBroadcaster_WatcherCount verifies WatcherCount through subscribe/unsubscribe

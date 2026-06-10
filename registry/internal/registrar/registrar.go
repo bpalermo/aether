@@ -17,7 +17,9 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -280,6 +282,15 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 	for {
 		event, err := stream.Recv()
 		if err != nil {
+			// DataLoss means the registrar force-resynced this watcher (its
+			// event buffer overflowed). Resuming from lastVersion could skip
+			// the missed events — batches share a version, so lastVersion may
+			// match the current version while events were still dropped. Clear
+			// the resume token so the reconnect receives a full snapshot.
+			if status.Code(err) == codes.DataLoss {
+				r.log.Info("registrar forced a resync; requesting full snapshot on reconnect")
+				return ""
+			}
 			if err != io.EOF && ctx.Err() == nil {
 				r.log.Error(err, "watch stream disconnected")
 			}

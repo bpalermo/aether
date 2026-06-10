@@ -15,7 +15,10 @@ const (
 
 // Broadcaster fans out endpoint events to all connected agent watch streams.
 // Each watcher is identified by a string key (typically node name) and receives
-// events on a buffered channel. Events are dropped for slow consumers.
+// events on a buffered channel. A watcher too slow to keep up is forcibly
+// resynced: its channel is closed, ending its WatchEndpoints stream, and the
+// agent's reconnect receives a full snapshot — it must never silently miss an
+// event and serve stale endpoints until something else triggers a resync.
 type Broadcaster struct {
 	mu       sync.RWMutex
 	watchers map[string]chan *registrarv1.WatchEndpointsResponse
@@ -74,23 +77,53 @@ func (b *Broadcaster) Unsubscribe(id string, ch <-chan *registrarv1.WatchEndpoin
 	b.log.V(1).Info("watcher unsubscribed", "id", id)
 }
 
-// Broadcast sends events to all watchers. Events are sent non-blocking;
-// if a watcher's channel is full the event is dropped for that watcher.
+// Broadcast sends events to all watchers. Events are sent non-blocking; a
+// watcher whose channel is full has already missed an event, so it is forced
+// to resync: its channel is closed, which ends its WatchEndpoints stream, and
+// the agent reconnects to receive a fresh full snapshot. The alternative —
+// silently dropping the event — leaves the agent serving stale endpoints with
+// nothing to correct it until its next reconnect for unrelated reasons.
 func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	// Collect overflowed watchers under the read lock; closing them requires
+	// the write lock, taken afterwards to avoid lock-upgrade deadlocks.
+	type droppedWatcher struct {
+		id string
+		ch chan *registrarv1.WatchEndpointsResponse
+	}
+	var dropped []droppedWatcher
 
+	b.mu.RLock()
 	for _, event := range events {
 		for id, ch := range b.watchers {
 			select {
 			case ch <- event:
 				b.metrics.eventBroadcast(context.Background(), event.GetType().String())
 			default:
-				// A dropped event means this watcher's view silently diverges
-				// until it reconnects — the counter is the staleness alarm.
+				// This watcher's view has diverged — schedule a force-resync.
+				// The counter is the staleness alarm.
 				b.metrics.eventDropped(context.Background(), event.GetType().String())
-				b.log.V(1).Info("dropped event for slow watcher", "id", id, "eventType", event.GetType())
+				b.log.Info("event overflowed slow watcher; forcing resync",
+					"id", id, "eventType", event.GetType())
+				dropped = append(dropped, droppedWatcher{id: id, ch: ch})
 			}
+		}
+	}
+	b.mu.RUnlock()
+
+	if len(dropped) == 0 {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, d := range dropped {
+		// Re-check identity: the watcher may have reconnected (replacing its
+		// channel) or unsubscribed between the locks; later events in this batch
+		// may also have queued the same channel more than once.
+		if current, ok := b.watchers[d.id]; ok && current == d.ch {
+			close(current)
+			delete(b.watchers, d.id)
+			b.metrics.watcherUnsubscribed(context.Background())
 		}
 	}
 }
