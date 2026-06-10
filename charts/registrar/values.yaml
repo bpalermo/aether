@@ -15,6 +15,19 @@ namespace:
 # Cluster name passed to the registrar (`--cluster-name`).
 clusterName: talos-main
 
+# OTel telemetry, push-first: when otlpEndpoint is set, the registrar pushes
+# metrics (and traces when tracing.enabled) to the collector.
+telemetry:
+  # Enables the OTel MeterProvider (`--otel-enabled`).
+  enabled: false
+  # OTLP gRPC collector endpoint (host:port, insecure). Empty disables push.
+  otlpEndpoint: ""
+  tracing:
+    # Enables OTLP trace export (`--tracing-enabled`); requires otlpEndpoint.
+    enabled: false
+    # Head-sampling ratio for traces (`--trace-sample-rate`).
+    sampleRate: 0.1
+
 # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd, cloudmap.
 registryBackend: kubernetes
 

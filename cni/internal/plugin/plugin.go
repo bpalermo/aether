@@ -30,8 +30,9 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/cni/config"
 	"github.com/bpalermo/aether/cni/internal/cri"
+	"github.com/bpalermo/aether/cni/internal/telemetry"
 	"github.com/bpalermo/aether/common/constants"
-	"github.com/bpalermo/aether/common/telemetry"
+	commontelemetry "github.com/bpalermo/aether/common/telemetry"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -63,6 +64,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
+	telemetry.Init(context.Background(), p.logger, netConf.OTLPEndpoint)
 
 	if ignorableNamespace(string(k8sArgs.K8S_POD_NAMESPACE)) {
 		p.logger.Info("skipping CNI add for system pod",
@@ -110,6 +112,7 @@ func (p *AetherPlugin) CmdCheck(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
+	telemetry.Init(context.Background(), p.logger, netConf.OTLPEndpoint)
 
 	if ignorableNamespace(string(k8sArgs.K8S_POD_NAMESPACE)) {
 		return nil
@@ -149,6 +152,7 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
+	telemetry.Init(context.Background(), p.logger, conf.OTLPEndpoint)
 
 	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
 	if ignorableNamespace(namespace) {
@@ -301,7 +305,7 @@ func (p *AetherPlugin) resolvePID(netns, criSocket, containerID string) *wrapper
 // sendAddPod sends the pod to the agent and returns the previous result on success.
 func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, pod *cniv1.CNIPod, prevResult *current.Result) (retErr error) {
 	ctx, span := startPodSpan(ctx, "cni.add_pod", pod.GetName(), pod.GetNamespace(), pod.GetContainerId())
-	defer func() { telemetry.EndSpan(span, retErr) }()
+	defer func() { commontelemetry.EndSpan(span, retErr) }()
 
 	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
 	if err != nil {
@@ -328,7 +332,7 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 // sendRemovePod sends the pod removal request to the agent.
 func (p *AetherPlugin) sendRemovePod(ctx context.Context, conf config.AetherConf, podName, namespace, containerID string) (retErr error) {
 	ctx, span := startPodSpan(ctx, "cni.remove_pod", podName, namespace, containerID)
-	defer func() { telemetry.EndSpan(span, retErr) }()
+	defer func() { commontelemetry.EndSpan(span, retErr) }()
 
 	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
 	if err != nil {

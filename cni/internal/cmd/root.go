@@ -33,6 +33,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.CNIBinSourceDir, "cni-bin-dir", constants.DefaultCNIBinDir, "Directory from where the CNI binaries should be copied")
 	rootCmd.Flags().StringVar(&cfg.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
 	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
+	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint written into the netconf so the CNI plugin pushes traces and metrics (e.g. collector:4317); empty disables plugin telemetry")
 }
 
 // GetCommand returns the main cobra.Command object for this application

@@ -1,9 +1,9 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
+	"time"
 
 	cnilog "github.com/bpalermo/aether/cni/internal/log"
 	"github.com/bpalermo/aether/cni/internal/plugin"
@@ -12,6 +12,19 @@ import (
 	"github.com/containernetworking/cni/pkg/version"
 	"go.uber.org/zap"
 )
+
+// instrument wraps a CNI command handler with operation metrics. Telemetry is
+// initialized lazily inside the handler (the OTLP endpoint lives in the
+// netconf, parsed there); recording after the handler returns is therefore
+// already past initialization — or a no-op when telemetry is disabled.
+func instrument(op string, fn func(*skel.CmdArgs) error) func(*skel.CmdArgs) error {
+	return func(args *skel.CmdArgs) error {
+		start := time.Now()
+		err := fn(args)
+		telemetry.RecordOperation(op, time.Since(start), err)
+		return err
+	}
+}
 
 func main() {
 	logger, err := cnilog.NewLogger()
@@ -36,19 +49,17 @@ func main() {
 		return
 	}
 
-	// Opt-in tracing (OTEL_EXPORTER_OTLP_ENDPOINT). The plugin process exits
-	// after a single CNI operation, so batched spans must be flushed on every
-	// path — including failures — before the error is reported to the runtime.
-	flushTraces := telemetry.Setup(context.Background(), logger)
-
+	// The plugin process exits after a single CNI operation, so batched spans
+	// and metrics must be flushed on every path — including failures — before
+	// the error is reported to the runtime.
 	e := skel.PluginMainFuncsWithError(skel.CNIFuncs{
-		Add:    p.CmdAdd,
-		Check:  p.CmdCheck,
-		Del:    p.CmdDel,
-		GC:     p.CmdGC,
-		Status: p.CmdStatus,
+		Add:    instrument("add", p.CmdAdd),
+		Check:  instrument("check", p.CmdCheck),
+		Del:    instrument("del", p.CmdDel),
+		GC:     instrument("gc", p.CmdGC),
+		Status: instrument("status", p.CmdStatus),
 	}, version.All, "CNI aether plugin v0.0.1")
-	flushTraces()
+	telemetry.Flush(logger)
 	if e != nil {
 		if err := e.Print(); err != nil {
 			log.Print("Error writing error JSON to stdout: ", err)

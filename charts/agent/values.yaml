@@ -24,6 +24,23 @@ clusterName: talos-main
 # Enable verbose logging on the agent and cni-install containers (`--debug`).
 debug: true
 
+# OTel telemetry, push-first: when otlpEndpoint is set, the agent, the CNI
+# plugin (via the netconf written by cni-install), and the proxy supervisor
+# all push metrics to the collector; tracing additionally enables OTLP trace
+# export on the agent and CNI plugin.
+telemetry:
+  # Enables the OTel MeterProvider on the agent (`--otel-enabled`).
+  enabled: false
+  # OTLP gRPC collector endpoint (host:port, insecure), e.g.
+  # "otel-collector.observability.svc:4317". Empty disables push everywhere.
+  otlpEndpoint: ""
+  tracing:
+    # Enables OTLP trace export on the agent (`--tracing-enabled`);
+    # requires otlpEndpoint.
+    enabled: false
+    # Head-sampling ratio for traces (`--trace-sample-rate`).
+    sampleRate: 0.1
+
 agent:
   image:
     # Substituted at package time with the digest-pinned reference produced by

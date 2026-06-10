@@ -134,11 +134,17 @@ func TestSupervisor_HotRestartRecordsEpoch(t *testing.T) {
 	}
 }
 
+func TestTelemetry_RequiresEndpoint(t *testing.T) {
+	if _, err := NewTelemetry(context.Background(), TelemetryConfig{ServiceVersion: "test"}); err == nil {
+		t.Fatal("NewTelemetry() without an OTLP endpoint should fail")
+	}
+}
+
 func TestTelemetry_MeterAndShutdown(t *testing.T) {
 	tel, err := NewTelemetry(context.Background(), TelemetryConfig{
 		ServiceVersion: "test",
-		// no BindAddress: Serve is a no-op; no OTLP: Prometheus reader only
-	}, logr.Discard())
+		OTLPEndpoint:   "localhost:4317", // never dialed until export
+	})
 	if err != nil {
 		t.Fatalf("NewTelemetry() error = %v", err)
 	}
@@ -146,7 +152,7 @@ func TestTelemetry_MeterAndShutdown(t *testing.T) {
 	if _, err := NewSupervisorMetrics(tel.Meter()); err != nil {
 		t.Fatalf("NewSupervisorMetrics() on telemetry meter error = %v", err)
 	}
-	if err := tel.Shutdown(); err != nil {
-		t.Fatalf("Shutdown() error = %v", err)
-	}
+	// Shutdown flushes toward the unreachable collector; bounded by the
+	// pipeline's own timeout, and the export error is expected.
+	_ = tel.Shutdown()
 }

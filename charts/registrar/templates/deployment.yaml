@@ -23,6 +23,16 @@ spec:
           args:
             - "--debug={{ .Values.debug }}"
             - "--cluster-name={{ .Values.clusterName }}"
+            {{- if .Values.telemetry.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.telemetry.otlpEndpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.telemetry.tracing.enabled }}
+            - "--tracing-enabled=true"
+            - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"
+            {{- end }}
             - "--registry-backend={{ .Values.registryBackend }}"
             {{- if eq .Values.registryBackend "cloudmap" }}
             - "--cloudmap-namespace={{ .Values.cloudMap.namespace }}"
