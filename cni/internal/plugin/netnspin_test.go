@@ -23,7 +23,7 @@ func TestNetnsPinPathDefaults(t *testing.T) {
 }
 
 func TestNetnsUnpinDelay(t *testing.T) {
-	assert.Equal(t, 10*time.Second, config.AetherConf{}.NetnsUnpinDelay())
+	assert.Equal(t, 60*time.Second, config.AetherConf{}.NetnsUnpinDelay())
 	assert.Equal(t, time.Duration(0), config.AetherConf{NetnsUnpinDelaySeconds: -1}.NetnsUnpinDelay())
 	assert.Equal(t, 3*time.Second, config.AetherConf{NetnsUnpinDelaySeconds: 3}.NetnsUnpinDelay())
 }
@@ -111,4 +111,26 @@ func TestSweepNetnsPins(t *testing.T) {
 func TestSweepNetnsPinsEmpty(t *testing.T) {
 	p := NewAetherPlugin(zap.NewNop())
 	p.sweepNetnsPins(config.AetherConf{NetnsPinDir: filepath.Join(t.TempDir(), "missing")}, []byte(`{}`))
+}
+
+// TestUnpinDelayDefault pins the 60s drain-tail margin (observed late dials up
+// to ~13s post-removal; a dial through a released pin segfaults Envoy).
+func TestUnpinDelayDefault(t *testing.T) {
+	assert.Equal(t, 60*time.Second, config.AetherConf{}.NetnsUnpinDelay())
+}
+
+// TestRunDetachedUnpin: the detached entrypoint waits and releases the target;
+// bad argv is rejected without panicking.
+func TestRunDetachedUnpin(t *testing.T) {
+	p := NewAetherPlugin(zap.NewNop())
+	conf := pinTestConf(t)
+	target := conf.NetnsPinPath("det-1")
+	require.NoError(t, os.WriteFile(target, nil, 0o600))
+
+	p.RunDetachedUnpin([]string{target, "1ms"})
+	_, err := os.Stat(target)
+	assert.True(t, os.IsNotExist(err))
+
+	p.RunDetachedUnpin([]string{"only-one-arg"})
+	p.RunDetachedUnpin([]string{target, "not-a-duration"})
 }

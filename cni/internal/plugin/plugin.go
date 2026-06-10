@@ -26,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/cni/config"
@@ -174,11 +173,11 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 
 	if !conf.NetnsPinDisabled {
 		// The agent has deregistered the pod and waited for Envoy to ack the
-		// listener removal; hold the pin briefly for deferred cluster
-		// destruction / connection-pool dials, then release the netns.
-		time.Sleep(conf.NetnsUnpinDelay())
-		if err := p.unpinNetns(conf, args.ContainerID); err != nil {
-			p.logger.Warn("failed to unpin netns; orphan will be swept by GC",
+		// listener removal; a detached unpinner holds the pin through Envoy's
+		// drain tail (health checkers and pool drains were observed dialing
+		// 10-13s after removal under churn) without delaying pod teardown.
+		if err := p.spawnDetachedUnpin(conf.NetnsPinPath(args.ContainerID), conf.NetnsUnpinDelay()); err != nil {
+			p.logger.Warn("failed to spawn netns unpinner; orphan will be swept by GC",
 				zap.String("containerID", args.ContainerID), zap.Error(err))
 		}
 	}

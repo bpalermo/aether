@@ -26,6 +26,13 @@ func main() {
 
 	p := plugin.NewAetherPlugin(logger)
 
+	// Detached netns-unpin mode (spawned by CmdDel, not by the runtime): wait
+	// out the drain tail, then release the pin. See plugin.RunDetachedUnpin.
+	if len(os.Args) > 1 && os.Args[1] == plugin.NetnsUnpinSubcommand {
+		p.RunDetachedUnpin(os.Args[2:])
+		return
+	}
+
 	skel.PluginMainFuncs(skel.CNIFuncs{
 		Add:    p.CmdAdd,
 		Check:  p.CmdCheck,
