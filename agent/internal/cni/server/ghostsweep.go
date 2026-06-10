@@ -6,7 +6,10 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Registry reconciliation (e2e findings, 2026-06-10).
@@ -70,9 +73,23 @@ func (s *CNIServer) drainLivenessForget(last map[string]registryv1.ServiceEndpoi
 // storage: deregisters entries no live local pod accounts for, and re-registers
 // live pods the registry is missing.
 func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
+	// A sweep correction is direct evidence of a missed update somewhere in the
+	// pipeline, so each iteration is traced with the corrections it made.
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.ghost_sweep")
+	var retErr error
+	ghostsRemoved, missingRegistered := 0, 0
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("aether.sweep.ghosts_removed", ghostsRemoved),
+			attribute.Int("aether.sweep.missing_registered", missingRegistered),
+		)
+		telemetry.EndSpan(span, retErr)
+	}()
+
 	all, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
 		s.log.V(1).Info("ghost sweep: failed to list registry endpoints", "error", err)
+		retErr = err
 		return
 	}
 
@@ -84,6 +101,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	pods, err := s.storage.GetAll(ctx)
 	if err != nil {
 		s.log.V(1).Info("ghost sweep: failed to list local pods", "error", err)
+		retErr = err
 		return
 	}
 	// Live local pods by IP. Terminating pods are tracked separately: their
@@ -129,6 +147,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 					"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
 				continue
 			}
+			ghostsRemoved++
 			s.log.Info("ghost sweep: deregistered ghost endpoint",
 				"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
 		}
@@ -156,6 +175,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 			continue
 		}
 		s.forgetLiveness(pod.GetContainerId())
+		missingRegistered++
 		s.log.Info("ghost sweep: registered missing endpoint",
 			"service", serviceName, "ip", ip, "pod", pod.GetName())
 	}

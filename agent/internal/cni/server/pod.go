@@ -12,7 +12,10 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +23,21 @@ import (
 )
 
 const envoyAdminTimeout = 2 * time.Second
+
+// tracerName identifies this instrumentation scope in trace backends. The RPC
+// span itself comes from the otelgrpc stats handler; spans started here break
+// the pod lifecycle down into its API-server / registry / xDS / Envoy steps.
+const tracerName = "aether/agent-cni-server"
+
+// startStepSpan starts a child span for one step of a pod lifecycle operation.
+func startStepSpan(ctx context.Context, name string, pod *cniv1.CNIPod) (context.Context, trace.Span) {
+	return otel.Tracer(tracerName).Start(ctx, name,
+		trace.WithAttributes(
+			telemetry.AttrPodName.String(pod.GetName()),
+			telemetry.AttrPodNamespace.String(pod.GetNamespace()),
+		),
+	)
+}
 
 // AddPod handles CNI ADD requests for a pod.
 // It enriches the pod data with Kubernetes annotations and labels, validates that the pod
@@ -73,7 +91,10 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		// Registry unavailability must not block pod creation node-wide (a
 		// failed ADD fails the sandbox): the pod is already stored, so the
 		// reconciliation sweep registers it as soon as the registry answers.
-		if err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, sEndpoint); err != nil {
+		regCtx, regSpan := startStepSpan(ctx, "cni_server.register_endpoint", cniPod)
+		err = s.registry.RegisterEndpoint(regCtx, serviceName, protocol, sEndpoint)
+		telemetry.EndSpan(regSpan, err)
+		if err != nil {
 			log.Error(err, "failed to register endpoint; reconciliation sweep will retry", "service", serviceName)
 		}
 	}
@@ -91,14 +112,20 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	}
 
 	// Update the xDS listener snapshot with the new pod
-	if err = s.snapshotCache.AddPod(ctx, cniPod, s.trustDomain); err != nil {
+	xdsCtx, xdsSpan := startStepSpan(ctx, "cni_server.xds_add_pod", cniPod)
+	err = s.snapshotCache.AddPod(xdsCtx, cniPod, s.trustDomain)
+	telemetry.EndSpan(xdsSpan, err)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add listener: %v", err)
 	}
 
 	// Best-effort: wait for Envoy to apply the listener configuration
 	adminCtx, adminCancel := context.WithTimeout(ctx, envoyAdminTimeout)
 	defer adminCancel()
-	if waitErr := s.envoyAdmin.WaitForListenerPresent(adminCtx, cniPod.GetNetworkNamespace()); waitErr != nil {
+	waitCtx, waitSpan := startStepSpan(adminCtx, "cni_server.envoy_listener_wait", cniPod)
+	waitErr := s.envoyAdmin.WaitForListenerPresent(waitCtx, cniPod.GetNetworkNamespace())
+	telemetry.EndSpan(waitSpan, waitErr)
+	if waitErr != nil {
 		log.V(1).Info("timed out waiting for Envoy to apply listener", "netns", cniPod.GetNetworkNamespace(), "error", waitErr)
 	}
 
@@ -146,7 +173,10 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	s.lifecycleMu.Lock()
 
 	serviceName, ips, err := registry.ExtractCNIPodInformation(storedPod)
-	if err = s.registry.UnregisterEndpoints(ctx, serviceName, ips); err != nil {
+	unregCtx, unregSpan := startStepSpan(ctx, "cni_server.unregister_endpoints", storedPod)
+	err = s.registry.UnregisterEndpoints(unregCtx, serviceName, ips)
+	telemetry.EndSpan(unregSpan, err)
+	if err != nil {
 		s.lifecycleMu.Unlock()
 		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
 	}
@@ -159,7 +189,10 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 
 	// Remove listener from xDS first
-	if err = s.snapshotCache.RemovePod(ctx, storedPod.GetNetworkNamespace()); err != nil {
+	xdsCtx, xdsSpan := startStepSpan(ctx, "cni_server.xds_remove_pod", storedPod)
+	err = s.snapshotCache.RemovePod(xdsCtx, storedPod.GetNetworkNamespace())
+	telemetry.EndSpan(xdsSpan, err)
+	if err != nil {
 		s.lifecycleMu.Unlock()
 		return nil, status.Errorf(codes.Internal, "failed to remove listener: %v", err)
 	}
@@ -174,7 +207,10 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	// Best-effort: wait for Envoy to remove the listener configuration
 	adminCtx, adminCancel := context.WithTimeout(ctx, envoyAdminTimeout)
 	defer adminCancel()
-	if waitErr := s.envoyAdmin.WaitForListenerRemoval(adminCtx, storedPod.GetNetworkNamespace()); waitErr != nil {
+	waitCtx, waitSpan := startStepSpan(adminCtx, "cni_server.envoy_listener_wait", storedPod)
+	waitErr := s.envoyAdmin.WaitForListenerRemoval(waitCtx, storedPod.GetNetworkNamespace())
+	telemetry.EndSpan(waitSpan, waitErr)
+	if waitErr != nil {
 		log.V(1).Info("timed out waiting for Envoy to remove listener", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
 	}
 
@@ -188,7 +224,10 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 // This allows changing the registry implementation without modifying the CNI plugin,
 // since the local stored file contains all relevant information.
 // It returns the pod's Kubernetes UID, used to build SPIRE workload selectors.
-func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) (string, error) {
+func (s *CNIServer) enhanceCNIPod(ctx context.Context, cniPod *cniv1.CNIPod) (_ string, retErr error) {
+	ctx, span := startStepSpan(ctx, "cni_server.enhance_pod", cniPod)
+	defer func() { telemetry.EndSpan(span, retErr) }()
+
 	var k8sPod corev1.Pod
 	if err := s.k8sClient.Get(ctx, client.ObjectKey{
 		Namespace: cniPod.GetNamespace(),

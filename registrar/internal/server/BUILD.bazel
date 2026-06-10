@@ -13,9 +13,12 @@ go_library(
     deps = [
         "//api/aether/registrar/v1:registrar",
         "//api/aether/registry/v1:registry",
+        "//common/telemetry",
         "//common/xds",
         "//registry",
         "@com_github_go_logr_logr//:logr",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_protobuf//proto",
     ],

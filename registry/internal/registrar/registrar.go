@@ -13,6 +13,7 @@ import (
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -97,6 +98,8 @@ func (r *RegistrarRegistry) Initialize(ctx context.Context) error {
 	if len(opts) == 0 {
 		opts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	}
+	// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+	opts = append(opts, grpc.WithStatsHandler(telemetry.ClientStatsHandler()))
 	conn, err := grpc.NewClient(r.config.Address, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to registrar at %s: %w", r.config.Address, err)

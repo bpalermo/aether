@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/bpalermo/aether/common/telemetry"
@@ -9,26 +10,49 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
+// defaultTraceSampleRate is the default head-sampling ratio for traces.
+const defaultTraceSampleRate = 0.1
+
 // Result holds the bootstrapped manager and an optional telemetry shutdown function.
 type Result struct {
 	Manager  ctrl.Manager
-	Shutdown func(context.Context) error // nil if OTel not enabled
+	Shutdown func(context.Context) error // nil if neither OTel metrics nor tracing enabled
 }
 
 // Bootstrap sets up telemetry (if enabled), creates a controller-runtime Manager,
 // and registers the standard health and readiness probes.
 func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion string) (*Result, error) {
-	var shutdown func(context.Context) error
+	telemetryCfg := telemetry.Config{
+		ServiceName:     serviceName,
+		ServiceVersion:  serviceVersion,
+		OTLPEndpoint:    cfg.OTLPEndpoint,
+		TraceSampleRate: cfg.TraceSampleRate,
+	}
 
+	var shutdowns []func(context.Context) error
 	if cfg.OTelEnabled {
-		var err error
-		shutdown, err = telemetry.Setup(ctx, telemetry.Config{
-			ServiceName:    serviceName,
-			ServiceVersion: serviceVersion,
-			OTLPEndpoint:   cfg.OTLPEndpoint,
-		})
+		metricsShutdown, err := telemetry.Setup(ctx, telemetryCfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to setup telemetry: %w", err)
+		}
+		shutdowns = append(shutdowns, metricsShutdown)
+	}
+	if cfg.TracingEnabled {
+		tracingShutdown, err := telemetry.SetupTracing(ctx, telemetryCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to setup tracing: %w", err)
+		}
+		shutdowns = append(shutdowns, tracingShutdown)
+	}
+
+	var shutdown func(context.Context) error
+	if len(shutdowns) > 0 {
+		shutdown = func(ctx context.Context) error {
+			var errs []error
+			for _, fn := range shutdowns {
+				errs = append(errs, fn(ctx))
+			}
+			return errors.Join(errs...)
 		}
 	}
 

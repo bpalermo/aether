@@ -6,6 +6,7 @@ import (
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/common/xds"
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
@@ -41,6 +42,8 @@ func NewRegistrarServer(
 	cfg.Network = "tcp"
 	cfg.Address = address
 
+	// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+	grpcOpts = append(grpcOpts, grpc.StatsHandler(telemetry.ServerStatsHandler()))
 	grpcSrv := grpc.NewServer(grpcOpts...)
 
 	srv := &RegistrarServer{

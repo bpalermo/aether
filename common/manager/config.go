@@ -21,4 +21,8 @@ type Config struct {
 	OTelEnabled bool
 	// OTLPEndpoint is the OTLP gRPC collector endpoint (e.g. "localhost:4317"); empty disables OTLP export
 	OTLPEndpoint string
+	// TracingEnabled enables the OTel TracerProvider with OTLP trace export (requires OTLPEndpoint)
+	TracingEnabled bool
+	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0)
+	TraceSampleRate float64
 }

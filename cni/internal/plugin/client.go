@@ -7,6 +7,7 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/retry"
+	"github.com/bpalermo/aether/common/telemetry"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -40,6 +41,9 @@ func NewCNIClient(logger *zap.Logger, socketPath string) (*CNIClient, error) {
 	conn, err := grpc.NewClient(
 		"unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// No-op unless tracing is enabled via OTEL_EXPORTER_OTLP_ENDPOINT;
+		// propagates the CNI operation's trace context to the agent.
+		grpc.WithStatsHandler(telemetry.ClientStatsHandler()),
 	)
 	if err != nil {
 		msg := "failed to connect to socket"

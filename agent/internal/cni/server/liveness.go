@@ -7,7 +7,11 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/types"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // livenessInterval is how often the agent reconciles local pod app health from
@@ -93,6 +97,16 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 		}
 		endpoint.Health = want
 
+		// Health transitions are rare and meaningful, so each gets its own trace
+		// (a per-tick span would be a 5s-interval no-op most of the time).
+		spanCtx, span := otel.Tracer(tracerName).Start(ctx, "agent.liveness.health_transition",
+			trace.WithAttributes(
+				telemetry.AttrPodName.String(pod.GetName()),
+				telemetry.AttrPodNamespace.String(pod.GetNamespace()),
+				attribute.String("aether.health.from", prev.String()),
+				attribute.String("aether.health.to", want.String()),
+			))
+
 		// Re-check the pod still exists in storage — and is not terminating —
 		// under lifecycleMu before re-registering: the pods slice is a snapshot
 		// from the start of this tick, and a concurrent RemovePod (which holds
@@ -100,14 +114,16 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 		// deregistration may have unregistered the endpoint — re-registering
 		// then would resurrect a deleted endpoint in the registry permanently.
 		s.lifecycleMu.Lock()
-		if cur, getErr := s.storage.GetResource(ctx, types.ContainerID(pod.GetContainerId())); getErr != nil || cur.GetTerminating() {
+		if cur, getErr := s.storage.GetResource(spanCtx, types.ContainerID(pod.GetContainerId())); getErr != nil || cur.GetTerminating() {
 			s.lifecycleMu.Unlock()
+			span.End()
 			delete(last, key)
 			s.log.V(1).Info("liveness: pod gone or terminating; skipping health update", "pod", pod.GetName())
 			continue
 		}
-		err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint)
+		err = s.registry.RegisterEndpoint(spanCtx, serviceName, protocol, endpoint)
 		s.lifecycleMu.Unlock()
+		telemetry.EndSpan(span, err)
 		if err != nil {
 			s.log.Error(err, "liveness: failed to re-register endpoint health", "pod", pod.GetName())
 			continue
