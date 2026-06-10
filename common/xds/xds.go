@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bpalermo/aether/common/telemetry"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
@@ -53,6 +54,8 @@ func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.Snapshot
 			PermitWithoutStream: true,              // Allow pings even without active streams
 		}),
 		grpc.MaxConcurrentStreams(1000),
+		// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+		grpc.StatsHandler(telemetry.ServerStatsHandler()),
 	)
 	xdsSrv := serverv3.NewServer(ctx, cache, callbacks)
 

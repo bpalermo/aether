@@ -5,13 +5,20 @@ import (
 	"fmt"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // snapshotVersionLabel identifies the unified snapshot in version strings.
 const snapshotVersionLabel = "snapshot"
+
+// tracerName identifies this instrumentation scope in trace backends.
+const tracerName = "aether/agent-xds-cache"
 
 // generateSnapshot assembles a single, consistent xDS snapshot from every cached
 // resource type — listeners, clusters, endpoints, the outbound route config and
@@ -28,11 +35,15 @@ const snapshotVersionLabel = "snapshot"
 // older version (and older content) lands last, replacing newer config in Envoy
 // until the next trigger. Serialization also guarantees the last snapshot set
 // always reflects the final state of every map.
-func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
+func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	c.snapshotMu.Lock()
 	defer c.snapshotMu.Unlock()
 
 	v := generateSnapshotVersion(snapshotVersionLabel, c.version)
+
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.snapshot.generate",
+		trace.WithAttributes(telemetry.AttrSnapshotVersion.String(v)))
+	defer func() { telemetry.EndSpan(span, retErr) }()
 
 	listeners := c.Listeners()
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
@@ -62,6 +73,12 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
 	c.log.V(1).Info("setting snapshot", "version", v,
 		"listeners", len(listeners), "clusters", len(clusters),
 		"endpoints", len(endpoints), "vhosts", len(vhosts), "secrets", len(secrets))
+	span.SetAttributes(
+		attribute.Int("aether.snapshot.listeners", len(listeners)),
+		attribute.Int("aether.snapshot.clusters", len(clusters)),
+		attribute.Int("aether.snapshot.endpoints", len(endpoints)),
+		attribute.Int("aether.snapshot.secrets", len(secrets)),
+	)
 
 	snapshot, err := cachev3.NewSnapshot(v, resources)
 	if err != nil {

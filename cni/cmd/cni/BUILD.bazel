@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//cni/internal/log",
         "//cni/internal/plugin",
+        "//cni/internal/telemetry",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/version",
         "@org_uber_go_zap//:zap",

@@ -12,6 +12,7 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/common/xds"
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
@@ -81,6 +82,8 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(protovalidate_middleware.UnaryServerInterceptor(validator)),
+		// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+		grpc.StatsHandler(telemetry.ServerStatsHandler()),
 	)
 
 	cniSrv := &CNIServer{

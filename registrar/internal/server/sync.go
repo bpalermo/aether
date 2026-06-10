@@ -4,11 +4,17 @@ import (
 	"context"
 	"time"
 
+	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 )
+
+// tracerName identifies this instrumentation scope in trace backends.
+const tracerName = "aether/registrar"
 
 // Syncer periodically polls an external registry, computes a diff against the
 // local snapshot, and broadcasts changes to all watching agents. It implements
@@ -60,9 +66,14 @@ func (s *Syncer) Start(ctx context.Context) error {
 func (s *Syncer) sync(ctx context.Context) {
 	s.log.V(1).Info("starting sync cycle")
 
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "registrar.sync_loop")
+	var retErr error
+	defer func() { telemetry.EndSpan(span, retErr) }()
+
 	endpoints, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
 		s.log.Error(err, "failed to list endpoints from registry")
+		retErr = err
 		return
 	}
 
@@ -78,6 +89,10 @@ func (s *Syncer) sync(ctx context.Context) {
 	// Compute diff and apply.
 	events := s.snapshot.Diff(newState)
 	version := s.snapshot.Replace(newState)
+	span.SetAttributes(
+		attribute.Int("aether.sync.events", len(events)),
+		telemetry.AttrSnapshotVersion.String(version),
+	)
 
 	if s.firstSync {
 		s.log.Info("initial sync complete", "version", version, "endpoints", countEndpoints(newState))

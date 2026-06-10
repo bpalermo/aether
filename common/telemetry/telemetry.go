@@ -5,6 +5,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
@@ -16,6 +17,10 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+// otlpMetricTimeout bounds each OTLP metric export so a missing or slow
+// collector cannot back up the periodic reader indefinitely.
+const otlpMetricTimeout = 10 * time.Second
+
 // Config holds telemetry setup parameters.
 type Config struct {
 	// ServiceName identifies the service (e.g. "aether-agent", "aether-registrar").
@@ -25,6 +30,24 @@ type Config struct {
 	// OTLPEndpoint is the OTLP gRPC collector endpoint (e.g. "localhost:4317").
 	// Empty disables OTLP export.
 	OTLPEndpoint string
+	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0). Only
+	// used by SetupTracing.
+	TraceSampleRate float64
+}
+
+// newResource builds the OTel Resource shared by the meter and tracer
+// providers so metrics and traces carry identical service identity attributes.
+func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
+	return resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceName(cfg.ServiceName),
+			semconv.ServiceVersion(cfg.ServiceVersion),
+		),
+		resource.WithFromEnv(),
+		resource.WithTelemetrySDK(),
+		resource.WithProcess(),
+		resource.WithHost(),
+	)
 }
 
 // Setup creates an OTel MeterProvider with a Prometheus exporter registered
@@ -35,16 +58,7 @@ type Config struct {
 // so any package can create meters via otel.Meter().
 // The returned shutdown function flushes and stops the provider.
 func Setup(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
-	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(cfg.ServiceName),
-			semconv.ServiceVersion(cfg.ServiceVersion),
-		),
-		resource.WithFromEnv(),
-		resource.WithTelemetrySDK(),
-		resource.WithProcess(),
-		resource.WithHost(),
-	)
+	res, err := newResource(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
@@ -63,6 +77,7 @@ func Setup(ctx context.Context, cfg Config) (shutdown func(context.Context) erro
 		grpcExporter, grpcErr := otlpmetricgrpc.New(ctx,
 			otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint),
 			otlpmetricgrpc.WithInsecure(),
+			otlpmetricgrpc.WithTimeout(otlpMetricTimeout),
 		)
 		if grpcErr != nil {
 			return nil, fmt.Errorf("failed to create OTLP gRPC exporter: %w", grpcErr)

@@ -12,6 +12,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/common/xds",
     visibility = ["//visibility:public"],
     deps = [
+        "//common/telemetry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_envoyproxy_go_control_plane_envoy//service/cluster/v3:cluster",
