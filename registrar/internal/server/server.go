@@ -23,6 +23,7 @@ type RegistrarServer struct {
 	snapshot    *Snapshot
 	broadcaster *Broadcaster
 	log         logr.Logger
+	metrics     *Metrics
 
 	// Embed xds.Server for gRPC lifecycle management.
 	xds.Server
@@ -30,12 +31,14 @@ type RegistrarServer struct {
 
 // NewRegistrarServer creates a RegistrarServer and registers it on the gRPC server.
 // Additional gRPC server options (e.g., TLS credentials) can be passed via grpcOpts.
+// metrics may be nil to disable instrumentation.
 func NewRegistrarServer(
 	reg registry.Registry,
 	snapshot *Snapshot,
 	broadcaster *Broadcaster,
 	address string,
 	log logr.Logger,
+	metrics *Metrics,
 	grpcOpts ...grpc.ServerOption,
 ) *RegistrarServer {
 	cfg := xds.NewServerConfig()
@@ -51,6 +54,7 @@ func NewRegistrarServer(
 		snapshot:    snapshot,
 		broadcaster: broadcaster,
 		log:         log.WithName("registrar-server"),
+		metrics:     metrics,
 		Server:      xds.NewServer(cfg, log, xds.WithGRPCServer(grpcSrv)),
 	}
 
@@ -78,6 +82,7 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 	for _, e := range events {
 		e.Version = version
 	}
+	s.metrics.versionAdvanced(ctx, version)
 	s.broadcaster.Broadcast(events)
 
 	return &registrarv1.RegisterEndpointResponse{}, nil
@@ -111,6 +116,7 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 	for _, e := range events {
 		e.Version = version
 	}
+	s.metrics.versionAdvanced(ctx, version)
 	s.broadcaster.Broadcast(events)
 
 	return &registrarv1.UnregisterEndpointResponse{}, nil

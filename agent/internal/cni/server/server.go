@@ -17,6 +17,7 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -64,6 +65,7 @@ type CNIServer struct {
 	snapshotCache *cache.SnapshotCache
 	spireBridge   *spire.Bridge
 	envoyAdmin    *admin.Client
+	metrics       *cniMetrics
 
 	k8sClient client.Client
 	// informers is the manager's (node-scoped) informer cache, used by the
@@ -86,9 +88,17 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 		grpc.StatsHandler(telemetry.ServerStatsHandler()),
 	)
 
+	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
+	// a registration failure only disables instrumentation, never the server.
+	metrics, err := newCNIMetrics(otel.Meter(meterName))
+	if err != nil {
+		log.Error(err, "failed to create CNI server metrics; continuing without instrumentation")
+	}
+
 	cniSrv := &CNIServer{
 		Server:        xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
 		log:           log.WithName("cni"),
+		metrics:       metrics,
 		clusterName:   clusterName,
 		nodeName:      nodeName,
 		proxyID:       proxyID,
