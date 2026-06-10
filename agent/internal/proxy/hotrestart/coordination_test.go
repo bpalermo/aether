@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -136,6 +137,80 @@ func TestReadyMarker(t *testing.T) {
 	s.clearReady()
 	_, err = os.Stat(s.cfg.ReadyMarkerPath)
 	assert.True(t, os.IsNotExist(err))
+}
+
+// TestReadinessHeldWhileServingParentMidHandoff reproduces the 2026-06-11 e2e
+// finding: a surging successor pod binds the shared admin socket and answers at
+// its (not yet LIVE) epoch, which previously made the old pod's supervisor drop
+// the ready marker immediately — the DaemonSet (maxUnavailable=0 counts only
+// Ready pods) then deleted the old pod mid-handoff and the kubelet's grace
+// SIGKILL cut the hot-restart parent from under the successor (errno-111
+// abort). While this supervisor's newest child is alive and admin is reachable,
+// readiness must be HELD; it clears once the child exits (protocol terminate).
+func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available in this sandbox")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "envoy.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("v0\n"), 0o644))
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	marker := filepath.Join(t.TempDir(), "ready")
+
+	// Mutable admin: starts LIVE at this supervisor's epoch 0, then flips to a
+	// successor answering INITIALIZING at epoch 1.
+	var adminResp atomic.Value
+	adminResp.Store(`{"state":"LIVE","command_line_options":{"restart_epoch":0}}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, adminResp.Load().(string))
+	}))
+	defer srv.Close()
+
+	s := New(Config{
+		EnvoyPath:          stubEnvoy(t, recordPath),
+		ConfigPath:         configPath,
+		DrainTime:          time.Second,
+		ParentShutdownTime: time.Second,
+		StateDir:           t.TempDir(),
+		ReadyMarkerPath:    marker,
+		AdminAddress:       srv.Listener.Addr().String(),
+	}, logr.Discard(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(10 * time.Second):
+			t.Error("Run did not return after cancel")
+		}
+	})
+
+	// Phase A: LIVE at our epoch -> Ready.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "pod never became ready")
+
+	// Phase B: a successor binds admin, not yet LIVE. Readiness must be held
+	// while our child (the successor's hot-restart parent) is alive.
+	adminResp.Store(`{"state":"INITIALIZING","command_line_options":{"restart_epoch":1}}`)
+	assert.Never(t, func() bool {
+		_, err := os.Stat(marker)
+		return os.IsNotExist(err)
+	}, 3*readyPollInterval+500*time.Millisecond, 100*time.Millisecond,
+		"ready marker dropped mid-handoff while still the serving parent")
+
+	// Phase C: the successor's protocol terminates our child (clean exit) ->
+	// nothing left serving here -> readiness clears.
+	s.signalEpoch(0, syscall.SIGTERM)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return os.IsNotExist(err)
+	}, 10*time.Second, 100*time.Millisecond, "ready marker must clear once the child exits")
 }
 
 // TestHandoffWatchdogFiresWhenSuccessorNeverLive reproduces the 2026-06-10 e2e
