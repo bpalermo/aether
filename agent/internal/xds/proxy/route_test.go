@@ -74,3 +74,21 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 		})
 	}
 }
+
+// TestOutboundRetryPolicy: every client-side service route retries endpoint-churn
+// failures (drain/warm-up windows) on a different host, with only
+// non-idempotent-safe conditions.
+func TestOutboundRetryPolicy(t *testing.T) {
+	for name, vh := range map[string]*routev3.VirtualHost{
+		"cluster vhost": BuildOutboundClusterVirtualHost("svc-1"),
+		"service vhost": NewServiceVirtualHost("svc-1"),
+	} {
+		rp := vh.GetRoutes()[0].GetRoute().GetRetryPolicy()
+		require.NotNil(t, rp, name)
+		assert.Equal(t, "connect-failure,refused-stream,reset-before-request,retriable-status-codes", rp.GetRetryOn(), name)
+		assert.Equal(t, []uint32{503}, rp.GetRetriableStatusCodes(), name)
+		assert.Equal(t, uint32(2), rp.GetNumRetries().GetValue(), name)
+		require.Len(t, rp.GetRetryHostPredicate(), 1, name)
+		assert.Equal(t, "envoy.retry_host_predicates.previous_hosts", rp.GetRetryHostPredicate()[0].GetName(), name)
+	}
+}
