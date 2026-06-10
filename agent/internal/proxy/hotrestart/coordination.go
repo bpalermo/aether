@@ -171,6 +171,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 	defer t.Stop()
 	ready := false
 	everLive := false
+	holding := false
 	var unreachableSince time.Time
 	for {
 		select {
@@ -188,6 +189,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			}
 			if live {
 				everLive = true
+				holding = false
 				if launched, wasLive := s.epochProgress(); !wasLive {
 					// First LIVE confirmation for this epoch: the handoff (or
 					// initial start, epoch 0) completed.
@@ -206,9 +208,27 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 				}
 				continue
 			}
-			if ready {
+			// Hold readiness while this supervisor's Envoy is still the serving
+			// hot-restart parent: admin reachable but answering at another (or
+			// not-yet-LIVE) epoch with our newest child alive is the normal
+			// mid-handoff state — a surging successor pod attaching to us, or our
+			// own in-pod restart still initializing. Dropping Ready here lets the
+			// DaemonSet (maxUnavailable=0 counts only Ready pods) delete this pod
+			// immediately, and the kubelet's grace-period SIGKILL then cuts the
+			// parent from under the successor's hot-restart protocol — observed as
+			// errno-111 aborts and node data-plane gaps when a proxy roll
+			// coincided with pod churn (e2e 2026-06-11). The wedge watchdogs below
+			// still run: a successor stuck pre-LIVE or an unreachable admin ends
+			// the hold via container restart, and the child exiting ends it here.
+			hold := ready && reachable && s.childTracked(epoch)
+			if hold && !holding {
+				holding = true
+				s.log.Info("holding readiness: serving as hot-restart parent mid-handoff", "epoch", epoch)
+			}
+			if ready && !hold {
 				s.clearReady()
 				ready = false
+				holding = false
 				s.metrics.readyTransition(false)
 				s.log.Info("pod not ready: envoy not live at newest epoch", "epoch", epoch)
 			}

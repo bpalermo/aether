@@ -36,9 +36,12 @@ spec:
       {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
       # The deleted (old) pod must keep its Envoy alive as the successor's
       # hot-restart parent until the successor's protocol terminates it — the
-      # successor's timers start only after its xDS-gated init. Give the
-      # supervisor room to wait; the kubelet's SIGKILL here is the hard stop.
-      terminationGracePeriodSeconds: 60
+      # successor's timers start only after its xDS-gated init, which pod churn
+      # can stretch past a minute (e2e 2026-06-11: a 60s grace SIGKILLed the
+      # parent mid-protocol on 3/5 nodes when a proxy roll coincided with
+      # churn). Give the supervisor generous room to wait; the kubelet's
+      # SIGKILL here is the hard stop.
+      terminationGracePeriodSeconds: 180
       {{- end }}
       {{- if .Values.proxy.hotRestart.enabled }}
       initContainers:
