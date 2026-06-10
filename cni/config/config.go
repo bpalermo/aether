@@ -62,9 +62,11 @@ type AetherConf struct {
 const defaultNetnsPinDir = "/run/aether/netns"
 
 // defaultNetnsUnpinDelay covers the post-removal dial window observed on
-// talos-main (health checkers / connection pools dialing up to ~5-9s after the
-// listener and clusters were removed from the snapshot).
-const defaultNetnsUnpinDelay = 10 * time.Second
+// talos-main: health checkers / connection pools dialed up to ~13s after the
+// listener and clusters were removed from the snapshot under roll churn (one
+// such dial through an already-released pin segfaulted Envoy 1.38). The unpin
+// runs as a detached process, so a generous delay does not slow pod teardown.
+const defaultNetnsUnpinDelay = 60 * time.Second
 
 // NetnsPinPath returns the pin target for a container (sandbox) ID.
 func (c AetherConf) NetnsPinPath(containerID string) string {

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/bpalermo/aether/cni/config"
 	"go.uber.org/zap"
@@ -59,7 +61,12 @@ func (p *AetherPlugin) pinNetns(conf config.AetherConf, netns, containerID strin
 // (a dial mid-setns) falls back to a lazy detach: the path disappears now and
 // the namespace is released when its last opener closes it.
 func (p *AetherPlugin) unpinNetns(conf config.AetherConf, containerID string) error {
-	target := conf.NetnsPinPath(containerID)
+	return p.unpinTarget(conf.NetnsPinPath(containerID))
+}
+
+// unpinTarget removes the pin at an explicit path (the detached unpinner gets
+// the resolved path on its argv rather than re-parsing CNI config).
+func (p *AetherPlugin) unpinTarget(target string) error {
 	if _, err := os.Stat(target); os.IsNotExist(err) {
 		return nil
 	}
@@ -78,6 +85,52 @@ func (p *AetherPlugin) unpinNetns(conf config.AetherConf, containerID string) er
 		return fmt.Errorf("removing netns pin %s (unmount: %v): %w", target, unmountErr, err)
 	}
 	return nil
+}
+
+// NetnsUnpinSubcommand is the hidden argv[1] under which the CNI binary
+// re-executes itself as a short-lived detached unpinner.
+const NetnsUnpinSubcommand = "netns-unpin"
+
+// spawnDetachedUnpin re-executes this binary as a detached (setsid) process
+// that sleeps delay and then unpins target. CNI DEL must return promptly (a
+// long in-process sleep delays pod teardown node-wide), but the pin must
+// outlive Envoy's drain tail — health checkers and pool drains were observed
+// dialing 10-13s after config removal under roll churn, and a dial through an
+// already-unpinned path is the nullptr segfault all over again.
+func (p *AetherPlugin) spawnDetachedUnpin(target string, delay time.Duration) error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolving self: %w", err)
+	}
+	cmd := exec.Command(self, NetnsUnpinSubcommand, target, delay.String())
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting detached unpinner: %w", err)
+	}
+	// Detach: the child outlives this CNI invocation; init reaps it.
+	return cmd.Process.Release()
+}
+
+// RunDetachedUnpin is the detached-unpinner entrypoint: argv = [target, delay].
+func (p *AetherPlugin) RunDetachedUnpin(args []string) {
+	if len(args) != 2 {
+		p.logger.Error("netns-unpin: expected <target> <delay>", zap.Strings("args", args))
+		return
+	}
+	target := args[0]
+	delay, err := time.ParseDuration(args[1])
+	if err != nil {
+		p.logger.Error("netns-unpin: bad delay", zap.String("delay", args[1]), zap.Error(err))
+		return
+	}
+	time.Sleep(delay)
+	if err := p.unpinTarget(target); err != nil {
+		p.logger.Warn("netns-unpin: failed; orphan will be swept by GC", zap.String("target", target), zap.Error(err))
+		return
+	}
+	p.logger.Info("netns-unpin: released", zap.String("target", target), zap.Duration("delay", delay))
 }
 
 // gcAttachments is the CNI GC payload subset listing still-valid attachments.
