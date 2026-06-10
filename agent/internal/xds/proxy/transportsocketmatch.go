@@ -49,6 +49,13 @@ func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName st
 // each local pod's network namespace to a TransportSocketNameAction naming that
 // pod's SPIFFE ID — the match name used by UpstreamTransportSocketMatches — so
 // the upstream connection presents the originating pod's certificate.
+//
+// Returns nil when no valid netns→SPIFFE-ID entries exist: an empty
+// exact_match_map fails proto validation (`MatchMapValidationError.Map: value
+// must contain at least 1 pair(s)`), making Envoy NACK the entire CDS push —
+// observed on agents starting before any local workload mapping exists, and
+// permanent on nodes with zero managed pods (e2e 2026-06-10). Callers fall
+// back to a plain transport socket.
 func UpstreamTransportSocketMatcher(netnsToSpiffeID map[string]string) *matcherv3.Matcher {
 	m := make(map[string]*matcherv3.Matcher_OnMatch, len(netnsToSpiffeID))
 	for netns, id := range netnsToSpiffeID {
@@ -56,6 +63,9 @@ func UpstreamTransportSocketMatcher(netnsToSpiffeID map[string]string) *matcherv
 			continue
 		}
 		m[netns] = transportSocketNameOnMatch(id)
+	}
+	if len(m) == 0 {
+		return nil
 	}
 
 	return &matcherv3.Matcher{

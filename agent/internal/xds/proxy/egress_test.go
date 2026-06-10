@@ -52,6 +52,34 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	}
 	assert.True(t, names[ids[0]] && names[ids[1]] && names[node], "matches for both pods and the node")
 	require.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch(), "on-no-match present")
+	assert.GreaterOrEqual(t, len(c.GetTransportSocketMatcher().GetMatcherTree().GetExactMatchMap().GetMap()), 1,
+		"exact_match_map must never be empty (proto validation rejects it)")
+}
+
+// TestInjectUpstreamMTLS_NoLocalWorkloads: an empty netns→SPIFFE-ID map must
+// not produce a matcher — an empty exact_match_map fails Envoy's proto
+// validation and NACKs the whole CDS push (observed on agents starting before
+// any local workload mapping exists, and permanent on nodes with no managed
+// pods). The node identity is presented directly instead, and no legacy
+// transport_socket_matches are set (without the matcher, an empty match
+// criteria set would select the first entry for every endpoint).
+func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
+	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
+
+	for name, netnsToID := range map[string]map[string]string{
+		"nil map":              nil,
+		"empty map":            {},
+		"only invalid entries": {"": "spiffe://example.org/x", "/ns/a": ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewServiceCluster("svc-a")
+			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org")
+
+			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
+			assert.Empty(t, c.GetTransportSocketMatches(), "no legacy matches without the matcher")
+			require.NotNil(t, c.GetTransportSocket(), "node identity presented directly")
+		})
+	}
 }
 
 func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
