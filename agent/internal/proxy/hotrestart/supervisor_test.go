@@ -123,3 +123,50 @@ func TestSupervisorConfigChangeTriggersHotRestart(t *testing.T) {
 		t.Fatal("supervisor did not return after context cancel")
 	}
 }
+
+// TestHotRestartDeferredWhileEpochNotLive is the R7 regression test
+// (docs/proposals/002): a hot-restart trigger must be deferred while the current
+// epoch is still initializing — forking N+1 against a not-yet-LIVE N makes Envoy
+// exit fatally and restarts the container.
+func TestHotRestartDeferredWhileEpochNotLive(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available in this sandbox")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "envoy.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("v0\n"), 0o644))
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+
+	s := New(Config{
+		EnvoyPath:          stubEnvoy(t, recordPath),
+		ConfigPath:         configPath,
+		DrainTime:          time.Second,
+		ParentShutdownTime: time.Second,
+		WatchConfig:        true,
+		// Admin reports the current epoch as still initializing.
+		AdminAddress: fakeAdmin(t, "PRE_INITIALIZING", 0),
+	}, logr.Discard())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return len(recordedEpochs(t, recordPath)) >= 1
+	}, 5*time.Second, 50*time.Millisecond, "epoch 0 never started")
+
+	// Trigger a restart; with the epoch not LIVE it must be deferred, not forked.
+	require.NoError(t, os.WriteFile(configPath, []byte("v1\n"), 0o644))
+	require.Never(t, func() bool {
+		return len(recordedEpochs(t, recordPath)) >= 2
+	}, 2*time.Second, 100*time.Millisecond, "hot restart must be deferred while current epoch is not LIVE")
+
+	cancel()
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not return after cancel")
+	}
+}

@@ -34,12 +34,16 @@ func (c *SnapshotCache) RemoveEndpoint(ctx context.Context, clusterName string, 
 
 	delete(entry.endpoints, ip)
 
-	// Rebuild the load assignment endpoints slice from the map.
-	endpoints := make([]*endpointv3.LocalityLbEndpoints, 0, len(entry.endpoints))
+	// Build a NEW load assignment rather than mutating the existing one in place:
+	// the current proto is aliased into snapshots already set on go-control-plane,
+	// which xDS server goroutines marshal without holding clusterMu — an in-place
+	// mutation is a data race (torn marshal). The LocalityLbEndpoints values are
+	// never mutated after creation, so sharing them between assignments is safe.
+	cla := proxy.NewClusterLoadAssignment(clusterName)
 	for _, ep := range entry.endpoints {
-		endpoints = append(endpoints, ep)
+		cla.Endpoints = append(cla.Endpoints, ep)
 	}
-	entry.loadAssignment.Endpoints = endpoints
+	entry.loadAssignment = cla
 
 	c.clusters[clusterName] = entry
 	c.clusterMu.Unlock()

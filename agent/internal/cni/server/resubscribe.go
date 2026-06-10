@@ -5,6 +5,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"github.com/bpalermo/aether/agent/types"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -56,6 +57,18 @@ func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 		selectors := spire.PodSelectors(pod.GetNamespace(), pod.GetServiceAccount(), pod.GetName(), string(k8sPod.UID))
 		if err := s.spireBridge.SubscribePod(pod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
 			log.Error(err, "resubscribe: failed to subscribe SVID", "spiffeID", spiffeID)
+			continue
+		}
+
+		// Close the remove race: if the pod's CNI DEL ran between the GetAll above
+		// and the SubscribePod (its UnsubscribePod saw nothing to remove), the
+		// subscription just created would leak for the agent's lifetime. Re-check
+		// storage and undo if the pod is gone.
+		if _, getErr := s.storage.GetResource(ctx, types.ContainerID(pod.GetContainerId())); getErr != nil {
+			log.V(1).Info("resubscribe: pod removed concurrently; unsubscribing", "spiffeID", spiffeID)
+			if unsubErr := s.spireBridge.UnsubscribePod(ctx, pod.GetNetworkNamespace()); unsubErr != nil {
+				log.Error(unsubErr, "resubscribe: failed to unsubscribe removed pod")
+			}
 			continue
 		}
 		resubscribed++

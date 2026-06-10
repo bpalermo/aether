@@ -205,7 +205,12 @@ func PodSelectors(namespace, serviceAccount, podName, uid string) []*apitypes.Se
 // if the bridge has not been started yet or the netns is already subscribed. The
 // subscription is bound to the bridge's lifetime, not any request context.
 func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Selector) error {
-	if b.client == nil {
+	// Gate on the started channel rather than a bare b.client nil-check: the
+	// close(b.started) in Start happens-after the client/ctx assignments, so this
+	// select also synchronizes their reads (a plain nil-check is a data race).
+	select {
+	case <-b.started:
+	default:
 		b.log.V(1).Info("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
 		return nil
 	}
@@ -261,7 +266,10 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 // runs two same-identity pods never drops the live SVID. No-op if the bridge has
 // not been started or the netns is not subscribed.
 func (b *Bridge) UnsubscribePod(ctx context.Context, netns string) error {
-	if b.client == nil {
+	// See SubscribePod: the started gate synchronizes client/ctx reads.
+	select {
+	case <-b.started:
+	default:
 		return nil
 	}
 

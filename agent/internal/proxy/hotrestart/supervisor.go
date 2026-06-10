@@ -197,6 +197,17 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 		case <-debounceC:
 			debounceC = nil
+			// Defer the restart while the current epoch is still initializing:
+			// forking epoch N+1 against a not-yet-LIVE N makes Envoy exit with
+			// "previous envoy process is still initializing", which the main loop
+			// treats as a fatal newest-epoch death (container restart, brief node
+			// data-plane gap). Re-arm and retry once N is LIVE. Skipped when no
+			// admin address is configured.
+			if s.cfg.AdminAddress != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
+				s.log.V(1).Info("current epoch not yet live; deferring hot restart", "epoch", s.currentEpoch())
+				arm("deferred: current epoch not live")
+				continue
+			}
 			s.log.Info("performing hot restart")
 			if err := s.hotRestart(); err != nil {
 				s.log.Error(err, "hot restart failed; keeping current epoch")
