@@ -162,8 +162,14 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 // the Envoy EDS health status. Unknown/unspecified defaults to HEALTHY so older
 // agents and freshly registered endpoints route until proven unhealthy.
 func endpointHealthStatus(endpoint *registryv1.ServiceEndpoint) corev3.HealthStatus {
-	if endpoint.GetHealth() == registryv1.ServiceEndpoint_HEALTH_UNHEALTHY {
+	switch endpoint.GetHealth() {
+	case registryv1.ServiceEndpoint_HEALTH_UNHEALTHY:
 		return corev3.HealthStatus_UNHEALTHY
+	case registryv1.ServiceEndpoint_HEALTH_DRAINING:
+		// Pod deletion requested: excluded from new selections, established
+		// connections drain gracefully.
+		return corev3.HealthStatus_DRAINING
+	default:
+		return corev3.HealthStatus_HEALTHY
 	}
-	return corev3.HealthStatus_HEALTHY
 }

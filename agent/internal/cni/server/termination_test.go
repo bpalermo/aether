@@ -22,6 +22,7 @@ type unregisterRecordingRegistry struct {
 	testRegistry
 	unregistered int
 	registered   int
+	lastHealth   registryv1.ServiceEndpoint_Health
 }
 
 func (r *unregisterRecordingRegistry) UnregisterEndpoints(_ context.Context, _ string, _ []string) error {
@@ -29,9 +30,10 @@ func (r *unregisterRecordingRegistry) UnregisterEndpoints(_ context.Context, _ s
 	return r.unregisterEndpointsErr
 }
 
-func (r *unregisterRecordingRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, _ *registryv1.ServiceEndpoint) error {
+func (r *unregisterRecordingRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, ep *registryv1.ServiceEndpoint) error {
 	r.registered++
-	return nil
+	r.lastHealth = ep.GetHealth()
+	return r.registerEndpointErr
 }
 
 // terminatingK8sPod returns a corev1.Pod on the given node with
@@ -49,8 +51,9 @@ func terminatingK8sPod(name, namespace, node string) *corev1.Pod {
 }
 
 // TestHandlePodTerminating covers the early-drain path: a deletion-requested
-// pod is deregistered exactly once, persisted as terminating, and repeat events
-// (informer resync, force-delete after the transition) are no-ops.
+// pod is marked DRAINING in the registry exactly once, persisted as
+// terminating, and repeat events (informer resync, force-delete after the
+// transition) are no-ops.
 func TestHandlePodTerminating(t *testing.T) {
 	ctx := context.Background()
 	pod := validCNIPod("pod-a", "default", "container-a")
@@ -62,14 +65,33 @@ func TestHandlePodTerminating(t *testing.T) {
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
 
-	assert.Equal(t, 1, reg.unregistered, "endpoint must be deregistered")
+	assert.Equal(t, 1, reg.registered, "endpoint must be re-registered as draining")
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_DRAINING, reg.lastHealth)
+	assert.Zero(t, reg.unregistered, "draining replaces removal; CNI DEL removes later")
 	stored, err := store.GetResource(ctx, types.ContainerID("container-a"))
 	require.NoError(t, err)
 	assert.True(t, stored.GetTerminating(), "terminating flag must be persisted")
 
 	// Second event (resync / DELETE after the transition): idempotent.
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
-	assert.Equal(t, 1, reg.unregistered, "repeat events must not deregister again")
+	assert.Equal(t, 1, reg.registered, "repeat events must not re-mark again")
+}
+
+// TestHandlePodTerminatingFallsBackToRemoval: if the DRAINING mark cannot be
+// written, removal is the safe fallback (never leave the endpoint selectable).
+func TestHandlePodTerminatingFallsBackToRemoval(t *testing.T) {
+	ctx := context.Background()
+	pod := validCNIPod("pod-a", "default", "container-a")
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
+	reg := &unregisterRecordingRegistry{}
+	reg.registerEndpointErr = assert.AnError
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+
+	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
+
+	assert.Equal(t, 1, reg.unregistered, "failed draining mark must fall back to deregistration")
 }
 
 // TestHandlePodTerminatingScope: pods on other nodes or unknown to local
@@ -84,23 +106,24 @@ func TestHandlePodTerminatingScope(t *testing.T) {
 	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "other-node"))
-	assert.Zero(t, reg.unregistered, "another node's pod must be ignored")
+	assert.Zero(t, reg.registered+reg.unregistered, "another node's pod must be ignored")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-unknown", "default", "test-node"))
-	assert.Zero(t, reg.unregistered, "a pod absent from local storage must be ignored")
+	assert.Zero(t, reg.registered+reg.unregistered, "a pod absent from local storage must be ignored")
 }
 
-// TestHandlePodTerminatingMarksEvenWhenUnregisterFails: the terminating flag is
-// persisted before the registry call, so a transient unregister failure cannot
+// TestHandlePodTerminatingMarksEvenWhenRegistryFails: the terminating flag is
+// persisted before any registry call, so transient registry failures cannot
 // leave the liveness loop free to resurrect the endpoint (CNI DEL retries the
-// unregister later).
-func TestHandlePodTerminatingMarksEvenWhenUnregisterFails(t *testing.T) {
+// removal later).
+func TestHandlePodTerminatingMarksEvenWhenRegistryFails(t *testing.T) {
 	ctx := context.Background()
 	pod := validCNIPod("pod-a", "default", "container-a")
 
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
+	reg.registerEndpointErr = assert.AnError
 	reg.unregisterEndpointsErr = assert.AnError
 	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
 
@@ -108,7 +131,7 @@ func TestHandlePodTerminatingMarksEvenWhenUnregisterFails(t *testing.T) {
 
 	stored, err := store.GetResource(ctx, types.ContainerID("container-a"))
 	require.NoError(t, err)
-	assert.True(t, stored.GetTerminating(), "flag must be set even when unregister fails")
+	assert.True(t, stored.GetTerminating(), "flag must be set even when the registry is unavailable")
 }
 
 // TestReconcileLivenessSkipsTerminatingPod: the liveness loop must never
