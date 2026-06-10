@@ -81,8 +81,19 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 // that pod's client certificate (on-no-match presents the node identity). The
 // matches reference each local workload's SVID over SDS. This is applied at snapshot
 // time because it depends on the current set of local workloads.
+//
+// With no local workload mappings the matcher is omitted entirely — an empty
+// exact_match_map NACKs the whole CDS push — and the node identity is presented
+// directly (what on_no_match would have done for every connection). No
+// transport_socket_matches are set in that branch: without the matcher Envoy
+// falls back to legacy metadata matching, where an empty match criteria set
+// would select the first entry for every endpoint.
 func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string) {
 	matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
+	if matcher == nil {
+		cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName)
+		return
+	}
 	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
 
 	cluster.TransportSocketMatcher = matcher
