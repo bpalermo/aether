@@ -44,7 +44,8 @@ func (r *sweepRegistry) RegisterEndpoint(_ context.Context, service string, _ re
 
 func sweepEndpoint(ip, node, pod string) *registryv1.ServiceEndpoint {
 	return &registryv1.ServiceEndpoint{
-		Ip: ip,
+		Ip:          ip,
+		ClusterName: "test-cluster",
 		KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
 			Namespace: "default",
 			PodName:   pod,
@@ -73,6 +74,14 @@ func TestSweepGhostEndpoints(t *testing.T) {
 			sweepEndpoint("10.0.0.1", "test-node", "pod-live"),   // live -> keep
 			sweepEndpoint("10.0.0.9", "test-node", "pod-ghost"),  // ghost -> deregister
 			sweepEndpoint("10.0.0.3", "other-node", "pod-other"), // other node -> ignore
+			func() *registryv1.ServiceEndpoint {
+				// Same node name, different cluster: registrars share the mesh
+				// registry across clusters and node names are not unique — this
+				// is another cluster's endpoint, never ours to sweep.
+				ep := sweepEndpoint("10.0.0.4", "test-node", "pod-foreign")
+				ep.ClusterName = "other-cluster"
+				return ep
+			}(),
 		},
 		"svc-b": {
 			// Terminating pod's endpoint: marked DRAINING by the termination

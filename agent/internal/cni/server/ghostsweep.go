@@ -110,8 +110,12 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	registered := make(map[string]struct{})
 	for service, endpoints := range all {
 		for _, ep := range endpoints {
-			if ep.GetKubernetesMetadata().GetNodeName() != s.nodeName {
-				continue // another agent's responsibility
+			// Own only this cluster's slice of this node's endpoints: registrars
+			// run per cluster against a shared mesh registry, and node names are
+			// NOT unique across clusters — matching on NodeName alone could
+			// deregister another cluster's endpoints.
+			if ep.GetClusterName() != s.clusterName || ep.GetKubernetesMetadata().GetNodeName() != s.nodeName {
+				continue // another agent's (or cluster's) responsibility
 			}
 			if _, ok := live[ep.GetIp()]; ok {
 				registered[ep.GetIp()] = struct{}{}
