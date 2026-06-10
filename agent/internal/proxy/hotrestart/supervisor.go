@@ -67,6 +67,18 @@ type Config struct {
 	// self-triggers a hot restart when the bootstrap config changes (e.g. a
 	// ConfigMap update propagated by the kubelet).
 	WatchConfig bool
+	// StateDir, when set, enables Strategy B cross-pod coordination: a per-node
+	// epoch heartbeat file on a shared hostPath. A surging successor pod reads it
+	// to start at (live predecessor epoch + 1) and hot-restart across the pod
+	// boundary. Empty = Strategy A only (always start at epoch 0).
+	StateDir string
+	// ReadyMarkerPath, when set, enables the readiness gate: the supervisor keeps a
+	// pod-local marker present only while the node's Envoy admin reports LIVE at
+	// this supervisor's newest epoch. An exec readiness probe checks the marker so
+	// the DaemonSet keeps the old pod until the new one has taken over.
+	ReadyMarkerPath string
+	// AdminAddress is the Envoy admin host:port used for the readiness check.
+	AdminAddress string
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -86,7 +98,18 @@ type Supervisor struct {
 
 	childExited chan childExit
 	done        chan struct{}
+
+	// readyGate delays the pod's readiness until after a cross-pod handoff is fully
+	// complete: the successor Envoy terminates the predecessor itself via
+	// --parent-shutdown-time-s, so the pod must not report Ready (which lets the
+	// DaemonSet delete the old pod) until that has elapsed — otherwise the old
+	// Envoy is killed out from under the still-attached successor (errno 111).
+	readyGate time.Time
 }
+
+// readyGateBuffer is added to ParentShutdownTime when gating a cross-pod
+// successor's readiness, to ensure the predecessor is fully gone first.
+const readyGateBuffer = 3 * time.Second
 
 // New creates a Supervisor.
 func New(cfg Config, log logr.Logger) *Supervisor {
@@ -115,6 +138,17 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		go s.watchConfig(ctx, trigger)
 	}
 
+	// Strategy B: pick the start epoch from a confirmed-live predecessor (if any),
+	// then maintain the readiness marker and the LIVE-gated node epoch heartbeat.
+	// No-ops when StateDir / ReadyMarkerPath are unset (Strategy A).
+	s.initStartEpoch(ctx)
+	if s.cfg.StateDir != "" && s.nextEpoch > 0 {
+		// Cross-pod successor: hold readiness until the predecessor has been
+		// terminated by this Envoy's own parent-shutdown protocol.
+		s.readyGate = time.Now().Add(s.cfg.ParentShutdownTime + readyGateBuffer)
+	}
+	go s.watchLiveness(ctx)
+
 	if err := s.hotRestart(); err != nil {
 		return fmt.Errorf("starting initial envoy epoch: %w", err)
 	}
@@ -132,6 +166,20 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Cross-pod mode: if our Envoy no longer answers admin LIVE at our own
+			// epoch, its sockets have (very likely) been transferred to a surging
+			// successor that is still initializing — the DaemonSet deletes this pod
+			// the moment it turns NotReady, which is exactly that window. Do NOT
+			// signal Envoy (the successor still needs its hot-restart parent alive,
+			// even before reaching LIVE — killing it aborts the successor with
+			// errno 111): wait for the successor's parent-shutdown protocol to
+			// terminate it, with a deadline fallback. The check cannot rely on the
+			// successor having published its epoch, since it does so only once LIVE.
+			if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
+				s.log.Info("termination requested mid-handoff; waiting for successor to terminate our envoy")
+				s.awaitProtocolTermination()
+				return nil
+			}
 			s.log.Info("termination requested, shutting down all envoy epochs")
 			s.shutdown()
 			return nil
@@ -156,6 +204,19 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 		case exit := <-s.childExited:
 			if exit.epoch == s.currentEpoch() {
+				if s.cfg.StateDir != "" && exit.err == nil {
+					// Clean exit (status 0) of our newest epoch in cross-pod mode:
+					// that's the successor's hot-restart parent-shutdown protocol
+					// terminating us (a crash would be non-zero/signaled). The signal
+					// is deliberate process state, not the shared epoch file — the
+					// successor publishes its epoch only once LIVE, which may be
+					// after it terminates us. Don't exit (restartPolicy=Always would
+					// relaunch and collide): await deletion by the DaemonSet.
+					s.log.Info("newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
+					s.reap(exit.epoch)
+					<-ctx.Done()
+					return nil
+				}
 				// The newest epoch died unexpectedly: nothing left serving traffic.
 				// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).
 				s.reap(exit.epoch)
@@ -185,6 +246,10 @@ func (s *Supervisor) hotRestart() error {
 	s.mu.Lock()
 	s.children[epoch] = cmd
 	s.mu.Unlock()
+
+	// The node epoch is published to the shared state file only once this Envoy is
+	// confirmed LIVE (by watchLiveness), never at launch — so a failed handoff does
+	// not advance the epoch and cause a restart to climb against a dead parent.
 
 	go func() {
 		err := cmd.Wait()
@@ -292,6 +357,26 @@ func (s *Supervisor) reap(epoch int) {
 	delete(s.children, epoch)
 	s.mu.Unlock()
 	s.log.Info("reaped envoy epoch", "epoch", epoch)
+}
+
+// awaitProtocolTermination waits (without signaling) for the remaining children to
+// exit via the successor's hot-restart parent-shutdown protocol. It deliberately
+// imposes NO deadline of its own: the successor's timers start only after its
+// (xDS-gated, unbounded) init completes, and the successor keeps using the parent
+// socket (stat merges) right up to protocol-terminate — killing the parent at any
+// "reasonable" cutoff aborts the successor with errno 111. The kubelet's SIGKILL
+// at the pod's terminationGracePeriod is the real, and only safe, hard stop.
+func (s *Supervisor) awaitProtocolTermination() {
+	s.mu.Lock()
+	pending := len(s.children)
+	s.mu.Unlock()
+
+	for pending > 0 {
+		exit := <-s.childExited
+		s.reap(exit.epoch)
+		pending--
+		s.log.Info("envoy epoch terminated by successor", "epoch", exit.epoch)
+	}
 }
 
 // shutdown SIGTERMs every tracked epoch and waits up to DrainTime+grace for them

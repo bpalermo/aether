@@ -66,13 +66,30 @@ proxy:
   # connections. See docs/proposals/001_proxy-hot-restart.md. Off by default.
   hotRestart:
     enabled: false
+    # Strategy B (cross-pod, true image upgrade): surge a new pod onto the node and
+    # hot-restart the new Envoy from the old across the pod boundary. Adds the
+    # maxSurge update strategy, a shared hostPath /dev/shm, per-node epoch
+    # coordination, and a readiness gate. When false, hot restart is Strategy A
+    # (in-place, bootstrap-config/binary only). See docs/proposals/001.
+    crossPod: false
+    # Surge update strategy (maxSurge=1/maxUnavailable=0) for connection-preserving
+    # B→B image upgrades. Keep false for the one-time bootstrap INTO B (delete-first,
+    # brief per-node gap): two non-coordinating epoch-0 Envoys sharing --base-id in
+    # the host netns collide on the hot-restart domain socket. Flip to true once all
+    # nodes run a Strategy B proxy.
+    surge: false
     # Envoy --base-id, pinned so successive epochs share one shared-memory segment.
     baseId: 0
     # Envoy --drain-time-s / --parent-shutdown-time-s (parent must exceed drain).
-    drainTime: 45s
-    parentShutdownTime: 60s
+    # For Strategy B the successor pod holds readiness for ~parentShutdownTime
+    # (until its Envoy terminates the predecessor), so keep these modest.
+    drainTime: 10s
+    parentShutdownTime: 15s
     # /dev/shm size for the hot-restart shared-memory segment (gauges/counters).
+    # Strategy A only (emptyDir Memory); Strategy B uses shmHostPath instead.
     shmSizeLimit: 64Mi
+    # Strategy B: host tmpfs dir shared across overlapping pods, mounted at /dev/shm.
+    shmHostPath: /run/aether/shm
 
 # AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
 # The chart never bakes credentials into the image. By default it references an

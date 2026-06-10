@@ -15,9 +15,10 @@ import (
 // supervisorCfg holds the flag-bound configuration for the proxy-supervisor
 // subcommand. SPIKE: see docs/proposals/001_proxy-hot-restart.md.
 var (
-	supervisorCfg         hotrestart.Config
-	supervisorDebug       bool
-	supervisorInstallPath string
+	supervisorCfg            hotrestart.Config
+	supervisorDebug          bool
+	supervisorInstallPath    string
+	supervisorReadinessCheck bool
 )
 
 var proxySupervisorCmd = &cobra.Command{
@@ -32,6 +33,15 @@ var proxySupervisorCmd = &cobra.Command{
 		// supervisor injected alongside it.
 		if supervisorInstallPath != "" {
 			return installSelf(supervisorInstallPath)
+		}
+		// --readiness-check is the exec readiness probe: exit 0 iff the supervisor's
+		// pod-local ready marker is present (the distroless Envoy image has no shell
+		// or cat, so the probe re-execs this binary).
+		if supervisorReadinessCheck {
+			if _, err := os.Stat(supervisorCfg.ReadyMarkerPath); err != nil {
+				return fmt.Errorf("not ready: %w", err)
+			}
+			return nil
 		}
 		log := manager.SetupLogging(supervisorDebug, cmd.Name())
 		return hotrestart.New(supervisorCfg, log).Run(cmd.Context())
@@ -76,6 +86,10 @@ func init() {
 	f.DurationVar(&supervisorCfg.ParentShutdownTime, "parent-shutdown-time", 60*time.Second, "Envoy --parent-shutdown-time-s: when the previous epoch is terminated (must exceed --drain-time)")
 	f.StringArrayVar(&supervisorCfg.ExtraArgs, "envoy-arg", nil, "Extra argument appended to every Envoy invocation (repeatable); keep --concurrency constant across epochs")
 	f.BoolVar(&supervisorCfg.WatchConfig, "watch-config", false, "Watch --config and self-trigger a hot restart when the bootstrap config changes")
+	f.StringVar(&supervisorCfg.StateDir, "state-dir", "", "Shared-hostPath dir for the per-node epoch heartbeat (enables Strategy B cross-pod hot restart)")
+	f.StringVar(&supervisorCfg.ReadyMarkerPath, "ready-marker", "", "Pod-local path for the readiness marker maintained while Envoy is live at the newest epoch")
+	f.StringVar(&supervisorCfg.AdminAddress, "admin-address", "127.0.0.1:9901", "Envoy admin host:port used for the readiness check")
+	f.BoolVar(&supervisorReadinessCheck, "readiness-check", false, "Exit 0 iff the --ready-marker file exists (exec readiness probe mode)")
 
 	rootCmd.AddCommand(proxySupervisorCmd)
 }

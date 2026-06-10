@@ -1,6 +1,6 @@
 # Proposal: Hot Restart for the aether-proxy Envoy (Spike)
 
-**Status:** Spike — Strategy A **validated GREEN on talos-main**; target is Strategy B
+**Status:** Strategies A and B **validated GREEN on talos-main** (B incl. zero-drop app e2e)
 **Author:** Bruno Palermo
 **Date:** 2026-06-09
 
@@ -142,6 +142,22 @@ First on-cluster run (rev 29, `proxy.hotRestart.enabled=true` fleet-wide):
 - **Re-validated GREEN (rev 30, fixed image):** hot restart epoch 0 → 1, `hot_restart_generation` 1 → 2, 4 listeners preserved, `server.live` held. The old epoch was terminated by Envoy's own parent-shutdown (~76s) and reaped cleanly — **no external SIGTERM, no crash, `restartCount` stayed 0** through ~104s past the restart (the window that previously crashed). Strategy A's exit criterion is met.
 
 **Caveat (test workloads):** the `aether-test` `client`/`echo`/`svc-a` pods were not exercising the mesh data path on their app port during this run (`client→echo:8080` showed zero delta on the `echo`/`app_echo` clusters — direct pod-to-pod, no XFCC), so an application-level zero-dropped-request assertion could not be made here. The hot-restart guarantees were instead proven via Envoy's own signals (listener/socket handover, `server.live` continuity, in-place `restartCount: 0`). A follow-up should restore a known mesh-intercepted request path for an end-to-end zero-drop assertion.
+
+## Strategy B Findings (talos-main, 2026-06-10) — **VALIDATED GREEN**
+
+Cross-pod hot restart implemented and validated over five on-cluster iterations. Final proof: a 5-node surge roll with **zero container restarts**, every node landing **LIVE at epoch 2, `hot_restart_generation` 3** (stats carried across the pod boundary twice), and an **application-level zero-drop e2e: 1500/1500 mesh requests succeeded (`ok=1500 fail=0`)** while the roll executed under live traffic.
+
+The implementation: per-node epoch heartbeat file on shared hostPath (`--state-dir`), admin-epoch readiness marker + exec probe (`--ready-marker`/`--readiness-check`), shared hostPath `/dev/shm`, and `crossPod`/`surge` chart gates. Hard-won lessons, each from a failed on-cluster run:
+
+1. **Bootstrap into B must be delete-first.** Two non-coordinating epoch-0 Envoys with the same `--base-id` in the shared host netns collide on the hot-restart domain socket (`errno=98`); surge deadlocks the initial transition. The `proxy.hotRestart.surge` gate keeps the first roll delete-first; surge is for B→B only.
+2. **Publish the node epoch only while LIVE.** Recording the epoch at launch makes any failed handoff advance the counter, and crash-restarts then climb epochs against dead parents (cascade 0→1→2…). The heartbeat is written by the liveness watcher only while admin reports LIVE at that epoch, and `initStartEpoch` verifies the predecessor via admin (ground truth), not the file.
+3. **Supersession signals must not depend on the successor being LIVE.** A slow (xDS-gated) successor init opens a window where the old pod is deleted before the successor publishes anything. The old pod detects mid-handoff via *its own* Envoy no longer answering admin at its epoch (sockets transferred), and detects protocol termination via the child's clean exit status — both independent of successor state.
+4. **Never kill the parent while a successor is attached.** The successor uses the parent IPC socket (stat merges) right up to its parent-terminate, whose timing is unbounded (starts after init). Any supervisor-imposed deadline races it and aborts the successor (`errno 111`). The old pod waits for protocol termination indefinitely; the kubelet's SIGKILL at `terminationGracePeriodSeconds` (60s in crossPod mode) is the only safe hard stop.
+5. **The old pod goes NotReady at takeover, voiding `maxUnavailable=0` protection** — the DaemonSet deletes it mid-handoff. Combined with (3) and (4) this is harmless: the deleted pod's supervisor keeps the parent alive through the protocol.
+
+**Also fixed en route:** the e2e mesh path itself. There is no iptables interception — apps reach the mesh via the outbound listener (`127.0.0.1:18081` + `Host: <service>`); the earlier direct-pod-IP curls were bypassing the proxy entirely.
+
+**Known issue found (pre-existing, agent):** `SubscribePod` (workload SVID subscription) fires only on CNI ADD. After an **agent** restart, listeners are rebuilt from storage but SVIDs are never re-subscribed → existing pods' mTLS breaks ("Secret is not supplied by SDS") until the workload pods are recreated. Needs a re-subscribe-from-storage path in the agent. Unrelated to hot restart.
 
 ## Risks / Open Questions
 
