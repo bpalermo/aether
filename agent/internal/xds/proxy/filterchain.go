@@ -14,6 +14,10 @@ import (
 func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager(name, nil)
 
+	// Readiness probe target: answered on worker threads ahead of the router, so
+	// the CNI plugin's in-netns probe never depends on routes or upstreams.
+	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			RouteConfigName: OutboundHTTPRouteName,

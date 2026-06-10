@@ -80,7 +80,7 @@ func TestNewAgentXdsServer(t *testing.T) {
 			reg := &mockRegistry{}
 			log := logr.Discard()
 
-			got, err := NewAgentXdsServer(ctx, tt.clusterName, tt.nodeName, "example.org", reg, mockStore, snapshotCache, log)
+			got, err := NewAgentXdsServer(ctx, tt.clusterName, tt.nodeName, "example.org", reg, mockStore, snapshotCache, nil, log)
 
 			require.NoError(t, err)
 			require.NotNil(t, got)
@@ -102,7 +102,7 @@ func TestNewAgentXdsServer_ImplementsServerCallback(t *testing.T) {
 	mockStore := storage.NewMockStorage[*cniv1.CNIPod]()
 	reg := &mockRegistry{}
 
-	got, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, logr.Discard())
+	got, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, logr.Discard())
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -174,7 +174,7 @@ func TestAgentXdsServer_PreListen(t *testing.T) {
 			mockStore := storage.NewMockStorageWithGetAll(tt.storageGetAll)
 			reg := &mockRegistry{listAllEndpointsFunc: tt.registryListAll}
 
-			srv, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, logr.Discard())
+			srv, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, logr.Discard())
 			require.NoError(t, err)
 
 			preListenErr := srv.PreListen(ctx)

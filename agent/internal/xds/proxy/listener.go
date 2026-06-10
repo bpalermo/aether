@@ -13,9 +13,16 @@ import (
 const (
 	// defaultOutboundAddress is the address for outbound listeners (localhost only)
 	defaultOutboundAddress = "127.0.0.1"
-	// defaultHTTPOutboundPort is the port for outbound HTTP listeners
-	defaultHTTPOutboundPort = 18081
+	// defaultHTTPOutboundPort is the port for outbound HTTP listeners. Shared
+	// with the CNI plugin, which probes it in-netns for data-plane readiness.
+	defaultHTTPOutboundPort = constants.ProxyOutboundPort
 )
+
+// OutboundListenerName returns the name of the per-pod outbound HTTP listener,
+// used by the CNI server to await Envoy's delta-xDS ACK of the listener.
+func OutboundListenerName(cniPod *cniv1.CNIPod) string {
+	return fmt.Sprintf("outbound_http_%s", cniPod.GetName())
+}
 
 // GenerateListenersFromRegistryPod generates the per-pod inbound and outbound HTTP
 // listeners and the per-pod application and health-probe clusters for a pod.
@@ -65,7 +72,7 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, e
 	}
 
 	return &listenerv3.Listener{
-		Name: fmt.Sprintf("outbound_http_%s", cniPod.GetName()),
+		Name: OutboundListenerName(cniPod),
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{

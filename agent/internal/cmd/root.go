@@ -30,6 +30,7 @@ import (
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/spire"
+	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/storage"
@@ -182,6 +183,10 @@ func runAgent(ctx context.Context) (retErr error) {
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 
+	// Tracks Envoy's delta-xDS ACK/NACKs so the CNI server can confirm (and
+	// diagnose) config delivery without polling the Envoy admin interface.
+	ackTracker := ack.NewTracker(l)
+
 	// Optionally create and start the SPIRE bridge for SDS
 	var spireBridge *spire.Bridge
 	if cfg.SpireEnabled {
@@ -193,11 +198,11 @@ func runAgent(ctx context.Context) (retErr error) {
 		l.Info("SPIRE integration disabled")
 	}
 
-	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, identityTrustDomain); err != nil {
+	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain); err != nil {
 		return err
 	}
 
-	if err = setupCNIServer(m, localStorage, reg, snapshotCache, spireBridge, identityTrustDomain); err != nil {
+	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain); err != nil {
 		return err
 	}
 
@@ -221,9 +226,9 @@ func runAgent(ctx context.Context) (retErr error) {
 // setXDSServer creates and registers an Agent xDS server as a runnable with the Manager.
 // The server listens on a Unix domain socket and serves Envoy discovery service requests
 // (LDS, CDS, EDS, RDS, ADS) with resource snapshots generated from local pod storage and the registry.
-func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, trustDomain string) error {
+func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, trustDomain string) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, trustDomain, registry, localStorage, snapshotCache, l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, trustDomain, registry, localStorage, snapshotCache, ackTracker.Callbacks(), l)
 	if err != nil {
 		return err
 	}
@@ -237,7 +242,7 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 // setupCNIServer creates and registers a CNI gRPC server as a runnable with the Manager.
 // The server listens on a Unix domain socket and handles pod registration/deregistration
 // requests from the CNI plugin binary. It stores pod data locally and triggers xDS snapshot updates.
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, spireBridge *spire.Bridge, trustDomain string) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
@@ -247,6 +252,7 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 		localStorage,
 		registry,
 		snapshotCache,
+		ackTracker,
 		spireBridge,
 		l,
 		m.GetClient(),

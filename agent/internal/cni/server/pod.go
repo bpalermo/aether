@@ -22,7 +22,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const envoyAdminTimeout = 2 * time.Second
+// envoyAckTimeout bounds the best-effort wait for Envoy's delta-xDS ACK of a
+// pod's listener update. An ACK means Envoy validated and accepted the config
+// (including the listener's netns socket bind — a failed bind NACKs); the
+// data-plane proof that the listener serves is the CNI plugin's in-netns probe.
+const envoyAckTimeout = 2 * time.Second
 
 // tracerName identifies this instrumentation scope in trace backends. The RPC
 // span itself comes from the otelgrpc stats handler; spans started here break
@@ -119,14 +123,15 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, status.Errorf(codes.Internal, "failed to add listener: %v", err)
 	}
 
-	// Best-effort: wait for Envoy to apply the listener configuration
-	adminCtx, adminCancel := context.WithTimeout(ctx, envoyAdminTimeout)
-	defer adminCancel()
-	waitCtx, waitSpan := startStepSpan(adminCtx, "cni_server.envoy_listener_wait", cniPod)
-	waitErr := s.envoyAdmin.WaitForListenerPresent(waitCtx, cniPod.GetNetworkNamespace())
+	// Best-effort: wait for Envoy to ACK the listener configuration. A NACK
+	// (bad config, failed netns bind) surfaces here with Envoy's error detail.
+	ackCtx, ackCancel := context.WithTimeout(ctx, envoyAckTimeout)
+	defer ackCancel()
+	waitCtx, waitSpan := startStepSpan(ackCtx, "cni_server.envoy_ack_wait", cniPod)
+	waitErr := s.ackTracker.WaitListenerPresent(waitCtx, proxy.OutboundListenerName(cniPod))
 	telemetry.EndSpan(waitSpan, waitErr)
 	if waitErr != nil {
-		log.V(1).Info("timed out waiting for Envoy to apply listener", "netns", cniPod.GetNetworkNamespace(), "error", waitErr)
+		log.V(1).Info("envoy did not ack listener", "listener", proxy.OutboundListenerName(cniPod), "error", waitErr)
 	}
 
 	return &cniv1.AddPodResponse{
@@ -204,14 +209,19 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 	s.lifecycleMu.Unlock()
 
-	// Best-effort: wait for Envoy to remove the listener configuration
-	adminCtx, adminCancel := context.WithTimeout(ctx, envoyAdminTimeout)
-	defer adminCancel()
-	waitCtx, waitSpan := startStepSpan(adminCtx, "cni_server.envoy_listener_wait", storedPod)
-	waitErr := s.envoyAdmin.WaitForListenerRemoval(waitCtx, storedPod.GetNetworkNamespace())
+	// Best-effort: wait for Envoy to ACK removal of both per-pod listeners —
+	// the inbound listener also binds (and dials) inside the pod netns, so
+	// netns teardown must not race either of them.
+	ackCtx, ackCancel := context.WithTimeout(ctx, envoyAckTimeout)
+	defer ackCancel()
+	waitCtx, waitSpan := startStepSpan(ackCtx, "cni_server.envoy_ack_wait", storedPod)
+	waitErr := s.ackTracker.WaitListenerAbsent(waitCtx, proxy.OutboundListenerName(storedPod))
+	if waitErr == nil {
+		waitErr = s.ackTracker.WaitListenerAbsent(waitCtx, proxy.InboundListenerName(storedPod))
+	}
 	telemetry.EndSpan(waitSpan, waitErr)
 	if waitErr != nil {
-		log.V(1).Info("timed out waiting for Envoy to remove listener", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
+		log.V(1).Info("envoy did not ack listener removal", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
 	}
 
 	return &cniv1.RemovePodResponse{

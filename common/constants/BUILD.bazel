@@ -8,6 +8,7 @@ go_library(
         "endpoint.go",
         "labels.go",
         "namespaces.go",
+        "proxy.go",
         "registry.go",
     ],
     importpath = "github.com/bpalermo/aether/common/constants",
