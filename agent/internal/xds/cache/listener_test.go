@@ -104,7 +104,8 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 			c := newTestCache("node-1")
 			tt.setupFunc(c)
 			got := c.Listeners()
-			assert.Len(t, got, tt.wantLen)
+			// +1: the health gateway listener is always present.
+			assert.Len(t, got, tt.wantLen+1)
 		})
 	}
 }
@@ -232,7 +233,8 @@ func TestLoadListenersFromStorage_EmptyStorage(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, c.listeners)
-	assert.Empty(t, c.Listeners())
+	// Only the always-present health gateway listener remains.
+	assert.Len(t, c.Listeners(), 1)
 }
 
 // TestLoadListenersFromStorage_ValidPodsMapPopulation verifies that valid pods
@@ -288,8 +290,9 @@ func TestLoadListenersFromStorage_ValidPodsMapPopulation(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Len(t, c.listeners, tt.wantEntries)
-			// Each entry contributes an inbound and an outbound listener resource.
-			assert.Len(t, c.Listeners(), tt.wantEntries*2)
+			// Each entry contributes an inbound and an outbound listener resource,
+			// plus the always-present health gateway listener.
+			assert.Len(t, c.Listeners(), tt.wantEntries*2+1)
 		})
 	}
 }
@@ -512,7 +515,7 @@ func TestSnapshotCache_Listeners_ThreadSafety(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			result := c.Listeners()
-			assert.Len(t, result, 4)
+			assert.Len(t, result, 5) // 2 pods x 2 listeners + health gateway
 		}()
 	}
 	wg.Wait()
@@ -556,14 +559,14 @@ func TestSnapshotCache_Listeners_ResultIsIndependentSlice(t *testing.T) {
 	seedListeners(c, makeCNIPod("pod-a", "default", "/proc/100/ns/net"))
 
 	first := c.Listeners()
-	require.Len(t, first, 2)
+	require.Len(t, first, 3) // inbound + outbound + health gateway
 
 	// Zero out the returned slice.
 	for i := range first {
 		first[i] = types.Resource(nil)
 	}
 
-	// A second call must still return the original two resources.
+	// A second call must still return the original resources.
 	second := c.Listeners()
-	assert.Len(t, second, 2)
+	assert.Len(t, second, 3)
 }

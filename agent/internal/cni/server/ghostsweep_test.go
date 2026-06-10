@@ -89,7 +89,7 @@ func TestSweepGhostEndpoints(t *testing.T) {
 			sweepEndpoint("10.0.0.2", "test-node", "pod-term"),
 		},
 	}}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
 
 	s.sweepGhostEndpoints(ctx)
 
@@ -112,7 +112,7 @@ func TestSweepRegistersMissingEndpoint(t *testing.T) {
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-missing"), missing))
 
 	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
 
 	s.sweepGhostEndpoints(ctx)
 
@@ -121,7 +121,10 @@ func TestSweepRegistersMissingEndpoint(t *testing.T) {
 	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY, ep.GetHealth(), "EDS-mode re-registration starts UNHEALTHY pending promotion")
 
 	// The liveness loop must treat the next observation as a transition.
-	last := map[string]registryv1.ServiceEndpoint_Health{"container-missing": registryv1.ServiceEndpoint_HEALTH_HEALTHY}
-	s.drainLivenessForget(last)
-	assert.NotContains(t, last, "container-missing")
+	state := newLivenessState()
+	state.last["container-missing"] = registryv1.ServiceEndpoint_HEALTH_HEALTHY
+	state.sawHealthy["container-missing"] = struct{}{}
+	s.drainLivenessForget(state)
+	assert.NotContains(t, state.last, "container-missing")
+	assert.NotContains(t, state.sawHealthy, "container-missing", "forget must clear warm-up memory too")
 }

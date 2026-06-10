@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -61,7 +62,7 @@ func TestHandlePodTerminating(t *testing.T) {
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
 
@@ -87,7 +88,7 @@ func TestHandlePodTerminatingFallsBackToRemoval(t *testing.T) {
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
 	reg.registerEndpointErr = assert.AnError
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
 
@@ -103,7 +104,7 @@ func TestHandlePodTerminatingScope(t *testing.T) {
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "other-node"))
 	assert.Zero(t, reg.registered+reg.unregistered, "another node's pod must be ignored")
@@ -125,7 +126,7 @@ func TestHandlePodTerminatingMarksEvenWhenRegistryFails(t *testing.T) {
 	reg := &unregisterRecordingRegistry{}
 	reg.registerEndpointErr = assert.AnError
 	reg.unregisterEndpointsErr = assert.AnError
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
 
@@ -142,15 +143,14 @@ func TestReconcileLivenessSkipsTerminatingPod(t *testing.T) {
 	pod := validCNIPod("pod-a", "default", "container-a")
 	pod.Terminating = true
 
-	srv := fakeClustersAdmin(t, "health_pod-a")
-	defer srv.Close()
+	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
 
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), srv.Listener.Addr().String())
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
 
-	s.reconcileLiveness(ctx, map[string]registryv1.ServiceEndpoint_Health{})
+	s.reconcileLiveness(ctx, newLivenessState())
 
 	assert.Zero(t, reg.registered, "terminating pod must not be re-registered by liveness")
 }

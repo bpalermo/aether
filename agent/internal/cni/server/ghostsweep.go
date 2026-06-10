@@ -59,12 +59,12 @@ func (s *CNIServer) forgetLiveness(containerID string) {
 }
 
 // drainLivenessForget removes queued container IDs from the liveness loop's
-// transition cache.
-func (s *CNIServer) drainLivenessForget(last map[string]registryv1.ServiceEndpoint_Health) {
+// per-container state.
+func (s *CNIServer) drainLivenessForget(state *livenessState) {
 	s.livenessForgetMu.Lock()
 	defer s.livenessForgetMu.Unlock()
 	for id := range s.livenessForget {
-		delete(last, id)
+		state.forget(id)
 	}
 	s.livenessForget = nil
 }

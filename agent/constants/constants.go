@@ -14,6 +14,12 @@ const (
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
 	// DefaultCNISocketPath is the default Unix domain socket path for the CNI server
 	DefaultCNISocketPath = "/run/aether/cni.sock"
+	// DefaultProxyHealthSocketPath is the Unix domain socket where the proxy's
+	// agent-programmed health gateway listener exposes per-pod app health
+	// (health_check filters over the health_<pod> clusters, served on worker
+	// threads). The liveness loop probes it instead of the admin interface.
+	// /run/aether is shared between the agent and proxy containers.
+	DefaultProxyHealthSocketPath = "/run/aether/health.sock"
 
 	// DefaultSpireAdminSocketPath is the default path to the SPIRE agent admin socket
 	DefaultSpireAdminSocketPath = "/tmp/spire-agent/private/admin.sock"

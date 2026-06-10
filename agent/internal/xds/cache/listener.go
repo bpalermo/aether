@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 
+	agentconstants "github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
@@ -61,16 +63,23 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 	return c.generateListenerSnapshot(ctx)
 }
 
-// Listeners returns all cached inbound and outbound listener resources as a flat
-// slice. Thread-safe.
+// Listeners returns all cached inbound and outbound listener resources plus
+// the health gateway listener (per-pod health_check filters over the
+// health_<pod> clusters, probed by the liveness loop) as a flat slice.
+// Thread-safe.
 func (c *SnapshotCache) Listeners() []types.Resource {
 	c.listenerMu.RLock()
 	defer c.listenerMu.RUnlock()
 
-	resources := make([]types.Resource, 0, 2*len(c.listeners))
+	resources := make([]types.Resource, 0, 2*len(c.listeners)+1)
+	probeClusters := make([]string, 0, len(c.listeners))
 	for _, entry := range c.listeners {
 		resources = append(resources, entry.inbound, entry.outbound)
+		if hc, ok := entry.healthCluster.(*clusterv3.Cluster); ok && hc != nil {
+			probeClusters = append(probeClusters, hc.GetName())
+		}
 	}
+	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probeClusters))
 	return resources
 }
 

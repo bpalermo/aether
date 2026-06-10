@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"buf.build/go/protovalidate"
-	"github.com/bpalermo/aether/agent/internal/envoy/admin"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -66,11 +65,11 @@ type CNIServer struct {
 	snapshotCache *cache.SnapshotCache
 	spireBridge   *spire.Bridge
 	// ackTracker confirms (and diagnoses) Envoy's delta-xDS ACK/NACK of pod
-	// listener updates; envoyAdmin remains only for the liveness loop's
-	// /clusters health scrape.
-	ackTracker *ack.Tracker
-	envoyAdmin *admin.Client
-	metrics    *cniMetrics
+	// listener updates; healthClient probes the proxy's health gateway
+	// listener for the liveness loop. The agent makes no Envoy admin calls.
+	ackTracker   *ack.Tracker
+	healthClient *healthGatewayClient
+	metrics      *cniMetrics
 
 	k8sClient client.Client
 	// informers is the manager's (node-scoped) informer cache, used by the
@@ -115,7 +114,7 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 		snapshotCache: snapshotCache,
 		ackTracker:    ackTracker,
 		spireBridge:   spireBridge,
-		envoyAdmin:    admin.NewClient(cfg.EnvoyAdminAddress),
+		healthClient:  newHealthGatewayClient(cfg.ProxyHealthSocketPath),
 	}
 
 	cniSrv.AddCallback(cniSrv)
