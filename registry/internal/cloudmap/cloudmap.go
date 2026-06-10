@@ -125,6 +125,19 @@ func (r *CloudMapRegistry) RegisterEndpoint(ctx context.Context, serviceName str
 		return fmt.Errorf("failed to register instance for IP %s: %w", ip, err)
 	}
 
+	// Health lives in Cloud Map's native per-instance status, not an attribute.
+	// AWS_INIT_HEALTH_STATUS only applies to brand-new instances, so an update
+	// is required for re-registrations (liveness transitions, draining marks).
+	// Best-effort: services created before custom health checks reject this
+	// until they are re-created (see resolveOrCreateServiceID).
+	if _, healthErr := r.client.UpdateInstanceCustomHealthStatus(ctx, &servicediscovery.UpdateInstanceCustomHealthStatusInput{
+		ServiceId:  aws.String(svcID),
+		InstanceId: aws.String(instID),
+		Status:     customHealthStatus(endpoint.GetHealth()),
+	}); healthErr != nil {
+		r.log.Error(healthErr, "failed to update instance health status", "service", serviceName, "ip", ip)
+	}
+
 	// Evict endpoint cache for this service (all protocols)
 	r.evictEndpointCache(serviceName)
 
@@ -302,6 +315,12 @@ func (r *CloudMapRegistry) resolveOrCreateServiceID(ctx context.Context, service
 	out, err := r.client.CreateService(ctx, &servicediscovery.CreateServiceInput{
 		Name:        aws.String(serviceName),
 		NamespaceId: aws.String(r.namespaceID),
+		// Custom health checks let endpoint health live in Cloud Map's native
+		// per-instance health status (UpdateInstanceCustomHealthStatus) instead
+		// of an Aether attribute. Immutable after creation: services created
+		// without it must be deleted and re-created (the agents' reconciliation
+		// sweep re-registers all live endpoints automatically).
+		HealthCheckCustomConfig: &types.HealthCheckCustomConfig{},
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create service %q: %w", serviceName, err)

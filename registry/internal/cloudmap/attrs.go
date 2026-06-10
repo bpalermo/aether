@@ -26,12 +26,20 @@ const (
 	attrK8sNamespace    = "AETHER_K8S_NAMESPACE"
 	attrK8sPod          = "AETHER_K8S_POD"
 	attrK8sNode         = "AETHER_K8S_NODE"
-	attrHealth          = "AETHER_HEALTH"
 	attrHealthCheckMode = "AETHER_HEALTH_CHECK_MODE"
-	attrContainerID     = "AETHER_CONTAINER_ID"
-	attrNetworkNS       = "AETHER_NETWORK_NS"
-	attrMetadata        = "AETHER_METADATA"
-	attrController      = "AETHER_CONTROLLER"
+	// attrDraining refines Cloud Map's binary instance health: a draining
+	// endpoint is natively UNHEALTHY (excluded from selection) and this marker
+	// upgrades it to EDS DRAINING (established connections finish gracefully).
+	// The health verdict itself lives in Cloud Map's native per-instance
+	// status, never in an attribute.
+	attrDraining = "AETHER_DRAINING"
+	// attrInitHealth is Cloud Map's reserved attribute seeding a brand-new
+	// instance's custom health status at registration.
+	attrInitHealth  = "AWS_INIT_HEALTH_STATUS"
+	attrContainerID = "AETHER_CONTAINER_ID"
+	attrNetworkNS   = "AETHER_NETWORK_NS"
+	attrMetadata    = "AETHER_METADATA"
+	attrController  = "AETHER_CONTROLLER"
 
 	// controllerName identifies instances managed by Aether.
 	controllerName = "aether"
@@ -90,9 +98,12 @@ func marshalAttrs(protocol registryv1.Service_Protocol, ep *registryv1.ServiceEn
 		}
 	}
 
-	// Only persist an explicit health verdict; absence means "unknown" (healthy).
-	if h := ep.GetHealth(); h != registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED {
-		attrs[attrHealth] = h.String()
+	// Health is native: seed new instances via AWS_INIT_HEALTH_STATUS (updates
+	// go through UpdateInstanceCustomHealthStatus). DRAINING maps to natively
+	// UNHEALTHY plus the draining marker.
+	attrs[attrInitHealth] = string(initHealthStatus(ep.GetHealth()))
+	if ep.GetHealth() == registryv1.ServiceEndpoint_HEALTH_DRAINING {
+		attrs[attrDraining] = "true"
 	}
 
 	// Only persist an explicit mode; absence means the default (active).
@@ -152,10 +163,6 @@ func unmarshalEndpoint(attrs map[string]string) (*registryv1.ServiceEndpoint, er
 		}
 	}
 
-	if h, ok := registryv1.ServiceEndpoint_Health_value[attrs[attrHealth]]; ok {
-		ep.Health = registryv1.ServiceEndpoint_Health(h)
-	}
-
 	if m, ok := registryv1.ServiceEndpoint_HealthCheckMode_value[attrs[attrHealthCheckMode]]; ok {
 		ep.HealthCheckMode = registryv1.ServiceEndpoint_HealthCheckMode(m)
 	}
@@ -163,9 +170,41 @@ func unmarshalEndpoint(attrs map[string]string) (*registryv1.ServiceEndpoint, er
 	return ep, nil
 }
 
-// unmarshalEndpointFromSummary converts an HttpInstanceSummary into a ServiceEndpoint.
+// unmarshalEndpointFromSummary converts an HttpInstanceSummary into a
+// ServiceEndpoint. Health comes from Cloud Map's native per-instance status
+// (set via custom health checks), refined to DRAINING by the draining marker;
+// an unknown status maps to UNSPECIFIED (treated healthy, matching older
+// instances).
 func unmarshalEndpointFromSummary(summary types.HttpInstanceSummary) (*registryv1.ServiceEndpoint, error) {
-	return unmarshalEndpoint(summary.Attributes)
+	ep, err := unmarshalEndpoint(summary.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	switch summary.HealthStatus {
+	case types.HealthStatusHealthy:
+		ep.Health = registryv1.ServiceEndpoint_HEALTH_HEALTHY
+	case types.HealthStatusUnhealthy:
+		ep.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+		if summary.Attributes[attrDraining] == "true" {
+			ep.Health = registryv1.ServiceEndpoint_HEALTH_DRAINING
+		}
+	default:
+		ep.Health = registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED
+	}
+	return ep, nil
+}
+
+// initHealthStatus maps a registry health to the AWS_INIT_HEALTH_STATUS seed.
+func initHealthStatus(h registryv1.ServiceEndpoint_Health) types.CustomHealthStatus {
+	if h == registryv1.ServiceEndpoint_HEALTH_UNHEALTHY || h == registryv1.ServiceEndpoint_HEALTH_DRAINING {
+		return types.CustomHealthStatusUnhealthy
+	}
+	return types.CustomHealthStatusHealthy
+}
+
+// customHealthStatus maps a registry health to the native custom health update.
+func customHealthStatus(h registryv1.ServiceEndpoint_Health) types.CustomHealthStatus {
+	return initHealthStatus(h)
 }
 
 // protocolFromAttrs extracts the protocol from instance attributes.

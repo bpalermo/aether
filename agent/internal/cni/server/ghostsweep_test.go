@@ -75,7 +75,9 @@ func TestSweepGhostEndpoints(t *testing.T) {
 			sweepEndpoint("10.0.0.3", "other-node", "pod-other"), // other node -> ignore
 		},
 		"svc-b": {
-			sweepEndpoint("10.0.0.2", "test-node", "pod-term"), // terminating ghost -> deregister
+			// Terminating pod's endpoint: marked DRAINING by the termination
+			// watch and removed at CNI DEL — the sweep must leave it alone.
+			sweepEndpoint("10.0.0.2", "test-node", "pod-term"),
 		},
 	}}
 	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "127.0.0.1:1")
@@ -84,7 +86,6 @@ func TestSweepGhostEndpoints(t *testing.T) {
 
 	assert.Equal(t, map[string][]string{
 		"svc-a": {"10.0.0.9"},
-		"svc-b": {"10.0.0.2"},
 	}, reg.unregistered)
 	assert.Empty(t, reg.registered, "all live pods were present in the registry")
 }

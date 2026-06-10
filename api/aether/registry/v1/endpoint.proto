@@ -51,6 +51,12 @@ message ServiceEndpoint {
     HEALTH_UNSPECIFIED = 0;
     HEALTH_HEALTHY = 1;
     HEALTH_UNHEALTHY = 2;
+    // HEALTH_DRAINING marks an endpoint whose pod's deletion has been
+    // requested: clients must stop selecting it for new requests (Envoy EDS
+    // DRAINING) while established connections finish through the pod's
+    // termination grace period. Set by the agent's termination watch; the
+    // endpoint is removed entirely at CNI DEL.
+    HEALTH_DRAINING = 3;
   }
 
   Health health = 9;

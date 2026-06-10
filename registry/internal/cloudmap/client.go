@@ -15,4 +15,5 @@ type Client interface {
 	RegisterInstance(ctx context.Context, params *servicediscovery.RegisterInstanceInput, optFns ...func(*servicediscovery.Options)) (*servicediscovery.RegisterInstanceOutput, error)
 	DeregisterInstance(ctx context.Context, params *servicediscovery.DeregisterInstanceInput, optFns ...func(*servicediscovery.Options)) (*servicediscovery.DeregisterInstanceOutput, error)
 	DiscoverInstances(ctx context.Context, params *servicediscovery.DiscoverInstancesInput, optFns ...func(*servicediscovery.Options)) (*servicediscovery.DiscoverInstancesOutput, error)
+	UpdateInstanceCustomHealthStatus(ctx context.Context, params *servicediscovery.UpdateInstanceCustomHealthStatusInput, optFns ...func(*servicediscovery.Options)) (*servicediscovery.UpdateInstanceCustomHealthStatusOutput, error)
 }

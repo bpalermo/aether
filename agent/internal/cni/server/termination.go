@@ -5,6 +5,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
 	corev1 "k8s.io/api/core/v1"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -102,23 +103,35 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 		return // already removed by CNI DEL, or another event won the race
 	}
 
-	// Mark first: even if the unregister below fails transiently, the liveness
-	// loop must stop refreshing this endpoint (CNI DEL retries the unregister).
+	// Mark first: even if the registry update below fails transiently, the
+	// liveness loop must stop refreshing this endpoint (CNI DEL still removes
+	// it at teardown).
 	cur.Terminating = true
 	if err := s.storage.AddResource(ctx, types.ContainerID(cur.GetContainerId()), cur); err != nil {
 		log.Error(err, "termination: failed to persist terminating flag")
 	}
 
-	serviceName, ips, err := registry.ExtractCNIPodInformation(cur)
+	// Mark the endpoint DRAINING rather than removing it: Envoy excludes
+	// DRAINING hosts from new selections but lets established connections
+	// finish through the grace period — less connection-pool churn than
+	// outright removal. CNI DEL performs the final removal.
+	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cur)
 	if err != nil {
-		log.Error(err, "termination: failed to extract endpoint info")
+		log.Error(err, "termination: failed to build endpoint")
 		return
 	}
-	if err := s.registry.UnregisterEndpoints(ctx, serviceName, ips); err != nil {
-		log.Error(err, "termination: early deregistration failed; CNI DEL will retry")
+	endpoint.Health = registryv1.ServiceEndpoint_HEALTH_DRAINING
+	if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
+		log.Error(err, "termination: failed to mark endpoint draining; falling back to deregistration")
+		// Removal is strictly safer than leaving the endpoint selectable.
+		if _, ips, exErr := registry.ExtractCNIPodInformation(cur); exErr == nil {
+			if unregErr := s.registry.UnregisterEndpoints(ctx, serviceName, ips); unregErr != nil {
+				log.Error(unregErr, "termination: fallback deregistration also failed; CNI DEL will retry")
+			}
+		}
 		return
 	}
-	log.Info("pod terminating: endpoint deregistered ahead of shutdown", "service", serviceName)
+	log.Info("pod terminating: endpoint marked draining ahead of shutdown", "service", serviceName)
 }
 
 // findStoredPod scans local storage for the CNIPod with the given name and

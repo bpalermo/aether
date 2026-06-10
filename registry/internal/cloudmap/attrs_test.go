@@ -39,6 +39,13 @@ func fullEndpoint() *registryv1.ServiceEndpoint {
 	}
 }
 
+// healthStripped returns the endpoint as it comes back from an attribute-only
+// unmarshal: health is carried natively, not in attributes.
+func healthStripped(ep *registryv1.ServiceEndpoint) *registryv1.ServiceEndpoint {
+	ep.Health = registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED
+	return ep
+}
+
 func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -49,14 +56,19 @@ func TestMarshalAttrsUnmarshalEndpointRoundTrip(t *testing.T) {
 		expected *registryv1.ServiceEndpoint
 	}{
 		{
+			// Health deliberately does NOT round-trip through attributes: it
+			// lives in Cloud Map's native per-instance status (see
+			// unmarshalEndpointFromSummary / TestSummaryHealthMapping).
 			name:     "full endpoint with HTTP protocol",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: fullEndpoint(),
+			expected: healthStripped(fullEndpoint()),
 		},
 		{
 			name:     "full endpoint with unspecified protocol",
 			protocol: registryv1.Service_PROTOCOL_UNSPECIFIED,
 			endpoint: fullEndpoint(),
+			expected: healthStripped(fullEndpoint()),
 		},
 		{
 			name:     "minimal endpoint — only required fields",
@@ -555,4 +567,43 @@ func TestInstanceIDFormat(t *testing.T) {
 	// Verify the ID uses the expected "clusterName/ip" separator format.
 	got := instanceID("prod-cluster", "192.168.0.5")
 	assert.Equal(t, fmt.Sprintf("%s/%s", "prod-cluster", "192.168.0.5"), got)
+}
+
+// TestSummaryHealthMapping: native Cloud Map instance health maps onto the
+// registry health, with the draining marker refining UNHEALTHY to DRAINING.
+func TestSummaryHealthMapping(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status   types.HealthStatus
+		draining bool
+		want     registryv1.ServiceEndpoint_Health
+	}{
+		"healthy":            {types.HealthStatusHealthy, false, registryv1.ServiceEndpoint_HEALTH_HEALTHY},
+		"unhealthy":          {types.HealthStatusUnhealthy, false, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY},
+		"draining":           {types.HealthStatusUnhealthy, true, registryv1.ServiceEndpoint_HEALTH_DRAINING},
+		"unknown -> default": {types.HealthStatusUnknown, false, registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ep := fullEndpoint()
+			ep.Health = registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED
+			if tc.draining {
+				ep.Health = registryv1.ServiceEndpoint_HEALTH_DRAINING // sets the marker on marshal
+			}
+			attrs := marshalAttrs(registryv1.Service_PROTOCOL_HTTP, ep)
+			got, err := unmarshalEndpointFromSummary(types.HttpInstanceSummary{
+				Attributes:   attrs,
+				HealthStatus: tc.status,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got.GetHealth())
+		})
+	}
+}
+
+// TestInitHealthStatus: registry health seeds Cloud Map custom health; both
+// UNHEALTHY and DRAINING gate natively as UNHEALTHY.
+func TestInitHealthStatus(t *testing.T) {
+	assert.Equal(t, types.CustomHealthStatusHealthy, initHealthStatus(registryv1.ServiceEndpoint_HEALTH_UNSPECIFIED))
+	assert.Equal(t, types.CustomHealthStatusHealthy, initHealthStatus(registryv1.ServiceEndpoint_HEALTH_HEALTHY))
+	assert.Equal(t, types.CustomHealthStatusUnhealthy, initHealthStatus(registryv1.ServiceEndpoint_HEALTH_UNHEALTHY))
+	assert.Equal(t, types.CustomHealthStatusUnhealthy, initHealthStatus(registryv1.ServiceEndpoint_HEALTH_DRAINING))
 }

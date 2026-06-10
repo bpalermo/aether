@@ -86,12 +86,20 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		s.log.V(1).Info("ghost sweep: failed to list local pods", "error", err)
 		return
 	}
-	// Live local pods by IP. Terminating pods are intentionally excluded: their
-	// endpoints were already deregistered, so a ghost re-listing them would be
-	// equally stale (and they must not be re-registered as missing).
+	// Live local pods by IP. Terminating pods are tracked separately: their
+	// endpoints are deliberately still registered (marked DRAINING by the
+	// termination watch, removed at CNI DEL) — they are neither ghosts to
+	// deregister nor missing entries to re-register.
 	live := make(map[string]*cniv1.CNIPod, len(pods))
+	terminating := make(map[string]struct{})
 	for _, p := range pods {
-		if p.GetTerminating() || isIgnorablePod(p) {
+		if isIgnorablePod(p) {
+			continue
+		}
+		if p.GetTerminating() {
+			for _, ip := range p.GetIps() {
+				terminating[ip] = struct{}{}
+			}
 			continue
 		}
 		for _, ip := range p.GetIps() {
@@ -108,6 +116,9 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 			if _, ok := live[ep.GetIp()]; ok {
 				registered[ep.GetIp()] = struct{}{}
 				continue
+			}
+			if _, ok := terminating[ep.GetIp()]; ok {
+				continue // draining; CNI DEL owns the final removal
 			}
 			if err := s.registry.UnregisterEndpoint(ctx, service, ep.GetIp()); err != nil {
 				s.log.Error(err, "ghost sweep: failed to deregister ghost endpoint",

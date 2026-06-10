@@ -22,6 +22,8 @@ type fakeClient struct {
 	services map[string]map[string]string
 	// instances maps serviceID -> (instanceID -> attributes)
 	instances map[string]map[string]map[string]string
+	// health maps serviceID -> (instanceID -> custom health status)
+	health map[string]map[string]types.HealthStatus
 	// serviceNameByID maps serviceID -> serviceName (reverse lookup)
 	serviceNameByID map[string]string
 	// namespaceIDByServiceID maps serviceID -> namespaceID
@@ -35,6 +37,7 @@ func newFakeClient() *fakeClient {
 		namespaces:             make(map[string]string),
 		services:               make(map[string]map[string]string),
 		instances:              make(map[string]map[string]map[string]string),
+		health:                 make(map[string]map[string]types.HealthStatus),
 		serviceNameByID:        make(map[string]string),
 		namespaceIDByServiceID: make(map[string]string),
 	}
@@ -146,6 +149,20 @@ func (f *fakeClient) RegisterInstance(_ context.Context, input *servicediscovery
 		return nil, fmt.Errorf("service %s not found", svcID)
 	}
 
+	// AWS_INIT_HEALTH_STATUS seeds custom health for brand-new instances only
+	// (matching Cloud Map: re-registrations keep the current health).
+	if _, exists := svcInstances[instID]; !exists {
+		if f.health[svcID] == nil {
+			f.health[svcID] = make(map[string]types.HealthStatus)
+		}
+		switch input.Attributes["AWS_INIT_HEALTH_STATUS"] {
+		case "UNHEALTHY":
+			f.health[svcID][instID] = types.HealthStatusUnhealthy
+		default:
+			f.health[svcID][instID] = types.HealthStatusHealthy
+		}
+	}
+
 	// Copy attributes (upsert semantics)
 	attrs := make(map[string]string, len(input.Attributes))
 	for k, v := range input.Attributes {
@@ -154,6 +171,26 @@ func (f *fakeClient) RegisterInstance(_ context.Context, input *servicediscovery
 	svcInstances[instID] = attrs
 
 	return &servicediscovery.RegisterInstanceOutput{}, nil
+}
+
+func (f *fakeClient) UpdateInstanceCustomHealthStatus(_ context.Context, input *servicediscovery.UpdateInstanceCustomHealthStatusInput, _ ...func(*servicediscovery.Options)) (*servicediscovery.UpdateInstanceCustomHealthStatusOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	svcID := aws.ToString(input.ServiceId)
+	instID := aws.ToString(input.InstanceId)
+	if _, ok := f.instances[svcID][instID]; !ok {
+		return nil, fmt.Errorf("instance %s not found in service %s", instID, svcID)
+	}
+	if f.health[svcID] == nil {
+		f.health[svcID] = make(map[string]types.HealthStatus)
+	}
+	if input.Status == types.CustomHealthStatusUnhealthy {
+		f.health[svcID][instID] = types.HealthStatusUnhealthy
+	} else {
+		f.health[svcID][instID] = types.HealthStatusHealthy
+	}
+	return &servicediscovery.UpdateInstanceCustomHealthStatusOutput{}, nil
 }
 
 func (f *fakeClient) DeregisterInstance(_ context.Context, input *servicediscovery.DeregisterInstanceInput, _ ...func(*servicediscovery.Options)) (*servicediscovery.DeregisterInstanceOutput, error) {
@@ -197,8 +234,9 @@ func (f *fakeClient) DiscoverInstances(_ context.Context, input *servicediscover
 			continue
 		}
 		results = append(results, types.HttpInstanceSummary{
-			InstanceId: aws.String(instID),
-			Attributes: copyAttrs(attrs),
+			InstanceId:   aws.String(instID),
+			Attributes:   copyAttrs(attrs),
+			HealthStatus: f.health[svcID][instID],
 		})
 	}
 
