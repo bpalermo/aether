@@ -35,26 +35,49 @@ const (
 	stateFileName     = "epoch"
 )
 
+// initProbeInterval is the delay between admin re-probes in initStartEpoch while
+// the heartbeat file is fresh but the admin has not yet confirmed the predecessor.
+const initProbeInterval = 500 * time.Millisecond
+
 // initStartEpoch decides the restart epoch for the first Envoy this supervisor
 // launches. With cross-pod coordination (StateDir set), it starts at E+1 only when
 // the heartbeat file names epoch E AND the node's Envoy admin actually reports E
-// LIVE — admin is ground truth, so a crashed/initializing predecessor (stale or
-// absent on admin) correctly resets to epoch 0 instead of attaching to a dead
-// parent and climbing epochs. Without StateDir (Strategy A) this is a no-op.
+// LIVE — admin is ground truth, so a crashed predecessor (stale heartbeat, dead on
+// admin) correctly resets to epoch 0 instead of attaching to a dead parent.
+//
+// The two signals must AGREE before a decision is made: the heartbeat is
+// LIVE-gated by construction, so a fresh heartbeat means the predecessor was
+// serving within the stale window — a single failed admin probe (transient
+// timeout under node load) must not send us to epoch 0, which bind-collides with
+// the live predecessor on the base-id domain socket (errno 98) and crash-loops.
+// While the file is fresh but admin unconfirmed, re-probe; the wait is bounded by
+// the heartbeat going stale. Without StateDir (Strategy A) this is a no-op.
 func (s *Supervisor) initStartEpoch(ctx context.Context) {
 	if s.cfg.StateDir == "" {
 		return
 	}
-	epoch, hb, ok := s.readState()
-	if ok && time.Since(hb) < predecessorStale && s.adminLiveAtEpoch(ctx, epoch) {
-		s.mu.Lock()
-		s.nextEpoch = epoch + 1
-		s.mu.Unlock()
-		s.log.Info("live predecessor confirmed; starting cross-pod hot restart",
-			"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
-		return
+	for {
+		epoch, hb, ok := s.readState()
+		if !ok || time.Since(hb) >= predecessorStale {
+			s.log.Info("no live predecessor; starting fresh at epoch 0", "statePresent", ok)
+			return
+		}
+		if s.adminLiveAtEpoch(ctx, epoch) {
+			s.mu.Lock()
+			s.nextEpoch = epoch + 1
+			s.mu.Unlock()
+			s.log.Info("live predecessor confirmed; starting cross-pod hot restart",
+				"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
+			return
+		}
+		s.log.V(1).Info("fresh heartbeat but admin not confirming predecessor; re-probing",
+			"epoch", epoch, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(initProbeInterval):
+		}
 	}
-	s.log.Info("no live predecessor; starting fresh at epoch 0", "statePresent", ok)
 }
 
 func (s *Supervisor) statePath() string { return filepath.Join(s.cfg.StateDir, stateFileName) }
