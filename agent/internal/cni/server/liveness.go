@@ -52,7 +52,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 	}
 
 	for _, pod := range pods {
-		if isIgnorablePod(pod) {
+		if isIgnorablePod(pod) || pod.GetTerminating() {
 			continue
 		}
 		healthy, known := appHealth[proxy.HealthProbeClusterName(pod)]
@@ -83,16 +83,17 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 		}
 		endpoint.Health = want
 
-		// Re-check the pod still exists in storage under lifecycleMu before
-		// re-registering: the pods slice is a snapshot from the start of this
-		// tick, and a concurrent RemovePod (which holds lifecycleMu across
-		// unregister + storage delete) may have removed the pod — re-registering
+		// Re-check the pod still exists in storage — and is not terminating —
+		// under lifecycleMu before re-registering: the pods slice is a snapshot
+		// from the start of this tick, and a concurrent RemovePod (which holds
+		// lifecycleMu across unregister + storage delete) or termination-watch
+		// deregistration may have unregistered the endpoint — re-registering
 		// then would resurrect a deleted endpoint in the registry permanently.
 		s.lifecycleMu.Lock()
-		if _, getErr := s.storage.GetResource(ctx, types.ContainerID(pod.GetContainerId())); getErr != nil {
+		if cur, getErr := s.storage.GetResource(ctx, types.ContainerID(pod.GetContainerId())); getErr != nil || cur.GetTerminating() {
 			s.lifecycleMu.Unlock()
 			delete(last, key)
-			s.log.V(1).Info("liveness: pod no longer in storage; skipping health update", "pod", pod.GetName())
+			s.log.V(1).Info("liveness: pod gone or terminating; skipping health update", "pod", pod.GetName())
 			continue
 		}
 		err = s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint)

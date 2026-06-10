@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -57,6 +58,10 @@ type CNIServer struct {
 	envoyAdmin    *admin.Client
 
 	k8sClient client.Client
+	// informers is the manager's (node-scoped) informer cache, used by the
+	// termination watch to observe pod deletionTimestamp transitions. Nil
+	// disables the watch.
+	informers ctrlcache.Informers
 }
 
 var _ xds.ServerCallback = (*CNIServer)(nil)
@@ -64,7 +69,7 @@ var _ xds.ServerCallback = (*CNIServer)(nil)
 // NewCNIServer creates a new CNI gRPC server.
 // The server listens on a Unix domain socket and registers the CNI service with
 // protovalidate middleware for request validation.
-func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDomain string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, spireBridge *spire.Bridge, log logr.Logger, k8sClient client.Client, cfg *CNIServerConfig) (*CNIServer, error) {
+func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDomain string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, spireBridge *spire.Bridge, log logr.Logger, k8sClient client.Client, informers ctrlcache.Informers, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -81,6 +86,7 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 		storage:       localStorage,
 		registry:      registry,
 		k8sClient:     k8sClient,
+		informers:     informers,
 		snapshotCache: snapshotCache,
 		spireBridge:   spireBridge,
 		envoyAdmin:    admin.NewClient(cfg.EnvoyAdminAddress),
@@ -116,6 +122,11 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	// otherwise created only on CNI ADD, so an agent restart would leave existing
 	// pods' workload SVIDs unsubscribed and their mTLS broken until recreation.
 	go s.runResubscribeStoredPods(ctx)
+
+	// Early drain: deregister endpoints the moment pod deletion is requested
+	// (deletionTimestamp), instead of waiting for CNI DEL after the containers
+	// are already dead.
+	go s.runTerminationWatch(ctx, s.informers)
 	return nil
 }
 

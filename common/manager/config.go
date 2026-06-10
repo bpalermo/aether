@@ -2,8 +2,13 @@
 // used by both the agent and registrar commands.
 package manager
 
+import "sigs.k8s.io/controller-runtime/pkg/cache"
+
 // Config holds common configuration shared across all controller-runtime manager-based commands.
 type Config struct {
+	// CacheOptions optionally scopes the manager's informer cache (e.g. the
+	// agent limits Pod watches to its own node). Nil keeps the default cache.
+	CacheOptions *cache.Options
 	// Debug enables debug logging
 	Debug bool
 	// HealthProbeBindAddress is the address for the health probe HTTP server

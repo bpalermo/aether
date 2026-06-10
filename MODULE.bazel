@@ -104,6 +104,7 @@ use_repo(
     "io_etcd_go_etcd_server_v3",
     "io_k8s_api",
     "io_k8s_apimachinery",
+    "io_k8s_client_go",
     "io_k8s_component_base",
     "io_k8s_cri_api",
     "io_k8s_sigs_controller_runtime",
