@@ -2,6 +2,7 @@ package registrar
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
@@ -9,6 +10,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func newTestRegistry() *RegistrarRegistry {
@@ -427,4 +430,74 @@ func TestSignalChange_Coalesces(t *testing.T) {
 		t.Fatal("expected change signals to coalesce into one")
 	default:
 	}
+}
+
+// fakeWatchStream feeds canned events to processStream, then returns err.
+// Only Recv is used by processStream; the embedded nil interface panics on
+// anything else, which would indicate a test assumption broke.
+type fakeWatchStream struct {
+	registrarv1.RegistrarService_WatchEndpointsClient
+	events []*registrarv1.WatchEndpointsResponse
+	err    error
+}
+
+func (f *fakeWatchStream) Recv() (*registrarv1.WatchEndpointsResponse, error) {
+	if len(f.events) > 0 {
+		e := f.events[0]
+		f.events = f.events[1:]
+		return e, nil
+	}
+	return nil, f.err
+}
+
+func TestProcessStream_TracksLastVersion(t *testing.T) {
+	r := newTestRegistry()
+	stream := &fakeWatchStream{
+		events: []*registrarv1.WatchEndpointsResponse{
+			{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+				ServiceName: "svc-a",
+				Endpoint:    makeEndpoint("10.0.0.1", 8080),
+				Version:     "7",
+			},
+		},
+		err: io.EOF,
+	}
+
+	got := r.processStream(context.Background(), stream, "5")
+	assert.Equal(t, "7", got, "lastVersion must advance to the newest event version")
+}
+
+// TestProcessStream_DataLossClearsResumeToken verifies the force-resync
+// contract: when the registrar ends the stream with DataLoss (event buffer
+// overflowed), the client must NOT resume from its last seen version —
+// events within a batch share one version, so lastVersion can equal the
+// registrar's current version while events were still missed. Clearing the
+// token makes the reconnect fetch a full snapshot.
+func TestProcessStream_DataLossClearsResumeToken(t *testing.T) {
+	r := newTestRegistry()
+	stream := &fakeWatchStream{
+		events: []*registrarv1.WatchEndpointsResponse{
+			{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+				ServiceName: "svc-a",
+				Endpoint:    makeEndpoint("10.0.0.1", 8080),
+				Version:     "7",
+			},
+		},
+		err: status.Error(codes.DataLoss, "watch stream overflowed; reconnect for a full snapshot"),
+	}
+
+	got := r.processStream(context.Background(), stream, "5")
+	assert.Equal(t, "", got, "DataLoss must clear the resume token to force a full snapshot")
+}
+
+func TestProcessStream_OtherErrorsKeepResumeToken(t *testing.T) {
+	r := newTestRegistry()
+	stream := &fakeWatchStream{
+		err: status.Error(codes.Unavailable, "connection reset"),
+	}
+
+	got := r.processStream(context.Background(), stream, "5")
+	assert.Equal(t, "5", got, "transient errors must keep the resume token")
 }
