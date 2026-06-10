@@ -4,6 +4,7 @@ go_library(
     name = "server",
     srcs = [
         "broadcaster.go",
+        "metrics.go",
         "server.go",
         "snapshot.go",
         "sync.go",
@@ -19,6 +20,7 @@ go_library(
         "@com_github_go_logr_logr//:logr",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_metric//:metric",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_protobuf//proto",
     ],
@@ -28,6 +30,7 @@ go_test(
     name = "server_test",
     srcs = [
         "broadcaster_test.go",
+        "metrics_test.go",
         "snapshot_test.go",
         "sync_test.go",
     ],
@@ -38,5 +41,7 @@ go_test(
         "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
 )

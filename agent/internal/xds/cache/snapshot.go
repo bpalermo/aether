@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/common/telemetry"
@@ -44,6 +45,10 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.snapshot.generate",
 		trace.WithAttributes(telemetry.AttrSnapshotVersion.String(v)))
 	defer func() { telemetry.EndSpan(span, retErr) }()
+	start := time.Now()
+	defer func() {
+		c.metrics.generated(ctx, time.Since(start).Seconds(), int64(c.version.Load()), retErr)
+	}()
 
 	listeners := c.Listeners()
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()

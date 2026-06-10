@@ -12,7 +12,7 @@ import (
 // TestNewBroadcaster verifies that NewBroadcaster initializes a broadcaster with
 // no watchers.
 func TestNewBroadcaster(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 
 	require.NotNil(t, b)
 	assert.Equal(t, 0, b.WatcherCount())
@@ -41,7 +41,7 @@ func TestBroadcaster_Subscribe(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBroadcaster(logr.Discard())
+			b := NewBroadcaster(logr.Discard(), nil)
 
 			for _, id := range tt.ids {
 				ch := b.Subscribe(id)
@@ -56,7 +56,7 @@ func TestBroadcaster_Subscribe(t *testing.T) {
 // TestBroadcaster_Subscribe_SameID verifies that subscribing with the same ID
 // closes the old channel and replaces it with a new one.
 func TestBroadcaster_Subscribe_SameID(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 
 	ch1 := b.Subscribe("node-1")
 	require.NotNil(t, ch1)
@@ -102,7 +102,7 @@ func TestBroadcaster_Unsubscribe(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBroadcaster(logr.Discard())
+			b := NewBroadcaster(logr.Discard(), nil)
 
 			var targetCh <-chan *registrarv1.WatchEndpointsResponse
 			for _, id := range tt.subscribeIDs {
@@ -127,7 +127,7 @@ func TestBroadcaster_Unsubscribe(t *testing.T) {
 // TestBroadcaster_Unsubscribe_UnknownID verifies that Unsubscribe on an unknown
 // ID is a no-op and does not panic or alter the watcher count.
 func TestBroadcaster_Unsubscribe_UnknownID(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 	b.Subscribe("node-1")
 
 	// Must not panic.
@@ -139,7 +139,7 @@ func TestBroadcaster_Unsubscribe_UnknownID(t *testing.T) {
 // TestBroadcaster_Unsubscribe_EmptyBroadcaster verifies that calling Unsubscribe
 // on a broadcaster with no watchers is a no-op.
 func TestBroadcaster_Unsubscribe_EmptyBroadcaster(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 
 	// Must not panic.
 	b.Unsubscribe("node-1", nil)
@@ -152,7 +152,7 @@ func TestBroadcaster_Unsubscribe_EmptyBroadcaster(t *testing.T) {
 // or remove the newer subscription's channel. This guards against a same-id
 // reconnect race that would otherwise drop the live watcher and double-close.
 func TestBroadcaster_Unsubscribe_StaleChannel(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 
 	ch1 := b.Subscribe("node-1") // first connection; channel closed by re-Subscribe below
 	ch2 := b.Subscribe("node-1") // reconnect with the same id replaces ch1
@@ -216,7 +216,7 @@ func TestBroadcaster_Broadcast_DeliveredToAll(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBroadcaster(logr.Discard())
+			b := NewBroadcaster(logr.Discard(), nil)
 
 			channels := make(map[string]<-chan *registrarv1.WatchEndpointsResponse, len(tt.watcherIDs))
 			for _, id := range tt.watcherIDs {
@@ -244,7 +244,7 @@ func TestBroadcaster_Broadcast_DeliveredToAll(t *testing.T) {
 // TestBroadcaster_Broadcast_NoWatchers verifies that Broadcast with no subscribed
 // watchers does not panic.
 func TestBroadcaster_Broadcast_NoWatchers(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 
 	// Must not panic.
 	b.Broadcast([]*registrarv1.WatchEndpointsResponse{
@@ -255,7 +255,7 @@ func TestBroadcaster_Broadcast_NoWatchers(t *testing.T) {
 // TestBroadcaster_Broadcast_EmptyEventList verifies that broadcasting an empty
 // event slice is a no-op and does not panic.
 func TestBroadcaster_Broadcast_EmptyEventList(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 	b.Subscribe("node-1")
 
 	// Must not panic.
@@ -270,7 +270,7 @@ func TestBroadcaster_Broadcast_EmptyEventList(t *testing.T) {
 // Broadcast uses a non-blocking select internally, so it must return immediately
 // even when the watcher channel is at capacity.
 func TestBroadcaster_Broadcast_DropsEventsForSlowConsumer(t *testing.T) {
-	b := NewBroadcaster(logr.Discard())
+	b := NewBroadcaster(logr.Discard(), nil)
 	ch := b.Subscribe("slow-node")
 
 	// Fill the watcher's channel to capacity by broadcasting one event at a time.
@@ -357,7 +357,7 @@ func TestBroadcaster_WatcherCount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBroadcaster(logr.Discard())
+			b := NewBroadcaster(logr.Discard(), nil)
 			tt.actions(b)
 			assert.Equal(t, tt.wantCount, b.WatcherCount())
 		})

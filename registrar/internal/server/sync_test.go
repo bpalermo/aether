@@ -46,8 +46,8 @@ func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 func newTestSyncer(reg *mockRegistry, interval time.Duration) (*Syncer, *Snapshot, *Broadcaster) {
 	log := logr.Discard()
 	snap := NewSnapshot()
-	bc := NewBroadcaster(log)
-	s := NewSyncer(reg, snap, bc, interval, log)
+	bc := NewBroadcaster(log, nil)
+	s := NewSyncer(reg, snap, bc, interval, log, nil)
 	return s, snap, bc
 }
 

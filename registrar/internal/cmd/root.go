@@ -13,6 +13,7 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -97,10 +98,17 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
-	snapshot := server.NewSnapshot()
-	broadcaster := server.NewBroadcaster(l)
+	// Server metrics ride the global MeterProvider registered by Bootstrap;
+	// without --otel-enabled the meter is a no-op, so this is always safe.
+	serverMetrics, err := server.NewMetrics(otel.Meter("aether/registrar"))
+	if err != nil {
+		return fmt.Errorf("failed to create server metrics: %w", err)
+	}
 
-	syncer := server.NewSyncer(reg, snapshot, broadcaster, cfg.SyncInterval, l)
+	snapshot := server.NewSnapshot()
+	broadcaster := server.NewBroadcaster(l, serverMetrics)
+
+	syncer := server.NewSyncer(reg, snapshot, broadcaster, cfg.SyncInterval, l, serverMetrics)
 	if err = m.Add(syncer); err != nil {
 		return fmt.Errorf("failed to add syncer: %w", err)
 	}
@@ -122,7 +130,7 @@ func runRegistrar(ctx context.Context) (retErr error) {
 		l.Info("SPIRE disabled, gRPC server will use insecure transport")
 	}
 
-	grpcSrv := server.NewRegistrarServer(reg, snapshot, broadcaster, cfg.GRPCAddress, l, grpcOpts...)
+	grpcSrv := server.NewRegistrarServer(reg, snapshot, broadcaster, cfg.GRPCAddress, l, serverMetrics, grpcOpts...)
 	if err = m.Add(grpcSrv); err != nil {
 		return fmt.Errorf("failed to add gRPC server: %w", err)
 	}

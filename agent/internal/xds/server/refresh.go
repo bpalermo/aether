@@ -7,6 +7,8 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // defaultRefreshDebounce is how long the refresher waits for change signals to
@@ -31,11 +33,18 @@ type RegistryRefresher struct {
 	clusterName string
 	nodeName    string
 	debounce    time.Duration
+
+	// coalesced counts change signals absorbed into an already-armed debounce
+	// window; refreshErrors counts failed reloads, each of which leaves the
+	// cluster snapshot stale until the next change signal (errors are not
+	// retried). Either may be nil (instrumentation disabled).
+	coalesced     metric.Int64Counter
+	refreshErrors metric.Int64Counter
 }
 
 // NewRegistryRefresher creates a RegistryRefresher.
 func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.SnapshotCache, reg registry.Registry, log logr.Logger) *RegistryRefresher {
-	return &RegistryRefresher{
+	r := &RegistryRefresher{
 		log:         log.WithName("registry-refresher"),
 		cache:       snapshotCache,
 		registry:    reg,
@@ -43,6 +52,21 @@ func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.Sna
 		nodeName:    nodeName,
 		debounce:    defaultRefreshDebounce,
 	}
+
+	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
+	// a registration failure only disables instrumentation, never the refresher.
+	meter := otel.Meter("aether/agent-xds-refresher")
+	var err error
+	if r.coalesced, err = meter.Int64Counter("aether.agent.refresher.coalesced",
+		metric.WithDescription("Registry change signals absorbed into an already-armed debounce window")); err != nil {
+		r.log.Error(err, "failed to create coalesced counter; continuing without instrumentation")
+	}
+	if r.refreshErrors, err = meter.Int64Counter("aether.agent.refresher.errors",
+		metric.WithDescription("Failed cluster reloads from the registry (snapshot left stale until the next change signal)")); err != nil {
+		r.log.Error(err, "failed to create refresh errors counter; continuing without instrumentation")
+	}
+
+	return r
 }
 
 // Start blocks until ctx is cancelled, rebuilding the cluster snapshot from the
@@ -73,8 +97,13 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 			return nil
 		case <-changes:
 			// (Re)arm the debounce window. Stop+drain before Reset so a prior
-			// expiry doesn't leave a stale tick queued.
-			if !timer.Stop() {
+			// expiry doesn't leave a stale tick queued. Stop reporting true
+			// means the timer was already armed — this signal coalesced.
+			if timer.Stop() {
+				if r.coalesced != nil {
+					r.coalesced.Add(ctx, 1)
+				}
+			} else {
 				select {
 				case <-timer.C:
 				default:
@@ -84,6 +113,9 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 		case <-timer.C:
 			if err := r.cache.LoadClustersFromRegistry(ctx, r.clusterName, r.nodeName, r.registry); err != nil {
 				r.log.Error(err, "failed to refresh clusters from registry")
+				if r.refreshErrors != nil {
+					r.refreshErrors.Add(ctx, 1)
+				}
 				continue
 			}
 			r.log.V(1).Info("refreshed clusters from registry")

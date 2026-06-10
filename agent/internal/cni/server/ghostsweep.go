@@ -77,12 +77,13 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// pipeline, so each iteration is traced with the corrections it made.
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.ghost_sweep")
 	var retErr error
-	ghostsRemoved, missingRegistered := 0, 0
+	ghostsRemoved, missingRegistered, storedPods := 0, 0, 0
 	defer func() {
 		span.SetAttributes(
 			attribute.Int("aether.sweep.ghosts_removed", ghostsRemoved),
 			attribute.Int("aether.sweep.missing_registered", missingRegistered),
 		)
+		s.metrics.sweepCompleted(ctx, ghostsRemoved, missingRegistered, storedPods, retErr)
 		telemetry.EndSpan(span, retErr)
 	}()
 
@@ -104,6 +105,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		retErr = err
 		return
 	}
+	storedPods = len(pods)
 	// Live local pods by IP. Terminating pods are tracked separately: their
 	// endpoints are deliberately still registered (marked DRAINING by the
 	// termination watch, removed at CNI DEL) — they are neither ghosts to

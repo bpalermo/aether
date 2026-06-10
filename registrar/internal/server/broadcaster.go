@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"sync"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
@@ -19,13 +20,16 @@ type Broadcaster struct {
 	mu       sync.RWMutex
 	watchers map[string]chan *registrarv1.WatchEndpointsResponse
 	log      logr.Logger
+	metrics  *Metrics
 }
 
-// NewBroadcaster creates a Broadcaster.
-func NewBroadcaster(log logr.Logger) *Broadcaster {
+// NewBroadcaster creates a Broadcaster. metrics may be nil to disable
+// instrumentation.
+func NewBroadcaster(log logr.Logger, metrics *Metrics) *Broadcaster {
 	return &Broadcaster{
 		watchers: make(map[string]chan *registrarv1.WatchEndpointsResponse),
 		log:      log.WithName("broadcaster"),
+		metrics:  metrics,
 	}
 }
 
@@ -36,12 +40,17 @@ func (b *Broadcaster) Subscribe(id string) <-chan *registrarv1.WatchEndpointsRes
 	defer b.mu.Unlock()
 
 	// Close any existing channel for this ID (reconnection scenario).
-	if ch, exists := b.watchers[id]; exists {
-		close(ch)
+	existing, replaced := b.watchers[id]
+	if replaced {
+		close(existing)
 	}
 
 	ch := make(chan *registrarv1.WatchEndpointsResponse, defaultChannelBuffer)
 	b.watchers[id] = ch
+	if !replaced {
+		// A reconnect replaces the channel but keeps the watcher count.
+		b.metrics.watcherSubscribed(context.Background())
+	}
 	b.log.V(1).Info("watcher subscribed", "id", id)
 	return ch
 }
@@ -61,6 +70,7 @@ func (b *Broadcaster) Unsubscribe(id string, ch <-chan *registrarv1.WatchEndpoin
 
 	close(existing)
 	delete(b.watchers, id)
+	b.metrics.watcherUnsubscribed(context.Background())
 	b.log.V(1).Info("watcher unsubscribed", "id", id)
 }
 
@@ -74,7 +84,11 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 		for id, ch := range b.watchers {
 			select {
 			case ch <- event:
+				b.metrics.eventBroadcast(context.Background(), event.GetType().String())
 			default:
+				// A dropped event means this watcher's view silently diverges
+				// until it reconnects — the counter is the staleness alarm.
+				b.metrics.eventDropped(context.Background(), event.GetType().String())
 				b.log.V(1).Info("dropped event for slow watcher", "id", id, "eventType", event.GetType())
 			}
 		}

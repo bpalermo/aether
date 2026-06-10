@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/bpalermo/aether/common/telemetry"
@@ -25,17 +26,20 @@ type Syncer struct {
 	broadcaster  *Broadcaster
 	syncInterval time.Duration
 	log          logr.Logger
+	metrics      *Metrics
 	firstSync    bool
 }
 
-// NewSyncer creates a Syncer that polls the external registry at the given interval.
-func NewSyncer(reg registry.Registry, snapshot *Snapshot, broadcaster *Broadcaster, syncInterval time.Duration, log logr.Logger) *Syncer {
+// NewSyncer creates a Syncer that polls the external registry at the given
+// interval. metrics may be nil to disable instrumentation.
+func NewSyncer(reg registry.Registry, snapshot *Snapshot, broadcaster *Broadcaster, syncInterval time.Duration, log logr.Logger, metrics *Metrics) *Syncer {
 	return &Syncer{
 		registry:     reg,
 		snapshot:     snapshot,
 		broadcaster:  broadcaster,
 		syncInterval: syncInterval,
 		log:          log.WithName("syncer"),
+		metrics:      metrics,
 		firstSync:    true,
 	}
 }
@@ -69,10 +73,12 @@ func (s *Syncer) sync(ctx context.Context) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "registrar.sync_loop")
 	var retErr error
 	defer func() { telemetry.EndSpan(span, retErr) }()
+	start := time.Now()
 
 	endpoints, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
 		s.log.Error(err, "failed to list endpoints from registry")
+		s.metrics.syncFailed(ctx, time.Since(start).Seconds())
 		retErr = err
 		return
 	}
@@ -93,6 +99,13 @@ func (s *Syncer) sync(ctx context.Context) {
 		attribute.Int("aether.sync.events", len(events)),
 		telemetry.AttrSnapshotVersion.String(version),
 	)
+
+	eventsByType := make(map[string]int)
+	for _, event := range events {
+		eventsByType[event.GetType().String()]++
+	}
+	versionNum, _ := strconv.ParseInt(version, 10, 64)
+	s.metrics.syncCompleted(ctx, time.Since(start).Seconds(), versionNum, eventsByType)
 
 	if s.firstSync {
 		s.log.Info("initial sync complete", "version", version, "endpoints", countEndpoints(newState))

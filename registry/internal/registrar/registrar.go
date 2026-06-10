@@ -15,6 +15,7 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -47,8 +48,9 @@ type Config struct {
 // Registrar gRPC service. Reads are served from a local cache populated by a
 // WatchEndpoints stream. Writes are delegated to the Registrar.
 type RegistrarRegistry struct {
-	log    logr.Logger
-	config Config
+	log     logr.Logger
+	config  Config
+	metrics *clientMetrics
 
 	conn   *grpc.ClientConn
 	client registrarv1.RegistrarServiceClient
@@ -66,11 +68,19 @@ type RegistrarRegistry struct {
 
 // NewRegistrarRegistry creates a new RegistrarRegistry.
 func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
+	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
+	// a registration failure only disables instrumentation, never the client.
+	metrics, err := newClientMetrics(otel.Meter(meterName))
+	if err != nil {
+		log.Error(err, "failed to create registrar client metrics; continuing without instrumentation")
+	}
+
 	return &RegistrarRegistry{
-		log:    log.WithName("registrar-registry"),
-		config: cfg,
-		cache:  make(map[string][]*registryv1.ServiceEndpoint),
-		notify: make(chan struct{}, 1),
+		log:     log.WithName("registrar-registry"),
+		config:  cfg,
+		metrics: metrics,
+		cache:   make(map[string][]*registryv1.ServiceEndpoint),
+		notify:  make(chan struct{}, 1),
 	}
 }
 
@@ -240,6 +250,7 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 			LastVersion: lastVersion,
 		})
 		if err != nil {
+			r.metrics.streamFailed(ctx)
 			jitter := time.Duration(float64(backoff) * jitterFraction * rand.Float64())
 			wait := backoff + jitter
 			r.log.Error(err, "failed to start watch stream, retrying", "backoff", wait)
@@ -254,6 +265,7 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 
 		// Reset backoff on successful connection.
 		backoff = initialBackoff
+		r.metrics.streamReconnected(ctx)
 		r.log.V(1).Info("watch stream connected")
 
 		lastVersion = r.processStream(ctx, stream, lastVersion)
@@ -286,6 +298,7 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 
 		if event.GetVersion() != "" {
 			lastVersion = event.GetVersion()
+			r.metrics.versionApplied(ctx, lastVersion)
 		}
 	}
 }

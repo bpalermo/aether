@@ -128,6 +128,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, last map[string]regis
 			s.log.Error(err, "liveness: failed to re-register endpoint health", "pod", pod.GetName())
 			continue
 		}
+		s.metrics.healthTransition(ctx, prev.String(), want.String())
 		last[key] = want
 		s.log.V(1).Info("liveness: updated endpoint health", "pod", pod.GetName(), "health", want.String())
 	}
