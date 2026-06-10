@@ -22,6 +22,7 @@ func NewServiceVirtualHost(svcName string) *routev3.VirtualHost {
 						ClusterSpecifier: &routev3.RouteAction_Cluster{
 							Cluster: svcName,
 						},
+						RetryPolicy: outboundRetryPolicy(),
 					},
 				},
 			},
