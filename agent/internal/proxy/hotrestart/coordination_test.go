@@ -137,3 +137,98 @@ func TestReadyMarker(t *testing.T) {
 	_, err = os.Stat(s.cfg.ReadyMarkerPath)
 	assert.True(t, os.IsNotExist(err))
 }
+
+// TestHandoffWatchdogFiresWhenSuccessorNeverLive reproduces the 2026-06-10 e2e
+// wedge: a cross-pod successor starts at epoch N+1 against a confirmed-live
+// predecessor, the predecessor then dies mid hot-restart RPC, and the successor's
+// main thread blocks forever — admin keeps answering with the old epoch (here: a
+// static fake), LIVE at the new epoch never arrives. The handoff watchdog must
+// bail out of Run with a non-nil error so the container restarts.
+func TestHandoffWatchdogFiresWhenSuccessorNeverLive(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available in this sandbox")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "envoy.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("v0\n"), 0o644))
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+
+	s := New(Config{
+		EnvoyPath:          stubEnvoy(t, recordPath),
+		ConfigPath:         configPath,
+		DrainTime:          time.Second,
+		ParentShutdownTime: time.Second,
+		StateDir:           t.TempDir(),
+		ReadyMarkerPath:    filepath.Join(t.TempDir(), "ready"),
+		// The "predecessor": admin permanently LIVE at epoch 0, so initStartEpoch
+		// selects epoch 1 — which then never reaches LIVE (the wedge).
+		AdminAddress:    fakeAdmin(t, "LIVE", 0),
+		HandoffDeadline: 1 * time.Second,
+	}, logr.Discard())
+	writeRawState(t, s, 0, 0)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(context.Background()) }()
+
+	select {
+	case err := <-runErr:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "handoff watchdog")
+	case <-time.After(15 * time.Second):
+		t.Fatal("handoff watchdog did not fire")
+	}
+	// It must have attempted the cross-pod successor epoch, not a fresh epoch 0.
+	assert.Equal(t, []string{"1"}, recordedEpochs(t, recordPath))
+}
+
+// TestAdminWatchdogFiresWhenAdminUnreachableAfterLive covers the post-LIVE
+// variant of the wedge: Envoy reached LIVE (pod Ready), then the admin endpoint
+// stops answering entirely (main thread blocked in a hot-restart stats-merge
+// against a dead parent) while the child process stays alive. The admin watchdog
+// must bail out of Run with a non-nil error.
+func TestAdminWatchdogFiresWhenAdminUnreachableAfterLive(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available in this sandbox")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "envoy.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("v0\n"), 0o644))
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	marker := filepath.Join(t.TempDir(), "ready")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"state":"LIVE","command_line_options":{"restart_epoch":0}}`)
+	}))
+	defer srv.Close()
+
+	s := New(Config{
+		EnvoyPath:                 stubEnvoy(t, recordPath),
+		ConfigPath:                configPath,
+		DrainTime:                 time.Second,
+		ParentShutdownTime:        time.Second,
+		StateDir:                  t.TempDir(),
+		ReadyMarkerPath:           marker,
+		AdminAddress:              srv.Listener.Addr().String(),
+		AdminUnresponsiveDeadline: 1 * time.Second,
+	}, logr.Discard())
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(context.Background()) }()
+
+	// Wait for LIVE to be observed (ready marker present), then kill the admin.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "pod never became ready")
+	srv.Close()
+
+	select {
+	case err := <-runErr:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "admin watchdog")
+	case <-time.After(15 * time.Second):
+		t.Fatal("admin watchdog did not fire")
+	}
+}

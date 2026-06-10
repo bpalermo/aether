@@ -70,6 +70,8 @@ spec:
             - "--state-dir=/run/aether/hotrestart"
             - "--ready-marker=/var/run/aether-proxy/ready"
             - "--admin-address=127.0.0.1:9901"
+            - "--handoff-deadline={{ .Values.proxy.hotRestart.handoffDeadline }}"
+            - "--admin-unresponsive-deadline={{ .Values.proxy.hotRestart.adminUnresponsiveDeadline }}"
             {{- end }}
             - "--envoy-arg=-l"
             - "--envoy-arg={{ .Values.proxy.logLevel }}"
