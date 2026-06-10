@@ -38,6 +38,7 @@ go_test(
         "cluster_test.go",
         "listener_test.go",
         "outbound_mtls_test.go",
+        "races_test.go",
         "snapshot_test.go",
         "version_test.go",
     ],

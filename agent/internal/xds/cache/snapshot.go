@@ -22,7 +22,16 @@ const snapshotVersionLabel = "snapshot"
 // resource type (e.g. only listeners) drops every other type from Envoy — which
 // makes listener, cluster and secret updates clobber one another. Resources are
 // read from the in-memory maps (nothing is rebuilt), so a full snapshot is cheap.
+//
+// snapshotMu serializes the whole version-generate + read + SetSnapshot sequence:
+// concurrent callers would otherwise interleave so the snapshot carrying the
+// older version (and older content) lands last, replacing newer config in Envoy
+// until the next trigger. Serialization also guarantees the last snapshot set
+// always reflects the final state of every map.
 func (c *SnapshotCache) generateSnapshot(ctx context.Context) error {
+	c.snapshotMu.Lock()
+	defer c.snapshotMu.Unlock()
+
 	v := generateSnapshotVersion(snapshotVersionLabel, c.version)
 
 	listeners := c.Listeners()

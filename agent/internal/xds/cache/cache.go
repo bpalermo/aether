@@ -54,6 +54,13 @@ type SnapshotCache struct {
 	secretMu sync.RWMutex
 	secrets  map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
 
+	// snapshotMu serializes generateSnapshot (version generation + map reads +
+	// SetSnapshot) across concurrent mutators. Without it, two callers can
+	// interleave so the snapshot with the OLDER version (and older content) is
+	// set last — Envoy sees a version change and applies the stale config,
+	// silently dropping the newer mutation until the next snapshot trigger.
+	snapshotMu sync.Mutex
+
 	localMu sync.RWMutex
 	// localWorkloads maps a local pod's network namespace to its SPIFFE ID. It
 	// drives the outbound clusters' transport-socket matcher so each upstream
