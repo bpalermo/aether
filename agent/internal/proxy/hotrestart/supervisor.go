@@ -109,8 +109,9 @@ type childExit struct {
 
 // Supervisor owns the Envoy process lifecycle and performs hot restarts.
 type Supervisor struct {
-	cfg Config
-	log logr.Logger
+	cfg     Config
+	log     logr.Logger
+	metrics *SupervisorMetrics // nil disables instrumentation
 
 	mu        sync.Mutex
 	children  map[int]*exec.Cmd // keyed by restart epoch
@@ -140,11 +141,12 @@ type Supervisor struct {
 // successor's readiness, to ensure the predecessor is fully gone first.
 const readyGateBuffer = 3 * time.Second
 
-// New creates a Supervisor.
-func New(cfg Config, log logr.Logger) *Supervisor {
+// New creates a Supervisor. metrics may be nil to disable instrumentation.
+func New(cfg Config, log logr.Logger, metrics *SupervisorMetrics) *Supervisor {
 	return &Supervisor{
 		cfg:           cfg,
 		log:           log.WithName("proxy-supervisor"),
+		metrics:       metrics,
 		children:      make(map[int]*exec.Cmd),
 		childExited:   make(chan childExit, 8),
 		done:          make(chan struct{}),
@@ -189,6 +191,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 	arm := func(reason string) {
 		s.log.V(1).Info("hot restart armed", "reason", reason, "debounce", debounceDelay)
+		s.metrics.restartTriggered(reason)
 		debounce.Reset(debounceDelay)
 		debounceC = debounce.C
 	}
@@ -217,13 +220,13 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		case sig := <-sigCh:
 			switch sig {
 			case syscall.SIGHUP:
-				arm("SIGHUP")
+				arm("sighup")
 			case syscall.SIGUSR1:
 				s.forwardToCurrent(syscall.SIGUSR1)
 			}
 
 		case <-trigger:
-			arm("config change")
+			arm("config_change")
 
 		case <-debounceC:
 			debounceC = nil
@@ -235,7 +238,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			// admin address is configured.
 			if s.cfg.AdminAddress != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
 				s.log.V(1).Info("current epoch not yet live; deferring hot restart", "epoch", s.currentEpoch())
-				arm("deferred: current epoch not live")
+				arm("deferred_not_live")
 				continue
 			}
 			s.log.Info("performing hot restart")
@@ -254,6 +257,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		case exit := <-s.childExited:
 			if exit.epoch == s.currentEpoch() {
 				if s.cfg.StateDir != "" && exit.err == nil {
+					s.metrics.childExited(exitSuccessorTerminated)
 					// Clean exit (status 0) of our newest epoch in cross-pod mode:
 					// that's the successor's hot-restart parent-shutdown protocol
 					// terminating us (a crash would be non-zero/signaled). The signal
@@ -268,11 +272,13 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				}
 				// The newest epoch died unexpectedly: nothing left serving traffic.
 				// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).
+				s.metrics.childExited(exitUnexpected)
 				s.reap(exit.epoch)
 				s.shutdown()
 				return fmt.Errorf("envoy epoch %d exited unexpectedly: %w", exit.epoch, exit.err)
 			}
 			// An older epoch finished draining after a hot restart: expected. Reap it.
+			s.metrics.childExited(exitDrained)
 			s.reap(exit.epoch)
 		}
 	}
@@ -297,6 +303,7 @@ func (s *Supervisor) hotRestart() error {
 	s.epochLaunched = time.Now()
 	s.epochLive = false
 	s.mu.Unlock()
+	s.metrics.epochStarted(epoch)
 
 	// The node epoch is published to the shared state file only once this Envoy is
 	// confirmed LIVE (by watchLiveness), never at launch — so a failed handoff does
@@ -494,6 +501,8 @@ func (s *Supervisor) shutdown() {
 	if len(pending) == 0 {
 		return
 	}
+	start := time.Now()
+	defer func() { s.metrics.drainCompleted(time.Since(start).Seconds()) }()
 
 	deadline := time.NewTimer(s.cfg.DrainTime + shutdownGrace)
 	defer deadline.Stop()

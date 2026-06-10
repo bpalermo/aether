@@ -16,6 +16,8 @@ import (
 // subcommand. SPIKE: see docs/proposals/001_proxy-hot-restart.md.
 var (
 	supervisorCfg            hotrestart.Config
+	supervisorTelemetryCfg   hotrestart.TelemetryConfig
+	supervisorMetricsEnabled bool
 	supervisorDebug          bool
 	supervisorInstallPath    string
 	supervisorReadinessCheck bool
@@ -44,7 +46,31 @@ var proxySupervisorCmd = &cobra.Command{
 			return nil
 		}
 		log := manager.SetupLogging(supervisorDebug, cmd.Name())
-		return hotrestart.New(supervisorCfg, log).Run(cmd.Context())
+
+		// Metrics are the supervisor's crash forensics: the wedge watchdog exits
+		// the process non-zero, so the deferred Shutdown flush is what gets the
+		// wedge counter out before the pod is recreated. Telemetry failures are
+		// never fatal — the supervisor's job is keeping Envoy alive.
+		var metrics *hotrestart.SupervisorMetrics
+		if supervisorMetricsEnabled {
+			supervisorTelemetryCfg.ServiceVersion = Version
+			telemetry, telErr := hotrestart.NewTelemetry(cmd.Context(), supervisorTelemetryCfg, log)
+			if telErr != nil {
+				log.Error(telErr, "failed to set up supervisor telemetry; continuing without metrics")
+			} else {
+				defer func() {
+					if shutdownErr := telemetry.Shutdown(); shutdownErr != nil {
+						log.V(1).Error(shutdownErr, "failed to flush supervisor metrics")
+					}
+				}()
+				go telemetry.Serve(cmd.Context())
+				if metrics, telErr = hotrestart.NewSupervisorMetrics(telemetry.Meter()); telErr != nil {
+					log.Error(telErr, "failed to create supervisor metrics; continuing without metrics")
+				}
+			}
+		}
+
+		return hotrestart.New(supervisorCfg, log, metrics).Run(cmd.Context())
 	},
 }
 
@@ -92,6 +118,9 @@ func init() {
 	f.BoolVar(&supervisorReadinessCheck, "readiness-check", false, "Exit 0 iff the --ready-marker file exists (exec readiness probe mode)")
 	f.DurationVar(&supervisorCfg.HandoffDeadline, "handoff-deadline", 0, "Watchdog: max time a hot-restart epoch may stay not-LIVE after launch before the supervisor exits non-zero (0 = 2m default)")
 	f.DurationVar(&supervisorCfg.AdminUnresponsiveDeadline, "admin-unresponsive-deadline", 0, "Watchdog: max time the Envoy admin may be unreachable (once previously LIVE) before the supervisor exits non-zero (0 = 30s default)")
+	f.BoolVar(&supervisorMetricsEnabled, "metrics-enabled", true, "Enable supervisor hot-restart lifecycle metrics")
+	f.StringVar(&supervisorTelemetryCfg.BindAddress, "metrics-bind-address", ":9902", "Prometheus /metrics address; the supervisor shares the host netns, so a surge predecessor holding the port is retried, not fatal")
+	f.StringVar(&supervisorTelemetryCfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for metrics push (e.g. collector:4317); empty disables OTLP export")
 
 	rootCmd.AddCommand(proxySupervisorCmd)
 }
