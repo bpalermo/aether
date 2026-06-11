@@ -126,11 +126,11 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
 func TestEndpointHealthStatus(t *testing.T) {
 	assert.Equal(t, corev3.HealthStatus_UNHEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY}))
-	// DRAINING (deletion requested) maps to UNHEALTHY, not Envoy DRAINING:
-	// paired with close_connections_on_host_health_failure it closes the idle
-	// H2 pools at drain-mark time, pre-empting the app-exit GOAWAY race that
-	// strands claimed-but-unanswered streams (P2, instrumented 2026-06-11).
-	assert.Equal(t, corev3.HealthStatus_UNHEALTHY,
+	// DRAINING (deletion requested) maps to Envoy DRAINING — two-phase drain
+	// phase 1: no new selections, established streams complete. The pool close
+	// happens in phase 2, when the termination watch re-registers UNHEALTHY
+	// after drainPoolCloseDelay (see endpointHealthStatus / schedulePoolClose).
+	assert.Equal(t, corev3.HealthStatus_DRAINING,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_DRAINING}))
 	// Unspecified (older agents / fresh endpoints) and explicit healthy both route.
 	assert.Equal(t, corev3.HealthStatus_HEALTHY,

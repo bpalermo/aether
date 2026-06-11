@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	agentconstants "github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/spire"
@@ -76,7 +77,10 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()),
 		ackTracker:    ack.NewTracker(logr.Discard()),
 		healthClient:  newHealthGatewayClient(healthSocket),
-		k8sClient:     k8sClient,
+		// Effectively disables drain phase 2 so unrelated tests never race the
+		// pool-close goroutine; tests of phase 2 override this explicitly.
+		drainPoolCloseDelay: time.Hour,
+		k8sClient:           k8sClient,
 	}
 }
 

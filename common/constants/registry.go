@@ -15,5 +15,4 @@ const (
 
 	// DefaultEtcdKeyPrefix is the default prefix for all registry keys in etcd
 	DefaultEtcdKeyPrefix = "/aether/services"
-
 )

@@ -27,5 +27,4 @@ const (
 	DefaultSpireTrustDomain = "ROOTCA"
 	// DefaultSpireWorkloadSocketPath is the default SPIRE Workload API UDS socket (csi.spiffe.io mount)
 	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
-
 )

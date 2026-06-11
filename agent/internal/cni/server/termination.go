@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"time"
 
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -21,9 +23,11 @@ import (
 //
 // The API server sets metadata.deletionTimestamp the moment deletion is
 // *requested*, before the kubelet sends SIGTERM. Watching node-local pods for
-// that transition lets the agent deregister the endpoint immediately: the
-// registrar propagates the removal to every agent's EDS within ~1s while the
-// app serves in-flight requests through its grace period. Local xDS resources
+// that transition lets the agent start the two-phase drain immediately:
+// phase 1 marks the endpoint DRAINING (no new selections, in-flight streams
+// complete) and the registrar propagates it to every agent's EDS within ~1s;
+// phase 2, drainPoolCloseDelay later, re-registers UNHEALTHY so client pools
+// close while idle — before the app's exit GOAWAY. Local xDS resources
 // (inbound listener, app/health clusters) deliberately stay untouched until
 // CNI DEL so that drain traffic still flows.
 
@@ -132,6 +136,47 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 	log.Info("pod terminating: endpoint marked draining ahead of shutdown", "service", serviceName)
+
+	// Phase 2: after the drain delay, re-register UNHEALTHY so clients'
+	// close_connections_on_host_health_failure shuts the by-then-idle pools
+	// while the app is still alive (preStop window) — pre-empting the app-exit
+	// GOAWAY race without cutting the streams phase 1 let finish.
+	go s.schedulePoolClose(ctx, cur.GetContainerId(), serviceName, protocol, endpoint, log)
+}
+
+// drainPoolCloseDelay separates the two drain phases: long enough for phase
+// 1's DRAINING to propagate (~1s broadcast + EDS apply) and for streams in
+// flight at t0 to complete, short enough to land inside the workload's preStop
+// window (workload-requirements: preStop sleep >= 3s) so pools close before
+// the app exits.
+const drainPoolCloseDelay = 2 * time.Second
+
+// schedulePoolClose re-registers the endpoint UNHEALTHY after
+// drainPoolCloseDelay, unless CNI DEL has already removed the pod — never
+// resurrect a deregistered endpoint.
+func (s *CNIServer) schedulePoolClose(ctx context.Context, containerID, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint, log logr.Logger) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(s.drainPoolCloseDelay):
+	}
+
+	// Same critical section as RemovePod: re-check the pod still exists and is
+	// still terminating before re-registering, so a CNI DEL that won the race
+	// (unregister + storage delete under lifecycleMu) is never undone.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	cur, err := s.storage.GetResource(ctx, types.ContainerID(containerID))
+	if err != nil || !cur.GetTerminating() {
+		return // pod already removed (or no longer terminating); nothing to close
+	}
+
+	endpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+	if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
+		log.Error(err, "termination: failed to mark draining endpoint unhealthy; pools close at app exit instead")
+		return
+	}
+	log.V(1).Info("pod terminating: drain pool-close phase engaged", "service", serviceName)
 }
 
 // findStoredPod scans local storage for the CNIPod with the given name and

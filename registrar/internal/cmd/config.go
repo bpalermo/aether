@@ -26,7 +26,6 @@ type RegistrarConfig struct {
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
 
-
 	// SyncInterval is how often the registrar polls the external registry
 	SyncInterval time.Duration
 
