@@ -125,9 +125,9 @@ proxy:
   resources:
     requests:
       cpu: 500m
-      memory: 1Gi
+      memory: 512Mi
     limits:
-      memory: 1Gi
+      memory: 512Mi
   # Envoy overload manager: a graceful-degradation ladder (shrink heap ->
   # close idle/keepalive downstream connections -> scale idle timeouts down
   # -> 503 new requests -> stop accepting connections) that engages well
@@ -135,12 +135,13 @@ proxy:
   # state heap sits far below the first (0.80) rung.
   overload:
     enabled: true
-    # Optional upper bound for the cgroup_memory monitor; when unset (0) the
-    # container's own cgroup limit (resources.limits.memory) is the
-    # denominator, so the thresholds track the real OOM kill line and nothing
-    # needs bumping in lockstep. Set only to engage the ladder below the
-    # cgroup limit (e.g. canary-tightening).
-    maxMemoryBytes: 0
+    # Heap budget for the fixed_heap monitor. Keep at ~75% of
+    # resources.limits.memory (bump BOTH together): heap excludes the
+    # supervisor process, kernel socket buffers and thread stacks, and the
+    # ladder's top rung must engage below the real OOM line. (cgroup_memory
+    # would avoid this coupling but is unusable in the privileged proxy pod
+    # — host cgroup namespace; see the bootstrap ConfigMap comment.)
+    maxHeapSizeBytes: 402653184 # 384Mi = 75% of 512Mi
 
 # AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
 # The chart never bakes credentials into the image. By default it references an
