@@ -28,6 +28,11 @@ type Syncer struct {
 	log          logr.Logger
 	metrics      *Metrics
 	firstSync    bool
+	// synced is closed after the first successful sync cycle; RPCs that serve
+	// snapshot state gate on it so a freshly restarted registrar never serves
+	// an empty/partial view of the world (agents deriving route configs from
+	// such a view 404 live traffic — observed on the rev-66 co-roll).
+	synced chan struct{}
 }
 
 // NewSyncer creates a Syncer that polls the external registry at the given
@@ -41,8 +46,13 @@ func NewSyncer(reg registry.Registry, snapshot *Snapshot, broadcaster *Broadcast
 		log:          log.WithName("syncer"),
 		metrics:      metrics,
 		firstSync:    true,
+		synced:       make(chan struct{}),
 	}
 }
+
+// Synced returns a channel that is closed once the first sync cycle has
+// completed and the snapshot reflects the external registry.
+func (s *Syncer) Synced() <-chan struct{} { return s.synced }
 
 // Start runs the sync loop until the context is cancelled.
 func (s *Syncer) Start(ctx context.Context) error {
@@ -110,6 +120,7 @@ func (s *Syncer) sync(ctx context.Context) {
 	if s.firstSync {
 		s.log.Info("initial sync complete", "version", version, "endpoints", countEndpoints(newState))
 		s.firstSync = false
+		close(s.synced)
 	} else if len(events) > 0 {
 		s.log.V(1).Info("sync detected changes", "version", version, "events", len(events))
 	}

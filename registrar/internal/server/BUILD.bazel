@@ -33,6 +33,7 @@ go_test(
     srcs = [
         "broadcaster_test.go",
         "metrics_test.go",
+        "server_test.go",
         "snapshot_test.go",
         "sync_test.go",
     ],
@@ -45,5 +46,6 @@ go_test(
         "@com_github_stretchr_testify//require",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+        "@org_golang_google_grpc//:grpc",
     ],
 )

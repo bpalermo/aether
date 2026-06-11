@@ -65,6 +65,13 @@ type RegistrarRegistry struct {
 	// burst of watch events collapses into a single pending signal.
 	notify chan struct{}
 
+	// ready is closed when the first SNAPSHOT_COMPLETE event arrives — the
+	// local cache then holds a complete world view. Consumers deriving config
+	// from the cache (the agent's initial snapshot) wait on it so they never
+	// publish from an empty/partial cache (rev-66 404 gap).
+	ready     chan struct{}
+	readyOnce sync.Once
+
 	cancel context.CancelFunc
 }
 
@@ -83,6 +90,7 @@ func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
 		metrics: metrics,
 		cache:   make(map[string][]*registryv1.ServiceEndpoint),
 		notify:  make(chan struct{}, 1),
+		ready:   make(chan struct{}),
 	}
 }
 
@@ -93,6 +101,19 @@ func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
 // registry.ChangeNotifier capability.
 func (r *RegistrarRegistry) Changes() <-chan struct{} {
 	return r.notify
+}
+
+// WaitReady blocks until the watch cache holds a complete snapshot (the first
+// SNAPSHOT_COMPLETE event) or ctx ends. It satisfies the registry.ReadyWaiter
+// capability; callers bound it with a context timeout and may proceed with
+// degraded (RPC-fallback) reads on expiry.
+func (r *RegistrarRegistry) WaitReady(ctx context.Context) error {
+	select {
+	case <-r.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // signalChange performs a non-blocking send on the notify channel, coalescing
@@ -305,6 +326,11 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			snapshotCleared = true
 		}
 
+		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE {
+			// The cache now holds a complete world view.
+			r.readyOnce.Do(func() { close(r.ready) })
+		}
+
 		r.applyEvent(event)
 
 		if event.GetVersion() != "" {
@@ -332,6 +358,10 @@ func (r *RegistrarRegistry) applyEvent(event *registrarv1.WatchEndpointsResponse
 
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
 		r.removeLocked(svcName, ep.GetIp())
+
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE:
+		// Marker only; no cache mutation. The change signal below still fires
+		// so consumers re-derive from the now-complete cache.
 	}
 
 	// Wake consumers (e.g. the agent xDS cache) so they re-read the registry and

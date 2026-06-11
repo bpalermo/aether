@@ -18,6 +18,7 @@ package cache
 
 import (
 	"sync"
+	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -52,6 +53,9 @@ type SnapshotCache struct {
 
 	clusterMu sync.RWMutex
 	clusters  map[string]clusterEntry // keyed by cluster name
+	// serviceRetentionGrace overrides defaultServiceRetentionGrace when > 0
+	// (test hook; see clusterEntry.absentSince).
+	serviceRetentionGrace time.Duration
 
 	secretMu sync.RWMutex
 	secrets  map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
@@ -106,6 +110,13 @@ type clusterEntry struct {
 	loadAssignment *endpointv3.ClusterLoadAssignment
 	endpoints      map[string]*endpointv3.LocalityLbEndpoints // keyed by IP, for granular add/remove
 	vhost          *routev3.VirtualHost
+	// absentSince is non-zero while the service is missing from the registry
+	// listing. Such entries are retained (with empty endpoints) for
+	// serviceRetentionGrace before being pruned: during pod churn a service
+	// can transiently lose ALL endpoints, and dropping its vhost turns
+	// in-flight client traffic into 404s (route table miss) instead of the
+	// honest, retriable 503 of an empty cluster (rev-66 roll, 2026-06-11).
+	absentSince time.Time
 }
 
 // NewSnapshotCache creates and returns a new SnapshotCache for the given node.

@@ -42,3 +42,13 @@ type ChangeNotifier interface {
 	// endpoints changes.
 	Changes() <-chan struct{}
 }
+
+// ReadyWaiter is an optional capability for Registry implementations whose
+// reads are served from an asynchronously populated cache (the registrar
+// watch client). WaitReady blocks until the cache holds a complete snapshot
+// or ctx ends; callers bound it with a timeout and may proceed with degraded
+// reads on expiry. Synchronous backends (DynamoDB, etcd, Cloud Map direct)
+// do not implement it.
+type ReadyWaiter interface {
+	WaitReady(ctx context.Context) error
+}

@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -157,9 +158,14 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.log.V(1).Info("found service endpoints in registry", "count", len(serviceEndpoints))
 
 	c.clusterMu.Lock()
-	// Rebuild the cluster set from scratch so this method is idempotent and safe
-	// to call repeatedly (on registry changes, not just at startup): services and
-	// endpoints that disappeared from the registry are pruned rather than retained.
+	// Rebuild the cluster set so this method is idempotent and safe to call
+	// repeatedly (on registry changes, not just at startup). Services that
+	// disappeared from the listing are NOT dropped immediately: pod churn can
+	// transiently empty a service's endpoint set, and removing its vhost
+	// turns live client traffic into 404s (route-table miss) instead of the
+	// honest, retriable 503 of an empty cluster. Absent services are retained
+	// with empty endpoints for serviceRetentionGrace, then pruned.
+	prev := c.clusters
 	c.clusters = make(map[string]clusterEntry, len(serviceEndpoints))
 	for serviceName, endpoints := range serviceEndpoints {
 		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
@@ -187,11 +193,43 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 	}
 
+	// Retain recently disappeared services with an empty endpoint set.
+	now := time.Now()
+	for name, entry := range prev {
+		if _, present := c.clusters[name]; present {
+			continue
+		}
+		if entry.absentSince.IsZero() {
+			entry.absentSince = now
+			entry.loadAssignment = proxy.NewClusterLoadAssignment(name)
+			entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
+			c.log.Info("service disappeared from registry; retaining empty cluster/vhost for grace period",
+				"service", name, "grace", c.retentionGrace().String())
+		} else if now.Sub(entry.absentSince) > c.retentionGrace() {
+			c.log.Info("service absent past grace period; pruning", "service", name)
+			continue
+		}
+		c.clusters[name] = entry
+	}
+
 	c.clusterMu.Unlock()
 
 	c.log.V(1).Info("loaded clusters from registry", "count", len(c.clusters))
 
 	return c.generateClusterSnapshot(ctx)
+}
+
+// defaultServiceRetentionGrace is how long a service that vanished from the
+// registry listing keeps its (empty) cluster and vhost before being pruned.
+// Sized to outlast a rolling-restart churn window (~40s observed) with margin.
+const defaultServiceRetentionGrace = 90 * time.Second
+
+// retentionGrace returns the configured service retention grace (test hook).
+func (c *SnapshotCache) retentionGrace() time.Duration {
+	if c.serviceRetentionGrace > 0 {
+		return c.serviceRetentionGrace
+	}
+	return defaultServiceRetentionGrace
 }
 
 // generateClusterSnapshot regenerates the node snapshot after a cluster,
