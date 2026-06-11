@@ -110,6 +110,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 		if _, ok := state.firstSeen[key]; !ok {
 			state.firstSeen[key] = time.Now()
 		}
+		_, servedBefore := state.sawHealthy[key]
 		if healthy {
 			state.sawHealthy[key] = struct{}{}
 		}
@@ -126,7 +127,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 		// window is startup, not an app failure. EDS-mode pods need no grace —
 		// they are registered UNHEALTHY, so warm-up 503s are not transitions.
 		if !healthy && !eds {
-			if _, served := state.sawHealthy[key]; !served && time.Since(state.firstSeen[key]) < livenessWarmupGrace {
+			if !servedBefore && time.Since(state.firstSeen[key]) < livenessWarmupGrace {
 				continue
 			}
 		}
@@ -186,6 +187,12 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 			continue
 		}
 		s.metrics.healthTransition(ctx, prev.String(), want.String())
+		// First-ever promotion to HEALTHY: record how long the pod waited between
+		// its gateway becoming observable and mesh routability (the gap that lets
+		// k8s rolls outpace mesh promotion when it grows).
+		if want == registryv1.ServiceEndpoint_HEALTH_HEALTHY && !servedBefore {
+			s.metrics.promotionDelayObserved(ctx, time.Since(state.firstSeen[key]).Seconds())
+		}
 		state.last[key] = want
 		s.log.V(1).Info("liveness: updated endpoint health", "pod", pod.GetName(), "health", want.String())
 	}
