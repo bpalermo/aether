@@ -84,6 +84,18 @@ func BuildHealthGatewayListener(socketPath string, probeClusters []string) *list
 	return &listenerv3.Listener{
 		Name:                          HealthGatewayListenerName,
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		// Exempt from overload-manager actions (stop_accepting_requests etc.):
+		// the gateway answers the agent's delegated-liveness probes, whose job is
+		// to report APP truth, not proxy state. Without the bypass, an overloaded
+		// proxy would 503 liveness probes, the agent would mark every local pod
+		// unhealthy, and the registry would flap cluster-wide on transient
+		// overload. Shedding away from an overloaded node happens through the
+		// data-plane listeners instead: 503'd new streams are retried by client
+		// routes on a different endpoint, and active-mode client health checks
+		// fail against the inbound listener. The gateway is a node-local UDS
+		// with a handful of agent connections — bypassing it frees no
+		// meaningful memory.
+		BypassOverloadManager: true,
 		Address: &corev3.Address{
 			Address: &corev3.Address_Pipe{
 				Pipe: &corev3.Pipe{Path: socketPath},

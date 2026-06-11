@@ -128,6 +128,19 @@ proxy:
       memory: 1Gi
     limits:
       memory: 1Gi
+  # Envoy overload manager: a graceful-degradation ladder (shrink heap ->
+  # close idle/keepalive downstream connections -> scale idle timeouts down
+  # -> 503 new requests -> stop accepting connections) that engages well
+  # before the memory limit's OOM kill. Inert in normal operation: steady-
+  # state heap sits far below the first (0.80) rung.
+  overload:
+    enabled: true
+    # Optional upper bound for the cgroup_memory monitor; when unset (0) the
+    # container's own cgroup limit (resources.limits.memory) is the
+    # denominator, so the thresholds track the real OOM kill line and nothing
+    # needs bumping in lockstep. Set only to engage the ladder below the
+    # cgroup limit (e.g. canary-tightening).
+    maxMemoryBytes: 0
 
 # AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
 # The chart never bakes credentials into the image. By default it references an
