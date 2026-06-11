@@ -248,6 +248,15 @@ func (r *RegistrarRegistry) ListAllEndpoints(ctx context.Context, protocol regis
 	return r.listAllEndpointsFromServer(ctx, protocol)
 }
 
+// ListAllEndpointsAuthoritative lists endpoints via the ListAllEndpoints RPC,
+// bypassing the watch-fed cache. It satisfies the registry.AuthoritativeLister
+// capability: the cache can be a stale superset of a fresh registrar's
+// snapshot (an empty snapshot emits no FULL_SNAPSHOT events, so the cache is
+// never cleared), and reconciliation diffing against it would silently no-op.
+func (r *RegistrarRegistry) ListAllEndpointsAuthoritative(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+	return r.listAllEndpointsFromServer(ctx, protocol)
+}
+
 func (r *RegistrarRegistry) listEndpointsFromServer(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	resp, err := r.client.ListAllEndpoints(ctx, &registrarv1.ListAllEndpointsRequest{
 		Protocol: protocol,
