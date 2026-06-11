@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"sort"
+
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	matcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
@@ -23,9 +25,19 @@ const (
 // client certificate (over SPIRE-served SDS) for upstream mTLS. The match name
 // is the SPIFFE ID itself so the matcher's TransportSocketNameAction can
 // reference it; pods sharing a service account share a single match.
+//
+// Matches are emitted in sorted SPIFFE-ID order regardless of input order:
+// transport_socket_matches is a repeated field, so its order is part of the
+// cluster's bytes — and the delta-xDS cache decides "changed" by hashing those
+// bytes. Callers build the ID list from map iteration; without the sort every
+// snapshot bump (e.g. an SVID rotation) reshuffled the field, made every
+// service cluster hash as changed, and sent Envoy a full CDS replace + EDS
+// re-warm cycle each time (observed as `cds: N added/updated, skipped 0
+// unmodified` + `initial fetch timed out` every push, and unbounded proxy
+// memory growth under long-lived downstream connections).
 func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName string) []*clusterv3.Cluster_TransportSocketMatch {
+	unique := make([]string, 0, len(spiffeIDs))
 	seen := make(map[string]struct{}, len(spiffeIDs))
-	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(spiffeIDs))
 	for _, id := range spiffeIDs {
 		if id == "" {
 			continue
@@ -34,6 +46,12 @@ func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName st
 			continue
 		}
 		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	sort.Strings(unique)
+
+	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
+	for _, id := range unique {
 		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
 			Name:            id,
 			Match:           &structpb.Struct{},
