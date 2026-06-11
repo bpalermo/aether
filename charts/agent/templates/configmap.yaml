@@ -27,28 +27,34 @@ data:
     overload_manager:
       refresh_interval: 0.25s
       resource_monitors:
-        # cgroup_memory measures the container's ACTUAL memory usage against
-        # its ACTUAL cgroup limit (memory.current / memory.max, cgroup v2) —
-        # unlike a heap monitor it sees everything the OOM killer sees
-        # (tcmalloc heap, the supervisor process, kernel socket buffers), so
-        # the thresholds are against the real kill line with no heap-to-RSS
-        # ratio guesswork. Validated at runtime against the pinned Envoy
-        # image (pressure tracks the docker --memory limit; failed_updates 0).
-        - name: "envoy.resource_monitors.cgroup_memory"
+        # fixed_heap (tcmalloc-internal), NOT cgroup_memory. cgroup_memory
+        # reads /sys/fs/cgroup/memory.{current,max}, which works in docker
+        # (private cgroup namespace: the container sees its own leaf cgroup)
+        # but NOT in this DaemonSet: the proxy is a privileged pod, which
+        # gets the HOST cgroup namespace — /sys/fs/cgroup is the host root
+        # cgroup, where memory.max does not exist. Envoy then aborts at
+        # bootstrap with "No supported cgroup memory implementation found",
+        # and the config-watching supervisors hot-restarted every node into
+        # the poisoned config simultaneously (cluster-wide data-plane outage,
+        # 2026-06-11 ~12:50Z, rev 64). Do not reintroduce cgroup_memory
+        # unless the proxy stops being privileged or gains a private
+        # cgroupns. Keep maxHeapSizeBytes at ~75% of
+        # proxy.resources.limits.memory: the heap excludes the supervisor
+        # process, kernel socket buffers and thread stacks, and the top rung
+        # must engage below the real OOM line.
+        - name: "envoy.resource_monitors.fixed_heap"
           typed_config:
-            "@type": type.googleapis.com/envoy.extensions.resource_monitors.cgroup_memory.v3.CgroupMemoryConfig
-            {{- if .Values.proxy.overload.maxMemoryBytes }}
-            max_memory_bytes: {{ int64 .Values.proxy.overload.maxMemoryBytes }}
-            {{- end }}
+            "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+            max_heap_size_bytes: {{ int64 .Values.proxy.overload.maxHeapSizeBytes }}
       actions:
         - name: "envoy.overload_actions.shrink_heap"
           triggers:
-            - name: "envoy.resource_monitors.cgroup_memory"
+            - name: "envoy.resource_monitors.fixed_heap"
               threshold:
                 value: 0.80
         - name: "envoy.overload_actions.disable_http_keepalive"
           triggers:
-            - name: "envoy.resource_monitors.cgroup_memory"
+            - name: "envoy.resource_monitors.fixed_heap"
               threshold:
                 value: 0.90
         - name: "envoy.overload_actions.reduce_timeouts"
@@ -58,18 +64,18 @@ data:
               - timer: HTTP_DOWNSTREAM_CONNECTION_IDLE
                 min_timeout: 2s
           triggers:
-            - name: "envoy.resource_monitors.cgroup_memory"
+            - name: "envoy.resource_monitors.fixed_heap"
               scaled:
                 scaling_threshold: 0.85
                 saturation_threshold: 0.95
         - name: "envoy.overload_actions.stop_accepting_requests"
           triggers:
-            - name: "envoy.resource_monitors.cgroup_memory"
+            - name: "envoy.resource_monitors.fixed_heap"
               threshold:
                 value: 0.95
         - name: "envoy.overload_actions.stop_accepting_connections"
           triggers:
-            - name: "envoy.resource_monitors.cgroup_memory"
+            - name: "envoy.resource_monitors.fixed_heap"
               threshold:
                 value: 0.98
 {{- end }}
