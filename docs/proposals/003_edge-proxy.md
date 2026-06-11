@@ -82,7 +82,30 @@ The edge Envoy needs xDS; three options were considered:
    the SPIRE bridge).
 
 The xDS socket moves from a hostPath to a pod-local `emptyDir`
-(`/run/aether/xds.sock`) — nothing else on the node needs it.
+(`/run/aether/xds.sock`) — same socket convention as the node DS, but
+nothing else on the node needs it.
+
+**Why a sidecar and not a node-level (DS-shaped) edge agent:**
+
+- **Identity is the forcing function.** The SVID the edge presents belongs
+  to the edge pod's ServiceAccount, attested per-pod by the SPIFFE CSI
+  driver. A shared node agent serving several gateway pods' secrets is
+  exactly the delegated-identity machinery (admin socket, selectors,
+  per-pod subscriptions) that edge mode exists to subtract. One pod, one
+  identity, one Workload API socket — no delegation.
+- **Lifecycle coupling is a feature.** Each gateway replica carries its own
+  control plane: a Deployment roll rolls both atomically, ACK-tracked; a
+  sick sidecar fails exactly one replica behind the LB instead of every
+  gateway on a node. No shared host state, no hostPath, nothing
+  privileged.
+- **Scheduling stays generic.** Edge pods can land on any node — dedicated
+  edge nodes or mixed onto mesh nodes — without coordinating with (or
+  colliding with) the node agent's host sockets.
+
+A per-node edge agent (hostPath UDS shared by co-located gateways) only
+pays off with many gateway replicas per node, and buys that saving by
+reintroducing host coupling and the whose-SVID-is-this problem. Edge
+replica counts are small; the sidecar overhead is noise.
 
 ### What edge mode generates
 
@@ -175,12 +198,48 @@ shape settles — the v1 internals (per-service vhosts) map 1:1 onto it.
 | 4 | talos e2e: expose svc-1, external traffic through NodePort, rolling edge restart hitless behind the Service, XFCC shows edge SA at the destination |
 | 5 (later) | Gateway API translation; JWT/external authn at the edge; peer authz when the mesh grows it |
 
+## Why Cross-Cluster Routing Is Deferred (Not Forgotten)
+
+Endpoints already carry `cluster` subset metadata, so emitting remote
+endpoints into an edge cluster is mechanically trivial — and that is the
+trap. Doing it *correctly* depends on four layers that are unsettled, and
+the edge would be the first consumer of each:
+
+1. **Reachability is an infrastructure assumption, not a mesh property.**
+   Intra-cluster, `pod_ip:15008` rides the CNI pod network — guaranteed.
+   Cross-cluster, pod IPs are reachable only with peered/flat networks and
+   non-overlapping CIDRs; the mesh neither owns nor verifies that. Silently
+   routing to unreachable remote endpoints manifests as endpoint failures,
+   not as the configuration error it actually is.
+2. **Health semantics degrade across the boundary.** Active HC (2s
+   timeout / 5s interval, tuned intra-cluster) over a WAN link gives
+   latency-skewed, flap-prone verdicts — per gateway replica, per remote
+   endpoint. For eds-mode endpoints the edge would be trusting the *remote*
+   cluster's agents/registrar for its routing decisions, coupling failure
+   domains; per the multi-cluster directive there is deliberately no
+   authoritative registrar, so merging two registrars' versioned snapshots
+   has no defined semantics yet.
+3. **Drain guarantees stretch.** Hitless rolls lean on deletionTimestamp →
+   DRAINING reaching every client in ~1s (watch latency). Cross-cluster the
+   signal path is remote-agent → external registry → local registrar poll →
+   edge: staleness measured in poll intervals. Routing remote traffic
+   without budgeting that window re-opens the request-drop class the drain
+   work closes.
+4. **Routing policy does not exist yet.** Cross-cluster traffic wants
+   priority failover (local cluster first, remote on local exhaustion) —
+   Envoy locality priorities with a zone < cluster tiering — not the flat
+   `ANY_ENDPOINT` subset fallback. Plus the SPIRE trust-bundle federation
+   story across clusters needs confirming before cross-cluster mTLS is
+   assumed.
+
+The pressure for cross-cluster will arrive at the edge first ("fail over to
+cluster B when local capacity dies"), so this section exists to make the
+dependency explicit: the edge consumes cross-cluster routing when the
+multi-cluster registrar work ([[multicluster-registry]]) defines it, and
+must not define it implicitly by being first.
+
 ## Open Questions
 
-- **Cross-cluster routing**: endpoints carry `cluster` subset metadata; an
-  edge could route to remote-cluster endpoints (pod IP reachability across
-  clusters permitting). Defer until the multi-cluster registrar work
-  ([[multicluster-registry]]) settles.
 - **Listener-per-port vs single 8443**: v1 single HTTPS port + optional
   HTTP; TCP/SNI passthrough is a later mode.
 - **Rate limiting / WAF**: out of scope; standard Envoy filters can be
