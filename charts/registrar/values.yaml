@@ -28,10 +28,10 @@ telemetry:
     # Head-sampling ratio for traces (`--trace-sample-rate`).
     sampleRate: 0.1
 
-# Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd, cloudmap.
+# Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
 registryBackend: kubernetes
 
-# AWS configuration for the dynamodb / cloudmap registry backends.
+# AWS configuration for the dynamodb registry backend.
 aws:
   # Region for AWS SDK clients. NOTE: the registrar binary currently forces
   # us-east-1 internally; this is wired for forward-compat and clarity.
@@ -39,11 +39,6 @@ aws:
   # Name of an existing Secret holding AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
   # Empty = inject nothing (rely on IRSA / instance role / ambient credentials).
   credentialsSecret: ""
-
-# Cloud Map settings (used when registryBackend == cloudmap).
-cloudMap:
-  # Cloud Map HTTP namespace name (`--cloudmap-namespace`).
-  namespace: aether
 
 # etcd settings (used when registryBackend == etcd).
 etcd:

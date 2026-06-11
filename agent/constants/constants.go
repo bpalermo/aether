@@ -28,6 +28,4 @@ const (
 	// DefaultSpireWorkloadSocketPath is the default SPIRE Workload API UDS socket (csi.spiffe.io mount)
 	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
 
-	// DefaultCloudMapNamespace is the default AWS Cloud Map HTTP namespace name
-	DefaultCloudMapNamespace = constants.DefaultCloudMapNamespace
 )

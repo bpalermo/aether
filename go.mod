@@ -161,7 +161,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.39
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.3
-	github.com/aws/aws-sdk-go-v2/service/servicediscovery v1.39.28
 	github.com/blang/semver/v4 v4.0.0
 	github.com/containernetworking/cni v1.3.0
 	github.com/envoyproxy/go-control-plane v0.14.0

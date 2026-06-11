@@ -43,11 +43,6 @@ func TestRegistrarConfig_DefaultValues(t *testing.T) {
 			expected: []string{"localhost:2379"},
 		},
 		{
-			name:     "cloud map namespace defaults to aether",
-			got:      c.CloudMapNamespace,
-			expected: "aether",
-		},
-		{
 			name:     "debug is false by default",
 			got:      c.Debug,
 			expected: false,
@@ -70,7 +65,6 @@ func TestRegistrarConfig_ConfigurableFields(t *testing.T) {
 	c.GRPCAddress = ":8443"
 	c.SyncInterval = 30 * time.Second
 	c.EtcdEndpoints = []string{"etcd-0:2379", "etcd-1:2379"}
-	c.CloudMapNamespace = "custom-namespace"
 
 	assert.True(t, c.Debug)
 	assert.Equal(t, "my-cluster", c.ClusterName)
@@ -78,7 +72,6 @@ func TestRegistrarConfig_ConfigurableFields(t *testing.T) {
 	assert.Equal(t, ":8443", c.GRPCAddress)
 	assert.Equal(t, 30*time.Second, c.SyncInterval)
 	assert.Equal(t, []string{"etcd-0:2379", "etcd-1:2379"}, c.EtcdEndpoints)
-	assert.Equal(t, "custom-namespace", c.CloudMapNamespace)
 }
 
 func TestRegistrarConfig_InstancesAreIndependent(t *testing.T) {
