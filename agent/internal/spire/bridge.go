@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -25,11 +26,23 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
+	"go.opentelemetry.io/otel"
 )
 
 // nodeSVIDRefreshInterval is how often the bridge re-reads its node SVID from
 // the Workload API source to pick up rotations and push the refreshed secret.
 const nodeSVIDRefreshInterval = 30 * time.Second
+
+// Backoff policy for re-establishing delegated-identity subscription streams
+// after a disconnect (e.g. a SPIRE agent restart). Matches the registrar
+// watch-stream policy. The backoff resets only once a response is received on
+// the new stream, so a stream that connects and immediately closes keeps
+// backing off rather than hot-looping.
+const (
+	initialStreamBackoff = 1 * time.Second
+	maxStreamBackoff     = 30 * time.Second
+	streamJitterFraction = 0.2
+)
 
 // SecretStore is the interface for pushing secrets into the xDS snapshot cache.
 type SecretStore interface {
@@ -59,6 +72,12 @@ type Bridge struct {
 	client     *Client
 	store      SecretStore
 	log        logr.Logger
+	metrics    *bridgeMetrics
+
+	// Stream re-subscribe backoff bounds; set to the package constants in
+	// NewBridge, overridable in tests.
+	backoffInitial time.Duration
+	backoffMax     time.Duration
 
 	// nodeSource provides the agent's own SVID (the node identity). When set,
 	// the bridge serves it as an SDS secret named by its SPIFFE ID and refreshes
@@ -96,14 +115,24 @@ type podSubscription struct {
 // API SVID source used to serve the node identity; it may be nil to disable
 // node-SVID serving.
 func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, log logr.Logger) *Bridge {
+	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
+	// a registration failure only disables instrumentation, never the bridge.
+	metrics, err := newBridgeMetrics(otel.Meter(meterName))
+	if err != nil {
+		log.Error(err, "failed to create SPIRE bridge metrics; continuing without instrumentation")
+	}
+
 	return &Bridge{
-		socketPath:    socketPath,
-		store:         store,
-		nodeSource:    nodeSource,
-		log:           log.WithName("spire-bridge"),
-		secrets:       make(map[string]*tlsv3.Secret),
-		subscriptions: make(map[string]podSubscription),
-		started:       make(chan struct{}),
+		socketPath:     socketPath,
+		store:          store,
+		nodeSource:     nodeSource,
+		log:            log.WithName("spire-bridge"),
+		metrics:        metrics,
+		backoffInitial: initialStreamBackoff,
+		backoffMax:     maxStreamBackoff,
+		secrets:        make(map[string]*tlsv3.Secret),
+		subscriptions:  make(map[string]podSubscription),
+		started:        make(chan struct{}),
 	}
 }
 
@@ -144,13 +173,6 @@ func (b *Bridge) Start(ctx context.Context) error {
 	b.log.Info("connected to SPIRE agent", "socket", b.socketPath)
 	close(b.started)
 
-	bundleCh, err := client.SubscribeBundles(ctx)
-	if err != nil {
-		return fmt.Errorf("subscribing to bundles: %w", err)
-	}
-
-	b.log.Info("subscribed to X.509 bundles")
-
 	// Serve the agent's own node SVID (for node-originated upstream mTLS and the
 	// node-health listener) and keep it refreshed on rotation.
 	if b.nodeSource != nil {
@@ -160,19 +182,83 @@ func (b *Bridge) Start(ctx context.Context) error {
 		go b.runNodeSVIDRefresh(ctx)
 	}
 
+	// Maintain the bundle subscription for the bridge's lifetime, re-subscribing
+	// with backoff when the stream ends (e.g. the SPIRE agent restarts) instead
+	// of failing the runnable — which would take down the whole agent for a
+	// transient disconnect. SPIRE sends the full bundle set as the first response
+	// on every new stream, so a plain re-subscribe fully resynchronizes; the
+	// cached bundle secrets keep serving while disconnected.
+	backoff := b.backoffInitial
+	first := true
 	for {
-		select {
-		case <-ctx.Done():
-			b.log.Info("shutting down SPIRE bridge")
-			return nil
-		case resp, ok := <-bundleCh:
-			if !ok {
-				return fmt.Errorf("bundle subscription stream closed unexpectedly")
+		bundleCh, subErr := client.SubscribeBundles(ctx)
+		if subErr != nil {
+			if ctx.Err() != nil {
+				b.log.Info("shutting down SPIRE bridge")
+				return nil
 			}
-			if err := b.handleBundleUpdate(ctx, resp); err != nil {
-				b.log.Error(err, "handling bundle update")
+			b.metrics.streamFailed(ctx, streamBundle)
+			wait := jitteredBackoff(backoff)
+			b.log.Error(subErr, "subscribing to X.509 bundles failed; retrying", "backoff", wait)
+			if !sleepCtx(ctx, wait) {
+				b.log.Info("shutting down SPIRE bridge")
+				return nil
+			}
+			backoff = min(backoff*2, b.backoffMax)
+			first = false
+			continue
+		}
+		if first {
+			b.log.Info("subscribed to X.509 bundles")
+			first = false
+		} else {
+			b.metrics.streamReconnected(ctx, streamBundle)
+			b.log.Info("re-subscribed to X.509 bundles")
+		}
+
+	receive:
+		for {
+			select {
+			case <-ctx.Done():
+				b.log.Info("shutting down SPIRE bridge")
+				return nil
+			case resp, ok := <-bundleCh:
+				if !ok {
+					break receive
+				}
+				// Receiving proves the stream is healthy; reset the backoff.
+				backoff = b.backoffInitial
+				if err := b.handleBundleUpdate(ctx, resp); err != nil {
+					b.log.Error(err, "handling bundle update")
+				}
 			}
 		}
+
+		b.metrics.streamFailed(ctx, streamBundle)
+		wait := jitteredBackoff(backoff)
+		b.log.Info("bundle subscription stream closed; re-subscribing", "backoff", wait)
+		if !sleepCtx(ctx, wait) {
+			b.log.Info("shutting down SPIRE bridge")
+			return nil
+		}
+		backoff = min(backoff*2, b.backoffMax)
+	}
+}
+
+// jitteredBackoff returns d plus up to streamJitterFraction of random jitter,
+// de-synchronizing re-subscribe attempts across streams and agents.
+func jitteredBackoff(d time.Duration) time.Duration {
+	return d + time.Duration(float64(d)*streamJitterFraction*rand.Float64())
+}
+
+// sleepCtx waits for d or until ctx is done; it reports whether the full wait
+// elapsed (false means ctx was cancelled).
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
 
@@ -237,22 +323,54 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 	b.log.Info("subscribed to SVIDs", "spiffeID", spiffeID)
 
 	go func() {
+		ch := svidCh
+		backoff := b.backoffInitial
 		for {
-			select {
-			case <-subCtx.Done():
-				return
-			case resp, ok := <-svidCh:
-				if !ok {
-					b.log.Info("SVID subscription stream closed", "spiffeID", spiffeID)
+		receive:
+			for {
+				select {
+				case <-subCtx.Done():
+					return
+				case resp, ok := <-ch:
+					if !ok {
+						break receive
+					}
+					// Receiving proves the stream is healthy; reset the backoff.
+					backoff = b.backoffInitial
+					// Use subCtx (tied to the bridge/subscription lifetime), not the
+					// caller's request context: SubscribePod is called synchronously
+					// from CmdAdd, whose context is cancelled as soon as it returns —
+					// pushing the SVID into the snapshot must outlive that request.
+					if handleErr := b.handleSVIDUpdate(subCtx, resp); handleErr != nil {
+						b.log.Error(handleErr, "handling SVID update", "spiffeID", spiffeID)
+					}
+				}
+			}
+
+			// The stream ended while the pod is still subscribed (e.g. the SPIRE
+			// agent restarted): re-subscribe with backoff so rotations keep
+			// flowing — exiting here would silently freeze this pod's SVID until
+			// it expired. The cached SVID keeps serving meanwhile, and the first
+			// response on the new stream is the current SVID set, so a plain
+			// re-subscribe fully resynchronizes.
+			b.metrics.streamFailed(subCtx, streamSVID)
+			for {
+				wait := jitteredBackoff(backoff)
+				b.log.Info("SVID subscription stream closed; re-subscribing", "spiffeID", spiffeID, "backoff", wait)
+				if !sleepCtx(subCtx, wait) {
 					return
 				}
-				// Use subCtx (tied to the bridge/subscription lifetime), not the
-				// caller's request context: SubscribePod is called synchronously
-				// from CmdAdd, whose context is cancelled as soon as it returns —
-				// pushing the SVID into the snapshot must outlive that request.
-				if handleErr := b.handleSVIDUpdate(subCtx, resp); handleErr != nil {
-					b.log.Error(handleErr, "handling SVID update", "spiffeID", spiffeID)
+				backoff = min(backoff*2, b.backoffMax)
+				newCh, subErr := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
+				if subErr != nil {
+					b.metrics.streamFailed(subCtx, streamSVID)
+					b.log.Error(subErr, "re-subscribing to SVIDs failed; retrying", "spiffeID", spiffeID)
+					continue
 				}
+				ch = newCh
+				b.metrics.streamReconnected(subCtx, streamSVID)
+				b.log.Info("re-subscribed to SVIDs", "spiffeID", spiffeID)
+				break
 			}
 		}
 	}()
