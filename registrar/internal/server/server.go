@@ -27,8 +27,32 @@ type RegistrarServer struct {
 	log         logr.Logger
 	metrics     *Metrics
 
+	// synced, when set (GateOnSync), gates snapshot-serving RPCs until the
+	// syncer's first cycle completes: a freshly restarted registrar must not
+	// serve an empty/partial world view — agents derive route configs from it
+	// and 404 live traffic (rev-66 co-roll, 2026-06-11).
+	synced <-chan struct{}
+
 	// Embed xds.Server for gRPC lifecycle management.
 	xds.Server
+}
+
+// GateOnSync makes snapshot-serving RPCs (WatchEndpoints, ListAllEndpoints)
+// block until ch is closed (the syncer's first completed cycle). Nil leaves
+// the RPCs ungated.
+func (s *RegistrarServer) GateOnSync(ch <-chan struct{}) { s.synced = ch }
+
+// awaitSynced blocks until the sync gate opens or ctx ends.
+func (s *RegistrarServer) awaitSynced(ctx context.Context) error {
+	if s.synced == nil {
+		return nil
+	}
+	select {
+	case <-s.synced:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // NewRegistrarServer creates a RegistrarServer and registers it on the gRPC server.
@@ -131,6 +155,11 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	watcherID := fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
 	s.log.V(1).Info("WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion())
 
+	// Never serve a snapshot before the first sync has populated it.
+	if err := s.awaitSynced(stream.Context()); err != nil {
+		return err
+	}
+
 	// Send current snapshot unless the client is already up-to-date.
 	events, currentVersion := s.snapshot.FullSnapshotEvents()
 	if req.GetLastVersion() != currentVersion {
@@ -139,6 +168,14 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 				return fmt.Errorf("failed to send snapshot event: %w", err)
 			}
 		}
+	}
+	// Mark the snapshot boundary so the client knows its cache is complete
+	// (sent even when the snapshot was skipped: the client is current).
+	if err := stream.Send(&registrarv1.WatchEndpointsResponse{
+		Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+		Version: currentVersion,
+	}); err != nil {
+		return fmt.Errorf("failed to send snapshot-complete event: %w", err)
 	}
 
 	// Subscribe and stream incremental events.
@@ -168,8 +205,14 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 }
 
 // ListAllEndpoints returns all endpoints from the local snapshot.
-func (s *RegistrarServer) ListAllEndpoints(_ context.Context, req *registrarv1.ListAllEndpointsRequest) (*registrarv1.ListAllEndpointsResponse, error) {
+func (s *RegistrarServer) ListAllEndpoints(ctx context.Context, req *registrarv1.ListAllEndpointsRequest) (*registrarv1.ListAllEndpointsResponse, error) {
 	s.log.V(1).Info("ListAllEndpoints", "protocol", req.GetProtocol())
+
+	// Never serve a snapshot before the first sync has populated it (agents
+	// fall back to this RPC at startup when their watch cache is empty).
+	if err := s.awaitSynced(ctx); err != nil {
+		return nil, err
+	}
 
 	endpoints, version := s.snapshot.GetAllWithVersion(req.GetProtocol())
 

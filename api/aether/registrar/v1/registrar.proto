@@ -49,6 +49,11 @@ message WatchEndpointsResponse {
     EVENT_TYPE_ENDPOINT_ADDED = 2;
     EVENT_TYPE_ENDPOINT_REMOVED = 3;
     EVENT_TYPE_ENDPOINT_UPDATED = 4;
+    // Sent by the server once the initial full snapshot has been fully
+    // streamed (or immediately when the client was already up-to-date).
+    // Carries the snapshot version; has no service_name/endpoint. Clients use
+    // it to know their cache is complete before deriving config from it.
+    EVENT_TYPE_SNAPSHOT_COMPLETE = 5;
   }
 
   EventType type = 1;

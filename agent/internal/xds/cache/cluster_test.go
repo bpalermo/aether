@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -492,6 +493,7 @@ func TestLoadClustersFromRegistry_EndpointsReachable(t *testing.T) {
 // pruned from the cache rather than retained.
 func TestLoadClustersFromRegistry_RebuildPrunesStale(t *testing.T) {
 	c := newTestCache("node-1")
+	c.serviceRetentionGrace = 50 * time.Millisecond
 	data := map[string][]*registryv1.ServiceEndpoint{
 		"keep":   {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
 		"remove": {makeEndpoint("10.0.0.2", "cluster-1", "node-2", 8080)},
@@ -506,14 +508,23 @@ func TestLoadClustersFromRegistry_RebuildPrunesStale(t *testing.T) {
 	require.NotNil(t, c.Endpoints("keep"))
 	require.NotNil(t, c.Endpoints("remove"))
 
-	// The registry now reports only "keep"; a reload must drop "remove".
+	// The registry now reports only "keep". "remove" is RETAINED with empty
+	// endpoints during the retention grace (dropping the vhost mid-churn 404s
+	// live traffic — rev-66), and pruned once the grace elapses.
 	data = map[string][]*registryv1.ServiceEndpoint{
 		"keep": {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
 
 	assert.NotNil(t, c.Endpoints("keep"))
-	assert.Nil(t, c.Endpoints("remove"), "stale cluster should be pruned on reload")
+	if assert.NotNil(t, c.Endpoints("remove"), "disappeared cluster is retained during the grace") {
+		cla := c.Endpoints("remove")[0].(*endpointv3.ClusterLoadAssignment)
+		assert.Empty(t, cla.GetEndpoints(), "retained cluster serves no endpoints")
+	}
+
+	time.Sleep(60 * time.Millisecond) // c.serviceRetentionGrace is 50ms in this test
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	assert.Nil(t, c.Endpoints("remove"), "stale cluster is pruned after the retention grace")
 }
 
 // TestLoadClustersFromRegistry_VirtualHostsPopulated verifies that after loading, VirtualHosts()
@@ -659,4 +670,55 @@ func TestSnapshotCache_VirtualHosts_ThreadSafety(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		<-done
 	}
+}
+
+// TestLoadClustersFromRegistry_RetainsDisappearedServices is the regression
+// test for the rev-66 404 gap (Gap 1): a service whose endpoints all vanish
+// mid-churn must keep its cluster and vhost (with empty endpoints) for the
+// retention grace, so clients get a retriable 503 instead of a route-table
+// 404; after the grace it is pruned.
+func TestLoadClustersFromRegistry_RetainsDisappearedServices(t *testing.T) {
+	c := newTestCache("node-1")
+	c.serviceRetentionGrace = 50 * time.Millisecond
+
+	full := map[string][]*registryv1.ServiceEndpoint{
+		"svc-a": {{Ip: "10.0.0.1"}},
+		"svc-b": {{Ip: "10.0.0.2"}},
+	}
+	partial := map[string][]*registryv1.ServiceEndpoint{
+		"svc-a": {{Ip: "10.0.0.1"}},
+	}
+	data := full
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return data, nil
+		},
+	}
+
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	require.Contains(t, c.clusters, "svc-b")
+
+	// svc-b vanishes from the listing: retained with empty endpoints + vhost.
+	data = partial
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	entry, ok := c.clusters["svc-b"]
+	require.True(t, ok, "disappeared service must be retained during grace")
+	assert.False(t, entry.absentSince.IsZero(), "absence must be stamped")
+	assert.Empty(t, entry.endpoints, "retained service must have empty endpoints")
+	assert.Empty(t, entry.loadAssignment.GetEndpoints(), "retained CLA must be empty")
+	assert.NotNil(t, entry.vhost, "vhost must survive (404 prevention)")
+
+	// Reappearance clears the absence mark and restores endpoints.
+	data = full
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	entry = c.clusters["svc-b"]
+	assert.True(t, entry.absentSince.IsZero(), "reappeared service must be unmarked")
+	assert.Len(t, entry.endpoints, 1)
+
+	// Absent past the grace: pruned.
+	data = partial
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	time.Sleep(80 * time.Millisecond)
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	assert.NotContains(t, c.clusters, "svc-b", "service absent past grace must be pruned")
 }

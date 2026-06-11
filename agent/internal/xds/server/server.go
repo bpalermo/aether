@@ -76,6 +76,21 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 		return err
 	}
 
+	// Wait (bounded) for the registry watch cache to hold a complete snapshot
+	// before deriving the initial config from it: a fresh agent that builds its
+	// snapshot from an empty/partial cache opens the xDS socket serving a
+	// route config with missing vhosts, and the reconnecting Envoy 404s live
+	// traffic until the next refresh (rev-66 agent roll, 2026-06-11). On
+	// timeout we proceed — the fallback below still serves local-only config
+	// rather than crash-looping the node.
+	if rw, ok := s.registry.(registry.ReadyWaiter); ok {
+		waitCtx, cancel := context.WithTimeout(ctx, registryReadyTimeout)
+		if err := rw.WaitReady(waitCtx); err != nil {
+			s.log.Info("registry watch cache not complete in time; proceeding (RPC fallback / background retry will fill in)", "timeout", registryReadyTimeout.String(), "error", err.Error())
+		}
+		cancel()
+	}
+
 	// Registry unavailability must not prevent the agent from starting: a
 	// crash-looping agent takes down the node's CNI ADD/DEL and xDS entirely,
 	// turning a registrar blip into a node-wide outage (observed cascading
@@ -89,6 +104,12 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 
 	return nil
 }
+
+// registryReadyTimeout bounds how long PreListen waits for the registry watch
+// cache to hold a complete snapshot. Generous enough to cover a registrar
+// restart finishing its first external-registry sync (~3-5s observed), small
+// enough that a genuinely unavailable registrar cannot stall agent startup.
+const registryReadyTimeout = 15 * time.Second
 
 // retryInitialRegistryLoad retries the registry-derived snapshot load with
 // capped exponential backoff until it succeeds or ctx ends.

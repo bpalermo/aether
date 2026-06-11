@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -500,4 +501,46 @@ func TestProcessStream_OtherErrorsKeepResumeToken(t *testing.T) {
 
 	got := r.processStream(context.Background(), stream, "5")
 	assert.Equal(t, "5", got, "transient errors must keep the resume token")
+}
+
+// TestSnapshotCompleteClosesReady verifies WaitReady unblocks once
+// processStream sees the SNAPSHOT_COMPLETE marker (Gap 2 of the rev-66 404
+// fix): consumers deriving config from the watch cache wait until it holds a
+// complete world view, the marker advances the resume token, and it mutates
+// no cache state.
+func TestSnapshotCompleteClosesReady(t *testing.T) {
+	r := newTestRegistry()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	require.Error(t, r.WaitReady(ctx), "WaitReady must block before SNAPSHOT_COMPLETE")
+	cancel()
+
+	stream := &fakeWatchStream{
+		events: []*registrarv1.WatchEndpointsResponse{
+			{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
+				ServiceName: "svc-a",
+				Endpoint:    makeEndpoint("10.0.0.1", 8080),
+				Version:     "7",
+			},
+			{
+				Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+				Version: "7",
+			},
+			// A second marker (reconnect) must be harmless.
+			{
+				Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+				Version: "8",
+			},
+		},
+		err: io.EOF,
+	}
+
+	got := r.processStream(context.Background(), stream, "")
+	assert.Equal(t, "8", got, "marker version must advance the resume token")
+	require.NoError(t, r.WaitReady(context.Background()), "ready must be closed after the marker")
+
+	eps, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Len(t, eps, 1, "marker must not mutate the cache")
 }

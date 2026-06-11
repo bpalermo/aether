@@ -131,6 +131,9 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	}
 
 	grpcSrv := server.NewRegistrarServer(reg, snapshot, broadcaster, cfg.GRPCAddress, l, serverMetrics, grpcOpts...)
+	// Snapshot-serving RPCs block until the syncer's first cycle so a freshly
+	// rolled registrar never serves an empty/partial world view to agents.
+	grpcSrv.GateOnSync(syncer.Synced())
 	if err = m.Add(grpcSrv); err != nil {
 		return fmt.Errorf("failed to add gRPC server: %w", err)
 	}
