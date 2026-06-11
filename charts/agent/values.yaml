@@ -143,7 +143,7 @@ proxy:
     # — host cgroup namespace; see the bootstrap ConfigMap comment.)
     maxHeapSizeBytes: 402653184 # 384Mi = 75% of 512Mi
 
-# AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
+# AWS credentials consumed by the agent (DynamoDB registry backend).
 # The chart never bakes credentials into the image. By default it references an
 # existing secret; set `create: true` and supply the keys to have the chart
 # render the Secret instead.

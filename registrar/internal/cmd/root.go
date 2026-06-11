@@ -54,9 +54,8 @@ func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
-	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, etcd, or cloudmap)")
+	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
-	rootCmd.Flags().StringVar(&cfg.CloudMapNamespace, "cloudmap-namespace", cfg.CloudMapNamespace, "AWS Cloud Map HTTP namespace name")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
 
@@ -168,16 +167,8 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 		reg = registry.NewEtcdRegistry(l, registry.EtcdConfig{
 			Endpoints: cfg.EtcdEndpoints,
 		})
-	case "cloudmap":
-		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
-		if err != nil {
-			return nil, fmt.Errorf("failed to load AWS config: %w", err)
-		}
-		reg = registry.NewCloudMapRegistry(l, awsCfg, cfg.ClusterName,
-			registry.WithCloudMapNamespace(cfg.CloudMapNamespace),
-		)
 	default:
-		return nil, fmt.Errorf("unsupported registry backend: %s (supported: kubernetes, dynamodb, etcd, cloudmap)", cfg.RegistryBackend)
+		return nil, fmt.Errorf("unsupported registry backend: %s (supported: kubernetes, dynamodb, etcd)", cfg.RegistryBackend)
 	}
 
 	if err := reg.Initialize(ctx); err != nil {

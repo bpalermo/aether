@@ -20,14 +20,12 @@ type RegistrarConfig struct {
 	// ClusterName is the Kubernetes cluster name
 	ClusterName string
 
-	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", "etcd", or "cloudmap")
+	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", or "etcd")
 	RegistryBackend string
 
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
 
-	// CloudMapNamespace is the AWS Cloud Map HTTP namespace for service discovery
-	CloudMapNamespace string
 
 	// SyncInterval is how often the registrar polls the external registry
 	SyncInterval time.Duration
@@ -60,7 +58,6 @@ func NewRegistrarConfig() *RegistrarConfig {
 		},
 		RegistryBackend:         "kubernetes",
 		EtcdEndpoints:           []string{"localhost:2379"},
-		CloudMapNamespace:       "aether",
 		SyncInterval:            defaultSyncInterval,
 		GRPCAddress:             defaultGRPCAddress,
 		SpireEnabled:            true,

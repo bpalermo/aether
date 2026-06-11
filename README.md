@@ -1,6 +1,6 @@
 # Aether
 
-A Kubernetes service mesh data plane built in Go. Aether runs a per-node agent (DaemonSet) that manages an Envoy xDS control plane and a CNI plugin for transparent traffic interception. An in-cluster Registrar service proxies all registry operations, caches an endpoint snapshot, and streams changes to agents. It supports pluggable external registry backends (DynamoDB, etcd, AWS Cloud Map) and integrates with SPIRE for workload identity and mTLS.
+A Kubernetes service mesh data plane built in Go. Aether runs a per-node agent (DaemonSet) that manages an Envoy xDS control plane and a CNI plugin for transparent traffic interception. An in-cluster Registrar service proxies all registry operations, caches an endpoint snapshot, and streams changes to agents. It supports pluggable external registry backends (DynamoDB, etcd) and integrates with SPIRE for workload identity and mTLS.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ graph TD
     Registrar["Registrar<br/><i>in-cluster Deployment</i>"]
     Agent -- "gRPC<br/>register, watch, list" --> Registrar
 
-    Registry["External Registry<br/><i>DynamoDB · etcd · Cloud Map</i>"]
+    Registry["External Registry<br/><i>DynamoDB · etcd</i>"]
     Registrar -- "sync + persist" --> Registry
 ```
 
@@ -35,7 +35,6 @@ graph TD
 **External Registry** — Pluggable backend for durable endpoint storage, selected on the Registrar via `--registry-backend`:
 - **DynamoDB** — single-table design for AWS-native deployments
 - **etcd** — hierarchical key structure with protobuf serialization
-- **AWS Cloud Map** — multi-cluster service discovery via AWS Cloud Map
 
 ## Getting Started
 
