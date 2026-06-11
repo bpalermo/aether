@@ -14,6 +14,57 @@ data:
           address: 127.0.0.1
           port_value: 9901
 
+{{- if .Values.proxy.overload.enabled }}
+    # Graceful degradation BEFORE the container memory limit OOM-kills Envoy:
+    # shed the cheapest state first (free heap, then idle downstream
+    # connections), then stop accepting new work. stop_accepting_requests
+    # 503s new streams, which the mesh's client retry policy retries on a
+    # DIFFERENT endpoint — an overloaded node sheds load to other replicas.
+    # The agent-generated health-gateway listener sets
+    # bypass_overload_manager so delegated liveness keeps reporting APP
+    # truth (not proxy state) and the registry never flaps on transient
+    # overload.
+    overload_manager:
+      refresh_interval: 0.25s
+      resource_monitors:
+        - name: "envoy.resource_monitors.fixed_heap"
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+            max_heap_size_bytes: {{ int64 .Values.proxy.overload.maxHeapSizeBytes }}
+      actions:
+        - name: "envoy.overload_actions.shrink_heap"
+          triggers:
+            - name: "envoy.resource_monitors.fixed_heap"
+              threshold:
+                value: 0.80
+        - name: "envoy.overload_actions.disable_http_keepalive"
+          triggers:
+            - name: "envoy.resource_monitors.fixed_heap"
+              threshold:
+                value: 0.90
+        - name: "envoy.overload_actions.reduce_timeouts"
+          typed_config:
+            "@type": type.googleapis.com/envoy.config.overload.v3.ScaleTimersOverloadActionConfig
+            timer_scale_factors:
+              - timer: HTTP_DOWNSTREAM_CONNECTION_IDLE
+                min_timeout: 2s
+          triggers:
+            - name: "envoy.resource_monitors.fixed_heap"
+              scaled:
+                scaling_threshold: 0.85
+                saturation_threshold: 0.95
+        - name: "envoy.overload_actions.stop_accepting_requests"
+          triggers:
+            - name: "envoy.resource_monitors.fixed_heap"
+              threshold:
+                value: 0.95
+        - name: "envoy.overload_actions.stop_accepting_connections"
+          triggers:
+            - name: "envoy.resource_monitors.fixed_heap"
+              threshold:
+                value: 0.98
+{{- end }}
+
     dynamic_resources:
       ads_config:
         api_type: DELTA_GRPC
