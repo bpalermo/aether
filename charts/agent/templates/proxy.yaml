@@ -139,6 +139,10 @@ spec:
             failureThreshold: 3
             successThreshold: 1
           {{- end }}
+          {{- with .Values.proxy.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             privileged: true
             runAsUser: 0

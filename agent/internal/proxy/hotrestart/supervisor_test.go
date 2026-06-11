@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -168,5 +169,108 @@ func TestHotRestartDeferredWhileEpochNotLive(t *testing.T) {
 	case <-runErr:
 	case <-time.After(5 * time.Second):
 		t.Fatal("supervisor did not return after cancel")
+	}
+}
+
+// failingThenServingEnvoy writes a stub that records each invocation's epoch and
+// exits 1 immediately while blockerPath exists (simulating the base-id domain
+// socket held by a live predecessor), then behaves like stubEnvoy once the
+// blocker is gone.
+func failingThenServingEnvoy(t *testing.T, recordPath, blockerPath string) string {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"epoch=\"\"\n" +
+		"while [ $# -gt 0 ]; do\n" +
+		"  case \"$1\" in\n" +
+		"    --restart-epoch) epoch=\"$2\"; shift 2;;\n" +
+		"    *) shift;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"echo \"$epoch\" >> \"" + recordPath + "\"\n" +
+		"if [ -e \"" + blockerPath + "\" ]; then\n" +
+		"  echo 'unable to bind domain socket with base_id=0, id=0, errno=98' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"trap 'exit 0' TERM INT\n" +
+		"while true; do sleep 0.05; done\n"
+
+	path := filepath.Join(t.TempDir(), "stub-envoy-collide.sh")
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
+// TestBindCollisionRetriedInProcess is the regression test for the worker-04
+// EADDRINUSE crash-loop (e2e 2026-06-11): a stale heartbeat under node load made
+// initStartEpoch pick epoch 0 while the predecessor's Envoy still held the
+// base-id domain socket; the fast non-LIVE exit must be retried in-process (the
+// predecessor keeps serving meanwhile) instead of failing the supervisor into
+// the kubelet's CrashLoopBackOff.
+func TestBindCollisionRetriedInProcess(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available in this sandbox")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "envoy.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("v0\n"), 0o644))
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	blockerPath := filepath.Join(t.TempDir(), "socket-held")
+	require.NoError(t, os.WriteFile(blockerPath, []byte("x"), 0o644))
+
+	s := New(Config{
+		EnvoyPath:          failingThenServingEnvoy(t, recordPath, blockerPath),
+		ConfigPath:         configPath,
+		DrainTime:          1 * time.Second,
+		ParentShutdownTime: 1 * time.Second,
+		StateDir:           t.TempDir(), // cross-pod mode; no state file = stale/absent heartbeat
+	}, logr.Discard(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(ctx) }()
+
+	// At least two attempts must be made (initial + ≥1 in-process retry) without
+	// Run returning. Retries are paced by bindCollisionRetryPause (3s).
+	require.Eventually(t, func() bool {
+		return len(recordedEpochs(t, recordPath)) >= 2
+	}, 15*time.Second, 100*time.Millisecond, "bind collision was not retried in-process")
+	select {
+	case err := <-runErr:
+		t.Fatalf("supervisor exited during bind-collision retries: %v", err)
+	default:
+	}
+
+	// Predecessor exits (socket released): the next retry must come up and stay up.
+	require.NoError(t, os.Remove(blockerPath))
+	require.Eventually(t, func() bool {
+		launched, _ := s.epochProgress()
+		return s.childTracked(0) && time.Since(launched) > bindCollisionWindow
+	}, 20*time.Second, 100*time.Millisecond, "envoy did not come up after the socket was released")
+	select {
+	case err := <-runErr:
+		t.Fatalf("supervisor exited after successful retry: %v", err)
+	default:
+	}
+
+	// All attempts were epoch 0 (no climbing against a dead parent).
+	for _, e := range recordedEpochs(t, recordPath) {
+		assert.Equal(t, "0", e)
+	}
+
+	// Tear down via the clean successor-termination path: SIGTERM the stub (it
+	// exits 0, which cross-pod mode treats as protocol termination and awaits
+	// pod deletion), then cancel. Cancelling with a live child would instead
+	// enter awaitProtocolTermination, which deliberately never returns without
+	// an admin endpoint.
+	s.signalEpoch(0, syscall.SIGTERM)
+	require.Eventually(t, func() bool { return !s.childTracked(0) },
+		10*time.Second, 50*time.Millisecond, "stub did not exit on SIGTERM")
+	cancel()
+	select {
+	case err := <-runErr:
+		assert.NoError(t, err, "Run must return nil on context cancel")
+	case <-time.After(10 * time.Second):
+		t.Fatal("supervisor did not return after context cancel")
 	}
 }

@@ -200,7 +200,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 				// Hold readiness until the cross-pod handoff is fully complete (the
 				// predecessor has been terminated by this Envoy's parent-shutdown), so
 				// the DaemonSet doesn't delete the old pod while we still need it.
-				if !ready && !time.Now().Before(s.readyGate) {
+				if !ready && !time.Now().Before(s.readyGateTime()) {
 					s.setReady()
 					ready = true
 					s.metrics.readyTransition(true)
