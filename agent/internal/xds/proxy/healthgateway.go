@@ -82,7 +82,8 @@ func BuildHealthGatewayListener(socketPath string, probeClusters []string) *list
 	}
 
 	return &listenerv3.Listener{
-		Name: HealthGatewayListenerName,
+		Name:                          HealthGatewayListenerName,
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		Address: &corev3.Address{
 			Address: &corev3.Address_Pipe{
 				Pipe: &corev3.Pipe{Path: socketPath},

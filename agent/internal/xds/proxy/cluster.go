@@ -77,7 +77,8 @@ func AppPortFromPod(cniPod *cniv1.CNIPod) uint16 {
 // is assumed to speak HTTP/1.1, so no explicit HTTP/2 protocol options are set.
 func NewAppCluster(name, netns string, port uint16) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
-		Name: name,
+		Name:                          name,
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_STATIC,
 		},

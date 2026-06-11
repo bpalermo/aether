@@ -60,7 +60,8 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
 
 	return &listenerv3.Listener{
-		Name: InboundListenerName(cniPod),
+		Name:                          InboundListenerName(cniPod),
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{

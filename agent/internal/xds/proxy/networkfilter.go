@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"time"
+
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -9,6 +11,7 @@ import (
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	set_filter_state_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 const (
@@ -52,6 +55,15 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 	return networkFilter("envoy.filters.network.set_filter_state", filter)
 }
 
+// downstreamIdleTimeout bounds idle downstream connections on the per-pod HCMs
+// (inbound mesh mTLS conns from peer proxies, and app→proxy conns on the
+// outbound listener). It is the server-side backstop to the upstream
+// config.UpstreamIdleTimeout: peers reclaim their idle conns at 30s, so this
+// only catches clients that don't (Envoy's default is 1 hour, which let a
+// peer's leaked upstream conns pin ~7k inbound conns per listener). Kept well
+// above the upstream timeout so the client side always disconnects first.
+const downstreamIdleTimeout = 5 * time.Minute
+
 // buildHTTPConnectionManager creates an HTTP connection manager for processing HTTP traffic.
 // It includes a router HTTP filter and uses the provided route configuration.
 // If routeConfig is nil, routes will be retrieved via RDS.
@@ -59,6 +71,9 @@ func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfigura
 	return &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: name,
 		CodecType:  http_connection_managerv3.HttpConnectionManager_AUTO,
+		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
+			IdleTimeout: durationpb.New(downstreamIdleTimeout),
+		},
 		HttpFilters: []*http_connection_managerv3.HttpFilter{
 			routerHttpFilter(),
 		},

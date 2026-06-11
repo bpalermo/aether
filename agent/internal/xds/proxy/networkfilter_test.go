@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
@@ -74,4 +75,16 @@ func TestBuildSetFilterState(t *testing.T) {
 	require.NotNil(t, filter)
 	assert.Equal(t, "envoy.filters.network.set_filter_state", filter.GetName())
 	assert.NotNil(t, filter.GetTypedConfig())
+}
+
+// TestHCMDownstreamIdleTimeout verifies the shared HCM builder sets the
+// downstream idle timeout backstop (Envoy default is 1h, which let a peer's
+// leaked upstream connections pin thousands of inbound connections).
+func TestHCMDownstreamIdleTimeout(t *testing.T) {
+	hcm := buildHTTPConnectionManager("test", nil)
+	idle := hcm.GetCommonHttpProtocolOptions().GetIdleTimeout()
+	require.NotNil(t, idle, "downstream idle timeout must be set")
+	assert.Equal(t, downstreamIdleTimeout, idle.AsDuration())
+	assert.Greater(t, downstreamIdleTimeout, config.UpstreamIdleTimeout,
+		"downstream timeout must exceed upstream so the client side disconnects first")
 }

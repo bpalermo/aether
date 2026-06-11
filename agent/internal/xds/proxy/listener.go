@@ -8,6 +8,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const (
@@ -16,6 +17,14 @@ const (
 	// defaultHTTPOutboundPort is the port for outbound HTTP listeners. Shared
 	// with the CNI plugin, which probes it in-netns for data-plane readiness.
 	defaultHTTPOutboundPort = constants.ProxyOutboundPort
+	// perConnectionBufferLimitBytes caps read/write buffering per connection on
+	// every generated listener and cluster (Envoy edge-hardening guidance: 32
+	// KiB). Envoy's default is 1 MiB per connection per direction — with the
+	// node proxy's per-pod listeners and per-source upstream pools carrying
+	// thousands of connections, that default turns connection-count incidents
+	// into memory incidents. Flow control (watermarks) handles larger payloads;
+	// this does not cap request/response sizes.
+	perConnectionBufferLimitBytes = 32 * 1024
 )
 
 // OutboundListenerName returns the name of the per-pod outbound HTTP listener,
@@ -85,8 +94,9 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, e
 				},
 			},
 		},
-		StatPrefix:       fmt.Sprintf("out_http_%s", cniPod.GetName()),
-		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		StatPrefix:                    fmt.Sprintf("out_http_%s", cniPod.GetName()),
+		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
 			buildDefaultOutboundHTTPFilterChain(cniPod.GetName()),
 		},
