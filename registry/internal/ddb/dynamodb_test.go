@@ -162,7 +162,7 @@ func TestDynamoDBRegistry_RegisterEndpoint(t *testing.T) {
 	assert.Equal(t, ep.Metadata["version"], endpoints[0].Metadata["version"])
 	assert.Equal(t, ep.ContainerMetadata.ContainerId, endpoints[0].ContainerMetadata.ContainerId)
 	assert.Equal(t, ep.KubernetesMetadata.Namespace, endpoints[0].KubernetesMetadata.Namespace)
-	// Feature parity with cloudmap: health round-trip.
+	// Health round-trip parity across registry backends.
 	assert.Equal(t, ep.Health, endpoints[0].Health)
 }
 

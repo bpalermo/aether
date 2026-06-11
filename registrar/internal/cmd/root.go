@@ -158,9 +158,15 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 			ClusterName: cfg.ClusterName,
 		})
 	case "dynamodb":
-		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+		// Region comes from the standard AWS chain (AWS_REGION env — set by the
+		// chart's aws.region value — shared config, IMDS), falling back to
+		// us-east-1 so bare runs keep the historical default.
+		awsCfg, err := config.LoadDefaultConfig(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		}
+		if awsCfg.Region == "" {
+			awsCfg.Region = "us-east-1"
 		}
 		reg = registry.NewDynamoDBRegistry(l, awsCfg)
 	case "etcd":

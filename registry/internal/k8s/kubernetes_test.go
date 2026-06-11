@@ -248,7 +248,7 @@ func TestListEndpoints(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:        "pod readiness is derived (parity with cloudmap)",
+			name:        "pod readiness is derived (parity with other backends)",
 			clusterName: "test-cluster",
 			objects: []any{
 				func() *corev1.Pod {
