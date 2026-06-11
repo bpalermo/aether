@@ -33,8 +33,7 @@ registryBackend: kubernetes
 
 # AWS configuration for the dynamodb registry backend.
 aws:
-  # Region for AWS SDK clients. NOTE: the registrar binary currently forces
-  # us-east-1 internally; this is wired for forward-compat and clarity.
+  # Region for AWS SDK clients (exported as AWS_REGION).
   region: us-east-1
   # Name of an existing Secret holding AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
   # Empty = inject nothing (rely on IRSA / instance role / ambient credentials).
