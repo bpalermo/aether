@@ -45,6 +45,12 @@ cloudMap:
   # Cloud Map HTTP namespace name (`--cloudmap-namespace`).
   namespace: aether
 
+# etcd settings (used when registryBackend == etcd).
+etcd:
+  # etcd client endpoints (`--etcd-endpoints`), e.g.
+  # ["http://etcd.aether-etcd.svc.cluster.local:2379"].
+  endpoints: []
+
 # Enable verbose logging (`--debug`).
 debug: true
 
