@@ -73,3 +73,23 @@ func TestHttp2ProtocolOptions(t *testing.T) {
 		})
 	}
 }
+
+// TestUpstreamIdleTimeoutSet verifies both protocol-options helpers carry the
+// 30s idle timeout. Service clusters pool per downstream connection for
+// per-source mTLS; an orphaned pool's upstream connection is reclaimed ONLY by
+// this timeout (Envoy default 1h leaked ~41k mTLS conns / 3.2 GiB per proxy
+// under non-keepalive downstream traffic on talos-main, 2026-06-11).
+func TestUpstreamIdleTimeoutSet(t *testing.T) {
+	for name, opts := range map[string]*httpv3.HttpProtocolOptions{
+		"http1": Http1ProtocolOptions(),
+		"http2": Http2ProtocolOptions(),
+	} {
+		idle := opts.GetCommonHttpProtocolOptions().GetIdleTimeout()
+		if idle == nil {
+			t.Fatalf("%s: idle timeout must be set (orphaned per-downstream pools leak without it)", name)
+		}
+		if idle.AsDuration() != UpstreamIdleTimeout {
+			t.Fatalf("%s: idle timeout = %v, want %v", name, idle.AsDuration(), UpstreamIdleTimeout)
+		}
+	}
+}

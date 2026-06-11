@@ -27,6 +27,7 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name:                                  serviceName,
 		ConnectTimeout:                        durationpb.New(2 * time.Second),
+		PerConnectionBufferLimitBytes:         wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ConnectionPoolPerDownstreamConnection: true,
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_EDS,

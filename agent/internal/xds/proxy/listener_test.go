@@ -127,3 +127,24 @@ func TestGenerateOutboundHTTPListener(t *testing.T) {
 		})
 	}
 }
+
+// TestPerConnectionBufferLimits verifies every generated listener and cluster
+// caps per-connection buffering at 32 KiB (Envoy default is 1 MiB/connection/
+// direction, which turns connection-count incidents into memory incidents on
+// a node proxy carrying thousands of connections).
+func TestPerConnectionBufferLimits(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "buf-pod",
+		NetworkNamespace: "/var/run/netns/buf",
+	}
+	inbound, outbound, appCluster, healthCluster, err := GenerateListenersFromRegistryPod(pod, "aether.internal")
+	require.NoError(t, err)
+
+	want := uint32(perConnectionBufferLimitBytes)
+	assert.Equal(t, want, inbound.GetPerConnectionBufferLimitBytes().GetValue(), "inbound listener")
+	assert.Equal(t, want, outbound.GetPerConnectionBufferLimitBytes().GetValue(), "outbound listener")
+	assert.Equal(t, want, appCluster.GetPerConnectionBufferLimitBytes().GetValue(), "app cluster")
+	assert.Equal(t, want, healthCluster.GetPerConnectionBufferLimitBytes().GetValue(), "health cluster")
+	assert.Equal(t, want, NewServiceCluster("svc-x").GetPerConnectionBufferLimitBytes().GetValue(), "service cluster")
+	assert.Equal(t, want, BuildHealthGatewayListener("/run/aether/health.sock", nil).GetPerConnectionBufferLimitBytes().GetValue(), "health gateway")
+}
