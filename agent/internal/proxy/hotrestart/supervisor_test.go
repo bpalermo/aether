@@ -46,13 +46,16 @@ func TestBuildEnvoyCmd(t *testing.T) {
 func stubEnvoy(t *testing.T, recordPath string) string {
 	t.Helper()
 	script := "#!/bin/sh\n" +
-		"epoch=\"\"\n" +
+		"epoch=\"\"; mode=\"\"\n" +
 		"while [ $# -gt 0 ]; do\n" +
 		"  case \"$1\" in\n" +
+		"    --mode) mode=\"$2\"; shift 2;;\n" +
 		"    --restart-epoch) epoch=\"$2\"; shift 2;;\n" +
 		"    *) shift;;\n" +
 		"  esac\n" +
 		"done\n" +
+		"# config pre-validation invocations succeed immediately\n" +
+		"[ \"$mode\" = \"validate\" ] && exit 0\n" +
 		"echo \"$epoch\" >> \"" + recordPath + "\"\n" +
 		"trap 'exit 0' TERM INT\n" +
 		"while true; do sleep 0.05; done\n"
@@ -272,5 +275,90 @@ func TestBindCollisionRetriedInProcess(t *testing.T) {
 		assert.NoError(t, err, "Run must return nil on context cancel")
 	case <-time.After(10 * time.Second):
 		t.Fatal("supervisor did not return after context cancel")
+	}
+}
+
+// validatingStubEnvoy behaves like stubEnvoy but also implements
+// `--mode validate`: it exits 1 if the config file contains "poison",
+// 0 otherwise (mirroring envoy's bootstrap-init validation).
+func validatingStubEnvoy(t *testing.T, recordPath string) string {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"mode=\"\"; epoch=\"\"; cfg=\"\"\n" +
+		"while [ $# -gt 0 ]; do\n" +
+		"  case \"$1\" in\n" +
+		"    --mode) mode=\"$2\"; shift 2;;\n" +
+		"    -c) cfg=\"$2\"; shift 2;;\n" +
+		"    --restart-epoch) epoch=\"$2\"; shift 2;;\n" +
+		"    *) shift;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"if [ \"$mode\" = \"validate\" ]; then\n" +
+		"  grep -q poison \"$cfg\" && { echo 'config poison detected' >&2; exit 1; }\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"echo \"$epoch\" >> \"" + recordPath + "\"\n" +
+		"trap 'exit 0' TERM INT\n" +
+		"while true; do sleep 0.05; done\n"
+
+	path := filepath.Join(t.TempDir(), "stub-envoy-validate.sh")
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
+// TestPoisonedConfigDoesNotHotRestart is the regression test for the rev-64
+// outage (2026-06-11): a bootstrap config that fails node-local validation
+// must NOT be hot-restarted into — the current epoch keeps serving — and a
+// subsequent good config must restart normally.
+func TestPoisonedConfigDoesNotHotRestart(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available in this sandbox")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "envoy.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("v0\n"), 0o644))
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+
+	s := New(Config{
+		EnvoyPath:          validatingStubEnvoy(t, recordPath),
+		ConfigPath:         configPath,
+		DrainTime:          1 * time.Second,
+		ParentShutdownTime: 1 * time.Second,
+		WatchConfig:        true,
+	}, logr.Discard(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return len(recordedEpochs(t, recordPath)) >= 1
+	}, 5*time.Second, 50*time.Millisecond, "epoch 0 never started")
+
+	// Poisoned config: watcher fires, validation rejects, NO epoch 1.
+	require.NoError(t, os.WriteFile(configPath, []byte("v1 poison\n"), 0o644))
+	time.Sleep(2 * time.Second) // debounce (500ms) + headroom for a wrong restart to appear
+	assert.Len(t, recordedEpochs(t, recordPath), 1, "poisoned config must not be hot-restarted into")
+	select {
+	case err := <-runErr:
+		t.Fatalf("supervisor exited on poisoned config: %v", err)
+	default:
+	}
+
+	// Good config afterwards: validated, epoch 1 spawns.
+	require.NoError(t, os.WriteFile(configPath, []byte("v2 fixed\n"), 0o644))
+	require.Eventually(t, func() bool {
+		epochs := recordedEpochs(t, recordPath)
+		return len(epochs) == 2 && epochs[1] == "1"
+	}, 5*time.Second, 50*time.Millisecond, "good config after a rejected one did not hot restart")
+
+	cancel()
+	select {
+	case err := <-runErr:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not return after cancel")
 	}
 }
