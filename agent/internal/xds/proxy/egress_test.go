@@ -146,9 +146,13 @@ func TestServiceClusterDrainPoolClose(t *testing.T) {
 	c := NewServiceCluster("svc-x")
 	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
 		"pools must close at drain-mark, not at the app-exit GOAWAY race")
-	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
-	assert.Zero(t, c.GetCommonLbConfig().GetHealthyPanicThreshold().GetValue(),
-		"panic spraying at known-unhealthy hosts is never the mesh behavior")
+	// Default panic threshold deliberately kept (no override): the Cloud Map
+	// registration race can zero the RECORDED healthy fraction while real
+	// capacity exists; panic spraying is the safety net until registration
+	// failures get fast retries (panic 0 turned rolls into 300-500 hard 503s,
+	// e2e 2026-06-11).
+	assert.Nil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold(),
+		"panic threshold must stay at Envoy's default")
 	thresholds := c.GetCircuitBreakers().GetThresholds()
 	require.Len(t, thresholds, 1)
 	assert.Equal(t, uint32(16), thresholds[0].GetMaxRetries().GetValue(),

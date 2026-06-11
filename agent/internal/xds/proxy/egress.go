@@ -64,15 +64,18 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 			},
 		},
 		// Don't route to a newly discovered endpoint until its first readiness check
-		// passes, so traffic never lands on a not-yet-ready pod. Panic routing is
-		// disabled: with draining endpoints now reported UNHEALTHY (see
-		// endpointHealthStatus), a heavy simultaneous roll could cross Envoy's
-		// default 50% panic threshold and spray traffic at known-unhealthy hosts;
-		// deterministic exclusion + per-request retries + the registry's own
-		// health pipeline are the mesh's answer, not panic spraying.
+		// passes, so traffic never lands on a not-yet-ready pod. Envoy's default
+		// 50% panic threshold is deliberately KEPT: panic spraying is the safety
+		// net for incorrect health bookkeeping, and the bookkeeping is not yet
+		// trustworthy during rolls — the Cloud Map async-registration race can
+		// leave brand-new (healthy, serving) pods unregistered for up to a sweep
+		// interval, so a roll can drive the *recorded* healthy fraction to zero
+		// while real capacity exists. Disabling panic (tried 2026-06-11) turned
+		// every roll into 300-500 hard no_healthy_upstream 503s. Revisit only
+		// after registration failures get fast retries instead of waiting for
+		// the 60s reconciliation sweep.
 		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
 			IgnoreNewHostsUntilFirstHc: true,
-			HealthyPanicThreshold:      &typev3.Percent{Value: 0},
 		},
 		// Close pool connections the moment an endpoint goes unhealthy (incl.
 		// the EDS drain mark above): the pools are idle then, and closing them
