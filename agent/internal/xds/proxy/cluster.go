@@ -140,6 +140,16 @@ func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string
 			Interval:           durationpb.New(5 * time.Second),
 			HealthyThreshold:   wrapperspb.UInt32(1),
 			UnhealthyThreshold: wrapperspb.UInt32(2),
+			// This cluster never carries routed traffic (see above), so without
+			// these Envoy applies its no-traffic HC cadence (default 60s) to every
+			// check after the immediate first one — measured as a 30-62s
+			// endpoint-promotion delay per new pod (e2e 2026-06-11): the first
+			// probe races app startup, loses, and the retry waits out the
+			// no-traffic interval. The healthy variant likewise delayed *demotion*
+			// of a dying app by up to 60s. Probing localhost is cheap; keep the
+			// configured cadence regardless of traffic.
+			NoTrafficInterval:        durationpb.New(5 * time.Second),
+			NoTrafficHealthyInterval: durationpb.New(5 * time.Second),
 			HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
 				HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
 					Host:            appHealthCheckHost,

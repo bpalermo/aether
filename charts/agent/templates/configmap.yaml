@@ -14,6 +14,37 @@ data:
           address: 127.0.0.1
           port_value: 9901
 
+    # Bound stats-memory growth (measured 2026-06-11: ~5.1k stats/proxy at
+    # 7 pods + 8 services; per-pod clusters/listeners dominate). Nothing
+    # scrapes the Envoy admin — delegated liveness rides the health-gateway
+    # listener and the supervisor only polls /server_info — so the excluded
+    # subtrees have zero operational value. Excluded stats are null (not
+    # rendered, not allocated, increments are no-ops).
+    #
+    # NOTE: excluding cluster.health_* also nulls the probe clusters'
+    # upstream_cx_total, which Envoy's HC interval selection consults
+    # (".used()" is permanently false) — those clusters then ALWAYS run on
+    # the no-traffic HC cadence. Safe only because the agent pins
+    # no_traffic_interval == interval on probe clusters; do not remove that
+    # pin while this exclusion exists.
+    stats_config:
+      # No scraper exists; skip default tag extraction (saves per-stat tag
+      # structs and admin /stats render time, which runs on the main thread).
+      use_all_default_tags: false
+      stats_matcher:
+        exclusion_list:
+          patterns:
+            # Per-pod delivery + health-probe clusters: O(pods) x ~230 stats.
+            - prefix: "cluster.app_"
+            - prefix: "cluster.health_"
+            # Certificate expiration gauges: SPIRE owns rotation/expiry.
+            - contains: "ssl.certificate."
+            # Per-cluster active-HC verbose stats on the remaining (service)
+            # clusters; membership_healthy/membership_total are not under
+            # this subtree and remain. RE2 only — no lookahead.
+            - safe_regex:
+                regex: "^cluster\\..*\\.health_check\\."
+
 {{- if .Values.proxy.overload.enabled }}
     # Graceful degradation BEFORE the container memory limit OOM-kills Envoy:
     # shed the cheapest state first (free heap, then idle downstream

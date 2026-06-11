@@ -58,6 +58,11 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 			require.NotNil(t, healthCluster)
 			assert.Equal(t, HealthProbeClusterName(tt.cniPod), healthCluster.GetName())
 			require.Len(t, healthCluster.GetHealthChecks(), 1, "probe cluster carries the HC")
+			hc := healthCluster.GetHealthChecks()[0]
+			assert.Equal(t, hc.GetInterval().AsDuration(), hc.GetNoTrafficInterval().AsDuration(),
+				"probe cluster never carries routed traffic; the no-traffic interval (default 60s) would govern every check after the first")
+			assert.Equal(t, hc.GetInterval().AsDuration(), hc.GetNoTrafficHealthyInterval().AsDuration(),
+				"healthy no-traffic interval must match too, or app-death demotion waits up to 60s")
 			require.Empty(t, appCluster.GetHealthChecks(), "delivery cluster must NOT carry the HC")
 			assert.Equal(t, tt.expectedInboundName, inbound.GetName())
 			assert.Equal(t, tt.expectedOutboundName, outbound.GetName())

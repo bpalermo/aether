@@ -29,6 +29,7 @@ type cniMetrics struct {
 	sweepErrors       metric.Int64Counter
 	storagePods       metric.Int64Gauge
 	healthTransitions metric.Int64Counter
+	promotionDelay    metric.Float64Histogram
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
@@ -55,6 +56,11 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	if m.healthTransitions, err = meter.Int64Counter("aether.agent.liveness.health_transitions",
 		metric.WithDescription("Endpoint health transitions reflected into the registry by the liveness loop")); err != nil {
 		return nil, fmt.Errorf("health transitions: %w", err)
+	}
+	if m.promotionDelay, err = meter.Float64Histogram("aether.agent.liveness.promotion_delay_seconds",
+		metric.WithDescription("Seconds from the liveness loop first observing a pod's programmed health gateway to promoting it HEALTHY in the registry"),
+		metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("promotion delay: %w", err)
 	}
 
 	return m, nil
@@ -85,4 +91,15 @@ func (m *cniMetrics) healthTransition(ctx context.Context, from, to string) {
 		attrHealthFrom.String(from),
 		attrHealthTo.String(to),
 	))
+}
+
+// promotionDelayObserved records how long a new pod sat between its health
+// gateway becoming observable and its first HEALTHY promotion — the mesh's
+// endpoint-promotion latency (the e2e-measured gap that lets k8s rolls outpace
+// mesh routability).
+func (m *cniMetrics) promotionDelayObserved(ctx context.Context, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.promotionDelay.Record(ctx, seconds)
 }
