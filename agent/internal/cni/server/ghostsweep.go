@@ -100,7 +100,21 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		telemetry.EndSpan(span, retErr)
 	}()
 
-	all, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	// The sweep decides what to (de)register, so it must diff against the
+	// AUTHORITATIVE registry state, never the watch-fed cache: a fresh or
+	// failed-over registrar with an empty snapshot emits no events, the cache
+	// keeps the stale pre-loss world, and a cache-based diff concludes nothing
+	// is missing — exactly defeating the reconnect re-assert this sweep
+	// implements (observed 2026-06-11: a registry-backend switch left the
+	// registry empty while every agent no-op'd; only an agent restart healed
+	// it).
+	var all map[string][]*registryv1.ServiceEndpoint
+	var err error
+	if al, ok := s.registry.(registry.AuthoritativeLister); ok {
+		all, err = al.ListAllEndpointsAuthoritative(ctx, registryv1.Service_PROTOCOL_HTTP)
+	} else {
+		all, err = s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	}
 	if err != nil {
 		s.log.V(1).Info("ghost sweep: failed to list registry endpoints", "error", err)
 		retErr = err

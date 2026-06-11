@@ -128,3 +128,45 @@ func TestSweepRegistersMissingEndpoint(t *testing.T) {
 	assert.NotContains(t, state.last, "container-missing")
 	assert.NotContains(t, state.sawHealthy, "container-missing", "forget must clear warm-up memory too")
 }
+
+// authoritativeSweepRegistry simulates the post-backend-switch trap: the
+// watch-fed cache (ListAllEndpoints) still holds the stale pre-switch world,
+// while the authoritative listing (the registrar's actual snapshot) is empty.
+type authoritativeSweepRegistry struct {
+	sweepRegistry
+	authoritative map[string][]*registryv1.ServiceEndpoint
+}
+
+func (r *authoritativeSweepRegistry) ListAllEndpointsAuthoritative(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+	return r.authoritative, nil
+}
+
+// TestSweepPrefersAuthoritativeListing: when the registry exposes an
+// authoritative listing, the sweep must diff against it — not the watch cache.
+// A fresh/failed-over registrar with an empty snapshot emits no events, so the
+// cache remains a stale superset claiming every pod is registered; diffing
+// against it silently skips the re-assert (observed 2026-06-11: a backend
+// switch left the registry empty until the agents were restarted).
+func TestSweepPrefersAuthoritativeListing(t *testing.T) {
+	ctx := context.Background()
+
+	pod := validCNIPod("pod-stale", "default", "container-stale")
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-stale"), pod))
+
+	reg := &authoritativeSweepRegistry{
+		// Cache claims the pod is registered (stale superset)...
+		sweepRegistry: sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{
+			"default": {sweepEndpoint("10.0.0.1", "test-node", "pod-stale")},
+		}},
+		// ...but the registrar's real snapshot is empty.
+		authoritative: map[string][]*registryv1.ServiceEndpoint{},
+	}
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+
+	s.sweepGhostEndpoints(ctx)
+
+	_, ok := reg.registered["default/10.0.0.1"]
+	require.True(t, ok, "sweep must re-register from the authoritative (empty) listing, not the stale cache")
+}

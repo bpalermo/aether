@@ -61,3 +61,16 @@ type ReadyWaiter interface {
 type ReconnectNotifier interface {
 	Reconnects() <-chan struct{}
 }
+
+// AuthoritativeLister is an optional capability for Registry implementations
+// whose ListAllEndpoints may serve from a local watch-fed cache. It lists from
+// the authoritative source (an RPC to the registrar, the external registry),
+// bypassing any cache. Reconciliation that decides what to (de)register must
+// use this when present: a watch cache can be a stale superset of a fresh or
+// failed-over registrar's snapshot — an empty snapshot emits no events, so the
+// cache keeps the old world and a cache-based diff concludes nothing is
+// missing (2026-06-11: backend switch left the registry empty while every
+// agent's re-assert no-op'd against its own stale cache).
+type AuthoritativeLister interface {
+	ListAllEndpointsAuthoritative(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error)
+}
