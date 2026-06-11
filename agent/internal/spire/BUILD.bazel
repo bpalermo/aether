@@ -6,6 +6,7 @@ go_library(
         "bridge.go",
         "client.go",
         "converter.go",
+        "metrics.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/spire",
     visibility = ["//agent:__subpackages__"],
@@ -17,6 +18,9 @@ go_library(
         "@com_github_spiffe_go_spiffe_v2//svid/x509svid",
         "@com_github_spiffe_spire_api_sdk//proto/spire/api/agent/delegatedidentity/v1:delegatedidentity",
         "@com_github_spiffe_spire_api_sdk//proto/spire/api/types",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_metric//:metric",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//credentials/insecure",
     ],
@@ -25,12 +29,14 @@ go_library(
 go_test(
     name = "spire_test",
     srcs = [
+        "bridge_reconnect_test.go",
         "bridge_test.go",
         "converter_test.go",
         "node_svid_test.go",
     ],
     embed = [":spire"],
     deps = [
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spiffe_go_spiffe_v2//spiffeid",
         "@com_github_spiffe_go_spiffe_v2//svid/x509svid",
@@ -38,5 +44,6 @@ go_test(
         "@com_github_spiffe_spire_api_sdk//proto/spire/api/types",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
     ],
 )
