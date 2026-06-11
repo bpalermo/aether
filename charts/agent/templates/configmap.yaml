@@ -27,19 +27,28 @@ data:
     overload_manager:
       refresh_interval: 0.25s
       resource_monitors:
-        - name: "envoy.resource_monitors.fixed_heap"
+        # cgroup_memory measures the container's ACTUAL memory usage against
+        # its ACTUAL cgroup limit (memory.current / memory.max, cgroup v2) —
+        # unlike a heap monitor it sees everything the OOM killer sees
+        # (tcmalloc heap, the supervisor process, kernel socket buffers), so
+        # the thresholds are against the real kill line with no heap-to-RSS
+        # ratio guesswork. Validated at runtime against the pinned Envoy
+        # image (pressure tracks the docker --memory limit; failed_updates 0).
+        - name: "envoy.resource_monitors.cgroup_memory"
           typed_config:
-            "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
-            max_heap_size_bytes: {{ int64 .Values.proxy.overload.maxHeapSizeBytes }}
+            "@type": type.googleapis.com/envoy.extensions.resource_monitors.cgroup_memory.v3.CgroupMemoryConfig
+            {{- if .Values.proxy.overload.maxMemoryBytes }}
+            max_memory_bytes: {{ int64 .Values.proxy.overload.maxMemoryBytes }}
+            {{- end }}
       actions:
         - name: "envoy.overload_actions.shrink_heap"
           triggers:
-            - name: "envoy.resource_monitors.fixed_heap"
+            - name: "envoy.resource_monitors.cgroup_memory"
               threshold:
                 value: 0.80
         - name: "envoy.overload_actions.disable_http_keepalive"
           triggers:
-            - name: "envoy.resource_monitors.fixed_heap"
+            - name: "envoy.resource_monitors.cgroup_memory"
               threshold:
                 value: 0.90
         - name: "envoy.overload_actions.reduce_timeouts"
@@ -49,18 +58,18 @@ data:
               - timer: HTTP_DOWNSTREAM_CONNECTION_IDLE
                 min_timeout: 2s
           triggers:
-            - name: "envoy.resource_monitors.fixed_heap"
+            - name: "envoy.resource_monitors.cgroup_memory"
               scaled:
                 scaling_threshold: 0.85
                 saturation_threshold: 0.95
         - name: "envoy.overload_actions.stop_accepting_requests"
           triggers:
-            - name: "envoy.resource_monitors.fixed_heap"
+            - name: "envoy.resource_monitors.cgroup_memory"
               threshold:
                 value: 0.95
         - name: "envoy.overload_actions.stop_accepting_connections"
           triggers:
-            - name: "envoy.resource_monitors.fixed_heap"
+            - name: "envoy.resource_monitors.cgroup_memory"
               threshold:
                 value: 0.98
 {{- end }}

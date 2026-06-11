@@ -135,11 +135,12 @@ proxy:
   # state heap sits far below the first (0.80) rung.
   overload:
     enabled: true
-    # Heap budget for the fixed_heap monitor. Keep at ~75% of
-    # resources.limits.memory: Envoy's heap excludes stats memory, code and
-    # the hot-restart /dev/shm segment, all of which also count against the
-    # container limit. Bump BOTH together.
-    maxHeapSizeBytes: 805306368 # 768Mi = 75% of 1Gi
+    # Optional upper bound for the cgroup_memory monitor; when unset (0) the
+    # container's own cgroup limit (resources.limits.memory) is the
+    # denominator, so the thresholds track the real OOM kill line and nothing
+    # needs bumping in lockstep. Set only to engage the ladder below the
+    # cgroup limit (e.g. canary-tightening).
+    maxMemoryBytes: 0
 
 # AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
 # The chart never bakes credentials into the image. By default it references an
