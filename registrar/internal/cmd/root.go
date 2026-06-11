@@ -134,6 +134,15 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	// Snapshot-serving RPCs block until the syncer's first cycle so a freshly
 	// rolled registrar never serves an empty/partial world view to agents.
 	grpcSrv.GateOnSync(syncer.Synced())
+	// Snapshot-first registry mutations: apply + broadcast immediately, flush
+	// the external-registry write asynchronously with retries (write-behind;
+	// the sync loop overlays pending intents so it never regresses them).
+	writeBehind := server.NewWriteBehindQueue(reg, l, serverMetrics)
+	grpcSrv.UseWriteBehind(writeBehind)
+	syncer.UseWriteBehind(writeBehind)
+	if err = m.Add(writeBehind); err != nil {
+		return fmt.Errorf("failed to add write-behind queue: %w", err)
+	}
 	if err = m.Add(grpcSrv); err != nil {
 		return fmt.Errorf("failed to add gRPC server: %w", err)
 	}

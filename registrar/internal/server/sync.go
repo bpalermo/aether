@@ -28,6 +28,10 @@ type Syncer struct {
 	log          logr.Logger
 	metrics      *Metrics
 	firstSync    bool
+	// writeBehind, when set, overlays still-pending snapshot-first intents
+	// onto the fetched external state before Diff/Replace, so the sync never
+	// regresses an intent the external registry has not materialized yet.
+	writeBehind *WriteBehindQueue
 	// synced is closed after the first successful sync cycle; RPCs that serve
 	// snapshot state gate on it so a freshly restarted registrar never serves
 	// an empty/partial view of the world (agents deriving route configs from
@@ -49,6 +53,10 @@ func NewSyncer(reg registry.Registry, snapshot *Snapshot, broadcaster *Broadcast
 		synced:       make(chan struct{}),
 	}
 }
+
+// UseWriteBehind wires the write-behind queue's pending-intent overlay into
+// the sync cycle.
+func (s *Syncer) UseWriteBehind(q *WriteBehindQueue) { s.writeBehind = q }
 
 // Synced returns a channel that is closed once the first sync cycle has
 // completed and the snapshot reflects the external registry.
@@ -100,6 +108,13 @@ func (s *Syncer) sync(ctx context.Context) {
 			newState[svcName] = make(map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
 		}
 		newState[svcName][registryv1.Service_PROTOCOL_HTTP] = eps
+	}
+
+	// Reconcile pending write-behind intents: release the observed ones,
+	// overlay the rest so neither the diff events nor the replacement
+	// snapshot regress them toward the external registry's stale view.
+	if s.writeBehind != nil {
+		s.writeBehind.Overlay(newState)
 	}
 
 	// Compute diff and apply.

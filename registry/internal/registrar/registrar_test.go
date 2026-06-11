@@ -544,3 +544,22 @@ func TestSnapshotCompleteClosesReady(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, eps, 1, "marker must not mutate the cache")
 }
+
+// TestReconnectSignal verifies the watch loop's reconnect notification fires
+// (coalesced) so the agent can re-assert local registrations a failed-over
+// registrar replica may have lost from its write-behind queue.
+func TestReconnectSignal(t *testing.T) {
+	r := newTestRegistry()
+	select {
+	case <-r.Reconnects():
+		t.Fatal("no reconnect signal expected before any connection")
+	default:
+	}
+	r.signalReconnect()
+	r.signalReconnect() // coalesces, must not block
+	select {
+	case <-r.Reconnects():
+	default:
+		t.Fatal("reconnect signal expected")
+	}
+}
