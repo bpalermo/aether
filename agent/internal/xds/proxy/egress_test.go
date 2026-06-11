@@ -126,9 +126,31 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
 func TestEndpointHealthStatus(t *testing.T) {
 	assert.Equal(t, corev3.HealthStatus_UNHEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY}))
+	// DRAINING (deletion requested) maps to UNHEALTHY, not Envoy DRAINING:
+	// paired with close_connections_on_host_health_failure it closes the idle
+	// H2 pools at drain-mark time, pre-empting the app-exit GOAWAY race that
+	// strands claimed-but-unanswered streams (P2, instrumented 2026-06-11).
+	assert.Equal(t, corev3.HealthStatus_UNHEALTHY,
+		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_DRAINING}))
 	// Unspecified (older agents / fresh endpoints) and explicit healthy both route.
 	assert.Equal(t, corev3.HealthStatus_HEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{}))
 	assert.Equal(t, corev3.HealthStatus_HEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY}))
+}
+
+// TestServiceClusterDrainPoolClose pins the P2 drain-gap fix shape: pool
+// connections close on (EDS) health failure, panic routing is off, and the
+// retry circuit breaker has headroom for the drain-time reset burst.
+func TestServiceClusterDrainPoolClose(t *testing.T) {
+	c := NewServiceCluster("svc-x")
+	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
+		"pools must close at drain-mark, not at the app-exit GOAWAY race")
+	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
+	assert.Zero(t, c.GetCommonLbConfig().GetHealthyPanicThreshold().GetValue(),
+		"panic spraying at known-unhealthy hosts is never the mesh behavior")
+	thresholds := c.GetCircuitBreakers().GetThresholds()
+	require.Len(t, thresholds, 1)
+	assert.Equal(t, uint32(16), thresholds[0].GetMaxRetries().GetValue(),
+		"drain-time reset bursts must not be sacrificed to the retry breaker")
 }
