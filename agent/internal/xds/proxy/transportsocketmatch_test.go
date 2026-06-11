@@ -61,3 +61,25 @@ func TestUpstreamTransportSocketMatcher(t *testing.T) {
 	require.NoError(t, proto.Unmarshal(action.GetTypedConfig().GetValue(), &nameAction))
 	assert.Equal(t, idA, nameAction.GetName())
 }
+
+// TestUpstreamTransportSocketMatchesDeterministic verifies the matches are
+// byte-identical regardless of input order: transport_socket_matches order is
+// part of the cluster's delta-xDS version hash, and callers build the ID list
+// from map iteration — a reshuffled order made every service cluster hash as
+// changed on every snapshot bump (full CDS replace + EDS re-warm per push).
+func TestUpstreamTransportSocketMatchesDeterministic(t *testing.T) {
+	idA := "spiffe://aether.internal/ns/aether-test/sa/echo"
+	idB := "spiffe://aether.internal/ns/aether-test/sa/client"
+	idC := "spiffe://aether.internal/ns/aether-test/sa/loadgen"
+
+	a := UpstreamTransportSocketMatches([]string{idC, idA, idB}, "spiffe://aether.internal")
+	b := UpstreamTransportSocketMatches([]string{idB, idC, idA, idB}, "spiffe://aether.internal")
+
+	require.Len(t, a, 3)
+	require.Len(t, b, 3)
+	// Sorted output order, independent of input order.
+	assert.Equal(t, []string{idB, idA, idC}, []string{a[0].GetName(), a[1].GetName(), a[2].GetName()})
+	for i := range a {
+		assert.True(t, proto.Equal(a[i], b[i]), "match %d must be identical across input orders", i)
+	}
+}

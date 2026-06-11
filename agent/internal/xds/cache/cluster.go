@@ -43,6 +43,9 @@ func (c *SnapshotCache) RemoveEndpoint(ctx context.Context, clusterName string, 
 	for _, ep := range entry.endpoints {
 		cla.Endpoints = append(cla.Endpoints, ep)
 	}
+	// Map iteration order is random; sort so the remaining (unchanged) endpoints
+	// don't make the EDS resource hash as changed beyond the actual removal.
+	proxy.SortLocalityLbEndpoints(cla.Endpoints)
 	entry.loadAssignment = cla
 
 	c.clusters[clusterName] = entry
@@ -172,6 +175,9 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			cla.Endpoints = append(cla.Endpoints, lbEp)
 			epMap[endpoint.GetIp()] = lbEp
 		}
+		// Registry listing order is not guaranteed stable across syncs; sort so a
+		// re-sync with an unchanged endpoint set never hashes as an EDS change.
+		proxy.SortLocalityLbEndpoints(cla.Endpoints)
 
 		c.clusters[serviceName] = clusterEntry{
 			cluster:        cluster,
