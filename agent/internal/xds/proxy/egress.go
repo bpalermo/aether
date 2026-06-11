@@ -64,9 +64,30 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 			},
 		},
 		// Don't route to a newly discovered endpoint until its first readiness check
-		// passes, so traffic never lands on a not-yet-ready pod.
+		// passes, so traffic never lands on a not-yet-ready pod. Panic routing is
+		// disabled: with draining endpoints now reported UNHEALTHY (see
+		// endpointHealthStatus), a heavy simultaneous roll could cross Envoy's
+		// default 50% panic threshold and spray traffic at known-unhealthy hosts;
+		// deterministic exclusion + per-request retries + the registry's own
+		// health pipeline are the mesh's answer, not panic spraying.
 		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
 			IgnoreNewHostsUntilFirstHc: true,
+			HealthyPanicThreshold:      &typev3.Percent{Value: 0},
+		},
+		// Close pool connections the moment an endpoint goes unhealthy (incl.
+		// the EDS drain mark above): the pools are idle then, and closing them
+		// pre-empts the app-exit GOAWAY race that strands claimed-but-unanswered
+		// streams. See endpointHealthStatus.
+		CloseConnectionsOnHostHealthFailure: true,
+		// Retry headroom: the default cluster max_retries circuit breaker (3
+		// concurrent) rejected retries during roll bursts (retry_overflow,
+		// instrumented 2026-06-11); pool-close at drain-mark briefly retries a
+		// burst of pre-request resets, which must never be sacrificed to the
+		// breaker.
+		CircuitBreakers: &clusterv3.CircuitBreakers{
+			Thresholds: []*clusterv3.CircuitBreakers_Thresholds{
+				{MaxRetries: wrapperspb.UInt32(16)},
+			},
 		},
 		// With active health checks configured, Envoy by default keeps an
 		// EDS-removed host in rotation until its health check fails — which would
@@ -178,9 +199,19 @@ func endpointHealthStatus(endpoint *registryv1.ServiceEndpoint) corev3.HealthSta
 	case registryv1.ServiceEndpoint_HEALTH_UNHEALTHY:
 		return corev3.HealthStatus_UNHEALTHY
 	case registryv1.ServiceEndpoint_HEALTH_DRAINING:
-		// Pod deletion requested: excluded from new selections, established
-		// connections drain gracefully.
-		return corev3.HealthStatus_DRAINING
+		// Pod deletion requested. UNHEALTHY — deliberately NOT Envoy's
+		// DRAINING: DRAINING excludes the host from new selections but keeps
+		// the established H2 pool connections open until the app's shutdown
+		// GOAWAY arrives, and streams the server had claimed but not yet
+		// answered at that instant fail non-retriably (the residual ~3-7
+		// fails per pod delete, P2; instrumented 2026-06-11: rx_reset=0,
+		// retry_success=retry_total — every failure was a stream the GOAWAY
+		// race left unretriable). UNHEALTHY combined with the cluster's
+		// close_connections_on_host_health_failure closes those pools at
+		// drain-mark time instead (~t0+0.8s), while the app is still healthy
+		// and the pools are idle; anything in flight resets pre-request and
+		// retries successfully onto a live endpoint.
+		return corev3.HealthStatus_UNHEALTHY
 	default:
 		return corev3.HealthStatus_HEALTHY
 	}
