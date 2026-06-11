@@ -27,6 +27,7 @@ const (
 	exitDrained             = "drained"              // older epoch finished draining after a hot restart
 	exitUnexpected          = "unexpected"           // newest epoch died — pod restart follows
 	exitSuccessorTerminated = "successor_terminated" // cross-pod handoff: successor's parent-shutdown protocol
+	exitBindCollision       = "bind_collision_retry" // fresh epoch lost the base-id socket bind race; retried in-process
 )
 
 // SupervisorMetrics holds the hot-restart lifecycle instruments. All methods

@@ -54,6 +54,16 @@ with the destination service in the `Host` header (`Host: my-svc` or
 `my-svc.aether.internal`). Every hop is mTLS between workload identities; the
 callee sees the caller's SPIFFE ID in `x-forwarded-client-cert`.
 
+**Use keepalive (or HTTP/2) connections to the outbound listener.** The mesh
+pools upstream mTLS connections *per downstream connection* (this is what
+keeps one pod's certificate from ever being reused for another pod's
+traffic). A long-lived client connection — an HTTP/1.1 keepalive connection
+or an HTTP/2/gRPC channel, whose multiplexed streams all share one upstream —
+reuses its mTLS connection across requests. Connection-per-request clients
+pay a fresh mTLS handshake per request and each abandoned upstream lingers
+until the 30s idle timeout reclaims it: it works, but it is the expensive
+traffic shape.
+
 ## Hitless rolling restarts
 
 The mesh handles most of the work automatically — endpoints are marked

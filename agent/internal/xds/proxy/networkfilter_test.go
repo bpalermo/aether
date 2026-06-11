@@ -5,7 +5,9 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	setFilterStatev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	set_filter_state_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -87,4 +89,18 @@ func TestHCMDownstreamIdleTimeout(t *testing.T) {
 	assert.Equal(t, downstreamIdleTimeout, idle.AsDuration())
 	assert.Greater(t, downstreamIdleTimeout, config.UpstreamIdleTimeout,
 		"downstream timeout must exceed upstream so the client side disconnects first")
+}
+
+// TestNetnsFilterStateSharedOnce verifies the netns filter state is shared with
+// the immediate upstream connection only (ONCE): that is the hop where the
+// service cluster's transport-socket matcher selects the source pod's cert.
+// TRANSITIVE was HBONE-era multi-hop plumbing; re-propagating the source netns
+// into any future chained hop could silently drive cert selection there.
+func TestNetnsFilterStateSharedOnce(t *testing.T) {
+	f := buildNetworkNamespaceFilterState()
+	var cfg set_filter_state_v3.Config
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(&cfg))
+	require.Len(t, cfg.GetOnNewConnection(), 1)
+	v := cfg.GetOnNewConnection()[0]
+	assert.Equal(t, setFilterStatev3.FilterStateValue_ONCE, v.GetSharedWithUpstream())
 }

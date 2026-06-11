@@ -115,6 +115,19 @@ proxy:
     shmSizeLimit: 64Mi
     # Strategy B: host tmpfs dir shared across overlapping pods, mounted at /dev/shm.
     shmHostPath: /run/aether/shm
+  # Proxy container resources. Previously unset (fully unbounded): a leaking
+  # Envoy could eat the node until the kubelet itself flapped (observed
+  # 2026-06-11, 3.5 GiB RSS) instead of being contained by an OOM kill, which
+  # the cross-pod hot-restart machinery recovers from with a bounded blip.
+  # Memory request == limit (Guaranteed for the data plane's memory); CPU is
+  # requested but deliberately UNLIMITED — throttling the data plane under
+  # load turns CPU contention into latency and failed health checks.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 1Gi
 
 # AWS credentials consumed by the agent (DynamoDB / Cloud Map registry backends).
 # The chart never bakes credentials into the image. By default it references an

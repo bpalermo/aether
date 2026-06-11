@@ -55,6 +55,26 @@ const (
 	// mid stats-merge). A reachable admin answering at a different epoch — the
 	// normal mid-handoff state — never trips this.
 	defaultAdminUnresponsiveDeadline = 30 * time.Second
+
+	// Bind-collision retry (cross-pod mode only). When epoch detection cannot
+	// confirm a predecessor (stale heartbeat: its admin probes were timing out
+	// under node load, so its LIVE-gated heartbeat stopped) but the predecessor's
+	// Envoy is in fact still alive, a fresh epoch-0 launch loses the base-id
+	// domain-socket bind race ("unable to bind domain socket ... errno=98") and
+	// exits within milliseconds. Exiting the supervisor non-zero hands the retry
+	// to the kubelet's CrashLoopBackOff (10→20→40→80s gaps; observed as a ~165s
+	// node data-plane gap, e2e 2026-06-11) — instead, a newest epoch that dies
+	// non-LIVE within bindCollisionWindow of launch is retried in-process on a
+	// tight cadence: re-run epoch detection (the predecessor may have become
+	// confirmable, or finally exited) and relaunch. The predecessor keeps
+	// serving the node's traffic the whole time; the first attempt after it
+	// exits binds cleanly. Bounded by maxBindCollisionRetries so a genuinely
+	// broken Envoy (a bad bootstrap also dies fast) still surfaces as a pod
+	// crash; the budget comfortably exceeds the predecessor pod's 180s
+	// termination grace, the latest the collision can possibly resolve.
+	bindCollisionWindow     = 5 * time.Second
+	bindCollisionRetryPause = 3 * time.Second
+	maxBindCollisionRetries = 90
 )
 
 // Config configures the Envoy hot-restart supervisor.
@@ -134,7 +154,38 @@ type Supervisor struct {
 	// --parent-shutdown-time-s, so the pod must not report Ready (which lets the
 	// DaemonSet delete the old pod) until that has elapsed — otherwise the old
 	// Envoy is killed out from under the still-attached successor (errno 111).
+	// Guarded by mu: bind-collision retries re-run epoch detection (and re-gate)
+	// while watchLiveness is already polling.
 	readyGate time.Time
+}
+
+// setReadyGate / readyGateTime guard readyGate for concurrent access between
+// Run (bind-collision retries) and watchLiveness.
+func (s *Supervisor) setReadyGate(t time.Time) {
+	s.mu.Lock()
+	s.readyGate = t
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) readyGateTime() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readyGate
+}
+
+// gateReadinessIfSuccessor delays readiness when epoch detection selected a
+// cross-pod successor epoch (>0): the predecessor must be terminated by this
+// Envoy's own parent-shutdown protocol before the pod may report Ready.
+func (s *Supervisor) gateReadinessIfSuccessor() {
+	if s.cfg.StateDir == "" {
+		return
+	}
+	s.mu.Lock()
+	successor := s.nextEpoch > 0
+	s.mu.Unlock()
+	if successor {
+		s.setReadyGate(time.Now().Add(s.cfg.ParentShutdownTime + readyGateBuffer))
+	}
 }
 
 // readyGateBuffer is added to ParentShutdownTime when gating a cross-pod
@@ -174,11 +225,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	// then maintain the readiness marker and the LIVE-gated node epoch heartbeat.
 	// No-ops when StateDir / ReadyMarkerPath are unset (Strategy A).
 	s.initStartEpoch(ctx)
-	if s.cfg.StateDir != "" && s.nextEpoch > 0 {
-		// Cross-pod successor: hold readiness until the predecessor has been
-		// terminated by this Envoy's own parent-shutdown protocol.
-		s.readyGate = time.Now().Add(s.cfg.ParentShutdownTime + readyGateBuffer)
-	}
+	s.gateReadinessIfSuccessor()
 	go s.watchLiveness(ctx)
 
 	if err := s.hotRestart(); err != nil {
@@ -188,6 +235,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	debounce := time.NewTimer(debounceDelay)
 	debounce.Stop()
 	var debounceC <-chan time.Time
+	bindRetries := 0
 
 	arm := func(reason string) {
 		s.log.V(1).Info("hot restart armed", "reason", reason, "debounce", debounceDelay)
@@ -269,6 +317,32 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					s.reap(exit.epoch)
 					<-ctx.Done()
 					return nil
+				}
+				// Suspected base-id bind collision (see the bindCollision*
+				// constants): a fresh epoch that died non-LIVE within seconds of
+				// launch while a predecessor may still hold the domain socket.
+				// Retry epoch detection in-process — the predecessor keeps
+				// serving meanwhile — instead of exiting into the kubelet's
+				// CrashLoopBackOff.
+				if s.cfg.StateDir != "" && s.quickNonLiveExit() && bindRetries < maxBindCollisionRetries {
+					bindRetries++
+					s.metrics.childExited(exitBindCollision)
+					s.reap(exit.epoch)
+					s.log.Info("suspected base-id bind collision with a live predecessor; retrying epoch detection in-process",
+						"epoch", exit.epoch, "attempt", bindRetries, "error", exit.err.Error())
+					select {
+					case <-ctx.Done():
+						s.shutdown()
+						return nil
+					case <-time.After(bindCollisionRetryPause):
+					}
+					s.resetEpochForRetry()
+					s.initStartEpoch(ctx)
+					s.gateReadinessIfSuccessor()
+					if err := s.hotRestart(); err != nil {
+						return fmt.Errorf("relaunching envoy after bind-collision retry: %w", err)
+					}
+					continue
 				}
 				// The newest epoch died unexpectedly: nothing left serving traffic.
 				// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).
@@ -397,6 +471,24 @@ func (s *Supervisor) epochProgress() (launched time.Time, live bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.epochLaunched, s.epochLive
+}
+
+// quickNonLiveExit reports whether the newest epoch died without ever reaching
+// LIVE and within bindCollisionWindow of launch — the bind-collision signature
+// (a base-id domain-socket bind failure exits in milliseconds, long before any
+// xDS-gated initialization could fail).
+func (s *Supervisor) quickNonLiveExit() bool {
+	launched, live := s.epochProgress()
+	return !live && time.Since(launched) < bindCollisionWindow
+}
+
+// resetEpochForRetry rewinds epoch selection so a bind-collision retry re-runs
+// initStartEpoch from scratch (attach at E+1 if the predecessor has become
+// confirmable, else epoch 0 again once the socket is free).
+func (s *Supervisor) resetEpochForRetry() {
+	s.mu.Lock()
+	s.nextEpoch = 0
+	s.mu.Unlock()
 }
 
 // markEpochLive records that the newest epoch has been confirmed LIVE.

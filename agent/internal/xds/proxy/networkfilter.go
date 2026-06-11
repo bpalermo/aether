@@ -48,7 +48,13 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 				// Shared with the upstream connection so the service cluster's
 				// transport-socket matcher can read the source pod's network namespace
 				// and select that pod's client certificate for the outbound mTLS.
-				SharedWithUpstream: setFilterStatev3.FilterStateValue_TRANSITIVE,
+				// ONCE (immediate upstream connection only) is sufficient for the
+				// single-hop transport: TRANSITIVE — which re-propagates through any
+				// further upstream hops — was HBONE/tunnel-era (#86) plumbing for the
+				// two-layer upstream path and was left behind when #98 flattened the
+				// transport; scoping it to one hop keeps a future chained/internal
+				// hop from silently inheriting source-netns cert selection.
+				SharedWithUpstream: setFilterStatev3.FilterStateValue_ONCE,
 			},
 		},
 	}
