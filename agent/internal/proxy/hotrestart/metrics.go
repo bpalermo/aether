@@ -43,6 +43,7 @@ type SupervisorMetrics struct {
 	wedges              metric.Int64Counter
 	restartTriggers     metric.Int64Counter
 	childExits          metric.Int64Counter
+	configRejections    metric.Int64Counter
 	predecessorDetected metric.Int64Gauge
 	drainDuration       metric.Float64Histogram
 	readyTransitions    metric.Int64Counter
@@ -74,6 +75,10 @@ func NewSupervisorMetrics(meter metric.Meter) (*SupervisorMetrics, error) {
 	if m.childExits, err = meter.Int64Counter("aether.supervisor.child_exits",
 		metric.WithDescription("Supervised Envoy process exits, by kind")); err != nil {
 		return nil, fmt.Errorf("child exits: %w", err)
+	}
+	if m.configRejections, err = meter.Int64Counter("aether.supervisor.config_validation_failures",
+		metric.WithDescription("Changed bootstrap configs rejected by node-local envoy --mode validate before hot restart (each one is a prevented outage; the current epoch keeps serving)")); err != nil {
+		return nil, fmt.Errorf("config validation failures: %w", err)
 	}
 	if m.predecessorDetected, err = meter.Int64Gauge("aether.supervisor.predecessor_detected",
 		metric.WithDescription("1 if a live predecessor was found at startup (cross-pod hot restart), 0 for a fresh epoch-0 start")); err != nil {
@@ -126,6 +131,13 @@ func (m *SupervisorMetrics) childExited(kind string) {
 		return
 	}
 	m.childExits.Add(context.Background(), 1, metric.WithAttributes(attrExitKind.String(kind)))
+}
+
+func (m *SupervisorMetrics) configValidationFailed() {
+	if m == nil {
+		return
+	}
+	m.configRejections.Add(context.Background(), 1)
 }
 
 func (m *SupervisorMetrics) predecessorFound(found bool) {

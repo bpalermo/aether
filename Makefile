@@ -79,3 +79,12 @@ load-all: load-agent-image load-cni-install-image load-registrar-image
 
 .PHONY: push-all
 push-all: push-agent-image push-cni-install-image push-registrar-image
+
+# Publish everything in the order that works: image manifests FIRST, then the
+# charts (chart-only push targets). The combined `:*.push` targets race the
+# chart's digest reference against the image manifest upload and fail with
+# `Tag ... not found` (observed repeatedly); pushing images first avoids it.
+.PHONY: publish
+publish: push-all
+	@bazel run //charts/agent:agent.push_registry --stamp
+	@bazel run //charts/registrar:registrar.push_registry --stamp

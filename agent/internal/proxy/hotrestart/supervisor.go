@@ -289,6 +289,23 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				arm("deferred_not_live")
 				continue
 			}
+			// Pre-validate the changed bootstrap ON THIS NODE before forking
+			// the new epoch. Every supervisor sees a ConfigMap change at the
+			// same time (fsnotify), so a config that fails at runtime takes
+			// down every node's data plane simultaneously, bypassing all
+			// rollout safety — observed 2026-06-11 (rev 64): a resource
+			// monitor that validated fine in docker was fatal in the
+			// privileged pod environment, and the fleet-wide in-place hot
+			// restart turned it into a 13-minute cluster outage. envoy
+			// --mode validate executes bootstrap initialization in the same
+			// environment as the real fork, so it catches exactly that
+			// class. On failure: keep the current epoch serving, count it,
+			// and wait for the next config change.
+			if err := s.validateConfig(ctx); err != nil {
+				s.metrics.configValidationFailed()
+				s.log.Error(err, "changed bootstrap config failed node-local validation; KEEPING current epoch (hot restart skipped)")
+				continue
+			}
 			s.log.Info("performing hot restart")
 			if err := s.hotRestart(); err != nil {
 				s.log.Error(err, "hot restart failed; keeping current epoch")
@@ -439,6 +456,33 @@ func (s *Supervisor) watchConfig(ctx context.Context, trigger chan<- struct{}) {
 			s.log.Error(err, "config watch error")
 		}
 	}
+}
+
+// configValidateTimeout bounds the node-local `envoy --mode validate` run. A
+// hung validation must not wedge the trigger loop; validation of this
+// bootstrap takes well under a second normally.
+const configValidateTimeout = 30 * time.Second
+
+// validateConfig runs `envoy --mode validate` against the (changed) bootstrap
+// in the exact environment the real fork would use — same binary, same
+// container, same cgroup/namespace context — so environment-dependent
+// bootstrap failures (the class that docker-side validation cannot catch)
+// are detected before the serving epoch is put at risk. ExtraArgs are passed
+// through because the config may reference --service-cluster/--service-node.
+func (s *Supervisor) validateConfig(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, configValidateTimeout)
+	defer cancel()
+
+	args := append([]string{"--mode", "validate", "-c", s.cfg.ConfigPath}, s.cfg.ExtraArgs...)
+	out, err := exec.CommandContext(ctx, s.cfg.EnvoyPath, args...).CombinedOutput()
+	if err != nil {
+		tail := out
+		if len(tail) > 2048 {
+			tail = tail[len(tail)-2048:]
+		}
+		return fmt.Errorf("envoy --mode validate: %w; output tail: %s", err, string(tail))
+	}
+	return nil
 }
 
 // buildEnvoyCmd constructs the Envoy invocation for a given restart epoch.
