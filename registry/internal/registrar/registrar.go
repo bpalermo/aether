@@ -65,6 +65,14 @@ type RegistrarRegistry struct {
 	// burst of watch events collapses into a single pending signal.
 	notify chan struct{}
 
+	// reconnected signals each successful watch (re)connection (coalesced,
+	// non-blocking). The agent re-asserts its local registrations on it: a
+	// reconnect may mean a fresh/failed-over registrar replica whose
+	// write-behind queue (and therefore snapshot) lost in-flight intents —
+	// re-assertion makes that state loss self-healing at reconnect speed
+	// instead of the 60s ghost sweep.
+	reconnected chan struct{}
+
 	// ready is closed when the first SNAPSHOT_COMPLETE event arrives — the
 	// local cache then holds a complete world view. Consumers deriving config
 	// from the cache (the agent's initial snapshot) wait on it so they never
@@ -85,12 +93,13 @@ func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
 	}
 
 	return &RegistrarRegistry{
-		log:     log.WithName("registrar-registry"),
-		config:  cfg,
-		metrics: metrics,
-		cache:   make(map[string][]*registryv1.ServiceEndpoint),
-		notify:  make(chan struct{}, 1),
-		ready:   make(chan struct{}),
+		log:         log.WithName("registrar-registry"),
+		config:      cfg,
+		metrics:     metrics,
+		cache:       make(map[string][]*registryv1.ServiceEndpoint),
+		notify:      make(chan struct{}, 1),
+		ready:       make(chan struct{}),
+		reconnected: make(chan struct{}, 1),
 	}
 }
 
@@ -101,6 +110,21 @@ func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
 // registry.ChangeNotifier capability.
 func (r *RegistrarRegistry) Changes() <-chan struct{} {
 	return r.notify
+}
+
+// Reconnects returns a channel receiving a (coalesced) signal after each
+// successful watch stream (re)connection. It satisfies the
+// registry.ReconnectNotifier capability.
+func (r *RegistrarRegistry) Reconnects() <-chan struct{} {
+	return r.reconnected
+}
+
+// signalReconnect performs a non-blocking, coalescing send on reconnected.
+func (r *RegistrarRegistry) signalReconnect() {
+	select {
+	case r.reconnected <- struct{}{}:
+	default:
+	}
 }
 
 // WaitReady blocks until the watch cache holds a complete snapshot (the first
@@ -290,6 +314,7 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		backoff = initialBackoff
 		r.metrics.streamReconnected(ctx)
 		r.log.V(1).Info("watch stream connected")
+		r.signalReconnect()
 
 		lastVersion = r.processStream(ctx, stream, lastVersion)
 	}

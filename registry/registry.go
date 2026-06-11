@@ -52,3 +52,12 @@ type ChangeNotifier interface {
 type ReadyWaiter interface {
 	WaitReady(ctx context.Context) error
 }
+
+// ReconnectNotifier is an optional capability for Registry implementations
+// backed by a watch stream. Reconnects signals (coalesced) each successful
+// stream (re)connection; consumers re-assert state the far side may have lost
+// across the reconnect (e.g. the agent re-registers its local pods, repairing
+// a failed-over registrar's lost write-behind intents at reconnect speed).
+type ReconnectNotifier interface {
+	Reconnects() <-chan struct{}
+}

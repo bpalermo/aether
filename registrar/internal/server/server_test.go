@@ -106,3 +106,26 @@ func TestListAllEndpointsGatedOnFirstSync(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, resp.GetServices(), 1)
 }
+
+// TestRegisterEndpointSnapshotFirst verifies write-behind semantics at the RPC
+// boundary: a failing external registry must NOT fail the RPC or delay
+// visibility — the snapshot and broadcast happen immediately and the external
+// write is queued (the rev-68 regression: a failed external write left a
+// serving pod invisible until the 60s sweep).
+func TestRegisterEndpointSnapshotFirst(t *testing.T) {
+	reg := &flakyRegistry{failing: true}
+	s := newGateTestServer(t)
+	q := NewWriteBehindQueue(reg, logr.Discard(), nil)
+	s.UseWriteBehind(q)
+
+	_, err := s.RegisterEndpoint(context.Background(), &registrarv1.RegisterEndpointRequest{
+		ServiceName: "svc-new",
+		Protocol:    registryv1.Service_PROTOCOL_HTTP,
+		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.9"},
+	})
+	require.NoError(t, err, "external-registry failure must not fail the RPC")
+
+	eps := s.snapshot.GetAll(registryv1.Service_PROTOCOL_HTTP)
+	require.Contains(t, eps, "svc-new", "endpoint must be in the snapshot immediately")
+	assert.True(t, q.Shielding("svc-new", "10.0.0.9"), "external write must be queued")
+}

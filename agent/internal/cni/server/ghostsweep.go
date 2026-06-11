@@ -33,8 +33,18 @@ import (
 const ghostSweepInterval = 60 * time.Second
 
 // runGhostSweepLoop periodically reconciles this node's registry endpoints
-// against local pod storage. It returns when ctx is cancelled.
+// against local pod storage, and additionally runs an immediate sweep after
+// each registry watch (re)connection: a reconnect may mean a fresh or
+// failed-over registrar whose snapshot lost this node's in-flight
+// (write-behind) registrations — re-asserting them at reconnect speed bounds
+// that loss window to seconds instead of a full sweep interval. It returns
+// when ctx is cancelled.
 func (s *CNIServer) runGhostSweepLoop(ctx context.Context) {
+	var reconnects <-chan struct{}
+	if rn, ok := s.registry.(registry.ReconnectNotifier); ok {
+		reconnects = rn.Reconnects()
+	}
+
 	ticker := time.NewTicker(ghostSweepInterval)
 	defer ticker.Stop()
 	for {
@@ -42,6 +52,9 @@ func (s *CNIServer) runGhostSweepLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.sweepGhostEndpoints(ctx)
+		case <-reconnects:
+			s.log.V(1).Info("registry watch reconnected; re-asserting this node's registrations")
 			s.sweepGhostEndpoints(ctx)
 		}
 	}

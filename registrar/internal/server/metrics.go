@@ -29,6 +29,10 @@ type Metrics struct {
 	syncErrors      metric.Int64Counter
 	syncEvents      metric.Int64Counter
 	snapshotVersion metric.Int64Gauge
+	wbQueueDepth    metric.Int64Gauge
+	wbFlushFailures metric.Int64Counter
+	wbDrops         metric.Int64Counter
+	wbShields       metric.Int64Counter
 }
 
 // NewMetrics registers the registrar server instruments on the given meter.
@@ -64,6 +68,22 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.snapshotVersion, err = meter.Int64Gauge("aether.registrar.snapshot.version",
 		metric.WithDescription("Current endpoint snapshot version (compare with aether.agent.registry.last_version for skew)")); err != nil {
 		return nil, fmt.Errorf("snapshot version: %w", err)
+	}
+	if m.wbQueueDepth, err = meter.Int64Gauge("aether.registrar.writebehind.queue_depth",
+		metric.WithDescription("Pending external-registry writes (snapshot-first ops not yet flushed and observed)")); err != nil {
+		return nil, fmt.Errorf("writebehind queue depth: %w", err)
+	}
+	if m.wbFlushFailures, err = meter.Int64Counter("aether.registrar.writebehind.flush_failures",
+		metric.WithDescription("External-registry write attempts that failed and were rescheduled")); err != nil {
+		return nil, fmt.Errorf("writebehind flush failures: %w", err)
+	}
+	if m.wbDrops, err = meter.Int64Counter("aether.registrar.writebehind.drops",
+		metric.WithDescription("Write-behind ops dropped after exceeding max age (agents' re-assertion/sweep repair these)")); err != nil {
+		return nil, fmt.Errorf("writebehind drops: %w", err)
+	}
+	if m.wbShields, err = meter.Int64Counter("aether.registrar.writebehind.shielded_intents",
+		metric.WithDescription("Pending intents overlaid onto a sync cycle's fetched state (each prevented a snapshot regression)")); err != nil {
+		return nil, fmt.Errorf("writebehind shields: %w", err)
 	}
 
 	return m, nil
@@ -125,4 +145,32 @@ func (m *Metrics) syncFailed(ctx context.Context, seconds float64) {
 	}
 	m.syncDuration.Record(ctx, seconds)
 	m.syncErrors.Add(ctx, 1)
+}
+
+func (m *Metrics) wbDepth(ctx context.Context, depth int) {
+	if m == nil {
+		return
+	}
+	m.wbQueueDepth.Record(ctx, int64(depth))
+}
+
+func (m *Metrics) wbFlushFailed(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.wbFlushFailures.Add(ctx, 1)
+}
+
+func (m *Metrics) wbDropped(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.wbDrops.Add(ctx, 1)
+}
+
+func (m *Metrics) wbShielded(ctx context.Context, n int) {
+	if m == nil {
+		return
+	}
+	m.wbShields.Add(ctx, int64(n))
 }

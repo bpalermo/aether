@@ -27,6 +27,11 @@ type RegistrarServer struct {
 	log         logr.Logger
 	metrics     *Metrics
 
+	// writeBehind, when set (UseWriteBehind), makes RegisterEndpoint /
+	// UnregisterEndpoint snapshot-first: apply + broadcast immediately, queue
+	// the external-registry write. Nil = legacy write-through (tests).
+	writeBehind *WriteBehindQueue
+
 	// synced, when set (GateOnSync), gates snapshot-serving RPCs until the
 	// syncer's first cycle completes: a freshly restarted registrar must not
 	// serve an empty/partial world view — agents derive route configs from it
@@ -36,6 +41,9 @@ type RegistrarServer struct {
 	// Embed xds.Server for gRPC lifecycle management.
 	xds.Server
 }
+
+// UseWriteBehind enables snapshot-first registry mutations through q.
+func (s *RegistrarServer) UseWriteBehind(q *WriteBehindQueue) { s.writeBehind = q }
 
 // GateOnSync makes snapshot-serving RPCs (WatchEndpoints, ListAllEndpoints)
 // block until ch is closed (the syncer's first completed cycle). Nil leaves
@@ -89,15 +97,22 @@ func NewRegistrarServer(
 	return srv
 }
 
-// RegisterEndpoint delegates to the external registry and broadcasts the change.
+// RegisterEndpoint applies the change to the snapshot and broadcasts it
+// immediately (discovery moves at watch latency), then writes the external
+// registry — through the write-behind queue when enabled, so a failing
+// external write can never make a serving pod invisible to the mesh (rev-68
+// roll regression). Without a queue (tests/legacy) the write is synchronous
+// and failures fail the RPC.
 func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1.RegisterEndpointRequest) (*registrarv1.RegisterEndpointResponse, error) {
 	s.log.V(1).Info("RegisterEndpoint", "service", req.GetServiceName(), "ip", req.GetEndpoint().GetIp())
 
-	if err := s.registry.RegisterEndpoint(ctx, req.GetServiceName(), req.GetProtocol(), req.GetEndpoint()); err != nil {
+	if s.writeBehind != nil {
+		s.writeBehind.EnqueueRegister(req.GetServiceName(), req.GetProtocol(), req.GetEndpoint())
+	} else if err := s.registry.RegisterEndpoint(ctx, req.GetServiceName(), req.GetProtocol(), req.GetEndpoint()); err != nil {
 		return nil, fmt.Errorf("failed to register endpoint: %w", err)
 	}
 
-	// Optimistic broadcast: notify watchers immediately.
+	// Snapshot-first broadcast: watchers see the endpoint immediately.
 	events := []*registrarv1.WatchEndpointsResponse{{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: req.GetServiceName(),
@@ -114,12 +129,21 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 	return &registrarv1.RegisterEndpointResponse{}, nil
 }
 
-// UnregisterEndpoint delegates to the external registry and broadcasts the change.
+// UnregisterEndpoint applies the removal to the snapshot and broadcasts it
+// immediately, then writes the external registry (write-behind when enabled;
+// see RegisterEndpoint).
 func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrarv1.UnregisterEndpointRequest) (*registrarv1.UnregisterEndpointResponse, error) {
 	s.log.V(1).Info("UnregisterEndpoint", "service", req.GetServiceName(), "ips", req.GetIps())
 
 	ips := req.GetIps()
-	if len(ips) == 1 {
+	if s.writeBehind != nil {
+		for _, ip := range ips {
+			// UnregisterEndpointRequest carries no protocol; the registrar is
+			// HTTP-only end-to-end today (the sync loop lists PROTOCOL_HTTP),
+			// and the key must match the register side's for supersede.
+			s.writeBehind.EnqueueUnregister(req.GetServiceName(), registryv1.Service_PROTOCOL_HTTP, ip)
+		}
+	} else if len(ips) == 1 {
 		if err := s.registry.UnregisterEndpoint(ctx, req.GetServiceName(), ips[0]); err != nil {
 			return nil, fmt.Errorf("failed to unregister endpoint: %w", err)
 		}

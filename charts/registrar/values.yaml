@@ -48,7 +48,10 @@ cloudMap:
 # Enable verbose logging (`--debug`).
 debug: true
 
-replicaCount: 1
+# 2 replicas ALWAYS (directive 2026-06-11): both serve gRPC and sync the
+# external registry independently, so the multi-replica write-behind topology
+# is permanently exercised rather than a theoretical configuration.
+replicaCount: 2
 
 image:
   # Substituted at package time with the digest-pinned reference produced by
