@@ -67,6 +67,14 @@ type SnapshotCache struct {
 	// silently dropping the newer mutation until the next snapshot trigger.
 	snapshotMu sync.Mutex
 
+	// depMu guards podDeps. The node dependency set derived from it scopes
+	// which registry services the snapshot carries (proposal 004).
+	depMu   sync.RWMutex
+	podDeps map[string]podDependencies // keyed by container network namespace
+	// depChanged receives a (coalesced) signal when the dependency set
+	// changes; the registry refresher rebuilds the scoped snapshot on it.
+	depChanged chan struct{}
+
 	localMu sync.RWMutex
 	// localWorkloads maps a local pod's network namespace to its SPIFFE ID. It
 	// drives the outbound clusters' transport-socket matcher so each upstream
@@ -141,6 +149,8 @@ func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
 		clusters:       make(map[string]clusterEntry),
 		secrets:        make(map[string]*tlsv3.Secret),
 		localWorkloads: make(map[string]string),
+		podDeps:        make(map[string]podDependencies),
+		depChanged:     make(chan struct{}, 1),
 		version:        atomic.NewUint64(0),
 	}
 }

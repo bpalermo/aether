@@ -39,6 +39,12 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 
 	c.setLocalWorkload(netns, proxy.SpiffeIDFromPod(cniPod, trustDomain), trustDomain)
 
+	// Contribute the pod's own service and declared upstreams to the node
+	// dependency set; a change signals the refresher to rebuild the scoped
+	// cluster snapshot (the pod's upstream clusters must be distributed
+	// before its first request — the declared warm path).
+	c.setPodDependencies(netns, cniPod)
+
 	return c.generateListenerSnapshot(ctx)
 }
 
@@ -59,6 +65,10 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 	}
 
 	c.removeLocalWorkload(netns)
+
+	// Shrink the node dependency set; clusters only this pod depended on are
+	// dropped on the next scoped reload (after the retention grace).
+	c.removePodDependencies(netns)
 
 	return c.generateListenerSnapshot(ctx)
 }
@@ -145,6 +155,9 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			healthCluster: healthCluster,
 		}
 		local[netns] = proxy.SpiffeIDFromPod(pod, trustDomain)
+		// Contribute to the node dependency set so the scoped registry load
+		// that follows (PreListen) carries these pods' upstreams.
+		c.setPodDependencies(netns, pod)
 	}
 	c.listenerMu.Unlock()
 

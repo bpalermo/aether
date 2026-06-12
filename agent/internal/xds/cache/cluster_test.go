@@ -434,6 +434,13 @@ func TestLoadClustersFromRegistry_MapPopulation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newTestCache(tt.cacheNodeName)
+			// Declare every registry service as a dependency: these cases
+			// exercise cluster-shape generation, not demand scoping.
+			services := make([]string, 0, len(tt.registryData))
+			for svc := range tt.registryData {
+				services = append(services, svc)
+			}
+			declareDeps(c, services...)
 
 			reg := &mockRegistry{
 				listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
@@ -473,6 +480,7 @@ func TestLoadClustersFromRegistry_IncreasesVersion(t *testing.T) {
 // returns a non-nil result for a service that was present in the registry.
 func TestLoadClustersFromRegistry_EndpointsReachable(t *testing.T) {
 	c := newTestCache("node-1")
+	declareDeps(c, "my-svc")
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{
@@ -493,6 +501,7 @@ func TestLoadClustersFromRegistry_EndpointsReachable(t *testing.T) {
 // pruned from the cache rather than retained.
 func TestLoadClustersFromRegistry_RebuildPrunesStale(t *testing.T) {
 	c := newTestCache("node-1")
+	declareDeps(c, "keep", "remove")
 	c.serviceRetentionGrace = 50 * time.Millisecond
 	data := map[string][]*registryv1.ServiceEndpoint{
 		"keep":   {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
@@ -531,6 +540,7 @@ func TestLoadClustersFromRegistry_RebuildPrunesStale(t *testing.T) {
 // returns non-empty results for registered services.
 func TestLoadClustersFromRegistry_VirtualHostsPopulated(t *testing.T) {
 	c := newTestCache("node-1")
+	declareDeps(c, "my-svc")
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{
@@ -679,6 +689,7 @@ func TestSnapshotCache_VirtualHosts_ThreadSafety(t *testing.T) {
 // 404; after the grace it is pruned.
 func TestLoadClustersFromRegistry_RetainsDisappearedServices(t *testing.T) {
 	c := newTestCache("node-1")
+	declareDeps(c, "svc-a", "svc-b")
 	c.serviceRetentionGrace = 50 * time.Millisecond
 
 	full := map[string][]*registryv1.ServiceEndpoint{

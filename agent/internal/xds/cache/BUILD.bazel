@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "cache.go",
         "cluster.go",
+        "dependencies.go",
         "listener.go",
         "metrics.go",
         "secret.go",
@@ -44,6 +45,7 @@ go_test(
         "cache_test.go",
         "cluster_alias_test.go",
         "cluster_test.go",
+        "dependencies_test.go",
         "listener_test.go",
         "metrics_test.go",
         "outbound_mtls_test.go",
@@ -56,6 +58,7 @@ go_test(
         "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
+        "//common/constants",
         "//registry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",

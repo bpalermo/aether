@@ -62,6 +62,7 @@ func TestServiceClusterMTLSInjected(t *testing.T) {
 // identity).
 func TestServiceClusterNoMTLSWithoutNodeIdentity(t *testing.T) {
 	c := newTestCache("node-1")
+	declareDeps(c, "echo")
 	ctx := context.Background()
 
 	reg := &mockRegistry{

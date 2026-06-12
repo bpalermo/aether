@@ -142,11 +142,13 @@ func (c *SnapshotCache) VirtualHosts() []types.Resource {
 	return resources
 }
 
-// LoadClustersFromRegistry fetches all HTTP service endpoints from the registry,
-// generates Envoy clusters and load assignments for each service, and populates
-// the cache. It also creates a local cluster for each service with endpoints
-// on the same node, and adds a local SPIRE cluster for mTLS configuration.
-// After populating the cache, it generates and sets a new cluster snapshot.
+// LoadClustersFromRegistry fetches the HTTP service endpoints from the registry
+// for the node dependency set (local pods' declared upstreams + their own
+// services — demand-scoped distribution, proposal 004), generates Envoy
+// clusters and load assignments for each in-scope service, and populates the
+// cache. The outbound RDS virtual-host set shrinks identically (vhosts are
+// derived from the cluster entries). After populating the cache, it generates
+// and sets a new cluster snapshot.
 // Returns an error if registry listing fails or snapshot generation fails.
 func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterName string, nodeName string, reg registry.Registry) error {
 	c.log.V(2).Info("generating clusters and endpoints from registry")
@@ -155,7 +157,10 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	if err != nil {
 		return fmt.Errorf("failed to list endpoints from registry: %w", err)
 	}
-	c.log.V(1).Info("found service endpoints in registry", "count", len(serviceEndpoints))
+
+	deps := c.DependencySet()
+	c.log.V(1).Info("found service endpoints in registry",
+		"count", len(serviceEndpoints), "dependencySet", len(deps))
 
 	c.clusterMu.Lock()
 	// Rebuild the cluster set so this method is idempotent and safe to call
@@ -164,10 +169,17 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// transiently empty a service's endpoint set, and removing its vhost
 	// turns live client traffic into 404s (route-table miss) instead of the
 	// honest, retriable 503 of an empty cluster. Absent services are retained
-	// with empty endpoints for serviceRetentionGrace, then pruned.
+	// with empty endpoints for serviceRetentionGrace, then pruned. The same
+	// grace acts as hysteresis for services leaving the dependency set.
 	prev := c.clusters
-	c.clusters = make(map[string]clusterEntry, len(serviceEndpoints))
+	c.clusters = make(map[string]clusterEntry, len(deps))
 	for serviceName, endpoints := range serviceEndpoints {
+		// Demand scoping: only services in the node dependency set are
+		// distributed to this node's proxy. Everything else stays in the
+		// registrar; an undeclared upstream is fetched on demand (ODCDS).
+		if _, inScope := deps[serviceName]; !inScope {
+			continue
+		}
 		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
 		// destination pod's mesh inbound (pod_ip:15008). The per-source mTLS transport
 		// socket is injected at snapshot time (clustersEndpointsAndVhosts).
