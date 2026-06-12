@@ -28,6 +28,7 @@ type Metrics struct {
 	syncDuration    metric.Float64Histogram
 	syncErrors      metric.Int64Counter
 	syncEvents      metric.Int64Counter
+	filteredSubs    metric.Int64Gauge
 	snapshotVersion metric.Int64Gauge
 	wbQueueDepth    metric.Int64Gauge
 	wbFlushFailures metric.Int64Counter
@@ -65,6 +66,10 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Endpoint change events detected by the sync loop, by event type")); err != nil {
 		return nil, fmt.Errorf("sync events: %w", err)
 	}
+	if m.filteredSubs, err = meter.Int64Gauge("aether.registrar.watch.filtered_subscribers",
+		metric.WithDescription("Watch streams carrying a service filter (demand-scoped agents)")); err != nil {
+		return nil, fmt.Errorf("filtered subscribers: %w", err)
+	}
 	if m.snapshotVersion, err = meter.Int64Gauge("aether.registrar.snapshot.version",
 		metric.WithDescription("Current endpoint snapshot version (compare with aether.agent.registry.last_version for skew)")); err != nil {
 		return nil, fmt.Errorf("snapshot version: %w", err)
@@ -101,6 +106,13 @@ func (m *Metrics) watcherUnsubscribed(ctx context.Context) {
 		return
 	}
 	m.watchers.Add(ctx, -1)
+}
+
+func (m *Metrics) filteredWatchers(ctx context.Context, n int) {
+	if m == nil {
+		return
+	}
+	m.filteredSubs.Record(ctx, int64(n))
 }
 
 func (m *Metrics) eventBroadcast(ctx context.Context, eventType string) {

@@ -563,3 +563,36 @@ func TestReconnectSignal(t *testing.T) {
 		t.Fatal("reconnect signal expected")
 	}
 }
+
+// TestSetServiceFilter_ReassertsOnChangeOnly verifies the filter setter
+// cancels the active stream only when the effective set changes (order
+// -insensitive), and that the generation bump clears the resume token path.
+func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
+	r := NewRegistrarRegistry(logr.Discard(), Config{Address: "test"})
+
+	cancels := 0
+	r.filterMu.Lock()
+	r.streamCancel = func() { cancels++ }
+	r.filterMu.Unlock()
+
+	r.SetServiceFilter([]string{"svc-a", "svc-b"})
+	assert.Equal(t, 1, cancels, "first filter must cancel the stream")
+
+	// Same set, different order: no re-assert.
+	r.SetServiceFilter([]string{"svc-b", "svc-a"})
+	assert.Equal(t, 1, cancels, "unchanged filter must not cancel")
+
+	// Shrink: re-assert.
+	r.SetServiceFilter([]string{"svc-a"})
+	assert.Equal(t, 2, cancels)
+
+	// Empty non-nil (watch nothing) differs from nil (full watch).
+	r.SetServiceFilter([]string{})
+	assert.Equal(t, 3, cancels)
+	r.SetServiceFilter(nil)
+	assert.Equal(t, 4, cancels)
+
+	services, gen := r.currentFilter()
+	assert.Nil(t, services)
+	assert.Equal(t, uint64(4), gen)
+}

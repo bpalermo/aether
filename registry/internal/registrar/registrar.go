@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -80,6 +81,19 @@ type RegistrarRegistry struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
+	// filterMu guards the watch service filter. filterServices nil = full
+	// watch; non-nil = scope the watch to these services (demand-scoped
+	// distribution). filterGen increments on every filter change; the watch
+	// loop compares it against the generation its stream was opened with and
+	// clears the resume token when they differ, forcing a full (re-filtered)
+	// snapshot — resuming by version would skip the newly in-scope services.
+	filterMu       sync.Mutex
+	filterServices []string
+	filterGen      uint64
+	// streamCancel ends the in-flight watch stream so the loop reconnects
+	// with the current filter.
+	streamCancel context.CancelFunc
+
 	cancel context.CancelFunc
 }
 
@@ -138,6 +152,59 @@ func (r *RegistrarRegistry) WaitReady(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// SetServiceFilter scopes the endpoint watch to the given services (the
+// node's dependency set). nil restores the full watch; an empty non-nil set
+// watches nothing. If the effective filter changed while a stream is active,
+// the stream is cancelled so the loop reconnects re-asserting the new filter
+// with a cleared resume token (the registrar must resend the snapshot — the
+// new scope may include services the old stream never delivered). It
+// satisfies the registry.WatchScoper capability.
+func (r *RegistrarRegistry) SetServiceFilter(services []string) {
+	r.filterMu.Lock()
+	if stringSetsEqual(r.filterServices, services) {
+		r.filterMu.Unlock()
+		return
+	}
+	r.filterServices = slices.Clone(services)
+	r.filterGen++
+	cancelStream := r.streamCancel
+	r.filterMu.Unlock()
+
+	r.log.V(1).Info("watch service filter updated; re-asserting on stream", "services", len(services))
+	if cancelStream != nil {
+		cancelStream()
+	}
+}
+
+// currentFilter returns the filter to assert on the next stream and its
+// generation.
+func (r *RegistrarRegistry) currentFilter() ([]string, uint64) {
+	r.filterMu.Lock()
+	defer r.filterMu.Unlock()
+	return slices.Clone(r.filterServices), r.filterGen
+}
+
+// stringSetsEqual reports whether a and b contain the same members,
+// treating nil and non-nil differently (nil = full watch).
+func stringSetsEqual(a, b []string) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // signalChange performs a non-blocking send on the notify channel, coalescing
@@ -288,10 +355,15 @@ func (r *RegistrarRegistry) listAllEndpointsFromServer(ctx context.Context, prot
 }
 
 // watchLoop maintains a persistent WatchEndpoints stream, reconnecting with
-// exponential backoff on disconnect.
+// exponential backoff on disconnect. Every (re)connect asserts the current
+// service filter; when the filter changed since the stream the resume token
+// was earned on, the token is cleared so the registrar resends the full
+// (re-filtered) snapshot — newly in-scope services were never delivered to
+// the old stream, so resuming by version would silently skip them.
 func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 	backoff := initialBackoff
 	lastVersion := ""
+	lastFilterGen := uint64(0)
 
 	for {
 		select {
@@ -300,12 +372,30 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		default:
 		}
 
-		stream, err := r.client.WatchEndpoints(ctx, &registrarv1.WatchEndpointsRequest{
+		services, filterGen := r.currentFilter()
+		if filterGen != lastFilterGen {
+			lastVersion = ""
+			lastFilterGen = filterGen
+		}
+		req := &registrarv1.WatchEndpointsRequest{
 			ClusterName: r.config.ClusterName,
 			NodeName:    r.config.NodeName,
 			LastVersion: lastVersion,
-		})
+		}
+		if services != nil {
+			req.Filter = &registrarv1.ServiceFilter{Services: services}
+		}
+
+		// Per-stream context so SetServiceFilter can end the stream and force
+		// a reconnect that re-asserts the new filter.
+		streamCtx, streamCancel := context.WithCancel(ctx)
+		r.filterMu.Lock()
+		r.streamCancel = streamCancel
+		r.filterMu.Unlock()
+
+		stream, err := r.client.WatchEndpoints(streamCtx, req)
 		if err != nil {
+			streamCancel()
 			r.metrics.streamFailed(ctx)
 			jitter := time.Duration(float64(backoff) * jitterFraction * rand.Float64())
 			wait := backoff + jitter
@@ -322,10 +412,11 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		// Reset backoff on successful connection.
 		backoff = initialBackoff
 		r.metrics.streamReconnected(ctx)
-		r.log.V(1).Info("watch stream connected")
+		r.log.V(1).Info("watch stream connected", "filtered", services != nil, "filterServices", len(services))
 		r.signalReconnect()
 
 		lastVersion = r.processStream(ctx, stream, lastVersion)
+		streamCancel()
 	}
 }
 
@@ -345,6 +436,12 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			if status.Code(err) == codes.DataLoss {
 				r.log.Info("registrar forced a resync; requesting full snapshot on reconnect")
 				return ""
+			}
+			if status.Code(err) == codes.Canceled && ctx.Err() == nil {
+				// The stream was cancelled locally (SetServiceFilter
+				// re-asserting a changed filter), not a registrar failure.
+				r.log.V(1).Info("watch stream ended for filter re-assertion")
+				return lastVersion
 			}
 			if err != io.EOF && ctx.Err() == nil {
 				r.log.Error(err, "watch stream disconnected")

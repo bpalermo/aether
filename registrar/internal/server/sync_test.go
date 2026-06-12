@@ -144,7 +144,7 @@ func TestSyncer_Start_BroadcastsChangesOnSubsequentSync(t *testing.T) {
 	syncer, _, bc := newTestSyncer(reg, 60*time.Millisecond)
 
 	// Subscribe before starting so we catch broadcast events.
-	eventCh := bc.Subscribe("test-watcher")
+	eventCh := bc.Subscribe("test-watcher", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -350,7 +350,7 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 
 	// Let initial sync complete, then subscribe to capture only subsequent events.
 	time.Sleep(50 * time.Millisecond)
-	eventCh := bc.Subscribe("no-change-watcher")
+	eventCh := bc.Subscribe("no-change-watcher", nil)
 
 	// Let at least two more syncs fire.
 	time.Sleep(200 * time.Millisecond)
