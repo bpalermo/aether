@@ -61,6 +61,16 @@ type ReconnectNotifier interface {
 	Reconnects() <-chan struct{}
 }
 
+// WatchScoper is an optional capability for Registry implementations backed
+// by a watch stream. SetServiceFilter scopes the watch to the given services
+// (the node's dependency set -- demand-scoped distribution): the registrar
+// then fans out an endpoint change only to that service's consumers. nil
+// restores the full watch; an empty non-nil set watches nothing. The
+// implementation re-asserts the filter on every reconnect.
+type WatchScoper interface {
+	SetServiceFilter(services []string)
+}
+
 // AuthoritativeLister is an optional capability for Registry implementations
 // whose ListAllEndpoints may serve from a local watch-fed cache. It lists from
 // the authoritative source (an RPC to the registrar, the external registry),

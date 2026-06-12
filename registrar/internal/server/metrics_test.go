@@ -91,7 +91,7 @@ func TestBroadcaster_DropIncrementsCounter(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	b := NewBroadcaster(logr.Discard(), m)
 
-	ch := b.Subscribe("slow-watcher")
+	ch := b.Subscribe("slow-watcher", nil)
 	_ = ch // never drained: fills to capacity, then drops
 
 	// Fill the buffer, then overflow by 3.
@@ -117,14 +117,14 @@ func TestBroadcaster_WatcherCountMetric(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	b := NewBroadcaster(logr.Discard(), m)
 
-	ch1 := b.Subscribe("a")
-	b.Subscribe("b")
+	ch1 := b.Subscribe("a", nil)
+	b.Subscribe("b", nil)
 	if got := collectSum(t, reader, "aether.registrar.watchers"); got != 2 {
 		t.Errorf("watchers after subscribes = %d, want 2", got)
 	}
 
 	// Reconnect with the same ID: count must not grow.
-	b.Subscribe("a")
+	b.Subscribe("a", nil)
 	if got := collectSum(t, reader, "aether.registrar.watchers"); got != 2 {
 		t.Errorf("watchers after reconnect = %d, want 2", got)
 	}

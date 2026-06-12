@@ -174,20 +174,44 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 
 // WatchEndpoints streams endpoint events to the agent. It first sends a full
 // snapshot (unless the client's last_version matches the current version), then
-// forwards incremental events from the broadcaster.
+// forwards incremental events from the broadcaster. A request filter scopes
+// both the snapshot and the incremental events to the named services
+// (demand-scoped distribution): the agent re-asserts its filter on every
+// reconnect, and an unset filter preserves the full watch.
 func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse]) error {
 	watcherID := fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
-	s.log.V(1).Info("WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion())
+
+	// nil = full watch; non-nil (possibly empty) = scoped to these services.
+	var filterServices []string
+	var filterSet map[string]struct{}
+	if f := req.GetFilter(); f != nil {
+		filterServices = f.GetServices()
+		if filterServices == nil {
+			filterServices = []string{}
+		}
+		filterSet = make(map[string]struct{}, len(filterServices))
+		for _, svc := range filterServices {
+			filterSet[svc] = struct{}{}
+		}
+	}
+	s.log.V(1).Info("WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion(),
+		"filtered", filterSet != nil, "filterServices", len(filterServices))
 
 	// Never serve a snapshot before the first sync has populated it.
 	if err := s.awaitSynced(stream.Context()); err != nil {
 		return err
 	}
 
-	// Send current snapshot unless the client is already up-to-date.
+	// Send current snapshot (scoped to the filter) unless the client is
+	// already up-to-date.
 	events, currentVersion := s.snapshot.FullSnapshotEvents()
 	if req.GetLastVersion() != currentVersion {
 		for _, event := range events {
+			if filterSet != nil {
+				if _, inScope := filterSet[event.GetServiceName()]; !inScope {
+					continue
+				}
+			}
 			if err := stream.Send(event); err != nil {
 				return fmt.Errorf("failed to send snapshot event: %w", err)
 			}
@@ -202,8 +226,8 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		return fmt.Errorf("failed to send snapshot-complete event: %w", err)
 	}
 
-	// Subscribe and stream incremental events.
-	ch := s.broadcaster.Subscribe(watcherID)
+	// Subscribe and stream incremental events (fan-out indexed by service).
+	ch := s.broadcaster.Subscribe(watcherID, filterServices)
 	defer s.broadcaster.Unsubscribe(watcherID, ch)
 
 	for {

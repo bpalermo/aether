@@ -42,6 +42,23 @@ type RegistryRefresher struct {
 	refreshErrors metric.Int64Counter
 }
 
+// AssertWatchFilter pushes the cache's current dependency set to the registry
+// as the watch service filter (registry.WatchScoper capability), so the
+// registrar fans out endpoint changes for this node's dependencies only.
+// No-op for registries without watch scoping or when the filter is unchanged.
+func AssertWatchFilter(c *cache.SnapshotCache, reg registry.Registry) {
+	scoper, ok := reg.(registry.WatchScoper)
+	if !ok {
+		return
+	}
+	deps := c.DependencySet()
+	services := make([]string, 0, len(deps))
+	for svc := range deps {
+		services = append(services, svc)
+	}
+	scoper.SetServiceFilter(services)
+}
+
 // NewRegistryRefresher creates a RegistryRefresher.
 func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.SnapshotCache, reg registry.Registry, log logr.Logger) *RegistryRefresher {
 	r := &RegistryRefresher{
@@ -123,6 +140,11 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 			// recomputed even though the registry contents are unchanged.
 			arm()
 		case <-timer.C:
+			// Re-assert the watch filter from the current dependency set
+			// before reloading: a grown set must reach the registrar so the
+			// watch cache receives the newly in-scope services (no-op when
+			// unchanged; the resulting watch events trigger the next reload).
+			AssertWatchFilter(r.cache, r.registry)
 			if err := r.cache.LoadClustersFromRegistry(ctx, r.clusterName, r.nodeName, r.registry); err != nil {
 				r.log.Error(err, "failed to refresh clusters from registry")
 				if r.refreshErrors != nil {
