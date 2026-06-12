@@ -12,7 +12,7 @@ import (
 )
 
 func TestNewServiceCluster(t *testing.T) {
-	c := NewServiceCluster("svc-a", "aether.internal")
+	c := NewServiceCluster("svc-a", "aether.internal", nil)
 
 	// FQDN-only: the cluster name IS the mesh authority; the bare service
 	// name stays the stats key (alt_stat_name) and the EDS resource name.
@@ -24,9 +24,16 @@ func TestNewServiceCluster(t *testing.T) {
 	require.NotNil(t, c.GetEdsClusterConfig().GetEdsConfig())
 	// HTTP/2 upstream protocol options for mTLS multiplexing.
 	assert.Contains(t, c.GetTypedExtensionProtocolOptions(), config.UpstreamHTTPProtocolOptionsKey)
-	// Subset selector by endpoint IP for per-pod affinity.
-	require.Len(t, c.GetLbSubsetConfig().GetSubsetSelectors(), 1)
-	assert.Equal(t, []string{subsetIPKey}, c.GetLbSubsetConfig().GetSubsetSelectors()[0].GetKeys())
+	// Always-on pinning selectors (ip/pod), NO_FALLBACK: pin or fail.
+	selectors := c.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, selectors, 2)
+	assert.Equal(t, []string{subsetIPKey}, selectors[0].GetKeys())
+	assert.Equal(t, []string{subsetPodNameKey}, selectors[1].GetKeys())
+	for _, sel := range selectors {
+		assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, sel.GetFallbackPolicy())
+	}
+	// Criteria-less traffic rides the cluster-level ANY_ENDPOINT fallback.
+	assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_ANY_ENDPOINT, c.GetLbSubsetConfig().GetFallbackPolicy())
 	// mTLS is injected at snapshot time, not at build time.
 	assert.Nil(t, c.GetTransportSocketMatcher(), "matcher injected later via InjectUpstreamMTLS")
 
@@ -53,7 +60,7 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	ids := []string{"spiffe://example.org/ns/test/sa/pod-a", "spiffe://example.org/ns/test/sa/pod-b"}
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
-	c := NewServiceCluster("svc-a", "aether.internal")
+	c := NewServiceCluster("svc-a", "aether.internal", nil)
 	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org")
 
 	// Per-source mTLS: a match per workload identity + the node identity, and
@@ -84,7 +91,7 @@ func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
 		"only invalid entries": {"": "spiffe://example.org/x", "/ns/a": ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := NewServiceCluster("svc-a", "aether.internal")
+			c := NewServiceCluster("svc-a", "aether.internal", nil)
 			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org")
 
 			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
@@ -105,7 +112,7 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
 		Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY,
 	}
 
-	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep)
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "")
 	require.Len(t, lle.GetLbEndpoints(), 1)
 	endpoint := lle.GetLbEndpoints()[0].GetEndpoint()
 
@@ -130,7 +137,7 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
 		Ip:              "10.0.0.5",
 		HealthCheckMode: registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS,
 	}
-	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep)
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "")
 	assert.True(t, lle.GetLbEndpoints()[0].GetEndpoint().GetHealthCheckConfig().GetDisableActiveHealthCheck(),
 		"EDS-mode endpoints opt out of active health checking and rely on EDS health")
 }
@@ -155,7 +162,7 @@ func TestEndpointHealthStatus(t *testing.T) {
 // connections close on (EDS) health failure, panic routing is off, and the
 // retry circuit breaker has headroom for the drain-time reset burst.
 func TestServiceClusterDrainPoolClose(t *testing.T) {
-	c := NewServiceCluster("svc-x", "aether.internal")
+	c := NewServiceCluster("svc-x", "aether.internal", nil)
 	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
 		"pools must close at drain-mark, not at the app-exit GOAWAY race")
 	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
@@ -194,4 +201,47 @@ func TestServiceFromClusterName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewServiceCluster_DerivedSubsetSelectors verifies provider-defined keys
+// become single-key NO_FALLBACK selectors after the fixed ip/pod pair.
+func TestNewServiceCluster_DerivedSubsetSelectors(t *testing.T) {
+	c := NewServiceCluster("svc-a", "aether.internal", []string{"shard", "version"})
+	selectors := c.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, selectors, 4)
+	assert.Equal(t, []string{"shard"}, selectors[2].GetKeys())
+	assert.Equal(t, []string{"version"}, selectors[3].GetKeys())
+	assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, selectors[3].GetFallbackPolicy())
+}
+
+// TestEndpointPriority pins the locality-failover priority mapping.
+func TestEndpointPriority(t *testing.T) {
+	ep := func(region, zone string) *registryv1.ServiceEndpoint {
+		if region == "" && zone == "" {
+			return &registryv1.ServiceEndpoint{}
+		}
+		return &registryv1.ServiceEndpoint{Locality: &registryv1.ServiceEndpoint_Locality{Region: region, Zone: zone}}
+	}
+	// Agent without locality: no preference anywhere.
+	assert.Equal(t, uint32(0), EndpointPriority("", "", ep("r1", "z1")))
+	// Same zone -> 0, same region -> 1, elsewhere/unknown -> 2.
+	assert.Equal(t, uint32(0), EndpointPriority("r1", "z1", ep("r1", "z1")))
+	assert.Equal(t, uint32(1), EndpointPriority("r1", "z1", ep("r1", "z2")))
+	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("r2", "z1")))
+	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("", "")))
+	// Agent with region but no zone: whole region is local.
+	assert.Equal(t, uint32(0), EndpointPriority("r1", "", ep("r1", "z9")))
+}
+
+// TestServiceLocalityLbEndpoint_Priority verifies the EDS endpoint carries
+// the locality-derived priority.
+func TestServiceLocalityLbEndpoint_Priority(t *testing.T) {
+	ep := &registryv1.ServiceEndpoint{
+		Ip:       "10.0.0.5",
+		Locality: &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z2"},
+	}
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z1")
+	assert.Equal(t, uint32(1), lle.GetPriority(), "same region, different zone")
+	lle = ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z2")
+	assert.Equal(t, uint32(0), lle.GetPriority(), "same zone")
 }

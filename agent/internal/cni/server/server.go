@@ -142,6 +142,11 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.nodeRegion = region
 	s.nodeZone = zone
 
+	// Locality-aware failover: the xDS cache assigns EDS priorities relative
+	// to this node's locality (signals a scoped reload — the initial
+	// snapshot may predate this).
+	s.snapshotCache.SetNodeLocality(region, zone)
+
 	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone)
 
 	// Delegated liveness: reflect each local pod's app health (from the proxy's

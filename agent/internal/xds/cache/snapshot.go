@@ -65,11 +65,19 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	}
 	c.secretMu.RUnlock()
 
+	// The shared subset-headers extension config (ECDS): every outbound
+	// HCM's header_to_metadata filter references this one resource, so
+	// vocabulary changes apply in place with no listener drain.
+	c.subsetMu.RLock()
+	subsetExt := proxy.BuildSubsetHeadersExtension(c.subsetHeaderKeys)
+	c.subsetMu.RUnlock()
+
 	resources := map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: listeners,
-		resourcev3.ClusterType:  clusters,
-		resourcev3.EndpointType: endpoints,
-		resourcev3.SecretType:   secrets,
+		resourcev3.ListenerType:        listeners,
+		resourcev3.ClusterType:         clusters,
+		resourcev3.EndpointType:        endpoints,
+		resourcev3.SecretType:          secrets,
+		resourcev3.ExtensionConfigType: {subsetExt},
 	}
 	if len(vhosts) > 0 {
 		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain)}

@@ -126,9 +126,9 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 
 	serviceName := "my-service"
 	endpoint := newServiceEndpoint("10.0.0.2", "cluster-1", "remote-pod", "node-2", 8080)
-	cluster := proxy.NewServiceCluster(serviceName, "aether.internal")
+	cluster := proxy.NewServiceCluster(serviceName, "aether.internal", nil)
 	cla := proxy.NewClusterLoadAssignment(serviceName)
-	lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint)
+	lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, "", "")
 	cla.Endpoints = append(cla.Endpoints, lbEp)
 	vhost := proxy.BuildOutboundClusterVirtualHost(serviceName, "aether.internal")
 

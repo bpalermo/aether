@@ -159,6 +159,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 
 	deps := c.DependencySet()
+	localRegion, localZone := c.nodeLocality()
 	c.log.V(1).Info("found service endpoints in registry",
 		"count", len(serviceEndpoints), "dependencySet", len(deps))
 
@@ -173,6 +174,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// grace acts as hysteresis for services leaving the dependency set.
 	prev := c.clusters
 	c.clusters = make(map[string]clusterEntry, len(deps))
+	nodeSubsetKeys := make(map[string]struct{})
 	for serviceName, endpoints := range serviceEndpoints {
 		// Demand scoping: only services in the node dependency set are
 		// distributed to this node's proxy. Everything else stays in the
@@ -183,13 +185,30 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
 		// destination pod's mesh inbound (pod_ip:15008). The per-source mTLS transport
 		// socket is injected at snapshot time (clustersEndpointsAndVhosts).
-		cluster := proxy.NewServiceCluster(serviceName, c.meshDomain)
+		// Provider-defined subset keys: the union of this service's endpoint
+		// metadata keys becomes its subset selectors, and the node-wide union
+		// (below) the shared subset-headers ECDS mapping — the provider's
+		// vocabulary travels to its consumers via the control plane.
+		serviceKeys := make(map[string]struct{})
+		for _, endpoint := range endpoints {
+			for key := range endpoint.GetMetadata() {
+				if proxy.ValidSubsetKey(key) {
+					serviceKeys[key] = struct{}{}
+				}
+			}
+		}
+		sortedKeys := proxy.SortSubsetKeys(serviceKeys)
+		for _, k := range sortedKeys {
+			nodeSubsetKeys[k] = struct{}{}
+		}
+
+		cluster := proxy.NewServiceCluster(serviceName, c.meshDomain, sortedKeys)
 		cla := proxy.NewClusterLoadAssignment(serviceName)
 		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName, c.meshDomain)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
 
 		for _, endpoint := range endpoints {
-			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint)
+			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone)
 			cla.Endpoints = append(cla.Endpoints, lbEp)
 			epMap[endpoint.GetIp()] = lbEp
 		}
@@ -225,6 +244,11 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 
 	c.clusterMu.Unlock()
+
+	// Publish the node-wide subset-key union as the shared ECDS mapping.
+	c.subsetMu.Lock()
+	c.subsetHeaderKeys = proxy.SortSubsetKeys(nodeSubsetKeys)
+	c.subsetMu.Unlock()
 
 	c.log.V(1).Info("loaded clusters from registry", "count", len(c.clusters))
 

@@ -55,10 +55,11 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 		"authority :port must be stripped before routing (FQDN-only authorities, cluster_header cold path)")
 
 	httpFilters := hcm.GetHttpFilters()
-	require.Len(t, httpFilters, 3, "expected health_check + on_demand + router")
+	require.Len(t, httpFilters, 4, "expected health_check + subset-headers + on_demand + router")
 	assert.Equal(t, httpHealthCheckFilterName, httpFilters[0].GetName())
-	assert.Equal(t, httpOnDemandFilterName, httpFilters[1].GetName())
-	assert.Equal(t, httpRouterFilterName, httpFilters[2].GetName())
+	assert.Equal(t, SubsetHeadersFilterName, httpFilters[1].GetName())
+	assert.Equal(t, httpOnDemandFilterName, httpFilters[2].GetName())
+	assert.Equal(t, httpRouterFilterName, httpFilters[3].GetName())
 
 	hc := &health_checkv3.HealthCheck{}
 	require.NoError(t, httpFilters[0].GetTypedConfig().UnmarshalTo(hc))

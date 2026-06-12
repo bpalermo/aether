@@ -104,6 +104,52 @@ pay a fresh mTLS handshake per request and each abandoned upstream lingers
 until the 30s idle timeout reclaims it: it works, but it is the expensive
 traffic shape.
 
+## Subset routing and locality
+
+Requests choose *which endpoints* of a service they may land on via headers;
+the mesh prefers *closer* endpoints automatically.
+
+### Pinning (always available)
+
+| Header | Meaning |
+|---|---|
+| `x-aether-ip: 10.42.1.11` | route to exactly that endpoint |
+| `x-aether-pod: my-svc-7f9c4-xv2qp` | route to exactly that pod |
+
+Pin-or-fail: if the target is gone (drained, ejected, never existed) the
+request gets a 503 — it never silently lands on a different pod.
+
+### Provider-defined subsets
+
+Endpoints publish routing dimensions via metadata annotations:
+
+```yaml
+metadata:
+  annotations:
+    metadata.endpoint.aether.io/version: "v2"
+```
+
+Consumers select with `x-aether-subset-<key>` (here
+`x-aether-subset-version: v2`). The vocabulary travels via the control
+plane — consumers declare nothing; any key published by an in-scope service
+is routable from every pod on the node. Selection is strict (NO_FALLBACK):
+asking for a subset that has no endpoints fails rather than spilling onto
+the rest of the service. Keys must be lowercase DNS-label shaped
+(`[a-z0-9-]`); `ip`, `pod`, `cluster`, `namespace` are reserved. One subset
+header per request (multi-key selection falls back to normal balancing).
+Requests without subset headers are balanced across all healthy endpoints,
+unchanged. Note: a *cold* (ODCDS) first request to an undeclared upstream
+routes before that service's vocabulary lands (~ms); declare upstreams whose
+subset routing is correctness-critical.
+
+### Locality-aware failover
+
+Endpoints carry their node's `topology.kubernetes.io/region`/`zone`. Each
+node's proxy routes to same-zone endpoints first (EDS priority 0), spilling
+to same-region (1) and then anywhere (2) only as closer endpoints become
+unhealthy or drain — a zonal roll automatically shifts traffic to the
+region and back. Nodes without topology labels express no preference.
+
 ## Hitless rolling restarts
 
 The mesh handles most of the work automatically — endpoints are marked

@@ -56,6 +56,7 @@ go_test(
     ],
     embed = [":cache"],
     deps = [
+        "//agent/internal/xds/proxy",
         "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",

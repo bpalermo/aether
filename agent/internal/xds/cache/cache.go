@@ -50,6 +50,20 @@ type SnapshotCache struct {
 
 	nodeName string
 
+	// localityMu guards the node locality (region/zone from node labels,
+	// resolved by the CNI server's PreListen). It drives EDS priority
+	// assignment (locality-aware failover).
+	localityMu sync.RWMutex
+	nodeRegion string
+	nodeZone   string
+
+	// subsetMu guards subsetHeaderKeys: the sorted union of provider-defined
+	// subset keys across the node's dependency set, recomputed on every
+	// scoped registry load and published as the shared ECDS subset-headers
+	// resource.
+	subsetMu         sync.RWMutex
+	subsetHeaderKeys []string
+
 	// meshDomain is the DNS-style domain mesh authorities live under; service
 	// clusters are named <service>.<meshDomain> while every control-plane key
 	// (registry, watch filter, dependency set, EDS, stats) stays bare. Set
@@ -171,6 +185,29 @@ func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
 		depChanged:     make(chan struct{}, 1),
 		version:        atomic.NewUint64(0),
 	}
+}
+
+// SetNodeLocality records the node's topology labels once resolved (CNI
+// server PreListen) and signals a dependency change so the scoped snapshot
+// is rebuilt with locality-aware EDS priorities — the initial snapshot may
+// have been generated before the labels were known.
+func (c *SnapshotCache) SetNodeLocality(region, zone string) {
+	c.localityMu.Lock()
+	changed := c.nodeRegion != region || c.nodeZone != zone
+	c.nodeRegion = region
+	c.nodeZone = zone
+	c.localityMu.Unlock()
+
+	if changed {
+		c.signalDependencyChange()
+	}
+}
+
+// nodeLocality returns the node's region and zone ("" until resolved).
+func (c *SnapshotCache) nodeLocality() (string, string) {
+	c.localityMu.RLock()
+	defer c.localityMu.RUnlock()
+	return c.nodeRegion, c.nodeZone
 }
 
 // SetMeshDomain overrides the default mesh domain (--mesh-domain flag). Must
