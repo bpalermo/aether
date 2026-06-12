@@ -28,7 +28,7 @@ spec:
         - name: app
           readinessProbe: { httpGet: { path: /healthz, port: 8080 } }
           lifecycle:
-            preStop: { sleep: { seconds: 3 } }   # see "Hitless rolling restarts"
+            preStop: { sleep: { seconds: 10 } }  # see "Hitless rolling restarts"
 ```
 
 - **Service identity**: the registry service name is the pod's
@@ -77,11 +77,19 @@ windows; **without them rolls outrun the mesh and drop requests**:
    health-check pass → liveness promotion → registrar → every client's EDS).
    `minReadySeconds` paces the roll so the previous endpoint is only retired
    after the replacement is mesh-routable.
-2. **`preStop: { sleep: { seconds: 3 } }`** (native sleep action, k8s ≥ 1.30 —
+2. **`preStop: { sleep: { seconds: 10 } }`** (native sleep action, k8s ≥ 1.30 —
    no shell needed in the image) — delays SIGTERM so the app keeps serving
-   while the draining mark propagates (~1s). Apps that serve in-flight
-   requests after SIGTERM for a few seconds don't strictly need it; apps that
-   exit immediately do.
+   through the mesh's two-phase drain. The sleep **sizes the in-flight
+   completion window**: at deletion-requested the endpoint goes DRAINING (no
+   new requests after ~1s), and the mesh closes client connection pools 1s
+   before SIGTERM — established requests have `sleep − 1s` to finish, and the
+   pools close while idle, ahead of the app's exit.
+
+   Measured under full load (2026-06-12): `sleep 10` (9s window) → **0 failed
+   requests per roll**; `sleep 3` (2s window, the supported minimum) → ~1 blip
+   per pod for requests still in flight when the window ends. Use ≥ 10 for
+   zero-loss rolls; longer if requests can run longer than ~9s (the window is
+   capped 2s short of `terminationGracePeriodSeconds`).
 
 Also keep `maxUnavailable: 0` (the mesh never has fewer vetted endpoints than
 replicas) and a real `readinessProbe` (the agent gates endpoint promotion on
@@ -103,8 +111,10 @@ kubectl delete pod / rollout step
   └─ apiserver sets deletionTimestamp          (pod still Running)
        └─ agent marks endpoint DRAINING        (~1s to every client's EDS:
           new requests stop arriving; established connections keep going)
-  └─ kubelet runs preStop sleep (3s), then SIGTERM
-       └─ app finishes in-flight work through the grace period
+       └─ 1s before SIGTERM: agent re-marks UNHEALTHY — clients close their
+          now-idle pools ahead of the app's exit (drain phase 2)
+  └─ kubelet runs preStop sleep, then SIGTERM
+       └─ app finishes any post-SIGTERM work through the grace period
   └─ containers exit; CNI DEL fires
        └─ endpoint removed from the registry; local xDS torn down;
           netns pin released after the drain tail (60s, detached)
