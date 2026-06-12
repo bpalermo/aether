@@ -46,6 +46,7 @@ spec:
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness) |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds`: node-local agent vets the endpoint once and publishes health over EDS (endpoints enter clients pre-warmed). `active`: every client proxy probes the endpoint itself |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata (subset keys) |
+| `config.aether.io/upstreams` | — | Comma-separated services this pod **calls** (see "Declaring upstreams") |
 
 ## Calling other services
 
@@ -53,6 +54,33 @@ Apps reach the mesh through the outbound listener: `http://127.0.0.1:18081`
 with the destination service in the `Host` header (`Host: my-svc` or
 `my-svc.aether.internal`). Every hop is mTLS between workload identities; the
 callee sees the caller's SPIFFE ID in `x-forwarded-client-cert`.
+
+### Declaring upstreams
+
+The mesh distributes a service's clusters/endpoints/routes only to nodes that
+need them (demand-scoped distribution, proposal 004). Declare what a pod
+calls:
+
+```yaml
+metadata:
+  annotations:
+    config.aether.io/upstreams: "svc-payments,svc-ledger,svc-audit"
+```
+
+- **Declared upstreams are warm before first use** — the node's proxy carries
+  them the moment the pod lands. Declare everything latency- or
+  correctness-critical. The list is also reviewable architecture
+  documentation, exactly like `minReadySeconds`/`preStop` above.
+- **Undeclared upstreams still work** (cold path): the first request pauses
+  ~one node-local xDS round-trip while the cluster is fetched on demand
+  (ODCDS), then stays warm while used (1h idle TTL). Cold-path calls must use
+  the **bare service name** in `Host` (no port, no `.aether.internal`
+  suffix). Requests to nonexistent services fail after the 5s on-demand
+  timeout instead of an immediate 404.
+- Every miss increments `aether.agent.upstreams.miss` (and is logged with the
+  service name) — the signal to promote an undeclared dependency to the
+  annotation.
+- A pod's **own** service is always in scope; it never needs declaring.
 
 **Use keepalive (or HTTP/2) connections to the outbound listener.** The mesh
 pools upstream mTLS connections *per downstream connection* (this is what
