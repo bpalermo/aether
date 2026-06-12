@@ -58,6 +58,10 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 			require.NotNil(t, healthCluster)
 			assert.Equal(t, HealthProbeClusterName(tt.cniPod), healthCluster.GetName())
 			require.Len(t, healthCluster.GetHealthChecks(), 1, "probe cluster carries the HC")
+			assert.Equal(t, "app", appCluster.GetAltStatName(),
+				"app clusters collapse into one cluster.app.* stats block (cardinality round 2)")
+			assert.Empty(t, healthCluster.GetAltStatName(),
+				"health probe cluster stats MUST stay per-pod: the health_check filter reads THIS cluster's membership gauges (2026-06-11 outage) — a shared alt_stat_name merges every pod's membership")
 			hc := healthCluster.GetHealthChecks()[0]
 			assert.Equal(t, hc.GetInterval().AsDuration(), hc.GetNoTrafficInterval().AsDuration(),
 				"probe cluster never carries routed traffic; the no-traffic interval (default 60s) would govern every check after the first")
@@ -84,7 +88,7 @@ func TestGenerateOutboundHTTPListener(t *testing.T) {
 				Name:             "test-pod",
 				NetworkNamespace: "/var/run/netns/test",
 			},
-			expectedStatPrefix:       "out_http_test-pod",
+			expectedStatPrefix:       "out_http",
 			expectedNetworkNamespace: "/var/run/netns/test",
 			expectedError:            false,
 		},

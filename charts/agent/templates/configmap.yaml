@@ -28,6 +28,11 @@ data:
             envoy_grpc:
               cluster_name: otel_collector
           prefix: envoy
+          # Export the tag-extracted name with tags as OTLP attributes: one
+          # metric family per stat, labeled by aether.cluster (see stats_tags)
+          # instead of a name per cluster.
+          emit_tags_as_attributes: true
+          use_tag_extracted_name: true
 {{- end }}
 
     # Bound stats-memory growth (measured 2026-06-11: ~5.1k stats/proxy at
@@ -52,15 +57,23 @@ data:
     # interval selection sees them as no-traffic regardless; the agent pins
     # no_traffic_interval == interval on them (cluster.go) — keep that pin.
     stats_config:
-      # No scraper exists; skip default tag extraction (saves per-stat tag
-      # structs and admin /stats render time, which runs on the main thread).
+      # Default tag extraction stays off; the single custom tag below lifts
+      # the cluster name out of cluster.* stat names so the OTel sink exports
+      # one metric family per stat with the cluster as an attribute
+      # (use_tag_extracted_name + emit_tags_as_attributes on the sink). For
+      # health_<pod> probe clusters that attribute IS the pod identity.
       use_all_default_tags: false
+      stats_tags:
+        - tag_name: aether.cluster
+          regex: "^cluster\\.(([^.]+))\\."
       stats_matcher:
         exclusion_list:
           patterns:
-            # Per-pod delivery clusters: O(pods) x ~115 stats. Do NOT add
-            # cluster.health_ here — see the outage note above.
-            - prefix: "cluster.app_"
+            # NOTE: per-pod app_ delivery clusters are no longer excluded —
+            # they collapse into one cluster.app.* block via alt_stat_name
+            # (agent cluster.go), trading the exclusion for O(1) aggregate
+            # visibility of the Envoy->app loopback hop.
+            #
             # Certificate expiration gauges: SPIRE owns rotation/expiry.
             - contains: "ssl.certificate."
             # Per-cluster active-HC verbose stats (attempt/success/failure
@@ -68,6 +81,13 @@ data:
             # this subtree and remain readable. RE2 only — no lookahead.
             - safe_regex:
                 regex: "^cluster\\..*\\.health_check\\."
+            # health_<pod> probe clusters never carry routed traffic, so their
+            # upstream_*/lb_*/protocol subtrees are permanently zero (~100
+            # dead stats per pod). The membership_* gauges the health_check
+            # filter READS (2026-06-11 outage) do not match and remain.
+            # Repro-validated against the deployed image: filter answers 200.
+            - safe_regex:
+                regex: "^cluster\\.health_[^.]*\\.(upstream_|lb_|retry|external|circuit_breakers|http1|http2|max_host_weight|assignment|bind_|original_dst|default_total_match)"
 
 {{- if .Values.proxy.overload.enabled }}
     # Graceful degradation BEFORE the container memory limit OOM-kills Envoy:

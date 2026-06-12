@@ -95,7 +95,11 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, e
 			},
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		StatPrefix:                    fmt.Sprintf("out_http_%s", cniPod.GetName()),
+		// Shared across all pods: per-pod listener stats cost ~40/pod for data
+		// available elsewhere; per-pod attribution rides tags/cluster stats, not
+		// listener stat names (cardinality round 2). The listener NAME stays
+		// per-pod — only stats collapse.
+		StatPrefix:                    "out_http",
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
 			buildDefaultOutboundHTTPFilterChain(cniPod.GetName()),

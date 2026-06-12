@@ -10,9 +10,11 @@ import (
 
 // buildDefaultOutboundHTTPFilterChain creates a filter chain for outbound HTTP traffic.
 // It uses RDS (Route Discovery Service) to dynamically fetch routes and includes
-// network namespace filter state.
+// network namespace filter state. The chain NAME stays per-pod; the HCM stat
+// prefix is shared across pods (cardinality round 2) — per-pod egress
+// attribution rides tags and cluster stats, not HCM stat names.
 func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager(name, nil)
+	hcm := buildHTTPConnectionManager("outbound_http", nil)
 
 	// Readiness probe target: answered on worker threads ahead of the router, so
 	// the CNI plugin's in-netns probe never depends on routes or upstreams.

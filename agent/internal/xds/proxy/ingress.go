@@ -74,7 +74,11 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 				},
 			},
 		},
-		StatPrefix:       fmt.Sprintf("in_%s", cniPod.GetName()),
+		// Shared across all pods (cardinality round 2): per-pod inbound traffic
+		// visibility lives in client-side service-cluster stats and the per-pod
+		// health_ membership gauges; the listener/HCM stat families aggregate
+		// node-wide. Listener NAME stays per-pod — only stats collapse.
+		StatPrefix:       "inbound",
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{
@@ -87,7 +91,7 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 // inbound listener: it routes all requests to the pod's application cluster and sets
 // XFCC from the verified peer certificate's URI SAN (the caller's SVID).
 func buildInboundFilterChain(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager(InboundListenerName(cniPod), buildInboundRouteConfiguration(AppClusterName(cniPod)))
+	hcm := buildHTTPConnectionManager("inbound", buildInboundRouteConfiguration(AppClusterName(cniPod)))
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application.
 	hcm.HttpFilters = []*http_connection_managerv3.HttpFilter{
