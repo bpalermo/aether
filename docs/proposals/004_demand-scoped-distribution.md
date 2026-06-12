@@ -1,6 +1,6 @@
 # Proposal: Demand-Scoped Service Distribution
 
-**Status:** Draft — design decision pending (dependency declaration mechanism)
+**Status:** Accepted — cold path = ODCDS; ships as a breaking change (no fallback flag)
 **Author:** Bruno Palermo
 **Date:** 2026-06-12
 
@@ -41,8 +41,9 @@ pod **on that node** calls it. Real dependency fan-outs are ~5–50 services;
    count, not the node count.
 4. Per-endpoint health continues to come from delegated liveness via EDS; the
    O(clients×endpoints) active-HC term is retired, not just reduced.
-5. Incremental: each phase deployable and revertible alone; the every-node-
-   everything behavior remains available as a fallback flag until Phase 4.
+5. Incremental: each phase deployable and revertible alone (by reverting the
+   phase, not via a runtime flag — decided 2026-06-12: scoped distribution is
+   a breaking change and the every-node-everything mode is not preserved).
 
 ## Proposed Solution
 
@@ -68,22 +69,20 @@ The `config.aether.io/*` prefix is distinct from `endpoint.aether.io/*`
 (endpoint registration facts) — upstreams describe what the pod *consumes*,
 not what it serves.
 
-**B. Observed (cold path + undeclared tail):** when an outbound request names
-a service outside the node's current set, the proxy must still route it. Two
-candidate mechanisms, decided by spike (see Open Questions):
+**B. Observed (cold path + undeclared tail) — DECIDED: ODCDS.** When an
+outbound request names a service outside the node's current set, the outbound
+HCM requests the unknown cluster on demand (`envoy.filters.http.on_demand` +
+`odcds` pointing at the agent's ADS): the agent's xDS server serves it from
+the registrar snapshot and adds it to the node set with a TTL'd membership so
+one-off calls don't pin clusters forever. First-request latency ≈ one xDS
+round-trip on the node-local UDS (~ms). The spike that precedes Phase 3 must
+prove two interactions on the deployed Envoy build: ODCDS with the per-source
+mTLS transport-socket matcher (injected at snapshot time — an on-demand
+cluster must carry it too), and with
+`connection_pool_per_downstream_connection`.
 
-- **ODCDS** (Envoy on-demand CDS): the outbound HCM requests the unknown
-  cluster on first use; the agent's xDS server serves it from the registrar
-  snapshot and adds it to the node set (with a TTL'd membership so one-off
-  calls don't pin clusters forever). First-request latency ≈ one xDS
-  round-trip on the node-local UDS (~ms).
-- **Fallback route → node egress cluster**: requests to unknown authorities
-  route to a small dynamic-forward-proxy-style path while the agent observes
-  the miss (access-log/filter-state tap), adds the service, and the next
-  request takes the warm path.
-
-Either way, **observed misses emit a metric** (`aether.agent.upstreams.miss`)
-so undeclared dependencies are visible and can be promoted to annotations.
+**Observed misses emit a metric** (`aether.agent.upstreams.miss`) so
+undeclared upstreams are visible and can be promoted to annotations.
 
 ### Layer changes
 
@@ -141,10 +140,11 @@ svc-cluster families move to a 60s flush as a separate knob.
 
 ## Failure Modes
 
-- **Undeclared dependency, cold path down** (ODCDS not yet serving / fallback
-  misroute): request fails until the miss path lands. Mitigation: declared
-  annotations for everything latency- or correctness-critical; miss metric for
-  the rest. The fallback flag (full distribution) remains an escape hatch.
+- **Undeclared dependency, cold path down** (ODCDS request fails or times
+  out): the request fails until ODCDS lands. Mitigation: declared annotations
+  for everything latency- or correctness-critical; the miss metric for the
+  rest. There is deliberately no full-distribution escape hatch — reverting
+  the offending phase is the rollback path.
 - **Dependency-set churn thrash**: TTL'd observed entries + hysteresis (don't
   drop a cluster until idle > TTL) bound CDS churn; declared entries only
   change with pod specs.
@@ -157,25 +157,27 @@ svc-cluster families move to a 60s flush as a separate knob.
 
 ## Implementation Phases
 
-### Phase 1 — Scoped agent snapshot from declared dependencies
-Annotation schema; agent unions local pods' dependencies; snapshot builds the
-scoped set; fallback flag `--full-service-distribution` (default **on** until
-Phase 4). E2e: declared-only cluster, verify scoped CDS + steady traffic.
+### Phase 1 — Scoped agent snapshot from declared upstreams
+Annotation schema; agent unions local pods' upstreams; snapshot builds the
+scoped set. **Breaking from day one: undeclared upstreams 404 until Phase 3
+lands ODCDS**, so Phases 1+3 deploy together to any cluster with undeclared
+traffic (the e2e workloads get annotations first). E2e: declared-only
+cluster, verify scoped CDS + steady traffic.
 
 ### Phase 2 — Scoped registrar watch
 `services` filter on `WatchEndpoints` + broadcaster consumer index + filter
 update/reconnect path. E2e: churn fan-out counted per consumer, not per node.
 
-### Phase 3 — Cold path
-Spike ODCDS vs fallback-route+observe on the deployed Envoy; pick one; TTL'd
+### Phase 3 — Cold path (ODCDS)
+Spike the two flagged interactions (transport-socket matcher, per-downstream
+pools) on the deployed Envoy; then on_demand filter + odcds wiring, TTL'd
 observed entries + miss metric. E2e: undeclared call succeeds, warms, expires.
 
 ### Phase 4 — Retire client-side active HC
 Outlier detection on service clusters; remove `MeshReadyPath` HC and
-`IgnoreNewHostsUntilFirstHc` from `NewServiceCluster`; flip the fallback flag
-default to **off**. E2e: full suite incl. roll-under-churn and induced-5xx
-ejection; this phase re-runs the #143/#152 drain validations since the health
-composition changes.
+`IgnoreNewHostsUntilFirstHc` from `NewServiceCluster`. E2e: full suite incl.
+roll-under-churn and induced-5xx ejection; this phase re-runs the #143/#152
+drain validations since the health composition changes.
 
 ### Phase 5 — Export budget (optional)
 Per-family OTel flush intervals if collector volume warrants it at real scale.
@@ -189,15 +191,14 @@ Per-family OTel flush intervals if collector volume warrants it at real scale.
 
 ## Open Questions
 
-1. **ODCDS vs fallback-route for the cold path** — Phase 3 spike decides;
-   ODCDS is the cleaner contract but its interaction with the per-source mTLS
-   transport-socket matcher and `connection_pool_per_downstream_connection`
-   needs proving on the deployed Envoy build.
-2. **Dependency TTL** for observed entries (initial: 1h idle).
+1. ~~ODCDS vs fallback-route~~ — **decided: ODCDS** (2026-06-12); the two
+   Envoy interactions to prove remain listed under the cold-path section.
+2. **Upstream TTL** for observed entries (initial: 1h idle).
 3. **Namespace-level declarations** (`config.aether.io/upstreams` on the
    namespace as a default-union) — convenience vs blast radius.
-4. **Edge proxy** (proposal 003) — the edge tier likely *wants* full
-   distribution (it fronts everything); the fallback flag covers it, but the
-   edge chart should pin it explicitly.
+4. **Edge proxy** (proposal 003) — the edge tier fronts everything; with no
+   full-distribution mode it relies on ODCDS to load services on first use
+   (acceptable: edge traffic warms the working set) or declares a wildcard
+   upstream set — decide in the edge implementation.
 5. Whether Phase 4's outlier-detection settings can be validated with the
    existing loadgen or need a fault-injecting workload.
