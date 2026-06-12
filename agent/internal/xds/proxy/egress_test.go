@@ -12,9 +12,13 @@ import (
 )
 
 func TestNewServiceCluster(t *testing.T) {
-	c := NewServiceCluster("svc-a")
+	c := NewServiceCluster("svc-a", "aether.internal")
 
-	assert.Equal(t, "svc-a", c.GetName())
+	// FQDN-only: the cluster name IS the mesh authority; the bare service
+	// name stays the stats key (alt_stat_name) and the EDS resource name.
+	assert.Equal(t, "svc-a.aether.internal", c.GetName())
+	assert.Equal(t, "svc-a", c.GetAltStatName())
+	assert.Equal(t, "svc-a", c.GetEdsClusterConfig().GetServiceName())
 	assert.Equal(t, clusterv3.Cluster_EDS, c.GetType())
 	assert.True(t, c.GetConnectionPoolPerDownstreamConnection(), "per-downstream pools prevent cross-source identity reuse")
 	require.NotNil(t, c.GetEdsClusterConfig().GetEdsConfig())
@@ -49,7 +53,7 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	ids := []string{"spiffe://example.org/ns/test/sa/pod-a", "spiffe://example.org/ns/test/sa/pod-b"}
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
-	c := NewServiceCluster("svc-a")
+	c := NewServiceCluster("svc-a", "aether.internal")
 	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org")
 
 	// Per-source mTLS: a match per workload identity + the node identity, and
@@ -80,7 +84,7 @@ func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
 		"only invalid entries": {"": "spiffe://example.org/x", "/ns/a": ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := NewServiceCluster("svc-a")
+			c := NewServiceCluster("svc-a", "aether.internal")
 			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org")
 
 			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
@@ -151,7 +155,7 @@ func TestEndpointHealthStatus(t *testing.T) {
 // connections close on (EDS) health failure, panic routing is off, and the
 // retry circuit breaker has headroom for the drain-time reset burst.
 func TestServiceClusterDrainPoolClose(t *testing.T) {
-	c := NewServiceCluster("svc-x")
+	c := NewServiceCluster("svc-x", "aether.internal")
 	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
 		"pools must close at drain-mark, not at the app-exit GOAWAY race")
 	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
@@ -161,4 +165,33 @@ func TestServiceClusterDrainPoolClose(t *testing.T) {
 	require.Len(t, thresholds, 1)
 	assert.Equal(t, uint32(16), thresholds[0].GetMaxRetries().GetValue(),
 		"drain-time reset bursts must not be sacrificed to the retry breaker")
+}
+
+// TestServiceFromClusterName pins the deterministic authority<->service
+// bijection: only single-label names directly under the mesh domain map back
+// to a service.
+func TestServiceFromClusterName(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{name: "mesh authority", in: "payments.aether.internal", want: "payments", ok: true},
+		{name: "bare name rejected", in: "payments", ok: false},
+		{name: "nested label rejected", in: "a.b.aether.internal", ok: false},
+		{name: "empty service rejected", in: ".aether.internal", ok: false},
+		{name: "foreign domain rejected", in: "payments.example.com", ok: false},
+		{name: "domain itself rejected", in: "aether.internal", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ServiceFromClusterName(tt.in, "aether.internal")
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.Equal(t, tt.want, got)
+				assert.Equal(t, tt.in, ServiceClusterName(got, "aether.internal"), "round-trips")
+			}
+		})
+	}
 }

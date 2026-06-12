@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
@@ -49,22 +48,26 @@ func outboundRetryPolicy() *routev3.RetryPolicy {
 }
 
 // onDemandClusterHeader is the header the catch-all route resolves its cluster
-// from: ":authority" makes the requested service name the cluster name, so an
-// undeclared upstream called by its bare service name reaches the on_demand
-// filter as a well-formed cluster reference for ODCDS to fetch.
+// from: ":authority" makes the requested authority the cluster name. Cluster
+// names ARE mesh authorities (<service>.<meshDomain>, see ServiceClusterName),
+// so an undeclared upstream reaches the on_demand filter as a well-formed
+// cluster reference for ODCDS to fetch — deterministically, with no
+// name translation anywhere.
 const onDemandClusterHeader = ":authority"
 
-// buildOnDemandCatchAllVirtualHost builds the lowest-priority ("*") outbound
-// virtual host: requests whose authority matches no distributed service vhost
-// route to the cluster named by the authority. The scoped snapshot does not
-// carry that cluster, so the on_demand HTTP filter pauses the request and
-// fetches it via ODCDS (proposal 004 cold path). Cold requests therefore work
-// for bare service names (svc-name, no port); nonexistent services fail when
-// the ODCDS timeout expires.
-func buildOnDemandCatchAllVirtualHost() *routev3.VirtualHost {
+// buildOnDemandCatchAllVirtualHost builds the lowest-priority outbound
+// virtual host, scoped to the mesh domain (*.<meshDomain>): a mesh authority
+// that matches no distributed service vhost routes to the cluster named by
+// the authority. The scoped snapshot does not carry that cluster, so the
+// on_demand HTTP filter pauses the request and fetches it via ODCDS
+// (proposal 004 cold path). Authorities OUTSIDE the mesh domain match no
+// vhost at all and 404 immediately — typos and stray hostnames never reach
+// the cold path, spend its 5s timeout, or pollute the observed set.
+// Nonexistent services under the domain fail when the ODCDS timeout expires.
+func buildOnDemandCatchAllVirtualHost(meshDomain string) *routev3.VirtualHost {
 	return &routev3.VirtualHost{
 		Name:    "on_demand_catch_all",
-		Domains: []string{"*"},
+		Domains: []string{"*." + meshDomain},
 		Routes: []*routev3.Route{
 			{
 				Match: &routev3.RouteMatch{
@@ -87,22 +90,25 @@ func buildOnDemandCatchAllVirtualHost() *routev3.VirtualHost {
 
 // BuildOutboundRouteConfiguration creates a route configuration for outbound traffic.
 // It includes the provided virtual hosts plus the on-demand catch-all virtual
-// host, which routes unmatched authorities by name for ODCDS resolution.
-// Each service virtual host matches requests by cluster name and FQDN.
-func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.RouteConfiguration {
+// host (*.<meshDomain>), which routes unmatched mesh authorities by name for
+// ODCDS resolution. Authorities outside the mesh domain 404 at the route table.
+func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
-		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost()),
+		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain)),
 	}
 }
 
-// BuildOutboundClusterVirtualHost creates a virtual host that routes traffic to a specific cluster.
-// The virtual host matches both the cluster name and its FQDN (cluster.aether.internal).
-func BuildOutboundClusterVirtualHost(clusterName string) *routev3.VirtualHost {
-	fqdn := fmt.Sprintf("%s.%s", clusterName, "aether.internal")
+// BuildOutboundClusterVirtualHost creates a virtual host that routes traffic
+// to a service. Mesh authorities are FQDN-only: the single accepted domain is
+// <service>.<meshDomain>, which is also the cluster name (bare authorities
+// fall through to no match and 404 — the outbound HCM strips any :port from
+// the authority before matching, so ported FQDNs work).
+func BuildOutboundClusterVirtualHost(serviceName, meshDomain string) *routev3.VirtualHost {
+	fqdn := ServiceClusterName(serviceName, meshDomain)
 	return &routev3.VirtualHost{
-		Name:    clusterName,
-		Domains: []string{clusterName, fqdn},
+		Name:    serviceName,
+		Domains: []string{fqdn},
 		Routes: []*routev3.Route{
 			{
 				Match: &routev3.RouteMatch{
@@ -113,7 +119,7 @@ func BuildOutboundClusterVirtualHost(clusterName string) *routev3.VirtualHost {
 				Action: &routev3.Route_Route{
 					Route: &routev3.RouteAction{
 						ClusterSpecifier: &routev3.RouteAction_Cluster{
-							Cluster: clusterName,
+							Cluster: fqdn,
 						},
 						RetryPolicy: outboundRetryPolicy(),
 					},

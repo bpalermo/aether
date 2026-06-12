@@ -51,9 +51,21 @@ spec:
 ## Calling other services
 
 Apps reach the mesh through the outbound listener: `http://127.0.0.1:18081`
-with the destination service in the `Host` header (`Host: my-svc` or
-`my-svc.aether.internal`). Every hop is mTLS between workload identities; the
-callee sees the caller's SPIFFE ID in `x-forwarded-client-cert`.
+with the destination service's mesh FQDN in the `Host` header:
+`Host: my-svc.aether.internal`. Every hop is mTLS between workload
+identities; the callee sees the caller's SPIFFE ID in
+`x-forwarded-client-cert`.
+
+**Authorities are FQDN-only and deterministic.** `<service>.<mesh-domain>`
+(default domain `aether.internal`, agent `--mesh-domain` / chart
+`meshDomain`) is the single accepted form — it is simultaneously the vhost
+domain, the data-plane cluster name, and the on-demand (ODCDS) lookup key,
+declared or not. A `:port` on the authority is stripped before routing.
+Anything else — bare names (`Host: my-svc`), foreign domains, nested labels —
+matches no route and 404s immediately; only authorities under the mesh domain
+can reach the cold path. The mesh domain also defaults the SPIFFE trust
+domain (`--spire-trust-domain`), so addressing and identity share one domain
+unless explicitly split.
 
 ### Declaring upstreams
 
@@ -73,10 +85,10 @@ metadata:
   documentation, exactly like `minReadySeconds`/`preStop` above.
 - **Undeclared upstreams still work** (cold path): the first request pauses
   ~one node-local xDS round-trip while the cluster is fetched on demand
-  (ODCDS), then stays warm while used (1h idle TTL). Cold-path calls must use
-  the **bare service name** in `Host` (no port, no `.aether.internal`
-  suffix). Requests to nonexistent services fail after the 5s on-demand
-  timeout instead of an immediate 404.
+  (ODCDS), then stays warm while used (1h idle TTL). Cold-path calls use the
+  same FQDN authority as everything else. Requests to nonexistent services
+  *under the mesh domain* fail after the 5s on-demand timeout; anything
+  outside the domain 404s immediately at the route table.
 - Every miss increments `aether.agent.upstreams.miss` (and is logged with the
   service name) — the signal to promote an undeclared dependency to the
   annotation.

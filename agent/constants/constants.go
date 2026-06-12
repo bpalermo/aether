@@ -23,8 +23,6 @@ const (
 
 	// DefaultSpireAdminSocketPath is the default path to the SPIRE agent admin socket
 	DefaultSpireAdminSocketPath = "/tmp/spire-agent/private/admin.sock"
-	// DefaultSpireTrustDomain is the default SPIFFE trust domain used for SDS secret naming
-	DefaultSpireTrustDomain = "ROOTCA"
 	// DefaultSpireWorkloadSocketPath is the default SPIRE Workload API UDS socket (csi.spiffe.io mount)
 	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
 )

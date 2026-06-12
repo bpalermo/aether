@@ -20,27 +20,28 @@ func TestOnDemandObserver_RecordsNamedCDSSubscriptions(t *testing.T) {
 	c := cache.NewSnapshotCache("node-1", logr.Discard())
 	o := newOnDemandObserver(c, logr.Discard())
 
-	// Named CDS subscription: observed.
+	// Named CDS subscription for a mesh authority: observed under the bare
+	// service name (the suffix is the deterministic bridge between the
+	// data-plane cluster name and the control-plane keys).
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
-		ResourceNamesSubscribe: []string{"svc-on-demand"},
+		ResourceNamesSubscribe: []string{"svc-on-demand.aether.internal"},
 	}))
 	assert.Contains(t, c.DependencySet(), "svc-on-demand")
 
-	// Wildcard and per-pod names: ignored.
+	// Wildcard, per-pod names, names outside the mesh domain, and nested
+	// labels under it: all ignored.
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
-		ResourceNamesSubscribe: []string{"*", "", "app_pod-1", "health_pod-1"},
+		ResourceNamesSubscribe: []string{"*", "", "app_pod-1", "health_pod-1", "svc-bare", "a.b.aether.internal", ".aether.internal"},
 	}))
 	deps := c.DependencySet()
-	assert.NotContains(t, deps, "*")
-	assert.NotContains(t, deps, "app_pod-1")
-	assert.NotContains(t, deps, "health_pod-1")
+	assert.Len(t, deps, 1, "only the mesh-authority subscription is observed")
 
 	// EDS subscriptions are named per cluster; they must not be observed.
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.EndpointType,
-		ResourceNamesSubscribe: []string{"svc-eds-sub"},
+		ResourceNamesSubscribe: []string{"svc-eds-sub.aether.internal"},
 	}))
 	assert.NotContains(t, c.DependencySet(), "svc-eds-sub")
 }
@@ -56,7 +57,7 @@ func TestCombinedCallbacks_Dispatch(t *testing.T) {
 
 	require.NoError(t, combined.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
-		ResourceNamesSubscribe: []string{"svc-x"},
+		ResourceNamesSubscribe: []string{"svc-x.aether.internal"},
 	}))
 	assert.Contains(t, c1.DependencySet(), "svc-x")
 	assert.Contains(t, c2.DependencySet(), "svc-x")

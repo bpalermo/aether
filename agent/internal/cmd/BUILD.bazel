@@ -19,6 +19,7 @@ go_library(
         "//agent/internal/xds/server",
         "//agent/storage",
         "//api/aether/cni/v1:cni",
+        "//common/constants",
         "//common/manager",
         "//common/must",
         "//common/spire",

@@ -4,6 +4,7 @@ package cmd
 import (
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
 )
 
@@ -24,6 +25,10 @@ type AgentConfig struct {
 
 	// RegistrarAddress is the gRPC address of the in-cluster Registrar service
 	RegistrarAddress string
+
+	// MeshDomain is the DNS-style domain mesh authorities live under
+	// (<service>.<mesh-domain>); see constants.DefaultMeshDomain.
+	MeshDomain string
 
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
@@ -46,12 +51,16 @@ func NewAgentConfig() *AgentConfig {
 			MetricsEnabled:         true,
 			MetricsBindAddress:     ":8080",
 		},
-		ProxyServiceNodeID:      constants.DefaultProxyID,
-		CNIServerConfig:         cniServer.NewCNIServerConfig(),
-		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
-		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
-		SpireEnabled:            true,
-		SpireTrustDomain:        constants.DefaultSpireTrustDomain,
+		ProxyServiceNodeID:     constants.DefaultProxyID,
+		CNIServerConfig:        cniServer.NewCNIServerConfig(),
+		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
+		RegistrarAddress:       "aether-registrar.aether-system.svc:443",
+		MeshDomain:             commonconstants.DefaultMeshDomain,
+		SpireEnabled:           true,
+		// Empty = follow MeshDomain (resolved in runAgent): mesh addressing
+		// and SPIFFE peer authorization share one domain unless explicitly
+		// split via --spire-trust-domain.
+		SpireTrustDomain:        "",
 		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
 	}

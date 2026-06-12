@@ -53,6 +53,7 @@ spec:
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
+            - "--mesh-domain={{ .Values.meshDomain }}"
             {{- if .Values.telemetry.enabled }}
             - "--otel-enabled=true"
             {{- end }}

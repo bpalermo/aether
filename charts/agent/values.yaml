@@ -21,6 +21,11 @@ namespace:
 # Cluster name passed to the agent (`--cluster-name`).
 clusterName: talos-main
 
+# DNS-style domain mesh authorities live under (`--mesh-domain`): clients
+# address services as <service>.<meshDomain> in the Host header; bare names
+# 404. Also the ODCDS catch-all suffix (*.<meshDomain>).
+meshDomain: aether.internal
+
 # Enable verbose logging on the agent and cni-install containers (`--debug`).
 debug: true
 
@@ -162,8 +167,9 @@ awsCredentials:
 spire:
   enabled: true
   # SPIFFE trust domain authorized for mTLS peers. Leave empty to omit the flag
-  # and let the binary default (ROOTCA) authorize any peer chaining to the SPIRE
-  # root CA; set e.g. "aether.internal" to restrict peers to that trust domain.
+  # and the trust domain follows meshDomain (mesh addressing and SPIFFE peer
+  # authorization share one domain); set explicitly only to split them, or to
+  # the ROOTCA sentinel to authorize any peer chaining to the SPIRE root CA.
   trustDomain: ""
   # Workload API socket (the csi.spiffe.io mount + socket filename).
   workloadSocketPath: /run/secrets/workload-spiffe-uds/socket

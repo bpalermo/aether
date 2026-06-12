@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
@@ -15,17 +16,49 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-// NewServiceCluster builds the outbound service cluster. Endpoints (delivered via
-// EDS) are the destination pods' mesh inbound addresses (pod_ip:defaultInboundPort),
-// each reached by the pod's own netns-bound inbound listener. The cluster speaks
-// HTTP/2 mTLS to the destination pod, presenting the originating pod's identity. The
-// per-source mTLS transport socket is injected at snapshot time (InjectUpstreamMTLS)
-// from the current local workloads; connection_pool_per_downstream_connection keeps a
-// source pod's connection (and therefore its certificate) from being reused for
-// another source.
-func NewServiceCluster(serviceName string) *clusterv3.Cluster {
+// ServiceClusterName returns the data-plane name of a service's outbound
+// cluster: <service>.<meshDomain>. Authorities are FQDN-only, and the cluster
+// name equals the authority so the warm path (service vhost) and the cold
+// path (catch-all cluster_header: ":authority" + ODCDS) resolve the same
+// resource deterministically. The bare service name remains the
+// control-plane key (registry, watch filter, dependency set, EDS, stats).
+func ServiceClusterName(serviceName, meshDomain string) string {
+	return serviceName + "." + meshDomain
+}
+
+// ServiceFromClusterName maps a data-plane cluster name (a mesh authority,
+// <service>.<meshDomain>) back to the bare service name. ok is false when the
+// name is not under the mesh domain or the remainder is not a single DNS
+// label (service names are ServiceAccount names — single lowercase labels),
+// so nested or foreign authorities are rejected deterministically.
+func ServiceFromClusterName(clusterName, meshDomain string) (string, bool) {
+	suffix := "." + meshDomain
+	if !strings.HasSuffix(clusterName, suffix) {
+		return "", false
+	}
+	service := strings.TrimSuffix(clusterName, suffix)
+	if service == "" || strings.Contains(service, ".") {
+		return "", false
+	}
+	return service, true
+}
+
+// NewServiceCluster builds the outbound service cluster, named
+// <service>.<meshDomain> (see ServiceClusterName). Endpoints (delivered via
+// EDS under the bare service name) are the destination pods' mesh inbound
+// addresses (pod_ip:defaultInboundPort), each reached by the pod's own
+// netns-bound inbound listener. The cluster speaks HTTP/2 mTLS to the
+// destination pod, presenting the originating pod's identity. The per-source
+// mTLS transport socket is injected at snapshot time (InjectUpstreamMTLS)
+// from the current local workloads; connection_pool_per_downstream_connection
+// keeps a source pod's connection (and therefore its certificate) from being
+// reused for another source.
+func NewServiceCluster(serviceName, meshDomain string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
-		Name:                                  serviceName,
+		Name: ServiceClusterName(serviceName, meshDomain),
+		// Stats stay keyed by the bare service name (cardinality rounds 1-2
+		// shapes unchanged by the FQDN cluster naming).
+		AltStatName:                           serviceName,
 		ConnectTimeout:                        durationpb.New(2 * time.Second),
 		PerConnectionBufferLimitBytes:         wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ConnectionPoolPerDownstreamConnection: true,
@@ -34,6 +67,11 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 		},
 		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
 			EdsConfig: config.XDSConfigSourceADS(),
+			// EDS resources stay keyed by the bare service name: the cache's
+			// endpoint bookkeeping, the registrar watch, and the dependency
+			// set all speak bare names; only the cluster (and the vhost that
+			// references it) carries the FQDN.
+			ServiceName: serviceName,
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.Http2ProtocolOptions()),

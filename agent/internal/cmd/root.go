@@ -96,9 +96,12 @@ func init() {
 	// Registrar configuration
 	rootCmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
 
+	// Mesh routing configuration
+	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
+
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
-	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
+	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", cfg.SpireTrustDomain, "SPIFFE trust domain used to authorize mesh peers; defaults to --mesh-domain (set the ROOTCA sentinel to authorize any SVID chaining to the SPIRE root)")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
 
@@ -120,6 +123,16 @@ func runAgent(ctx context.Context) (retErr error) {
 		"metricsEnabled", cfg.MetricsEnabled,
 		"otelEnabled", cfg.OTelEnabled,
 	)
+
+	// The SPIFFE trust domain follows the mesh domain unless explicitly
+	// split: service addressing (<svc>.<mesh-domain>) and workload identity
+	// (spiffe://<trust-domain>/ns/...) share one domain by default, so peer
+	// authorization is scoped to the mesh's own trust domain instead of the
+	// historical authorize-any ROOTCA sentinel.
+	if cfg.SpireTrustDomain == "" {
+		cfg.SpireTrustDomain = cfg.MeshDomain
+		l.Info("spire trust domain following mesh domain", "trustDomain", cfg.SpireTrustDomain)
+	}
 
 	// Scope the manager's Pod informer to this node: the agent only ever reads
 	// (CNI ADD enrichment) and watches (termination drain) its own node's pods,
@@ -179,6 +192,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
+	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 
 	// Tracks Envoy's delta-xDS ACK/NACKs so the CNI server can confirm (and
 	// diagnose) config delivery without polling the Envoy admin interface.

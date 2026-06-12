@@ -42,7 +42,11 @@ func (o *onDemandObserver) Callbacks() serverv3.Callbacks {
 
 // onDeltaRequest inspects delta CDS subscriptions for on-demand cluster
 // names. The wildcard subscription ("*" or empty) is the normal CDS stream;
-// per-pod clusters (app_/health_) can never be on-demand requests.
+// per-pod clusters (app_/health_) can never be on-demand requests. On-demand
+// names are mesh authorities (<service>.<meshDomain>, the catch-all routes on
+// the raw authority): the suffix is stripped to the bare service name before
+// it enters the dependency set, and names not under the mesh domain — which
+// the route table shouldn't produce — are dropped, never observed.
 func (o *onDemandObserver) onDeltaRequest(_ int64, req *discoveryv3.DeltaDiscoveryRequest) error {
 	if req.GetTypeUrl() != resourcev3.ClusterType {
 		return nil
@@ -51,7 +55,12 @@ func (o *onDemandObserver) onDeltaRequest(_ int64, req *discoveryv3.DeltaDiscove
 		if name == "*" || name == "" || proxy.IsPerPodClusterName(name) {
 			continue
 		}
-		o.cache.ObserveDependency(context.Background(), name)
+		service, ok := proxy.ServiceFromClusterName(name, o.cache.MeshDomain())
+		if !ok {
+			o.log.V(1).Info("ignoring on-demand subscription outside the mesh domain", "name", name)
+			continue
+		}
+		o.cache.ObserveDependency(context.Background(), service)
 	}
 	return nil
 }
