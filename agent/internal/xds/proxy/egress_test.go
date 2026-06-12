@@ -61,7 +61,7 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
 	c := NewServiceCluster("svc-a", "aether.internal", nil)
-	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org")
+	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil)
 
 	// Per-source mTLS: a match per workload identity + the node identity, and
 	// on-no-match presents the node identity.
@@ -92,7 +92,7 @@ func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := NewServiceCluster("svc-a", "aether.internal", nil)
-			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org")
+			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org", nil)
 
 			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
 			assert.Empty(t, c.GetTransportSocketMatches(), "no legacy matches without the matcher")

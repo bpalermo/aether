@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -88,7 +89,8 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		ids = append(ids, id)
 	}
 	nodeSpiffeID := c.nodeSpiffeID
-	validationContextName := fmt.Sprintf("spiffe://%s", c.trustDomain)
+	trustDomain := c.trustDomain
+	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
 	c.localMu.RUnlock()
 
 	c.clusterMu.RLock()
@@ -97,11 +99,18 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	clusters := make([]types.Resource, 0, len(c.clusters))
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
-	for _, entry := range c.clusters {
+	for serviceName, entry := range c.clusters {
 		cluster := entry.cluster
 		if nodeSpiffeID != "" {
+			// Expected server identities for this service: one SPIFFE ID per
+			// endpoint namespace. The handshake then proves the peer IS the
+			// service asked for, not merely some workload in the trust domain.
+			sanURIs := make([]string, 0, len(entry.sanNamespaces))
+			for _, ns := range entry.sanNamespaces {
+				sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, serviceName))
+			}
 			cl, _ := proto.Clone(entry.cluster).(*clusterv3.Cluster)
-			proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName)
+			proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs)
 			cluster = cl
 		}
 		clusters = append(clusters, cluster)
@@ -185,6 +194,20 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
 		// destination pod's mesh inbound (pod_ip:15008). The per-source mTLS transport
 		// socket is injected at snapshot time (clustersEndpointsAndVhosts).
+		// Server-identity pinning: the union of the endpoints' namespaces
+		// renders the service's expected SPIFFE IDs at snapshot time.
+		nsSet := make(map[string]struct{})
+		for _, endpoint := range endpoints {
+			if ns := endpoint.GetKubernetesMetadata().GetNamespace(); ns != "" {
+				nsSet[ns] = struct{}{}
+			}
+		}
+		sanNamespaces := make([]string, 0, len(nsSet))
+		for ns := range nsSet {
+			sanNamespaces = append(sanNamespaces, ns)
+		}
+		sort.Strings(sanNamespaces)
+
 		// Provider-defined subset keys: the union of this service's endpoint
 		// metadata keys becomes its subset selectors, and the node-wide union
 		// (below) the shared subset-headers ECDS mapping — the provider's
@@ -221,6 +244,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			loadAssignment: cla,
 			endpoints:      epMap,
 			vhost:          vhost,
+			sanNamespaces:  sanNamespaces,
 		}
 	}
 

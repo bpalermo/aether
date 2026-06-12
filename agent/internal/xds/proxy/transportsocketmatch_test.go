@@ -16,7 +16,7 @@ func TestUpstreamTransportSocketMatches(t *testing.T) {
 
 	// Duplicate idA (two pods, same service account) collapses to one match;
 	// empty IDs are skipped.
-	matches := UpstreamTransportSocketMatches([]string{idA, idB, idA, ""}, "spiffe://aether.internal")
+	matches := UpstreamTransportSocketMatches([]string{idA, idB, idA, ""}, "spiffe://aether.internal", nil)
 
 	require.Len(t, matches, 2)
 	names := []string{matches[0].GetName(), matches[1].GetName()}
@@ -72,8 +72,8 @@ func TestUpstreamTransportSocketMatchesDeterministic(t *testing.T) {
 	idB := "spiffe://aether.internal/ns/aether-test/sa/client"
 	idC := "spiffe://aether.internal/ns/aether-test/sa/loadgen"
 
-	a := UpstreamTransportSocketMatches([]string{idC, idA, idB}, "spiffe://aether.internal")
-	b := UpstreamTransportSocketMatches([]string{idB, idC, idA, idB}, "spiffe://aether.internal")
+	a := UpstreamTransportSocketMatches([]string{idC, idA, idB}, "spiffe://aether.internal", nil)
+	b := UpstreamTransportSocketMatches([]string{idB, idC, idA, idB}, "spiffe://aether.internal", nil)
 
 	require.Len(t, a, 3)
 	require.Len(t, b, 3)

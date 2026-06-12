@@ -173,16 +173,18 @@ func NewServiceCluster(serviceName, meshDomain string, subsetKeys []string) *clu
 // transport_socket_matches are set in that branch: without the matcher Envoy
 // falls back to legacy metadata matching, where an empty match criteria set
 // would select the first entry for every endpoint.
-func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string) {
+// sanURIs (the service's expected server SPIFFE IDs) pin the upstream peer
+// identity on every emitted socket; empty disables pinning (bundle-only).
+func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string) {
 	matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
 	if matcher == nil {
-		cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName)
+		cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
 		return
 	}
 	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
 
 	cluster.TransportSocketMatcher = matcher
-	cluster.TransportSocketMatches = UpstreamTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName)
+	cluster.TransportSocketMatches = UpstreamTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs)
 }
 
 // EndpointPriority maps an endpoint's locality distance from this node into
