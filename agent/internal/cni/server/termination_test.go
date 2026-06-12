@@ -207,3 +207,31 @@ func TestHandlePodTerminatingPoolClosePhase(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // > test drain delay
 	assert.Equal(t, registeredBefore, reg.Registered(), "phase 2 must not re-register a removed pod")
 }
+
+// TestDrainDelayForPod: phase 2 scales with the workload's sleep preStop
+// (close 1s before SIGTERM), capped by the deletion grace, with the
+// conservative floor for hookless/opaque pods.
+func TestDrainDelayForPod(t *testing.T) {
+	s := newTestCNIServer(nil, storage.NewMockStorage[*cniv1.CNIPod](), &unregisterRecordingRegistry{}, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s.drainPoolCloseDelay = 2 * time.Second // production floor
+
+	withSleep := func(seconds int64, grace *int64) *corev1.Pod {
+		pod := terminatingK8sPod("p", "default", "test-node")
+		pod.DeletionGracePeriodSeconds = grace
+		if seconds > 0 {
+			pod.Spec.Containers = []corev1.Container{{
+				Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+					Sleep: &corev1.SleepAction{Seconds: seconds},
+				}},
+			}}
+		}
+		return pod
+	}
+	grace30 := int64(30)
+
+	assert.Equal(t, 2*time.Second, s.drainDelayForPod(withSleep(0, &grace30)), "no preStop: floor")
+	assert.Equal(t, 2*time.Second, s.drainDelayForPod(withSleep(3, &grace30)), "sleep 3: 1s before SIGTERM == floor")
+	assert.Equal(t, 14*time.Second, s.drainDelayForPod(withSleep(15, &grace30)), "sleep 15: generous window")
+	assert.Equal(t, 28*time.Second, s.drainDelayForPod(withSleep(60, &grace30)), "sleep > grace: capped 2s short of hard kill")
+	assert.Equal(t, 14*time.Second, s.drainDelayForPod(withSleep(15, nil)), "no grace recorded: sleep governs")
+}
