@@ -51,12 +51,12 @@ node's **dependency set**, derived from two sources that cover each other:
 
 ### Dependency sources
 
-**A. Declared (warm path):** pods annotate their outbound dependencies:
+**A. Declared (warm path):** pods declare their upstreams:
 
 ```yaml
 metadata:
   annotations:
-    endpoint.aether.io/dependencies: "svc-payments,svc-ledger,svc-audit"
+    config.aether.io/upstreams: "svc-payments,svc-ledger,svc-audit"
 ```
 
 The CNI plugin already forwards pod annotations in `CNIPod`; the agent unions
@@ -64,6 +64,9 @@ the annotations of its local pods into the node dependency set. Declared
 dependencies are distributed *before* first use — no cold-start latency — and
 double as reviewable, diffable architecture documentation. Operationally this
 extends `workload-requirements.md`, exactly like `minReadySeconds`/`preStop`.
+The `config.aether.io/*` prefix is distinct from `endpoint.aether.io/*`
+(endpoint registration facts) — upstreams describe what the pod *consumes*,
+not what it serves.
 
 **B. Observed (cold path + undeclared tail):** when an outbound request names
 a service outside the node's current set, the proxy must still route it. Two
@@ -79,7 +82,7 @@ candidate mechanisms, decided by spike (see Open Questions):
   the miss (access-log/filter-state tap), adds the service, and the next
   request takes the warm path.
 
-Either way, **observed misses emit a metric** (`aether.agent.dependency.miss`)
+Either way, **observed misses emit a metric** (`aether.agent.upstreams.miss`)
 so undeclared dependencies are visible and can be promoted to annotations.
 
 ### Layer changes
@@ -179,7 +182,7 @@ Per-family OTel flush intervals if collector volume warrants it at real scale.
 
 ## Metrics and Observability
 
-- `aether.agent.dependency.{declared,observed,miss}` (gauge/counter)
+- `aether.agent.upstreams.{declared,observed,miss}` (gauge/counter)
 - `aether.agent.snapshot.clusters` (gauge — the headline number per node)
 - `aether.registrar.watch.filtered_subscribers`, `fanout_messages`
 - Existing: snapshot build duration, watch reconnects, promotion delay
@@ -191,7 +194,7 @@ Per-family OTel flush intervals if collector volume warrants it at real scale.
    transport-socket matcher and `connection_pool_per_downstream_connection`
    needs proving on the deployed Envoy build.
 2. **Dependency TTL** for observed entries (initial: 1h idle).
-3. **Namespace-level declarations** (`endpoint.aether.io/dependencies` on the
+3. **Namespace-level declarations** (`config.aether.io/upstreams` on the
    namespace as a default-union) — convenience vs blast radius.
 4. **Edge proxy** (proposal 003) — the edge tier likely *wants* full
    distribution (it fronts everything); the fallback flag covers it, but the
