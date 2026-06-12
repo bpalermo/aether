@@ -26,11 +26,19 @@ func TestNewServiceCluster(t *testing.T) {
 	// mTLS is injected at snapshot time, not at build time.
 	assert.Nil(t, c.GetTransportSocketMatcher(), "matcher injected later via InjectUpstreamMTLS")
 
-	// Active readiness health check against each endpoint's mesh readiness path.
-	require.Len(t, c.GetHealthChecks(), 1)
-	assert.Equal(t, MeshReadyPath, c.GetHealthChecks()[0].GetHttpHealthCheck().GetPath())
-	assert.True(t, c.GetCommonLbConfig().GetIgnoreNewHostsUntilFirstHc(), "don't route to a pod until its first readiness check passes")
-	assert.True(t, c.GetIgnoreHealthOnHostRemoval(), "EDS removals (early termination drain) must take effect immediately, not after an HC failure")
+	// Client-side active HC is retired (004 Phase 4): routability is EDS
+	// health (delegated liveness); fast local failure detection is outlier
+	// detection, which rides real traffic.
+	assert.Empty(t, c.GetHealthChecks(), "no per-client active health checks")
+	assert.False(t, c.GetCommonLbConfig().GetIgnoreNewHostsUntilFirstHc(), "EDS health already gates: endpoints register UNHEALTHY and are promoted pre-warmed")
+	od := c.GetOutlierDetection()
+	require.NotNil(t, od, "outlier detection replaces active HC for local failure detection")
+	assert.True(t, od.GetSplitExternalLocalOriginErrors())
+	assert.Equal(t, uint32(3), od.GetConsecutiveLocalOriginFailure().GetValue())
+	assert.Equal(t, uint32(5), od.GetConsecutive_5Xx().GetValue())
+	assert.Equal(t, uint32(50), od.GetMaxEjectionPercent().GetValue(),
+		"ejection cap keeps a local wave from emptying a cluster EDS believes healthy (panic-0)")
+	assert.True(t, c.GetIgnoreHealthOnHostRemoval(), "EDS removals (early termination drain) must take effect immediately, even for ejected hosts")
 }
 
 func TestInjectUpstreamMTLS(t *testing.T) {
