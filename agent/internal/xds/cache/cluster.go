@@ -284,6 +284,34 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 // Sized to outlast a rolling-restart churn window (~40s observed) with margin.
 const defaultServiceRetentionGrace = 90 * time.Second
 
+// SignalIfRetentionExpired emits a dependency-change signal when any retained
+// (absent) service has outlived the retention grace, so the refresher runs a
+// reload that prunes it. Pruning is otherwise reload-driven — and under
+// demand-scoped watches a node in steady state receives NO events once a
+// service leaves its dependency set, so the retained empty cluster/vhost
+// would shadow the on-demand catch-all forever (fast 503 instead of ODCDS;
+// observed in vivo 2026-06-12: svc-4's pods moved off a node and the stale
+// vhost stuck). The refresher calls this from its periodic prune tick.
+func (c *SnapshotCache) SignalIfRetentionExpired() {
+	now := time.Now()
+	grace := c.retentionGrace()
+
+	c.clusterMu.RLock()
+	expired := false
+	for _, entry := range c.clusters {
+		if !entry.absentSince.IsZero() && now.Sub(entry.absentSince) > grace {
+			expired = true
+			break
+		}
+	}
+	c.clusterMu.RUnlock()
+
+	if expired {
+		c.log.V(1).Info("retained service past grace in steady state; triggering prune reload")
+		c.signalDependencyChange()
+	}
+}
+
 // retentionGrace returns the configured service retention grace (test hook).
 func (c *SnapshotCache) retentionGrace() time.Duration {
 	if c.serviceRetentionGrace > 0 {

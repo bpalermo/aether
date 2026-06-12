@@ -16,8 +16,9 @@ import (
 // snapshot replay) into a single reload.
 const defaultRefreshDebounce = 250 * time.Millisecond
 
-// observedPruneInterval is how often ODCDS-observed dependencies are checked
-// against their idle TTL (default 1h; minute-level expiry precision is fine).
+// observedPruneInterval is how often time-driven expiry runs: ODCDS-observed
+// dependencies against their idle TTL, and retained absent services against
+// the retention grace (worst-case stale-retention window = grace + this).
 const observedPruneInterval = time.Minute
 
 // RegistryRefresher is a controller-runtime runnable that rebuilds the xDS
@@ -150,9 +151,13 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 			// contents are unchanged.
 			arm()
 		case <-pruneTicker.C:
-			// Signals a dependency change (handled above) when anything
-			// expired.
+			// Each signals a dependency change (handled above) when anything
+			// expired: observed (ODCDS) entries past their idle TTL, and
+			// retained absent services past the retention grace — the latter
+			// receive no watch events in steady state under scoped watches,
+			// so expiry must be time-driven, not event-driven.
 			r.cache.PruneObservedDependencies()
+			r.cache.SignalIfRetentionExpired()
 		case <-timer.C:
 			// Re-assert the watch filter from the current dependency set
 			// before reloading: a grown set must reach the registrar so the
