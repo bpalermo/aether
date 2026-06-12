@@ -53,26 +53,84 @@ func ServiceFromClusterName(clusterName, meshDomain string) (string, bool) {
 // from the current local workloads; connection_pool_per_downstream_connection
 // keeps a source pod's connection (and therefore its certificate) from being
 // reused for another source.
-// subsetSelectors builds the cluster's subset index: the always-on ip/pod
-// pinning selectors plus one selector per provider-defined key (derived from
-// the service's endpoint metadata, pre-sorted). Every selector is
-// NO_FALLBACK — a request asking for a subset that doesn't exist fails
-// (pin-or-fail; spilling a version=v2 request onto v1 is the canary-poisoning
-// failure mode; deterministic exclusion over spraying, same doctrine as
-// panic-0). Criteria-LESS traffic never consults selectors and rides the
-// cluster-level ANY_ENDPOINT fallback. Multi-key criteria match no selector
-// (single-key selectors only) and also fall back: one subset header per
-// request.
+// maxSubsetComboKeys caps how many provider-defined keys participate in
+// multi-key combinations: the selector count is 2 + 2^k - 1, and a service
+// with more than 4 routing dimensions is an architecture smell, not a config
+// to silently honor. Beyond the cap, the lexicographically-first keys keep
+// full combinations and the rest are emitted as singletons only.
+const maxSubsetComboKeys = 4
+
+// subsetSelectors builds the cluster's subset index:
+//
+//   - The always-on ip/pod pinning selectors. These identify ONE endpoint by
+//     construction and are therefore never combined with other keys (pin
+//     headers are exclusive — mixing a pin with subset headers matches no
+//     selector and falls back to normal balancing). single_host_per_subset
+//     tells Envoy each subset holds exactly one host, replacing the
+//     per-value subset maps with a direct host index.
+//   - The power set of the provider-defined keys (derived from the service's
+//     endpoint metadata, pre-sorted): a request carrying N subset headers
+//     routes to endpoints matching ALL N dimensions. Combos are emitted in
+//     deterministic order (by length, then lexicographically) — selector
+//     order is part of the CDS resource bytes (delta-xDS hashing).
+//
+// Every selector is NO_FALLBACK — a request asking for a subset that doesn't
+// exist fails (pin-or-fail; spilling a version=v2 request onto v1 is the
+// canary-poisoning failure mode; deterministic exclusion over spraying, same
+// doctrine as panic-0). Criteria-LESS traffic never consults selectors and
+// rides the cluster-level ANY_ENDPOINT fallback.
 func subsetSelectors(subsetKeys []string) []*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector {
-	keys := append([]string{subsetIPKey, subsetPodNameKey}, subsetKeys...)
-	selectors := make([]*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector, 0, len(keys))
-	for _, key := range keys {
+	selectors := []*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector{
+		{
+			Keys:                []string{subsetIPKey},
+			FallbackPolicy:      clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK,
+			SingleHostPerSubset: true,
+		},
+		{
+			Keys:                []string{subsetPodNameKey},
+			FallbackPolicy:      clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK,
+			SingleHostPerSubset: true,
+		},
+	}
+	for _, combo := range subsetKeyCombos(subsetKeys) {
 		selectors = append(selectors, &clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector{
-			Keys:           []string{key},
+			Keys:           combo,
 			FallbackPolicy: clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK,
 		})
 	}
 	return selectors
+}
+
+// subsetKeyCombos returns every non-empty combination of the (sorted) keys,
+// ordered by size then lexicographically. Keys beyond maxSubsetComboKeys
+// participate as singletons only.
+func subsetKeyCombos(keys []string) [][]string {
+	comboKeys := keys
+	var singletonOnly []string
+	if len(keys) > maxSubsetComboKeys {
+		comboKeys = keys[:maxSubsetComboKeys]
+		singletonOnly = keys[maxSubsetComboKeys:]
+	}
+
+	var combos [][]string
+	n := len(comboKeys)
+	for size := 1; size <= n; size++ {
+		var build func(start int, cur []string)
+		build = func(start int, cur []string) {
+			if len(cur) == size {
+				combos = append(combos, append([]string(nil), cur...))
+				return
+			}
+			for i := start; i < n; i++ {
+				build(i+1, append(cur, comboKeys[i]))
+			}
+		}
+		build(0, nil)
+	}
+	for _, k := range singletonOnly {
+		combos = append(combos, []string{k})
+	}
+	return combos
 }
 
 func NewServiceCluster(serviceName, meshDomain string, subsetKeys []string) *clusterv3.Cluster {

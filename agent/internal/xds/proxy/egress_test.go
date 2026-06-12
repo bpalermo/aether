@@ -208,10 +208,11 @@ func TestServiceFromClusterName(t *testing.T) {
 func TestNewServiceCluster_DerivedSubsetSelectors(t *testing.T) {
 	c := NewServiceCluster("svc-a", "aether.internal", []string{"shard", "version"})
 	selectors := c.GetLbSubsetConfig().GetSubsetSelectors()
-	require.Len(t, selectors, 4)
+	require.Len(t, selectors, 5)
 	assert.Equal(t, []string{"shard"}, selectors[2].GetKeys())
 	assert.Equal(t, []string{"version"}, selectors[3].GetKeys())
-	assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, selectors[3].GetFallbackPolicy())
+	assert.Equal(t, []string{"shard", "version"}, selectors[4].GetKeys())
+	assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, selectors[4].GetFallbackPolicy())
 }
 
 // TestEndpointPriority pins the locality-failover priority mapping.
@@ -244,4 +245,52 @@ func TestServiceLocalityLbEndpoint_Priority(t *testing.T) {
 	assert.Equal(t, uint32(1), lle.GetPriority(), "same region, different zone")
 	lle = ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z2")
 	assert.Equal(t, uint32(0), lle.GetPriority(), "same zone")
+}
+
+// TestSubsetKeyCombos pins multi-key combination generation: power set in
+// (length, lexicographic) order; keys past the cap fall back to singletons.
+func TestSubsetKeyCombos(t *testing.T) {
+	assert.Empty(t, subsetKeyCombos(nil))
+	assert.Equal(t, [][]string{{"a"}}, subsetKeyCombos([]string{"a"}))
+	assert.Equal(t, [][]string{{"a"}, {"b"}, {"a", "b"}}, subsetKeyCombos([]string{"a", "b"}))
+	assert.Equal(t, [][]string{
+		{"a"},
+		{"b"},
+		{"c"},
+		{"a", "b"},
+		{"a", "c"},
+		{"b", "c"},
+		{"a", "b", "c"},
+	}, subsetKeyCombos([]string{"a", "b", "c"}))
+
+	// Six keys: first four (lexicographic input order) combine fully
+	// (2^4-1 = 15), the rest are singletons.
+	combos := subsetKeyCombos([]string{"a", "b", "c", "d", "e", "f"})
+	assert.Len(t, combos, 15+2)
+	assert.Equal(t, []string{"e"}, combos[15])
+	assert.Equal(t, []string{"f"}, combos[16])
+}
+
+// TestSubsetSelectors_MultiKey verifies the full selector shape: pinned
+// ip/pod singletons (single_host_per_subset, never combined) followed by the
+// derived-key power set, all NO_FALLBACK.
+func TestSubsetSelectors_MultiKey(t *testing.T) {
+	c := NewServiceCluster("svc-a", "aether.internal", []string{"shard", "version"})
+	sel := c.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, sel, 2+3)
+
+	assert.Equal(t, []string{"ip"}, sel[0].GetKeys())
+	assert.True(t, sel[0].GetSingleHostPerSubset(), "ip subsets hold exactly one host")
+	assert.Equal(t, []string{"pod"}, sel[1].GetKeys())
+	assert.True(t, sel[1].GetSingleHostPerSubset())
+
+	assert.Equal(t, []string{"shard"}, sel[2].GetKeys())
+	assert.Equal(t, []string{"version"}, sel[3].GetKeys())
+	assert.Equal(t, []string{"shard", "version"}, sel[4].GetKeys(), "multi-key intersection selector")
+	for i, s := range sel {
+		assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, s.GetFallbackPolicy(), "selector %d", i)
+		if i >= 2 {
+			assert.False(t, s.GetSingleHostPerSubset(), "derived selectors are not single-host")
+		}
+	}
 }

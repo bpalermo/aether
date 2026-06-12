@@ -211,12 +211,13 @@ func TestLoadClustersFromRegistry_SubsetVocabulary(t *testing.T) {
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
-	// Cluster selectors: ip, pod + derived (sorted).
+	// Cluster selectors: ip, pod + derived power set (sorted).
 	entry := c.clusters["svc-a"]
 	sel := entry.cluster.GetLbSubsetConfig().GetSubsetSelectors()
-	require.Len(t, sel, 4)
+	require.Len(t, sel, 5)
 	assert.Equal(t, []string{"shard"}, sel[2].GetKeys())
 	assert.Equal(t, []string{"version"}, sel[3].GetKeys())
+	assert.Equal(t, []string{"shard", "version"}, sel[4].GetKeys())
 
 	// Node union published for the shared ECDS mapping.
 	c.subsetMu.RLock()
