@@ -44,35 +44,37 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 				{Keys: []string{subsetIPKey}},
 			},
 		},
-		// Every client proxy actively health-checks each endpoint's mesh readiness
-		// path over the cluster's mTLS (the HC connection has no source filter state,
-		// so the transport-socket matcher's on-no-match presents the node identity).
-		// A 200 means the destination pod is ready (config + mTLS up and the app
-		// passes its readiness probe); a 503 or failure drops it from load balancing.
-		HealthChecks: []*corev3.HealthCheck{
-			{
-				Timeout:            durationpb.New(2 * time.Second),
-				Interval:           durationpb.New(5 * time.Second),
-				HealthyThreshold:   wrapperspb.UInt32(1),
-				UnhealthyThreshold: wrapperspb.UInt32(2),
-				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
-					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
-						Path:            MeshReadyPath,
-						CodecClientType: typev3.CodecClientType_HTTP2,
-					},
-				},
-			},
-		},
-		// Don't route to a newly discovered endpoint until its first readiness check
-		// passes, so traffic never lands on a not-yet-ready pod. Panic routing is
-		// disabled: with draining endpoints now reported UNHEALTHY (see
-		// endpointHealthStatus), a heavy simultaneous roll could cross Envoy's
-		// default 50% panic threshold and spray traffic at known-unhealthy hosts;
-		// deterministic exclusion + per-request retries + the registry's own
-		// health pipeline are the mesh's answer, not panic spraying.
+		// Per-endpoint health comes from delegated liveness via EDS (proposal
+		// 004 Phase 4): endpoints register UNHEALTHY, the destination-side
+		// health gateway vets them, and the registrar propagates promotion in
+		// ~1s — so new endpoints enter every client pre-warmed and the
+		// O(clients x endpoints) active-HC term is retired, not just reduced.
+		// Fast local failure detection is outlier detection below, which is
+		// O(actual traffic).
+		//
+		// Panic routing is disabled: with draining endpoints reported
+		// UNHEALTHY (see endpointHealthStatus), a heavy simultaneous roll
+		// could cross Envoy's default 50% panic threshold and spray traffic
+		// at known-unhealthy hosts; deterministic exclusion + per-request
+		// retries + the registry's own health pipeline are the mesh's
+		// answer, not panic spraying.
 		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
-			IgnoreNewHostsUntilFirstHc: true,
-			HealthyPanicThreshold:      &typev3.Percent{Value: 0},
+			HealthyPanicThreshold: &typev3.Percent{Value: 0},
+		},
+		// Outlier detection ejects endpoints that fail in practice — consecutive
+		// locally-originated failures (connect refused/reset/timeout: 3 in a row,
+		// the SIGKILL'd-pod case EDS hasn't caught up with yet) or consecutive
+		// 5xx from the app (5 in a row). The ejection percent cap keeps a local
+		// ejection wave from emptying a cluster EDS still believes healthy
+		// (panic-0 above would then fail ALL requests): at most half the
+		// endpoints can be ejected at once.
+		OutlierDetection: &clusterv3.OutlierDetection{
+			SplitExternalLocalOriginErrors: true,
+			ConsecutiveLocalOriginFailure:  wrapperspb.UInt32(3),
+			Consecutive_5Xx:                wrapperspb.UInt32(5),
+			BaseEjectionTime:               durationpb.New(30 * time.Second),
+			MaxEjectionPercent:             wrapperspb.UInt32(50),
+			Interval:                       durationpb.New(10 * time.Second),
 		},
 		// Close pool connections the moment an endpoint goes unhealthy (incl.
 		// the EDS drain mark above): the pools are idle then, and closing them
@@ -89,10 +91,10 @@ func NewServiceCluster(serviceName string) *clusterv3.Cluster {
 				{MaxRetries: wrapperspb.UInt32(16)},
 			},
 		},
-		// With active health checks configured, Envoy by default keeps an
-		// EDS-removed host in rotation until its health check fails — which would
-		// defeat the early termination drain (the agent deregisters an endpoint
-		// the moment its pod's deletion is requested, precisely so clients stop
+		// Envoy by default keeps an EDS-removed host in rotation while it is
+		// marked unhealthy (now: outlier-ejected) — which would defeat the
+		// early termination drain (the agent deregisters an endpoint the
+		// moment its pod's deletion is requested, precisely so clients stop
 		// picking it before the app dies). Honor EDS removals immediately.
 		IgnoreHealthOnHostRemoval: true,
 	}
