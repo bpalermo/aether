@@ -135,8 +135,16 @@ plane — consumers declare nothing; any key published by an in-scope service
 is routable from every pod on the node. Selection is strict (NO_FALLBACK):
 asking for a subset that has no endpoints fails rather than spilling onto
 the rest of the service. Keys must be lowercase DNS-label shaped
-(`[a-z0-9-]`); `ip`, `pod`, `cluster`, `namespace` are reserved. One subset
-header per request (multi-key selection falls back to normal balancing).
+(`[a-z0-9-]`); `ip`, `pod`, `cluster`, `namespace` are reserved.
+
+**Multiple subset headers intersect**: a request carrying
+`x-aether-subset-version: v2` and `x-aether-subset-shard: s1` routes only to
+endpoints matching both, or fails. Up to 4 keys per service combine; beyond
+that, extra keys select individually only. **Pin headers are exclusive**:
+`x-aether-ip`/`x-aether-pod` identify a single endpoint by design and never
+combine — mixing a pin with subset headers matches no selector and falls
+back to normal balancing.
+
 Requests without subset headers are balanced across all healthy endpoints,
 unchanged. Note: a *cold* (ODCDS) first request to an undeclared upstream
 routes before that service's vocabulary lands (~ms); declare upstreams whose
