@@ -70,17 +70,20 @@ func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.Sna
 }
 
 // Start blocks until ctx is cancelled, rebuilding the cluster snapshot from the
-// registry on each (debounced) change notification. It implements
+// registry on each (debounced) change notification — registry endpoint changes
+// and node dependency-set changes (pod add/remove or changed declared
+// upstreams) both funnel into the same debounced reload. It implements
 // controller-runtime's manager.Runnable.
 func (r *RegistryRefresher) Start(ctx context.Context) error {
-	notifier, ok := r.registry.(registry.ChangeNotifier)
-	if !ok {
-		r.log.Info("registry does not support change notifications; clusters refresh only at startup")
-		<-ctx.Done()
-		return nil
-	}
+	depChanges := r.cache.DependencyChanges()
 
-	changes := notifier.Changes()
+	notifier, ok := r.registry.(registry.ChangeNotifier)
+	var changes <-chan struct{}
+	if ok {
+		changes = notifier.Changes()
+	} else {
+		r.log.Info("registry does not support change notifications; clusters refresh on dependency-set changes only")
+	}
 
 	// Debounce timer, created stopped: it is (re)armed on each change signal and
 	// fires once the signals settle, triggering a single reload.
@@ -91,25 +94,34 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 
 	r.log.V(1).Info("watching registry for endpoint changes")
 
+	// arm (re)arms the debounce window. Stop+drain before Reset so a prior
+	// expiry doesn't leave a stale tick queued. Stop reporting true means the
+	// timer was already armed — this signal coalesced.
+	arm := func() {
+		if timer.Stop() {
+			if r.coalesced != nil {
+				r.coalesced.Add(ctx, 1)
+			}
+		} else {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(r.debounce)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-changes:
-			// (Re)arm the debounce window. Stop+drain before Reset so a prior
-			// expiry doesn't leave a stale tick queued. Stop reporting true
-			// means the timer was already armed — this signal coalesced.
-			if timer.Stop() {
-				if r.coalesced != nil {
-					r.coalesced.Add(ctx, 1)
-				}
-			} else {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(r.debounce)
+			arm()
+		case <-depChanges:
+			// The node dependency set changed (pod add/remove or changed
+			// declared upstreams): the scoped cluster set must be
+			// recomputed even though the registry contents are unchanged.
+			arm()
 		case <-timer.C:
 			if err := r.cache.LoadClustersFromRegistry(ctx, r.clusterName, r.nodeName, r.registry); err != nil {
 				r.log.Error(err, "failed to refresh clusters from registry")

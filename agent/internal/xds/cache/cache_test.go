@@ -49,6 +49,15 @@ func newTestCache(nodeName string) *SnapshotCache {
 	return NewSnapshotCache(nodeName, logr.Discard())
 }
 
+// declareDeps seeds the node dependency set with the given services, as if a
+// local pod declared them as upstreams (LoadClustersFromRegistry scopes the
+// snapshot to the dependency set).
+func declareDeps(c *SnapshotCache, services ...string) {
+	c.depMu.Lock()
+	c.podDeps["test-netns"] = podDependencies{upstreams: services}
+	c.depMu.Unlock()
+}
+
 // makeEndpoint builds a minimal ServiceEndpoint for use in table-driven tests.
 func makeEndpoint(ip, clusterName, nodeName string, port uint32) *registryv1.ServiceEndpoint {
 	return &registryv1.ServiceEndpoint{

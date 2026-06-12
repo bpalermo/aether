@@ -6,6 +6,20 @@ const (
 	// Aether annotations
 	annotationAetherPrefix         = "aether.io/"
 	annotationAetherEndpointPrefix = "endpoint." + annotationAetherPrefix
+	// config.aether.io/* annotations describe what the pod CONSUMES (mesh
+	// client configuration), distinct from endpoint.aether.io/* which states
+	// endpoint registration facts (what the pod serves).
+	annotationAetherConfigPrefix = "config." + annotationAetherPrefix
+
+	// AnnotationConfigUpstreams is the pod annotation declaring the upstream
+	// services the pod calls, as a comma-separated list of service names
+	// (e.g. "svc-payments,svc-ledger"). The agent unions the annotations of
+	// its local pods into the node dependency set and distributes
+	// clusters/endpoints/routes only for that set (demand-scoped
+	// distribution, proposal 004). Declared upstreams are warm before first
+	// use; undeclared upstreams are loaded on demand (ODCDS) with one xDS
+	// round-trip of first-request latency.
+	AnnotationConfigUpstreams = annotationAetherConfigPrefix + "upstreams"
 
 	// AnnotationSpiffeID is the pod annotation key for specifying the workload's SPIFFE ID.
 	// When set, this is used as the SDS secret name for the workload's TLS certificate.

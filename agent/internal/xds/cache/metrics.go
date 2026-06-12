@@ -21,6 +21,13 @@ type cacheMetrics struct {
 	errors   metric.Int64Counter
 	duration metric.Float64Histogram
 	version  metric.Int64Gauge
+	// clusters is the headline demand-scoping number: how many clusters this
+	// node's snapshot carries (scoped set + per-pod clusters), vs. the full
+	// mesh service count.
+	clusters metric.Int64Gauge
+	// upstreamsDeclared is the size of the node's declared dependency union
+	// (config.aether.io/upstreams across local pods).
+	upstreamsDeclared metric.Int64Gauge
 }
 
 // newCacheMetrics registers the snapshot instruments on the given meter.
@@ -45,8 +52,25 @@ func newCacheMetrics(meter metric.Meter) (*cacheMetrics, error) {
 		metric.WithDescription("Counter component of the current xDS snapshot version")); err != nil {
 		return nil, fmt.Errorf("version: %w", err)
 	}
+	if m.clusters, err = meter.Int64Gauge("aether.agent.snapshot.clusters",
+		metric.WithDescription("Clusters in the node's current xDS snapshot (demand-scoped set + per-pod clusters)")); err != nil {
+		return nil, fmt.Errorf("clusters: %w", err)
+	}
+	if m.upstreamsDeclared, err = meter.Int64Gauge("aether.agent.upstreams.declared",
+		metric.WithDescription("Distinct upstream services declared by local pods (config.aether.io/upstreams union)")); err != nil {
+		return nil, fmt.Errorf("upstreams declared: %w", err)
+	}
 
 	return m, nil
+}
+
+// snapshotShape records per-snapshot size gauges.
+func (m *cacheMetrics) snapshotShape(ctx context.Context, clusters, declared int) {
+	if m == nil {
+		return
+	}
+	m.clusters.Record(ctx, int64(clusters))
+	m.upstreamsDeclared.Record(ctx, int64(declared))
 }
 
 // generated records the outcome of one snapshot generation.

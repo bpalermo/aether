@@ -29,7 +29,9 @@ func TestGenerateSnapshot_NoClobberAcrossTypes(t *testing.T) {
 	})
 	require.NoError(t, c.LoadListenersFromStorage(ctx, store, "example.org"))
 
-	// Clusters/routes from the registry.
+	// Clusters/routes from the registry ("echo" must be in the node
+	// dependency set to be distributed).
+	declareDeps(c, "echo")
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{

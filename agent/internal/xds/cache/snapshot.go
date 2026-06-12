@@ -85,6 +85,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		attribute.Int("aether.snapshot.secrets", len(secrets)),
 	)
 
+	c.depMu.RLock()
+	declared := c.declaredCountLocked()
+	c.depMu.RUnlock()
+	c.metrics.snapshotShape(ctx, len(clusters), declared)
+
 	snapshot, err := cachev3.NewSnapshot(v, resources)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %w", err)
