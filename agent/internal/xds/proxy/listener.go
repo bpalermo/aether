@@ -95,8 +95,10 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod) (*listenerv3.Listener, e
 			},
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		StatPrefix:                    fmt.Sprintf("out_http_%s", cniPod.GetName()),
-		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
+		// Per-pod listener stats kept (see ingress.go); "out_http_<pod>" is the
+		// shape the aether.pod stats_tag extracts.
+		StatPrefix:       fmt.Sprintf("out_http_%s", cniPod.GetName()),
+		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
 			buildDefaultOutboundHTTPFilterChain(cniPod.GetName()),
 		},

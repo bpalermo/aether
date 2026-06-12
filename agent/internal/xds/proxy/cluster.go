@@ -117,6 +117,12 @@ func NewAppCluster(name, netns string, port uint16) *clusterv3.Cluster {
 				NetworkNamespaceFilepath: netns,
 			},
 		},
+		// Collapse every per-pod app cluster into one cluster.app.* stats block
+		// (cardinality round 2): the Envoy->app loopback hop gets node-aggregate
+		// visibility (connect failures, rq totals) at O(1) instead of either
+		// O(pods) stats or a blanket exclusion. Nothing reads app cluster stats
+		// per-cluster (verified: no ClusterMinHealthyPercentages references).
+		AltStatName: "app",
 	}
 }
 
@@ -134,6 +140,12 @@ func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
 // app_<pod> at startup and whenever the probe fails.
 func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string) *clusterv3.Cluster {
 	c := NewAppCluster(name, netns, port)
+	// MUST stay per-pod (clear the inherited collapse): the health_check
+	// filter answers per-pod readiness by reading THIS cluster's
+	// membership_healthy/membership_total gauges (see the 2026-06-11 stats
+	// outage). A shared alt_stat_name would merge every pod's membership into
+	// one gauge and one unhealthy pod would fail every pod's readiness.
+	c.AltStatName = ""
 	c.HealthChecks = []*corev3.HealthCheck{
 		{
 			Timeout:            durationpb.New(1 * time.Second),

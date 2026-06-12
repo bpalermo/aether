@@ -74,7 +74,12 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 				},
 			},
 		},
-		StatPrefix:       fmt.Sprintf("in_%s", cniPod.GetName()),
+		// Per-pod listener stats are kept deliberately (downstream_cx_* per pod
+		// is the connection-leak debugging signal — see the 2026-06-11 cx-leak).
+		// The "inbound_<pod>" shape is what the aether.pod stats_tag extracts, so
+		// exports collapse to listener.inbound.* labeled by pod while the stats
+		// stay per-pod. HCM stats (5x larger) aggregate node-wide instead.
+		StatPrefix:       fmt.Sprintf("inbound_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{
@@ -87,7 +92,7 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 // inbound listener: it routes all requests to the pod's application cluster and sets
 // XFCC from the verified peer certificate's URI SAN (the caller's SVID).
 func buildInboundFilterChain(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager(InboundListenerName(cniPod), buildInboundRouteConfiguration(AppClusterName(cniPod)))
+	hcm := buildHTTPConnectionManager("inbound", buildInboundRouteConfiguration(AppClusterName(cniPod)))
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application.
 	hcm.HttpFilters = []*http_connection_managerv3.HttpFilter{
