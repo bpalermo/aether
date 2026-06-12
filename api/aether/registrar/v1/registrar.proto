@@ -40,6 +40,19 @@ message WatchEndpointsRequest {
   string cluster_name = 1;
   string node_name = 2;
   string last_version = 3;
+  // When set, the watch is scoped to filter.services: the initial snapshot
+  // and incremental events are limited to those services (demand-scoped
+  // distribution -- fan-out per endpoint change scales with the service's
+  // consumer count, not the node count). An explicitly set but empty filter
+  // watches nothing (a node with no mesh pods). Unset = full watch.
+  // Agents re-assert their filter on every reconnect; the registrar never
+  // serves less than asked.
+  ServiceFilter filter = 4;
+}
+
+// ServiceFilter scopes a watch to a set of service names.
+message ServiceFilter {
+  repeated string services = 1;
 }
 
 message WatchEndpointsResponse {

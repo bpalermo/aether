@@ -129,3 +129,63 @@ func TestRegisterEndpointSnapshotFirst(t *testing.T) {
 	require.Contains(t, eps, "svc-new", "endpoint must be in the snapshot immediately")
 	assert.True(t, q.Shielding("svc-new", "10.0.0.9"), "external write must be queued")
 }
+
+// TestWatchEndpointsFilteredSnapshot verifies a watch carrying a service
+// filter receives only the filtered services' snapshot events (plus the
+// SNAPSHOT_COMPLETE marker), and that an explicitly empty filter receives the
+// marker alone.
+func TestWatchEndpointsFilteredSnapshot(t *testing.T) {
+	snap := NewSnapshot()
+	snap.Apply([]*registrarv1.WatchEndpointsResponse{
+		{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+			ServiceName: "svc-a",
+			Protocol:    registryv1.Service_PROTOCOL_HTTP,
+			Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.1"},
+		},
+		{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+			ServiceName: "svc-b",
+			Protocol:    registryv1.Service_PROTOCOL_HTTP,
+			Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.2"},
+		},
+	})
+	s := NewRegistrarServer(nil, snap, NewBroadcaster(logr.Discard(), nil), "127.0.0.1:0", logr.Discard(), nil)
+
+	run := func(req *registrarv1.WatchEndpointsRequest) []*registrarv1.WatchEndpointsResponse {
+		ctx, cancel := context.WithCancel(context.Background())
+		stream := &fakeWatchServerStream{ctx: ctx}
+		done := make(chan error, 1)
+		go func() { done <- s.WatchEndpoints(req, stream) }()
+		require.Eventually(t, func() bool {
+			for _, e := range stream.sent {
+				if e.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE {
+					return true
+				}
+			}
+			return false
+		}, 5*time.Second, 10*time.Millisecond, "snapshot-complete marker never sent")
+		cancel()
+		<-done
+		return stream.sent
+	}
+
+	// Scoped to svc-a: exactly one FULL_SNAPSHOT (svc-a) + the marker.
+	sent := run(&registrarv1.WatchEndpointsRequest{
+		Filter: &registrarv1.ServiceFilter{Services: []string{"svc-a"}},
+	})
+	require.Len(t, sent, 2)
+	assert.Equal(t, "svc-a", sent[0].GetServiceName())
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, sent[1].GetType())
+
+	// Explicitly empty filter: marker only (a node with no mesh pods).
+	sent = run(&registrarv1.WatchEndpointsRequest{
+		Filter: &registrarv1.ServiceFilter{},
+	})
+	require.Len(t, sent, 1)
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, sent[0].GetType())
+
+	// No filter: full snapshot (both services) + marker.
+	sent = run(&registrarv1.WatchEndpointsRequest{})
+	require.Len(t, sent, 3)
+}

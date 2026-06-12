@@ -44,7 +44,7 @@ func TestBroadcaster_Subscribe(t *testing.T) {
 			b := NewBroadcaster(logr.Discard(), nil)
 
 			for _, id := range tt.ids {
-				ch := b.Subscribe(id)
+				ch := b.Subscribe(id, nil)
 				require.NotNil(t, ch)
 			}
 
@@ -58,12 +58,12 @@ func TestBroadcaster_Subscribe(t *testing.T) {
 func TestBroadcaster_Subscribe_SameID(t *testing.T) {
 	b := NewBroadcaster(logr.Discard(), nil)
 
-	ch1 := b.Subscribe("node-1")
+	ch1 := b.Subscribe("node-1", nil)
 	require.NotNil(t, ch1)
 	assert.Equal(t, 1, b.WatcherCount())
 
 	// Re-subscribing with the same ID should close the old channel.
-	ch2 := b.Subscribe("node-1")
+	ch2 := b.Subscribe("node-1", nil)
 	require.NotNil(t, ch2)
 
 	// The watcher count must stay at one (replacement, not addition).
@@ -106,7 +106,7 @@ func TestBroadcaster_Unsubscribe(t *testing.T) {
 
 			var targetCh <-chan *registrarv1.WatchEndpointsResponse
 			for _, id := range tt.subscribeIDs {
-				ch := b.Subscribe(id)
+				ch := b.Subscribe(id, nil)
 				if id == tt.unsubscribeID {
 					targetCh = ch
 				}
@@ -128,7 +128,7 @@ func TestBroadcaster_Unsubscribe(t *testing.T) {
 // ID is a no-op and does not panic or alter the watcher count.
 func TestBroadcaster_Unsubscribe_UnknownID(t *testing.T) {
 	b := NewBroadcaster(logr.Discard(), nil)
-	b.Subscribe("node-1")
+	b.Subscribe("node-1", nil)
 
 	// Must not panic.
 	b.Unsubscribe("does-not-exist", nil)
@@ -154,8 +154,8 @@ func TestBroadcaster_Unsubscribe_EmptyBroadcaster(t *testing.T) {
 func TestBroadcaster_Unsubscribe_StaleChannel(t *testing.T) {
 	b := NewBroadcaster(logr.Discard(), nil)
 
-	ch1 := b.Subscribe("node-1") // first connection; channel closed by re-Subscribe below
-	ch2 := b.Subscribe("node-1") // reconnect with the same id replaces ch1
+	ch1 := b.Subscribe("node-1", nil) // first connection; channel closed by re-Subscribe below
+	ch2 := b.Subscribe("node-1", nil) // reconnect with the same id replaces ch1
 
 	// The stale caller unsubscribing with its old channel must be a no-op: ch2 is
 	// still the live subscription and must remain registered.
@@ -220,7 +220,7 @@ func TestBroadcaster_Broadcast_DeliveredToAll(t *testing.T) {
 
 			channels := make(map[string]<-chan *registrarv1.WatchEndpointsResponse, len(tt.watcherIDs))
 			for _, id := range tt.watcherIDs {
-				channels[id] = b.Subscribe(id)
+				channels[id] = b.Subscribe(id, nil)
 			}
 
 			b.Broadcast(tt.events)
@@ -256,7 +256,7 @@ func TestBroadcaster_Broadcast_NoWatchers(t *testing.T) {
 // event slice is a no-op and does not panic.
 func TestBroadcaster_Broadcast_EmptyEventList(t *testing.T) {
 	b := NewBroadcaster(logr.Discard(), nil)
-	b.Subscribe("node-1")
+	b.Subscribe("node-1", nil)
 
 	// Must not panic.
 	b.Broadcast([]*registrarv1.WatchEndpointsResponse{})
@@ -271,7 +271,7 @@ func TestBroadcaster_Broadcast_EmptyEventList(t *testing.T) {
 // full snapshot instead of silently missing the event.
 func TestBroadcaster_Broadcast_ForcesResyncOnSlowConsumer(t *testing.T) {
 	b := NewBroadcaster(logr.Discard(), nil)
-	ch := b.Subscribe("slow-node")
+	ch := b.Subscribe("slow-node", nil)
 
 	// Fill the watcher's channel to capacity by broadcasting one event at a time.
 	// No goroutine drains the channel so after defaultChannelBuffer calls it is full.
@@ -312,7 +312,7 @@ func TestBroadcaster_Broadcast_ForcesResyncOnSlowConsumer(t *testing.T) {
 // and receives events normally.
 func TestBroadcaster_Broadcast_ResyncedWatcherCanResubscribe(t *testing.T) {
 	b := NewBroadcaster(logr.Discard(), nil)
-	b.Subscribe("slow-node")
+	b.Subscribe("slow-node", nil)
 
 	event := &registrarv1.WatchEndpointsResponse{
 		Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
@@ -322,7 +322,7 @@ func TestBroadcaster_Broadcast_ResyncedWatcherCanResubscribe(t *testing.T) {
 	}
 	require.Equal(t, 0, b.WatcherCount(), "watcher must be force-resynced")
 
-	ch2 := b.Subscribe("slow-node")
+	ch2 := b.Subscribe("slow-node", nil)
 	b.Broadcast([]*registrarv1.WatchEndpointsResponse{event})
 	require.Equal(t, 1, b.WatcherCount())
 	select {
@@ -350,16 +350,16 @@ func TestBroadcaster_WatcherCount(t *testing.T) {
 		{
 			name: "count reflects subscriptions",
 			actions: func(b *Broadcaster) {
-				b.Subscribe("node-1")
-				b.Subscribe("node-2")
+				b.Subscribe("node-1", nil)
+				b.Subscribe("node-2", nil)
 			},
 			wantCount: 2,
 		},
 		{
 			name: "count reflects unsubscriptions",
 			actions: func(b *Broadcaster) {
-				ch1 := b.Subscribe("node-1")
-				b.Subscribe("node-2")
+				ch1 := b.Subscribe("node-1", nil)
+				b.Subscribe("node-2", nil)
 				b.Unsubscribe("node-1", ch1)
 			},
 			wantCount: 1,
@@ -367,15 +367,15 @@ func TestBroadcaster_WatcherCount(t *testing.T) {
 		{
 			name: "re-subscribing same ID does not increase count",
 			actions: func(b *Broadcaster) {
-				b.Subscribe("node-1")
-				b.Subscribe("node-1")
+				b.Subscribe("node-1", nil)
+				b.Subscribe("node-1", nil)
 			},
 			wantCount: 1,
 		},
 		{
 			name: "unsubscribe of unknown ID does not decrement count",
 			actions: func(b *Broadcaster) {
-				b.Subscribe("node-1")
+				b.Subscribe("node-1", nil)
 				b.Unsubscribe("node-99", nil)
 			},
 			wantCount: 1,
@@ -383,8 +383,8 @@ func TestBroadcaster_WatcherCount(t *testing.T) {
 		{
 			name: "subscribe then unsubscribe all returns to zero",
 			actions: func(b *Broadcaster) {
-				ch1 := b.Subscribe("node-1")
-				ch2 := b.Subscribe("node-2")
+				ch1 := b.Subscribe("node-1", nil)
+				ch2 := b.Subscribe("node-2", nil)
 				b.Unsubscribe("node-1", ch1)
 				b.Unsubscribe("node-2", ch2)
 			},
@@ -399,4 +399,81 @@ func TestBroadcaster_WatcherCount(t *testing.T) {
 			assert.Equal(t, tt.wantCount, b.WatcherCount())
 		})
 	}
+}
+
+// TestBroadcaster_FilteredFanout verifies demand-scoped fan-out: an endpoint
+// event reaches the service's consumers and full watchers only — never
+// watchers filtered to other services or to nothing.
+func TestBroadcaster_FilteredFanout(t *testing.T) {
+	b := NewBroadcaster(logr.Discard(), nil)
+
+	chA := b.Subscribe("consumer-a", []string{"svc-a"})
+	chB := b.Subscribe("consumer-b", []string{"svc-b"})
+	chFull := b.Subscribe("full-watcher", nil)
+	chNone := b.Subscribe("empty-node", []string{})
+
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+		ServiceName: "svc-a",
+	}})
+
+	select {
+	case e := <-chA:
+		assert.Equal(t, "svc-a", e.GetServiceName())
+	default:
+		t.Fatal("svc-a consumer must receive the svc-a event")
+	}
+	select {
+	case e := <-chFull:
+		assert.Equal(t, "svc-a", e.GetServiceName())
+	default:
+		t.Fatal("full watcher must receive every event")
+	}
+	select {
+	case <-chB:
+		t.Fatal("svc-b consumer must not receive svc-a events")
+	default:
+	}
+	select {
+	case <-chNone:
+		t.Fatal("empty-filter watcher must receive nothing")
+	default:
+	}
+}
+
+// TestBroadcaster_ResubscribeReplacesFilter verifies a reconnect with a new
+// filter fully replaces the old index entries (no events from the old scope).
+func TestBroadcaster_ResubscribeReplacesFilter(t *testing.T) {
+	b := NewBroadcaster(logr.Discard(), nil)
+
+	chOld := b.Subscribe("node-1", []string{"svc-a"})
+	chNew := b.Subscribe("node-1", []string{"svc-b"}) // reconnect, new scope
+
+	// Old channel is closed by the replacement.
+	_, open := <-chOld
+	assert.False(t, open, "replaced subscription's channel must be closed")
+
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{
+		{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "svc-a"},
+		{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "svc-b"},
+	})
+
+	select {
+	case e := <-chNew:
+		assert.Equal(t, "svc-b", e.GetServiceName(), "only the new scope's events may arrive")
+	default:
+		t.Fatal("new subscription must receive svc-b")
+	}
+	select {
+	case e := <-chNew:
+		t.Fatalf("unexpected extra event for %s", e.GetServiceName())
+	default:
+	}
+
+	// Unsubscribe cleans the index: broadcasting afterwards reaches nobody.
+	b.Unsubscribe("node-1", chNew)
+	assert.Zero(t, b.WatcherCount())
+	b.Broadcast([]*registrarv1.WatchEndpointsResponse{
+		{Type: registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, ServiceName: "svc-b"},
+	})
 }

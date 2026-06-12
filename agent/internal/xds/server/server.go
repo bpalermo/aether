@@ -76,6 +76,11 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 		return err
 	}
 
+	// The dependency set is now known (local pods loaded): scope the registry
+	// watch to it before waiting on the watch cache, so the snapshot the
+	// registrar streams is the filtered one (demand-scoped distribution).
+	AssertWatchFilter(s.cache, s.registry)
+
 	// Wait (bounded) for the registry watch cache to hold a complete snapshot
 	// before deriving the initial config from it: a fresh agent that builds its
 	// snapshot from an empty/partial cache opens the xDS socket serving a
