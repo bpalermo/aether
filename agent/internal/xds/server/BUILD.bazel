@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "server",
     srcs = [
+        "odcds.go",
         "refresh.go",
         "server.go",
     ],
@@ -11,11 +12,15 @@ go_library(
     deps = [
         "//agent/constants",
         "//agent/internal/xds/cache",
+        "//agent/internal/xds/proxy",
         "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//common/xds",
         "//registry",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_go_logr_logr//:logr",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_metric//:metric",
@@ -25,6 +30,7 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "odcds_test.go",
         "refresh_test.go",
         "server_integration_test.go",
         "server_test.go",

@@ -7,6 +7,7 @@ package proxy
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -124,6 +125,13 @@ func NewAppCluster(name, netns string, port uint16) *clusterv3.Cluster {
 		// per-cluster (verified: no ClusterMinHealthyPercentages references).
 		AltStatName: "app",
 	}
+}
+
+// IsPerPodClusterName reports whether the cluster name belongs to a per-pod
+// cluster (app_<pod> delivery or health_<pod> probe), as opposed to a
+// registry-derived service cluster.
+func IsPerPodClusterName(name string) bool {
+	return strings.HasPrefix(name, appClusterPrefix) || strings.HasPrefix(name, healthProbeClusterPrefix)
 }
 
 // HealthProbeClusterName returns the name of the per-pod health-probe cluster.

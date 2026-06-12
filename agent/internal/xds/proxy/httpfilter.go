@@ -1,14 +1,18 @@
 package proxy
 
 import (
+	"time"
+
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	"github.com/bpalermo/aether/common/constants"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
+	on_demandv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/on_demand/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -17,11 +21,35 @@ const (
 	httpRouterFilterName = "envoy.filters.http.router"
 	// httpHealthCheckFilterName is the Envoy HTTP health_check filter name
 	httpHealthCheckFilterName = "envoy.filters.http.health_check"
+	// httpOnDemandFilterName is the Envoy HTTP on_demand filter name (ODCDS)
+	httpOnDemandFilterName = "envoy.filters.http.on_demand"
+
+	// onDemandClusterTimeout bounds how long a request to a not-yet-distributed
+	// cluster is paused while ODCDS fetches it from the node-local agent. The
+	// warm path is one UDS xDS round-trip plus the agent's scoped reload
+	// (sub-second); the bound mostly caps requests to nonexistent services,
+	// which fail when it expires.
+	onDemandClusterTimeout = 5 * time.Second
 )
 
 // routerHttpFilter creates a router HTTP filter for forwarding matched requests to clusters.
 func routerHttpFilter() *http_connection_managerv3.HttpFilter {
 	return httpFilter(httpRouterFilterName, &routerv3.Router{})
+}
+
+// onDemandHttpFilter creates the on_demand HTTP filter with ODCDS pointing at
+// the agent's ADS (proposal 004 cold path): when an outbound request routes to
+// a cluster the node snapshot does not carry (an undeclared upstream, reached
+// via the catch-all authority route), the request pauses while Envoy requests
+// the cluster on demand; the agent observes the miss, adds the service to the
+// node dependency set (TTL'd), and serves it from the registrar snapshot.
+func onDemandHttpFilter() *http_connection_managerv3.HttpFilter {
+	return httpFilter(httpOnDemandFilterName, &on_demandv3.OnDemand{
+		Odcds: &on_demandv3.OnDemandCds{
+			Source:  config.XDSConfigSourceADS(),
+			Timeout: durationpb.New(onDemandClusterTimeout),
+		},
+	})
 }
 
 // readinessHttpFilter creates a non-pass-through health_check filter answering

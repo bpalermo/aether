@@ -52,9 +52,10 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
 
 	httpFilters := hcm.GetHttpFilters()
-	require.Len(t, httpFilters, 2, "expected health_check + router")
+	require.Len(t, httpFilters, 3, "expected health_check + on_demand + router")
 	assert.Equal(t, httpHealthCheckFilterName, httpFilters[0].GetName())
-	assert.Equal(t, httpRouterFilterName, httpFilters[1].GetName())
+	assert.Equal(t, httpOnDemandFilterName, httpFilters[1].GetName())
+	assert.Equal(t, httpRouterFilterName, httpFilters[2].GetName())
 
 	hc := &health_checkv3.HealthCheck{}
 	require.NoError(t, httpFilters[0].GetTypedConfig().UnmarshalTo(hc))

@@ -16,6 +16,10 @@ import (
 // snapshot replay) into a single reload.
 const defaultRefreshDebounce = 250 * time.Millisecond
 
+// observedPruneInterval is how often ODCDS-observed dependencies are checked
+// against their idle TTL (default 1h; minute-level expiry precision is fine).
+const observedPruneInterval = time.Minute
+
 // RegistryRefresher is a controller-runtime runnable that rebuilds the xDS
 // cluster/endpoint/route snapshot whenever the registry reports endpoint
 // changes. It bridges a registry.ChangeNotifier to the snapshot cache's
@@ -109,6 +113,11 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 		<-timer.C
 	}
 
+	// Periodically expire ODCDS-observed dependencies idle past their TTL;
+	// an expiry signals a dependency change, funneling into the same reload.
+	pruneTicker := time.NewTicker(observedPruneInterval)
+	defer pruneTicker.Stop()
+
 	r.log.V(1).Info("watching registry for endpoint changes")
 
 	// arm (re)arms the debounce window. Stop+drain before Reset so a prior
@@ -135,10 +144,15 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 		case <-changes:
 			arm()
 		case <-depChanges:
-			// The node dependency set changed (pod add/remove or changed
-			// declared upstreams): the scoped cluster set must be
-			// recomputed even though the registry contents are unchanged.
+			// The node dependency set changed (pod add/remove, changed
+			// declared upstreams, or an ODCDS observation): the scoped
+			// cluster set must be recomputed even though the registry
+			// contents are unchanged.
 			arm()
+		case <-pruneTicker.C:
+			// Signals a dependency change (handled above) when anything
+			// expired.
+			r.cache.PruneObservedDependencies()
 		case <-timer.C:
 			// Re-assert the watch filter from the current dependency set
 			// before reloading: a grown set must reach the registrar so the
