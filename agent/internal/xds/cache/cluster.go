@@ -183,9 +183,9 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
 		// destination pod's mesh inbound (pod_ip:15008). The per-source mTLS transport
 		// socket is injected at snapshot time (clustersEndpointsAndVhosts).
-		cluster := proxy.NewServiceCluster(serviceName)
+		cluster := proxy.NewServiceCluster(serviceName, c.meshDomain)
 		cla := proxy.NewClusterLoadAssignment(serviceName)
-		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName)
+		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName, c.meshDomain)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
 
 		for _, endpoint := range endpoints {

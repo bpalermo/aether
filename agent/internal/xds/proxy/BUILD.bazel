@@ -17,7 +17,6 @@ go_library(
         "transportsocket.go",
         "transportsocketmatch.go",
         "upstreams.go",
-        "vhost.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/xds/proxy",
     visibility = ["//agent:__subpackages__"],
@@ -70,7 +69,6 @@ go_test(
         "transportsocket_test.go",
         "transportsocketmatch_test.go",
         "upstreams_test.go",
-        "vhost_test.go",
     ],
     embed = [":proxy"],
     deps = [

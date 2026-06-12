@@ -46,7 +46,7 @@ func TestServiceClusterMTLSInjected(t *testing.T) {
 	require.NoError(t, err)
 	clusters := snap.GetResources(resourcev3.ClusterType)
 
-	echo, ok := clusters["echo"].(*clusterv3.Cluster)
+	echo, ok := clusters["echo.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
 	require.NotNil(t, echo.GetTransportSocketMatcher(), "service cluster must carry the per-source mTLS matcher")
 	names := map[string]bool{}
@@ -76,7 +76,7 @@ func TestServiceClusterNoMTLSWithoutNodeIdentity(t *testing.T) {
 
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
-	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo"].(*clusterv3.Cluster)
+	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
 	assert.Nil(t, echo.GetTransportSocketMatcher(), "no mTLS matcher before the node SVID is served")
 }

@@ -72,7 +72,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		resourcev3.SecretType:   secrets,
 	}
 	if len(vhosts) > 0 {
-		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts)}
+		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain)}
 	}
 
 	c.log.V(1).Info("setting snapshot", "version", v,

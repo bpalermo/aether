@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bpalermo/aether/common/constants"
+
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -47,6 +49,13 @@ type SnapshotCache struct {
 	metrics *cacheMetrics
 
 	nodeName string
+
+	// meshDomain is the DNS-style domain mesh authorities live under; service
+	// clusters are named <service>.<meshDomain> while every control-plane key
+	// (registry, watch filter, dependency set, EDS, stats) stays bare. Set
+	// once before the manager starts (SetMeshDomain); not safe to change at
+	// runtime.
+	meshDomain string
 
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace
@@ -148,6 +157,7 @@ func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
 		SnapshotCache: cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),
 		log:           log.WithName("cache"),
 		nodeName:      nodeName,
+		meshDomain:    constants.DefaultMeshDomain,
 		metrics:       metrics,
 		// Initialize the resource maps up front so callers never assign to a nil
 		// map. LoadListenersFromStorage assigns directly (no lazy init), which
@@ -161,6 +171,20 @@ func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
 		depChanged:     make(chan struct{}, 1),
 		version:        atomic.NewUint64(0),
 	}
+}
+
+// SetMeshDomain overrides the default mesh domain (--mesh-domain flag). Must
+// be called before the manager starts; the domain is read without locking on
+// every snapshot build.
+func (c *SnapshotCache) SetMeshDomain(domain string) {
+	if domain != "" {
+		c.meshDomain = domain
+	}
+}
+
+// MeshDomain returns the configured mesh domain.
+func (c *SnapshotCache) MeshDomain() string {
+	return c.meshDomain
 }
 
 // setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping

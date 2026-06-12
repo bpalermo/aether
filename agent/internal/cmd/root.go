@@ -13,7 +13,6 @@
 //   - mounted-registry-dir: Directory where pod data is stored locally
 //   - registrar-address: gRPC address of the in-cluster Registrar service
 //   - spire-enabled: Whether to enable SPIRE integration for mTLS via SDS
-//   - spire-trust-domain: SPIFFE trust domain for the cluster
 //   - spire-admin-socket: Path to SPIRE agent admin socket
 //
 // The agent uses controller-runtime Manager to orchestrate multiple runnables:
@@ -96,9 +95,11 @@ func init() {
 	// Registrar configuration
 	rootCmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
 
+	// Mesh routing configuration
+	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
+
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
-	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", constants.DefaultSpireTrustDomain, "SPIFFE trust domain for the cluster, used for service identity")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
 
@@ -153,11 +154,11 @@ func runAgent(ctx context.Context) (retErr error) {
 	// When SPIRE is enabled, open the Workload API source and resolve the real
 	// trust domain SPIRE issues into (e.g. "aether.internal"). That trust domain
 	// names the SDS resources / SPIFFE IDs the agent programs into Envoy so they
-	// match the secrets the SPIRE bridge delivers. The configured
-	// --spire-trust-domain governs only peer authorization and may be the
-	// RootCATrustDomain "authorize any" sentinel, which is not a real trust domain.
+	// match the secrets the SPIRE bridge delivers. Peer authorization uses the
+	// mesh domain — addressing (<svc>.<mesh-domain>) and identity
+	// (spiffe://<mesh-domain>/...) are one domain by design, never split.
 	var spireSource *commonspire.Source
-	identityTrustDomain := cfg.SpireTrustDomain
+	identityTrustDomain := cfg.MeshDomain
 	if cfg.SpireEnabled {
 		spireSource, err = commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
 		if err != nil {
@@ -179,6 +180,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
+	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 
 	// Tracks Envoy's delta-xDS ACK/NACKs so the CNI server can confirm (and
 	// diagnose) config delivery without polling the Envoy admin interface.
@@ -295,15 +297,14 @@ func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registr
 	}
 
 	if cfg.SpireEnabled {
-		// Peer authorization uses the configured trust domain (which may be the
-		// RootCATrustDomain "authorize any" sentinel), independent of the workload
-		// trust domain used for SDS resource naming.
-		tlsCfg, err := commonspire.ClientTLSConfig(src, cfg.SpireTrustDomain)
+		// Peer authorization is scoped to the mesh domain: the registrar must
+		// present an SVID in the mesh's own trust domain.
+		tlsCfg, err := commonspire.ClientTLSConfig(src, cfg.MeshDomain)
 		if err != nil {
 			return nil, err
 		}
 		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
-		l.Info("registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
+		l.Info("registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.MeshDomain)
 	} else {
 		l.Info("registrar client using insecure transport")
 	}

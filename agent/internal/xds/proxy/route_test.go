@@ -39,14 +39,15 @@ func TestBuildOutboundRouteConfiguration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			routeConfig := BuildOutboundRouteConfiguration(tt.vhosts)
+			routeConfig := BuildOutboundRouteConfiguration(tt.vhosts, "aether.internal")
 
 			require.NotNil(t, routeConfig)
 			assert.Equal(t, OutboundHTTPRouteName, routeConfig.GetName())
 			// Service vhosts plus the on-demand catch-all ("*"), always last.
 			require.Len(t, routeConfig.GetVirtualHosts(), tt.expectLen+1)
 			catchAll := routeConfig.GetVirtualHosts()[tt.expectLen]
-			assert.Equal(t, []string{"*"}, catchAll.GetDomains())
+			assert.Equal(t, []string{"*.aether.internal"}, catchAll.GetDomains(),
+				"catch-all is scoped to the mesh domain: foreign authorities 404 at the route table")
 			require.Len(t, catchAll.GetRoutes(), 1)
 			assert.Equal(t, onDemandClusterHeader, catchAll.GetRoutes()[0].GetRoute().GetClusterHeader())
 		})
@@ -64,18 +65,19 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vhost := BuildOutboundClusterVirtualHost(tt.clusterName)
+			vhost := BuildOutboundClusterVirtualHost(tt.clusterName, "aether.internal")
 
 			require.NotNil(t, vhost)
 			assert.Equal(t, tt.clusterName, vhost.GetName())
 
+			// FQDN-only: the single accepted authority is also the cluster name.
 			expectedFQDN := fmt.Sprintf("%s.aether.internal", tt.clusterName)
-			assert.Equal(t, []string{tt.clusterName, expectedFQDN}, vhost.GetDomains())
+			assert.Equal(t, []string{expectedFQDN}, vhost.GetDomains())
 
 			require.Len(t, vhost.GetRoutes(), 1)
 			route := vhost.GetRoutes()[0]
 			assert.Equal(t, "/", route.GetMatch().GetPrefix())
-			assert.Equal(t, tt.clusterName, route.GetRoute().GetCluster())
+			assert.Equal(t, expectedFQDN, route.GetRoute().GetCluster())
 		})
 	}
 }
@@ -85,8 +87,8 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 // non-idempotent-safe conditions.
 func TestOutboundRetryPolicy(t *testing.T) {
 	for name, vh := range map[string]*routev3.VirtualHost{
-		"cluster vhost": BuildOutboundClusterVirtualHost("svc-1"),
-		"service vhost": NewServiceVirtualHost("svc-1"),
+		"cluster vhost":   BuildOutboundClusterVirtualHost("svc-1", "aether.internal"),
+		"catch-all vhost": buildOnDemandCatchAllVirtualHost("aether.internal"),
 	} {
 		rp := vh.GetRoutes()[0].GetRoute().GetRetryPolicy()
 		require.NotNil(t, rp, name)

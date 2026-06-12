@@ -4,6 +4,7 @@ package cmd
 import (
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
 )
 
@@ -25,10 +26,12 @@ type AgentConfig struct {
 	// RegistrarAddress is the gRPC address of the in-cluster Registrar service
 	RegistrarAddress string
 
+	// MeshDomain is the DNS-style domain mesh authorities live under
+	// (<service>.<mesh-domain>); see constants.DefaultMeshDomain.
+	MeshDomain string
+
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
-	// SpireTrustDomain is the SPIFFE trust domain for the cluster
-	SpireTrustDomain string
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
 	SpireAdminSocketPath string
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
@@ -50,8 +53,8 @@ func NewAgentConfig() *AgentConfig {
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
+		MeshDomain:              commonconstants.DefaultMeshDomain,
 		SpireEnabled:            true,
-		SpireTrustDomain:        constants.DefaultSpireTrustDomain,
 		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
 	}
