@@ -14,6 +14,22 @@ data:
           address: 127.0.0.1
           port_value: 9901
 
+{{- if .Values.telemetry.otlpEndpoint }}
+    # Push Envoy stats to the OTel collector over OTLP. Push-first like the
+    # rest of the mesh telemetry: the admin /stats endpoint renders on Envoy's
+    # MAIN thread (100-500ms at scale), so it must never be scraped — the sink
+    # serializes off the flush path instead. Stats stay bounded by the
+    # stats_config exclusions below.
+    stats_sinks:
+      - name: envoy.stat_sinks.open_telemetry
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.stat_sinks.open_telemetry.v3.SinkConfig
+          grpc_service:
+            envoy_grpc:
+              cluster_name: otel_collector
+          prefix: envoy
+{{- end }}
+
     # Bound stats-memory growth (measured 2026-06-11: ~5.1k stats/proxy at
     # 7 pods + 8 services; per-pod clusters/listeners dominate). Nothing
     # scrapes the Envoy admin — delegated liveness rides the health-gateway
@@ -153,4 +169,24 @@ data:
                 initial_stream_window_size: 1048576    # 1 MiB
                 initial_connection_window_size: 1048576 # 1 MiB
                 max_concurrent_streams: 10
+{{- if .Values.telemetry.otlpEndpoint }}
+{{- $otlp := splitList ":" .Values.telemetry.otlpEndpoint }}
+      - name: otel_collector
+        type: STRICT_DNS
+        connect_timeout: 2s
+        load_assignment:
+          cluster_name: otel_collector
+          endpoints:
+            - lb_endpoints:
+                - endpoint:
+                    address:
+                      socket_address:
+                        address: {{ index $otlp 0 }}
+                        port_value: {{ index $otlp 1 }}
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
+{{- end }}
 {{- end }}
