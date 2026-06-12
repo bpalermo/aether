@@ -63,9 +63,17 @@ data:
       # (use_tag_extracted_name + emit_tags_as_attributes on the sink). For
       # health_<pod> probe clusters that attribute IS the pod identity.
       use_all_default_tags: false
+      # Envoy tag semantics: the FIRST capture group is removed from the stat
+      # name; the tag value is the SECOND group. Groups must include trailing
+      # separators or the collapsed name keeps a double dot.
       stats_tags:
         - tag_name: aether.cluster
-          regex: "^cluster\\.(([^.]+))\\."
+          regex: "^cluster\\.(([^.]+)\\.)"
+        # Per-pod listener stats stay allocated (cx-leak debugging needs
+        # downstream_cx_* per pod); this lifts the pod into a tag so exports
+        # collapse to listener.{inbound,out_http}.* labeled by aether.pod.
+        - tag_name: aether.pod
+          regex: "^listener\\.(?:inbound|out_http)(_([^.]+))\\."
       stats_matcher:
         exclusion_list:
           patterns:

@@ -74,11 +74,12 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 				},
 			},
 		},
-		// Shared across all pods (cardinality round 2): per-pod inbound traffic
-		// visibility lives in client-side service-cluster stats and the per-pod
-		// health_ membership gauges; the listener/HCM stat families aggregate
-		// node-wide. Listener NAME stays per-pod — only stats collapse.
-		StatPrefix:       "inbound",
+		// Per-pod listener stats are kept deliberately (downstream_cx_* per pod
+		// is the connection-leak debugging signal — see the 2026-06-11 cx-leak).
+		// The "inbound_<pod>" shape is what the aether.pod stats_tag extracts, so
+		// exports collapse to listener.inbound.* labeled by pod while the stats
+		// stay per-pod. HCM stats (5x larger) aggregate node-wide instead.
+		StatPrefix:       fmt.Sprintf("inbound_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
 		FilterChains: []*listenerv3.FilterChain{

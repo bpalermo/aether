@@ -88,7 +88,7 @@ func TestGenerateOutboundHTTPListener(t *testing.T) {
 				Name:             "test-pod",
 				NetworkNamespace: "/var/run/netns/test",
 			},
-			expectedStatPrefix:       "out_http",
+			expectedStatPrefix:       "out_http_test-pod",
 			expectedNetworkNamespace: "/var/run/netns/test",
 			expectedError:            false,
 		},
