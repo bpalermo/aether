@@ -48,13 +48,51 @@ func outboundRetryPolicy() *routev3.RetryPolicy {
 	}
 }
 
+// onDemandClusterHeader is the header the catch-all route resolves its cluster
+// from: ":authority" makes the requested service name the cluster name, so an
+// undeclared upstream called by its bare service name reaches the on_demand
+// filter as a well-formed cluster reference for ODCDS to fetch.
+const onDemandClusterHeader = ":authority"
+
+// buildOnDemandCatchAllVirtualHost builds the lowest-priority ("*") outbound
+// virtual host: requests whose authority matches no distributed service vhost
+// route to the cluster named by the authority. The scoped snapshot does not
+// carry that cluster, so the on_demand HTTP filter pauses the request and
+// fetches it via ODCDS (proposal 004 cold path). Cold requests therefore work
+// for bare service names (svc-name, no port); nonexistent services fail when
+// the ODCDS timeout expires.
+func buildOnDemandCatchAllVirtualHost() *routev3.VirtualHost {
+	return &routev3.VirtualHost{
+		Name:    "on_demand_catch_all",
+		Domains: []string{"*"},
+		Routes: []*routev3.Route{
+			{
+				Match: &routev3.RouteMatch{
+					PathSpecifier: &routev3.RouteMatch_Prefix{
+						Prefix: "/",
+					},
+				},
+				Action: &routev3.Route_Route{
+					Route: &routev3.RouteAction{
+						ClusterSpecifier: &routev3.RouteAction_ClusterHeader{
+							ClusterHeader: onDemandClusterHeader,
+						},
+						RetryPolicy: outboundRetryPolicy(),
+					},
+				},
+			},
+		},
+	}
+}
+
 // BuildOutboundRouteConfiguration creates a route configuration for outbound traffic.
-// It includes the provided virtual hosts along with a catch-all virtual host that returns 404.
-// Each virtual host matches requests by cluster name and FQDN.
+// It includes the provided virtual hosts plus the on-demand catch-all virtual
+// host, which routes unmatched authorities by name for ODCDS resolution.
+// Each service virtual host matches requests by cluster name and FQDN.
 func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
-		VirtualHosts: vhosts,
+		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost()),
 	}
 }
 

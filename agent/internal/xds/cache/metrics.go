@@ -28,6 +28,12 @@ type cacheMetrics struct {
 	// upstreamsDeclared is the size of the node's declared dependency union
 	// (config.aether.io/upstreams across local pods).
 	upstreamsDeclared metric.Int64Gauge
+	// upstreamsObserved is the number of live ODCDS-observed dependencies.
+	upstreamsObserved metric.Int64Gauge
+	// upstreamsMiss counts ODCDS requests for services outside the node
+	// dependency set — each is an undeclared upstream that should be
+	// promoted to a config.aether.io/upstreams annotation.
+	upstreamsMiss metric.Int64Counter
 }
 
 // newCacheMetrics registers the snapshot instruments on the given meter.
@@ -60,17 +66,35 @@ func newCacheMetrics(meter metric.Meter) (*cacheMetrics, error) {
 		metric.WithDescription("Distinct upstream services declared by local pods (config.aether.io/upstreams union)")); err != nil {
 		return nil, fmt.Errorf("upstreams declared: %w", err)
 	}
+	if m.upstreamsObserved, err = meter.Int64Gauge("aether.agent.upstreams.observed",
+		metric.WithDescription("Live ODCDS-observed dependencies in the node dependency set")); err != nil {
+		return nil, fmt.Errorf("upstreams observed: %w", err)
+	}
+	if m.upstreamsMiss, err = meter.Int64Counter("aether.agent.upstreams.miss",
+		metric.WithDescription("ODCDS requests for services outside the node dependency set (undeclared upstreams; promote to annotations)")); err != nil {
+		return nil, fmt.Errorf("upstreams miss: %w", err)
+	}
 
 	return m, nil
 }
 
 // snapshotShape records per-snapshot size gauges.
-func (m *cacheMetrics) snapshotShape(ctx context.Context, clusters, declared int) {
+func (m *cacheMetrics) snapshotShape(ctx context.Context, clusters, declared, observed int) {
 	if m == nil {
 		return
 	}
 	m.clusters.Record(ctx, int64(clusters))
 	m.upstreamsDeclared.Record(ctx, int64(declared))
+	m.upstreamsObserved.Record(ctx, int64(observed))
+}
+
+// upstreamMiss counts one ODCDS miss. The service name is deliberately NOT a
+// metric attribute (unbounded cardinality); it is logged instead.
+func (m *cacheMetrics) upstreamMiss(ctx context.Context, _ string) {
+	if m == nil {
+		return
+	}
+	m.upstreamsMiss.Add(ctx, 1)
 }
 
 // generated records the outcome of one snapshot generation.

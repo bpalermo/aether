@@ -35,6 +35,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/common/set_filter_state/v3:set_filter_state",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/health_check/v3:health_check",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/on_demand/v3:on_demand",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/listener/tls_inspector/v3:tls_inspector",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",

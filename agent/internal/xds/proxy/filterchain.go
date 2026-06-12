@@ -18,7 +18,10 @@ func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 
 	// Readiness probe target: answered on worker threads ahead of the router, so
 	// the CNI plugin's in-netns probe never depends on routes or upstreams.
-	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+	// The on_demand filter (before the router) pauses requests routed to a
+	// cluster the scoped snapshot does not carry while ODCDS fetches it from
+	// the agent (proposal 004 cold path).
+	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter(), onDemandHttpFilter()}, hcm.HttpFilters...)
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{

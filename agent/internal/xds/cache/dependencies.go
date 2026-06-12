@@ -1,9 +1,19 @@
 package cache
 
 import (
+	"context"
+	"time"
+
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 )
+
+// defaultObservedTTL is how long an observed (ODCDS-requested) dependency
+// stays in the node dependency set without being re-requested. One-off calls
+// therefore don't pin clusters forever; a continuously used undeclared
+// upstream re-warms with one xDS round-trip after expiry — and shows up in
+// the miss metric, the signal to promote it to a declared annotation.
+const defaultObservedTTL = time.Hour
 
 // podDependencies is one local pod's contribution to the node dependency set:
 // the services the pod declares it consumes plus the pod's own service (a
@@ -51,10 +61,70 @@ func (c *SnapshotCache) removePodDependencies(netns string) {
 	}
 }
 
+// ObserveDependency records an on-demand (ODCDS) request for a service that
+// is not in the node dependency set: the observed cold path. The service
+// joins the set with a TTL'd membership (refreshed on re-request) and a
+// change signal triggers the scoped reload that delivers the cluster,
+// resuming the paused request. A request for an already-known service only
+// refreshes its observation timestamp. Returns true when the dependency is
+// new (a miss).
+func (c *SnapshotCache) ObserveDependency(ctx context.Context, service string) bool {
+	if service == "" {
+		return false
+	}
+
+	c.depMu.Lock()
+	_, known := c.dependencySetLocked()[service]
+	c.observedDeps[service] = time.Now()
+	c.depMu.Unlock()
+
+	if known {
+		return false
+	}
+
+	c.log.Info("observed undeclared upstream (ODCDS miss); adding to node dependency set",
+		"service", service, "ttl", c.observedTTLValue().String())
+	c.metrics.upstreamMiss(ctx, service)
+	c.signalDependencyChange()
+	return true
+}
+
+// PruneObservedDependencies drops observed dependencies idle past the TTL and
+// signals a dependency change when any were dropped. The refresher calls it
+// periodically; the subsequent scoped reload removes the expired clusters
+// (after the retention grace), and Envoy re-fetches via ODCDS on next use.
+func (c *SnapshotCache) PruneObservedDependencies() {
+	now := time.Now()
+	ttl := c.observedTTLValue()
+
+	c.depMu.Lock()
+	expired := 0
+	for svc, last := range c.observedDeps {
+		if now.Sub(last) > ttl {
+			delete(c.observedDeps, svc)
+			expired++
+		}
+	}
+	c.depMu.Unlock()
+
+	if expired > 0 {
+		c.log.Info("expired observed upstreams from node dependency set", "count", expired)
+		c.signalDependencyChange()
+	}
+}
+
+// observedTTLValue returns the configured observed-dependency TTL (test hook).
+func (c *SnapshotCache) observedTTLValue() time.Duration {
+	if c.observedTTL > 0 {
+		return c.observedTTL
+	}
+	return defaultObservedTTL
+}
+
 // DependencySet returns the node dependency set: the union of all local pods'
-// declared upstreams and their own services. LoadClustersFromRegistry scopes
-// the cluster/endpoint/route snapshot to this set (demand-scoped
-// distribution, proposal 004).
+// declared upstreams, their own services, and live (non-expired) observed
+// dependencies. LoadClustersFromRegistry scopes the cluster/endpoint/route
+// snapshot to this set (demand-scoped distribution, proposal 004).
 func (c *SnapshotCache) DependencySet() map[string]struct{} {
 	c.depMu.RLock()
 	defer c.depMu.RUnlock()
@@ -63,7 +133,7 @@ func (c *SnapshotCache) DependencySet() map[string]struct{} {
 
 // dependencySetLocked builds the dependency set. Caller must hold depMu.
 func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
-	set := make(map[string]struct{}, len(c.podDeps)*4)
+	set := make(map[string]struct{}, len(c.podDeps)*4+len(c.observedDeps))
 	for _, deps := range c.podDeps {
 		if deps.service != "" {
 			set[deps.service] = struct{}{}
@@ -72,7 +142,28 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 			set[u] = struct{}{}
 		}
 	}
+	now := time.Now()
+	ttl := c.observedTTLValue()
+	for svc, last := range c.observedDeps {
+		if now.Sub(last) <= ttl {
+			set[svc] = struct{}{}
+		}
+	}
 	return set
+}
+
+// observedCountLocked returns the number of live observed dependencies.
+// Caller must hold depMu.
+func (c *SnapshotCache) observedCountLocked() int {
+	now := time.Now()
+	ttl := c.observedTTLValue()
+	n := 0
+	for _, last := range c.observedDeps {
+		if now.Sub(last) <= ttl {
+			n++
+		}
+	}
+	return n
 }
 
 // declaredCountLocked returns the number of distinct declared upstream

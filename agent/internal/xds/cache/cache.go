@@ -67,10 +67,17 @@ type SnapshotCache struct {
 	// silently dropping the newer mutation until the next snapshot trigger.
 	snapshotMu sync.Mutex
 
-	// depMu guards podDeps. The node dependency set derived from it scopes
-	// which registry services the snapshot carries (proposal 004).
+	// depMu guards podDeps and observedDeps. The node dependency set derived
+	// from them scopes which registry services the snapshot carries
+	// (proposal 004).
 	depMu   sync.RWMutex
 	podDeps map[string]podDependencies // keyed by container network namespace
+	// observedDeps holds services added by the ODCDS cold path, keyed by
+	// service name with the last observation time; entries idle past
+	// observedTTL are pruned.
+	observedDeps map[string]time.Time
+	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
+	observedTTL time.Duration
 	// depChanged receives a (coalesced) signal when the dependency set
 	// changes; the registry refresher rebuilds the scoped snapshot on it.
 	depChanged chan struct{}
@@ -150,6 +157,7 @@ func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
 		secrets:        make(map[string]*tlsv3.Secret),
 		localWorkloads: make(map[string]string),
 		podDeps:        make(map[string]podDependencies),
+		observedDeps:   make(map[string]time.Time),
 		depChanged:     make(chan struct{}, 1),
 		version:        atomic.NewUint64(0),
 	}

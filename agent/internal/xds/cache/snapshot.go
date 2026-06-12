@@ -87,8 +87,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 
 	c.depMu.RLock()
 	declared := c.declaredCountLocked()
+	observed := c.observedCountLocked()
 	c.depMu.RUnlock()
-	c.metrics.snapshotShape(ctx, len(clusters), declared)
+	c.metrics.snapshotShape(ctx, len(clusters), declared, observed)
 
 	snapshot, err := cachev3.NewSnapshot(v, resources)
 	if err != nil {

@@ -43,7 +43,12 @@ func TestBuildOutboundRouteConfiguration(t *testing.T) {
 
 			require.NotNil(t, routeConfig)
 			assert.Equal(t, OutboundHTTPRouteName, routeConfig.GetName())
-			assert.Len(t, routeConfig.GetVirtualHosts(), tt.expectLen)
+			// Service vhosts plus the on-demand catch-all ("*"), always last.
+			require.Len(t, routeConfig.GetVirtualHosts(), tt.expectLen+1)
+			catchAll := routeConfig.GetVirtualHosts()[tt.expectLen]
+			assert.Equal(t, []string{"*"}, catchAll.GetDomains())
+			require.Len(t, catchAll.GetRoutes(), 1)
+			assert.Equal(t, onDemandClusterHeader, catchAll.GetRoutes()[0].GetRoute().GetClusterHeader())
 		})
 	}
 }

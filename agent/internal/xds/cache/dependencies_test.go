@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"testing"
+	"time"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -136,4 +137,54 @@ func TestLoadClustersFromRegistry_EmptyDependencySet(t *testing.T) {
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
 	assert.Empty(t, c.clusters)
+}
+
+// TestObserveDependency_ColdPath verifies the ODCDS cold path: observing an
+// out-of-scope service adds it to the dependency set (returning true exactly
+// once), signals a dependency change, and a scoped reload then distributes
+// the service; expiry via PruneObservedDependencies removes it again.
+func TestObserveDependency_ColdPath(t *testing.T) {
+	c := newTestCache("node-1")
+	c.observedTTL = 50 * time.Millisecond
+	c.serviceRetentionGrace = time.Nanosecond // prune immediately on reload
+	ctx := context.Background()
+
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{
+				"svc-cold": {makeEndpoint("10.0.0.5", "cluster-1", "node-2", 8080)},
+			}, nil
+		},
+	}
+
+	// Not distributed: not in the dependency set.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	require.NotContains(t, c.clusters, "svc-cold")
+	drainDepSignal(c)
+
+	// First observation: a miss — added + signaled.
+	assert.True(t, c.ObserveDependency(ctx, "svc-cold"), "first observation is a miss")
+	assert.True(t, drainDepSignal(c), "observation must signal a dependency change")
+	assert.Contains(t, c.DependencySet(), "svc-cold")
+
+	// Re-observation refreshes the TTL without a second miss.
+	assert.False(t, c.ObserveDependency(ctx, "svc-cold"), "known dependency is not a miss")
+
+	// The scoped reload now distributes the cluster.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.Contains(t, c.clusters, "svc-cold")
+
+	// Idle past the TTL: pruned from the set and signaled.
+	time.Sleep(60 * time.Millisecond)
+	drainDepSignal(c)
+	c.PruneObservedDependencies()
+	assert.True(t, drainDepSignal(c), "expiry must signal a dependency change")
+	assert.NotContains(t, c.DependencySet(), "svc-cold")
+}
+
+// TestObserveDependency_EmptyName verifies empty names are rejected.
+func TestObserveDependency_EmptyName(t *testing.T) {
+	c := newTestCache("node-1")
+	assert.False(t, c.ObserveDependency(context.Background(), ""))
+	assert.False(t, drainDepSignal(c))
 }

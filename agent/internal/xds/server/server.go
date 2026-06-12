@@ -49,8 +49,16 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 		xds.WithUDS(constants.DefaultXdsSocketPath),
 	)
 
+	// Watch the discovery streams for on-demand CDS subscriptions (ODCDS cold
+	// path) alongside the caller's callbacks (the ACK tracker).
+	observer := newOnDemandObserver(snapshotCache, log)
+	combined := combinedCallbacks{observer.Callbacks()}
+	if callbacks != nil {
+		combined = append(combined, callbacks)
+	}
+
 	aXdsServer := &AgentXdsServer{
-		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, callbacks, log),
+		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, combined, log),
 		log:         log.WithName("agent-xds"),
 		clusterName: clusterName,
 		nodeName:    nodeName,
