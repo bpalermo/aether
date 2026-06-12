@@ -262,3 +262,47 @@ func TestSetNodeLocality_SignalsAndPrioritizes(t *testing.T) {
 	assert.Equal(t, uint32(0), prios["10.0.0.1"], "same zone is P0")
 	assert.Equal(t, uint32(2), prios["10.0.0.2"], "other region is P2")
 }
+
+// TestSignalIfRetentionExpired covers the steady-state retention bug
+// (2026-06-12): a service leaving the dependency set is retained empty for
+// the grace, but under scoped watches no further events arrive to trigger
+// the pruning reload — its stale vhost then shadows the ODCDS catch-all
+// forever. Time-driven expiry must signal the reload instead.
+func TestSignalIfRetentionExpired(t *testing.T) {
+	c := newTestCache("node-1")
+	c.serviceRetentionGrace = 30 * time.Millisecond
+	declareDeps(c, "svc-gone")
+	ctx := context.Background()
+
+	data := map[string][]*registryv1.ServiceEndpoint{
+		"svc-gone": {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+	}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return data, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	// The service vanishes (and leaves the dep set); one reload retains it.
+	data = map[string][]*registryv1.ServiceEndpoint{}
+	declareDeps(c) // no upstreams anymore
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	require.Contains(t, c.clusters, "svc-gone", "retained during grace")
+	drainDepSignal(c)
+
+	// Within the grace: no signal.
+	c.SignalIfRetentionExpired()
+	assert.False(t, drainDepSignal(c), "no signal while inside the grace")
+
+	// Past the grace: the tick signals, and the triggered reload prunes.
+	time.Sleep(40 * time.Millisecond)
+	c.SignalIfRetentionExpired()
+	require.True(t, drainDepSignal(c), "expiry must signal the pruning reload")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.NotContains(t, c.clusters, "svc-gone", "stale retained service pruned")
+
+	// Idempotent: nothing retained, no signal.
+	c.SignalIfRetentionExpired()
+	assert.False(t, drainDepSignal(c))
+}
