@@ -188,3 +188,76 @@ func TestObserveDependency_EmptyName(t *testing.T) {
 	assert.False(t, c.ObserveDependency(context.Background(), ""))
 	assert.False(t, drainDepSignal(c))
 }
+
+// TestLoadClustersFromRegistry_SubsetVocabulary verifies provider-defined
+// endpoint metadata keys become the service's subset selectors and the
+// node-wide ECDS subset-headers mapping, with invalid/reserved keys dropped.
+func TestLoadClustersFromRegistry_SubsetVocabulary(t *testing.T) {
+	c := newTestCache("node-1")
+	declareDeps(c, "svc-a")
+	ctx := context.Background()
+
+	ep := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+	ep.Metadata = map[string]string{
+		"version": "v2",
+		"shard":   "s1",
+		"Bad_Key": "x", // invalid shape: dropped
+		"ip":      "y", // reserved: dropped
+	}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"svc-a": {ep}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	// Cluster selectors: ip, pod + derived (sorted).
+	entry := c.clusters["svc-a"]
+	sel := entry.cluster.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, sel, 4)
+	assert.Equal(t, []string{"shard"}, sel[2].GetKeys())
+	assert.Equal(t, []string{"version"}, sel[3].GetKeys())
+
+	// Node union published for the shared ECDS mapping.
+	c.subsetMu.RLock()
+	keys := c.subsetHeaderKeys
+	c.subsetMu.RUnlock()
+	assert.Equal(t, []string{"shard", "version"}, keys)
+}
+
+// TestSetNodeLocality_SignalsAndPrioritizes verifies resolving the node
+// locality signals a reload and the rebuilt EDS carries failover priorities.
+func TestSetNodeLocality_SignalsAndPrioritizes(t *testing.T) {
+	c := newTestCache("node-1")
+	declareDeps(c, "svc-a")
+	ctx := context.Background()
+
+	sameZone := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+	sameZone.Locality = &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z1"}
+	otherRegion := makeEndpoint("10.0.0.2", "cluster-1", "node-9", 8080)
+	otherRegion.Locality = &registryv1.ServiceEndpoint_Locality{Region: "r2", Zone: "z1"}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"svc-a": {sameZone, otherRegion}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	drainDepSignal(c)
+
+	// No locality yet: no preference.
+	for _, lle := range c.clusters["svc-a"].loadAssignment.GetEndpoints() {
+		assert.Zero(t, lle.GetPriority())
+	}
+
+	c.SetNodeLocality("r1", "z1")
+	assert.True(t, drainDepSignal(c), "locality resolution must trigger a scoped reload")
+	assert.False(t, func() bool { c.SetNodeLocality("r1", "z1"); return drainDepSignal(c) }(), "unchanged locality must not re-signal")
+
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	prios := map[string]uint32{}
+	for _, lle := range c.clusters["svc-a"].loadAssignment.GetEndpoints() {
+		prios[lle.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress()] = lle.GetPriority()
+	}
+	assert.Equal(t, uint32(0), prios["10.0.0.1"], "same zone is P0")
+	assert.Equal(t, uint32(2), prios["10.0.0.2"], "other region is P2")
+}

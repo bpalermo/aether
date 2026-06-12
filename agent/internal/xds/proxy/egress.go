@@ -53,7 +53,29 @@ func ServiceFromClusterName(clusterName, meshDomain string) (string, bool) {
 // from the current local workloads; connection_pool_per_downstream_connection
 // keeps a source pod's connection (and therefore its certificate) from being
 // reused for another source.
-func NewServiceCluster(serviceName, meshDomain string) *clusterv3.Cluster {
+// subsetSelectors builds the cluster's subset index: the always-on ip/pod
+// pinning selectors plus one selector per provider-defined key (derived from
+// the service's endpoint metadata, pre-sorted). Every selector is
+// NO_FALLBACK — a request asking for a subset that doesn't exist fails
+// (pin-or-fail; spilling a version=v2 request onto v1 is the canary-poisoning
+// failure mode; deterministic exclusion over spraying, same doctrine as
+// panic-0). Criteria-LESS traffic never consults selectors and rides the
+// cluster-level ANY_ENDPOINT fallback. Multi-key criteria match no selector
+// (single-key selectors only) and also fall back: one subset header per
+// request.
+func subsetSelectors(subsetKeys []string) []*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector {
+	keys := append([]string{subsetIPKey, subsetPodNameKey}, subsetKeys...)
+	selectors := make([]*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector, 0, len(keys))
+	for _, key := range keys {
+		selectors = append(selectors, &clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector{
+			Keys:           []string{key},
+			FallbackPolicy: clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK,
+		})
+	}
+	return selectors
+}
+
+func NewServiceCluster(serviceName, meshDomain string, subsetKeys []string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name: ServiceClusterName(serviceName, meshDomain),
 		// Stats stay keyed by the bare service name (cardinality rounds 1-2
@@ -76,11 +98,12 @@ func NewServiceCluster(serviceName, meshDomain string) *clusterv3.Cluster {
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.Http2ProtocolOptions()),
 		},
+		// Cluster-level ANY_ENDPOINT routes criteria-less traffic (normal
+		// requests with no subset headers) across all healthy endpoints; the
+		// selectors themselves are NO_FALLBACK (see subsetSelectors).
 		LbSubsetConfig: &clusterv3.Cluster_LbSubsetConfig{
-			FallbackPolicy: clusterv3.Cluster_LbSubsetConfig_ANY_ENDPOINT,
-			SubsetSelectors: []*clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector{
-				{Keys: []string{subsetIPKey}},
-			},
+			FallbackPolicy:  clusterv3.Cluster_LbSubsetConfig_ANY_ENDPOINT,
+			SubsetSelectors: subsetSelectors(subsetKeys),
 		},
 		// Per-endpoint health comes from delegated liveness via EDS (proposal
 		// 004 Phase 4): endpoints register UNHEALTHY, the destination-side
@@ -162,12 +185,37 @@ func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]s
 	cluster.TransportSocketMatches = UpstreamTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName)
 }
 
+// EndpointPriority maps an endpoint's locality distance from this node into
+// an EDS priority (locality-aware failover): same zone 0, same region 1,
+// elsewhere or unknown 2. Envoy keeps traffic at the lowest healthy priority
+// and spills proportionally as it degrades (overprovisioning factor 1.4
+// default), so a zonal roll or outage drains to the region automatically —
+// including DRAINING/UNHEALTHY EDS marks. An agent without locality labels
+// expresses no preference (everything 0). This is deliberately NOT Envoy's
+// zone_aware_lb_config, which needs the local proxy fleet's per-zone
+// membership on every node — O(all nodes) state that demand-scoped
+// distribution (004) exists to eliminate.
+func EndpointPriority(localRegion, localZone string, endpoint *registryv1.ServiceEndpoint) uint32 {
+	if localRegion == "" {
+		return 0
+	}
+	loc := endpoint.GetLocality()
+	if loc.GetRegion() != localRegion {
+		return 2
+	}
+	if localZone == "" || loc.GetZone() == localZone {
+		return 0
+	}
+	return 1
+}
+
 // ServiceLocalityLbEndpointFromRegistryEndpoint builds an endpoint for the plain
 // transport: its socket address is the destination pod's mesh inbound
 // (<pod_ip>:defaultInboundPort), reached by the pod's own netns-bound inbound
 // listener, and its host metadata carries the envoy.lb subset keys for affinity.
-// The endpoint health reflects the registry's delegated-liveness status.
-func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint) *endpointv3.LocalityLbEndpoints {
+// The endpoint health reflects the registry's delegated-liveness status, and
+// its priority the locality distance from this node (EndpointPriority).
+func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint, localRegion, localZone string) *endpointv3.LocalityLbEndpoints {
 	subsetKeys := map[string]string{
 		subsetClusterKey: endpoint.GetClusterName(),
 		subsetIPKey:      endpoint.GetIp(),
@@ -228,6 +276,7 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 			},
 		},
 		Locality: locality,
+		Priority: EndpointPriority(localRegion, localZone, endpoint),
 	}
 }
 

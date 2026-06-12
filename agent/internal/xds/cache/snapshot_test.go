@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -52,4 +54,6 @@ func TestGenerateSnapshot_NoClobberAcrossTypes(t *testing.T) {
 	assert.NotEmpty(t, snap.GetResources(resourcev3.ClusterType), "clusters must survive later updates")
 	assert.NotEmpty(t, snap.GetResources(resourcev3.RouteType), "outbound route config must survive later updates")
 	assert.NotEmpty(t, snap.GetResources(resourcev3.SecretType), "secrets must be present")
+	assert.Contains(t, snap.GetResources(resourcev3.ExtensionConfigType), proxy.SubsetHeadersFilterName,
+		"the shared subset-headers ECDS resource is always emitted")
 }

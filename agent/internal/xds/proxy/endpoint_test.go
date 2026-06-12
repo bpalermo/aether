@@ -36,9 +36,9 @@ func TestSortLocalityLbEndpoints(t *testing.T) {
 		return &registryv1.ServiceEndpoint{Ip: ip}
 	}
 	eps := []*endpointv3.LocalityLbEndpoints{
-		ServiceLocalityLbEndpointFromRegistryEndpoint(mk("10.244.4.9")),
-		ServiceLocalityLbEndpointFromRegistryEndpoint(mk("10.244.1.7")),
-		ServiceLocalityLbEndpointFromRegistryEndpoint(mk("10.244.3.2")),
+		ServiceLocalityLbEndpointFromRegistryEndpoint(mk("10.244.4.9"), "", ""),
+		ServiceLocalityLbEndpointFromRegistryEndpoint(mk("10.244.1.7"), "", ""),
+		ServiceLocalityLbEndpointFromRegistryEndpoint(mk("10.244.3.2"), "", ""),
 	}
 
 	SortLocalityLbEndpoints(eps)

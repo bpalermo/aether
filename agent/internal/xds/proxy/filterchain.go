@@ -27,7 +27,10 @@ func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	// The on_demand filter (before the router) pauses requests routed to a
 	// cluster the scoped snapshot does not carry while ODCDS fetches it from
 	// the agent (proposal 004 cold path).
-	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter(), onDemandHttpFilter()}, hcm.HttpFilters...)
+	// The subset-headers filter (ECDS-discovered, shared node-wide) turns
+	// x-aether-ip/x-aether-pod/x-aether-subset-* request headers into
+	// envoy.lb match criteria ahead of routing.
+	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter(), subsetHeadersHttpFilter(), onDemandHttpFilter()}, hcm.HttpFilters...)
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
