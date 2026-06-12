@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"buf.build/go/protovalidate"
 	"github.com/bpalermo/aether/agent/internal/spire"
@@ -76,6 +77,10 @@ type CNIServer struct {
 	// termination watch to observe pod deletionTimestamp transitions. Nil
 	// disables the watch.
 	informers ctrlcache.Informers
+
+	// drainPoolCloseDelay separates the two drain phases (see
+	// schedulePoolClose); overridable in tests.
+	drainPoolCloseDelay time.Duration
 }
 
 var _ xds.ServerCallback = (*CNIServer)(nil)
@@ -100,21 +105,22 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 	}
 
 	cniSrv := &CNIServer{
-		Server:        xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
-		log:           log.WithName("cni"),
-		metrics:       metrics,
-		clusterName:   clusterName,
-		nodeName:      nodeName,
-		proxyID:       proxyID,
-		trustDomain:   trustDomain,
-		storage:       localStorage,
-		registry:      registry,
-		k8sClient:     k8sClient,
-		informers:     informers,
-		snapshotCache: snapshotCache,
-		ackTracker:    ackTracker,
-		spireBridge:   spireBridge,
-		healthClient:  newHealthGatewayClient(cfg.ProxyHealthSocketPath),
+		drainPoolCloseDelay: drainPoolCloseDelay,
+		Server:              xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
+		log:                 log.WithName("cni"),
+		metrics:             metrics,
+		clusterName:         clusterName,
+		nodeName:            nodeName,
+		proxyID:             proxyID,
+		trustDomain:         trustDomain,
+		storage:             localStorage,
+		registry:            registry,
+		k8sClient:           k8sClient,
+		informers:           informers,
+		snapshotCache:       snapshotCache,
+		ackTracker:          ackTracker,
+		spireBridge:         spireBridge,
+		healthClient:        newHealthGatewayClient(cfg.ProxyHealthSocketPath),
 	}
 
 	cniSrv.AddCallback(cniSrv)

@@ -199,19 +199,24 @@ func endpointHealthStatus(endpoint *registryv1.ServiceEndpoint) corev3.HealthSta
 	case registryv1.ServiceEndpoint_HEALTH_UNHEALTHY:
 		return corev3.HealthStatus_UNHEALTHY
 	case registryv1.ServiceEndpoint_HEALTH_DRAINING:
-		// Pod deletion requested. UNHEALTHY — deliberately NOT Envoy's
-		// DRAINING: DRAINING excludes the host from new selections but keeps
-		// the established H2 pool connections open until the app's shutdown
-		// GOAWAY arrives, and streams the server had claimed but not yet
-		// answered at that instant fail non-retriably (the residual ~3-7
-		// fails per pod delete, P2; instrumented 2026-06-11: rx_reset=0,
-		// retry_success=retry_total — every failure was a stream the GOAWAY
-		// race left unretriable). UNHEALTHY combined with the cluster's
-		// close_connections_on_host_health_failure closes those pools at
-		// drain-mark time instead (~t0+0.8s), while the app is still healthy
-		// and the pools are idle; anything in flight resets pre-request and
-		// retries successfully onto a live endpoint.
-		return corev3.HealthStatus_UNHEALTHY
+		// Pod deletion requested: phase 1 of the two-phase drain. Envoy
+		// DRAINING excludes the host from new selections but leaves
+		// established connections untouched, so requests already in flight
+		// complete (directive 2026-06-11: never hard-close active streams).
+		//
+		// History of the single-phase variants, both instrumented:
+		//  - DRAINING alone left idle H2 pool connections open until the
+		//    app's shutdown GOAWAY/RST, and streams claimed-but-unanswered at
+		//    that instant failed non-retriably (~3-7 per pod delete).
+		//  - UNHEALTHY + close_connections_on_host_health_failure (#143)
+		//    closed pools at drain-mark (~t0+0.8s) but cut streams that were
+		//    active at that moment (~6-7 per roll).
+		// The two-phase drain composes them: DRAINING at deletion-requested
+		// (in-flight finishes; no new claims after propagation ~1s), then the
+		// termination watch re-registers UNHEALTHY after drainPoolCloseDelay,
+		// closing the by-then-idle pools while the app is still alive — ahead
+		// of the GOAWAY race. See handlePodTerminating.
+		return corev3.HealthStatus_DRAINING
 	default:
 		return corev3.HealthStatus_HEALTHY
 	}

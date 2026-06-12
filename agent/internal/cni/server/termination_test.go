@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/storage"
@@ -21,20 +23,39 @@ import (
 // calls on top of testRegistry.
 type unregisterRecordingRegistry struct {
 	testRegistry
+	mu           sync.Mutex
 	unregistered int
 	registered   int
 	lastHealth   registryv1.ServiceEndpoint_Health
 }
 
 func (r *unregisterRecordingRegistry) UnregisterEndpoints(_ context.Context, _ string, _ []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.unregistered++
 	return r.unregisterEndpointsErr
 }
 
 func (r *unregisterRecordingRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, ep *registryv1.ServiceEndpoint) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.registered++
 	r.lastHealth = ep.GetHealth()
 	return r.registerEndpointErr
+}
+
+// Registered and LastHealth are mutex-guarded accessors for assertions that
+// race the asynchronous drain phase 2.
+func (r *unregisterRecordingRegistry) Registered() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.registered
+}
+
+func (r *unregisterRecordingRegistry) LastHealth() registryv1.ServiceEndpoint_Health {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastHealth
 }
 
 // terminatingK8sPod returns a corev1.Pod on the given node with
@@ -153,4 +174,64 @@ func TestReconcileLivenessSkipsTerminatingPod(t *testing.T) {
 	s.reconcileLiveness(ctx, newLivenessState())
 
 	assert.Zero(t, reg.registered, "terminating pod must not be re-registered by liveness")
+}
+
+// TestHandlePodTerminatingPoolClosePhase: after the drain delay, the endpoint
+// is re-registered UNHEALTHY (phase 2 — clients close the by-then-idle pools);
+// if CNI DEL removed the pod first, phase 2 must not resurrect the endpoint.
+func TestHandlePodTerminatingPoolClosePhase(t *testing.T) {
+	ctx := context.Background()
+	pod := validCNIPod("pod-2p", "default", "container-2p")
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-2p"), pod))
+	reg := &unregisterRecordingRegistry{}
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+
+	s.drainPoolCloseDelay = 10 * time.Millisecond
+
+	s.handlePodTerminating(ctx, terminatingK8sPod("pod-2p", "default", "test-node"))
+	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_DRAINING, reg.LastHealth(), "phase 1: draining")
+
+	assert.Eventually(t, func() bool {
+		return reg.LastHealth() == registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+	}, 2*time.Second, 10*time.Millisecond, "phase 2: unhealthy re-registration after drain delay")
+
+	// Resurrection guard: pod removed (CNI DEL) before phase 2 fires.
+	pod2 := validCNIPod("pod-2q", "default", "container-2q")
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-2q"), pod2))
+	s.handlePodTerminating(ctx, terminatingK8sPod("pod-2q", "default", "test-node"))
+	registeredBefore := reg.Registered()
+	require.NoError(t, store.RemoveResource(ctx, types.ContainerID("container-2q")))
+
+	time.Sleep(100 * time.Millisecond) // > test drain delay
+	assert.Equal(t, registeredBefore, reg.Registered(), "phase 2 must not re-register a removed pod")
+}
+
+// TestDrainDelayForPod: phase 2 scales with the workload's sleep preStop
+// (close 1s before SIGTERM), capped by the deletion grace, with the
+// conservative floor for hookless/opaque pods.
+func TestDrainDelayForPod(t *testing.T) {
+	s := newTestCNIServer(nil, storage.NewMockStorage[*cniv1.CNIPod](), &unregisterRecordingRegistry{}, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s.drainPoolCloseDelay = 2 * time.Second // production floor
+
+	withSleep := func(seconds int64, grace *int64) *corev1.Pod {
+		pod := terminatingK8sPod("p", "default", "test-node")
+		pod.DeletionGracePeriodSeconds = grace
+		if seconds > 0 {
+			pod.Spec.Containers = []corev1.Container{{
+				Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+					Sleep: &corev1.SleepAction{Seconds: seconds},
+				}},
+			}}
+		}
+		return pod
+	}
+	grace30 := int64(30)
+
+	assert.Equal(t, 2*time.Second, s.drainDelayForPod(withSleep(0, &grace30)), "no preStop: floor")
+	assert.Equal(t, 2*time.Second, s.drainDelayForPod(withSleep(3, &grace30)), "sleep 3: 1s before SIGTERM == floor")
+	assert.Equal(t, 14*time.Second, s.drainDelayForPod(withSleep(15, &grace30)), "sleep 15: generous window")
+	assert.Equal(t, 28*time.Second, s.drainDelayForPod(withSleep(60, &grace30)), "sleep > grace: capped 2s short of hard kill")
+	assert.Equal(t, 14*time.Second, s.drainDelayForPod(withSleep(15, nil)), "no grace recorded: sleep governs")
 }
