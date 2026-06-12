@@ -148,6 +148,12 @@ type clusterEntry struct {
 	loadAssignment *endpointv3.ClusterLoadAssignment
 	endpoints      map[string]*endpointv3.LocalityLbEndpoints // keyed by IP, for granular add/remove
 	vhost          *routev3.VirtualHost
+	// sanNamespaces is the sorted union of the service's endpoints'
+	// Kubernetes namespaces. At snapshot time it renders the expected server
+	// SPIFFE IDs (spiffe://<td>/ns/<ns>/sa/<service>) pinned on the cluster's
+	// upstream mTLS validation (anti registry-poisoning). Empty disables
+	// pinning for the service (bundle-only validation).
+	sanNamespaces []string
 	// absentSince is non-zero while the service is missing from the registry
 	// listing. Such entries are retained (with empty endpoints) for
 	// serviceRetentionGrace before being pruned: during pod churn a service
