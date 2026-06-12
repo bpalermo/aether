@@ -13,7 +13,6 @@
 //   - mounted-registry-dir: Directory where pod data is stored locally
 //   - registrar-address: gRPC address of the in-cluster Registrar service
 //   - spire-enabled: Whether to enable SPIRE integration for mTLS via SDS
-//   - spire-trust-domain: SPIFFE trust domain for the cluster
 //   - spire-admin-socket: Path to SPIRE agent admin socket
 //
 // The agent uses controller-runtime Manager to orchestrate multiple runnables:
@@ -101,7 +100,6 @@ func init() {
 
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
-	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", cfg.SpireTrustDomain, "SPIFFE trust domain used to authorize mesh peers; defaults to --mesh-domain (set the ROOTCA sentinel to authorize any SVID chaining to the SPIRE root)")
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
 
@@ -123,16 +121,6 @@ func runAgent(ctx context.Context) (retErr error) {
 		"metricsEnabled", cfg.MetricsEnabled,
 		"otelEnabled", cfg.OTelEnabled,
 	)
-
-	// The SPIFFE trust domain follows the mesh domain unless explicitly
-	// split: service addressing (<svc>.<mesh-domain>) and workload identity
-	// (spiffe://<trust-domain>/ns/...) share one domain by default, so peer
-	// authorization is scoped to the mesh's own trust domain instead of the
-	// historical authorize-any ROOTCA sentinel.
-	if cfg.SpireTrustDomain == "" {
-		cfg.SpireTrustDomain = cfg.MeshDomain
-		l.Info("spire trust domain following mesh domain", "trustDomain", cfg.SpireTrustDomain)
-	}
 
 	// Scope the manager's Pod informer to this node: the agent only ever reads
 	// (CNI ADD enrichment) and watches (termination drain) its own node's pods,
@@ -166,11 +154,11 @@ func runAgent(ctx context.Context) (retErr error) {
 	// When SPIRE is enabled, open the Workload API source and resolve the real
 	// trust domain SPIRE issues into (e.g. "aether.internal"). That trust domain
 	// names the SDS resources / SPIFFE IDs the agent programs into Envoy so they
-	// match the secrets the SPIRE bridge delivers. The configured
-	// --spire-trust-domain governs only peer authorization and may be the
-	// RootCATrustDomain "authorize any" sentinel, which is not a real trust domain.
+	// match the secrets the SPIRE bridge delivers. Peer authorization uses the
+	// mesh domain — addressing (<svc>.<mesh-domain>) and identity
+	// (spiffe://<mesh-domain>/...) are one domain by design, never split.
 	var spireSource *commonspire.Source
-	identityTrustDomain := cfg.SpireTrustDomain
+	identityTrustDomain := cfg.MeshDomain
 	if cfg.SpireEnabled {
 		spireSource, err = commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
 		if err != nil {
@@ -309,15 +297,14 @@ func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registr
 	}
 
 	if cfg.SpireEnabled {
-		// Peer authorization uses the configured trust domain (which may be the
-		// RootCATrustDomain "authorize any" sentinel), independent of the workload
-		// trust domain used for SDS resource naming.
-		tlsCfg, err := commonspire.ClientTLSConfig(src, cfg.SpireTrustDomain)
+		// Peer authorization is scoped to the mesh domain: the registrar must
+		// present an SVID in the mesh's own trust domain.
+		tlsCfg, err := commonspire.ClientTLSConfig(src, cfg.MeshDomain)
 		if err != nil {
 			return nil, err
 		}
 		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
-		l.Info("registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
+		l.Info("registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.MeshDomain)
 	} else {
 		l.Info("registrar client using insecure transport")
 	}

@@ -167,10 +167,9 @@ awsCredentials:
 spire:
   enabled: true
   # SPIFFE trust domain authorized for mTLS peers. Leave empty to omit the flag
-  # and the trust domain follows meshDomain (mesh addressing and SPIFFE peer
-  # authorization share one domain); set explicitly only to split them, or to
-  # the ROOTCA sentinel to authorize any peer chaining to the SPIRE root CA.
-  trustDomain: ""
+  # The SPIFFE trust domain is always meshDomain: mesh addressing
+  # (<svc>.<meshDomain>) and workload identity (spiffe://<meshDomain>/...)
+  # are one domain by design and cannot be split.
   # Workload API socket (the csi.spiffe.io mount + socket filename).
   workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
   # SPIRE agent admin socket (Delegated Identity API). Requires the SPIRE agent

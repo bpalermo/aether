@@ -66,9 +66,6 @@ spec:
             {{- end }}
             - "--spire-enabled={{ .Values.spire.enabled }}"
             {{- if .Values.spire.enabled }}
-            {{- with .Values.spire.trustDomain }}
-            - "--spire-trust-domain={{ . }}"
-            {{- end }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--spire-admin-socket={{ .Values.spire.adminSocket.mountPath }}/{{ .Values.spire.adminSocket.socketName }}"
             {{- end }}

@@ -32,8 +32,6 @@ type AgentConfig struct {
 
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
-	// SpireTrustDomain is the SPIFFE trust domain for the cluster
-	SpireTrustDomain string
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
 	SpireAdminSocketPath string
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
@@ -51,16 +49,12 @@ func NewAgentConfig() *AgentConfig {
 			MetricsEnabled:         true,
 			MetricsBindAddress:     ":8080",
 		},
-		ProxyServiceNodeID:     constants.DefaultProxyID,
-		CNIServerConfig:        cniServer.NewCNIServerConfig(),
-		MountedLocalStorageDir: constants.DefaultHostCNIRegistryDir,
-		RegistrarAddress:       "aether-registrar.aether-system.svc:443",
-		MeshDomain:             commonconstants.DefaultMeshDomain,
-		SpireEnabled:           true,
-		// Empty = follow MeshDomain (resolved in runAgent): mesh addressing
-		// and SPIFFE peer authorization share one domain unless explicitly
-		// split via --spire-trust-domain.
-		SpireTrustDomain:        "",
+		ProxyServiceNodeID:      constants.DefaultProxyID,
+		CNIServerConfig:         cniServer.NewCNIServerConfig(),
+		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
+		MeshDomain:              commonconstants.DefaultMeshDomain,
+		SpireEnabled:            true,
 		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
 	}
