@@ -87,15 +87,20 @@ data:
             # Per-cluster active-HC verbose stats (attempt/success/failure
             # counters); membership_healthy/membership_total are not under
             # this subtree and remain readable. RE2 only — no lookahead.
+            # ⚠ StringMatcher.safe_regex is a FULL-STRING match (RE2
+            # FullMatch), not a search: every pattern must consume the whole
+            # stat name (trailing .*) or it silently excludes NOTHING — this
+            # exact pattern shipped without the trailing .* in #146-#155 and
+            # never matched.
             - safe_regex:
-                regex: "^cluster\\..*\\.health_check\\."
+                regex: "^cluster\\..*\\.health_check\\..*"
             # health_<pod> probe clusters never carry routed traffic, so their
             # upstream_*/lb_*/protocol subtrees are permanently zero (~100
             # dead stats per pod). The membership_* gauges the health_check
             # filter READS (2026-06-11 outage) do not match and remain.
             # Repro-validated against the deployed image: filter answers 200.
             - safe_regex:
-                regex: "^cluster\\.health_[^.]*\\.(upstream_|lb_|retry|external|circuit_breakers|http1|http2|max_host_weight|assignment|bind_|original_dst|default_total_match)"
+                regex: "^cluster\\.health_[^.]*\\.(upstream_|lb_|retry|external|circuit_breakers|http1|http2|max_host_weight|assignment|bind_|original_dst|default_total_match).*"
 
 {{- if .Values.proxy.overload.enabled }}
     # Graceful degradation BEFORE the container memory limit OOM-kills Envoy:
