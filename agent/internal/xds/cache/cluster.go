@@ -248,10 +248,23 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 	}
 
-	// Retain recently disappeared services with an empty endpoint set.
+	// Retain recently disappeared services with an empty endpoint set —
+	// but only services still IN the dependency set (a destination mid-churn
+	// can transiently empty its endpoint listing; the retained empty cluster
+	// keeps clients on fast retriable 503s instead of ODCDS stalls until the
+	// endpoints return). A service that LEFT the dependency set is dropped
+	// immediately: post-FQDN its authority cannot 404 (the *.<mesh-domain>
+	// catch-all is the structural backstop), and retaining its vhost only
+	// shadows the on-demand cold path — the stale-503 outage behind #167.
+	// Any further traffic re-warms it as an observed dependency, which is
+	// the truthful state for traffic nobody on the node declares.
 	now := time.Now()
 	for name, entry := range prev {
 		if _, present := c.clusters[name]; present {
+			continue
+		}
+		if _, inScope := deps[name]; !inScope {
+			c.log.Info("service left dependency set; dropping cluster/vhost (cold path takes over)", "service", name)
 			continue
 		}
 		if entry.absentSince.IsZero() {
