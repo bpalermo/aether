@@ -110,6 +110,12 @@ func getPortsFromAnnotations(annotations map[string]string, defaultPort uint16) 
 			if t == "" {
 				continue
 			}
+			// Strip an optional "=proto" suffix (e.g. "9090=h2"): the protocol
+			// is an agent-local inbound concern; the registry carries only the
+			// numeric port set (per-port EDS membership).
+			if i := strings.IndexByte(t, '='); i >= 0 {
+				t = strings.TrimSpace(t[:i])
+			}
 			p, err := strconv.ParseUint(t, 10, 16)
 			if err != nil {
 				return nil, fmt.Errorf("invalid ports annotation entry %q", t)

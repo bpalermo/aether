@@ -11,12 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -69,7 +71,11 @@ func AppPortsFromPod(cniPod *cniv1.CNIPod) []uint16 {
 			if t == "" {
 				continue
 			}
-			if p, err := strconv.ParseUint(t, 10, 16); err == nil {
+			// Optional "=h2"/"=http2" protocol suffix (see AppPortProtocols).
+			if i := strings.IndexByte(t, '='); i >= 0 {
+				t = t[:i]
+			}
+			if p, err := strconv.ParseUint(strings.TrimSpace(t), 10, 16); err == nil {
 				set[uint16(p)] = struct{}{}
 			}
 		}
@@ -80,6 +86,30 @@ func AppPortsFromPod(cniPod *cniv1.CNIPod) []uint16 {
 	}
 	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
 	return ports
+}
+
+// AppPortProtocols returns which served ports the app speaks HTTP/2 (h2c) on,
+// from the endpoint.aether.io/ports annotation entries of the form
+// "<port>=h2" (or "=http2"). Ports without a suffix are HTTP/1.1. The loopback
+// (Envoy->app) hop uses this; the mesh hop is always HTTP/2 mTLS regardless.
+func AppPortProtocols(cniPod *cniv1.CNIPod) map[uint16]bool {
+	h2 := map[uint16]bool{}
+	raw, ok := cniPod.GetAnnotations()[constants.AnnotationEndpointPorts]
+	if !ok || raw == "" {
+		return h2
+	}
+	for _, part := range strings.Split(raw, ",") {
+		t := strings.TrimSpace(part)
+		i := strings.IndexByte(t, '=')
+		if i < 0 {
+			continue
+		}
+		proto := strings.ToLower(strings.TrimSpace(t[i+1:]))
+		if p, err := strconv.ParseUint(strings.TrimSpace(t[:i]), 10, 16); err == nil && (proto == "h2" || proto == "http2") {
+			h2[uint16(p)] = true
+		}
+	}
+	return h2
 }
 
 // AppPortFromPod returns the port the pod's application listens on, taken from
@@ -101,10 +131,12 @@ func AppPortFromPod(cniPod *cniv1.CNIPod) uint16 {
 // to the pod's own application at 127.0.0.1:<port>. The upstream connection is
 // bound into the pod's network namespace so the loopback address reaches the
 // application container, not the agent. This is the only cleartext hop in the
-// mesh: it is intra-pod (Envoy -> app on loopback), never pod-to-pod. The app
-// is assumed to speak HTTP/1.1, so no explicit HTTP/2 protocol options are set.
-func NewAppCluster(name, netns string, port uint16) *clusterv3.Cluster {
-	return &clusterv3.Cluster{
+// mesh: it is intra-pod (Envoy -> app on loopback), never pod-to-pod. When http2
+// is set the loopback hop speaks HTTP/2 (h2c) to the app — a per-port app
+// protocol (multi-port pods may serve h1 on one port and h2/gRPC on another);
+// otherwise HTTP/1.1 is assumed.
+func NewAppCluster(name, netns string, port uint16, http2 bool) *clusterv3.Cluster {
+	c := &clusterv3.Cluster{
 		Name:                          name,
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
@@ -152,6 +184,12 @@ func NewAppCluster(name, netns string, port uint16) *clusterv3.Cluster {
 		// per-cluster (verified: no ClusterMinHealthyPercentages references).
 		AltStatName: "app",
 	}
+	if http2 {
+		c.TypedExtensionProtocolOptions = map[string]*anypb.Any{
+			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.Http2ProtocolOptions()),
+		}
+	}
+	return c
 }
 
 // IsPerPodClusterName reports whether the cluster name belongs to a per-pod
@@ -174,7 +212,10 @@ func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
 // from load balancing, which would gate (break) the real delivery path through
 // app_<pod> at startup and whenever the probe fails.
 func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string) *clusterv3.Cluster {
-	c := NewAppCluster(name, netns, port)
+	// The active health check probes the app readiness path over HTTP/1.1
+	// (delegated liveness); h2 app ports are still liveness-probed on the
+	// primary port, so the probe cluster stays HTTP/1.1.
+	c := NewAppCluster(name, netns, port, false)
 	// MUST stay per-pod (clear the inherited collapse): the health_check
 	// filter answers per-pod readiness by reading THIS cluster's
 	// membership_healthy/membership_total gauges (see the 2026-06-11 stats

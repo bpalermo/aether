@@ -55,9 +55,12 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) 
 
 	netns := cniPod.GetNetworkNamespace()
 	// One app cluster per served port, each bound into the pod's netns at
-	// 127.0.0.1:<port>; the matching inbound SNI chain routes to it.
+	// 127.0.0.1:<port>; the matching inbound SNI chain routes to it. The
+	// per-port app protocol (h1 default, h2 via the "=h2" annotation suffix)
+	// sets the loopback hop's codec — protocol heterogeneity across ports.
+	h2Ports := AppPortProtocols(cniPod)
 	for _, port := range AppPortsFromPod(cniPod) {
-		appClusters = append(appClusters, NewAppCluster(AppClusterName(cniPod, port), netns, port))
+		appClusters = append(appClusters, NewAppCluster(AppClusterName(cniPod, port), netns, port, h2Ports[port]))
 	}
 	// Separate, unrouted cluster carrying the active app health check (delegated
 	// liveness) on the primary port; keeping the HC off app_<pod> avoids gating
