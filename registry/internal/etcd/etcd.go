@@ -42,6 +42,16 @@ type EtcdRegistry struct {
 	config    Config
 	client    *clientv3.Client
 	keyPrefix string
+
+	// notify coalesces change signals from the etcd watch for consumers (the
+	// registrar Syncer). Buffered cap-1, non-blocking send: a burst of watch
+	// events collapses into a single pending signal. Satisfies
+	// registry.ChangeNotifier so the registrar reacts at watch speed (~ms)
+	// instead of waiting out the poll interval — closing the cross-replica
+	// last-old-exit skew on the etcd backend.
+	notify chan struct{}
+	// watchCancel stops the background watch loop on Close.
+	watchCancel context.CancelFunc
 }
 
 // NewEtcdRegistry creates a new etcd-backed Registry.
@@ -62,6 +72,7 @@ func NewEtcdRegistry(log logr.Logger, cfg Config) *EtcdRegistry {
 		log:       log.WithName("registry-etcd"),
 		config:    cfg,
 		keyPrefix: keyPrefix,
+		notify:    make(chan struct{}, 1),
 	}
 }
 
@@ -94,8 +105,66 @@ func (r *EtcdRegistry) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to verify etcd connectivity: %w", err)
 	}
 
+	// Start the change watch over the key prefix so consumers learn of writes
+	// (from this replica or any other registrar/agent) at watch speed. A
+	// detached context keeps the watch alive for the registry's lifetime;
+	// Close cancels it.
+	watchCtx, cancel := context.WithCancel(context.Background())
+	r.watchCancel = cancel
+	go r.watchLoop(watchCtx)
+
 	r.log.Info("etcd registry initialized", "endpoints", r.config.Endpoints)
 	return nil
+}
+
+// Changes returns a channel that receives a (coalesced) signal whenever any
+// key under the registry prefix changes. Consumers treat each receive as
+// "something changed, re-read the registry". Satisfies registry.ChangeNotifier.
+func (r *EtcdRegistry) Changes() <-chan struct{} { return r.notify }
+
+// signalChange performs a non-blocking, coalescing send on notify.
+func (r *EtcdRegistry) signalChange() {
+	select {
+	case r.notify <- struct{}{}:
+	default:
+	}
+}
+
+// watchLoop maintains a clientv3 watch over the key prefix, signaling
+// consumers on every change. It re-establishes the watch on channel closure
+// (compaction, leader change, transient error); the consumer's periodic poll
+// is the backstop for any gap during a re-establish.
+func (r *EtcdRegistry) watchLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// WithPrevKV is unnecessary (consumers re-read), WithPrefix watches the
+		// whole registry subtree. The watch starts from the current revision.
+		wch := r.client.Watch(ctx, r.keyPrefix, clientv3.WithPrefix())
+		r.log.V(1).Info("etcd change watch established", "prefix", r.keyPrefix)
+
+		for resp := range wch {
+			if err := resp.Err(); err != nil {
+				r.log.V(1).Info("etcd watch error; will re-establish", "error", err.Error())
+				break
+			}
+			if len(resp.Events) > 0 {
+				r.signalChange()
+			}
+		}
+
+		// Channel closed (ctx cancel or watch broke). Loop to re-establish
+		// unless we are shutting down.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // RegisterEndpoint registers an endpoint to a service and protocol in etcd.
@@ -259,6 +328,10 @@ func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 
 // Close closes the etcd client connection.
 func (r *EtcdRegistry) Close() error {
+	if r.watchCancel != nil {
+		r.watchCancel()
+		r.watchCancel = nil
+	}
 	if r.client != nil {
 		err := r.client.Close()
 		r.client = nil

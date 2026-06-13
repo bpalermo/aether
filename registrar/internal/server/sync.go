@@ -62,15 +62,37 @@ func (s *Syncer) UseWriteBehind(q *WriteBehindQueue) { s.writeBehind = q }
 // completed and the snapshot reflects the external registry.
 func (s *Syncer) Synced() <-chan struct{} { return s.synced }
 
-// Start runs the sync loop until the context is cancelled.
+// changeDebounce coalesces a burst of registry change signals (e.g. an etcd
+// watch firing per key during a roll) into a single sync, while still
+// reacting within a fraction of the poll interval.
+const changeDebounce = 200 * time.Millisecond
+
+// Start runs the sync loop until the context is cancelled. When the registry
+// supports change notifications (registry.ChangeNotifier — the etcd backend's
+// clientv3 watch), the loop syncs at watch speed (debounced) instead of only
+// at the poll interval; the periodic poll remains a backstop for any event
+// missed during a watch re-establish. Backends without notifications (e.g.
+// DynamoDB) fall back to poll-only, unchanged.
 func (s *Syncer) Start(ctx context.Context) error {
 	s.log.Info("starting sync loop", "interval", s.syncInterval)
 
 	// Perform an initial sync immediately.
 	s.sync(ctx)
 
+	var changes <-chan struct{}
+	if n, ok := s.registry.(registry.ChangeNotifier); ok {
+		changes = n.Changes()
+		s.log.Info("registry supports change notifications; syncing at watch speed (poll is backstop)")
+	}
+
 	ticker := time.NewTicker(s.syncInterval)
 	defer ticker.Stop()
+
+	// Debounce timer for change-driven syncs, created stopped.
+	debounce := time.NewTimer(changeDebounce)
+	if !debounce.Stop() {
+		<-debounce.C
+	}
 
 	for {
 		select {
@@ -78,6 +100,18 @@ func (s *Syncer) Start(ctx context.Context) error {
 			s.log.Info("sync loop stopped")
 			return nil
 		case <-ticker.C:
+			s.sync(ctx)
+		case <-changes:
+			// (Re)arm the debounce window so a burst of watch events triggers
+			// a single sync once they settle.
+			if !debounce.Stop() {
+				select {
+				case <-debounce.C:
+				default:
+				}
+			}
+			debounce.Reset(changeDebounce)
+		case <-debounce.C:
 			s.sync(ctx)
 		}
 	}
