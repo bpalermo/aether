@@ -596,3 +596,50 @@ func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
 	assert.Nil(t, services)
 	assert.Equal(t, uint64(4), gen)
 }
+
+// TestServiceCatalog_ReplayAndIncrementals verifies the client catalog:
+// replay accumulates and swaps at SNAPSHOT_COMPLETE (when the server resent
+// state), stale names from a previous connection are dropped by the swap,
+// and post-marker transitions apply incrementally.
+func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
+	r := NewRegistrarRegistry(logr.Discard(), Config{Address: "test"})
+
+	ev := func(t registrarv1.WatchEndpointsResponse_EventType, svc, version string) *registrarv1.WatchEndpointsResponse {
+		return &registrarv1.WatchEndpointsResponse{Type: t, ServiceName: svc, Version: version}
+	}
+
+	// First connection: replay svc-a, svc-b; complete at version 5.
+	stream := &fakeWatchStream{events: []*registrarv1.WatchEndpointsResponse{
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-a", "5"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-b", "5"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "5"),
+		// Post-marker incremental transitions.
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-c", "6"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, "svc-b", "7"),
+	}}
+	last := r.processStream(context.Background(), stream, "")
+	assert.Equal(t, "7", last)
+	assert.True(t, r.HasService("svc-a"))
+	assert.False(t, r.HasService("svc-b"), "incremental removal applies")
+	assert.True(t, r.HasService("svc-c"))
+	assert.False(t, r.HasService("ghost"))
+
+	// Reconnect where the server RESENT state (version moved): the swap must
+	// drop names the new catalog doesn't carry.
+	stream = &fakeWatchStream{events: []*registrarv1.WatchEndpointsResponse{
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-z", "9"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "9"),
+	}}
+	_ = r.processStream(context.Background(), stream, "7")
+	assert.True(t, r.HasService("svc-z"))
+	assert.False(t, r.HasService("svc-a"), "swap drops stale catalog entries")
+	assert.False(t, r.HasService("svc-c"))
+
+	// Reconnect where the client is CURRENT (marker version == resume token):
+	// no replay was sent; the catalog must survive.
+	stream = &fakeWatchStream{events: []*registrarv1.WatchEndpointsResponse{
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "9"),
+	}}
+	_ = r.processStream(context.Background(), stream, "9")
+	assert.True(t, r.HasService("svc-z"), "current client keeps its catalog")
+}

@@ -67,6 +67,17 @@ message WatchEndpointsResponse {
     // Carries the snapshot version; has no service_name/endpoint. Clients use
     // it to know their cache is complete before deriving config from it.
     EVENT_TYPE_SNAPSHOT_COMPLETE = 5;
+
+    // Service-catalog events: a service exists while it has at least one
+    // endpoint in the registrar snapshot. Unlike endpoint events, these
+    // BYPASS the watch filter and reach every watcher (they are rare --
+    // deploy-time transitions, not pod churn), giving each agent a full
+    // local index of service names: the on-demand (ODCDS) cold path answers
+    // existence locally instead of stalling on nonexistent services. The
+    // full catalog is replayed as SERVICE_ADDED events on every (re)connect
+    // before SNAPSHOT_COMPLETE. Carries service_name only.
+    EVENT_TYPE_SERVICE_ADDED = 6;
+    EVENT_TYPE_SERVICE_REMOVED = 7;
   }
 
   EventType type = 1;

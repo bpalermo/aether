@@ -179,6 +179,15 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 
 	b.mu.RLock()
 	for _, event := range events {
+		// Service-catalog events bypass the watch filter: every agent keeps
+		// the full service-name index (rare, deploy-time transitions).
+		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED ||
+			event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED {
+			for id, w := range b.watchers {
+				send(id, w, event)
+			}
+			continue
+		}
 		for id, w := range b.byService[event.GetServiceName()] {
 			send(id, w, event)
 		}

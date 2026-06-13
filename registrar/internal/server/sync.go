@@ -119,7 +119,8 @@ func (s *Syncer) sync(ctx context.Context) {
 
 	// Compute diff and apply.
 	events := s.snapshot.Diff(newState)
-	version := s.snapshot.Replace(newState)
+	version, transitions := s.snapshot.Replace(newState)
+	events = append(events, transitions...)
 	span.SetAttributes(
 		attribute.Int("aether.sync.events", len(events)),
 		telemetry.AttrSnapshotVersion.String(version),

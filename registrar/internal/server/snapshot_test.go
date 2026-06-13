@@ -41,7 +41,7 @@ func TestVersion(t *testing.T) {
 		{
 			name: "version increments after Replace",
 			applyOperations: func(s *Snapshot) {
-				s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
+				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
 			},
 			expectedVersion: "1",
 		},
@@ -62,16 +62,16 @@ func TestVersion(t *testing.T) {
 		{
 			name: "version does not increment after Apply with empty events",
 			applyOperations: func(s *Snapshot) {
-				s.Apply([]*registrarv1.WatchEndpointsResponse{})
+				_, _ = s.Apply([]*registrarv1.WatchEndpointsResponse{})
 			},
 			expectedVersion: "0",
 		},
 		{
 			name: "version increments multiple times",
 			applyOperations: func(s *Snapshot) {
-				s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
-				s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
-				s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
+				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
+				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
+				_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{})
 			},
 			expectedVersion: "3",
 		},
@@ -149,7 +149,7 @@ func TestGetAll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSnapshot()
-			s.Replace(tt.seed)
+			_, _ = s.Replace(tt.seed)
 
 			got := s.GetAll(tt.protocol)
 
@@ -196,7 +196,7 @@ func TestGetAllWithVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSnapshot()
-			s.Replace(tt.seed)
+			_, _ = s.Replace(tt.seed)
 
 			got, version := s.GetAllWithVersion(tt.protocol)
 
@@ -323,7 +323,7 @@ func TestDiff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSnapshot()
-			s.Replace(tt.initial)
+			_, _ = s.Replace(tt.initial)
 
 			versionBefore := s.Version()
 			events := s.Diff(tt.newEndpoints)
@@ -401,9 +401,9 @@ func TestReplace(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSnapshot()
-			s.Replace(tt.initial)
+			_, _ = s.Replace(tt.initial)
 
-			newVersion := s.Replace(tt.replacement)
+			newVersion, _ := s.Replace(tt.replacement)
 
 			assert.Equal(t, tt.expectedVersion, newVersion)
 			assert.Equal(t, tt.expectedVersion, s.Version())
@@ -577,10 +577,10 @@ func TestApply(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSnapshot()
 			if len(tt.initial) > 0 {
-				s.Replace(tt.initial)
+				_, _ = s.Replace(tt.initial)
 			}
 
-			gotVersion := s.Apply(tt.events)
+			gotVersion, _ := s.Apply(tt.events)
 
 			assert.Equal(t, tt.expectedVersion, gotVersion)
 			assert.Equal(t, tt.expectedVersion, s.Version())
@@ -634,7 +634,7 @@ func TestFullSnapshotEvents(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSnapshot()
-			s.Replace(tt.seed)
+			_, _ = s.Replace(tt.seed)
 
 			events, version := s.FullSnapshotEvents()
 
@@ -679,9 +679,9 @@ func TestSnapshotThreadSafety(t *testing.T) {
 			defer wg.Done()
 			switch i % 5 {
 			case 0:
-				s.Replace(seed)
+				_, _ = s.Replace(seed)
 			case 1:
-				s.Apply(addEvent)
+				_, _ = s.Apply(addEvent)
 			case 2:
 				s.GetAll(registryv1.Service_PROTOCOL_HTTP)
 			case 3:
@@ -694,4 +694,58 @@ func TestSnapshotThreadSafety(t *testing.T) {
 
 	wg.Wait()
 	// If we reach here without a panic or race condition, the test passes.
+}
+
+// TestSnapshot_ServiceCatalogTransitions verifies SERVICE_ADDED/REMOVED are
+// emitted exactly on a service's endpoint count crossing 0<->1 (Apply) and
+// on service-set diffs (Replace), and that ServiceNames lists the catalog.
+func TestSnapshot_ServiceCatalogTransitions(t *testing.T) {
+	s := NewSnapshot()
+
+	add := func(svc, ip string) *registrarv1.WatchEndpointsResponse {
+		return &registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
+			ServiceName: svc, Protocol: registryv1.Service_PROTOCOL_HTTP,
+			Endpoint: &registryv1.ServiceEndpoint{Ip: ip},
+		}
+	}
+	rm := func(svc, ip string) *registrarv1.WatchEndpointsResponse {
+		return &registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
+			ServiceName: svc, Protocol: registryv1.Service_PROTOCOL_HTTP,
+			Endpoint: &registryv1.ServiceEndpoint{Ip: ip},
+		}
+	}
+
+	// First endpoint: SERVICE_ADDED. Second: no transition.
+	_, tr := s.Apply([]*registrarv1.WatchEndpointsResponse{add("svc-a", "10.0.0.1")})
+	require.Len(t, tr, 1)
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, tr[0].GetType())
+	assert.Equal(t, "svc-a", tr[0].GetServiceName())
+	_, tr = s.Apply([]*registrarv1.WatchEndpointsResponse{add("svc-a", "10.0.0.2")})
+	assert.Empty(t, tr, "1->2 is not a transition")
+	assert.Equal(t, []string{"svc-a"}, s.ServiceNames())
+
+	// Removing one of two: no transition. Removing the last: SERVICE_REMOVED.
+	_, tr = s.Apply([]*registrarv1.WatchEndpointsResponse{rm("svc-a", "10.0.0.2")})
+	assert.Empty(t, tr)
+	_, tr = s.Apply([]*registrarv1.WatchEndpointsResponse{rm("svc-a", "10.0.0.1")})
+	require.Len(t, tr, 1)
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, tr[0].GetType())
+	assert.Empty(t, s.ServiceNames())
+
+	// Removing a nonexistent endpoint: no spurious transition.
+	_, tr = s.Apply([]*registrarv1.WatchEndpointsResponse{rm("ghost", "10.9.9.9")})
+	assert.Empty(t, tr)
+
+	// Replace: diff of the service sets.
+	_, _ = s.Apply([]*registrarv1.WatchEndpointsResponse{add("svc-old", "10.0.1.1")})
+	_, tr = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
+		"svc-new": {registryv1.Service_PROTOCOL_HTTP: {{Ip: "10.0.2.1"}}},
+	})
+	require.Len(t, tr, 2)
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, tr[0].GetType())
+	assert.Equal(t, "svc-new", tr[0].GetServiceName())
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, tr[1].GetType())
+	assert.Equal(t, "svc-old", tr[1].GetServiceName())
 }

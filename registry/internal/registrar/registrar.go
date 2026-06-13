@@ -60,6 +60,11 @@ type RegistrarRegistry struct {
 
 	mu    sync.RWMutex
 	cache map[string][]*registryv1.ServiceEndpoint // keyed by serviceName
+	// services is the full mesh service-name catalog (every watcher receives
+	// catalog events regardless of filter): the ODCDS cold path answers
+	// existence locally instead of stalling on nonexistent services. Replayed
+	// on every reconnect; swapped atomically at SNAPSHOT_COMPLETE.
+	services map[string]struct{}
 
 	// notify coalesces endpoint-change signals for consumers (e.g. the agent
 	// xDS cache). It is buffered with capacity 1 and written non-blocking, so a
@@ -111,6 +116,7 @@ func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
 		config:      cfg,
 		metrics:     metrics,
 		cache:       make(map[string][]*registryv1.ServiceEndpoint),
+		services:    make(map[string]struct{}),
 		notify:      make(chan struct{}, 1),
 		ready:       make(chan struct{}),
 		reconnected: make(chan struct{}, 1),
@@ -139,6 +145,16 @@ func (r *RegistrarRegistry) signalReconnect() {
 	case r.reconnected <- struct{}{}:
 	default:
 	}
+}
+
+// HasService reports whether the named service currently has at least one
+// endpoint anywhere in the mesh, answered from the local catalog. It
+// satisfies the registry.ServiceCatalog capability.
+func (r *RegistrarRegistry) HasService(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.services[name]
+	return ok
 }
 
 // WaitReady blocks until the watch cache holds a complete snapshot (the first
@@ -424,6 +440,12 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 // It returns the last version seen, for use as a resume token.
 func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string) string {
 	snapshotCleared := false
+	// Catalog replay: SERVICE_ADDED events before SNAPSHOT_COMPLETE rebuild
+	// the service set, swapped in at the marker — but only when the server
+	// actually resent state (the marker's version differs from our resume
+	// token); a current client keeps its catalog.
+	connectVersion := lastVersion
+	catalogReplay := make(map[string]struct{})
 
 	for {
 		event, err := stream.Recv()
@@ -457,7 +479,31 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			snapshotCleared = true
 		}
 
-		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE {
+		switch event.GetType() {
+		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED:
+			if catalogReplay != nil {
+				// Pre-marker: catalog replay, accumulated and swapped at the
+				// marker so a reconnect can't leave stale names behind.
+				catalogReplay[event.GetServiceName()] = struct{}{}
+			} else {
+				// Post-marker: incremental transition.
+				r.mu.Lock()
+				r.services[event.GetServiceName()] = struct{}{}
+				r.mu.Unlock()
+			}
+		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED:
+			r.mu.Lock()
+			delete(r.services, event.GetServiceName())
+			r.mu.Unlock()
+		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE:
+			if catalogReplay != nil && event.GetVersion() != connectVersion {
+				// The server resent state: swap the catalog wholesale
+				// (possibly to empty — a fresh registrar with no services).
+				r.mu.Lock()
+				r.services = catalogReplay
+				r.mu.Unlock()
+			}
+			catalogReplay = nil
 			// The cache now holds a complete world view.
 			r.readyOnce.Do(func() { close(r.ready) })
 		}
