@@ -242,5 +242,49 @@ Confirmed:
 
 Remaining for Phase 1: agent per-pod `filter_config` injection on outbound HCMs +
 chart image-volume wiring + OCI-artifact build/publish (rules_img + CI), then helm
-+ e2e. `response_flags` deferred to the access-logger variant (Phase 1b) — it is
-the only place the final flags are reliably available.
++ e2e.
+
+## Phase-1b result (2026-06-13) — `response_flags`, validated; benchmarked against Istio
+
+`response_flags` is now on the dimensioned edge counter
+(`…,response_code=503,response_flags=UF` vs `…,200,-`, validated on stock
+distroless Envoy). The path there corrected an earlier assumption:
+
+- The **access-logger** dynamic-module variant is **not usable** for this metric:
+  its SDK metrics are flat counters defined at *config* time (`MetricsContext`
+  exposes only `increment_counter` — no vec, no log-time define), and our
+  destination is per-request and unbounded, so it can't carry per-dest dims.
+- `ResponseFlags` / `ResponseCodeDetails` **attributes are not exposed** to
+  dynamic-module HTTP filters at v1.38 (verified: `get_attribute_*` empty even at
+  `on_stream_complete`).
+- **What works:** record at `on_stream_complete` (log phase), derive the cause
+  flag from the **`details` captured in `on_local_reply`** (fires for
+  proxy-generated 503s, carries the response-code-details). A classifier maps it
+  to a bounded label: `UF`/`UH`/`NC`/`NR`/`UO`/`UT`/`UR`; `-` when the response
+  came from upstream (or success). Clean `counter_vec` retained.
+
+**Benchmarked against Istio `istio_stats`** (the canonical native filter):
+
+- Istio is an **HTTP filter recording at the log phase** (`AccessLog::Instance::log`,
+  `addAccessLogHandler`) with one tagged metric (`istio_requests_total`) — exactly
+  our HTTP-filter + `on_stream_complete` + `counter_vec` shape. ✓
+- Istio sets `response_flags` from `StreamInfo::ResponseFlagUtils::toShortString`
+  (full StreamInfo in C++). A dynamic module can't read that, so our
+  `on_local_reply` classifier reproduces the **same label vocabulary** — the one
+  forced divergence (dynamic-module vs native C++).
+- Istio's `reporter` enum (ClientSidecar/ServerSidecar/ServerGateway) maps to our
+  `reporter=source|destination` (+ a future gateway value, proposal 003).
+- Additive future dims/metrics from Istio: `request_duration` **histogram**
+  (Phase 3), `grpc_response_status`, `connection_security_policy` (mTLS),
+  `request_protocol`, and source/destination workload+namespace+principal splits.
+  Istio's `MetricOverrides` confirms cardinality control is first-class (matches
+  our service-granularity default + `*_pod` opt-in + overflow plan).
+
+**Packaging finding:** the published `.so` **must be Zig-built (libc-aware, glibc
+2.28)** — a host build links `GLIBC_2.39` and fails to load on the distroless
+proxy (glibc 2.36). Host build stays for CI structure validation; the OCI
+artifact uses `--platforms=@zig_sdk//libc_aware/platform:linux_{amd64,arm64}_gnu.2.28`.
+
+The access logger is out; the HTTP filter is the canonical recorder, so the agent
+wiring attaches the **HTTP filter** to each per-pod outbound HCM — Phase 1b folds
+into the agent-wiring step.
