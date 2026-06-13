@@ -284,11 +284,11 @@ func TestSignalIfRetentionExpired(t *testing.T) {
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
-	// The service vanishes (and leaves the dep set); one reload retains it.
+	// The service's endpoints vanish while it stays DECLARED (in scope);
+	// one reload retains it for the grace.
 	data = map[string][]*registryv1.ServiceEndpoint{}
-	declareDeps(c) // no upstreams anymore
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
-	require.Contains(t, c.clusters, "svc-gone", "retained during grace")
+	require.Contains(t, c.clusters, "svc-gone", "in-scope absence is retained during grace")
 	drainDepSignal(c)
 
 	// Within the grace: no signal.
@@ -305,4 +305,37 @@ func TestSignalIfRetentionExpired(t *testing.T) {
 	// Idempotent: nothing retained, no signal.
 	c.SignalIfRetentionExpired()
 	assert.False(t, drainDepSignal(c))
+}
+
+// TestLoadClustersFromRegistry_DropsOutOfScopeImmediately pins the #167
+// follow-up: a service that LEFT the dependency set is dropped in the same
+// reload — no retention, no stale window — so the next request falls through
+// to the on-demand catch-all instead of a retained empty vhost's 503s.
+func TestLoadClustersFromRegistry_DropsOutOfScopeImmediately(t *testing.T) {
+	c := newTestCache("node-1")
+	c.serviceRetentionGrace = time.Hour // retention must NOT be what drops it
+	declareDeps(c, "svc-moved")
+	ctx := context.Background()
+
+	// Registry keeps serving the endpoints throughout: the service is alive
+	// elsewhere, it just has no consumer/provider on this node anymore.
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{
+				"svc-moved": {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+			}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	require.Contains(t, c.clusters, "svc-moved")
+
+	// The declaring pod leaves: the very next reload drops cluster AND vhost.
+	declareDeps(c)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.NotContains(t, c.clusters, "svc-moved", "out-of-scope service must drop immediately")
+
+	// And the ODCDS path re-warms it as an observed dependency.
+	c.ObserveDependency(ctx, "svc-moved")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.Contains(t, c.clusters, "svc-moved", "observed traffic re-warms the dropped service")
 }
