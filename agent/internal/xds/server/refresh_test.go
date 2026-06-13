@@ -12,6 +12,7 @@ import (
 	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/registry"
 	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -149,4 +150,48 @@ func TestRegistryRefresher_NoNotifier_StopsOnContext(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("refresher did not return after context cancel")
 	}
+}
+
+// TestRegistryRefresher_LeadingEdgeDependencyChange verifies a dependency
+// change fires the reload immediately (an ODCDS observation has a paused
+// request behind it), not after the trailing debounce.
+func TestRegistryRefresher_LeadingEdgeDependencyChange(t *testing.T) {
+	c := cache.NewSnapshotCache("node-1", logr.Discard())
+
+	data := map[string][]*registryv1.ServiceEndpoint{
+		"echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
+	}
+	reg := &notifyRegistry{
+		mockRegistry: &mockRegistry{
+			listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+				return data, nil
+			},
+		},
+		ch: make(chan struct{}, 1),
+	}
+
+	r := NewRegistryRefresher("cluster-1", "node-1", c, reg, logr.Discard())
+	r.debounce = 2 * time.Second // long: leading edge must NOT wait this out
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	start := time.Now()
+	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
+		Name:             "client-1",
+		Namespace:        "default",
+		ServiceAccount:   "client",
+		NetworkNamespace: "/proc/100/ns/net",
+		Annotations:      map[string]string{constants.AnnotationConfigUpstreams: "echo"},
+	}, "example.org"))
+
+	require.Eventually(t, func() bool {
+		return c.Endpoints("echo") != nil
+	}, time.Second, 5*time.Millisecond, "dependency change must reload on the leading edge")
+	assert.Less(t, time.Since(start), r.debounce, "must not have waited out the debounce")
+
+	cancel()
+	<-done
 }

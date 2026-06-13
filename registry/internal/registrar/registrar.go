@@ -183,10 +183,29 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 		r.filterMu.Unlock()
 		return
 	}
+	previous := r.filterServices
 	r.filterServices = slices.Clone(services)
 	r.filterGen++
 	cancelStream := r.streamCancel
 	r.filterMu.Unlock()
+
+	// Purge cache entries for services leaving the filter: the registrar
+	// sends no removal events for out-of-scope services, so without this the
+	// entries go stale — and stale entries would satisfy ListEndpoints' cache
+	// check, poisoning the cold path's RPC-fill with old endpoints.
+	if previous != nil {
+		keep := make(map[string]struct{}, len(services))
+		for _, svc := range services {
+			keep[svc] = struct{}{}
+		}
+		r.mu.Lock()
+		for _, svc := range previous {
+			if _, ok := keep[svc]; !ok {
+				delete(r.cache, svc)
+			}
+		}
+		r.mu.Unlock()
+	}
 
 	r.log.V(1).Info("watch service filter updated; re-asserting on stream", "services", len(services))
 	if cancelStream != nil {

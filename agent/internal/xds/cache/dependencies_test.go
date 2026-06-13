@@ -339,3 +339,53 @@ func TestLoadClustersFromRegistry_DropsOutOfScopeImmediately(t *testing.T) {
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 	assert.Contains(t, c.clusters, "svc-moved", "observed traffic re-warms the dropped service")
 }
+
+// catalogListerRegistry extends mockRegistry with a service catalog and a
+// per-service RPC lister (the cold-path fill).
+type catalogListerRegistry struct {
+	*mockRegistry
+	known      map[string]bool
+	perService map[string][]*registryv1.ServiceEndpoint
+	rpcCalls   []string
+}
+
+func (c *catalogListerRegistry) HasService(name string) bool { return c.known[name] }
+func (c *catalogListerRegistry) ListEndpoints(_ context.Context, svc string, _ registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
+	c.rpcCalls = append(c.rpcCalls, svc)
+	return c.perService[svc], nil
+}
+
+// TestLoadClustersFromRegistry_RPCFillsColdDependency verifies the first
+// reload after an ODCDS observation builds the cluster by fetching the
+// missing service directly (catalog-gated), without waiting for the
+// re-filtered watch to deliver it — and that ghosts cost no RPC.
+func TestLoadClustersFromRegistry_RPCFillsColdDependency(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+
+	reg := &catalogListerRegistry{
+		mockRegistry: &mockRegistry{
+			listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+				return map[string][]*registryv1.ServiceEndpoint{}, nil // watch cache: nothing yet
+			},
+		},
+		known: map[string]bool{"svc-cold": true},
+		perService: map[string][]*registryv1.ServiceEndpoint{
+			"svc-cold": {makeEndpoint("10.0.0.5", "cluster-1", "node-2", 8080)},
+		},
+	}
+
+	// ODCDS observation, then ONE reload: cluster must exist already.
+	c.ObserveDependency(ctx, "svc-cold")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.Contains(t, c.clusters, "svc-cold", "first reload builds the cold cluster via RPC fill")
+	assert.Equal(t, []string{"svc-cold"}, reg.rpcCalls)
+
+	// A ghost in the dep set (shouldn't happen with the observer gate, but
+	// belt-and-braces): not in catalog -> no RPC, no cluster.
+	reg.rpcCalls = nil
+	c.ObserveDependency(ctx, "svc-ghost")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.NotContains(t, c.clusters, "svc-ghost")
+	assert.NotContains(t, reg.rpcCalls, "svc-ghost", "catalog gate prevents RPC for ghosts")
+}
