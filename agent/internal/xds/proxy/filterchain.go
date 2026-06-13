@@ -16,11 +16,10 @@ import (
 func buildDefaultOutboundHTTPFilterChain(name string) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("outbound_http", nil)
 
-	// Mesh authorities are FQDN-only and the catch-all routes on the raw
-	// authority as a cluster name: strip any :port from the authority before
-	// filters and routing so <svc>.<domain>:8080 matches the same vhost and
-	// names the same on-demand cluster as the portless form.
-	hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
+	// strip_any_host_port stays OFF: the authority port is a first-class routing
+	// selector (FQDN:port → that port's cluster, proposal 005). The default-port
+	// cluster's vhost lists both the portless and :defaultPort domains so the
+	// default is reachable either way.
 
 	// Readiness probe target: answered on worker threads ahead of the router, so
 	// the CNI plugin's in-netns probe never depends on routes or upstreams.

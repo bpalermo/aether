@@ -35,7 +35,7 @@ const (
 // re-warm cycle each time (observed as `cds: N added/updated, skipped 0
 // unmodified` + `initial fetch timed out` every push, and unbounded proxy
 // memory growth under long-lived downstream connections).
-func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string) []*clusterv3.Cluster_TransportSocketMatch {
+func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string, sni string) []*clusterv3.Cluster_TransportSocketMatch {
 	unique := make([]string, 0, len(spiffeIDs))
 	seen := make(map[string]struct{}, len(spiffeIDs))
 	for _, id := range spiffeIDs {
@@ -55,7 +55,7 @@ func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName st
 		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
 			Name:            id,
 			Match:           &structpb.Struct{},
-			TransportSocket: UpstreamTransportSocket(id, validationContextName, sanURIs),
+			TransportSocket: UpstreamTransportSocket(id, validationContextName, sanURIs, sni),
 		})
 	}
 	return matches

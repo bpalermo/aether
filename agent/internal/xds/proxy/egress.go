@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,17 +28,31 @@ func ServiceClusterName(serviceName, meshDomain string) string {
 	return serviceName + "." + meshDomain
 }
 
+// PortClusterName returns the data-plane name of a service's per-port cluster:
+// <service>.<meshDomain>:<port>. Equals the FQDN:port authority a client
+// addresses, so the catch-all cluster_header resolves it directly.
+func PortClusterName(serviceName, meshDomain string, port uint32) string {
+	return fmt.Sprintf("%s:%d", ServiceClusterName(serviceName, meshDomain), port)
+}
+
 // ServiceFromClusterName maps a data-plane cluster name (a mesh authority,
 // <service>.<meshDomain>) back to the bare service name. ok is false when the
 // name is not under the mesh domain or the remainder is not a single DNS
 // label (service names are ServiceAccount names — single lowercase labels),
 // so nested or foreign authorities are rejected deterministically.
 func ServiceFromClusterName(clusterName, meshDomain string) (string, bool) {
+	// Strip an optional :port (multi-port authority <svc>.<domain>:<port>).
+	name := clusterName
+	if i := strings.LastIndexByte(name, ':'); i >= 0 {
+		if _, err := strconv.Atoi(name[i+1:]); err == nil {
+			name = name[:i]
+		}
+	}
 	suffix := "." + meshDomain
-	if !strings.HasSuffix(clusterName, suffix) {
+	if !strings.HasSuffix(name, suffix) {
 		return "", false
 	}
-	service := strings.TrimSuffix(clusterName, suffix)
+	service := strings.TrimSuffix(name, suffix)
 	if service == "" || strings.Contains(service, ".") {
 		return "", false
 	}
@@ -133,12 +149,12 @@ func subsetKeyCombos(keys []string) [][]string {
 	return combos
 }
 
-func NewServiceCluster(serviceName, meshDomain string, subsetKeys []string) *clusterv3.Cluster {
+func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
-		Name: ServiceClusterName(serviceName, meshDomain),
+		Name: name,
 		// Stats stay keyed by the bare service name (cardinality rounds 1-2
-		// shapes unchanged by the FQDN cluster naming).
-		AltStatName:                           serviceName,
+		// shapes unchanged by the FQDN/port cluster naming).
+		AltStatName:                           altStatName,
 		ConnectTimeout:                        durationpb.New(2 * time.Second),
 		PerConnectionBufferLimitBytes:         wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ConnectionPoolPerDownstreamConnection: true,
@@ -147,11 +163,11 @@ func NewServiceCluster(serviceName, meshDomain string, subsetKeys []string) *clu
 		},
 		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
 			EdsConfig: config.XDSConfigSourceADS(),
-			// EDS resources stay keyed by the bare service name: the cache's
-			// endpoint bookkeeping, the registrar watch, and the dependency
-			// set all speak bare names; only the cluster (and the vhost that
-			// references it) carries the FQDN.
-			ServiceName: serviceName,
+			// EDS resource name: the default cluster shares the bare-service EDS
+			// (all endpoints); a per-port cluster uses its own name so its EDS
+			// membership is filtered to pods advertising that port (safe new-port
+			// rollout). The cache keys load assignments by this name.
+			ServiceName: edsServiceName,
 		},
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.Http2ProtocolOptions()),
@@ -233,16 +249,16 @@ func NewServiceCluster(serviceName, meshDomain string, subsetKeys []string) *clu
 // would select the first entry for every endpoint.
 // sanURIs (the service's expected server SPIFFE IDs) pin the upstream peer
 // identity on every emitted socket; empty disables pinning (bundle-only).
-func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string) {
+func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni string) {
 	matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
 	if matcher == nil {
-		cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
+		cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
 		return
 	}
 	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
 
 	cluster.TransportSocketMatcher = matcher
-	cluster.TransportSocketMatches = UpstreamTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs)
+	cluster.TransportSocketMatches = UpstreamTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs, sni)
 }
 
 // EndpointPriority maps an endpoint's locality distance from this node into

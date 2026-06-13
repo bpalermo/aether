@@ -39,7 +39,10 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 // and forwards it to the pod's application on loopback; the outbound listener routes
 // the pod's traffic to other services. The trustDomain names the pod's SVID and the
 // SDS validation context for the inbound listener's mTLS.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appCluster *clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+// appClusters is one per served port (the SNI-selected inbound chains forward
+// to these); healthCluster is the single delegated-liveness probe on the
+// primary port.
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
 	inbound, err = NewInboundListener(cniPod, trustDomain)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -51,13 +54,21 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string) 
 	}
 
 	netns := cniPod.GetNetworkNamespace()
-	port := AppPortFromPod(cniPod)
-	appCluster = NewAppCluster(AppClusterName(cniPod), netns, port)
+	// One app cluster per served port, each bound into the pod's netns at
+	// 127.0.0.1:<port>; the matching inbound SNI chain routes to it. The
+	// per-port app protocol (h1 default, h2 via the "=h2" annotation suffix)
+	// sets the loopback hop's codec — protocol heterogeneity across ports.
+	h2Ports := AppPortProtocols(cniPod)
+	for _, port := range AppPortsFromPod(cniPod) {
+		appClusters = append(appClusters, NewAppCluster(AppClusterName(cniPod, port), netns, port, h2Ports[port]))
+	}
 	// Separate, unrouted cluster carrying the active app health check (delegated
-	// liveness); keeping the HC off app_<pod> avoids gating the delivery path.
-	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, port, AppHealthPathFromPod(cniPod))
+	// liveness) on the primary port; keeping the HC off app_<pod> avoids gating
+	// the delivery path. Liveness stays pod-level (primary port), not per-port.
+	primary := AppPortFromPod(cniPod)
+	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, primary, AppHealthPathFromPod(cniPod))
 
-	return inbound, outbound, appCluster, healthCluster, nil
+	return inbound, outbound, appClusters, healthCluster, nil
 }
 
 // SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the

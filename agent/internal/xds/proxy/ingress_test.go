@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/constants"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
@@ -62,7 +63,7 @@ func TestNewInboundListener(t *testing.T) {
 	assert.False(t, rc.GetValidateClusters().GetValue(), "validation off so app_<pod> churn doesn't wedge the listener")
 	vh := rc.GetVirtualHosts()[0]
 	assert.Equal(t, []string{"*"}, vh.GetDomains())
-	assert.Equal(t, AppClusterName(pod), vh.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, AppClusterName(pod, AppPortFromPod(pod)), vh.GetRoutes()[0].GetRoute().GetCluster())
 }
 
 func TestNewInboundListener_Errors(t *testing.T) {
@@ -85,4 +86,42 @@ func decodeHealthCheck(t *testing.T, f *http_connection_managerv3.HttpFilter) *h
 	hc := &healthcheckv3.HealthCheck{}
 	require.NoError(t, f.GetTypedConfig().UnmarshalTo(hc))
 	return hc
+}
+
+// TestInboundFilterChains_MultiPort verifies per-port SNI demux: a default
+// (no-server_names) chain plus one server_names=<port> chain per served port,
+// each forwarding to that port's app cluster.
+func TestInboundFilterChains_MultiPort(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "mp",
+		Namespace:        "default",
+		ServiceAccount:   "mp",
+		NetworkNamespace: "/var/run/netns/cni-a",
+		Ips:              []string{"10.0.0.1"},
+		Annotations:      map[string]string{constants.AnnotationEndpointPorts: "8080,9090"},
+	}
+	l, err := NewInboundListener(pod, "example.org")
+	require.NoError(t, err)
+
+	bySNI := map[string]*listenerv3.FilterChain{}
+	var defaultChain *listenerv3.FilterChain
+	for _, fc := range l.GetFilterChains() {
+		if fc.GetFilterChainMatch() == nil || len(fc.GetFilterChainMatch().GetServerNames()) == 0 {
+			defaultChain = fc
+			continue
+		}
+		bySNI[fc.GetFilterChainMatch().GetServerNames()[0]] = fc
+	}
+	require.NotNil(t, defaultChain, "a default (no-SNI) chain must exist for back-compat")
+	require.Contains(t, bySNI, "8080")
+	require.Contains(t, bySNI, "9090")
+
+	clusterOf := func(fc *listenerv3.FilterChain) string {
+		hcm := &http_connection_managerv3.HttpConnectionManager{}
+		require.NoError(t, fc.GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+		return hcm.GetRouteConfig().GetVirtualHosts()[0].GetRoutes()[0].GetRoute().GetCluster()
+	}
+	assert.Equal(t, "app_mp_9090", clusterOf(bySNI["9090"]))
+	assert.Equal(t, "app_mp_8080", clusterOf(bySNI["8080"]))
+	assert.Equal(t, "app_mp_8080", clusterOf(defaultChain), "default chain → primary port")
 }

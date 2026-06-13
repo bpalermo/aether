@@ -2,7 +2,9 @@ package registry
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
@@ -31,10 +33,16 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
 	}
 
+	ports, err := getPortsFromAnnotations(cniPod.GetAnnotations(), port)
+	if err != nil {
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
+	}
+
 	endpoint := &registryv1.ServiceEndpoint{
 		Ip:              cniPod.GetIps()[0],
 		ClusterName:     clusterName,
 		Port:            uint32(port),
+		Ports:           ports,
 		Weight:          weight,
 		Metadata:        getEndpointMetadataFromAnnotations(cniPod.GetAnnotations()),
 		HealthCheckMode: HealthCheckModeFromAnnotations(cniPod.GetAnnotations()),
@@ -88,6 +96,39 @@ func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
 	}
 
 	return uint16(port), nil
+}
+
+// getPortsFromAnnotations parses the full served-port set from the
+// endpoint.aether.io/ports annotation (comma-separated). The default port is
+// always included. Returns the sorted, de-duplicated set; when the annotation
+// is absent the set is just {defaultPort}.
+func getPortsFromAnnotations(annotations map[string]string, defaultPort uint16) ([]uint32, error) {
+	set := map[uint32]struct{}{uint32(defaultPort): {}}
+	if raw, ok := annotations[constants.AnnotationEndpointPorts]; ok && raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			t := strings.TrimSpace(part)
+			if t == "" {
+				continue
+			}
+			// Strip an optional "=proto" suffix (e.g. "9090=h2"): the protocol
+			// is an agent-local inbound concern; the registry carries only the
+			// numeric port set (per-port EDS membership).
+			if i := strings.IndexByte(t, '='); i >= 0 {
+				t = strings.TrimSpace(t[:i])
+			}
+			p, err := strconv.ParseUint(t, 10, 16)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ports annotation entry %q", t)
+			}
+			set[uint32(p)] = struct{}{}
+		}
+	}
+	ports := make([]uint32, 0, len(set))
+	for p := range set {
+		ports = append(ports, p)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports, nil
 }
 
 // getWeightFromAnnotations extracts the endpoint weight from pod annotations.

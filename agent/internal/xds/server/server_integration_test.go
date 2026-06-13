@@ -15,6 +15,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/xds"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -121,22 +122,22 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	inbound, outbound, appCluster, _, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org")
+	inbound, outbound, appClusters, _, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org")
 	require.NoError(t, err)
 
 	serviceName := "my-service"
 	endpoint := newServiceEndpoint("10.0.0.2", "cluster-1", "remote-pod", "node-2", 8080)
-	cluster := proxy.NewServiceCluster(serviceName, "aether.internal", nil)
+	cluster := proxy.NewServiceCluster("my-service.aether.internal", serviceName, serviceName, nil)
 	cla := proxy.NewClusterLoadAssignment(serviceName)
 	lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, "", "")
 	cla.Endpoints = append(cla.Endpoints, lbEp)
-	vhost := proxy.BuildOutboundClusterVirtualHost(serviceName, "aether.internal")
+	vhost := proxy.BuildOutboundClusterVirtualHost("my-service.aether.internal", []string{"my-service.aether.internal"})
 
 	routeCfg := proxy.BuildOutboundRouteConfiguration([]*routev3.VirtualHost{vhost}, "aether.internal")
 
 	snapshot, err := cachev3.NewSnapshot("1", map[resourcev3.Type][]types.Resource{
 		resourcev3.ListenerType: {inbound, outbound},
-		resourcev3.ClusterType:  {cluster, appCluster},
+		resourcev3.ClusterType:  append([]types.Resource{cluster}, clustersAsResources(appClusters)...),
 		resourcev3.EndpointType: {cla},
 		resourcev3.RouteType:    {routeCfg},
 	})
@@ -350,4 +351,13 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 	err := srv.Start(ctx)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, storageErr)
+}
+
+// clustersAsResources adapts concrete clusters to the resource slice.
+func clustersAsResources(cs []*clusterv3.Cluster) []types.Resource {
+	out := make([]types.Resource, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c)
+	}
+	return out
 }

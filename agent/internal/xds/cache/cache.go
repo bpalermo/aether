@@ -130,12 +130,14 @@ type SnapshotCache struct {
 // cluster lives here (not in the registry-driven cluster map) so registry reloads,
 // which rebuild that map wholesale, never drop it.
 type listenerEntry struct {
-	inbound    types.Resource
-	outbound   types.Resource
-	appCluster types.Resource
+	inbound  types.Resource
+	outbound types.Resource
+	// appClusters holds one per-port application cluster (multi-port pods); the
+	// SNI-selected inbound filter chains forward decrypted traffic to these.
+	appClusters []types.Resource
 	// healthCluster is the unrouted per-pod cluster carrying the app's active
-	// health check (delegated liveness), kept separate from appCluster so the HC
-	// does not gate the delivery path.
+	// health check (delegated liveness) on the primary port, kept separate from
+	// the app clusters so the HC does not gate the delivery path.
 	healthCluster types.Resource
 }
 
@@ -154,6 +156,14 @@ type clusterEntry struct {
 	// upstream mTLS validation (anti registry-poisoning). Empty disables
 	// pinning for the service (bundle-only validation).
 	sanNamespaces []string
+	// service is the bare service name (the map key for the default cluster,
+	// but distinct from it for per-port clusters keyed <fqdn>:<port>); used to
+	// render SAN identities and check dependency-set membership on retention.
+	service string
+	// sni is the destination port this cluster addresses, set on the upstream
+	// mTLS transport socket so the destination inbound demuxes to the right
+	// loopback port (multi-port routing, proposal 005). Empty = default chain.
+	sni string
 	// absentSince is non-zero while the service is missing from the registry
 	// listing. Such entries are retained (with empty endpoints) for
 	// serviceRetentionGrace before being pruned: during pod churn a service

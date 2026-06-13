@@ -13,6 +13,14 @@ message ServiceEndpoint {
 
   uint32 port = 3 [(buf.validate.field).uint32.lte = 65535];
 
+  // ports is the full set of application ports this endpoint serves (multi-port
+  // pods). port (above) remains the default/primary port — what the portless
+  // FQDN resolves to and the fallback when ports is empty. Each client builds a
+  // per-port cluster whose EDS membership is filtered to endpoints advertising
+  // that port, so a new version adding a port rolls out safely (callers of the
+  // new port only ever land on pods that serve it). See proposal 005.
+  repeated uint32 ports = 11 [(buf.validate.field).repeated.items.uint32.lte = 65535];
+
   uint32 weight = 4 [(buf.validate.field).uint32.gte = 0];
 
   message Locality {

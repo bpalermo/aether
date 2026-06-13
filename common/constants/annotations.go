@@ -27,6 +27,11 @@ const (
 
 	// AnnotationEndpointPort is the pod annotation key for specifying the service port
 	AnnotationEndpointPort = annotationAetherEndpointPrefix + "port"
+	// AnnotationEndpointPorts is the pod annotation listing ALL application ports
+	// the pod serves, comma-separated (e.g. "8080,9090"), for multi-port routing
+	// (proposal 005). AnnotationEndpointPort remains the default/primary port;
+	// when AnnotationEndpointPorts is unset the served set is just {port}.
+	AnnotationEndpointPorts = annotationAetherEndpointPrefix + "ports"
 	// AnnotationEndpointWeight is the pod annotation key for specifying endpoint weight in load balancing
 	AnnotationEndpointWeight = annotationAetherEndpointPrefix + "weight"
 	// AnnotationEndpointHealthPath is the pod annotation key for the HTTP path the
