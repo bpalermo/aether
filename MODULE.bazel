@@ -23,6 +23,13 @@ bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 bazel_dep(name = "rules_helm", version = "0.29.0")
 
+# Rust dynamic module (telemetry/edge — proposal 007). hermetic_cc_toolchain
+# provides a Zig-based hermetic C/linker for the cdylib and amd64/arm64
+# cross-compilation; registered libc-aware (opt-in) so it does not override the
+# repo's default C++ toolchain used by the Go/protobuf builds.
+bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "hermetic_cc_toolchain", version = "4.1.0")
+
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.2")
 
@@ -149,3 +156,42 @@ pull(
     repository = "distroless/static-debian13",
     tag = "nonroot",
 )
+
+# --- Rust dynamic module toolchains (telemetry/edge) ---
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.83.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# Third-party crates for the module (the Envoy SDK is vendored under
+# telemetry/edge/third_party and built as a first-party rust_library).
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.spec(
+    features = ["derive"],
+    package = "serde",
+    version = "1",
+)
+crate.spec(
+    package = "serde_json",
+    version = "1",
+)
+crate.spec(
+    package = "mockall",
+    version = "0.13",
+)
+crate.from_specs()
+use_repo(crate, "crates")
+
+# Hermetic Zig C/C++ toolchain for linking the cdylib and amd64/arm64
+# cross-compilation. libc-aware toolchains only resolve for libc-aware
+# platforms (@zig_sdk//libc_aware/platform:...), so the repo's default C++
+# toolchain is unaffected; cross builds select them via --platforms.
+zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(zig, "zig_sdk")
+
+register_toolchains("@zig_sdk//libc_aware/toolchain/...")

@@ -1,0 +1,16 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+# Vendored Envoy dynamic-modules Rust SDK (envoyproxy/envoy @ v1.38.0), with the
+# ABI bindings pre-generated and checked in (src/bindings.rs, include!'d by
+# src/lib.rs) so the build needs no bindgen/libclang. ABI-pinned to the proxy
+# image — regenerate on an Envoy bump (see ../../README.md).
+rust_library(
+    name = "envoy_dynamic_modules_sdk",
+    srcs = glob(["src/**/*.rs"]),
+    # include!("bindings.rs") reads this at compile time relative to lib.rs.
+    compile_data = ["src/bindings.rs"],
+    crate_name = "envoy_proxy_dynamic_modules_rust_sdk",
+    edition = "2021",
+    visibility = ["//telemetry/edge:__subpackages__"],
+    deps = ["@crates//:mockall"],
+)

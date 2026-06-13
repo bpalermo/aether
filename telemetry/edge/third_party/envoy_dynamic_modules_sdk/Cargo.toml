@@ -1,0 +1,16 @@
+[package]
+name = "envoy-proxy-dynamic-modules-rust-sdk"
+version = "0.1.0"
+edition = "2021"
+authors = ["Envoy Proxy Authors <envoy-dev@googlegroups.com>"]
+description = "Envoy Proxy Dynamic Modules Rust SDK"
+license = "Apache-2.0"
+repository = "https://github.com/envoyproxy/envoy"
+
+# Vendored for Aether at tag v1.38.0. ABI bindings are pre-generated and checked
+# in (src/bindings.rs), so the build script + bindgen/libclang are removed to keep
+# the Bazel build hermetic. Regenerate on an Envoy bump — see the vendor README.
+[dependencies]
+mockall = "0.13.1"
+
+[lib]

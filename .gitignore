@@ -29,3 +29,6 @@ secrets.yaml
 
 # Local Claude Code scheduler state — never commit.
 .claude/scheduled_tasks.lock
+
+# Rust dynamic module: local cargo build cache (Bazel build is canonical)
+/telemetry/edge/target/

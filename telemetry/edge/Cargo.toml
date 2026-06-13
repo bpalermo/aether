@@ -1,0 +1,18 @@
+[package]
+name = "aether_telemetry"
+version = "0.1.0"
+edition = "2021"
+description = "Aether edge-telemetry Envoy dynamic module (proposal 007)"
+license = "Apache-2.0"
+
+[dependencies]
+# Vendored from envoyproxy/envoy at tag v1.38.0 (ABI-pinned to the proxy image,
+# charts/agent/values.yaml). Bindings are pre-generated and checked in so the
+# Bazel build needs no bindgen/libclang. See third_party/ and proposal 007.
+envoy-proxy-dynamic-modules-rust-sdk = { path = "third_party/envoy_dynamic_modules_sdk" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "aether_telemetry"
+crate-type = ["cdylib"]
