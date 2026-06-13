@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -362,4 +363,41 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 	// Because the state never changed after the first sync, no events should
 	// have been broadcast to the watcher.
 	assert.Equal(t, 0, len(eventCh), "expected no events when state is unchanged between syncs")
+}
+
+// notifyMockRegistry adds a controllable Changes() channel to mockRegistry to
+// exercise the Syncer's watch-driven (vs poll-driven) path.
+type notifyMockRegistry struct {
+	*mockRegistry
+	ch chan struct{}
+}
+
+func (n *notifyMockRegistry) Changes() <-chan struct{} { return n.ch }
+
+// TestSyncer_ChangeDrivenSync verifies that a ChangeNotifier registry triggers
+// a sync via the watch signal (debounced) well before the poll interval would.
+func TestSyncer_ChangeDrivenSync(t *testing.T) {
+	snap := NewSnapshot()
+	bc := NewBroadcaster(logr.Discard(), nil)
+	var calls atomic.Int64
+	base := &mockRegistry{listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+		calls.Add(1)
+		return map[string][]*registryv1.ServiceEndpoint{}, nil
+	}}
+	reg := &notifyMockRegistry{mockRegistry: base, ch: make(chan struct{}, 1)}
+
+	// Long poll interval so any timely sync must come from the change signal.
+	s := NewSyncer(reg, snap, bc, 1*time.Hour, logr.Discard(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Start(ctx) }()
+
+	// Wait for the initial sync.
+	require.Eventually(t, func() bool { return calls.Load() >= 1 }, 2*time.Second, 10*time.Millisecond)
+	before := calls.Load()
+
+	// Fire a change → expect a debounced sync within ~1s, not 1h.
+	reg.ch <- struct{}{}
+	require.Eventually(t, func() bool { return calls.Load() > before }, 2*time.Second, 10*time.Millisecond,
+		"change signal must drive a sync ahead of the poll interval")
 }

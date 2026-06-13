@@ -416,3 +416,41 @@ func TestEtcdRegistry_CloseWithoutStart(t *testing.T) {
 	err := registry.Close()
 	assert.NoError(t, err)
 }
+
+// TestEtcdRegistry_WatchSignalsChanges verifies the etcd backend satisfies
+// registry.ChangeNotifier: a write under the prefix fires a coalesced signal
+// on Changes(), so the registrar reacts at watch speed instead of polling.
+func TestEtcdRegistry_WatchSignalsChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+	ctx := context.Background()
+	registry := setupRegistry(ctx, t)
+
+	notifier, ok := interface{}(registry).(interface{ Changes() <-chan struct{} })
+	require.True(t, ok, "etcd registry must implement registry.ChangeNotifier")
+
+	// Drain any startup signal.
+	select {
+	case <-notifier.Changes():
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	ep := &registryv1.ServiceEndpoint{Ip: "10.0.9.9", ClusterName: "c", Port: 8080}
+	require.NoError(t, registry.RegisterEndpoint(ctx, "watch-svc", registryv1.Service_PROTOCOL_HTTP, ep))
+
+	select {
+	case <-notifier.Changes():
+		// got the signal
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not signal a change after RegisterEndpoint")
+	}
+
+	// A removal also signals.
+	require.NoError(t, registry.UnregisterEndpoint(ctx, "watch-svc", "10.0.9.9"))
+	select {
+	case <-notifier.Changes():
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not signal a change after UnregisterEndpoint")
+	}
+}
