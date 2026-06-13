@@ -1,0 +1,36 @@
+load("@rules_rust//rust:defs.bzl", "rust_shared_library")
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+])
+
+# The Envoy dynamic-modules ABI header, fetched from the Envoy repo at the
+# pinned tag (@envoy_abi_h, see MODULE.bazel) — nothing checked in. Re-exported
+# through this main-repo alias so the SDK's crate_universe build script can
+# reference it: a crate_universe-generated repo can't see external repos like
+# @envoy_abi_h, but it can see the main repo via @@//. Fed to the build script
+# via AETHER_ABI_H (the crate.annotation in MODULE.bazel).
+alias(
+    name = "abi_h",
+    actual = "@envoy_abi_h//file",
+    visibility = ["//visibility:public"],
+)
+
+# aether_telemetry edge-telemetry dynamic module (proposal 007, Phase 1).
+# Produces libaether_telemetry.so, loaded by the stock Envoy proxy via a
+# K8s image volume (ENVOY_DYNAMIC_MODULES_SEARCH_PATH). Cross-compile for the
+# proxy arches with the hermetic Zig toolchain, e.g.:
+#   bazel build //proxy/filters/telemetry:aether_telemetry \
+#     --platforms=@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28
+rust_shared_library(
+    name = "aether_telemetry",
+    srcs = ["src/lib.rs"],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:envoy-proxy-dynamic-modules-rust-sdk",
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)

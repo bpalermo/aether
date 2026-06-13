@@ -168,6 +168,33 @@ use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
 
+# Envoy artifact fetches (abi.h) — see //bazel/envoy:extensions.bzl.
+envoy = use_extension("//bazel/envoy:extensions.bzl", "envoy")
+use_repo(envoy, "envoy_abi_h")
+
+# Rust crate graph for the proxy dynamic modules (proposal 007), resolved from
+# proxy/filters/telemetry's Cargo.toml/Cargo.lock — includes the Envoy SDK as a
+# git dep (not vendored). Must use the rules_rust crate extension directly:
+# crate_universe wires the rust toolchain's cargo/rustc into the generated repo,
+# which a hand-wrapped crates_repository cannot reach. The SDK build script
+# (bindgen) hard-codes ../../abi/abi.h, outside the crate package; the patch
+# redirects it to AETHER_ABI_H, fed the fetched header via the main-repo alias
+# //proxy/filters/telemetry:abi_h.
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.annotation(
+    build_script_data = ["@@//proxy/filters/telemetry:abi_h"],
+    build_script_env = {"AETHER_ABI_H": "$(execpath @@//proxy/filters/telemetry:abi_h)"},
+    crate = "envoy-proxy-dynamic-modules-rust-sdk",
+    patch_args = ["-p1"],
+    patches = ["@@//proxy/filters/telemetry/patches:sdk_abi_header.patch"],
+)
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//proxy/filters/telemetry:Cargo.lock",
+    manifests = ["//proxy/filters/telemetry:Cargo.toml"],
+)
+use_repo(crate, "crates")
+
 # Hermetic Zig C/C++ toolchain for linking cdylibs and amd64/arm64
 # cross-compilation. libc-aware toolchains only resolve for libc-aware
 # platforms (@zig_sdk//libc_aware/platform:...), so the repo's default C++

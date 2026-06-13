@@ -1,0 +1,1 @@
+# Envoy artifact fetches live in extensions.bzl (see //bazel/envoy:extensions.bzl).

@@ -1,0 +1,16 @@
+Aether: the SDK build script reads abi.h via ../../abi/abi.h, a sibling of the
+crate package. crate_universe's per-crate sandbox does not include it, so we
+supply the (pinned) header via the AETHER_ABI_H env var (Bazel build_script_data)
+instead. See MODULE.bazel (@envoy_abi_h) and docs/proposals/007.
+
+--- a/build.rs
++++ b/build.rs
+@@ -15,7 +15,7 @@
+   let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+   let bindings = bindgen::Builder::default()
+-    .header("../../abi/abi.h")
++    .header(std::env::var("AETHER_ABI_H").expect("AETHER_ABI_H not set"))
+     .clang_arg("-v")
+     .default_enum_style(bindgen::EnumVariation::Rust {
+       non_exhaustive: false,
