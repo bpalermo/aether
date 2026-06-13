@@ -25,11 +25,11 @@ const (
 	httpOnDemandFilterName = "envoy.filters.http.on_demand"
 
 	// onDemandClusterTimeout bounds how long a request to a not-yet-distributed
-	// cluster is paused while ODCDS fetches it from the node-local agent. The
-	// warm path is one UDS xDS round-trip plus the agent's scoped reload
-	// (sub-second); the bound mostly caps requests to nonexistent services,
-	// which fail when it expires.
-	onDemandClusterTimeout = 5 * time.Second
+	// cluster is paused while ODCDS fetches it from the node-local agent. With
+	// the leading-edge reload + catalog-gated RPC fill, a legitimate cold warm
+	// completes in tens of milliseconds, so this bound is purely the ghost
+	// cap: requests for catalog-rejected services fail when it expires.
+	onDemandClusterTimeout = 2 * time.Second
 )
 
 // routerHttpFilter creates a router HTTP filter for forwarding matched requests to clusters.

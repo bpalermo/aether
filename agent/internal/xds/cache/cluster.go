@@ -169,6 +169,33 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 
 	deps := c.DependencySet()
 	localRegion, localZone := c.nodeLocality()
+
+	// RPC-fill (cold path): a dependency missing from the watch-fed listing —
+	// typically an ODCDS observation made milliseconds ago, whose endpoints
+	// the re-filtered watch hasn't delivered yet — is fetched directly from
+	// the registrar, gated by the service catalog so nonexistent services
+	// cost nothing. This takes the watch round-trip off the cold path: the
+	// FIRST reload after an observation builds the cluster. Fetch failures
+	// degrade to the old behavior (the watch catch-up repairs).
+	if cat, ok := reg.(registry.ServiceCatalog); ok {
+		for svc := range deps {
+			if _, have := serviceEndpoints[svc]; have {
+				continue
+			}
+			if !cat.HasService(svc) {
+				continue
+			}
+			eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_HTTP)
+			if err != nil {
+				c.log.Info("cold-path endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
+				continue
+			}
+			if len(eps) > 0 {
+				serviceEndpoints[svc] = eps
+			}
+		}
+	}
+
 	c.log.V(1).Info("found service endpoints in registry",
 		"count", len(serviceEndpoints), "dependencySet", len(deps))
 

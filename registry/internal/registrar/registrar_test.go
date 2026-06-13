@@ -643,3 +643,23 @@ func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
 	_ = r.processStream(context.Background(), stream, "9")
 	assert.True(t, r.HasService("svc-z"), "current client keeps its catalog")
 }
+
+// TestSetServiceFilter_PurgesOutOfScopeCache verifies entries for services
+// leaving the filter are dropped: the registrar sends no removals for
+// out-of-scope services, and a stale entry would poison the cold path's
+// RPC fill (ListEndpoints serves the cache before falling back to RPC).
+func TestSetServiceFilter_PurgesOutOfScopeCache(t *testing.T) {
+	r := NewRegistrarRegistry(logr.Discard(), Config{Address: "test"})
+	r.mu.Lock()
+	r.cache["svc-a"] = []*registryv1.ServiceEndpoint{{Ip: "10.0.0.1"}}
+	r.cache["svc-b"] = []*registryv1.ServiceEndpoint{{Ip: "10.0.0.2"}}
+	r.mu.Unlock()
+
+	r.SetServiceFilter([]string{"svc-a", "svc-b"})
+	r.SetServiceFilter([]string{"svc-a"}) // svc-b leaves the filter
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	assert.Contains(t, r.cache, "svc-a")
+	assert.NotContains(t, r.cache, "svc-b", "out-of-scope entries must purge with the filter")
+}

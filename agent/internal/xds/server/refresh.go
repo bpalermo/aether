@@ -138,6 +138,26 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 		timer.Reset(r.debounce)
 	}
 
+	// reload rebuilds the scoped snapshot now (shared by the debounce expiry
+	// and the dependency-change leading edge).
+	var lastReload time.Time
+	reload := func() {
+		lastReload = time.Now()
+		// Re-assert the watch filter from the current dependency set
+		// before reloading: a grown set must reach the registrar so the
+		// watch cache receives the newly in-scope services (no-op when
+		// unchanged; the resulting watch events trigger the next reload).
+		AssertWatchFilter(r.cache, r.registry)
+		if err := r.cache.LoadClustersFromRegistry(ctx, r.clusterName, r.nodeName, r.registry); err != nil {
+			r.log.Error(err, "failed to refresh clusters from registry")
+			if r.refreshErrors != nil {
+				r.refreshErrors.Add(ctx, 1)
+			}
+			return
+		}
+		r.log.V(1).Info("refreshed clusters from registry")
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,10 +166,17 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 			arm()
 		case <-depChanges:
 			// The node dependency set changed (pod add/remove, changed
-			// declared upstreams, or an ODCDS observation): the scoped
-			// cluster set must be recomputed even though the registry
-			// contents are unchanged.
-			arm()
+			// declared upstreams, or an ODCDS observation). Unlike registry
+			// event bursts, this is a single latency-critical event — an
+			// ODCDS observation has a PAUSED REQUEST behind it — so it fires
+			// the reload immediately on the leading edge; only when reloads
+			// are already hot (within one debounce window) does it fall back
+			// to the trailing debounce to coalesce storms.
+			if time.Since(lastReload) >= r.debounce {
+				reload()
+			} else {
+				arm()
+			}
 		case <-pruneTicker.C:
 			// Each signals a dependency change (handled above) when anything
 			// expired: observed (ODCDS) entries past their idle TTL, and
@@ -159,19 +186,7 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 			r.cache.PruneObservedDependencies()
 			r.cache.SignalIfRetentionExpired()
 		case <-timer.C:
-			// Re-assert the watch filter from the current dependency set
-			// before reloading: a grown set must reach the registrar so the
-			// watch cache receives the newly in-scope services (no-op when
-			// unchanged; the resulting watch events trigger the next reload).
-			AssertWatchFilter(r.cache, r.registry)
-			if err := r.cache.LoadClustersFromRegistry(ctx, r.clusterName, r.nodeName, r.registry); err != nil {
-				r.log.Error(err, "failed to refresh clusters from registry")
-				if r.refreshErrors != nil {
-					r.refreshErrors.Add(ctx, 1)
-				}
-				continue
-			}
-			r.log.V(1).Info("refreshed clusters from registry")
+			reload()
 		}
 	}
 }
