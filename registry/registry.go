@@ -61,6 +61,17 @@ type ReconnectNotifier interface {
 	Reconnects() <-chan struct{}
 }
 
+// ServiceCatalog is an optional capability for Registry implementations
+// that maintain a full local index of mesh service names (the registrar
+// watch streams catalog events to every watcher, unfiltered — service
+// existence is low-churn, unlike endpoints). HasService reports whether the
+// named service currently has at least one endpoint mesh-wide; the ODCDS
+// cold path consults it to reject nonexistent services locally instead of
+// polluting the dependency set and watch filter.
+type ServiceCatalog interface {
+	HasService(name string) bool
+}
+
 // WatchScoper is an optional capability for Registry implementations backed
 // by a watch stream. SetServiceFilter scopes the watch to the given services
 // (the node's dependency set -- demand-scoped distribution): the registrar

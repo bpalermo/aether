@@ -170,22 +170,37 @@ func TestWatchEndpointsFilteredSnapshot(t *testing.T) {
 		return stream.sent
 	}
 
-	// Scoped to svc-a: exactly one FULL_SNAPSHOT (svc-a) + the marker.
+	// The service CATALOG (every service's name) is replayed to every
+	// watcher regardless of filter; endpoint snapshots stay filtered.
+	countByType := func(sent []*registrarv1.WatchEndpointsResponse, t registrarv1.WatchEndpointsResponse_EventType) int {
+		n := 0
+		for _, e := range sent {
+			if e.GetType() == t {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Scoped to svc-a: one FULL_SNAPSHOT (svc-a) + full catalog + marker.
 	sent := run(&registrarv1.WatchEndpointsRequest{
 		Filter: &registrarv1.ServiceFilter{Services: []string{"svc-a"}},
 	})
-	require.Len(t, sent, 2)
+	require.Len(t, sent, 4)
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT, sent[0].GetType())
 	assert.Equal(t, "svc-a", sent[0].GetServiceName())
-	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, sent[1].GetType())
+	assert.Equal(t, 2, countByType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED), "catalog bypasses the filter")
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, sent[3].GetType())
 
-	// Explicitly empty filter: marker only (a node with no mesh pods).
+	// Explicitly empty filter: catalog + marker only (node with no mesh pods).
 	sent = run(&registrarv1.WatchEndpointsRequest{
 		Filter: &registrarv1.ServiceFilter{},
 	})
-	require.Len(t, sent, 1)
-	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, sent[0].GetType())
-
-	// No filter: full snapshot (both services) + marker.
-	sent = run(&registrarv1.WatchEndpointsRequest{})
 	require.Len(t, sent, 3)
+	assert.Equal(t, 0, countByType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT))
+	assert.Equal(t, 2, countByType(sent, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED))
+
+	// No filter: full snapshot (both services) + catalog + marker.
+	sent = run(&registrarv1.WatchEndpointsRequest{})
+	require.Len(t, sent, 5)
 }

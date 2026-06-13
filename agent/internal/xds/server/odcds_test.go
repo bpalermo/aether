@@ -18,7 +18,7 @@ import (
 // names, and other type URLs are ignored.
 func TestOnDemandObserver_RecordsNamedCDSSubscriptions(t *testing.T) {
 	c := cache.NewSnapshotCache("node-1", logr.Discard())
-	o := newOnDemandObserver(c, logr.Discard())
+	o := newOnDemandObserver(c, &mockRegistry{}, logr.Discard())
 
 	// Named CDS subscription for a mesh authority: observed under the bare
 	// service name (the suffix is the deterministic bridge between the
@@ -51,8 +51,8 @@ func TestCombinedCallbacks_Dispatch(t *testing.T) {
 	c1 := cache.NewSnapshotCache("node-1", logr.Discard())
 	c2 := cache.NewSnapshotCache("node-1", logr.Discard())
 	combined := combinedCallbacks{
-		newOnDemandObserver(c1, logr.Discard()).Callbacks(),
-		newOnDemandObserver(c2, logr.Discard()).Callbacks(),
+		newOnDemandObserver(c1, &mockRegistry{}, logr.Discard()).Callbacks(),
+		newOnDemandObserver(c2, &mockRegistry{}, logr.Discard()).Callbacks(),
 	}
 
 	require.NoError(t, combined.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
@@ -65,4 +65,28 @@ func TestCombinedCallbacks_Dispatch(t *testing.T) {
 	// Unwired hooks are nil-safe.
 	require.NoError(t, combined.OnStreamOpen(context.Background(), 1, resourcev3.ClusterType))
 	combined.OnStreamClosed(1, nil)
+}
+
+// catalogRegistry wraps mockRegistry with a fixed service catalog.
+type catalogRegistry struct {
+	*mockRegistry
+	known map[string]bool
+}
+
+func (c *catalogRegistry) HasService(name string) bool { return c.known[name] }
+
+// TestOnDemandObserver_CatalogGate verifies nonexistent services are rejected
+// before touching the dependency set, while known services are observed.
+func TestOnDemandObserver_CatalogGate(t *testing.T) {
+	c := cache.NewSnapshotCache("node-1", logr.Discard())
+	reg := &catalogRegistry{mockRegistry: &mockRegistry{}, known: map[string]bool{"svc-real": true}}
+	o := newOnDemandObserver(c, reg, logr.Discard())
+
+	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl:                resourcev3.ClusterType,
+		ResourceNamesSubscribe: []string{"svc-real.aether.internal", "svc-ghost.aether.internal"},
+	}))
+	deps := c.DependencySet()
+	assert.Contains(t, deps, "svc-real", "catalog hit is observed")
+	assert.NotContains(t, deps, "svc-ghost", "catalog miss never pollutes the dependency set")
 }

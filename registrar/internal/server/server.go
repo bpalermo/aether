@@ -119,7 +119,8 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 		Protocol:    req.GetProtocol(),
 		Endpoint:    req.GetEndpoint(),
 	}}
-	version := s.snapshot.Apply(events)
+	version, transitions := s.snapshot.Apply(events)
+	events = append(events, transitions...)
 	for _, e := range events {
 		e.Version = version
 	}
@@ -162,7 +163,8 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 			Endpoint:    &registryv1.ServiceEndpoint{Ip: ip},
 		})
 	}
-	version := s.snapshot.Apply(events)
+	version, transitions := s.snapshot.Apply(events)
+	events = append(events, transitions...)
 	for _, e := range events {
 		e.Version = version
 	}
@@ -217,6 +219,22 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 			}
 		}
 	}
+	// Replay the full service catalog (every watcher, regardless of filter):
+	// agents keep a local index of service names so the on-demand cold path
+	// answers existence locally. Skipped when the client is current (its
+	// catalog is too: transitions ride the same versioned stream).
+	if req.GetLastVersion() != currentVersion {
+		for _, name := range s.snapshot.ServiceNames() {
+			if err := stream.Send(&registrarv1.WatchEndpointsResponse{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED,
+				ServiceName: name,
+				Version:     currentVersion,
+			}); err != nil {
+				return fmt.Errorf("failed to send service catalog event: %w", err)
+			}
+		}
+	}
+
 	// Mark the snapshot boundary so the client knows its cache is complete
 	// (sent even when the snapshot was skipped: the client is current).
 	if err := stream.Send(&registrarv1.WatchEndpointsResponse{
