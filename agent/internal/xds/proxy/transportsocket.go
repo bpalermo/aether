@@ -49,7 +49,7 @@ func DownstreamTransportSocket(tlsCertificateSecretName string, validationContex
 // handshake only proves trust-domain membership — any mesh workload — which
 // leaves registry poisoning able to impersonate a service (an attacker-
 // registered endpoint would present a valid but WRONG identity).
-func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string) *corev3.TransportSocket {
+func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
 	common := &transport_sockets_v3.CommonTlsContext{
 		// Clusters speak HTTP/2 upstream; advertise it so the mTLS handshake
 		// negotiates h2 (matches the inbound listener's codec).
@@ -83,7 +83,11 @@ func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 		}
 	}
 
-	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{CommonTlsContext: common})
+	// SNI carries the destination PORT (multi-port routing): the destination
+	// inbound listener demuxes filter chains by server_names = the port. Empty
+	// for single-port/default callers, which hit the destination's default
+	// chain. SNI is routing only — identity is the validated SVID/SAN.
+	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{CommonTlsContext: common, Sni: sni})
 }
 
 // transportSocket creates a TLS transport socket from the given TLS context message.

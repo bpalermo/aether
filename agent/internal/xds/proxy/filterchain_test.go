@@ -51,8 +51,8 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
 
-	assert.True(t, hcm.GetStripAnyHostPort(),
-		"authority :port must be stripped before routing (FQDN-only authorities, cluster_header cold path)")
+	assert.False(t, hcm.GetStripAnyHostPort(),
+		"authority :port is a routing selector (FQDN:port → that port's cluster); must NOT be stripped")
 
 	httpFilters := hcm.GetHttpFilters()
 	require.Len(t, httpFilters, 4, "expected health_check + subset-headers + on_demand + router")

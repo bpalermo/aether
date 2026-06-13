@@ -27,7 +27,7 @@ func TestDownstreamTransportSocket(t *testing.T) {
 }
 
 func TestUpstreamTransportSocket(t *testing.T) {
-	ts := UpstreamTransportSocket("spiffe://example.org/ns/default/sa/my-sa", "spiffe://example.org", nil)
+	ts := UpstreamTransportSocket("spiffe://example.org/ns/default/sa/my-sa", "spiffe://example.org", nil, "")
 
 	require.NotNil(t, ts)
 	assert.Equal(t, tlsTransportSocketName, ts.GetName())
@@ -52,7 +52,7 @@ func TestUpstreamTransportSocket_SANPinning(t *testing.T) {
 		"spiffe://aether.internal/ns/aether-test/sa/svc-1",
 		"spiffe://aether.internal/ns/other/sa/svc-1",
 	}
-	ts := UpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", sans)
+	ts := UpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", sans, "")
 
 	utc := &transport_sockets_v3.UpstreamTlsContext{}
 	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(utc))
@@ -69,7 +69,7 @@ func TestUpstreamTransportSocket_SANPinning(t *testing.T) {
 	}
 
 	// No expected identities: bundle-only (legacy shape).
-	ts = UpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", nil)
+	ts = UpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", nil, "")
 	utc = &transport_sockets_v3.UpstreamTlsContext{}
 	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(utc))
 	assert.Nil(t, utc.GetCommonTlsContext().GetCombinedValidationContext())

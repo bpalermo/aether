@@ -6,6 +6,7 @@ package proxy
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -48,11 +49,37 @@ func AppHealthPathFromPod(cniPod *cniv1.CNIPod) string {
 	return defaultAppHealthPath
 }
 
-// AppClusterName returns the name of the per-pod application cluster that the
-// pod's inner tunnel listener forwards decrypted traffic to. It is unique per pod
-// so each inner listener routes to its own application on loopback.
-func AppClusterName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("%s%s", appClusterPrefix, cniPod.GetName())
+// AppClusterName returns the name of the per-pod, per-port application cluster
+// that the inbound filter chain for that port forwards decrypted traffic to.
+// It is unique per (pod, port) so each SNI-selected chain routes to its own
+// loopback port.
+func AppClusterName(cniPod *cniv1.CNIPod, port uint16) string {
+	return fmt.Sprintf("%s%s_%d", appClusterPrefix, cniPod.GetName(), port)
+}
+
+// AppPortsFromPod returns the full set of application ports the pod serves
+// (multi-port routing, proposal 005): the endpoint.aether.io/ports annotation
+// unioned with the default port (AppPortFromPod), sorted and de-duplicated.
+// A pod without the annotation yields just {default port} — today's shape.
+func AppPortsFromPod(cniPod *cniv1.CNIPod) []uint16 {
+	set := map[uint16]struct{}{AppPortFromPod(cniPod): {}}
+	if raw, ok := cniPod.GetAnnotations()[constants.AnnotationEndpointPorts]; ok && raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			t := strings.TrimSpace(part)
+			if t == "" {
+				continue
+			}
+			if p, err := strconv.ParseUint(t, 10, 16); err == nil {
+				set[uint16(p)] = struct{}{}
+			}
+		}
+	}
+	ports := make([]uint16, 0, len(set))
+	for p := range set {
+		ports = append(ports, p)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports
 }
 
 // AppPortFromPod returns the port the pod's application listens on, taken from

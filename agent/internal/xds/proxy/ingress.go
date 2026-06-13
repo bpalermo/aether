@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"strconv"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -82,17 +83,39 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 		StatPrefix:       fmt.Sprintf("inbound_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
-		FilterChains: []*listenerv3.FilterChain{
-			buildInboundFilterChain(cniPod, tlsCertificateSecretName, validationContextName),
-		},
+		FilterChains:     buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName),
 	}, nil
 }
 
-// buildInboundFilterChain builds the mTLS-terminating HTTP filter chain for a pod's
-// inbound listener: it routes all requests to the pod's application cluster and sets
-// XFCC from the verified peer certificate's URI SAN (the caller's SVID).
-func buildInboundFilterChain(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager("inbound", buildInboundRouteConfiguration(AppClusterName(cniPod)))
+// buildInboundFilterChains builds one mTLS filter chain per served port, each
+// matched by SNI = the port number (the source proxy sets SNI to the port it
+// is addressing) and forwarding to that port's app cluster, plus a default
+// (no-SNI) chain targeting the primary port for back-compat and clients that
+// send no SNI. Each port's chain can run its own codec, so ports may differ in
+// protocol. SNI is routing only — identity stays the terminated mTLS SVID.
+func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string) []*listenerv3.FilterChain {
+	defaultPort := AppPortFromPod(cniPod)
+	ports := AppPortsFromPod(cniPod)
+
+	chains := make([]*listenerv3.FilterChain, 0, len(ports)+1)
+	// Default chain (no server_names): primary port. Matches no-SNI clients and
+	// any SNI that doesn't match a port chain.
+	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName))
+	// One chain per served port, SNI-matched on the port number.
+	for _, port := range ports {
+		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName))
+	}
+	return chains
+}
+
+// buildInboundFilterChain builds an mTLS-terminating HTTP filter chain for one
+// served port: it forwards all requests to that port's app cluster and sets
+// XFCC from the verified peer certificate's URI SAN (the caller's SVID). When
+// sni is non-empty the chain is SNI-matched (server_names); the empty-sni chain
+// is the default (no match criteria). chainPort selects both the app cluster
+// and the chain name suffix.
+func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
+	hcm := buildHTTPConnectionManager("inbound", buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort)))
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application.
 	hcm.HttpFilters = []*http_connection_managerv3.HttpFilter{
@@ -108,10 +131,18 @@ func buildInboundFilterChain(cniPod *cniv1.CNIPod, tlsCertificateSecretName, val
 		Uri:     true,
 	}
 
+	name := fmt.Sprintf("in_%s", cniPod.GetName())
+	var match *listenerv3.FilterChainMatch
+	if sni != "" {
+		name = fmt.Sprintf("in_%s_%s", cniPod.GetName(), sni)
+		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
+	}
+
 	return &listenerv3.FilterChain{
-		Name:            fmt.Sprintf("in_%s", cniPod.GetName()),
-		Filters:         []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
-		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
+		Name:             name,
+		FilterChainMatch: match,
+		Filters:          []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
 	}
 }
 

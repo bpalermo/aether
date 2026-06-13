@@ -44,7 +44,7 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inbound, outbound, appCluster, healthCluster, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org")
+			inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org")
 
 			if tt.expectedError {
 				require.Error(t, err)
@@ -54,7 +54,8 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, inbound)
 			require.NotNil(t, outbound)
-			require.NotNil(t, appCluster)
+			require.NotEmpty(t, appClusters)
+			appCluster := appClusters[0]
 			require.NotNil(t, healthCluster)
 			assert.Equal(t, HealthProbeClusterName(tt.cniPod), healthCluster.GetName())
 			require.Len(t, healthCluster.GetHealthChecks(), 1, "probe cluster carries the HC")
@@ -146,7 +147,9 @@ func TestPerConnectionBufferLimits(t *testing.T) {
 		Name:             "buf-pod",
 		NetworkNamespace: "/var/run/netns/buf",
 	}
-	inbound, outbound, appCluster, healthCluster, err := GenerateListenersFromRegistryPod(pod, "aether.internal")
+	inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(pod, "aether.internal")
+	require.NotEmpty(t, appClusters)
+	appCluster := appClusters[0]
 	require.NoError(t, err)
 
 	want := uint32(perConnectionBufferLimitBytes)
@@ -154,6 +157,6 @@ func TestPerConnectionBufferLimits(t *testing.T) {
 	assert.Equal(t, want, outbound.GetPerConnectionBufferLimitBytes().GetValue(), "outbound listener")
 	assert.Equal(t, want, appCluster.GetPerConnectionBufferLimitBytes().GetValue(), "app cluster")
 	assert.Equal(t, want, healthCluster.GetPerConnectionBufferLimitBytes().GetValue(), "health cluster")
-	assert.Equal(t, want, NewServiceCluster("svc-x", "aether.internal", nil).GetPerConnectionBufferLimitBytes().GetValue(), "service cluster")
+	assert.Equal(t, want, NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil).GetPerConnectionBufferLimitBytes().GetValue(), "service cluster")
 	assert.Equal(t, want, BuildHealthGatewayListener("/run/aether/health.sock", nil).GetPerConnectionBufferLimitBytes().GetValue(), "health gateway")
 }

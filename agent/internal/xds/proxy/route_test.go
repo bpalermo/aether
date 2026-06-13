@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"fmt"
 	"testing"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -43,13 +42,16 @@ func TestBuildOutboundRouteConfiguration(t *testing.T) {
 
 			require.NotNil(t, routeConfig)
 			assert.Equal(t, OutboundHTTPRouteName, routeConfig.GetName())
-			// Service vhosts plus the on-demand catch-all ("*"), always last.
+			// Service vhosts plus the universal on-demand catch-all, always last.
 			require.Len(t, routeConfig.GetVirtualHosts(), tt.expectLen+1)
 			catchAll := routeConfig.GetVirtualHosts()[tt.expectLen]
-			assert.Equal(t, []string{"*.aether.internal"}, catchAll.GetDomains(),
-				"catch-all is scoped to the mesh domain: foreign authorities 404 at the route table")
-			require.Len(t, catchAll.GetRoutes(), 1)
+			assert.Equal(t, []string{"*"}, catchAll.GetDomains())
+			// Route 1: mesh-shaped authority (regex) -> ODCDS cluster_header.
+			// Route 2: everything else -> instant 404.
+			require.Len(t, catchAll.GetRoutes(), 2)
 			assert.Equal(t, onDemandClusterHeader, catchAll.GetRoutes()[0].GetRoute().GetClusterHeader())
+			assert.NotEmpty(t, catchAll.GetRoutes()[0].GetMatch().GetHeaders(), "mesh-authority regex gate")
+			assert.Equal(t, uint32(404), catchAll.GetRoutes()[1].GetDirectResponse().GetStatus())
 		})
 	}
 }
@@ -60,24 +62,22 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 		clusterName string
 	}{
 		{name: "standard cluster", clusterName: "my-service"},
-		{name: "cluster with dots", clusterName: "my.service"},
+		{name: "port cluster", clusterName: "my-service:9090"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vhost := BuildOutboundClusterVirtualHost(tt.clusterName, "aether.internal")
+			fqdn := tt.clusterName + ".aether.internal"
+			vhost := BuildOutboundClusterVirtualHost(fqdn, []string{fqdn})
 
 			require.NotNil(t, vhost)
-			assert.Equal(t, tt.clusterName, vhost.GetName())
-
-			// FQDN-only: the single accepted authority is also the cluster name.
-			expectedFQDN := fmt.Sprintf("%s.aether.internal", tt.clusterName)
-			assert.Equal(t, []string{expectedFQDN}, vhost.GetDomains())
+			assert.Equal(t, fqdn, vhost.GetName())
+			assert.Equal(t, []string{fqdn}, vhost.GetDomains())
 
 			require.Len(t, vhost.GetRoutes(), 1)
 			route := vhost.GetRoutes()[0]
 			assert.Equal(t, "/", route.GetMatch().GetPrefix())
-			assert.Equal(t, expectedFQDN, route.GetRoute().GetCluster())
+			assert.Equal(t, fqdn, route.GetRoute().GetCluster())
 		})
 	}
 }
@@ -87,7 +87,7 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 // non-idempotent-safe conditions.
 func TestOutboundRetryPolicy(t *testing.T) {
 	for name, vh := range map[string]*routev3.VirtualHost{
-		"cluster vhost":   BuildOutboundClusterVirtualHost("svc-1", "aether.internal"),
+		"cluster vhost":   BuildOutboundClusterVirtualHost("svc-1.aether.internal", []string{"svc-1.aether.internal"}),
 		"catch-all vhost": buildOnDemandCatchAllVirtualHost("aether.internal"),
 	} {
 		rp := vh.GetRoutes()[0].GetRoute().GetRetryPolicy()

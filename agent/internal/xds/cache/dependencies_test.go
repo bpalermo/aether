@@ -389,3 +389,48 @@ func TestLoadClustersFromRegistry_RPCFillsColdDependency(t *testing.T) {
 	assert.NotContains(t, c.clusters, "svc-ghost")
 	assert.NotContains(t, reg.rpcCalls, "svc-ghost", "catalog gate prevents RPC for ghosts")
 }
+
+// TestLoadClustersFromRegistry_MultiPort verifies multi-port routing (005):
+// a service whose endpoints advertise extra ports yields a default cluster
+// (dual-domain vhost, all endpoints) plus one per-port cluster whose EDS is
+// filtered to pods advertising that port (safe new-port rollout).
+func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
+	c := newTestCache("node-1")
+	c.SetMeshDomain("aether.internal")
+	declareDeps(c, "svc-mp")
+	ctx := context.Background()
+
+	// ep1 serves 8080 (default) + 9090; ep2 serves only 8080 (old version).
+	ep1 := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+	ep1.Ports = []uint32{8080, 9090}
+	ep2 := makeEndpoint("10.0.0.2", "cluster-1", "node-3", 8080)
+	ep2.Ports = []uint32{8080}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"svc-mp": {ep1, ep2}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	// Default cluster: dual-domain vhost, all endpoints.
+	def, ok := c.clusters["svc-mp"]
+	require.True(t, ok)
+	assert.Equal(t, "svc-mp.aether.internal", def.cluster.GetName())
+	assert.ElementsMatch(t, []string{"svc-mp.aether.internal", "svc-mp.aether.internal:8080"}, def.vhost.GetDomains())
+	assert.Len(t, def.loadAssignment.GetEndpoints(), 2, "default cluster carries all endpoints")
+	assert.Equal(t, "8080", def.sni)
+
+	// Per-port :9090 cluster: only ep1 (which advertises 9090).
+	port, ok := c.clusters["svc-mp.aether.internal:9090"]
+	require.True(t, ok, "non-default port gets its own cluster")
+	assert.Equal(t, []string{"svc-mp.aether.internal:9090"}, port.vhost.GetDomains())
+	assert.Equal(t, "9090", port.sni)
+	require.Len(t, port.loadAssignment.GetEndpoints(), 1, "per-port EDS = pods advertising the port")
+	assert.Equal(t, "10.0.0.1",
+		port.loadAssignment.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress())
+	assert.Equal(t, "svc-mp", port.service, "per-port cluster maps back to bare service (SAN/retention)")
+
+	// No spurious :8080 (default) port cluster — the default vhost owns it.
+	_, has8080 := c.clusters["svc-mp.aether.internal:8080"]
+	assert.False(t, has8080, "default port is not a separate cluster")
+}

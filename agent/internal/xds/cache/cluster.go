@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -99,18 +100,21 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	clusters := make([]types.Resource, 0, len(c.clusters))
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
-	for serviceName, entry := range c.clusters {
+	for _, entry := range c.clusters {
 		cluster := entry.cluster
 		if nodeSpiffeID != "" {
 			// Expected server identities for this service: one SPIFFE ID per
-			// endpoint namespace. The handshake then proves the peer IS the
+			// endpoint namespace (entry.service is the bare name even for
+			// per-port clusters). The handshake then proves the peer IS the
 			// service asked for, not merely some workload in the trust domain.
 			sanURIs := make([]string, 0, len(entry.sanNamespaces))
 			for _, ns := range entry.sanNamespaces {
-				sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, serviceName))
+				sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, entry.service))
 			}
 			cl, _ := proto.Clone(entry.cluster).(*clusterv3.Cluster)
-			proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs)
+			// entry.sni carries the destination port so the peer's inbound
+			// demuxes to the right loopback port (multi-port routing).
+			proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, entry.sni)
 			cluster = cl
 		}
 		clusters = append(clusters, cluster)
@@ -252,26 +256,78 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			nodeSubsetKeys[k] = struct{}{}
 		}
 
-		cluster := proxy.NewServiceCluster(serviceName, c.meshDomain, sortedKeys)
-		cla := proxy.NewClusterLoadAssignment(serviceName)
-		vhost := proxy.BuildOutboundClusterVirtualHost(serviceName, c.meshDomain)
-		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
+		if len(endpoints) == 0 {
+			continue
+		}
+		fqdn := proxy.ServiceClusterName(serviceName, c.meshDomain)
+		// Default/primary port: what the portless FQDN resolves to. Endpoints of
+		// one service share the primary; take the first.
+		defaultPort := endpoints[0].GetPort()
+
+		// Default cluster: name = FQDN, EDS = bare service (all endpoints), vhost
+		// carries both the portless and :defaultPort domains, SNI = default port.
+		defaultCla := proxy.NewClusterLoadAssignment(serviceName)
+		defaultEpMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
+		// Per-port buckets: endpoints advertising each non-default port (per-port
+		// EDS — safe new-port rollout: a caller of :P only ever lands on pods
+		// serving P).
+		type portBucket struct {
+			eps   []*endpointv3.LocalityLbEndpoints
+			epMap map[string]*endpointv3.LocalityLbEndpoints
+		}
+		buckets := make(map[uint32]*portBucket)
 
 		for _, endpoint := range endpoints {
 			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone)
-			cla.Endpoints = append(cla.Endpoints, lbEp)
-			epMap[endpoint.GetIp()] = lbEp
+			defaultCla.Endpoints = append(defaultCla.Endpoints, lbEp)
+			defaultEpMap[endpoint.GetIp()] = lbEp
+
+			served := endpoint.GetPorts()
+			if len(served) == 0 {
+				served = []uint32{endpoint.GetPort()}
+			}
+			for _, p := range served {
+				if p == defaultPort {
+					continue
+				}
+				b := buckets[p]
+				if b == nil {
+					b = &portBucket{epMap: map[string]*endpointv3.LocalityLbEndpoints{}}
+					buckets[p] = b
+				}
+				b.eps = append(b.eps, lbEp)
+				b.epMap[endpoint.GetIp()] = lbEp
+			}
 		}
 		// Registry listing order is not guaranteed stable across syncs; sort so a
 		// re-sync with an unchanged endpoint set never hashes as an EDS change.
-		proxy.SortLocalityLbEndpoints(cla.Endpoints)
+		proxy.SortLocalityLbEndpoints(defaultCla.Endpoints)
 
 		c.clusters[serviceName] = clusterEntry{
-			cluster:        cluster,
-			loadAssignment: cla,
-			endpoints:      epMap,
-			vhost:          vhost,
+			cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys),
+			loadAssignment: defaultCla,
+			endpoints:      defaultEpMap,
+			vhost:          proxy.BuildOutboundClusterVirtualHost(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}),
 			sanNamespaces:  sanNamespaces,
+			service:        serviceName,
+			sni:            strconv.Itoa(int(defaultPort)),
+		}
+
+		// One cluster per non-default advertised port.
+		for port, b := range buckets {
+			portName := proxy.PortClusterName(serviceName, c.meshDomain, port)
+			pcla := proxy.NewClusterLoadAssignment(portName)
+			pcla.Endpoints = b.eps
+			proxy.SortLocalityLbEndpoints(pcla.Endpoints)
+			c.clusters[portName] = clusterEntry{
+				cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys),
+				loadAssignment: pcla,
+				endpoints:      b.epMap,
+				vhost:          proxy.BuildOutboundClusterVirtualHost(portName, []string{portName}),
+				sanNamespaces:  sanNamespaces,
+				service:        serviceName,
+				sni:            strconv.Itoa(int(port)),
+			}
 		}
 	}
 
@@ -290,8 +346,11 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		if _, present := c.clusters[name]; present {
 			continue
 		}
-		if _, inScope := deps[name]; !inScope {
-			c.log.Info("service left dependency set; dropping cluster/vhost (cold path takes over)", "service", name)
+		// entry.service maps a per-port cluster (keyed <fqdn>:<port>) back to its
+		// bare service for the dependency-set check, so a service's default and
+		// per-port clusters are retained/dropped together.
+		if _, inScope := deps[entry.service]; !inScope {
+			c.log.Info("service left dependency set; dropping cluster/vhost (cold path takes over)", "cluster", name, "service", entry.service)
 			continue
 		}
 		if entry.absentSince.IsZero() {
