@@ -50,29 +50,29 @@ libc-aware toolchains only resolve for a platform that declares a libc-version
 constraint (`@zig_sdk//libc_aware/platform:linux_{amd64,arm64}_gnu.2.28`). A
 normal `bazel build //...` / `bazel test //...` therefore continues to use the
 repo's existing default C++ toolchain — the Go/protobuf builds are untouched.
-Hermetic cross-compilation is opt-in per invocation:
+Hermetic cross-compilation is opt-in per invocation, e.g. for the first
+consumer (proposal 007):
 
 ```
-bazel build //bazel/rust/smoke:smoke \
+bazel build //telemetry/edge:aether_telemetry \
   --platforms=@zig_sdk//libc_aware/platform:linux_arm64_gnu.2.28
 ```
 
 This is what the module's release-artifact build (proposal 007) uses to produce
 both-arch `.so`s.
 
-### Smoke target
-`//bazel/rust/smoke` is a tiny `cdylib` with a C-ABI export plus a `rust_test`,
-with no external crate deps. It proves the toolchain end to end: `rust_test`
-makes `bazel test //...` exercise rustc in CI, and the `rust_shared_library`
-exercises the C linker. It doubles as a permanent canary for future Rust/Envoy
-bumps.
+This PR adds only the toolchain layer — no Rust target, since the toolchain is
+exercised by its first consumer (proposal 007, stacked) and the validation
+below. A standalone smoke target was prototyped and dropped once the real
+module proved the toolchain.
 
 ## Validation (2026-06-13)
 
-- `bazel test //bazel/rust/smoke:smoke_test` — green (host toolchain).
-- `bazel build //bazel/rust/smoke:smoke` — green host, and green under
+- Module `//telemetry/edge:aether_telemetry` (proposal 007, stacked) builds
+  green on the host toolchain and under
   `--platforms=@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28` and
-  `…linux_arm64_gnu.2.28` (arm64 output confirmed `ELF … ARM aarch64`).
+  `…linux_arm64_gnu.2.28` (arm64 output confirmed `ELF … ARM aarch64`), and
+  loads into stock `envoyproxy/envoy:distroless-v1.38.0`.
 - Existing Go/protobuf builds unaffected (default C++ toolchain unchanged;
   libc-aware Zig toolchains do not resolve for default platforms).
 
