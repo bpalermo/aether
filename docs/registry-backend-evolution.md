@@ -145,27 +145,76 @@ resilience). Direct etcd loses:
 So the etcd `Watch` win is captured **at the registrar↔etcd link** (registrar
 as a watch cache over etcd), not at an agent↔etcd link.
 
-## Multi-cluster: where the choice reopens
+## Multi-region: etcd, not DynamoDB global tables
 
-Intra-cluster, the skew fix is local. Cross-cluster (N clusters × 2 replicas)
-is a separate tier, and the backend choice drives it:
+Intra-region/intra-cluster, the skew fix is local (the Watch above). The
+multi-region question used to point at DynamoDB global tables — but
+**a managed multi-region store is not worth adopting *just* for global tables**,
+and a per-region-etcd topology dissolves the reasons etcd looked unfit for
+multi-region in the first place.
 
-- **Shared DynamoDB global table** — multi-active, managed, AP under partition
-  (keeps accepting local writes), best for **multi-region**; pair with
-  intra-cluster **peer-watch** (registrar↔registrar) for the fast local path,
-  Streams/EFO for the cross-cluster backstop.
-- **Shared external etcd + Watch** — superior CDC and it *unifies* the
-  intra- and cross-cluster tiers under one primitive, best for **multi-cluster
-  same-region**; but it's CP (a partitioned cluster goes propagate-read-only),
-  a single-quorum blast radius, region-locality bound, ~2–8 GiB scale ceiling,
-  and self-managed.
+**Directive (2026-06-13): keep etcd for multi-region.** The model is **a
+per-region etcd cluster plus asynchronous cross-region replication, with
+eventual consistency between regions accepted.** Per-region quorums remove the
+three objections to a single shared etcd:
 
-Locality-aware failover (cross-cluster endpoints are priority 2) means
-cross-cluster staleness rides the failover budget, so it tolerates more lag
-than the intra-cluster path — which is exactly where the harder mechanism sits.
+- **Region locality** — each region writes to its local etcd at local RTT; no
+  cross-region Raft penalty.
+- **Blast radius** — per-region quorums; one region's etcd failure is isolated.
+- **CP partition behavior** — a region cut off from the others keeps its local
+  quorum, so it keeps registering and serving its own endpoints; only
+  cross-region propagation pauses, which is the accepted eventual-consistency
+  trade.
 
-**Decision axis:** single-region fleet → shared etcd + Watch is the elegant,
-unified answer; multi-region → DynamoDB global table + intra-cluster peer-watch.
+### How the cross-region replication stays conflict-free
+
+The mesh's existing discipline — *registrar per cluster, none authoritative,
+cluster-scoped reconciliation, no unilateral GC* — is exactly what makes
+multi-master replication conflict-free: **each region is authoritative only for
+its own `cluster_name` endpoints.** Encode that in the key so the partitions
+are truly disjoint regardless of pod-CIDR overlap across regions:
+
+```
+# prerequisite schema change — origin (cluster) goes IN the key, not just the value
+/aether/services/<service>/clusters/<cluster>/endpoints/<ip>
+```
+
+Each region authoritatively writes only `clusters/<self>`; peers' endpoints
+arrive mirrored into `clusters/<peer>`. Disjoint partitions ⇒ one writer per
+partition ⇒ last-write-wins is a no-op ⇒ eventual consistency is trivial.
+
+### The replication mechanism
+
+```
+Region A: agents → registrar(A) → etcd(A) ──own-prefix mirror──▶ etcd(B), etcd(C)
+Region B: agents → registrar(B) → etcd(B) ──own-prefix mirror──▶ etcd(A), etcd(C)
+```
+
+- The registrar stays **region-local** and store-shaped: it Watches only its
+  local etcd, which now contains local-authoritative *plus* mirrored-foreign
+  endpoints. It never knows about other regions.
+- A per-region **replicator** watches its own `clusters/<self>` prefix and
+  replays changes into peer regions' etcd. This is etcd↔etcd replication, *not*
+  registrar-to-registrar federation — deliberately, to avoid cross-trust-domain
+  mTLS (SPIFFE federation) and a WAN gossip mesh.
+- **Self-healing without unilateral GC:** mirrored keys carry an etcd **lease**
+  the replicator refreshes. If a region or the inter-region link dies, its
+  foreign keys elsewhere expire on their own — the *origin's* heartbeat
+  lapsing, not a peer judging it dead — giving automatic cross-region failover
+  cleanup that honors the no-GC directive.
+- **Locality keeps it safe:** foreign-region endpoints are priority 2 (failover
+  only), so the accepted cross-region staleness rides the non-critical path; the
+  steady path is always local.
+
+`etcdctl make-mirror` fits the one-directional-per-origin-prefix shape as a
+starting point but lacks lease management and origin-filtering, so the
+replicator is a thin purpose-built component (or a registrar mode). This is
+scoped as **proposal 006 (multi-region etcd federation)**: the key-schema
+change, the replicator spec (lease/tombstone/resume/compaction-resync, HA), and
+a region-failover e2e — not yet built.
+
+**Net:** etcd is the substrate single- *and* multi-region. DynamoDB global
+tables are an alternative, not a requirement.
 
 ## Empirical validation
 
@@ -192,10 +241,15 @@ cross-replica propagation eliminated even those.
 - **Current:** talos-main on etcd + watch (poll backstop); DynamoDB remains a
   fully-supported, e2e-validated managed alternative; Kubernetes is the
   zero-dependency option.
-- **Guidance:** single-region multi-cluster → etcd + Watch; multi-region or
-  managed-preference → DynamoDB global table + peer-watch. Agents always go
-  through the registrar, never the store directly.
-- **Open item:** `peer-watch` (registrar↔registrar) is the backend-agnostic
-  skew close — now lower priority for etcd (Watch already gets it to zero), but
-  the right fix if DynamoDB is the production substrate, and the intra-cluster
-  primitive for the multi-cluster tiering above.
+- **Guidance:** **etcd is the chosen substrate single- and multi-region** —
+  single-region/intra-cluster via `Watch`; multi-region via per-region etcd +
+  asynchronous, origin-partitioned, lease-managed cross-region replication
+  (eventual consistency cross-region, accepted). DynamoDB is supported but is
+  *not* required by the multi-region case — we do not adopt a managed store
+  solely for global tables. Agents always go through the registrar, never the
+  store directly.
+- **Open items:** proposal 006 (multi-region etcd federation — key-schema
+  change + replicator); and `peer-watch` (registrar↔registrar) as the
+  backend-agnostic intra-cluster skew close — lower priority for etcd (Watch
+  already gets it to zero), relevant only if DynamoDB is the production
+  substrate.
