@@ -17,6 +17,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+      - name: Setup Clang
+        # The proxy dynamic-modules SDK build script runs bindgen against
+        # abi.h; pin a known LLVM (22) instead of the runner default (clang-18),
+        # whose libclang is selected via LIBCLANG_PATH (see .bazelrc :ci).
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.18.0
         with:

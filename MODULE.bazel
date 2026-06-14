@@ -188,13 +188,13 @@ crate.annotation(
         "AETHER_ABI_H": "$(execpath @@//proxy/filters/telemetry:abi_h)",
         # bindgen runs the host libclang against abi.h, which pulls in C++ libc
         # headers (<cstdint> -> <stdint.h> -> <bits/...>). Inside the build
-        # sandbox clang can't always auto-detect the system GCC install (e.g.
-        # CI's clang-18 doesn't recognize a newer gcc), so it misses the glibc
-        # multiarch include dir and picks the wrong target (<bits/libc-header-
-        # start.h>/<gnu/stubs-32.h> not found). Pointing it at the GCC prefix
-        # restores multiarch + libstdc++ headers + the correct 64-bit target,
-        # without hardcoding the arch/gcc version (clang derives both).
-        "BINDGEN_EXTRA_CLANG_ARGS": "--gcc-toolchain=/usr",
+        # sandbox clang's GCC auto-detection is unreliable (CI's clang-18 finds
+        # libstdc++ but not the glibc multiarch dir, so <bits/libc-header-start.h>
+        # isn't found; --gcc-toolchain alone doesn't fix it). Pin the exec target
+        # (the build script always runs on the x86_64-linux exec host — the .so
+        # is cross-compiled separately via Zig) and add the glibc multiarch
+        # include dirs explicitly; clang ignores the nonexistent one.
+        "BINDGEN_EXTRA_CLANG_ARGS": "--target=x86_64-unknown-linux-gnu -I/usr/include/x86_64-linux-gnu -I/usr/include/aarch64-linux-gnu",
     },
     crate = "envoy-proxy-dynamic-modules-rust-sdk",
     patch_args = ["-p1"],
