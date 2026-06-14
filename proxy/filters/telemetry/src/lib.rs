@@ -1,4 +1,6 @@
-//! Aether edge-telemetry dynamic module (proposal 007, Phase 1: source-reported).
+//! Aether stats dynamic module (proposal 007, Phase 1: source-reported).
+//! Analogous to Istio's istio_stats: an HTTP filter that records a tagged
+//! request counter at the log phase.
 //!
 //! Attached to each per-pod OUTBOUND HCM. The agent passes the local pod's
 //! identity (reporter/source_service/source_pod/mesh_domain) as the per-instance
@@ -50,7 +52,7 @@ impl FilterConfig {
         let c: ConfigData = match serde_json::from_str(filter_config) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("aether_telemetry: bad filter_config: {e}");
+                eprintln!("aether_stats_filter: bad filter_config: {e}");
                 return None;
             }
         };
@@ -68,6 +70,7 @@ impl FilterConfig {
                     "source_pod",
                     "destination_service",
                     "response_code",
+                    "response_flags",
                 ],
             )
             .ok()?;
@@ -90,6 +93,7 @@ impl<EHF: EnvoyHttpFilter> HttpFilterConfig<EHF> for FilterConfig {
             mesh_domain: self.mesh_domain.clone(),
             requests_total: self.requests_total,
             dest_cluster: String::new(),
+            local_reply_details: String::new(),
             recorded: false,
         })
     }
@@ -102,6 +106,7 @@ pub struct Filter {
     mesh_domain: String,
     requests_total: EnvoyCounterVecId,
     dest_cluster: String,
+    local_reply_details: String,
     recorded: bool,
 }
 
@@ -124,6 +129,10 @@ impl Filter {
             })
             .unwrap_or_else(|| "0".to_string());
 
+        // Cause flag, mapped from the proxy's local-reply details (empty means
+        // the response came from upstream, or success).
+        let response_flags = classify_flag(&self.local_reply_details);
+
         let _ = envoy.increment_counter_vec(
             self.requests_total,
             &[
@@ -132,6 +141,7 @@ impl Filter {
                 &self.source_pod,
                 &destination_service,
                 &response_code,
+                response_flags,
             ],
             1,
         );
@@ -168,26 +178,60 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
         abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::Continue
     }
 
-    fn on_response_headers(
+    // Proxy-generated replies (connect failure, no healthy host, no cluster,
+    // timeouts) carry the cause in `details`; capture it for the flag label.
+    fn on_local_reply(
         &mut self,
-        envoy: &mut EHF,
-        end_of_stream: bool,
-    ) -> abi::envoy_dynamic_module_type_on_http_filter_response_headers_status {
-        if end_of_stream {
-            self.record(envoy);
-        }
-        abi::envoy_dynamic_module_type_on_http_filter_response_headers_status::Continue
+        _envoy: &mut EHF,
+        _response_code: u32,
+        details: EnvoyBuffer,
+        _reset_imminent: bool,
+    ) -> abi::envoy_dynamic_module_type_on_http_filter_local_reply_status {
+        self.local_reply_details = String::from_utf8_lossy(details.as_slice()).into_owned();
+        abi::envoy_dynamic_module_type_on_http_filter_local_reply_status::Continue
     }
 
-    fn on_response_body(
-        &mut self,
-        envoy: &mut EHF,
-        end_of_stream: bool,
-    ) -> abi::envoy_dynamic_module_type_on_http_filter_response_body_status {
-        if end_of_stream {
-            self.record(envoy);
-        }
-        abi::envoy_dynamic_module_type_on_http_filter_response_body_status::Continue
+    // Record once at stream completion (the log phase): response_code is final
+    // here, and on_stream_complete fires for every request including local
+    // replies (e.g. a 503/UF connect failure).
+    fn on_stream_complete(&mut self, envoy: &mut EHF) {
+        self.record(envoy);
+    }
+}
+
+/// Maps an Envoy local-reply `details` string to a bounded cause flag, so the
+/// `response_flags` label stays low-cardinality. Empty details (the response
+/// came from upstream, or success) -> "-". The ResponseFlags attribute is not
+/// exposed to dynamic-module HTTP filters at v1.38, so the cause is derived from
+/// the local-reply details captured in on_local_reply.
+fn classify_flag(details: &str) -> &'static str {
+    if details.is_empty() {
+        return "-";
+    }
+    // Order matters: check the most specific causes first.
+    if details.contains("connection_failure")
+        || details.contains("connect_error")
+        || details.contains("connection refused")
+        || details.contains("connection_termination")
+    {
+        "UF" // upstream connection failure
+    } else if details.contains("no_healthy_upstream") {
+        "UH" // no healthy upstream host
+    } else if details.contains("cluster_not_found") || details.contains("no_cluster") {
+        "NC" // no cluster (e.g. ODCDS cold-path miss)
+    } else if details.contains("route_not_found") || details.contains("no_route") {
+        "NR" // no route configured
+    } else if details.contains("overflow") {
+        "UO" // upstream/connection-pool overflow (circuit breaker)
+    } else if details.contains("timeout") {
+        "UT" // upstream/stream timeout
+    } else if details.contains("upstream_reset")
+        || details.contains("remote_reset")
+        || details.contains("local_reset")
+    {
+        "UR" // upstream reset (post-connect)
+    } else {
+        "LR" // some other proxy local reply
     }
 }
 
@@ -198,10 +242,10 @@ fn new_http_filter_config_fn<EC: EnvoyHttpFilterConfig, EHF: EnvoyHttpFilter>(
 ) -> Option<Box<dyn HttpFilterConfig<EHF>>> {
     let cfg = std::str::from_utf8(filter_config).unwrap_or("{}");
     match filter_name {
-        "edge" => FilterConfig::new(cfg, envoy_filter_config)
+        "stats" => FilterConfig::new(cfg, envoy_filter_config)
             .map(|c| Box::new(c) as Box<dyn HttpFilterConfig<EHF>>),
         other => {
-            eprintln!("aether_telemetry: unknown filter_name {other}");
+            eprintln!("aether_stats_filter: unknown filter_name {other}");
             None
         }
     }

@@ -77,10 +77,14 @@ cniInstall:
 proxy:
   enabled: true
   image:
-    # Envoy is an upstream image; pin it explicitly (not built by this repo).
-    repository: docker.io/envoyproxy/envoy
-    # envoyproxy/envoy:distroless-v1.38.0
-    digest: sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6
+    # Custom aether-proxy = stock Envoy distroless base + baked-in
+    # aether_stats_filter dynamic module (proposal 007), built and pinned by
+    # //proxy:image_push. The module's search path is baked into the image —
+    # self-contained, no K8s image volume. The Envoy version is pinned via
+    # //bazel/envoy ENVOY_VERSION (the @envoy_distroless base); keep that in
+    # lockstep with the SDK/abi.h.
+    ref: "{@//proxy:image_push}"
+    pullPolicy: Always
   logLevel: info
   # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
   # proxy-supervisor) as the proxy entrypoint instead of launching Envoy

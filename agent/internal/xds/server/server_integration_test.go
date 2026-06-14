@@ -122,7 +122,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	inbound, outbound, appClusters, _, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org")
+	inbound, outbound, appClusters, _, err := proxy.GenerateListenersFromRegistryPod(pod, "example.org", "example.org")
 	require.NoError(t, err)
 
 	serviceName := "my-service"

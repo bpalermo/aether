@@ -6,7 +6,7 @@ exports_files([
 ])
 
 # The Envoy dynamic-modules ABI header, fetched from the Envoy repo at the
-# pinned tag (@envoy_abi_h, see MODULE.bazel) — nothing checked in. Re-exported
+# pinned tag (@envoy_abi_h, see //bazel/envoy) — nothing checked in. Re-exported
 # through this main-repo alias so the SDK's crate_universe build script can
 # reference it: a crate_universe-generated repo can't see external repos like
 # @envoy_abi_h, but it can see the main repo via @@//. Fed to the build script
@@ -17,14 +17,15 @@ alias(
     visibility = ["//visibility:public"],
 )
 
-# aether_telemetry edge-telemetry dynamic module (proposal 007, Phase 1).
-# Produces libaether_telemetry.so, loaded by the stock Envoy proxy via a
-# K8s image volume (ENVOY_DYNAMIC_MODULES_SEARCH_PATH). Cross-compile for the
-# proxy arches with the hermetic LLVM toolchain (clang/lld + glibc sysroot), e.g.:
-#   bazel build //proxy/filters/telemetry:aether_telemetry \
+# aether_stats_filter stats dynamic module (proposal 007, Phase 1). Produces
+# libaether_stats_filter.so, baked into the custom aether-proxy image (//proxy)
+# at /modules and loaded via ENVOY_DYNAMIC_MODULES_SEARCH_PATH. Cross-compile
+# for the proxy arches with the hermetic LLVM toolchain (clang/lld + glibc
+# sysroot), e.g.:
+#   bazel build //proxy/filters/telemetry:aether_stats_filter \
 #     --platforms=//bazel/llvm/platform:linux_amd64
 rust_shared_library(
-    name = "aether_telemetry",
+    name = "aether_stats_filter",
     srcs = ["src/lib.rs"],
     edition = "2021",
     visibility = ["//visibility:public"],

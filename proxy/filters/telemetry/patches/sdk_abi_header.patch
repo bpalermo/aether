@@ -8,13 +8,14 @@ Aether: make the SDK's bindgen build script hermetic.
    than whatever clang/headers happen to be on the host. AETHER_SYSROOT is the
    execpath of <sysroot>/usr/include/stdint.h; the build script recovers the
    sysroot root (three parents up — execpath yields a file, not a directory) and
-   passes it to clang as --sysroot.
+   passes it as --sysroot plus explicit -isystem dirs for the Debian multiarch
+   layout (libclang, unlike the clang driver, doesn't auto-detect it).
 
 See MODULE.bazel (crate.annotation) and docs/proposals/008.
 
 --- a/build.rs
 +++ b/build.rs
-@@ -14,9 +14,25 @@ fn main() {
+@@ -14,9 +14,31 @@ fn main() {
 
    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
 
@@ -30,13 +31,19 @@ See MODULE.bazel (crate.annotation) and docs/proposals/008.
 +  // Aether: hermetic glibc headers via the chromium sysroot (no host headers).
 +  // AETHER_SYSROOT is the execpath of <sysroot>/usr/include/stdint.h; the
 +  // sysroot root is three parents up (execpath yields a file, not a dir).
++  // libclang (unlike the clang driver) doesn't auto-add the sysroot's Debian
++  // multiarch include dir, so pass it (and usr/include) explicitly alongside
++  // --sysroot, matching the x86_64 target pinned via BINDGEN_EXTRA_CLANG_ARGS.
 +  if let Ok(marker) = std::env::var("AETHER_SYSROOT") {
 +    let root = std::path::Path::new(&marker)
 +      .parent()
 +      .and_then(|p| p.parent())
 +      .and_then(|p| p.parent())
 +      .expect("AETHER_SYSROOT not deep enough");
-+    builder = builder.clang_arg(format!("--sysroot={}", root.display()));
++    builder = builder
++      .clang_arg(format!("--sysroot={}", root.display()))
++      .clang_arg(format!("-isystem{}/usr/include/x86_64-linux-gnu", root.display()))
++      .clang_arg(format!("-isystem{}/usr/include", root.display()));
 +  }
 +
 +  let bindings = builder

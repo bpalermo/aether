@@ -58,7 +58,11 @@ spec:
       {{- end }}
       containers:
         - name: proxy
-          image: "{{ .Values.proxy.image.repository }}@{{ .Values.proxy.image.digest }}"
+          # Custom aether-proxy = stock Envoy base + baked aether_stats_filter
+          # module (//proxy:image_push). The module's search path is baked into
+          # the image, so no volume or env is needed.
+          image: {{ .Values.proxy.image.ref | quote }}
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
           {{- if .Values.proxy.hotRestart.enabled }}
           command:
             - "/opt/aether/supervisor"

@@ -171,9 +171,10 @@ use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
 
-# Envoy artifact fetches (abi.h) — see //bazel/envoy:extensions.bzl.
+# Envoy artifacts — abi.h header + the @envoy_distroless proxy-image base, both
+# version-pinned via ENVOY_VERSION (see //bazel/envoy:extensions.bzl).
 envoy = use_extension("//bazel/envoy:extensions.bzl", "envoy")
-use_repo(envoy, "envoy_abi_h")
+use_repo(envoy, "envoy_abi_h", "envoy_distroless")
 
 # Rust crate graph for the proxy dynamic modules (proposal 007), resolved from
 # proxy/filters/telemetry's Cargo.toml/Cargo.lock — includes the Envoy SDK as a
@@ -189,14 +190,17 @@ crate.annotation(
     # libclang + a hermetic glibc sysroot — no host clang/headers (see the patch).
     # Routed through the MAIN repo (//bazel/llvm) — the crate_universe-generated
     # SDK repo can't see external repos by apparent name. The clang resource +
-    # libc++ headers and the glibc sysroot tree come in via the (now default) LLVM
-    # cc toolchain that cargo_build_script pulls in; supplying them here too would
-    # collide in the sandbox. We add only libclang itself (not a toolchain input)
-    # and the sysroot marker (for --sysroot).
+    # libc++ headers come in via the (now default) LLVM cc toolchain that
+    # cargo_build_script pulls in (re-supplying them here would collide on the
+    # include/c++ dir). The amd64 sysroot tree IS supplied explicitly: the
+    # toolchain only stages the cdylib *target* arch's sysroot, so on the arm64
+    # image leg the amd64 sysroot bindgen always uses would otherwise be absent.
     build_script_data = [
         "@@//proxy/filters/telemetry:abi_h",
         "@@//bazel/llvm:libclang",  # libclang soname chain present in the sandbox
         "@@//bazel/llvm:libclang_so",  # the file LIBCLANG_PATH points at
+        "@@//bazel/llvm:sysroot_amd64",  # full amd64 sysroot tree (toolchain only
+        # stages the cdylib target arch's sysroot; bindgen always uses amd64)
         "@@//bazel/llvm:sysroot_amd64_marker",  # sysroot-root marker for --sysroot
     ],
     build_script_env = {
@@ -205,6 +209,13 @@ crate.annotation(
         "LIBCLANG_PATH": "$(execpath @@//bazel/llvm:libclang_so)",
         # The patch three-parents this marker to derive --sysroot.
         "AETHER_SYSROOT": "$(execpath @@//bazel/llvm:sysroot_amd64_marker)",
+        # Pin bindgen's clang target to the (x86_64) sysroot we feed via --sysroot.
+        # cargo_build_script otherwise sets TARGET to the cdylib's arch (e.g.
+        # aarch64 for the arm64 image leg), making clang look for an aarch64
+        # multiarch dir inside the amd64 sysroot (bits/libc-header-start.h not
+        # found). The dynamic-module ABI is arch-neutral (LP64), so x86_64
+        # bindings are valid for the arm64 .so too. Appended last, so it wins.
+        "BINDGEN_EXTRA_CLANG_ARGS": "--target=x86_64-unknown-linux-gnu",
     },
     crate = "envoy-proxy-dynamic-modules-rust-sdk",
     patch_args = ["-p1"],

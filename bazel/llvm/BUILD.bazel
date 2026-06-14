@@ -28,10 +28,19 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# The full amd64 glibc sysroot tree for the bindgen build script. bindgen always
+# parses against the amd64 sysroot (the bindings are arch-neutral / LP64), but the
+# cc toolchain only stages the sysroot for the cdylib's *target* arch — so for the
+# arm64 image leg the amd64 tree would be absent. Stage it explicitly. (On the
+# amd64 leg these dedupe with the toolchain's identical files.)
+filegroup(
+    name = "sysroot_amd64",
+    srcs = ["@sysroot_linux_amd64//:sysroot"],
+    visibility = ["//visibility:public"],
+)
+
 # Marker file ($(execpath ...)) the build script three-parents to the sysroot
-# root for --sysroot. The sysroot header tree itself is staged by the LLVM cc
-# toolchain (exec is amd64); bindgen only parses, so the amd64 sysroot is fine
-# regardless of exec arch.
+# root for --sysroot.
 filegroup(
     name = "sysroot_amd64_marker",
     srcs = ["@sysroot_linux_amd64//:usr/include/stdint.h"],
