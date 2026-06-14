@@ -76,17 +76,22 @@ bazel build …`, re-verify the patch. On an LLVM bump: update
 
 `//proxy:image` builds a **custom `aether-proxy` image** (the image targets live
 at `//proxy`, not under this filter, so future proxy customizations share it):
-the stock Envoy distroless base (`@envoy_distroless`, pinned via `//bazel/envoy`
-`ENVOY_VERSION`) with the module `.so` baked at `/modules/libaether_stats_filter.so`
-and `ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules` baked into the image config — so
-the proxy loads it **self-contained, with no K8s image volume and no chart env**
-(drops the containerd ≥ 2.0 image-volume runtime dependency). Multi-arch; pushed
-by `//proxy:image_push` → `ghcr.io/bpalermo/aether/aether-proxy`; the chart's
+a **`gcr.io/distroless/cc` base** + the **official Envoy release binary** at
+`/usr/local/bin/envoy` (both pinned via `//bazel/envoy` `ENVOY_VERSION`) + the
+module `.so` baked at `/modules/libaether_stats_filter.so`, with
+`ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules` in the image config — so the proxy
+loads it **self-contained, with no K8s image volume and no chart env** (drops the
+containerd ≥ 2.0 image-volume runtime dependency). Multi-arch; pushed by
+`//proxy:image_push` → `ghcr.io/bpalermo/aether/aether-proxy`; the chart's
 `proxy.image.ref` is substituted from it.
 
-The LLVM-built `.so` links against an old glibc sysroot (max symbol `GLIBC_2.18`,
-well under the distroless base) and needs only `libgcc_s`/`libc`/`pthread` (the
-pure-Rust lib drops libstdc++ via `--as-needed`). Validated:
+**Why distroless/cc, not `envoyproxy/envoy:distroless`:** the LLVM-built `.so`
+needs `libgcc_s.so.1` at runtime (its unwinder; the old Zig build avoided it via
+compiler-rt, but the single-arch LLVM dist can't cross-compile compiler-rt for
+arm64). The stock Envoy distroless image is built on distroless/**base** and
+lacks `libgcc_s`, so the module fails to load there. distroless/**cc** ships
+`libstdc++` + `libgcc_s` + glibc (debian12, matching the Envoy release), which
+both the Envoy binary and the module need. Validated:
 `Dynamic module ABI version v0.1.0 matched` + `configuration OK` loading the
 baked module from the image with no volume/env.
 

@@ -160,6 +160,21 @@ pull(
     tag = "nonroot",
 )
 
+# Base for the custom aether-proxy image (//proxy:image): distroless/cc ships
+# libstdc++ + libgcc_s + glibc, which the Envoy binary and the Rust dynamic
+# module need at runtime (the Envoy distroless image is built on distroless/base
+# and lacks libgcc_s, so the module's unwinder fails to load there). debian12
+# matches the Envoy release's glibc.
+pull(
+    name = "distroless_cc",
+    digest = "sha256:d703b626ba455c4e6c6fbe5f36e6f427c85d51445598d564652a2f334179f96e",
+    layer_handling = "lazy",
+    registry = "gcr.io",
+    repository = "distroless/cc-debian12",
+    # root variant (the proxy runs privileged as uid 0).
+    tag = "latest",
+)
+
 # --- Rust toolchains (in-tree dynamic modules; see docs/proposals/008) ---
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
@@ -171,10 +186,10 @@ use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
 
-# Envoy artifacts — abi.h header + the @envoy_distroless proxy-image base, both
-# version-pinned via ENVOY_VERSION (see //bazel/envoy:extensions.bzl).
+# Envoy artifacts — abi.h header + the official Envoy release binaries baked into
+# //proxy:image, all version-pinned via ENVOY_VERSION (see //bazel/envoy).
 envoy = use_extension("//bazel/envoy:extensions.bzl", "envoy")
-use_repo(envoy, "envoy_abi_h", "envoy_distroless")
+use_repo(envoy, "envoy_abi_h", "envoy_bin_amd64", "envoy_bin_arm64")
 
 # Rust crate graph for the proxy dynamic modules (proposal 007), resolved from
 # proxy/filters/telemetry's Cargo.toml/Cargo.lock — includes the Envoy SDK as a
