@@ -1,20 +1,21 @@
 name: Setup LLVM runtime libs
 description: >-
-  Provide libtinfo.so.5 for the hermetic toolchains_llvm clang. The pinned LLVM
-  18.1.8 prebuilt (LLVM.org's ubuntu-18.04 build, matching Envoy's hermetic pin)
-  links libtinfo.so.5, but ubuntu-24.04 runners ship only libtinfo.so.6. This is
-  a build-host prerequisite for running the pinned clang (it does not affect build
-  reproducibility); ncurses 6 is ABI-compatible for the terminfo symbols clang
-  uses. See //bazel/llvm and MODULE.bazel.
+  Install libtinfo5 for the hermetic toolchains_llvm clang. The pinned LLVM 18.1.8
+  static build leaks a shared dependency on libtinfo.so.5
+  (llvm/llvm-project#75490), but ubuntu-24.04 runners ship only libtinfo.so.6
+  (and a .6->.5 symlink fails: clang needs the versioned NCURSES_TINFO_5.0
+  symbols). Fetch the real ncurses5 .deb from Debian — the same workaround Envoy
+  uses (envoyproxy/envoy#42397). Build-host prerequisite only; does not affect
+  build reproducibility. See //bazel/llvm and MODULE.bazel.
 
 runs:
   using: composite
   steps:
-    - name: Symlink libtinfo.so.5 -> libtinfo.so.6
+    - name: Install libtinfo5
       shell: bash
       run: |
-        for dir in /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
-          if [ -e "$dir/libtinfo.so.6" ] && [ ! -e "$dir/libtinfo.so.5" ]; then
-            sudo ln -sf "$dir/libtinfo.so.6" "$dir/libtinfo.so.5"
-          fi
-        done
+        arch="$(dpkg --print-architecture)"
+        deb="libtinfo5_6.4-4_${arch}.deb"
+        curl -fsSLO "http://deb.debian.org/debian/pool/main/n/ncurses/${deb}"
+        sudo dpkg -i "${deb}"
+        rm -f "${deb}"
