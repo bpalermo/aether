@@ -65,13 +65,14 @@ patch.
 
 ## Packaging & delivery — custom aether-proxy image
 
-`//proxy/filters/telemetry:proxy_image` builds a **custom `aether-proxy` image**:
-the stock Envoy distroless base (`@envoy_distroless`, pinned in `MODULE.bazel`)
-with the module `.so` baked at `/modules/libaether_stats_filter.so` and
-`ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules` baked into the image config — so the
-proxy loads it **self-contained, with no K8s image volume and no chart env**
+`//proxy:image` builds a **custom `aether-proxy` image** (the image targets live
+at `//proxy`, not under this filter, so future proxy customizations share it):
+the stock Envoy distroless base (`@envoy_distroless`, pinned via `//bazel/envoy`
+`ENVOY_VERSION`) with the module `.so` baked at `/modules/libaether_stats_filter.so`
+and `ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules` baked into the image config — so
+the proxy loads it **self-contained, with no K8s image volume and no chart env**
 (drops the containerd ≥ 2.0 image-volume runtime dependency). Multi-arch; pushed
-by `:proxy_image_push` → `ghcr.io/bpalermo/aether/aether-proxy`; the chart's
+by `//proxy:image_push` → `ghcr.io/bpalermo/aether/aether-proxy`; the chart's
 `proxy.image.ref` is substituted from it.
 
 The Zig-built (`libc_aware` glibc 2.28) `.so` needs **no extra runtime libs** —

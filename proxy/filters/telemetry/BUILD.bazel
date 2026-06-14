@@ -1,7 +1,3 @@
-load("@rules_img//img:image.bzl", "image_index", "image_manifest")
-load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
-load("@rules_img//img:load.bzl", "image_load")
-load("@rules_img//img:push.bzl", "image_push")
 load("@rules_rust//rust:defs.bzl", "rust_shared_library")
 
 exports_files([
@@ -10,7 +6,7 @@ exports_files([
 ])
 
 # The Envoy dynamic-modules ABI header, fetched from the Envoy repo at the
-# pinned tag (@envoy_abi_h, see MODULE.bazel) — nothing checked in. Re-exported
+# pinned tag (@envoy_abi_h, see //bazel/envoy) — nothing checked in. Re-exported
 # through this main-repo alias so the SDK's crate_universe build script can
 # reference it: a crate_universe-generated repo can't see external repos like
 # @envoy_abi_h, but it can see the main repo via @@//. Fed to the build script
@@ -21,10 +17,10 @@ alias(
     visibility = ["//visibility:public"],
 )
 
-# aether_stats_filter stats dynamic module (proposal 007, Phase 1).
-# Produces libaether_stats_filter.so, loaded by the stock Envoy proxy via a
-# K8s image volume (ENVOY_DYNAMIC_MODULES_SEARCH_PATH). Cross-compile for the
-# proxy arches with the hermetic Zig toolchain, e.g.:
+# aether_stats_filter stats dynamic module (proposal 007, Phase 1). Produces
+# libaether_stats_filter.so, baked into the custom aether-proxy image (//proxy)
+# at /modules and loaded via ENVOY_DYNAMIC_MODULES_SEARCH_PATH. Cross-compile
+# for the proxy arches with the hermetic Zig toolchain, e.g.:
 #   bazel build //proxy/filters/telemetry:aether_stats_filter \
 #     --platforms=@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28
 rust_shared_library(
@@ -37,61 +33,4 @@ rust_shared_library(
         "@crates//:serde",
         "@crates//:serde_json",
     ],
-)
-
-# --- Custom aether-proxy image: stock Envoy base + baked-in stats module ---
-# The stats module .so baked into the stock Envoy distroless image at /modules,
-# where the proxy loads it via ENVOY_DYNAMIC_MODULES_SEARCH_PATH (set by the
-# chart). Self-contained — no K8s image volume (drops the containerd >= 2.0
-# runtime dependency). The Zig libc-aware platforms build the .so against glibc
-# 2.28 (matches the distroless base) and need no libgcc_s (Zig compiler-rt
-# replaces it — verified: NEEDED = libc/libpthread/libdl).
-
-image_layer(
-    name = "module_layer",
-    srcs = {"/modules/libaether_stats_filter.so": ":aether_stats_filter"},
-    compress = "zstd",
-    default_metadata = file_metadata(mode = "0644"),
-    include_runfiles = False,
-)
-
-image_manifest(
-    name = "proxy_image_manifest",
-    base = "@envoy_distroless",
-    # Self-contained: the search path is baked into the image, so the proxy
-    # loads /modules/libaether_stats_filter.so with no chart-supplied env.
-    env = {"ENVOY_DYNAMIC_MODULES_SEARCH_PATH": "/modules"},
-    layers = [":module_layer"],
-    visibility = ["//visibility:private"],
-)
-
-image_index(
-    name = "proxy_image",
-    manifests = [":proxy_image_manifest"],
-    platforms = [
-        "@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28",
-        "@zig_sdk//libc_aware/platform:linux_arm64_gnu.2.28",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-image_push(
-    name = "proxy_image_push",
-    image = ":proxy_image",
-    registry = "ghcr.io",
-    repository = "bpalermo/aether/aether-proxy",
-    tag_list = [
-        "{{if (eq .GIT_BRANCH \"main\")}}dev{{else}}{{.GIT_COMMIT}}{{end}}",
-        "{{if .GIT_COMMIT}}{{.GIT_COMMIT}}{{end}}",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-# Loads the custom proxy image into the local Docker daemon (for the e2e suite
-# and local validation) under its registry-qualified ref.
-image_load(
-    name = "proxy_image_load",
-    image = ":proxy_image",
-    tag = "ghcr.io/bpalermo/aether/aether-proxy:latest",
-    visibility = ["//visibility:public"],
 )

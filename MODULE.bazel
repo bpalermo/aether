@@ -157,19 +157,6 @@ pull(
     tag = "nonroot",
 )
 
-# Stock upstream Envoy (distroless-v1.38.0), the base for the custom aether-proxy
-# image (//proxy/filters/telemetry:proxy_image — Envoy base + baked stats
-# module). Multi-arch index digest; keep in lockstep with //bazel/envoy
-# ENVOY_VERSION and charts/agent/values.yaml.
-pull(
-    name = "envoy_distroless",
-    digest = "sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6",
-    layer_handling = "lazy",
-    registry = "index.docker.io",
-    repository = "envoyproxy/envoy",
-    tag = "distroless-v1.38.0",
-)
-
 # --- Rust toolchains (in-tree dynamic modules; see docs/proposals/008) ---
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
@@ -181,9 +168,10 @@ use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
 
-# Envoy artifact fetches (abi.h) — see //bazel/envoy:extensions.bzl.
+# Envoy artifacts — abi.h header + the @envoy_distroless proxy-image base, both
+# version-pinned via ENVOY_VERSION (see //bazel/envoy:extensions.bzl).
 envoy = use_extension("//bazel/envoy:extensions.bzl", "envoy")
-use_repo(envoy, "envoy_abi_h")
+use_repo(envoy, "envoy_abi_h", "envoy_distroless")
 
 # Rust crate graph for the proxy dynamic modules (proposal 007), resolved from
 # proxy/filters/telemetry's Cargo.toml/Cargo.lock — includes the Envoy SDK as a
@@ -196,7 +184,18 @@ use_repo(envoy, "envoy_abi_h")
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.annotation(
     build_script_data = ["@@//proxy/filters/telemetry:abi_h"],
-    build_script_env = {"AETHER_ABI_H": "$(execpath @@//proxy/filters/telemetry:abi_h)"},
+    build_script_env = {
+        "AETHER_ABI_H": "$(execpath @@//proxy/filters/telemetry:abi_h)",
+        # bindgen runs the host libclang against abi.h, which pulls in C++ libc
+        # headers (<cstdint> -> <stdint.h> -> <bits/...>). Inside the build
+        # sandbox clang can't always auto-detect the system GCC install (e.g.
+        # CI's clang-18 doesn't recognize a newer gcc), so it misses the glibc
+        # multiarch include dir and picks the wrong target (<bits/libc-header-
+        # start.h>/<gnu/stubs-32.h> not found). Pointing it at the GCC prefix
+        # restores multiarch + libstdc++ headers + the correct 64-bit target,
+        # without hardcoding the arch/gcc version (clang derives both).
+        "BINDGEN_EXTRA_CLANG_ARGS": "--gcc-toolchain=/usr",
+    },
     crate = "envoy-proxy-dynamic-modules-rust-sdk",
     patch_args = ["-p1"],
     patches = ["@@//proxy/filters/telemetry/patches:sdk_abi_header.patch"],

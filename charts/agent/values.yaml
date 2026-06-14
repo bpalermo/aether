@@ -79,11 +79,11 @@ proxy:
   image:
     # Custom aether-proxy = stock Envoy distroless base + baked-in
     # aether_stats_filter dynamic module (proposal 007), built and pinned by
-    # //proxy/filters/telemetry:proxy_image_push. The module's search path is
-    # baked into the image — self-contained, no K8s image volume. The Envoy
-    # version is pinned via //bazel/envoy ENVOY_VERSION (the @envoy_distroless
-    # base); keep that in lockstep with the SDK/abi.h.
-    ref: "{@//proxy/filters/telemetry:proxy_image_push}"
+    # //proxy:image_push. The module's search path is baked into the image —
+    # self-contained, no K8s image volume. The Envoy version is pinned via
+    # //bazel/envoy ENVOY_VERSION (the @envoy_distroless base); keep that in
+    # lockstep with the SDK/abi.h.
+    ref: "{@//proxy:image_push}"
     pullPolicy: Always
   logLevel: info
   # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
