@@ -1,4 +1,6 @@
-//! Aether edge-telemetry dynamic module (proposal 007, Phase 1: source-reported).
+//! Aether stats dynamic module (proposal 007, Phase 1: source-reported).
+//! Analogous to Istio's istio_stats: an HTTP filter that records a tagged
+//! request counter at the log phase.
 //!
 //! Attached to each per-pod OUTBOUND HCM. The agent passes the local pod's
 //! identity (reporter/source_service/source_pod/mesh_domain) as the per-instance
@@ -50,7 +52,7 @@ impl FilterConfig {
         let c: ConfigData = match serde_json::from_str(filter_config) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("aether_telemetry: bad filter_config: {e}");
+                eprintln!("aether_stats_filter: bad filter_config: {e}");
                 return None;
             }
         };
@@ -240,10 +242,10 @@ fn new_http_filter_config_fn<EC: EnvoyHttpFilterConfig, EHF: EnvoyHttpFilter>(
 ) -> Option<Box<dyn HttpFilterConfig<EHF>>> {
     let cfg = std::str::from_utf8(filter_config).unwrap_or("{}");
     match filter_name {
-        "edge" => FilterConfig::new(cfg, envoy_filter_config)
+        "stats" => FilterConfig::new(cfg, envoy_filter_config)
             .map(|c| Box::new(c) as Box<dyn HttpFilterConfig<EHF>>),
         other => {
-            eprintln!("aether_telemetry: unknown filter_name {other}");
+            eprintln!("aether_stats_filter: unknown filter_name {other}");
             None
         }
     }

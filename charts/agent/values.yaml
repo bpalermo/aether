@@ -81,6 +81,17 @@ proxy:
     repository: docker.io/envoyproxy/envoy
     # envoyproxy/envoy:distroless-v1.38.0
     digest: sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6
+  # The aether_stats_filter dynamic module (proposal 007), delivered to the
+  # stock proxy via a K8s image volume mounted at /modules. The agent attaches
+  # the filter to every outbound HCM unconditionally, so this volume is always
+  # mounted (Envoy rejects the listener if the module is referenced but absent).
+  # Requires a container runtime with image-volume support (containerd >= 2.0).
+  statsFilter:
+    image:
+      # Substituted at package time with the digest-pinned artifact produced by
+      # //proxy/filters/telemetry:image_push (ghcr.io/bpalermo/aether/stats-filter@sha256:...).
+      ref: "{@//proxy/filters/telemetry:image_push}"
+      pullPolicy: IfNotPresent
   logLevel: info
   # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
   # proxy-supervisor) as the proxy entrypoint instead of launching Envoy

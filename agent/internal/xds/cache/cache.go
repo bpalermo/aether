@@ -71,12 +71,6 @@ type SnapshotCache struct {
 	// runtime.
 	meshDomain string
 
-	// edgeTelemetry attaches the source-reported edge-telemetry dynamic module
-	// (proposal 007) to each pod's outbound HCM. Set once before the manager
-	// starts (SetEdgeTelemetry). Only enable when the module .so is mounted on
-	// the proxy (image volume) — otherwise Envoy rejects the listener.
-	edgeTelemetry bool
-
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace
 
@@ -244,13 +238,6 @@ func (c *SnapshotCache) SetMeshDomain(domain string) {
 // MeshDomain returns the configured mesh domain.
 func (c *SnapshotCache) MeshDomain() string {
 	return c.meshDomain
-}
-
-// SetEdgeTelemetry enables attaching the edge-telemetry dynamic module to each
-// pod's outbound HCM (proposal 007). Must be called before the manager starts;
-// only enable when the module .so is mounted on the proxy.
-func (c *SnapshotCache) SetEdgeTelemetry(enabled bool) {
-	c.edgeTelemetry = enabled
 }
 
 // setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping

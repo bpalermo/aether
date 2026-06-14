@@ -5,10 +5,12 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
+	dynamic_modules_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_modules/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
@@ -31,7 +33,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "aether.internal", false)
+			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "aether.internal")
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())
@@ -46,7 +48,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 // non-pass-through health_check readiness filter ahead of the router, matched
 // on the shared readiness path probed by the CNI plugin from inside the netns.
 func TestOutboundChainReadinessFilter(t *testing.T) {
-	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "aether.internal", false)
+	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "aether.internal")
 	require.Len(t, fc.GetFilters(), 2)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
@@ -56,11 +58,12 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 		"authority :port is a routing selector (FQDN:port → that port's cluster); must NOT be stripped")
 
 	httpFilters := hcm.GetHttpFilters()
-	require.Len(t, httpFilters, 4, "expected health_check + subset-headers + on_demand + router")
+	require.Len(t, httpFilters, 5, "expected health_check + subset-headers + on_demand + stats + router")
 	assert.Equal(t, httpHealthCheckFilterName, httpFilters[0].GetName())
 	assert.Equal(t, SubsetHeadersFilterName, httpFilters[1].GetName())
 	assert.Equal(t, httpOnDemandFilterName, httpFilters[2].GetName())
-	assert.Equal(t, httpRouterFilterName, httpFilters[3].GetName())
+	assert.Equal(t, statsFilterName, httpFilters[3].GetName())
+	assert.Equal(t, httpRouterFilterName, httpFilters[4].GetName())
 
 	hc := &health_checkv3.HealthCheck{}
 	require.NoError(t, httpFilters[0].GetTypedConfig().UnmarshalTo(hc))
@@ -71,27 +74,29 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 	assert.Equal(t, constants.ProxyReadinessPath, hc.GetHeaders()[0].GetStringMatch().GetExact())
 }
 
-// TestOutboundChainEdgeTelemetry verifies the edge-telemetry dynamic module is
-// attached just before the router only when enabled (proposal 007), and absent
-// otherwise.
-func TestOutboundChainEdgeTelemetry(t *testing.T) {
+// TestOutboundChainStatsFilter verifies the stats dynamic module (proposal 007)
+// sits immediately before the router on the outbound HCM, carrying the pod's
+// source identity in its per-instance filter_config.
+func TestOutboundChainStatsFilter(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "my-pod", ServiceAccount: "checkout"}
 
-	// Disabled: no edge filter (health_check + subset + on_demand + router).
-	off := &http_connection_managerv3.HttpConnectionManager{}
-	fcOff := buildDefaultOutboundHTTPFilterChain(pod, "aether.internal", false)
-	require.NoError(t, fcOff.GetFilters()[1].GetTypedConfig().UnmarshalTo(off))
-	require.Len(t, off.GetHttpFilters(), 4)
-	for _, f := range off.GetHttpFilters() {
-		assert.NotEqual(t, edgeTelemetryFilterName, f.GetName(), "edge filter must be absent when disabled")
-	}
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	fc := buildDefaultOutboundHTTPFilterChain(pod, "aether.internal")
+	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
 
-	// Enabled: edge filter sits immediately before the router.
-	on := &http_connection_managerv3.HttpConnectionManager{}
-	fcOn := buildDefaultOutboundHTTPFilterChain(pod, "aether.internal", true)
-	require.NoError(t, fcOn.GetFilters()[1].GetTypedConfig().UnmarshalTo(on))
-	filters := on.GetHttpFilters()
-	require.Len(t, filters, 5, "expected health_check + subset + on_demand + edge + router")
-	assert.Equal(t, edgeTelemetryFilterName, filters[3].GetName())
+	filters := hcm.GetHttpFilters()
+	require.Len(t, filters, 5, "expected health_check + subset + on_demand + stats + router")
+	assert.Equal(t, statsFilterName, filters[3].GetName())
 	assert.Equal(t, httpRouterFilterName, filters[4].GetName())
+
+	// The dynamic module + the source identity travel in the filter config.
+	dm := &dynamic_modules_filterv3.DynamicModuleFilter{}
+	require.NoError(t, filters[3].GetTypedConfig().UnmarshalTo(dm))
+	assert.Equal(t, statsModuleName, dm.GetDynamicModuleConfig().GetName())
+	assert.Equal(t, statsFilterEntry, dm.GetFilterName())
+
+	cfg := &wrapperspb.StringValue{}
+	require.NoError(t, dm.GetFilterConfig().UnmarshalTo(cfg))
+	assert.Contains(t, cfg.GetValue(), `"source_service":"checkout"`)
+	assert.Contains(t, cfg.GetValue(), `"reporter":"source"`)
 }

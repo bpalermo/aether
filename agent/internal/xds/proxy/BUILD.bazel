@@ -4,7 +4,6 @@ go_library(
     name = "proxy",
     srcs = [
         "cluster.go",
-        "edge_telemetry.go",
         "egress.go",
         "endpoint.go",
         "filterchain.go",
@@ -15,6 +14,7 @@ go_library(
         "listenerfilter.go",
         "networkfilter.go",
         "route.go",
+        "stats_filter.go",
         "subset.go",
         "transportsocket.go",
         "transportsocketmatch.go",
@@ -88,6 +88,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/common/set_filter_state/v3:set_filter_state",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/dynamic_modules/v3:dynamic_modules",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/health_check/v3:health_check",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
@@ -99,5 +100,6 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
     ],
 )

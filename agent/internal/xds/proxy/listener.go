@@ -42,13 +42,13 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 // appClusters is one per served port (the SNI-selected inbound chains forward
 // to these); healthCluster is the single delegated-liveness probe on the
 // primary port.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, edgeTelemetry bool) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
 	inbound, err = NewInboundListener(cniPod, trustDomain)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 
-	outbound, err = generateOutboundHTTPListener(cniPod, meshDomain, edgeTelemetry)
+	outbound, err = generateOutboundHTTPListener(cniPod, meshDomain)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -82,7 +82,7 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetServiceAccount())
 }
 
-func generateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, edgeTelemetry bool) (*listenerv3.Listener, error) {
+func generateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -111,7 +111,7 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, edgeT
 		StatPrefix:       fmt.Sprintf("out_http_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultOutboundHTTPFilterChain(cniPod, meshDomain, edgeTelemetry),
+			buildDefaultOutboundHTTPFilterChain(cniPod, meshDomain),
 		},
 	}, nil
 }

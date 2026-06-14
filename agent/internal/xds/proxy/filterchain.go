@@ -15,11 +15,11 @@ import (
 // prefix is shared across pods (cardinality round 2) — per-pod egress
 // attribution rides tags and cluster stats, not HCM stat names.
 //
-// When edgeTelemetry is set, the source-reported edge-telemetry dynamic module
-// (proposal 007) is attached just before the router so it observes the final
-// route/cluster. Only enable it when the module .so is mounted on the proxy —
-// referencing an absent dynamic module makes Envoy reject the listener.
-func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, edgeTelemetry bool) *listenerv3.FilterChain {
+// The source-reported stats dynamic module (proposal 007) is attached just
+// before the router so it observes the final route/cluster. The chart mounts the
+// module .so on the proxy unconditionally; Envoy rejects the listener if the
+// referenced dynamic module is absent.
+func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("outbound_http", nil)
 
 	// strip_any_host_port stays OFF: the authority port is a first-class routing
@@ -35,9 +35,13 @@ func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string
 	// The subset-headers filter (ECDS-discovered, shared node-wide) turns
 	// x-aether-ip/x-aether-pod/x-aether-subset-* request headers into
 	// envoy.lb match criteria ahead of routing.
-	prefix := []*http_connection_managerv3.HttpFilter{readinessHttpFilter(), subsetHeadersHttpFilter(), onDemandHttpFilter()}
-	if edgeTelemetry {
-		prefix = append(prefix, outboundEdgeTelemetryHTTPFilter(cniPod, meshDomain))
+	// The stats filter runs last before the router so it observes the final
+	// route/cluster and response disposition at the log phase.
+	prefix := []*http_connection_managerv3.HttpFilter{
+		readinessHttpFilter(),
+		subsetHeadersHttpFilter(),
+		onDemandHttpFilter(),
+		outboundStatsFilter(cniPod, meshDomain),
 	}
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
 
