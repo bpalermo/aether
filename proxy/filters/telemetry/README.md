@@ -45,8 +45,13 @@ per-pod cardinality is wanted.
 
 ```
 bazel build //proxy/filters/telemetry:aether_stats_filter            # host
-bazel build //proxy/filters/telemetry:aether_stats_filter \          # cross
-  --platforms=@zig_sdk//libc_aware/platform:linux_arm64_gnu.2.28
+
+# Hermetic cross-compile for the proxy arches (clang/lld + glibc sysroot via
+# toolchains_llvm; see //bazel/llvm):
+bazel build //proxy/filters/telemetry:aether_stats_filter \
+  --platforms=//bazel/llvm/platform:linux_amd64
+bazel build //proxy/filters/telemetry:aether_stats_filter \
+  --platforms=//bazel/llvm/platform:linux_arm64
 # -> bazel-bin/proxy/filters/telemetry/libaether_stats_filter.so
 ```
 
@@ -58,10 +63,14 @@ reads `../../abi/abi.h`, outside the crate package (excluded by crate_universe's
 sandbox), so: `abi.h` is **fetched** from the Envoy repo at the pinned tag
 (`@envoy_abi_h` `http_file`, see `//bazel/envoy`), re-exported as the main-repo
 alias `//proxy/filters/telemetry:abi_h`, and `patches/sdk_abi_header.patch`
-redirects the build script to it via `AETHER_ABI_H`. libclang comes from
-rules_rust. On an Envoy bump: update the tag in `Cargo.toml` + the `abi.h`
-URL/sha256 in `//bazel/envoy`, `CARGO_BAZEL_REPIN=1 bazel build …`, re-verify the
-patch.
+redirects the build script to it via `AETHER_ABI_H`. bindgen is **fully
+hermetic**: it parses `abi.h` with the hermetic LLVM `libclang`
+(`@llvm_toolchain_llvm`, via `LIBCLANG_PATH`) against a hermetic glibc sysroot
+(chromium, `//bazel/llvm`) — no host clang or system headers; the patch derives
+`--sysroot` from the `AETHER_SYSROOT` marker. On an Envoy bump: update the tag in
+`Cargo.toml` + the `abi.h` URL/sha256 in `//bazel/envoy`, `CARGO_BAZEL_REPIN=1
+bazel build …`, re-verify the patch. On an LLVM bump: update
+`//bazel/llvm:version.bzl` + `llvm_version` in `MODULE.bazel`.
 
 ## Packaging & delivery — custom aether-proxy image
 
@@ -75,9 +84,9 @@ the proxy loads it **self-contained, with no K8s image volume and no chart env**
 by `//proxy:image_push` → `ghcr.io/bpalermo/aether/aether-proxy`; the chart's
 `proxy.image.ref` is substituted from it.
 
-The Zig-built (`libc_aware` glibc 2.28) `.so` needs **no extra runtime libs** —
-Zig's compiler-rt replaces libgcc, and glibc 2.28 matches the distroless base (a
-host build would link `GLIBC_2.39` and fail to load). Validated:
+The LLVM-built `.so` links against an old glibc sysroot (max symbol `GLIBC_2.18`,
+well under the distroless base) and needs only `libgcc_s`/`libc`/`pthread` (the
+pure-Rust lib drops libstdc++ via `--as-needed`). Validated:
 `Dynamic module ABI version v0.1.0 matched` + `configuration OK` loading the
 baked module from the image with no volume/env.
 
@@ -87,7 +96,7 @@ brief agent↔proxy skew window (independent DaemonSets) — see the release not
 
 ## Status
 
-Phase-1 validated 2026-06-13/14: builds (host + Zig amd64/arm64), loads on stock
+Phase-1 validated 2026-06-13/14: builds (host + LLVM cross amd64/arm64), loads on stock
 distroless Envoy, records `aether_requests_total` with `response_flags` (UF on
 connect-refused), exported via the OTel sink. Agent wiring + chart image-volume
 done. Remaining: helm upgrade + e2e on talos. Phase 2 = inbound/destination-

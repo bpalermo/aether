@@ -20,9 +20,10 @@ alias(
 # aether_stats_filter stats dynamic module (proposal 007, Phase 1). Produces
 # libaether_stats_filter.so, baked into the custom aether-proxy image (//proxy)
 # at /modules and loaded via ENVOY_DYNAMIC_MODULES_SEARCH_PATH. Cross-compile
-# for the proxy arches with the hermetic Zig toolchain, e.g.:
+# for the proxy arches with the hermetic LLVM toolchain (clang/lld + glibc
+# sysroot), e.g.:
 #   bazel build //proxy/filters/telemetry:aether_stats_filter \
-#     --platforms=@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28
+#     --platforms=//bazel/llvm/platform:linux_amd64
 rust_shared_library(
     name = "aether_stats_filter",
     srcs = ["src/lib.rs"],

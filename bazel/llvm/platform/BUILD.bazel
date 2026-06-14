@@ -1,0 +1,24 @@
+# Cross-compile target platforms for the proxy dynamic-module .so. The default
+# hermetic LLVM toolchain (clang + lld + the matching glibc sysroot, registered
+# in MODULE.bazel) is selected per cpu/os — replacing the prior
+# @zig_sdk//libc_aware/platform:* targets. Build the .so for an arch with, e.g.:
+#   bazel build //proxy/filters/telemetry:aether_telemetry \
+#     --platforms=//bazel/llvm/platform:linux_amd64
+
+platform(
+    name = "linux_amd64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+platform(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -35,7 +35,16 @@ follow-up PR stacked on this one.
 `crate_universe` is added here; external-crate management arrives with the first
 consumer that needs it (proposal 007).
 
-### hermetic_cc_toolchain (the C linker + cross-compile)
+> **Superseded (LLVM migration):** the C/C++ toolchain described below was later
+> replaced by a hermetic LLVM (`toolchains_llvm`, clang 18.1.8 — matching Envoy's
+> hermetic pin — + chromium glibc sysroots), which is now the repo's single
+> registered C/C++ toolchain and additionally supplies `libclang` to the SDK
+> bindgen build script (fully hermetic, no host clang/headers). See `//bazel/llvm`
+> and `MODULE.bazel`. The Zig (`@zig_sdk`) sections below are kept for history;
+> `--platforms=//bazel/llvm/platform:linux_{amd64,arm64}` replaces the
+> `@zig_sdk//libc_aware/platform:*` invocations.
+
+### hermetic_cc_toolchain (the C linker + cross-compile) — superseded
 `hermetic_cc_toolchain` 4.1.0 provides a Zig-based C/C++ toolchain
 (`@zig_sdk`). It is the Bazel-native equivalent of the `cargo-zigbuild` approach
 the upstream dynamic-module examples use for multi-arch.

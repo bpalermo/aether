@@ -280,10 +280,11 @@ distroless Envoy). The path there corrected an earlier assumption:
   Istio's `MetricOverrides` confirms cardinality control is first-class (matches
   our service-granularity default + `*_pod` opt-in + overflow plan).
 
-**Packaging finding:** the published `.so` **must be Zig-built (libc-aware, glibc
-2.28)** — a host build links `GLIBC_2.39` and fails to load on the distroless
-proxy (glibc 2.36). Host build stays for CI structure validation; the OCI
-artifact uses `--platforms=@zig_sdk//libc_aware/platform:linux_{amd64,arm64}_gnu.2.28`.
+**Packaging finding:** the published `.so` **must be cross-built against an old
+glibc** (max symbol `GLIBC_2.18` via the hermetic LLVM toolchain + chromium
+sysroot) — a plain host build links a newer glibc and fails to load on the
+distroless proxy (glibc 2.36). Host build stays for CI structure validation; the
+image build uses `--platforms=//bazel/llvm/platform:linux_{amd64,arm64}`.
 
 The access logger is out; the HTTP filter is the canonical recorder, so the agent
 wiring attaches the **HTTP filter** to each per-pod outbound HCM — Phase 1b folds

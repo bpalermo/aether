@@ -22,12 +22,6 @@ build:lint --aspects=//bazel/lint:linters.bzl%buf,//bazel/lint:linters.bzl%build
 build:ci --config=lint
 build:ci --@aspect_rules_lint//lint:fail_on_violation
 
-# Pin the SDK bindgen build script (proxy dynamic modules) to the CI-installed
-# LLVM 22 libclang instead of the runner's default clang-18; the ci.yaml "Setup
-# Clang" step installs it at this prefix. Header resolution is handled by
-# BINDGEN_EXTRA_CLANG_ARGS (see MODULE.bazel).
-build:ci --action_env=LIBCLANG_PATH=/usr/lib/llvm-22/lib
-
 # Race detector (usage: --config=race)
 test:race --@rules_go//go/config:race
 

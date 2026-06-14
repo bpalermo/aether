@@ -1,6 +1,7 @@
 module(name = "aether")
 
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
+bazel_dep(name = "platforms", version = "0.0.11")
 bazel_dep(name = "protobuf", version = "34.1")
 bazel_dep(name = "rules_go", version = "0.60.0")
 bazel_dep(name = "gazelle", version = "0.51.0")
@@ -23,12 +24,14 @@ bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 bazel_dep(name = "rules_helm", version = "0.29.0")
 
-# Rust toolchain for in-tree dynamic modules (see docs/proposals/008).
-# hermetic_cc_toolchain provides a Zig-based hermetic C/linker for cdylibs and
-# amd64/arm64 cross-compilation; registered libc-aware (opt-in) so it does not
-# override the repo's default C++ toolchain used by the Go/protobuf builds.
+# Rust toolchain for in-tree dynamic modules (see docs/proposals/008), plus a
+# hermetic LLVM (clang/lld + glibc sysroots) that cross-compiles the proxy cdylib
+# for amd64/arm64 and supplies libclang to the SDK bindgen build script. The LLVM
+# toolchains are registered opt-in (only for //bazel/llvm/platform:linux_* via
+# the :hermetic constraint), so the default host C++ toolchain used by the
+# Go/protobuf builds is untouched — the same approach as the prior Zig setup.
 bazel_dep(name = "rules_rust", version = "0.70.0")
-bazel_dep(name = "hermetic_cc_toolchain", version = "4.1.0")
+bazel_dep(name = "toolchains_llvm", version = "1.7.0")
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.2")
@@ -183,18 +186,26 @@ use_repo(envoy, "envoy_abi_h", "envoy_distroless")
 # //proxy/filters/telemetry:abi_h.
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.annotation(
-    build_script_data = ["@@//proxy/filters/telemetry:abi_h"],
+    # Hermetic bindgen: the SDK build script parses abi.h with the hermetic LLVM
+    # libclang + a hermetic glibc sysroot — no host clang/headers (see the patch).
+    # Routed through the MAIN repo (//bazel/llvm) — the crate_universe-generated
+    # SDK repo can't see external repos by apparent name. The clang resource +
+    # libc++ headers and the glibc sysroot tree come in via the (now default) LLVM
+    # cc toolchain that cargo_build_script pulls in; supplying them here too would
+    # collide in the sandbox. We add only libclang itself (not a toolchain input)
+    # and the sysroot marker (for --sysroot).
+    build_script_data = [
+        "@@//proxy/filters/telemetry:abi_h",
+        "@@//bazel/llvm:libclang",  # libclang soname chain present in the sandbox
+        "@@//bazel/llvm:libclang_so",  # the file LIBCLANG_PATH points at
+        "@@//bazel/llvm:sysroot_amd64_marker",  # sysroot-root marker for --sysroot
+    ],
     build_script_env = {
         "AETHER_ABI_H": "$(execpath @@//proxy/filters/telemetry:abi_h)",
-        # bindgen runs the host libclang against abi.h, which pulls in C++ libc
-        # headers (<cstdint> -> <stdint.h> -> <bits/...>). Inside the build
-        # sandbox clang's GCC auto-detection is unreliable (CI's clang-18 finds
-        # libstdc++ but not the glibc multiarch dir, so <bits/libc-header-start.h>
-        # isn't found; --gcc-toolchain alone doesn't fix it). Pin the exec target
-        # (the build script always runs on the x86_64-linux exec host — the .so
-        # is cross-compiled separately via Zig) and add the glibc multiarch
-        # include dirs explicitly; clang ignores the nonexistent one.
-        "BINDGEN_EXTRA_CLANG_ARGS": "--target=x86_64-unknown-linux-gnu -I/usr/include/x86_64-linux-gnu -I/usr/include/aarch64-linux-gnu",
+        # clang-sys accepts a file path for LIBCLANG_PATH — pins libclang hermetically.
+        "LIBCLANG_PATH": "$(execpath @@//bazel/llvm:libclang_so)",
+        # The patch three-parents this marker to derive --sysroot.
+        "AETHER_SYSROOT": "$(execpath @@//bazel/llvm:sysroot_amd64_marker)",
     },
     crate = "envoy-proxy-dynamic-modules-rust-sdk",
     patch_args = ["-p1"],
@@ -207,11 +218,39 @@ crate.from_cargo(
 )
 use_repo(crate, "crates")
 
-# Hermetic Zig C/C++ toolchain for linking cdylibs and amd64/arm64
-# cross-compilation. libc-aware toolchains only resolve for libc-aware
-# platforms (@zig_sdk//libc_aware/platform:...), so the repo's default C++
-# toolchain is unaffected; cross builds select them via --platforms.
-zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
-use_repo(zig, "zig_sdk")
+# Hermetic glibc sysroots (chromium bullseye, glibc 2.31 <= the proxy distroless
+# base) for the LLVM toolchain and the SDK bindgen — see //bazel/llvm.
+sysroots = use_extension("//bazel/llvm:extensions.bzl", "sysroots")
+use_repo(sysroots, "sysroot_linux_amd64", "sysroot_linux_arm64")
 
-register_toolchains("@zig_sdk//libc_aware/toolchain/...")
+# Hermetic LLVM C/C++ toolchain (clang 18.1.8 — matches Envoy's hermetic pin;
+# keep in lockstep with //bazel/llvm:version.bzl LLVM_VERSION), registered as the
+# default toolchain for host + linux amd64/arm64, each with its matching glibc
+# sysroot. This is the repo's single C/C++ toolchain (it replaced Zig): the Go
+# and protobuf builds use no cgo / cc_* targets, so making clang the default is
+# transparent to them, while the proxy cdylib cross-compiles against an
+# old-enough glibc to load on the Envoy distroless base.
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    name = "llvm_toolchain",
+    llvm_version = "18.1.8",
+    # The LLVM dist ships only host-arch libc++.a, so its default static libc++
+    # can't satisfy a cross-compile; point the C++ stdlib at the per-arch sysroot
+    # libstdc++ instead. The cdylib is pure Rust, so --as-needed drops libstdc++
+    # entirely anyway — the resulting .so needs only libgcc_s/libc/pthread (max
+    # GLIBC 2.18), matching the prior Zig output.
+    stdlib = {"": "dynamic-stdc++"},
+)
+llvm.sysroot(
+    name = "llvm_toolchain",
+    label = "@sysroot_linux_amd64//:sysroot",
+    targets = ["linux-x86_64"],
+)
+llvm.sysroot(
+    name = "llvm_toolchain",
+    label = "@sysroot_linux_arm64//:sysroot",
+    targets = ["linux-aarch64"],
+)
+use_repo(llvm, "llvm_toolchain", "llvm_toolchain_llvm")
+
+register_toolchains("@llvm_toolchain//:all")
