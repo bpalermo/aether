@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+      - name: Setup LLVM runtime libs
+        uses: ./.github/actions/setup-llvm-libs
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.18.0
         with:
