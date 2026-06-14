@@ -425,14 +425,10 @@
   "moduleExtensions": {
     "//bazel/envoy:extensions.bzl%envoy": {
       "general": {
-        "bzlTransitiveDigest": "cQg6Ld6bdeimF/jQyKypDwFUSRV0kTcmmKjS6nFMmA8=",
+        "bzlTransitiveDigest": "tyCBjsucDNfIhuYXTI/mdPco8uCEH0juK2+0IQWuo5Q=",
         "usagesDigest": "MueWQw6tIUQ5Dcgx8SLg65NzM0evS9ArXQ+upvsQQ/A=",
         "recordedInputs": [
-          "REPO_MAPPING:,bazel_tools bazel_tools",
-          "REPO_MAPPING:,rules_img rules_img+",
-          "REPO_MAPPING:rules_img+,bazel_skylib bazel_skylib+",
-          "REPO_MAPPING:rules_img+,pull_hub_repo rules_img++pull_tool+pull_hub_repo",
-          "REPO_MAPPING:rules_img++pull_tool+pull_hub_repo,rules_img rules_img+"
+          "REPO_MAPPING:,bazel_tools bazel_tools"
         ],
         "generatedRepoSpecs": {
           "envoy_abi_h": {
@@ -445,14 +441,26 @@
               ]
             }
           },
-          "envoy_distroless": {
-            "repoRuleId": "@@rules_img+//img/private/repository_rules:pull.bzl%pull",
+          "envoy_bin_amd64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
             "attributes": {
-              "digest": "sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6",
-              "layer_handling": "lazy",
-              "registry": "index.docker.io",
-              "repository": "envoyproxy/envoy",
-              "tag": "distroless-v1.38.0"
+              "downloaded_file_path": "envoy",
+              "executable": true,
+              "sha256": "cca312a7c3f91852f2849995c895130c59842e21ba787dc90bafa4026d6c5ecc",
+              "urls": [
+                "https://github.com/envoyproxy/envoy/releases/download/v1.38.0/envoy-1.38.0-linux-x86_64"
+              ]
+            }
+          },
+          "envoy_bin_arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "downloaded_file_path": "envoy",
+              "executable": true,
+              "sha256": "9f00678c0cc433d7a342c422415eb3fdd163e77414aee5c5b57c04bd7d579454",
+              "urls": [
+                "https://github.com/envoyproxy/envoy/releases/download/v1.38.0/envoy-1.38.0-linux-aarch_64"
+              ]
             }
           }
         }

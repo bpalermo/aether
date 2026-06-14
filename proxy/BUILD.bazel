@@ -1,18 +1,30 @@
-# Custom aether-proxy image: stock Envoy distroless base + baked-in dynamic
-# modules. Lives at //proxy (not under a specific filter) so future proxy
-# customizations — additional dynamic modules, bootstrap assets — append to the
-# same image rather than forking a new one.
+# Custom aether-proxy image: distroless/cc base + the official Envoy binary +
+# baked-in dynamic modules. Lives at //proxy (not under a specific filter) so
+# future proxy customizations — additional dynamic modules, bootstrap assets —
+# append to the same image rather than forking a new one.
 #
-# The Envoy base (@envoy_distroless) is pinned via //bazel/envoy ENVOY_VERSION;
-# keep that in lockstep with the SDK git tag (proxy/filters/telemetry/Cargo.toml)
-# and abi.h. The //bazel/llvm/platform:linux_* platforms build the module .so via
-# the hermetic LLVM toolchain against an old glibc sysroot (max symbol GLIBC_2.18,
-# loads on the distroless base); the pure-Rust .so needs only libgcc_s/libc/pthread.
+# Base is gcr.io/distroless/cc (not the stock envoyproxy/envoy:distroless, which
+# is built on distroless/base and lacks libgcc_s.so.1): cc ships libstdc++ +
+# libgcc_s + glibc, which the Envoy binary and the Rust dynamic module's unwinder
+# both need at runtime. The Envoy binary and abi.h are version-pinned via
+# //bazel/envoy ENVOY_VERSION; keep in lockstep with the SDK git tag
+# (proxy/filters/telemetry/Cargo.toml). The //bazel/llvm/platform:linux_*
+# platforms cross-build the module .so with the hermetic LLVM toolchain against an
+# old glibc sysroot (max symbol GLIBC_2.18) so it loads on the base.
 
 load("@rules_img//img:image.bzl", "image_index", "image_manifest")
 load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
+
+# The official Envoy release binary (per-arch via //bazel/envoy:envoy_bin select).
+image_layer(
+    name = "envoy_layer",
+    srcs = {"/usr/local/bin/envoy": "//bazel/envoy:envoy_bin"},
+    compress = "zstd",
+    default_metadata = file_metadata(mode = "0755"),
+    include_runfiles = False,
+)
 
 # aether_stats_filter module .so at /modules, where the proxy loads it via the
 # baked-in ENVOY_DYNAMIC_MODULES_SEARCH_PATH. Future modules add layers here.
@@ -26,12 +38,20 @@ image_layer(
 
 image_manifest(
     name = "image_manifest",
-    base = "@envoy_distroless",
-    # Self-contained: the search path is baked into the image, so the proxy
-    # loads /modules/*.so with no chart-supplied env and no K8s image volume
-    # (drops the containerd >= 2.0 image-volume runtime dependency).
+    base = "@distroless_cc",
+    # distroless/cc has no default entrypoint (the stock Envoy image did); set it
+    # so the image behaves like envoyproxy/envoy. The chart overrides command for
+    # the hot-restart supervisor, but keep this for parity + direct `docker run`.
+    entrypoint = ["/usr/local/bin/envoy"],
+    # Self-contained: the module search path is baked in, so the proxy loads
+    # /modules/*.so with no chart-supplied env and no K8s image volume (drops the
+    # containerd >= 2.0 image-volume runtime dependency). libgcc_s/libstdc++ come
+    # from the distroless/cc base, on the default loader path (no LD_LIBRARY_PATH).
     env = {"ENVOY_DYNAMIC_MODULES_SEARCH_PATH": "/modules"},
-    layers = [":stats_filter_layer"],
+    layers = [
+        ":envoy_layer",
+        ":stats_filter_layer",
+    ],
     visibility = ["//visibility:private"],
 )
 
