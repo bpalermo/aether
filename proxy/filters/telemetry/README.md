@@ -42,11 +42,12 @@ code at completion. Set `emit_pod:true` only when per-pod cardinality is wanted.
 # Host build (uses the default CC toolchain):
 bazel build //proxy/filters/telemetry:aether_telemetry
 
-# Hermetic cross-compile for the proxy arches (Zig via hermetic_cc_toolchain):
+# Hermetic cross-compile for the proxy arches (clang/lld + glibc sysroot via
+# toolchains_llvm; see //bazel/llvm):
 bazel build //proxy/filters/telemetry:aether_telemetry \
-  --platforms=@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28
+  --platforms=//bazel/llvm/platform:linux_amd64
 bazel build //proxy/filters/telemetry:aether_telemetry \
-  --platforms=@zig_sdk//libc_aware/platform:linux_arm64_gnu.2.28
+  --platforms=//bazel/llvm/platform:linux_arm64
 # -> bazel-bin/proxy/filters/telemetry/libaether_telemetry.so
 ```
 
@@ -65,9 +66,15 @@ that crate_universe's per-crate sandbox excludes — so:
 - `patches/sdk_abi_header.patch` redirects the build script to read the header
   via the `AETHER_ABI_H` env var, which `MODULE.bazel` points at that alias.
 
-bindgen's libclang is provided by rules_rust. On an Envoy bump: update the tag in
-`Cargo.toml` and the `@envoy_abi_h` URL + `sha256` in `MODULE.bazel`,
-`CARGO_BAZEL_REPIN=1 bazel build …`, and re-verify the patch still applies.
+- bindgen is **fully hermetic**: it parses `abi.h` with the hermetic LLVM
+  `libclang` (`@llvm_toolchain_llvm`, via `LIBCLANG_PATH`) against a hermetic
+  glibc sysroot (chromium, `//bazel/llvm`) — no host clang or system headers.
+  The patch derives `--sysroot` from the `AETHER_SYSROOT` marker.
+
+On an Envoy bump: update the tag in `Cargo.toml` and the `@envoy_abi_h` URL +
+`sha256` in `//bazel/envoy`, `CARGO_BAZEL_REPIN=1 bazel build …`, and re-verify
+the patch still applies. On an LLVM bump: update `//bazel/llvm:version.bzl` +
+`llvm_version` in `MODULE.bazel`.
 
 ## Cargo (dev convenience)
 

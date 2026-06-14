@@ -1,16 +1,45 @@
-Aether: the SDK build script reads abi.h via ../../abi/abi.h, a sibling of the
-crate package. crate_universe's per-crate sandbox does not include it, so we
-supply the (pinned) header via the AETHER_ABI_H env var (Bazel build_script_data)
-instead. See MODULE.bazel (@envoy_abi_h) and docs/proposals/007.
+Aether: make the SDK's bindgen build script hermetic.
+
+1. The SDK reads abi.h via ../../abi/abi.h, a sibling of the crate package that
+   crate_universe's per-crate sandbox excludes. Feed the pinned, fetched header
+   (see //bazel/envoy @envoy_abi_h) via the AETHER_ABI_H env var instead.
+2. Parse abi.h against the hermetic LLVM libclang (LIBCLANG_PATH, set in
+   MODULE.bazel) + a hermetic glibc sysroot (chromium, see //bazel/llvm) rather
+   than whatever clang/headers happen to be on the host. AETHER_SYSROOT is the
+   execpath of <sysroot>/usr/include/stdint.h; the build script recovers the
+   sysroot root (three parents up — execpath yields a file, not a directory) and
+   passes it to clang as --sysroot.
+
+See MODULE.bazel (crate.annotation) and docs/proposals/008.
 
 --- a/build.rs
 +++ b/build.rs
-@@ -15,7 +15,7 @@
+@@ -14,9 +14,25 @@ fn main() {
+
    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-   let bindings = bindgen::Builder::default()
+-  let bindings = bindgen::Builder::default()
 -    .header("../../abi/abi.h")
+-    .clang_arg("-v")
++  let mut builder = bindgen::Builder::default()
++    // Aether: feed the pinned, fetched abi.h (the SDK's ../../abi/abi.h is
++    // outside the crate sandbox) via AETHER_ABI_H.
 +    .header(std::env::var("AETHER_ABI_H").expect("AETHER_ABI_H not set"))
-     .clang_arg("-v")
++    .clang_arg("-v");
++
++  // Aether: hermetic glibc headers via the chromium sysroot (no host headers).
++  // AETHER_SYSROOT is the execpath of <sysroot>/usr/include/stdint.h; the
++  // sysroot root is three parents up (execpath yields a file, not a dir).
++  if let Ok(marker) = std::env::var("AETHER_SYSROOT") {
++    let root = std::path::Path::new(&marker)
++      .parent()
++      .and_then(|p| p.parent())
++      .and_then(|p| p.parent())
++      .expect("AETHER_SYSROOT not deep enough");
++    builder = builder.clang_arg(format!("--sysroot={}", root.display()));
++  }
++
++  let bindings = builder
      .default_enum_style(bindgen::EnumVariation::Rust {
        non_exhaustive: false,
+     })
