@@ -1,5 +1,6 @@
 load("@rules_img//img:image.bzl", "image_index", "image_manifest")
 load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
+load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
 load("@rules_rust//rust:defs.bzl", "rust_shared_library")
 
@@ -38,30 +39,35 @@ rust_shared_library(
     ],
 )
 
-# --- OCI artifact: the module .so for delivery via a K8s image volume ---
-# A minimal (no base) image holding just libaether_stats_filter.so at the root.
-# Mounted read-only into the stock proxy at /modules; the proxy loads it via
-# ENVOY_DYNAMIC_MODULES_SEARCH_PATH. The Zig libc-aware platforms below build
-# the .so against glibc 2.28 (distroless-compatible) and need no libgcc_s
-# (Zig's compiler-rt replaces it — verified: NEEDED = libc/libpthread/libdl).
+# --- Custom aether-proxy image: stock Envoy base + baked-in stats module ---
+# The stats module .so baked into the stock Envoy distroless image at /modules,
+# where the proxy loads it via ENVOY_DYNAMIC_MODULES_SEARCH_PATH (set by the
+# chart). Self-contained — no K8s image volume (drops the containerd >= 2.0
+# runtime dependency). The Zig libc-aware platforms build the .so against glibc
+# 2.28 (matches the distroless base) and need no libgcc_s (Zig compiler-rt
+# replaces it — verified: NEEDED = libc/libpthread/libdl).
 
 image_layer(
     name = "module_layer",
-    srcs = {"/libaether_stats_filter.so": ":aether_stats_filter"},
+    srcs = {"/modules/libaether_stats_filter.so": ":aether_stats_filter"},
     compress = "zstd",
     default_metadata = file_metadata(mode = "0644"),
     include_runfiles = False,
 )
 
 image_manifest(
-    name = "image_manifest",
+    name = "proxy_image_manifest",
+    base = "@envoy_distroless",
+    # Self-contained: the search path is baked into the image, so the proxy
+    # loads /modules/libaether_stats_filter.so with no chart-supplied env.
+    env = {"ENVOY_DYNAMIC_MODULES_SEARCH_PATH": "/modules"},
     layers = [":module_layer"],
     visibility = ["//visibility:private"],
 )
 
 image_index(
-    name = "image_index",
-    manifests = [":image_manifest"],
+    name = "proxy_image",
+    manifests = [":proxy_image_manifest"],
     platforms = [
         "@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28",
         "@zig_sdk//libc_aware/platform:linux_arm64_gnu.2.28",
@@ -70,13 +76,22 @@ image_index(
 )
 
 image_push(
-    name = "image_push",
-    image = ":image_index",
+    name = "proxy_image_push",
+    image = ":proxy_image",
     registry = "ghcr.io",
-    repository = "bpalermo/aether/stats-filter",
+    repository = "bpalermo/aether/aether-proxy",
     tag_list = [
         "{{if (eq .GIT_BRANCH \"main\")}}dev{{else}}{{.GIT_COMMIT}}{{end}}",
         "{{if .GIT_COMMIT}}{{.GIT_COMMIT}}{{end}}",
     ],
+    visibility = ["//visibility:public"],
+)
+
+# Loads the custom proxy image into the local Docker daemon (for the e2e suite
+# and local validation) under its registry-qualified ref.
+image_load(
+    name = "proxy_image_load",
+    image = ":proxy_image",
+    tag = "ghcr.io/bpalermo/aether/aether-proxy:latest",
     visibility = ["//visibility:public"],
 )

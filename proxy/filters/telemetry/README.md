@@ -63,22 +63,26 @@ rules_rust. On an Envoy bump: update the tag in `Cargo.toml` + the `abi.h`
 URL/sha256 in `//bazel/envoy`, `CARGO_BAZEL_REPIN=1 bazel build …`, re-verify the
 patch.
 
-## Packaging & delivery (no custom proxy image)
+## Packaging & delivery — custom aether-proxy image
 
-`//proxy/filters/telemetry:image_index` packages just the `.so` into a minimal
-multi-arch OCI image (`image_push` → `ghcr.io/bpalermo/aether/stats-filter`).
-The chart mounts it into the stock `envoyproxy/envoy:distroless-v1.38.0` proxy
-as a **Kubernetes image volume** (`volume.image`, beta/on-by-default in 1.34) at
-`/modules`, with `ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules`. The Zig-built
-(`libc_aware` glibc 2.28) `.so` needs **no extra runtime libs** — Zig's
-compiler-rt replaces libgcc, and glibc 2.28 is distroless-compatible (a host
-build would link `GLIBC_2.39` and fail to load). Requires a container runtime
-with image-volume support (containerd ≥ 2.0) — verify on talos.
+`//proxy/filters/telemetry:proxy_image` builds a **custom `aether-proxy` image**:
+the stock Envoy distroless base (`@envoy_distroless`, pinned in `MODULE.bazel`)
+with the module `.so` baked at `/modules/libaether_stats_filter.so` and
+`ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules` baked into the image config — so the
+proxy loads it **self-contained, with no K8s image volume and no chart env**
+(drops the containerd ≥ 2.0 image-volume runtime dependency). Multi-arch; pushed
+by `:proxy_image_push` → `ghcr.io/bpalermo/aether/aether-proxy`; the chart's
+`proxy.image.ref` is substituted from it.
 
-Default-on: the agent always attaches the filter and the chart always mounts the
-module (Envoy rejects the listener if the module is referenced but absent), so
-the two move together. First rollout introducing it has a brief agent↔proxy skew
-window (independent DaemonSets) — see the release note.
+The Zig-built (`libc_aware` glibc 2.28) `.so` needs **no extra runtime libs** —
+Zig's compiler-rt replaces libgcc, and glibc 2.28 matches the distroless base (a
+host build would link `GLIBC_2.39` and fail to load). Validated:
+`Dynamic module ABI version v0.1.0 matched` + `configuration OK` loading the
+baked module from the image with no volume/env.
+
+Default-on: the agent always attaches the filter, and the proxy image always
+carries the module — they move together. First rollout introducing it has a
+brief agent↔proxy skew window (independent DaemonSets) — see the release note.
 
 ## Status
 

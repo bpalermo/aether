@@ -1514,7 +1514,7 @@
           "ENV:CARGO_BAZEL_GENERATOR_SHA256 \\0",
           "ENV:CARGO_BAZEL_GENERATOR_URL \\0",
           "ENV:CARGO_BAZEL_ISOLATED \\0",
-          "ENV:CARGO_BAZEL_REPIN 1",
+          "ENV:CARGO_BAZEL_REPIN \\0",
           "ENV:CARGO_BAZEL_REPIN_ONLY \\0",
           "ENV:CARGO_BAZEL_TIMEOUT \\0",
           "ENV:REPIN \\0",
@@ -1531,8 +1531,8 @@
           "REPO_MAPPING:rules_rust+,bazel_tools bazel_tools",
           "REPO_MAPPING:rules_rust+,rules_cc rules_cc+",
           "REPO_MAPPING:rules_rust+,rules_rust rules_rust+",
-          "FILE:@@//proxy/filters/telemetry/Cargo.lock f6dbba59d7612f6916b521a404249cbd3ceb9b280d6ce89974022ec7a8c285b9",
-          "FILE:@@//proxy/filters/telemetry/Cargo.toml 20e6043e9a0f47fec50090224afe701a86529f51d136e01832ce85ce81e7bbab"
+          "FILE:@@//proxy/filters/telemetry/Cargo.lock cc095557cc7b1b1e97ff4adb0bbf47596b3b612c4b877c56fef09b561ac98bdb",
+          "FILE:@@//proxy/filters/telemetry/Cargo.toml e97c0e159129c63161a8d99c238ef223103c42cb74e8bfdc2178683baf4b9158"
         ],
         "generatedRepoSpecs": {
           "crates": {

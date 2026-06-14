@@ -157,6 +157,19 @@ pull(
     tag = "nonroot",
 )
 
+# Stock upstream Envoy (distroless-v1.38.0), the base for the custom aether-proxy
+# image (//proxy/filters/telemetry:proxy_image — Envoy base + baked stats
+# module). Multi-arch index digest; keep in lockstep with //bazel/envoy
+# ENVOY_VERSION and charts/agent/values.yaml.
+pull(
+    name = "envoy_distroless",
+    digest = "sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6",
+    layer_handling = "lazy",
+    registry = "index.docker.io",
+    repository = "envoyproxy/envoy",
+    tag = "distroless-v1.38.0",
+)
+
 # --- Rust toolchains (in-tree dynamic modules; see docs/proposals/008) ---
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")

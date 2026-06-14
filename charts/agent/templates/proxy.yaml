@@ -58,7 +58,11 @@ spec:
       {{- end }}
       containers:
         - name: proxy
-          image: "{{ .Values.proxy.image.repository }}@{{ .Values.proxy.image.digest }}"
+          # Custom aether-proxy = stock Envoy base + baked aether_stats_filter
+          # module (//proxy/filters/telemetry:proxy_image_push). The module's
+          # search path is baked into the image, so no volume or env is needed.
+          image: {{ .Values.proxy.image.ref | quote }}
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
           {{- if .Values.proxy.hotRestart.enabled }}
           command:
             - "/opt/aether/supervisor"
@@ -122,11 +126,6 @@ spec:
               value: "0"
             - name: ENVOY_GID
               value: "0"
-            # The aether_stats_filter module .so is delivered via the image
-            # volume mounted at /modules (see volumes). The Zig-built module
-            # needs no extra runtime libs, so no LD_LIBRARY_PATH.
-            - name: ENVOY_DYNAMIC_MODULES_SEARCH_PATH
-              value: /modules
           {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
           # Ready only once this pod's Envoy is live at the newest epoch (post
           # handoff), so the DaemonSet (maxUnavailable=0) keeps the old pod until
@@ -171,9 +170,6 @@ spec:
               mountPropagation: HostToContainer
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
-              readOnly: true
-            - name: stats-filter
-              mountPath: /modules
               readOnly: true
             {{- if .Values.proxy.hotRestart.enabled }}
             - name: supervisor-bin
@@ -226,13 +222,4 @@ spec:
           csi:
             driver: "csi.spiffe.io"
             readOnly: true
-        # K8s image volume (beta/on-by-default in 1.34): the stats-filter module
-        # image's filesystem is mounted read-only at /modules, so
-        # /modules/libaether_stats_filter.so is loaded by the stock proxy.
-        # Requires containerd >= 2.0. The agent attaches the filter to every
-        # outbound HCM, so this volume is always present.
-        - name: stats-filter
-          image:
-            reference: {{ .Values.proxy.statsFilter.image.ref | quote }}
-            pullPolicy: {{ .Values.proxy.statsFilter.image.pullPolicy }}
 {{- end }}

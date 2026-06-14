@@ -77,21 +77,14 @@ cniInstall:
 proxy:
   enabled: true
   image:
-    # Envoy is an upstream image; pin it explicitly (not built by this repo).
-    repository: docker.io/envoyproxy/envoy
-    # envoyproxy/envoy:distroless-v1.38.0
-    digest: sha256:a7a56545102f7a682e0cafea2c9b8448af1b09ebb710eab688dfb931e3ec7ff6
-  # The aether_stats_filter dynamic module (proposal 007), delivered to the
-  # stock proxy via a K8s image volume mounted at /modules. The agent attaches
-  # the filter to every outbound HCM unconditionally, so this volume is always
-  # mounted (Envoy rejects the listener if the module is referenced but absent).
-  # Requires a container runtime with image-volume support (containerd >= 2.0).
-  statsFilter:
-    image:
-      # Substituted at package time with the digest-pinned artifact produced by
-      # //proxy/filters/telemetry:image_push (ghcr.io/bpalermo/aether/stats-filter@sha256:...).
-      ref: "{@//proxy/filters/telemetry:image_push}"
-      pullPolicy: IfNotPresent
+    # Custom aether-proxy = stock Envoy distroless base + baked-in
+    # aether_stats_filter dynamic module (proposal 007), built and pinned by
+    # //proxy/filters/telemetry:proxy_image_push. The module's search path is
+    # baked into the image — self-contained, no K8s image volume. The Envoy
+    # version is pinned via //bazel/envoy ENVOY_VERSION (the @envoy_distroless
+    # base); keep that in lockstep with the SDK/abi.h.
+    ref: "{@//proxy/filters/telemetry:proxy_image_push}"
+    pullPolicy: Always
   logLevel: info
   # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
   # proxy-supervisor) as the proxy entrypoint instead of launching Envoy
