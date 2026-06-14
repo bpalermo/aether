@@ -17,6 +17,7 @@ helm_chart(
     images = [
         "//agent/cmd/agent:image_push",
         "//cni/cmd/cni-install:image_push",
+        "//proxy:image_push",
     ],
     login_url = "ghcr.io",
     registry_url = "oci://ghcr.io/bpalermo/aether/charts",
