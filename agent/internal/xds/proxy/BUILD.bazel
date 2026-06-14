@@ -4,6 +4,7 @@ go_library(
     name = "proxy",
     srcs = [
         "cluster.go",
+        "edge_telemetry.go",
         "egress.go",
         "endpoint.go",
         "filterchain.go",
@@ -33,7 +34,9 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/dynamic_modules/v3:dynamic_modules",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/common/set_filter_state/v3:set_filter_state",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/dynamic_modules/v3:dynamic_modules",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/health_check/v3:health_check",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/on_demand/v3:on_demand",

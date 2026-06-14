@@ -30,6 +30,12 @@ type AgentConfig struct {
 	// (<service>.<mesh-domain>); see constants.DefaultMeshDomain.
 	MeshDomain string
 
+	// EdgeTelemetry attaches the edge-telemetry dynamic module (proposal 007)
+	// to each pod's outbound HCM for source->destination request metrics. Only
+	// enable when the module .so is mounted on the proxy (image volume) — Envoy
+	// rejects the listener if the referenced dynamic module is absent.
+	EdgeTelemetry bool
+
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
