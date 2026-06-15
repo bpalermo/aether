@@ -78,7 +78,7 @@ proxy:
   enabled: true
   image:
     # Custom aether-proxy = distroless/cc base + official Envoy binary + baked-in
-    # aether_stats_filter dynamic module (proposal 007), built and pinned by
+    # aether_stats dynamic module (proposal 007), built and pinned by
     # //proxy:image_push. The module's search path is baked into the image —
     # self-contained, no K8s image volume. The Envoy version is pinned via
     # //bazel/envoy ENVOY_VERSION (the release binary); keep that in lockstep

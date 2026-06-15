@@ -1,4 +1,4 @@
-# aether_stats_filter — stats Envoy dynamic module
+# aether_stats — stats Envoy dynamic module
 
 [Proposal 007](../../docs/proposals/007_telemetry-edge-filter.md), Phase 1:
 source-reported source↔destination request metrics, aggregated **in-proxy** into
@@ -44,15 +44,15 @@ per-pod cardinality is wanted.
 ## Build (Bazel — canonical)
 
 ```
-bazel build //proxy/filters/telemetry:aether_stats_filter            # host
+bazel build //proxy/filters/http/aether_stats:aether_stats            # host
 
 # Hermetic cross-compile for the proxy arches (clang/lld + glibc sysroot via
 # toolchains_llvm; see //bazel/llvm):
-bazel build //proxy/filters/telemetry:aether_stats_filter \
+bazel build //proxy/filters/http/aether_stats:aether_stats \
   --platforms=//bazel/llvm/platform:linux_amd64
-bazel build //proxy/filters/telemetry:aether_stats_filter \
+bazel build //proxy/filters/http/aether_stats:aether_stats \
   --platforms=//bazel/llvm/platform:linux_arm64
-# -> bazel-bin/proxy/filters/telemetry/libaether_stats_filter.so
+# -> bazel-bin/proxy/filters/http/aether_stats/libaether_stats.so
 ```
 
 ### SDK dependency (nothing vendored)
@@ -62,7 +62,7 @@ tag (`Cargo.toml`), resolved by `crate_universe`. Its `bindgen` build script
 reads `../../abi/abi.h`, outside the crate package (excluded by crate_universe's
 sandbox), so: `abi.h` is **fetched** from the Envoy repo at the pinned tag
 (`@envoy_abi_h` `http_file`, see `//bazel/envoy`), re-exported as the main-repo
-alias `//proxy/filters/telemetry:abi_h`, and `patches/sdk_abi_header.patch`
+alias `//proxy/filters/http/aether_stats:abi_h`, and `patches/sdk_abi_header.patch`
 redirects the build script to it via `AETHER_ABI_H`. bindgen is **fully
 hermetic**: it parses `abi.h` with the hermetic LLVM `libclang`
 (`@llvm_toolchain_llvm`, via `LIBCLANG_PATH`) against a hermetic glibc sysroot
@@ -78,7 +78,7 @@ bazel build …`, re-verify the patch. On an LLVM bump: update
 at `//proxy`, not under this filter, so future proxy customizations share it):
 a **`gcr.io/distroless/cc` base** + the **official Envoy release binary** at
 `/usr/local/bin/envoy` (both pinned via `//bazel/envoy` `ENVOY_VERSION`) + the
-module `.so` baked at `/modules/libaether_stats_filter.so`, with
+module `.so` baked at `/modules/libaether_stats.so`, with
 `ENVOY_DYNAMIC_MODULES_SEARCH_PATH=/modules` in the image config — so the proxy
 loads it **self-contained, with no K8s image volume and no chart env** (drops the
 containerd ≥ 2.0 image-volume runtime dependency). Multi-arch; pushed by

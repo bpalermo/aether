@@ -8,7 +8,7 @@
 # libgcc_s + glibc, which the Envoy binary and the Rust dynamic module's unwinder
 # both need at runtime. The Envoy binary and abi.h are version-pinned via
 # //bazel/envoy ENVOY_VERSION; keep in lockstep with the SDK git tag
-# (proxy/filters/telemetry/Cargo.toml). The //bazel/llvm/platform:linux_*
+# (proxy/filters/http/aether_stats/Cargo.toml). The //bazel/llvm/platform:linux_*
 # platforms cross-build the module .so with the hermetic LLVM toolchain against an
 # old glibc sysroot (max symbol GLIBC_2.18) so it loads on the base.
 
@@ -26,11 +26,11 @@ image_layer(
     include_runfiles = False,
 )
 
-# aether_stats_filter module .so at /modules, where the proxy loads it via the
+# aether_stats module .so at /modules, where the proxy loads it via the
 # baked-in ENVOY_DYNAMIC_MODULES_SEARCH_PATH. Future modules add layers here.
 image_layer(
     name = "stats_filter_layer",
-    srcs = {"/modules/libaether_stats_filter.so": "//proxy/filters/telemetry:aether_stats_filter"},
+    srcs = {"/modules/libaether_stats.so": "//proxy/filters/http/aether_stats:aether_stats"},
     compress = "zstd",
     default_metadata = file_metadata(mode = "0644"),
     include_runfiles = False,

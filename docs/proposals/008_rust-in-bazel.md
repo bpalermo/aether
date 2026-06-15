@@ -63,7 +63,7 @@ Hermetic cross-compilation is opt-in per invocation, e.g. for the first
 consumer (proposal 007):
 
 ```
-bazel build //proxy/filters/telemetry:aether_telemetry \
+bazel build //proxy/filters/http/aether_stats:aether_telemetry \
   --platforms=@zig_sdk//libc_aware/platform:linux_arm64_gnu.2.28
 ```
 
@@ -77,7 +77,7 @@ module proved the toolchain.
 
 ## Validation (2026-06-13)
 
-- Module `//proxy/filters/telemetry:aether_telemetry` (proposal 007, stacked) builds
+- Module `//proxy/filters/http/aether_stats:aether_telemetry` (proposal 007, stacked) builds
   green on the host toolchain and under
   `--platforms=@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.28` and
   `…linux_arm64_gnu.2.28` (arm64 output confirmed `ELF … ARM aarch64`), and

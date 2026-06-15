@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_shared_library")
+load("@rules_rust//rust:defs.bzl", "rust_shared_library", "rust_test")
 
 exports_files([
     "Cargo.toml",
@@ -17,15 +17,15 @@ alias(
     visibility = ["//visibility:public"],
 )
 
-# aether_stats_filter stats dynamic module (proposal 007, Phase 1). Produces
-# libaether_stats_filter.so, baked into the custom aether-proxy image (//proxy)
+# aether_stats stats dynamic module (proposal 007, Phase 1). Produces
+# libaether_stats.so, baked into the custom aether-proxy image (//proxy)
 # at /modules and loaded via ENVOY_DYNAMIC_MODULES_SEARCH_PATH. Cross-compile
 # for the proxy arches with the hermetic LLVM toolchain (clang/lld + glibc
 # sysroot), e.g.:
-#   bazel build //proxy/filters/telemetry:aether_stats_filter \
+#   bazel build //proxy/filters/http/aether_stats:aether_stats \
 #     --platforms=//bazel/llvm/platform:linux_amd64
 rust_shared_library(
-    name = "aether_stats_filter",
+    name = "aether_stats",
     srcs = ["src/lib.rs"],
     edition = "2021",
     visibility = ["//visibility:public"],
@@ -34,4 +34,14 @@ rust_shared_library(
         "@crates//:serde",
         "@crates//:serde_json",
     ],
+)
+
+# Unit tests for the pure label-derivation logic (classify_flag,
+# dest_service_from_cluster, config parsing) and the HTTP filter hooks, driven
+# against the SDK's MockEnvoyHttpFilter. Host-native build (no cross-compile /
+# sysroot needed) since it links the test harness, not the Envoy .so.
+rust_test(
+    name = "aether_stats_test",
+    size = "small",
+    crate = ":aether_stats",
 )
