@@ -1,11 +1,17 @@
-//! Aether stats dynamic module (proposal 007, Phase 1: source-reported).
-//! Analogous to Istio's istio_stats: an HTTP filter that records a tagged
-//! request counter at the log phase.
+//! Aether stats dynamic module (proposal 007). Analogous to Istio's istio_stats:
+//! an HTTP filter that records a tagged request counter at the log phase. The
+//! same module serves both reporters via the per-instance `filter_config` JSON:
 //!
-//! Attached to each per-pod OUTBOUND HCM. The agent passes the local pod's
-//! identity (reporter/source_service/source_pod/mesh_domain) as the per-instance
-//! `filter_config` JSON. The module derives the destination from the routed
-//! cluster name and increments a cumulative Envoy counter vector at request
+//! - **Source-reported** (`reporter="source"`), attached to each per-pod
+//!   OUTBOUND HCM. The agent injects the local pod's identity
+//!   (source_service/source_pod); the module derives the destination from the
+//!   routed cluster name.
+//! - **Destination-reported** (`reporter="destination"`), attached to each
+//!   per-pod INBOUND HCM (Phase 2). The agent injects the local pod's identity
+//!   (destination_service); the module derives the source by parsing the
+//!   verified peer SVID's URI SAN (`ConnectionUriSanPeerCertificate`).
+//!
+//! Either way it increments a cumulative Envoy counter vector at request
 //! completion — exported by the existing OTel stat sink (no per-request egress).
 
 use envoy_proxy_dynamic_modules_rust_sdk::*;
@@ -25,6 +31,11 @@ struct ConfigData {
     source_service: String,
     #[serde(default)]
     source_pod: String,
+    /// Local pod's service for the inbound (destination-reported) side. The
+    /// outbound side leaves this empty and derives the destination per request
+    /// from the routed cluster name instead.
+    #[serde(default)]
+    destination_service: String,
     #[serde(default = "default_mesh_domain")]
     mesh_domain: String,
     /// When false, source_pod is reported as "" to bound cardinality.
@@ -43,6 +54,7 @@ pub struct FilterConfig {
     reporter: String,
     source_service: String,
     source_pod: String,
+    destination_service: String,
     mesh_domain: String,
     requests_total: EnvoyCounterVecId,
 }
@@ -82,6 +94,7 @@ impl FilterConfig {
             } else {
                 String::new()
             },
+            destination_service: c.destination_service,
             mesh_domain: c.mesh_domain,
             requests_total,
         })
@@ -94,6 +107,7 @@ impl<EHF: EnvoyHttpFilter> HttpFilterConfig<EHF> for FilterConfig {
             reporter: self.reporter.clone(),
             source_service: self.source_service.clone(),
             source_pod: self.source_pod.clone(),
+            destination_service: self.destination_service.clone(),
             mesh_domain: self.mesh_domain.clone(),
             requests_total: self.requests_total,
             dest_cluster: String::new(),
@@ -107,6 +121,7 @@ pub struct Filter {
     reporter: String,
     source_service: String,
     source_pod: String,
+    destination_service: String,
     mesh_domain: String,
     requests_total: EnvoyCounterVecId,
     dest_cluster: String,
@@ -115,13 +130,40 @@ pub struct Filter {
 }
 
 impl Filter {
+    fn is_destination(&self) -> bool {
+        self.reporter == "destination"
+    }
+
     fn record<EHF: EnvoyHttpFilter>(&mut self, envoy: &mut EHF) {
         if self.recorded {
             return;
         }
         self.recorded = true;
 
-        let destination_service = self.dest_service_from_cluster(&self.dest_cluster.clone());
+        // The two reporters fill the same counter vector but source each
+        // half differently. Outbound (source-reported): source from the
+        // agent-injected config, destination from the routed cluster name.
+        // Inbound (destination-reported): destination from the agent-injected
+        // local identity, source parsed from the verified peer SVID's URI SAN.
+        let (source_service, source_pod, destination_service) = if self.is_destination() {
+            (
+                self.peer_source_service(envoy),
+                // The SPIFFE SVID carries no pod, so the inbound source pod is
+                // always unknown; reported as "" like the outbound default.
+                String::new(),
+                if self.destination_service.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    self.destination_service.clone()
+                },
+            )
+        } else {
+            (
+                self.source_service.clone(),
+                self.source_pod.clone(),
+                self.dest_service_from_cluster(&self.dest_cluster.clone()),
+            )
+        };
 
         let response_code = envoy
             .get_attribute_int(abi::envoy_dynamic_module_type_attribute_id::ResponseCode)
@@ -141,14 +183,27 @@ impl Filter {
             self.requests_total,
             &[
                 &self.reporter,
-                &self.source_service,
-                &self.source_pod,
+                &source_service,
+                &source_pod,
                 &destination_service,
                 &response_code,
                 response_flags,
             ],
             1,
         );
+    }
+
+    /// Reads the verified peer (caller) SVID's URI SAN from the downstream mTLS
+    /// connection and parses its service-account segment. Returns "unknown" when
+    /// no peer cert / URI SAN is present or the SAN is not a SPIFFE SVID — this
+    /// is the only untrusted input the module parses.
+    fn peer_source_service<EHF: EnvoyHttpFilter>(&self, envoy: &mut EHF) -> String {
+        envoy
+            .get_attribute_string(
+                abi::envoy_dynamic_module_type_attribute_id::ConnectionUriSanPeerCertificate,
+            )
+            .and_then(|b| spiffe_service(&String::from_utf8_lossy(b.as_slice())).map(str::to_owned))
+            .unwrap_or_else(|| "unknown".to_string())
     }
 
     /// "<svc>.<mesh_domain>[:port]" -> "<svc>"; empty/foreign -> "unknown".
@@ -173,11 +228,16 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
         envoy: &mut EHF,
         _end_of_stream: bool,
     ) -> abi::envoy_dynamic_module_type_on_http_filter_request_headers_status {
-        // Cluster is selected by the router after request headers; capture it
-        // here via the dedicated getter (the XdsClusterName CEL attribute is
-        // not populated in the HTTP-filter context).
-        if let Some(b) = envoy.get_cluster_name() {
-            self.dest_cluster = String::from_utf8_lossy(b.as_slice()).into_owned();
+        // Only the source-reported (outbound) side derives the destination from
+        // the routed cluster; the inbound side takes its destination from config
+        // and reads the source from the peer SAN at record time.
+        if !self.is_destination() {
+            // Cluster is selected by the router after request headers; capture it
+            // here via the dedicated getter (the XdsClusterName CEL attribute is
+            // not populated in the HTTP-filter context).
+            if let Some(b) = envoy.get_cluster_name() {
+                self.dest_cluster = String::from_utf8_lossy(b.as_slice()).into_owned();
+            }
         }
         abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::Continue
     }
@@ -237,6 +297,25 @@ fn classify_flag(details: &str) -> &'static str {
     } else {
         "LR" // some other proxy local reply
     }
+}
+
+/// Extracts the service-account segment from a SPIFFE SVID URI SAN of the form
+/// `spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>` (the SVID the
+/// agent issues, see the agent's listener SVID template). Returns the value
+/// following the first `sa` path segment; `None` for any URI that is not a
+/// SPIFFE SVID or carries no non-empty `sa` segment. This is the only untrusted
+/// input the module parses, so it never panics and never allocates.
+fn spiffe_service(uri_san: &str) -> Option<&str> {
+    // Drop the scheme + authority (trust domain); keep the path segments.
+    let rest = uri_san.strip_prefix("spiffe://")?;
+    let path = rest.split_once('/').map(|(_, p)| p).unwrap_or("");
+    let mut segs = path.split('/');
+    while let Some(seg) = segs.next() {
+        if seg == "sa" {
+            return segs.next().filter(|s| !s.is_empty());
+        }
+    }
+    None
 }
 
 fn new_http_filter_config_fn<EC: EnvoyHttpFilterConfig, EHF: EnvoyHttpFilter>(
@@ -317,6 +396,23 @@ mod tests {
             reporter: "source".to_string(),
             source_service: "cart".to_string(),
             source_pod: "cart-abc".to_string(),
+            destination_service: String::new(),
+            mesh_domain: "aether.internal".to_string(),
+            requests_total: EnvoyCounterVecId(0),
+            dest_cluster: String::new(),
+            local_reply_details: String::new(),
+            recorded: false,
+        }
+    }
+
+    // Destination-reported (inbound) filter: destination is the agent-injected
+    // local identity; source is parsed per request from the peer SVID URI SAN.
+    fn test_filter_dest() -> Filter {
+        Filter {
+            reporter: "destination".to_string(),
+            source_service: String::new(),
+            source_pod: String::new(),
+            destination_service: "checkout".to_string(),
             mesh_domain: "aether.internal".to_string(),
             requests_total: EnvoyCounterVecId(0),
             dest_cluster: String::new(),
@@ -356,6 +452,41 @@ mod tests {
         assert_eq!(f.dest_service_from_cluster(":8080"), "unknown");
     }
 
+    // ---- spiffe_service --------------------------------------------------
+
+    #[test]
+    fn spiffe_service_extracts_sa_segment() {
+        assert_eq!(
+            spiffe_service("spiffe://aether.internal/ns/default/sa/cart"),
+            Some("cart")
+        );
+        // Extra trailing segments after the service are ignored.
+        assert_eq!(
+            spiffe_service("spiffe://aether.internal/ns/default/sa/cart/extra"),
+            Some("cart")
+        );
+        // The `ns` segment is not required; only `sa/<svc>` is.
+        assert_eq!(spiffe_service("spiffe://td/sa/payments"), Some("payments"));
+    }
+
+    #[test]
+    fn spiffe_service_rejects_non_spiffe() {
+        assert_eq!(spiffe_service(""), None);
+        assert_eq!(spiffe_service("https://example.com/sa/cart"), None);
+        assert_eq!(spiffe_service("cart"), None);
+    }
+
+    #[test]
+    fn spiffe_service_rejects_missing_or_empty_sa() {
+        // No sa segment at all.
+        assert_eq!(spiffe_service("spiffe://td/ns/default"), None);
+        // Authority only, no path.
+        assert_eq!(spiffe_service("spiffe://td"), None);
+        // sa segment present but the service value is empty.
+        assert_eq!(spiffe_service("spiffe://td/ns/default/sa/"), None);
+        assert_eq!(spiffe_service("spiffe://td/ns/default/sa"), None);
+    }
+
     // ---- ConfigData deserialization -------------------------------------
 
     #[test]
@@ -364,6 +495,7 @@ mod tests {
         assert_eq!(c.reporter, "source");
         assert_eq!(c.source_service, "");
         assert_eq!(c.source_pod, "");
+        assert_eq!(c.destination_service, "");
         assert_eq!(c.mesh_domain, "aether.internal");
         assert!(!c.emit_pod);
     }
@@ -374,6 +506,7 @@ mod tests {
             "reporter": "destination",
             "source_service": "cart",
             "source_pod": "cart-7d9",
+            "destination_service": "checkout",
             "mesh_domain": "example.mesh",
             "emit_pod": true
         }"#;
@@ -381,6 +514,7 @@ mod tests {
         assert_eq!(c.reporter, "destination");
         assert_eq!(c.source_service, "cart");
         assert_eq!(c.source_pod, "cart-7d9");
+        assert_eq!(c.destination_service, "checkout");
         assert_eq!(c.mesh_domain, "example.mesh");
         assert!(c.emit_pod);
     }
@@ -498,6 +632,54 @@ mod tests {
         assert_eq!(l[3], "unknown");
         assert_eq!(l[4], "0");
         assert_eq!(l[5], "-");
+    }
+
+    #[test]
+    fn record_destination_uses_config_dest_and_peer_san_source() {
+        // Inbound: destination from config, source parsed from the peer SVID.
+        let mut mock = MockEnvoyHttpFilter::default();
+        mock.expect_get_attribute_string().returning(|id| {
+            assert_eq!(
+                id,
+                abi::envoy_dynamic_module_type_attribute_id::ConnectionUriSanPeerCertificate
+            );
+            Some(EnvoyBuffer::new(
+                b"spiffe://aether.internal/ns/default/sa/cart",
+            ))
+        });
+        mock.expect_get_attribute_int()
+            .times(1)
+            .returning(|_| Some(200));
+        let labels = expect_record(&mut mock);
+
+        let mut f = test_filter_dest();
+        f.record(&mut mock);
+
+        assert_eq!(
+            *labels.lock().unwrap(),
+            // reporter, source_service (from SAN), source_pod (always ""),
+            // destination_service (from config), code, flag.
+            vec!["destination", "cart", "", "checkout", "200", "-"]
+        );
+    }
+
+    #[test]
+    fn record_destination_missing_peer_san_is_unknown_source() {
+        // No client cert / no URI SAN -> source_service "unknown", never panics.
+        let mut mock = MockEnvoyHttpFilter::default();
+        mock.expect_get_attribute_string().returning(|_| None);
+        mock.expect_get_attribute_int()
+            .times(1)
+            .returning(|_| Some(200));
+        let labels = expect_record(&mut mock);
+
+        let mut f = test_filter_dest();
+        f.record(&mut mock);
+
+        let l = labels.lock().unwrap();
+        assert_eq!(l[0], "destination");
+        assert_eq!(l[1], "unknown");
+        assert_eq!(l[3], "checkout");
     }
 
     #[test]
