@@ -7,10 +7,12 @@ import (
 	"github.com/bpalermo/aether/common/constants"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	dynamic_modules_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_modules/v3"
 	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestNewInboundListener(t *testing.T) {
@@ -41,11 +43,13 @@ func TestNewInboundListener(t *testing.T) {
 	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_SANITIZE_SET, hcm.GetForwardClientCertDetails())
 	assert.True(t, hcm.GetSetCurrentClientCertDetails().GetUri())
 
-	// Liveness + readiness health-check filters precede the router.
-	require.Len(t, hcm.GetHttpFilters(), 3)
+	// Liveness + readiness health-check filters, then the stats module (proposal
+	// 007 Phase 2), then the router.
+	require.Len(t, hcm.GetHttpFilters(), 4)
 	assert.Equal(t, livenessHealthCheckFilterName, hcm.GetHttpFilters()[0].GetName())
 	assert.Equal(t, readinessHealthCheckFilterName, hcm.GetHttpFilters()[1].GetName())
-	assert.Equal(t, "envoy.filters.http.router", hcm.GetHttpFilters()[2].GetName())
+	assert.Equal(t, statsFilterName, hcm.GetHttpFilters()[2].GetName())
+	assert.Equal(t, "envoy.filters.http.router", hcm.GetHttpFilters()[3].GetName())
 
 	live := decodeHealthCheck(t, hcm.GetHttpFilters()[0])
 	assert.False(t, live.GetPassThroughMode().GetValue())
@@ -124,4 +128,39 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 	assert.Equal(t, "app_mp_9090", clusterOf(bySNI["9090"]))
 	assert.Equal(t, "app_mp_8080", clusterOf(bySNI["8080"]))
 	assert.Equal(t, "app_mp_8080", clusterOf(defaultChain), "default chain → primary port")
+}
+
+// TestInboundChainStatsFilter verifies the stats dynamic module (proposal 007
+// Phase 2) sits after the two health-check filters (so locally-answered probes
+// are not counted) and before the router on the inbound HCM, carrying the local
+// pod's destination identity and reporter=destination in its filter_config.
+func TestInboundChainStatsFilter(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "checkout-abc",
+		Namespace:        "default",
+		ServiceAccount:   "checkout",
+		NetworkNamespace: "/var/run/netns/cni-a",
+		Ips:              []string{"10.0.0.1"},
+	}
+	l, err := NewInboundListener(pod, "aether.internal")
+	require.NoError(t, err)
+	require.NotEmpty(t, l.GetFilterChains())
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+
+	filters := hcm.GetHttpFilters()
+	require.Len(t, filters, 4, "expected liveness + readiness + stats + router")
+	assert.Equal(t, statsFilterName, filters[2].GetName())
+	assert.Equal(t, httpRouterFilterName, filters[3].GetName())
+
+	dm := &dynamic_modules_filterv3.DynamicModuleFilter{}
+	require.NoError(t, filters[2].GetTypedConfig().UnmarshalTo(dm))
+	assert.Equal(t, statsModuleName, dm.GetDynamicModuleConfig().GetName())
+	assert.Equal(t, statsFilterEntry, dm.GetFilterName())
+
+	cfg := &wrapperspb.StringValue{}
+	require.NoError(t, dm.GetFilterConfig().UnmarshalTo(cfg))
+	assert.Contains(t, cfg.GetValue(), `"reporter":"destination"`)
+	assert.Contains(t, cfg.GetValue(), `"destination_service":"checkout"`)
 }
