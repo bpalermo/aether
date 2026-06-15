@@ -21,15 +21,19 @@ cd proxy
 bazel build //:envoy
 
 # Build + load the custom aether-proxy image into the local Docker daemon.
-bazel build //:image
-bazel run //:load            # ghcr.io/bpalermo/aether/aether-proxy:latest
+# --config=release bakes the optimized, stripped Envoy (plain builds are
+# fastbuild/dev). The Makefile `load-proxy-image` target does this for you.
+bazel build --config=release //:image
+bazel run --config=release //:load   # ghcr.io/bpalermo/aether/aether-proxy:latest
 
 # Image smoke test (container-structure-test).
 bazel test //:image_test
 ```
 
 The image is `distroless/cc` base + the custom `//:envoy` binary at
-`/usr/local/bin/envoy`.
+`/usr/local/bin/envoy`. Plain `bazel build //:image` produces a **fastbuild**
+(unoptimized, unstripped) binary — always pass `--config=release` (CI and the
+Makefile targets do) to bake the production binary.
 
 > **Filter customization is currently unwired.** The first goal is a vanilla
 > custom Envoy that builds. The `aether_stats` dynamic module and its

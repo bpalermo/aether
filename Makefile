@@ -95,8 +95,8 @@ publish: push-all
 # cache / CI.
 .PHONY: load-proxy-image
 load-proxy-image:
-	@cd proxy && bazel run //:load
+	@cd proxy && bazel run --config=release //:load
 
 .PHONY: push-proxy-image
 push-proxy-image:
-	@cd proxy && bazel run //:push --stamp
+	@cd proxy && bazel run --config=release //:push --stamp

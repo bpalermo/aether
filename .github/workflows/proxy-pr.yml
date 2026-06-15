@@ -1,0 +1,51 @@
+name: proxy-pr
+
+# PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1):
+# `bazel test` over BuildBuddy RBE. Does NOT build/push the image — that happens
+# on merge (proxy-release.yml). Path-filtered so it only runs when proxy/ changes.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "proxy/**"
+      - ".github/workflows/proxy-pr.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: proxy
+
+env:
+  # Envoy's in-tree rust crate index (envoy_rust_crate_index) lockfile digest
+  # doesn't match what our rules_rust computes; repin it.
+  CARGO_BAZEL_REPIN: "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Test (BuildBuddy RBE)
+        # The compile runs remotely on BuildBuddy. //... runs the build_test (which
+        # compiles the custom Envoy + assembles the image) plus any unit tests.
+        # --config=ci adds the release build + static BuildBuddy metadata; dynamic
+        # metadata (https://www.buildbuddy.io/docs/guide-metadata) is attached here.
+        run: |
+          bazel test \
+            --config=ci \
+            --config=rbe-buildbuddy \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            //...

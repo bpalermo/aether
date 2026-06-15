@@ -56,9 +56,23 @@ oci_load(
     repo_tags = ["ghcr.io/bpalermo/aether/aether-proxy:latest"],
 )
 
+# Materialize the loadable image tarball for the structure test. rules_oci only
+# produces the tar via the `tarball` output group (it's expensive), so extract it
+# with a filegroup rather than referencing a (non-existent) :load.tar target.
+filegroup(
+    name = "image_tarball",
+    srcs = [":load"],
+    output_group = "tarball",
+)
+
+# PR gate (`bazel test //...`): builds the custom Envoy + image on RBE and
+# validates the image's structure. The `tar` driver runs against the image
+# tarball directly — no docker daemon, RBE-friendly. (No unit tests yet — the
+# aether_stats filter is parked; its rust_test rejoins //... when re-wired.)
 container_structure_test(
     name = "image_test",
     configs = ["//integration:image.yaml"],
-    image = ":image",
-    tags = ["manual"],
+    driver = "tar",
+    # The tar driver needs a .tar, not the oci_image — the oci_load tarball.
+    image = ":image_tarball",
 )

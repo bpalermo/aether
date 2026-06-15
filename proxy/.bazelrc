@@ -8,8 +8,19 @@ import %workspace%/envoy.bazelrc
 # applies the :linux config automatically on Linux hosts.
 build:linux --config=clang
 
+# Optimized, stripped release build — the binary baked into the proxy image.
+# Plain `bazel build //:image` is fastbuild (dev); image build paths (CI, the
+# Makefile load/push targets, the README) pass --config=release to bake the
+# optimized binary.
+build:release -c opt
+build:release --strip=always
+
 # Release build: optimized, stripped (used by CI to produce the image binary).
 build:ci --config=release
+# BuildBuddy invocation metadata (https://www.buildbuddy.io/docs/guide-metadata).
+# Dynamic metadata (COMMIT_SHA/REPO_URL/BRANCH_NAME) is passed by the CI workflow.
+build:ci --build_metadata=ROLE=CI
+build:ci --build_metadata=VISIBILITY=PUBLIC
 build:ci --color=yes
 common:ci --noshow_progress
 common:ci --noshow_loading_progress
