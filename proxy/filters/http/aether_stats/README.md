@@ -18,12 +18,24 @@ envoy.dynamicmodulescustom.aether_requests_total{
   response_code, response_flags }
 ```
 
+Plus a request-duration histogram on a deliberately leaner label set (a
+histogram multiplies series by its bucket count):
+
+```
+envoy.dynamicmodulescustom.aether_request_duration_milliseconds{
+  reporter, source_service, destination_service }
+```
+
 In Prometheus: `envoy_dynamicmodulescustom_aether_requests_total{...}`.
 
 `response_flags` is a bounded cause label (`UF`/`UH`/`NC`/`NR`/`UO`/`UT`/`UR`,
 `-` for upstream/success). The `ResponseFlags` attribute isn't exposed to
 dynamic-module HTTP filters at v1.38, so the module derives it from the
 `on_local_reply` details — reproducing Istio's `toShortString` vocabulary.
+
+Duration is likewise measured in-module (`std::time::Instant`, request start →
+`on_stream_complete`): no request-duration attribute is exposed to HTTP filters
+at v1.38, and the unit lives in the metric name.
 
 ## How identity is resolved
 
@@ -99,10 +111,28 @@ Default-on: the agent always attaches the filter, and the proxy image always
 carries the module — they move together. First rollout introducing it has a
 brief agent↔proxy skew window (independent DaemonSets) — see the release note.
 
+## Testing & fuzzing
+
+Unit tests run under Bazel: `bazel test //proxy/filters/http/aether_stats:aether_stats_test`.
+The HTTP hooks are exercised against the SDK's `MockEnvoyHttpFilter`.
+
+`spiffe_service()` parses the peer SVID URI SAN — the only untrusted input — so
+it has a torture test (`spiffe_service_never_panics_on_adversarial_input`) that
+sweeps every byte plus pathological/large inputs and asserts the parser is total
+(never panics, always returns a substring or `None`).
+
+For deeper coverage you can run a libFuzzer target locally (kept out of the
+hermetic Bazel build — it needs a nightly toolchain):
+
+```
+cd proxy/filters/http/aether_stats
+cargo +nightly fuzz run spiffe_service   # requires a fuzz/ target wrapping spiffe_service
+```
+
 ## Status
 
-Phase-1 validated 2026-06-13/14: builds (host + LLVM cross amd64/arm64), loads on stock
-distroless Envoy, records `aether_requests_total` with `response_flags` (UF on
-connect-refused), exported via the OTel sink. Agent wiring + chart image-volume
-done. Remaining: helm upgrade + e2e on talos. Phase 2 = inbound/destination-
-reported (peer URI SAN).
+Phase 1 + Phase 2 shipped and e2e-validated on talos-main (rev 93): emits both
+`reporter=source` (outbound) and `reporter=destination` (inbound, source parsed
+from the peer URI SAN). Phase 3 (in progress): request-duration histogram + SAN
+parser fuzz hardening; next is `destination_pod` behind `emit_pod` and a
+drop-attribution e2e. Deferred: cardinality cap + overflow bucket.

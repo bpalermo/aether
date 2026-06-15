@@ -16,6 +16,7 @@
 
 use envoy_proxy_dynamic_modules_rust_sdk::*;
 use serde::Deserialize;
+use std::time::Instant;
 
 declare_init_functions!(init, new_http_filter_config_fn);
 
@@ -57,6 +58,7 @@ pub struct FilterConfig {
     destination_service: String,
     mesh_domain: String,
     requests_total: EnvoyCounterVecId,
+    request_duration_ms: EnvoyHistogramVecId,
 }
 
 impl FilterConfig {
@@ -86,6 +88,17 @@ impl FilterConfig {
                 ],
             )
             .ok()?;
+        // Request-duration histogram. Deliberately a LEANER label set than the
+        // counter — a histogram multiplies series by its bucket count, so it
+        // omits source_pod/response_code/response_flags and keeps only the edge
+        // identity. Duration is measured in-module (no Envoy duration attribute
+        // is exposed to HTTP filters); the unit lives in the metric name.
+        let request_duration_ms = ec
+            .define_histogram_vec(
+                "aether_request_duration_milliseconds",
+                &["reporter", "source_service", "destination_service"],
+            )
+            .ok()?;
         Some(Self {
             reporter: c.reporter,
             source_service: c.source_service,
@@ -97,6 +110,7 @@ impl FilterConfig {
             destination_service: c.destination_service,
             mesh_domain: c.mesh_domain,
             requests_total,
+            request_duration_ms,
         })
     }
 }
@@ -110,6 +124,10 @@ impl<EHF: EnvoyHttpFilter> HttpFilterConfig<EHF> for FilterConfig {
             destination_service: self.destination_service.clone(),
             mesh_domain: self.mesh_domain.clone(),
             requests_total: self.requests_total,
+            request_duration_ms: self.request_duration_ms,
+            // Filters are created per stream at request start, so this is the
+            // earliest observable point for the request-duration measurement.
+            start: Instant::now(),
             dest_cluster: String::new(),
             local_reply_details: String::new(),
             recorded: false,
@@ -124,6 +142,8 @@ pub struct Filter {
     destination_service: String,
     mesh_domain: String,
     requests_total: EnvoyCounterVecId,
+    request_duration_ms: EnvoyHistogramVecId,
+    start: Instant,
     dest_cluster: String,
     local_reply_details: String,
     recorded: bool,
@@ -190,6 +210,14 @@ impl Filter {
                 response_flags,
             ],
             1,
+        );
+
+        // Request duration on the lean {reporter, source, destination} label set.
+        let elapsed_ms = self.start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let _ = envoy.record_histogram_value_vec(
+            self.request_duration_ms,
+            &[&self.reporter, &source_service, &destination_service],
+            elapsed_ms,
         );
     }
 
@@ -399,6 +427,8 @@ mod tests {
             destination_service: String::new(),
             mesh_domain: "aether.internal".to_string(),
             requests_total: EnvoyCounterVecId(0),
+            request_duration_ms: EnvoyHistogramVecId(0),
+            start: Instant::now(),
             dest_cluster: String::new(),
             local_reply_details: String::new(),
             recorded: false,
@@ -415,6 +445,8 @@ mod tests {
             destination_service: "checkout".to_string(),
             mesh_domain: "aether.internal".to_string(),
             requests_total: EnvoyCounterVecId(0),
+            request_duration_ms: EnvoyHistogramVecId(0),
+            start: Instant::now(),
             dest_cluster: String::new(),
             local_reply_details: String::new(),
             recorded: false,
@@ -528,7 +560,9 @@ mod tests {
 
     // Collects the label vector passed to increment_counter_vec so tests can
     // assert the exact (reporter, source_service, source_pod, destination,
-    // response_code, response_flags) tuple recorded.
+    // response_code, response_flags) tuple recorded. Also stubs the duration
+    // histogram record() always emits alongside the counter, so the strict mock
+    // does not fail on the unexpected call.
     fn expect_record(mock: &mut MockEnvoyHttpFilter) -> Arc<Mutex<Vec<String>>> {
         let labels = Arc::new(Mutex::new(Vec::new()));
         let sink = labels.clone();
@@ -538,6 +572,9 @@ mod tests {
                 *sink.lock().unwrap() = ls.iter().map(|s| s.to_string()).collect();
                 Ok(())
             });
+        mock.expect_record_histogram_value_vec()
+            .times(1)
+            .returning(|_id, _ls, _value| Ok(()));
         labels
     }
 
@@ -724,5 +761,79 @@ mod tests {
             *labels.lock().unwrap(),
             vec!["source", "cart", "cart-abc", "checkout", "503", "UF"]
         );
+    }
+
+    // ---- duration histogram ---------------------------------------------
+
+    #[test]
+    fn record_emits_duration_histogram_on_lean_labels() {
+        // The histogram carries only {reporter, source_service, destination_service}
+        // — not source_pod/response_code/response_flags — to bound bucket×label
+        // cardinality.
+        let mut mock = MockEnvoyHttpFilter::default();
+        mock.expect_get_attribute_int()
+            .times(1)
+            .returning(|_| Some(200));
+        mock.expect_increment_counter_vec()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        let hist_labels = Arc::new(Mutex::new(Vec::new()));
+        let sink = hist_labels.clone();
+        mock.expect_record_histogram_value_vec()
+            .times(1)
+            .returning(move |_id, ls, _value| {
+                *sink.lock().unwrap() = ls.iter().map(|s| s.to_string()).collect();
+                Ok(())
+            });
+
+        let mut f = test_filter();
+        f.dest_cluster = "checkout.aether.internal".to_string();
+        f.record(&mut mock);
+
+        assert_eq!(
+            *hist_labels.lock().unwrap(),
+            vec!["source", "cart", "checkout"]
+        );
+    }
+
+    // ---- spiffe_service fuzz/torture -------------------------------------
+
+    #[test]
+    fn spiffe_service_never_panics_on_adversarial_input() {
+        // The peer SAN is the only untrusted input. The parser must be total:
+        // never panic, always terminate, and only ever return a slice that is a
+        // substring of its input. Exercise pathological shapes plus a sweep of
+        // every single byte and some large/repetitive inputs.
+        let mut cases: Vec<String> = vec![
+            String::new(),
+            "spiffe://".to_string(),
+            "spiffe:///".to_string(),
+            "spiffe://td/sa".to_string(),
+            "spiffe://td/sa/".to_string(),
+            "sa/x".to_string(),
+            "/////".to_string(),
+            "spiffe://td/sa/svc/sa/other".to_string(),
+            "spiffe://td/ns//sa//".to_string(),
+            "\0\0\0".to_string(),
+            "spiffe://td/\u{0}/sa/\u{0}svc".to_string(),
+            "spiffe://td/ns/默认/sa/服务".to_string(),
+        ];
+        // Single-byte inputs (control chars, high bytes via lossy decode).
+        for b in 0u8..=255 {
+            cases.push(String::from_utf8_lossy(&[b]).into_owned());
+        }
+        // Large and repetitive shapes.
+        cases.push("a".repeat(1 << 20));
+        cases.push("/".repeat(100_000));
+        cases.push(format!("spiffe://td/{}/sa/svc", "x/".repeat(50_000)));
+        cases.push(format!("spiffe://td/ns/d/sa/{}", "s".repeat(1 << 20)));
+
+        for c in &cases {
+            if let Some(svc) = spiffe_service(c) {
+                // The result is always a non-empty substring of the input.
+                assert!(!svc.is_empty());
+                assert!(c.contains(svc));
+            }
+        }
     }
 }
