@@ -24,13 +24,12 @@ bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 bazel_dep(name = "rules_helm", version = "0.29.0")
 
-# Rust toolchain for in-tree dynamic modules (see docs/proposals/008), plus a
-# hermetic LLVM (clang/lld + glibc sysroots) that cross-compiles the proxy cdylib
-# for amd64/arm64 and supplies libclang to the SDK bindgen build script. The LLVM
-# toolchains are registered opt-in (only for //bazel/llvm/platform:linux_* via
-# the :hermetic constraint), so the default host C++ toolchain used by the
-# Go/protobuf builds is untouched — the same approach as the prior Zig setup.
-bazel_dep(name = "rules_rust", version = "0.70.0")
+# Hermetic LLVM C/C++ toolchain (clang/lld + glibc sysroots). The Rust toolchain
+# and the Envoy/proxy-module build that originally drove this moved to the
+# separate //proxy workspace (proposal 010); LLVM is retained here for the C/C++
+# toolchain it provides. (Follow-up: confirm via cquery whether any aether target
+# still resolves it; if nothing does, this and the sysroots/llvm extensions below
+# can be pruned too.)
 bazel_dep(name = "toolchains_llvm", version = "1.7.0")
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
@@ -160,90 +159,12 @@ pull(
     tag = "nonroot",
 )
 
-# Base for the custom aether-proxy image (//proxy:image): distroless/cc ships
-# libstdc++ + libgcc_s + glibc, which the Envoy binary and the Rust dynamic
-# module need at runtime (the Envoy distroless image is built on distroless/base
-# and lacks libgcc_s, so the module's unwinder fails to load there). debian12
-# matches the Envoy release's glibc.
-pull(
-    name = "distroless_cc",
-    digest = "sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985",
-    layer_handling = "lazy",
-    registry = "gcr.io",
-    repository = "distroless/cc-debian12",
-    # nonroot variant (USER 65532), mirroring the official distroless default. The
-    # chart's privileged securityContext still overrides to uid 0 at runtime for
-    # the data plane; this just keeps the image's own default nonroot.
-    tag = "nonroot",
-)
-
-# --- Rust toolchains (in-tree dynamic modules; see docs/proposals/008) ---
-
-rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
-rust.toolchain(
-    edition = "2021",
-    versions = ["1.83.0"],
-)
-use_repo(rust, "rust_toolchains")
-
-register_toolchains("@rust_toolchains//:all")
-
-# Envoy artifacts — abi.h header + the official Envoy release binaries baked into
-# //proxy:image, all version-pinned via ENVOY_VERSION (see //bazel/envoy).
-envoy = use_extension("//bazel/envoy:extensions.bzl", "envoy")
-use_repo(envoy, "envoy_abi_h", "envoy_bin_amd64", "envoy_bin_arm64")
-
-# Rust crate graph for the proxy dynamic modules (proposal 007), resolved from
-# proxy/filters/http/aether_stats's Cargo.toml/Cargo.lock — includes the Envoy SDK as a
-# git dep (not vendored). Must use the rules_rust crate extension directly:
-# crate_universe wires the rust toolchain's cargo/rustc into the generated repo,
-# which a hand-wrapped crates_repository cannot reach. The SDK build script
-# (bindgen) hard-codes ../../abi/abi.h, outside the crate package; the patch
-# redirects it to AETHER_ABI_H, fed the fetched header via the main-repo alias
-# //proxy/filters/http/aether_stats:abi_h.
-crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
-crate.annotation(
-    # Hermetic bindgen: the SDK build script parses abi.h with the hermetic LLVM
-    # libclang + a hermetic glibc sysroot — no host clang/headers (see the patch).
-    # Routed through the MAIN repo (//bazel/llvm) — the crate_universe-generated
-    # SDK repo can't see external repos by apparent name. The clang resource +
-    # libc++ headers come in via the (now default) LLVM cc toolchain that
-    # cargo_build_script pulls in (re-supplying them here would collide on the
-    # include/c++ dir). The amd64 sysroot tree IS supplied explicitly: the
-    # toolchain only stages the cdylib *target* arch's sysroot, so on the arm64
-    # image leg the amd64 sysroot bindgen always uses would otherwise be absent.
-    build_script_data = [
-        "@@//proxy/filters/http/aether_stats:abi_h",
-        "@@//bazel/llvm:libclang",  # libclang soname chain present in the sandbox
-        "@@//bazel/llvm:libclang_so",  # the file LIBCLANG_PATH points at
-        "@@//bazel/llvm:sysroot_amd64",  # full amd64 sysroot tree (toolchain only
-        # stages the cdylib target arch's sysroot; bindgen always uses amd64)
-        "@@//bazel/llvm:sysroot_amd64_marker",  # sysroot-root marker for --sysroot
-    ],
-    build_script_env = {
-        "AETHER_ABI_H": "$(execpath @@//proxy/filters/http/aether_stats:abi_h)",
-        # clang-sys accepts a file path for LIBCLANG_PATH — pins libclang hermetically.
-        "LIBCLANG_PATH": "$(execpath @@//bazel/llvm:libclang_so)",
-        # The patch three-parents this marker to derive --sysroot.
-        "AETHER_SYSROOT": "$(execpath @@//bazel/llvm:sysroot_amd64_marker)",
-        # Pin bindgen's clang target to the (x86_64) sysroot we feed via --sysroot.
-        # cargo_build_script otherwise sets TARGET to the cdylib's arch (e.g.
-        # aarch64 for the arm64 image leg), making clang look for an aarch64
-        # multiarch dir inside the amd64 sysroot (bits/libc-header-start.h not
-        # found). The dynamic-module ABI is arch-neutral (LP64), so x86_64
-        # bindings are valid for the arm64 .so too. Appended last, so it wins.
-        "BINDGEN_EXTRA_CLANG_ARGS": "--target=x86_64-unknown-linux-gnu",
-    },
-    crate = "envoy-proxy-dynamic-modules-rust-sdk",
-    patch_args = ["-p1"],
-    patches = ["@@//proxy/filters/http/aether_stats/patches:sdk_abi_header.patch"],
-)
-crate.from_cargo(
-    name = "crates",
-    cargo_lockfile = "//proxy/filters/http/aether_stats:Cargo.lock",
-    manifests = ["//proxy/filters/http/aether_stats:Cargo.toml"],
-)
-use_repo(crate, "crates")
+# NOTE: the custom aether-proxy image (distroless/cc base + custom Envoy + the
+# aether_stats dynamic module) and all its build wiring — the Rust toolchain, the
+# crate_universe graph, the Envoy abi.h/binary fetches — moved to the separate
+# //proxy workspace (proposal 010), which is listed in //.bazelignore. aether no
+# longer builds the proxy image; the chart references the published image (see
+# charts/agent/values.yaml).
 
 # Hermetic glibc sysroots (chromium bullseye, glibc 2.31 <= the proxy distroless
 # base) for the LLVM toolchain and the SDK bindgen — see //bazel/llvm.

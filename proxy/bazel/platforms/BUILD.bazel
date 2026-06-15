@@ -1,0 +1,16 @@
+# RBE execution platform for BuildBuddy.
+#
+# Inherits Envoy's RBE platform (@clang_platform = @envoy//bazel/platforms/rbe:
+# linux_x64) — keeping its container-image (the Envoy build image), docker
+# capabilities, and privileged flag, all of which BuildBuddy accepts — but
+# overrides the one property BuildBuddy rejects: Envoy sets dockerNetwork
+# "standard" (an EngFlow value); BuildBuddy errors with "Unsupported dockerNetwork
+# property value: standard". Hermetic RBE actions don't need network, so "off".
+platform(
+    name = "rbe_buildbuddy",
+    exec_properties = {
+        "dockerNetwork": "off",
+    },
+    parents = ["@envoy//bazel/platforms/rbe:linux_x64"],
+    visibility = ["//visibility:public"],
+)

@@ -88,3 +88,15 @@ push-all: push-agent-image push-cni-install-image push-registrar-image
 publish: push-all
 	@bazel run //charts/agent:agent.push_registry --stamp
 	@bazel run //charts/registrar:registrar.push_registry --stamp
+
+# --- Custom proxy (separate Bazel workspace under proxy/; see proposal 010) ---
+# These run inside proxy/ so its own Bazel version (.bazelversion=7.7.1) is used.
+# NOTE: building the proxy compiles Envoy from source (multi-hour); use a warm
+# cache / CI.
+.PHONY: load-proxy-image
+load-proxy-image:
+	@cd proxy && bazel run //:load
+
+.PHONY: push-proxy-image
+push-proxy-image:
+	@cd proxy && bazel run //:push --stamp
