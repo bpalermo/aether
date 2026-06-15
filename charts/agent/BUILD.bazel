@@ -14,10 +14,13 @@ load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_templat
 helm_chart(
     name = "agent",
     chart = "Chart.yaml",
+    # NOTE: the custom aether-proxy image moved to the separate //proxy workspace
+    # (proposal 010), so it is no longer built/pushed here. The chart references
+    # the externally-published proxy image by tag (see values.yaml proxy.image.ref);
+    # follow-up: digest-pin it via a proxy-CI bump.
     images = [
         "//agent/cmd/agent:image_push",
         "//cni/cmd/cni-install:image_push",
-        "//proxy:image_push",
     ],
     login_url = "ghcr.io",
     registry_url = "oci://ghcr.io/bpalermo/aether/charts",

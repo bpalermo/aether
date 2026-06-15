@@ -1,0 +1,93 @@
+# aether-proxy: a SEPARATE Bazel workspace that builds a custom Envoy.
+#
+# This workspace is independent of the root aether bzlmod workspace — it is
+# listed in the root //.bazelignore, so `bazel build //...` / Gazelle in the repo
+# root never descend here. Build it explicitly: `cd proxy && bazel build //:image`.
+# It pins its own Bazel version (.bazelversion = 7.7.1, required by Envoy 1.38's
+# WORKSPACE build) and uses Envoy's own (pre-bzlmod) dependency macro chain.
+#
+# The Envoy macro sequence below mirrors envoyproxy/envoy@v1.38.0's WORKSPACE
+# exactly (incl. envoy_bazel_dependencies / envoy_repo / envoy_toolchains — the
+# latter registers the hermetic LLVM toolchain + @clang_platform, so no local
+# clang is needed). Modeled on github.com/bpalermo/istio-proxy. See proposal 010.
+workspace(name = "github_com_bpalermo_aether_proxy")
+
+# Our http_archives: container_structure_test, rules_oci, and the @envoy source
+# archive (pinned in //bazel/envoy:repository.bzl).
+load("//bazel:repositories.bzl", "repositories")
+
+repositories()
+
+# The curated compiled-in Envoy extension set (//bazel/extension_config), read by
+# Envoy via the @envoy_build_config repo.
+local_repository(
+    name = "envoy_build_config",
+    path = "bazel/extension_config",
+)
+
+# --- Envoy dependency macro chain (matches @envoy//WORKSPACE at v1.38.0) ---
+load("@envoy//bazel:api_binding.bzl", "envoy_api_binding")
+
+envoy_api_binding()
+
+load("@envoy//bazel:api_repositories.bzl", "envoy_api_dependencies")
+
+envoy_api_dependencies()
+
+load("@envoy//bazel:repositories.bzl", "envoy_dependencies")
+
+envoy_dependencies()
+
+load("@envoy//bazel:bazel_deps.bzl", "envoy_bazel_dependencies")
+
+envoy_bazel_dependencies()
+
+load("@envoy//bazel:repositories_extra.bzl", "envoy_dependencies_extra")
+
+envoy_dependencies_extra()
+
+load("@envoy//bazel:python_dependencies.bzl", "envoy_python_dependencies")
+
+envoy_python_dependencies()
+
+load("@envoy//bazel:dependency_imports.bzl", "envoy_dependency_imports")
+
+envoy_dependency_imports()
+
+load("@envoy//bazel:repo.bzl", "envoy_repo")
+
+envoy_repo()
+
+# Registers Envoy's hermetic LLVM C/C++ toolchain (+ @clang_platform). This is
+# what lets --config=clang build with no local clang installed.
+load("@envoy//bazel:toolchains.bzl", "envoy_toolchains")
+
+envoy_toolchains()
+
+load("@envoy//bazel:dependency_imports_extra.bzl", "envoy_dependency_imports_extra")
+
+envoy_dependency_imports_extra()
+
+# --- Our packaging toolchains (rules_oci + container_structure_test) ---
+# Run after the Envoy chain so Envoy's versions of shared deps (bazel_features,
+# bazel_skylib, …) win; rules_oci's later definitions are no-ops for those.
+load("@rules_oci//oci:dependencies.bzl", "rules_oci_dependencies")
+
+rules_oci_dependencies()
+
+load("@container_structure_test//:repositories.bzl", "container_structure_test_register_toolchain")
+
+container_structure_test_register_toolchain(name = "cst")
+
+load("@rules_oci//oci:repositories.bzl", "oci_register_toolchains")
+
+oci_register_toolchains(name = "oci")
+
+load("//bazel/oci:images.bzl", "oci_images")
+
+oci_images()
+
+# NOTE: filter customization (the aether_stats Rust dynamic module + its
+# crate_universe/bindgen wiring) is intentionally NOT built yet — the first goal
+# is a vanilla custom Envoy that builds. The module is re-wired in the follow-up
+# (proposal 010). Its source is parked under filters/http/aether_stats/.

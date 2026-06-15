@@ -1,0 +1,67 @@
+# Keep envoy.bazelrc up-to-date by running:
+#   curl -sSL https://raw.githubusercontent.com/envoyproxy/envoy/v1.38.0/.bazelrc > envoy.bazelrc
+import %workspace%/envoy.bazelrc
+
+# Build the custom Envoy with Envoy's hermetic LLVM toolchain (clang + libc++ via
+# @toolchains_llvm / @clang_platform) — no local clang needed. --config=clang is
+# defined in envoy.bazelrc; --enable_platform_specific_config (also from there)
+# applies the :linux config automatically on Linux hosts.
+build:linux --config=clang
+
+# Optimized, stripped release build — the binary baked into the proxy image.
+# Plain `bazel build //:image` is fastbuild (dev); image build paths (CI, the
+# Makefile load/push targets, the README) pass --config=release to bake the
+# optimized binary.
+build:release -c opt
+build:release --strip=always
+
+# Release build: optimized, stripped (used by CI to produce the image binary).
+build:ci --config=release
+# BuildBuddy invocation metadata (https://www.buildbuddy.io/docs/guide-metadata).
+# Dynamic metadata (COMMIT_SHA/REPO_URL/BRANCH_NAME) is passed by the CI workflow.
+build:ci --build_metadata=ROLE=CI
+build:ci --build_metadata=VISIBILITY=PUBLIC
+build:ci --color=yes
+common:ci --noshow_progress
+common:ci --noshow_loading_progress
+common:ci --test_output=errors
+
+# BuildBuddy Remote Build Execution (RBE) — self-contained: remote executor +
+# cache + BES all on BuildBuddy. Invoke with `--config=rbe-buildbuddy`.
+#
+# Reuses Envoy's hermetic `--config=clang`, whose exec/host platform
+# @clang_platform (= @envoy//bazel/platforms/rbe:linux_x64) already declares the
+# container-image exec property (the Envoy build image, via image_worker()) plus
+# the docker capabilities (SYS_PTRACE/NET_RAW/NET_ADMIN, privileged) the build
+# needs — so BuildBuddy executors run every action in the right container with no
+# extra platform wiring.
+#
+# NOTE: do NOT use Envoy's `--config=remote-cache` here — in v1.38.0 that name is
+# Envoy's own EngFlow cache (mordenite.cluster.engflow.com), not BuildBuddy.
+#
+# Auth is a secret, so it lives in user.bazelrc (gitignored), one line:
+#   build:rbe-buildbuddy --remote_header=x-buildbuddy-api-key=YOUR_ORG_API_KEY
+build:rbe-buildbuddy --config=clang
+# Override the exec/host platform to fix dockerNetwork for BuildBuddy (the only
+# Envoy RBE exec property BuildBuddy rejects). Comes after --config=clang so it
+# wins over that config's --host_platform=@clang_platform.
+build:rbe-buildbuddy --host_platform=//bazel/platforms:rbe_buildbuddy
+build:rbe-buildbuddy --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy
+build:rbe-buildbuddy --remote_executor=grpcs://remote.buildbuddy.io
+build:rbe-buildbuddy --remote_cache=grpcs://remote.buildbuddy.io
+build:rbe-buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
+build:rbe-buildbuddy --bes_results_url=https://app.buildbuddy.io/invocation/
+# Shrink the uploaded build event stream: drop duplicate file references.
+build:rbe-buildbuddy --nolegacy_important_outputs
+build:rbe-buildbuddy --remote_cache_compression
+# Don't ZSTD-compress blobs < 100 bytes (compression would inflate them).
+build:rbe-buildbuddy --experimental_remote_cache_compression_threshold=100
+build:rbe-buildbuddy --remote_timeout=3600s
+build:rbe-buildbuddy --grpc_keepalive_time=30s
+build:rbe-buildbuddy --jobs=200
+build:rbe-buildbuddy --remote_download_toplevel
+build:rbe-buildbuddy --spawn_strategy=remote,local
+# Richer timing profile in the BuildBuddy UI (per-target/output detail).
+build:rbe-buildbuddy --noslim_profile
+build:rbe-buildbuddy --experimental_profile_include_target_label
+build:rbe-buildbuddy --experimental_profile_include_primary_output

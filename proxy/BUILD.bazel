@@ -1,87 +1,78 @@
-# Custom aether-proxy image: distroless/cc base + the official Envoy binary +
-# baked-in dynamic modules. Lives at //proxy (not under a specific filter) so
-# future proxy customizations — additional dynamic modules, bootstrap assets —
-# append to the same image rather than forking a new one.
-#
-# Base is gcr.io/distroless/cc (not the stock envoyproxy/envoy:distroless, which
-# is built on distroless/base and lacks libgcc_s.so.1): cc ships libstdc++ +
-# libgcc_s + glibc, which the Envoy binary and the Rust dynamic module's unwinder
-# both need at runtime. The Envoy binary and abi.h are version-pinned via
-# //bazel/envoy ENVOY_VERSION; keep in lockstep with the SDK git tag
-# (proxy/filters/http/aether_stats/Cargo.toml). The //bazel/llvm/platform:linux_*
-# platforms cross-build the module .so with the hermetic LLVM toolchain against an
-# old glibc sysroot (max symbol GLIBC_2.18) so it loads on the base.
+load("@container_structure_test//:defs.bzl", "container_structure_test")
+load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_binary")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
-load("@rules_img//img:image.bzl", "image_index", "image_manifest")
-load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
-load("@rules_img//img:load.bzl", "image_load")
-load("@rules_img//img:push.bzl", "image_push")
+# Custom aether Envoy. The compiled-in extension set comes from
+# //bazel/extension_config (extensions_build_config.bzl). Our own C++/Rust
+# compiled extensions get appended to AETHER_EXTENSIONS as the proposal-010
+# follow-up; today it's a vanilla custom build (same extensions as upstream).
+AETHER_EXTENSIONS = []
 
-# The official Envoy release binary (per-arch via //bazel/envoy:envoy_bin select).
-image_layer(
-    name = "envoy_layer",
-    srcs = {"/usr/local/bin/envoy": "//bazel/envoy:envoy_bin"},
-    compress = "zstd",
-    default_metadata = file_metadata(mode = "0755"),
-    include_runfiles = False,
-)
-
-# aether_stats module .so at /modules, where the proxy loads it via the
-# baked-in ENVOY_DYNAMIC_MODULES_SEARCH_PATH. Future modules add layers here.
-image_layer(
-    name = "stats_filter_layer",
-    srcs = {"/modules/libaether_stats.so": "//proxy/filters/http/aether_stats:aether_stats"},
-    compress = "zstd",
-    default_metadata = file_metadata(mode = "0644"),
-    include_runfiles = False,
-)
-
-image_manifest(
-    name = "image_manifest",
-    base = "@distroless_cc",
-    # distroless/cc has no default entrypoint (the stock Envoy image did); set it
-    # so the image behaves like envoyproxy/envoy. The chart overrides command for
-    # the hot-restart supervisor, but keep this for parity + direct `docker run`.
-    entrypoint = ["/usr/local/bin/envoy"],
-    # Self-contained: the module search path is baked in, so the proxy loads
-    # /modules/*.so with no chart-supplied env and no K8s image volume (drops the
-    # containerd >= 2.0 image-volume runtime dependency). libgcc_s/libstdc++ come
-    # from the distroless/cc base, on the default loader path (no LD_LIBRARY_PATH).
-    env = {"ENVOY_DYNAMIC_MODULES_SEARCH_PATH": "/modules"},
-    layers = [
-        ":envoy_layer",
-        ":stats_filter_layer",
+envoy_cc_binary(
+    name = "envoy",
+    repository = "@envoy",
+    deps = AETHER_EXTENSIONS + [
+        "@envoy//source/exe:envoy_main_entry_lib",
     ],
-    visibility = ["//visibility:private"],
 )
 
-image_index(
+# The custom Envoy binary at /usr/local/bin/envoy.
+pkg_tar(
+    name = "envoy_tar",
+    srcs = [":envoy"],
+    extension = "tar.gz",
+    mode = "0755",
+    owner = "0.0",
+    package_dir = "/usr/local/bin/",
+    tags = ["manual"],
+)
+
+# Custom aether-proxy image: distroless/cc base + the custom Envoy binary. The
+# aether_stats dynamic module is intentionally not baked in yet (filter
+# customization is unwired until the proposal-010 follow-up); this is a vanilla
+# custom Envoy image, which is the current build goal.
+oci_image(
     name = "image",
-    manifests = [":image_manifest"],
-    platforms = [
-        "//bazel/llvm/platform:linux_amd64",
-        "//bazel/llvm/platform:linux_arm64",
+    base = "@distroless_cc",
+    entrypoint = ["/usr/local/bin/envoy"],
+    tars = [
+        ":envoy_tar",
     ],
     visibility = ["//visibility:public"],
+    workdir = "/",
 )
 
-image_push(
-    name = "image_push",
+oci_push(
+    name = "push",
     image = ":image",
-    registry = "ghcr.io",
-    repository = "bpalermo/aether/aether-proxy",
-    tag_list = [
-        "{{if (eq .GIT_BRANCH \"main\")}}dev{{else}}{{.GIT_COMMIT}}{{end}}",
-        "{{if .GIT_COMMIT}}{{.GIT_COMMIT}}{{end}}",
-    ],
-    visibility = ["//visibility:public"],
+    remote_tags = ["dev"],
+    repository = "ghcr.io/bpalermo/aether/aether-proxy",
 )
 
-# Loads the custom proxy image into the local Docker daemon (for the e2e suite
-# and local validation) under its registry-qualified ref.
-image_load(
-    name = "image_load",
+oci_load(
+    name = "load",
     image = ":image",
-    tag = "ghcr.io/bpalermo/aether/aether-proxy:latest",
-    visibility = ["//visibility:public"],
+    repo_tags = ["ghcr.io/bpalermo/aether/aether-proxy:latest"],
+)
+
+# Materialize the loadable image tarball for the structure test. rules_oci only
+# produces the tar via the `tarball` output group (it's expensive), so extract it
+# with a filegroup rather than referencing a (non-existent) :load.tar target.
+filegroup(
+    name = "image_tarball",
+    srcs = [":load"],
+    output_group = "tarball",
+)
+
+# PR gate (`bazel test //...`): builds the custom Envoy + image on RBE and
+# validates the image's structure. The `tar` driver runs against the image
+# tarball directly — no docker daemon, RBE-friendly. (No unit tests yet — the
+# aether_stats filter is parked; its rust_test rejoins //... when re-wired.)
+container_structure_test(
+    name = "image_test",
+    configs = ["//integration:image.yaml"],
+    driver = "tar",
+    # The tar driver needs a .tar, not the oci_image — the oci_load tarball.
+    image = ":image_tarball",
 )

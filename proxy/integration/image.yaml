@@ -1,0 +1,15 @@
+schemaVersion: "2.0.0"
+
+# Smoke checks for the custom aether-proxy image (//:image_test).
+fileExistenceTests:
+  - name: envoy binary
+    path: /usr/local/bin/envoy
+    shouldExist: true
+    permissions: "-rwxr-xr-x"
+
+metadataTest:
+  entrypoint: ["/usr/local/bin/envoy"]
+
+# NOTE: no commandTests — the tar driver can't execute binaries (no container
+# runtime). Building from pinned v1.38.0 source already guarantees the version;
+# these structure checks confirm the binary is baked in + the entrypoint is set.

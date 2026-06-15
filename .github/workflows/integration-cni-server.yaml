@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "proxy/**"
 
 permissions:
   contents: read
