@@ -4,7 +4,7 @@ The single source of truth for the Envoy version (ENVOY_VERSION) — the abi.h
 fetch and the official Envoy release binary (baked into the custom aether-proxy
 image, //proxy:image) all derive their URLs from here, keeping the version out of
 MODULE.bazel. On an Envoy upgrade bump ENVOY_VERSION + the sha256s below, and the
-SDK git tag in proxy/filters/telemetry/Cargo.toml (a static manifest that can't
+SDK git tag in proxy/filters/http/aether_stats/Cargo.toml (a static manifest that can't
 read this).
 """
 
@@ -29,7 +29,7 @@ _ENVOY_BIN = {
 def _envoy_impl(_module_ctx):
     # The dynamic-modules ABI header. The SDK's bindgen build script reads it
     # via AETHER_ABI_H (the crate.annotation in MODULE.bazel); re-exported as
-    # the main-repo alias //proxy/filters/telemetry:abi_h.
+    # the main-repo alias //proxy/filters/http/aether_stats:abi_h.
     http_file(
         name = "envoy_abi_h",
         downloaded_file_path = "abi.h",

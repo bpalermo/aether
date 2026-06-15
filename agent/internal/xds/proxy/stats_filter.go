@@ -17,7 +17,7 @@ const (
 	statsFilterName = "aether.stats"
 	// statsModuleName is the dynamic module basename: the proxy loads
 	// lib<name>.so from ENVOY_DYNAMIC_MODULES_SEARCH_PATH (the image volume).
-	statsModuleName = "aether_stats_filter"
+	statsModuleName = "aether_stats"
 	// statsFilterEntry is the filter_name the module dispatches on.
 	statsFilterEntry = "stats"
 )

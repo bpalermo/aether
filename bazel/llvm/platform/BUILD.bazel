@@ -2,7 +2,7 @@
 # hermetic LLVM toolchain (clang + lld + the matching glibc sysroot, registered
 # in MODULE.bazel) is selected per cpu/os — replacing the prior
 # @zig_sdk//libc_aware/platform:* targets. Build the .so for an arch with, e.g.:
-#   bazel build //proxy/filters/telemetry:aether_telemetry \
+#   bazel build //proxy/filters/http/aether_stats:aether_stats \
 #     --platforms=//bazel/llvm/platform:linux_amd64
 
 platform(

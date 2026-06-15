@@ -215,7 +215,7 @@ Requires a runtime with image-volume support (containerd ≥ 2.0) — verify on 
 The Bazel Rust + hermetic_cc toolchain layer this builds on is its own change,
 [proposal 008](008_rust-in-bazel.md) (the stacked base PR).
 
-`proxy/filters/telemetry/` (crate `aether_telemetry`, cdylib) built against the in-tree
+`proxy/filters/http/aether_stats/` (crate `aether_telemetry`, cdylib) built against the in-tree
 SDK at the v1.38.0 tag and **loaded into stock `envoyproxy/envoy:distroless-v1.38.0`
 via a volume-mounted `.so` + `libgcc_s.so.1`** (no custom image). Driving traffic
 through a 200 path and a connect-refused 503 path produced, in `/stats` and via

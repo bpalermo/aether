@@ -194,13 +194,13 @@ envoy = use_extension("//bazel/envoy:extensions.bzl", "envoy")
 use_repo(envoy, "envoy_abi_h", "envoy_bin_amd64", "envoy_bin_arm64")
 
 # Rust crate graph for the proxy dynamic modules (proposal 007), resolved from
-# proxy/filters/telemetry's Cargo.toml/Cargo.lock — includes the Envoy SDK as a
+# proxy/filters/http/aether_stats's Cargo.toml/Cargo.lock — includes the Envoy SDK as a
 # git dep (not vendored). Must use the rules_rust crate extension directly:
 # crate_universe wires the rust toolchain's cargo/rustc into the generated repo,
 # which a hand-wrapped crates_repository cannot reach. The SDK build script
 # (bindgen) hard-codes ../../abi/abi.h, outside the crate package; the patch
 # redirects it to AETHER_ABI_H, fed the fetched header via the main-repo alias
-# //proxy/filters/telemetry:abi_h.
+# //proxy/filters/http/aether_stats:abi_h.
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.annotation(
     # Hermetic bindgen: the SDK build script parses abi.h with the hermetic LLVM
@@ -213,7 +213,7 @@ crate.annotation(
     # toolchain only stages the cdylib *target* arch's sysroot, so on the arm64
     # image leg the amd64 sysroot bindgen always uses would otherwise be absent.
     build_script_data = [
-        "@@//proxy/filters/telemetry:abi_h",
+        "@@//proxy/filters/http/aether_stats:abi_h",
         "@@//bazel/llvm:libclang",  # libclang soname chain present in the sandbox
         "@@//bazel/llvm:libclang_so",  # the file LIBCLANG_PATH points at
         "@@//bazel/llvm:sysroot_amd64",  # full amd64 sysroot tree (toolchain only
@@ -221,7 +221,7 @@ crate.annotation(
         "@@//bazel/llvm:sysroot_amd64_marker",  # sysroot-root marker for --sysroot
     ],
     build_script_env = {
-        "AETHER_ABI_H": "$(execpath @@//proxy/filters/telemetry:abi_h)",
+        "AETHER_ABI_H": "$(execpath @@//proxy/filters/http/aether_stats:abi_h)",
         # clang-sys accepts a file path for LIBCLANG_PATH — pins libclang hermetically.
         "LIBCLANG_PATH": "$(execpath @@//bazel/llvm:libclang_so)",
         # The patch three-parents this marker to derive --sysroot.
@@ -236,12 +236,12 @@ crate.annotation(
     },
     crate = "envoy-proxy-dynamic-modules-rust-sdk",
     patch_args = ["-p1"],
-    patches = ["@@//proxy/filters/telemetry/patches:sdk_abi_header.patch"],
+    patches = ["@@//proxy/filters/http/aether_stats/patches:sdk_abi_header.patch"],
 )
 crate.from_cargo(
     name = "crates",
-    cargo_lockfile = "//proxy/filters/telemetry:Cargo.lock",
-    manifests = ["//proxy/filters/telemetry:Cargo.toml"],
+    cargo_lockfile = "//proxy/filters/http/aether_stats:Cargo.lock",
+    manifests = ["//proxy/filters/http/aether_stats:Cargo.toml"],
 )
 use_repo(crate, "crates")
 

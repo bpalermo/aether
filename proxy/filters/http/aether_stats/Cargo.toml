@@ -1,5 +1,5 @@
 [package]
-name = "aether_stats_filter"
+name = "aether_stats"
 version = "0.1.0"
 edition = "2021"
 description = "Aether stats Envoy dynamic module — source->destination request metrics (proposal 007)"
@@ -15,5 +15,5 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [lib]
-name = "aether_stats_filter"
+name = "aether_stats"
 crate-type = ["cdylib"]

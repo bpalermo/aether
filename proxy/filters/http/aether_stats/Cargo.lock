@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "aether_stats_filter"
+name = "aether_stats"
 version = "0.1.0"
 dependencies = [
  "envoy-proxy-dynamic-modules-rust-sdk",
