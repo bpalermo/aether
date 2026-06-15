@@ -1,0 +1,75 @@
+{
+  "name": "Aether",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // Order matters: docker-in-docker first so kind/testcontainers have a
+  // daemon; node before claude-code (the feature needs a Node runtime).
+  "features": {
+    // Docker daemon inside the container, for `bazel run //...:image_load`
+    // (rules_img) and the testcontainers-go integration tests (etcd,
+    // DynamoDB Local). kind also talks to this daemon.
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "moby": true
+    },
+    // Host Go matching go.mod (rules_go is hermetic, but this powers gopls
+    // and `bazel run @rules_go//go get`).
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.26.2"
+    },
+    // Bazelisk -> bazel; reads .bazelversion (9.1.1) automatically.
+    "ghcr.io/devcontainers-extra/features/bazelisk:1": {},
+    // kubectl + helm for the charts/ and e2e workflows (skip minikube; we use kind).
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "version": "latest",
+      "helm": "latest",
+      "minikube": "none"
+    },
+    // kind: the e2e suite (test/e2e) spins up a kind cluster.
+    "ghcr.io/devcontainers-extra/features/kind:1": {},
+    // Node runtime for Claude Code.
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    },
+    // Claude Code CLI.
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+  },
+
+  // Persist the Bazel cache across container rebuilds — a cold Aether build
+  // (LLVM sysroots, Rust + Go SDKs, Envoy) is expensive to redownload.
+  "mounts": [
+    "source=aether-bazel-cache,target=/home/vscode/.cache/bazel,type=volume"
+  ],
+
+  // The bind-mounted workspace and the cache volume are owned by root until
+  // chowned; fix ownership for the non-root user.
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.cache/bazel && bazel version",
+
+  "remoteUser": "vscode",
+
+  "customizations": {
+    // IntelliJ IDEA Ultimate backend (JetBrains Gateway / Remote Dev).
+    "jetbrains": {
+      "backend": "IntelliJ",
+      "plugins": [
+        // Bazel via BSP — matches the repo's .bazelbsp/ project + aspects.
+        "org.jetbrains.bazel",
+        // Go support in IDEA Ultimate.
+        "org.jetbrains.plugins.go",
+        // Protobuf editing for api/*.proto.
+        "idea.plugin.protoeditor",
+        // Kubernetes + Helm chart support for charts/ and e2e.
+        "com.intellij.kubernetes"
+      ]
+    }
+  },
+
+  // The JetBrains backend IDE runs in-container on top of an already
+  // memory-hungry build (Bazel image builds, LLVM cross-compile), so give it
+  // more headroom than a VS Code setup would need.
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "12gb"
+  }
+}
