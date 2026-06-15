@@ -1,6 +1,6 @@
 load("@container_structure_test//:defs.bzl", "container_structure_test")
 load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_binary")
-load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_image_index", "oci_load", "oci_push")
 load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
 # Custom aether Envoy. The compiled-in extension set comes from
@@ -30,8 +30,8 @@ pkg_tar(
 
 # Custom aether-proxy image: distroless/cc base + the custom Envoy binary. The
 # aether_stats dynamic module is intentionally not baked in yet (filter
-# customization is unwired until the proposal-010 follow-up); this is a vanilla
-# custom Envoy image, which is the current build goal.
+# customization is unwired until the proposal-010 follow-up). This is the
+# single-arch image; the oci_image_index below builds it for amd64 + arm64.
 oci_image(
     name = "image",
     base = "@distroless_cc",
@@ -43,9 +43,23 @@ oci_image(
     workdir = "/",
 )
 
+# Multi-arch image. The transition cross-compiles the Envoy binary for each
+# platform (Envoy's hermetic toolchain ships the aarch64 sysroot + libcxx).
+oci_image_index(
+    name = "image_index",
+    images = [":image"],
+    platforms = [
+        "@envoy//bazel/platforms:linux_x64",
+        "@envoy//bazel/platforms:linux_arm64",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Pushes the multi-arch index. The release workflow appends a commit-pinned tag
+# (dev-<sha>) at push time via `bazel run //:push -- --tag dev-<commit>`.
 oci_push(
     name = "push",
-    image = ":image",
+    image = ":image_index",
     remote_tags = ["dev"],
     repository = "ghcr.io/bpalermo/aether/aether-proxy",
 )

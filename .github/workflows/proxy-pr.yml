@@ -36,8 +36,9 @@ jobs:
           repository-cache: true
 
       - name: Test (BuildBuddy RBE)
-        # The compile runs remotely on BuildBuddy. //... runs the build_test (which
-        # compiles the custom Envoy + assembles the image) plus any unit tests.
+        # The compile runs remotely on BuildBuddy. //... runs //:image_test (compiles
+        # the amd64 Envoy + validates the image). //:image_index additionally builds
+        # the arm64 cross-compile so multi-arch breakage is caught pre-merge.
         # --config=ci adds the release build + static BuildBuddy metadata; dynamic
         # metadata (https://www.buildbuddy.io/docs/guide-metadata) is attached here.
         run: |
@@ -48,4 +49,4 @@ jobs:
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
-            //...
+            //... //:image_index
