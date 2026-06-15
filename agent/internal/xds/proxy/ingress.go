@@ -117,10 +117,14 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("inbound", buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort)))
 	// Liveness/readiness are answered locally before the router; everything else
-	// passes through to the pod's application.
+	// passes through to the pod's application. The stats filter sits after the
+	// health-check filters (so locally-answered probe requests are not counted)
+	// and before the router, recording the destination-reported edge at the log
+	// phase (proposal 007 Phase 2).
 	hcm.HttpFilters = []*http_connection_managerv3.HttpFilter{
 		buildLivenessHealthCheckFilter(),
 		buildReadinessHealthCheckFilter(HealthProbeClusterName(cniPod)),
+		inboundStatsFilter(cniPod),
 		routerHttpFilter(),
 	}
 	// SANITIZE_SET replaces any client-supplied XFCC with details derived from the
