@@ -43,9 +43,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build + push image (BuildBuddy RBE)
-        # The compile runs remotely; oci_push runs on the runner (the image is
-        # downloaded via --remote_download_toplevel from --config=rbe-buildbuddy).
-        # --config=ci bakes the optimized/stripped binary + adds static metadata.
+        # The amd64 + arm64 compiles run remotely; oci_push (the multi-arch index)
+        # runs on the runner (the image is downloaded via --remote_download_toplevel
+        # from --config=rbe-buildbuddy). --config=ci bakes the optimized/stripped
+        # binary. `--tag dev-<sha>` adds a commit-pinned tag alongside the BUILD-time
+        # "dev" tag (oci_push applies both).
         run: |
           bazel run \
             --config=ci \
@@ -54,4 +56,4 @@ jobs:
             --build_metadata=COMMIT_SHA=${{ github.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.ref_name }} \
-            //:push
+            //:push -- --tag dev-${{ github.sha }}

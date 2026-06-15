@@ -11,8 +11,9 @@ def oci_images():
         name = "distroless_cc",
         digest = "sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985",
         image = "gcr.io/distroless/cc-debian12",
+        # The index lists arm64 as arm64/v8 (the variant must be matched exactly).
         platforms = [
             "linux/amd64",
-            "linux/arm64",
+            "linux/arm64/v8",
         ],
     )
