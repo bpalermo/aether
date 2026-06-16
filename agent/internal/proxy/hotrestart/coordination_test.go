@@ -119,11 +119,6 @@ func TestInitStartEpoch(t *testing.T) {
 		s.initStartEpoch(ctx)
 		assert.Equal(t, 0, s.nextEpoch)
 	})
-	t.Run("disabled (no StateDir) -> epoch 0", func(t *testing.T) {
-		s := New(Config{}, logr.Discard(), nil)
-		s.initStartEpoch(ctx)
-		assert.Equal(t, 0, s.nextEpoch)
-	})
 }
 
 func TestReadyMarker(t *testing.T) {

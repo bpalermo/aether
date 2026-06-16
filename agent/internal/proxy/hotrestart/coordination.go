@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Cross-pod coordination for Strategy B (see docs/proposals/001_proxy-hot-restart.md).
+// Cross-pod hot-restart coordination (see docs/proposals/001_proxy-hot-restart.md).
 //
 // When two aether-proxy pods overlap on a node during a surge upgrade, they share
 // the host network namespace, /dev/shm and the same --base-id, so an Envoy in the
@@ -40,10 +40,10 @@ const (
 const initProbeInterval = 500 * time.Millisecond
 
 // initStartEpoch decides the restart epoch for the first Envoy this supervisor
-// launches. With cross-pod coordination (StateDir set), it starts at E+1 only when
-// the heartbeat file names epoch E AND the node's Envoy admin actually reports E
-// LIVE — admin is ground truth, so a crashed predecessor (stale heartbeat, dead on
-// admin) correctly resets to epoch 0 instead of attaching to a dead parent.
+// launches. It starts at E+1 only when the heartbeat file names epoch E AND the
+// node's Envoy admin actually reports E LIVE — admin is ground truth, so a crashed
+// predecessor (stale heartbeat, dead on admin) correctly resets to epoch 0 instead
+// of attaching to a dead parent.
 //
 // The two signals must AGREE before a decision is made: the heartbeat is
 // LIVE-gated by construction, so a fresh heartbeat means the predecessor was
@@ -51,11 +51,8 @@ const initProbeInterval = 500 * time.Millisecond
 // timeout under node load) must not send us to epoch 0, which bind-collides with
 // the live predecessor on the base-id domain socket (errno 98) and crash-loops.
 // While the file is fresh but admin unconfirmed, re-probe; the wait is bounded by
-// the heartbeat going stale. Without StateDir (Strategy A) this is a no-op.
+// the heartbeat going stale.
 func (s *Supervisor) initStartEpoch(ctx context.Context) {
-	if s.cfg.StateDir == "" {
-		return
-	}
 	for {
 		epoch, hb, ok := s.readState()
 		if !ok || time.Since(hb) >= predecessorStale {
@@ -109,9 +106,6 @@ func (s *Supervisor) readState() (epoch int, heartbeat time.Time, ok bool) {
 // pod's epoch selection). A stale higher epoch (crashed predecessor) is
 // overwritten so a fresh node can reset to 0.
 func (s *Supervisor) writeState(epoch int) {
-	if s.cfg.StateDir == "" {
-		return
-	}
 	if err := os.MkdirAll(s.cfg.StateDir, 0o755); err != nil {
 		s.log.V(1).Error(err, "creating state dir")
 		return
@@ -163,9 +157,6 @@ func (s *Supervisor) writeState(epoch int) {
 //     AdminUnresponsiveDeadline once some epoch has been LIVE → wedged
 //     post-LIVE (parent died mid stats-merge).
 func (s *Supervisor) watchLiveness(ctx context.Context) {
-	if s.cfg.ReadyMarkerPath == "" && s.cfg.StateDir == "" {
-		return
-	}
 	defer s.clearReady()
 	t := time.NewTicker(readyPollInterval)
 	defer t.Stop()
