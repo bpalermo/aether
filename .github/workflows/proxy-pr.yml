@@ -1,8 +1,9 @@
 name: proxy-pr
 
 # PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1):
-# `bazel test` over BuildBuddy RBE. Does NOT build/push the image — that happens
-# on merge (proxy-release.yml). Path-filtered so it only runs when proxy/ changes.
+# `bazel test` built NATIVELY per arch (amd64 on ubuntu-latest, arm64 on the
+# GitHub arm runner), with BuildBuddy as a remote CACHE only (no RBE executor).
+# Does NOT build/push the image — that happens on merge (proxy-release.yml).
 on:
   pull_request:
     branches: [main]
@@ -18,13 +19,19 @@ defaults:
     working-directory: proxy
 
 env:
-  # Envoy's in-tree rust crate index (envoy_rust_crate_index) lockfile digest
-  # doesn't match what our rules_rust computes; repin it.
   CARGO_BAZEL_REPIN: "true"
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,18 +42,15 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      - name: Test (BuildBuddy RBE)
-        # The compile runs remotely on BuildBuddy. //... runs //:image_test (compiles
-        # the amd64 Envoy + validates the image). //:image_index additionally builds
-        # the arm64 cross-compile so multi-arch breakage is caught pre-merge.
-        # --config=ci adds the release build + static BuildBuddy metadata; dynamic
-        # metadata (https://www.buildbuddy.io/docs/guide-metadata) is attached here.
+      - name: Test (native ${{ matrix.arch }}, BuildBuddy cache)
+        # Native build for the runner's arch; BuildBuddy serves cached actions.
+        # //... runs //:image_test (compiles Envoy + validates the image structure).
         run: |
           bazel test \
             --config=ci \
-            --config=rbe-buildbuddy \
+            --config=bb-cache \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
-            //... //:image_index
+            //...

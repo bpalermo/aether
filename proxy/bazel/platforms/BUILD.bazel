@@ -1,4 +1,4 @@
-# RBE execution platform for BuildBuddy.
+# RBE execution platform for BuildBuddy (local `--config=rbe-buildbuddy` builds).
 #
 # Inherits Envoy's RBE platform (@clang_platform = @envoy//bazel/platforms/rbe:
 # linux_x64) — keeping its container-image (the Envoy build image), docker

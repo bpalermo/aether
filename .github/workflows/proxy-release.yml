@@ -1,8 +1,9 @@
 name: proxy-release
 
-# Post-merge release for the custom Envoy (//proxy): build the optimized image
-# over BuildBuddy RBE and push it to GHCR. Runs only on push to main when proxy/
-# changes (after a PR merges). PR validation is proxy-pr.yml.
+# Post-merge release for the custom Envoy (//proxy): build each arch NATIVELY
+# (amd64 on ubuntu-latest, arm64 on the GitHub arm runner) with BuildBuddy as a
+# remote cache, push each arch by DIGEST (no per-arch tags), then assemble one
+# multi-arch manifest tagged with the commit SHA.
 on:
   push:
     branches: [main]
@@ -12,18 +13,25 @@ on:
 
 permissions:
   contents: read
-  packages: write
-
-defaults:
-  run:
-    working-directory: proxy
 
 env:
   CARGO_BAZEL_REPIN: "true"
+  IMAGE: ghcr.io/bpalermo/aether/aether-proxy
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build-push:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -34,7 +42,6 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      # oci_push reads the local registry credentials, so log into GHCR first.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -42,18 +49,95 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build + push image (BuildBuddy RBE)
-        # The amd64 + arm64 compiles run remotely; oci_push (the multi-arch index)
-        # runs on the runner (the image is downloaded via --remote_download_toplevel
-        # from --config=rbe-buildbuddy). --config=ci bakes the optimized/stripped
-        # binary. `--tag dev-<sha>` adds a commit-pinned tag alongside the BUILD-time
-        # "dev" tag (oci_push applies both).
+      - name: Build + push ${{ matrix.arch }} by digest (native, BuildBuddy cache)
+        # remote_tags=[] and no --tag → oci_push pushes the image by digest only
+        # (no tag lingers in the registry). Capture the pushed manifest digest.
+        working-directory: proxy
         run: |
           bazel run \
             --config=ci \
-            --config=rbe-buildbuddy \
+            --config=bb-cache \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.ref_name }} \
-            //:push -- --tag dev-${{ github.sha }}
+            //:push 2>&1 | tee "$RUNNER_TEMP/push.log"
+          digest="$(grep -oE '@sha256:[0-9a-f]{64}' "$RUNNER_TEMP/push.log" | head -1 | cut -d@ -f2)"
+          test -n "$digest"
+          echo "$digest" > "$RUNNER_TEMP/digest.txt"
+          echo "pushed ${{ matrix.arch }}: $digest"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest.txt
+          if-no-files-found: error
+
+  manifest:
+    needs: build-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: digests
+
+      # Combine the two per-arch images (by digest) into one multi-arch manifest,
+      # tagged with the commit SHA.
+      - name: Assemble multi-arch manifest
+        run: |
+          amd64="$(cat digests/digest-amd64/digest.txt)"
+          arm64="$(cat digests/digest-arm64/digest.txt)"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${{ github.sha }}" \
+            "${IMAGE}@${amd64}" \
+            "${IMAGE}@${arm64}"
+
+  # Pin the agent chart to the just-published image (commit-SHA tag) by opening a
+  # PR against the protected main branch. peter-evans reuses a single rolling
+  # branch, so repeat releases update the same PR; if the chart is already pinned
+  # to this SHA there's no diff and no PR.
+  bump-chart:
+    needs: manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Pin agent chart to aether-proxy:${{ github.sha }}
+        run: |
+          ref="${IMAGE}:${{ github.sha }}"
+          sed -i -E 's|^(\s*ref: ")ghcr\.io/bpalermo/aether/aether-proxy:[^"]*(".*)$|\1'"${ref}"'\2|' \
+            charts/agent/values.yaml
+
+      - name: Open chart-bump PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # Default GITHUB_TOKEN works, but PRs it opens don't trigger CI (GitHub
+          # recursion guard). If main requires status checks to merge, set a PAT
+          # secret CHART_BUMP_PAT so the PR runs CI.
+          token: ${{ secrets.CHART_BUMP_PAT || secrets.GITHUB_TOKEN }}
+          base: main
+          branch: chore/proxy-image-bump
+          delete-branch: true
+          commit-message: "chore(proxy): pin agent chart to aether-proxy:${{ github.sha }}"
+          title: "chore(proxy): pin agent chart to aether-proxy:${{ github.sha }}"
+          body: |
+            Auto-generated by `proxy-release`. Pins the agent chart's proxy image
+            to the multi-arch image published for `${{ github.sha }}`.

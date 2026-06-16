@@ -26,42 +26,58 @@ common:ci --noshow_progress
 common:ci --noshow_loading_progress
 common:ci --test_output=errors
 
-# BuildBuddy Remote Build Execution (RBE) — self-contained: remote executor +
-# cache + BES all on BuildBuddy. Invoke with `--config=rbe-buildbuddy`.
+# BuildBuddy remote CACHE (not execution) — used by CI. The build runs locally on
+# the CI runner with the hermetic `--config=clang` toolchain (from build:linux);
+# BuildBuddy stores + serves compiled action results, so warm builds are fast.
+# Invoke with `--config=bb-cache`. CI builds multi-arch natively on per-arch
+# runners (amd64 + arm64) — no cross-compile, no RBE executor pool needed.
+# (For local dev, prefer `--config=rbe-buildbuddy` below to offload the heavy
+# Envoy compile to BuildBuddy executors.)
+#
+# NOTE: not Envoy's `--config=remote-cache` — at v1.38.0 that's Envoy's own
+# EngFlow cache (mordenite.cluster.engflow.com), not BuildBuddy.
+#
+# Auth is a secret, so it lives in user.bazelrc (gitignored) / the CI
+# --remote_header, one line:
+#   build:bb-cache --remote_header=x-buildbuddy-api-key=YOUR_ORG_API_KEY
+build:bb-cache --remote_cache=grpcs://remote.buildbuddy.io
+build:bb-cache --bes_backend=grpcs://remote.buildbuddy.io
+build:bb-cache --bes_results_url=https://app.buildbuddy.io/invocation/
+build:bb-cache --remote_cache_compression
+# Don't ZSTD-compress blobs < 100 bytes (compression would inflate them).
+build:bb-cache --experimental_remote_cache_compression_threshold=100
+# Shrink the uploaded build event stream: drop duplicate file references.
+build:bb-cache --nolegacy_important_outputs
+build:bb-cache --remote_timeout=3600s
+build:bb-cache --grpc_keepalive_time=30s
+# Richer timing profile in the BuildBuddy UI (per-target/output detail).
+build:bb-cache --noslim_profile
+build:bb-cache --experimental_profile_include_target_label
+build:bb-cache --experimental_profile_include_primary_output
+
+# BuildBuddy Remote Build Execution (RBE) — for LOCAL dev: offload the heavy Envoy
+# compile to BuildBuddy executors (executor + cache + BES). Invoke
+# `--config=rbe-buildbuddy`. CI does NOT use this (it builds natively per-arch with
+# --config=bb-cache); this is the fast path for a single-arch local build.
 #
 # Reuses Envoy's hermetic `--config=clang`, whose exec/host platform
-# @clang_platform (= @envoy//bazel/platforms/rbe:linux_x64) already declares the
-# container-image exec property (the Envoy build image, via image_worker()) plus
-# the docker capabilities (SYS_PTRACE/NET_RAW/NET_ADMIN, privileged) the build
-# needs — so BuildBuddy executors run every action in the right container with no
-# extra platform wiring.
+# @clang_platform already declares the container-image + docker capabilities. The
+# only fix is dockerNetwork, which @clang_platform sets to "standard" (an EngFlow
+# value BuildBuddy rejects) — overridden to "off" via //bazel/platforms:rbe_buildbuddy.
 #
-# NOTE: do NOT use Envoy's `--config=remote-cache` here — in v1.38.0 that name is
-# Envoy's own EngFlow cache (mordenite.cluster.engflow.com), not BuildBuddy.
-#
-# Auth is a secret, so it lives in user.bazelrc (gitignored), one line:
-#   build:rbe-buildbuddy --remote_header=x-buildbuddy-api-key=YOUR_ORG_API_KEY
+# Auth (gitignored user.bazelrc): build:rbe-buildbuddy --remote_header=x-buildbuddy-api-key=KEY
 build:rbe-buildbuddy --config=clang
-# Override the exec/host platform to fix dockerNetwork for BuildBuddy (the only
-# Envoy RBE exec property BuildBuddy rejects). Comes after --config=clang so it
-# wins over that config's --host_platform=@clang_platform.
 build:rbe-buildbuddy --host_platform=//bazel/platforms:rbe_buildbuddy
 build:rbe-buildbuddy --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy
 build:rbe-buildbuddy --remote_executor=grpcs://remote.buildbuddy.io
 build:rbe-buildbuddy --remote_cache=grpcs://remote.buildbuddy.io
 build:rbe-buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
 build:rbe-buildbuddy --bes_results_url=https://app.buildbuddy.io/invocation/
-# Shrink the uploaded build event stream: drop duplicate file references.
 build:rbe-buildbuddy --nolegacy_important_outputs
 build:rbe-buildbuddy --remote_cache_compression
-# Don't ZSTD-compress blobs < 100 bytes (compression would inflate them).
 build:rbe-buildbuddy --experimental_remote_cache_compression_threshold=100
 build:rbe-buildbuddy --remote_timeout=3600s
 build:rbe-buildbuddy --grpc_keepalive_time=30s
 build:rbe-buildbuddy --jobs=200
 build:rbe-buildbuddy --remote_download_toplevel
 build:rbe-buildbuddy --spawn_strategy=remote,local
-# Richer timing profile in the BuildBuddy UI (per-target/output detail).
-build:rbe-buildbuddy --noslim_profile
-build:rbe-buildbuddy --experimental_profile_include_target_label
-build:rbe-buildbuddy --experimental_profile_include_primary_output

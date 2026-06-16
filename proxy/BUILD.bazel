@@ -1,6 +1,6 @@
 load("@container_structure_test//:defs.bzl", "container_structure_test")
 load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_binary")
-load("@rules_oci//oci:defs.bzl", "oci_image", "oci_image_index", "oci_load", "oci_push")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
 # Custom aether Envoy. The compiled-in extension set comes from
@@ -28,10 +28,12 @@ pkg_tar(
     tags = ["manual"],
 )
 
-# Custom aether-proxy image: distroless/cc base + the custom Envoy binary. The
-# aether_stats dynamic module is intentionally not baked in yet (filter
-# customization is unwired until the proposal-010 follow-up). This is the
-# single-arch image; the oci_image_index below builds it for amd64 + arm64.
+# Custom aether-proxy image: distroless/cc base + the custom Envoy binary.
+# Single-arch, built for the build host's native arch. Multi-arch is assembled in
+# CI from two native per-arch builds (amd64 on ubuntu-latest, arm64 on
+# ubuntu-24.04-arm) rather than cross-compiled — Envoy's arm64 cross-compile is
+# unreliable (LuaJIT host-tool linker); native per-arch is how upstream Envoy
+# builds it too (separate RBE pools).
 oci_image(
     name = "image",
     base = "@distroless_cc",
@@ -43,24 +45,13 @@ oci_image(
     workdir = "/",
 )
 
-# Multi-arch image. The transition cross-compiles the Envoy binary for each
-# platform (Envoy's hermetic toolchain ships the aarch64 sysroot + libcxx).
-oci_image_index(
-    name = "image_index",
-    images = [":image"],
-    platforms = [
-        "@envoy//bazel/platforms:linux_x64",
-        "@envoy//bazel/platforms:linux_arm64",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-# Pushes the multi-arch index. The release workflow appends a commit-pinned tag
-# (dev-<sha>) at push time via `bazel run //:push -- --tag dev-<commit>`.
+# Pushes the single-arch image. The release workflow passes per-arch tags at push
+# time (`bazel run //:push -- --tag dev-<arch> --tag <sha>-<arch>`); a combine job
+# then assembles the multi-arch manifest.
 oci_push(
     name = "push",
-    image = ":image_index",
-    remote_tags = ["dev"],
+    image = ":image",
+    remote_tags = [],
     repository = "ghcr.io/bpalermo/aether/aether-proxy",
 )
 
