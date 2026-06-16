@@ -37,6 +37,12 @@ def envoy_repository():
             # lib/libclang.so" because only the x86_64 LLVM is staged on the arm64
             # executor. See proxy/bazel/patches/ for details.
             "//bazel/patches:envoy-rust-sdk-aarch64-libclang.patch",
+            # Teach envoy_dynamic_module_prefix_symbols() to use the aarch64 LLVM
+            # toolchain's llvm-objcopy on arm64 exec platforms. Without this, the
+            # _hickory_dns_static_renamed genrule fails with "Exec format error"
+            # because @llvm_toolchain_llvm//:objcopy is an x86_64 ELF that cannot
+            # run on the arm64 RBE executor.
+            "//bazel/patches:envoy-dynamic-modules-aarch64-objcopy.patch",
         ],
         patch_args = ["-p1"],
     )

@@ -1,0 +1,48 @@
+--- a/source/extensions/dynamic_modules/dynamic_modules.bzl	2026-06-16 16:41:04.561829129 -0300
++++ b/source/extensions/dynamic_modules/dynamic_modules.bzl	2026-06-16 16:41:58.139955890 -0300
+@@ -61,19 +61,36 @@
+     # NOTE: The case statement is kept outside $() command substitution for
+     # compatibility with bash 3.2 (macOS default), which cannot parse case
+     # pattern delimiters inside $().
++    _objcopy_prefix = (
++        "ARCH=\"\"; " +
++        "for f in $(SRCS); do case $$f in *.pic.a) continue;; *.a) ARCH=$$f; break;; esac; done; " +
++        "[ -z \"$$ARCH\" ] && " +
++        "for f in $(SRCS); do case $$f in *.a) ARCH=$$f; break;; esac; done; "
++    )
++    _objcopy_suffix = "--redefine-syms=$(location :" + redefine_syms_name + ") $$ARCH $@"
++
+     native.genrule(
+         name = renamed_name,
+         srcs = [archive, ":" + redefine_syms_name],
+         outs = [name + "_renamed.a"],
+-        cmd = (
+-            "ARCH=\"\"; " +
+-            "for f in $(SRCS); do case $$f in *.pic.a) continue;; *.a) ARCH=$$f; break;; esac; done; " +
+-            "[ -z \"$$ARCH\" ] && " +
+-            "for f in $(SRCS); do case $$f in *.a) ARCH=$$f; break;; esac; done; " +
+-            "$(location @llvm_toolchain_llvm//:objcopy) " +
+-            "--redefine-syms=$(location :" + redefine_syms_name + ") $$ARCH $@"
+-        ),
+-        tools = ["@llvm_toolchain_llvm//:objcopy"],
++        cmd = select({
++            # arm64 exec platform (native aarch64 RBE): use the aarch64 LLVM
++            # toolchain's llvm-objcopy so the tool runs natively on the executor.
++            "@platforms//cpu:aarch64": (
++                _objcopy_prefix +
++                "$(location @llvm_toolchain_aarch64_llvm//:objcopy) " +
++                _objcopy_suffix
++            ),
++            "//conditions:default": (
++                _objcopy_prefix +
++                "$(location @llvm_toolchain_llvm//:objcopy) " +
++                _objcopy_suffix
++            ),
++        }),
++        tools = select({
++            "@platforms//cpu:aarch64": ["@llvm_toolchain_aarch64_llvm//:objcopy"],
++            "//conditions:default": ["@llvm_toolchain_llvm//:objcopy"],
++        }),
+         tags = tags,
+     )
+ 
