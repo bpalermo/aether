@@ -84,8 +84,8 @@ build:rbe-buildbuddy --spawn_strategy=remote,local
 
 # x64 overlay: host/exec = BuildBuddy x64 pool.
 build:rbe-buildbuddy-amd64 --config=rbe-buildbuddy
-build:rbe-buildbuddy-amd64 --host_platform=//bazel/platforms:rbe_buildbuddy
-build:rbe-buildbuddy-amd64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy
+build:rbe-buildbuddy-amd64 --host_platform=//bazel/platforms:rbe_buildbuddy_amd64
+build:rbe-buildbuddy-amd64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_amd64
 
 # arm64 overlay: host/exec = BuildBuddy's native arm64 pool. CAVEAT: the pool
 # routes correctly (Arch=arm64, validated by a remote `uname -m`), but a native
