@@ -159,12 +159,11 @@ pull(
     tag = "nonroot",
 )
 
-# NOTE: the custom aether-proxy image (distroless/cc base + custom Envoy + the
-# aether_stats dynamic module) and all its build wiring — the Rust toolchain, the
-# crate_universe graph, the Envoy abi.h/binary fetches — moved to the separate
-# //proxy workspace (proposal 010), which is listed in //.bazelignore. aether no
-# longer builds the proxy image; the chart references the published image (see
-# charts/agent/values.yaml).
+# NOTE: the custom aether-proxy image (distroless/cc base + custom Envoy with the
+# compiled-in C++ aether_stats extension) and all its build wiring moved to the
+# separate //proxy workspace (proposals 010/012), which is listed in
+# //.bazelignore. aether no longer builds the proxy image; the chart references
+# the published image (see charts/agent/values.yaml).
 
 # Hermetic glibc sysroots (chromium bullseye, glibc 2.31 <= the proxy distroless
 # base) for the LLVM toolchain and the SDK bindgen — see //bazel/llvm.

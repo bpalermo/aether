@@ -73,8 +73,8 @@ filegroup(
 
 # PR gate (`bazel test //...`): builds the custom Envoy + image on RBE and
 # validates the image's structure. The `tar` driver runs against the image
-# tarball directly — no docker daemon, RBE-friendly. (No unit tests yet — the
-# aether_stats filter is parked; its rust_test rejoins //... when re-wired.)
+# tarball directly — no docker daemon, RBE-friendly. (The aether_stats filter
+# ships its own envoy_cc_test under source/extensions/filters/http/aether_stats.)
 container_structure_test(
     name = "image_test",
     configs = ["//integration:image.yaml"],

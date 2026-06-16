@@ -87,7 +87,8 @@ load("//bazel/oci:images.bzl", "oci_images")
 
 oci_images()
 
-# NOTE: filter customization (the aether_stats Rust dynamic module + its
-# crate_universe/bindgen wiring) is intentionally NOT built yet — the first goal
-# is a vanilla custom Envoy that builds. The module is re-wired in the follow-up
-# (proposal 010). Its source is parked under filters/http/aether_stats/.
+# NOTE: the aether_stats filter is compiled into //:envoy as a native C++
+# extension (//source/extensions/filters/http/aether_stats, proposal 012) — no
+# Rust toolchain, crate_universe, or dynamic-module wiring is needed here. The
+# `envoy_rust_crate_index` repo that requires CARGO_BAZEL_REPIN comes from
+# @envoy's own in-tree dynamic_modules support, not from aether.
