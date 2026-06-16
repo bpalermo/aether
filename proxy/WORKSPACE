@@ -89,7 +89,6 @@ load("@toolchains_llvm//toolchain:rules.bzl", "llvm_toolchain")
 llvm_toolchain(
     name = "llvm_toolchain_aarch64",
     exec_arch = "aarch64",
-    exec_os = "linux",
     llvm_version = "18.1.8",
     cxx_standard = {"": "c++20"},
     sysroot = {
