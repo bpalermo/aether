@@ -42,14 +42,12 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      # Envoy's hermetic LLVM clang needs libtinfo.so.5, absent on stock
-      # ubuntu-24.04 (ships .so.6) — the RBE build container had it. Compat symlink.
-      - name: libtinfo5 compat for hermetic clang
-        run: |
-          arch="$(uname -m)"
-          sudo apt-get install -y libtinfo5 2>/dev/null || \
-            sudo ln -sf "/usr/lib/${arch}-linux-gnu/libtinfo.so.6" \
-                        "/usr/lib/${arch}-linux-gnu/libtinfo.so.5"
+      # Envoy's hermetic LLVM clang needs libtinfo.so.5 (LLVM 18.1.8 leaks it);
+      # ubuntu-24.04 ships only .so.6 and a symlink fails (versioned
+      # NCURSES_TINFO_5.0 symbols). Install the real ncurses5 .deb — the shared
+      # composite action aether's own CI uses.
+      - name: Setup LLVM runtime libs
+        uses: ./.github/actions/setup-llvm-libs
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
