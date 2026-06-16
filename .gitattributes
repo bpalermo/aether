@@ -1,0 +1,10 @@
+# Machine-managed files: mark as generated so GitHub collapses them in pull
+# request diffs and excludes them from language statistics. They are produced by
+# Gazelle (BUILD files), bzlmod (MODULE.bazel.lock), and go mod (go.sum) rather
+# than edited by hand; MODULE.bazel is hand-edited but kept here so dependency
+# churn does not dominate review. Expand the file in the diff to review it.
+BUILD.bazel linguist-generated=true
+BUILD linguist-generated=true
+MODULE.bazel linguist-generated=true
+MODULE.bazel.lock linguist-generated=true
+go.sum linguist-generated=true
