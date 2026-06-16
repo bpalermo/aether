@@ -62,6 +62,18 @@ envoy_cc_test(
     ],
 )
 
+# Guards the stats_tags regexes in charts/agent/templates/configmap.yaml that let
+# the aether_stats tags survive a hot restart (StatMerger drops programmatic tags).
+envoy_cc_test(
+    name = "tag_extraction_test",
+    srcs = ["tag_extraction_test.cc"],
+    repository = "@envoy",
+    deps = [
+        "@envoy//source/common/stats:tag_producer_lib",
+        "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
+    ],
+)
+
 # Boots a real Envoy with the filter wired as the agent emits it (TypedStruct)
 # and drives a request through it. Catches a static-init abort (the binary won't
 # start) and factory-resolution failures, which the unit test and the tar-driver
@@ -73,7 +85,10 @@ envoy_cc_test(
     repository = "@envoy",
     deps = [
         ":config",
+        "@com_google_absl//absl/strings",
+        "@envoy//source/common/common:minimal_logger_lib",
         "@envoy//test/integration:http_integration_lib",
         "@envoy//test/test_common:utility_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
     ],
 )
