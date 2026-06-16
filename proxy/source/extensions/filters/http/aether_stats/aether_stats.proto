@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+// Config for the aether_stats HTTP filter (proposal 012). The agent attaches the
+// filter to each per-pod HCM and supplies the local pod's identity here (as a
+// google.protobuf.Struct / TypedStruct — same fields it built as JSON for the old
+// dynamic module).
+package aether.filters.http.aether_stats.v3;
+
+message Config {
+  // "source" (outbound HCM) or "destination" (inbound HCM). Default "source".
+  string reporter = 1;
+
+  // Source identity, injected on the outbound side.
+  string source_service = 2;
+  string source_pod = 3;
+
+  // Local identity, injected on the inbound side (the destination).
+  string destination_service = 4;
+
+  // Mesh domain suffix stripped from the routed cluster name. Default
+  // "aether.internal".
+  string mesh_domain = 5;
+
+  // When false, source_pod is reported as "" to bound metric cardinality.
+  bool emit_pod = 6;
+}

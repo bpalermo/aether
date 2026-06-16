@@ -3,11 +3,12 @@ load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
-# Custom aether Envoy. The compiled-in extension set comes from
-# //bazel/extension_config (extensions_build_config.bzl). Our own C++/Rust
-# compiled extensions get appended to AETHER_EXTENSIONS as the proposal-010
-# follow-up; today it's a vanilla custom build (same extensions as upstream).
-AETHER_EXTENSIONS = []
+# Custom aether Envoy: upstream core extensions (//bazel/extension_config) plus
+# our compiled-in C++ extensions.
+AETHER_EXTENSIONS = [
+    # aether_stats: source->destination request metrics (proposals 007/012).
+    "//source/extensions/filters/http/aether_stats:config",
+]
 
 envoy_cc_binary(
     name = "envoy",
