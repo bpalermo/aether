@@ -1,10 +1,10 @@
 name: proxy-release
 
-# Post-merge release for the custom Envoy (//proxy): build each arch on BuildBuddy
-# RBE (routed to its native executor pool — no cross-compile), push each arch by
-# DIGEST (no per-arch tags), then assemble one multi-arch manifest tagged with the
-# commit SHA. `bazel run //:push` runs the pusher locally, so each leg's runner
-# arch matches its image (amd64 on ubuntu-latest, arm64 on the GitHub arm runner).
+# Post-merge release for the custom Envoy (//proxy): build per arch — amd64 on
+# BuildBuddy's x64 RBE pool, arm64 NATIVELY on a GitHub arm runner (BuildBuddy as
+# remote cache; no arm64-exec toolchain for RBE yet) — push each arch by DIGEST
+# (no per-arch tags), then assemble one multi-arch manifest tagged with the commit
+# SHA. `bazel run //:push` runs the pusher locally, so each runner arch matches.
 on:
   push:
     branches: [main]
@@ -25,17 +25,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both arches offload the heavy compile to BuildBuddy RBE, each to its
-          # native executor pool (no cross-compile). `bazel run //:push` runs the
-          # pusher locally, so each leg's runner arch must match its image: amd64
-          # on ubuntu-latest, arm64 on the GitHub arm runner. The runner only
-          # pushes; the compile happens on RBE.
+          # amd64 offloads the heavy compile to BuildBuddy's x64 RBE pool.
           - arch: amd64
             runner: ubuntu-latest
-            bazel_config: rbe-buildbuddy
+            bazel_config: rbe-buildbuddy-amd64
+          # arm64 builds NATIVELY on the GitHub arm runner with BuildBuddy as a
+          # remote cache (the proxy has no arm64-exec C++ toolchain for RBE yet —
+          # see --config=rbe-buildbuddy-arm64).
           - arch: arm64
             runner: ubuntu-24.04-arm
-            bazel_config: rbe-buildbuddy-arm64
+            bazel_config: bb-cache
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -49,6 +48,12 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
+
+      # The NATIVE (arm64) build compiles locally and needs the hermetic clang's
+      # libtinfo.so.5. The RBE leg compiles remotely, so it doesn't.
+      - name: Setup LLVM runtime libs
+        if: matrix.bazel_config == 'bb-cache'
+        uses: ./.github/actions/setup-llvm-libs
 
       - name: Log in to GHCR
         uses: docker/login-action@v3

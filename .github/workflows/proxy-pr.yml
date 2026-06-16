@@ -1,9 +1,9 @@
 name: proxy-pr
 
 # PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1):
-# `bazel test //...` on BuildBuddy RBE, one leg per arch routed to its native
-# executor pool (amd64 + arm64 — no cross-compile). Both legs run on ubuntu-latest
-# since the build/tests execute remotely; the runner only drives Bazel.
+# `bazel test //...` per arch — amd64 on BuildBuddy's x64 RBE pool (ubuntu-latest),
+# arm64 NATIVELY on a GitHub arm runner with BuildBuddy as a remote cache (the
+# proxy has no arm64-exec C++ toolchain for RBE yet — see .bazelrc).
 # Does NOT build/push the image — that happens on merge (proxy-release.yml).
 on:
   pull_request:
@@ -28,14 +28,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both arches offload the heavy compile to BuildBuddy RBE, each to its
-          # native executor pool (no cross-compile). The runner only drives Bazel,
-          # so both use ubuntu-latest (x64); the build runs on remote x64 / arm64.
+          # amd64 offloads the heavy compile to BuildBuddy's x64 RBE pool.
           - arch: amd64
-            bazel_config: rbe-buildbuddy
+            runner: ubuntu-latest
+            bazel_config: rbe-buildbuddy-amd64
+          # arm64 builds NATIVELY on the GitHub arm runner with BuildBuddy as a
+          # remote cache. BuildBuddy now has an arm64 RBE pool, but the proxy lacks
+          # an arm64-exec C++ toolchain (see --config=rbe-buildbuddy-arm64).
           - arch: arm64
-            bazel_config: rbe-buildbuddy-arm64
-    runs-on: ubuntu-latest
+            runner: ubuntu-24.04-arm
+            bazel_config: bb-cache
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -45,6 +48,13 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
+
+      # The NATIVE (arm64) build compiles locally and needs the hermetic clang's
+      # libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6). The
+      # RBE leg compiles remotely, so it doesn't.
+      - name: Setup LLVM runtime libs
+        if: matrix.bazel_config == 'bb-cache'
+        uses: ./.github/actions/setup-llvm-libs
 
       - name: Test (${{ matrix.arch }}, ${{ matrix.bazel_config }})
         # //... runs //:image_test (compiles Envoy + validates the image structure).
