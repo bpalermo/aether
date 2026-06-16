@@ -1,21 +1,21 @@
 // Package hotrestart implements a supervisor that manages the aether-proxy Envoy
 // process and performs Envoy hot restarts across restart epochs, replicating the
-// behavior of Envoy's hot-restarter.py in Go.
-//
-// SPIKE: this package is the Strategy-A implementation for the proxy hot-restart
-// spike (see docs/proposals/001_proxy-hot-restart.md). It supervises a single
-// long-lived Envoy in one container and performs an in-place hot restart when the
-// bootstrap config changes (fsnotify) or on SIGHUP. The cross-pod machinery for
-// Strategy B (epoch coordination file, live-predecessor probe) is intentionally
-// not here yet.
+// behavior of Envoy's hot-restarter.py in Go (see
+// docs/proposals/001_proxy-hot-restart.md).
 //
 // Model: the supervisor is the proxy container's entrypoint (PID 1). It forks an
 // Envoy child with --restart-epoch 0 and a fixed --base-id. On a hot-restart
-// trigger it forks a new Envoy with the next epoch; Envoy's own shared-memory +
-// abstract-domain-socket IPC transfers the listen-socket FDs and stats to the new
-// process, the old process drains, and after --parent-shutdown-time-s the
-// supervisor terminates it. The supervisor and both epochs share the container's
-// /dev/shm and PID/IPC namespace, which is what makes the FD/stats handoff possible.
+// trigger (a watched bootstrap-config change or SIGHUP) it forks a new Envoy with
+// the next epoch; Envoy's own shared-memory + abstract-domain-socket IPC transfers
+// the listen-socket FDs and stats to the new process, the old process drains, and
+// after --parent-shutdown-time-s the supervisor terminates it.
+//
+// The handoff also works ACROSS the pod boundary during a surge upgrade: the
+// overlapping old and new aether-proxy pods share the node's network namespace,
+// /dev/shm (a hostPath) and the same --base-id, so the new pod's Envoy hot-restarts
+// from the old pod's. The supervisors coordinate the per-node restart epoch through
+// a heartbeat file on the shared StateDir and gate pod readiness (ReadyMarkerPath)
+// so the DaemonSet keeps the predecessor until the successor has taken over.
 package hotrestart
 
 import (
@@ -56,7 +56,7 @@ const (
 	// normal mid-handoff state — never trips this.
 	defaultAdminUnresponsiveDeadline = 30 * time.Second
 
-	// Bind-collision retry (cross-pod mode only). When epoch detection cannot
+	// Bind-collision retry. When epoch detection cannot
 	// confirm a predecessor (stale heartbeat: its admin probes were timing out
 	// under node load, so its LIVE-gated heartbeat stopped) but the predecessor's
 	// Envoy is in fact still alive, a fresh epoch-0 launch loses the base-id
@@ -101,15 +101,14 @@ type Config struct {
 	// self-triggers a hot restart when the bootstrap config changes (e.g. a
 	// ConfigMap update propagated by the kubelet).
 	WatchConfig bool
-	// StateDir, when set, enables Strategy B cross-pod coordination: a per-node
-	// epoch heartbeat file on a shared hostPath. A surging successor pod reads it
-	// to start at (live predecessor epoch + 1) and hot-restart across the pod
-	// boundary. Empty = Strategy A only (always start at epoch 0).
+	// StateDir is the shared-hostPath dir holding the per-node epoch heartbeat
+	// file. A surging successor pod reads it to start at (live predecessor epoch +
+	// 1) and hot-restart across the pod boundary. Required.
 	StateDir string
-	// ReadyMarkerPath, when set, enables the readiness gate: the supervisor keeps a
-	// pod-local marker present only while the node's Envoy admin reports LIVE at
-	// this supervisor's newest epoch. An exec readiness probe checks the marker so
-	// the DaemonSet keeps the old pod until the new one has taken over.
+	// ReadyMarkerPath is the pod-local readiness marker the supervisor keeps
+	// present only while the node's Envoy admin reports LIVE at this supervisor's
+	// newest epoch. An exec readiness probe checks the marker so the DaemonSet
+	// keeps the old pod until the new one has taken over. Required.
 	ReadyMarkerPath string
 	// AdminAddress is the Envoy admin host:port used for the readiness check.
 	AdminAddress string
@@ -177,9 +176,6 @@ func (s *Supervisor) readyGateTime() time.Time {
 // cross-pod successor epoch (>0): the predecessor must be terminated by this
 // Envoy's own parent-shutdown protocol before the pod may report Ready.
 func (s *Supervisor) gateReadinessIfSuccessor() {
-	if s.cfg.StateDir == "" {
-		return
-	}
 	s.mu.Lock()
 	successor := s.nextEpoch > 0
 	s.mu.Unlock()
@@ -221,9 +217,8 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		go s.watchConfig(ctx, trigger)
 	}
 
-	// Strategy B: pick the start epoch from a confirmed-live predecessor (if any),
-	// then maintain the readiness marker and the LIVE-gated node epoch heartbeat.
-	// No-ops when StateDir / ReadyMarkerPath are unset (Strategy A).
+	// Pick the start epoch from a confirmed-live predecessor (if any), then
+	// maintain the readiness marker and the LIVE-gated node epoch heartbeat.
 	s.initStartEpoch(ctx)
 	s.gateReadinessIfSuccessor()
 	go s.watchLiveness(ctx)
@@ -247,15 +242,19 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			// Cross-pod mode: if our Envoy no longer answers admin LIVE at our own
-			// epoch, its sockets have (very likely) been transferred to a surging
-			// successor that is still initializing — the DaemonSet deletes this pod
-			// the moment it turns NotReady, which is exactly that window. Do NOT
-			// signal Envoy (the successor still needs its hot-restart parent alive,
-			// even before reaching LIVE — killing it aborts the successor with
-			// errno 111): wait for the successor's parent-shutdown protocol to
-			// terminate it, with a deadline fallback. The check cannot rely on the
-			// successor having published its epoch, since it does so only once LIVE.
+			// If our Envoy no longer answers admin LIVE at our own epoch, its
+			// sockets have (very likely) been transferred to a surging successor
+			// that is still initializing — the DaemonSet deletes this pod the moment
+			// it turns NotReady, which is exactly that window. Do NOT signal Envoy
+			// (the successor still needs its hot-restart parent alive, even before
+			// reaching LIVE — killing it aborts the successor with errno 111): wait
+			// for the successor's parent-shutdown protocol to terminate it, with a
+			// deadline fallback. The check cannot rely on the successor having
+			// published its epoch, since it does so only once LIVE.
+			//
+			// StateDir is always set in production (the supervisor only runs in the
+			// cross-pod configuration); the guard keeps unit-test supervisors that
+			// run without coordination state on the plain shutdown path.
 			if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
 				s.log.Info("termination requested mid-handoff; waiting for successor to terminate our envoy")
 				s.awaitProtocolTermination()
@@ -295,7 +294,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			// down every node's data plane simultaneously, bypassing all
 			// rollout safety — observed 2026-06-11 (rev 64): a resource
 			// monitor that validated fine in docker was fatal in the
-			// privileged pod environment, and the fleet-wide in-place hot
+			// privileged pod environment, and the fleet-wide simultaneous hot
 			// restart turned it into a 13-minute cluster outage. envoy
 			// --mode validate executes bootstrap initialization in the same
 			// environment as the real fork, so it catches exactly that
@@ -321,11 +320,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 		case exit := <-s.childExited:
 			if exit.epoch == s.currentEpoch() {
-				if s.cfg.StateDir != "" && exit.err == nil {
+				if exit.err == nil {
 					s.metrics.childExited(exitSuccessorTerminated)
-					// Clean exit (status 0) of our newest epoch in cross-pod mode:
-					// that's the successor's hot-restart parent-shutdown protocol
-					// terminating us (a crash would be non-zero/signaled). The signal
+					// Clean exit (status 0) of our newest epoch: that's the
+					// successor's hot-restart parent-shutdown protocol terminating us
+					// (a crash would be non-zero/signaled). The signal
 					// is deliberate process state, not the shared epoch file — the
 					// successor publishes its epoch only once LIVE, which may be
 					// after it terminates us. Don't exit (restartPolicy=Always would
@@ -341,7 +340,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				// Retry epoch detection in-process — the predecessor keeps
 				// serving meanwhile — instead of exiting into the kubelet's
 				// CrashLoopBackOff.
-				if s.cfg.StateDir != "" && s.quickNonLiveExit() && bindRetries < maxBindCollisionRetries {
+				if s.quickNonLiveExit() && bindRetries < maxBindCollisionRetries {
 					bindRetries++
 					s.metrics.childExited(exitBindCollision)
 					s.reap(exit.epoch)
