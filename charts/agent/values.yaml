@@ -86,6 +86,13 @@ proxy:
     ref: "ghcr.io/bpalermo/aether/aether-proxy:0d0a5a37a4eb7d75231027a11fe385d9275d265c"
     pullPolicy: Always
   logLevel: info
+  # Emit Envoy's own application (operational) logs as one JSON object per line
+  # so the node log pipeline can parse them structurally instead of scraping the
+  # default `[ts][thread][level][name] file:line msg` text. Wired via the
+  # bootstrap `application_log_config` (the supported JSON path), NOT a
+  # `--log-format` CLI flag — Envoy rejects setting both. Set false to fall back
+  # to Envoy's default text format.
+  jsonLogs: true
   # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
   # proxy-supervisor) as the proxy entrypoint instead of launching Envoy
   # directly, so bootstrap-config changes hot-restart in place without dropping

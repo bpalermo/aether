@@ -14,6 +14,24 @@ data:
           address: 127.0.0.1
           port_value: 9901
 
+{{- if .Values.proxy.jsonLogs }}
+    # Emit Envoy's own application logs as one JSON object per line. This is the
+    # supported JSON path (vs a raw --log-format string): %j escapes the message
+    # as a JSON string and the trailing %* (added by Envoy) injects any
+    # ENVOY_TAGGED_LOG key/values as sibling fields. %v and %_ are NOT allowed in
+    # JSON format. Mutually exclusive with the --log-format CLI flag, which the
+    # proxy command intentionally does not pass.
+    application_log_config:
+      log_format:
+        json_format:
+          time: "%Y-%m-%dT%T.%e%z"
+          level: "%l"
+          name: "%n"
+          thread: "%t"
+          source: "%g:%#"
+          message: "%j"
+{{- end }}
+
 {{- if .Values.telemetry.otlpEndpoint }}
     # Push Envoy stats to the OTel collector over OTLP. Push-first like the
     # rest of the mesh telemetry: the admin /stats endpoint renders on Envoy's
@@ -74,6 +92,33 @@ data:
         # collapse to listener.{inbound,out_http}.* labeled by aether.pod.
         - tag_name: aether.pod
           regex: "^listener\\.(?:inbound|out_http)(_([^.]+))\\."
+        # aether_stats (proposal 012) records via counterFromStatNameWithTags,
+        # which inlines the tag VALUES into the full stat name
+        # (aether.requests_total.reporter.<v>.source_service.<v>.…). On the
+        # filter's own write path those values are real Stats tags — but the
+        # node proxy hot-restarts on every config change (talos-main hit epoch
+        # 53), and Envoy's StatMerger re-creates each counter across a restart
+        # via counterFromStatName() with NO tags
+        # ("TODO(snowp): Propagate tag values during hot restarts" in
+        # stat_merger.cc). After the first restart the programmatic tags are
+        # gone and the values collapse into the metric name with empty labels
+        # (the talos-main symptom). These regexes re-derive the six tags from
+        # the name exactly the way aether.cluster survives — tag_name MUST match
+        # the programmatic keys in aether_stats.cc so fresh and merged counters
+        # export identical labels. Values are dot-free, so [^.]* is exact.
+        # Guarded by //source/extensions/filters/http/aether_stats:tag_extraction_test.
+        - tag_name: reporter
+          regex: "(\\.reporter\\.([^.]*))"
+        - tag_name: source_service
+          regex: "(\\.source_service\\.([^.]*))"
+        - tag_name: source_pod
+          regex: "(\\.source_pod\\.([^.]*))"
+        - tag_name: destination_service
+          regex: "(\\.destination_service\\.([^.]*))"
+        - tag_name: response_code
+          regex: "(\\.response_code\\.([^.]*))"
+        - tag_name: response_flags
+          regex: "(\\.response_flags\\.([^.]*))"
       stats_matcher:
         exclusion_list:
           patterns:
