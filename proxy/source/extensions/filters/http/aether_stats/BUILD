@@ -1,6 +1,6 @@
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
-load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_library")
+load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_library", "envoy_cc_test")
 
 # aether_stats native C++ HTTP filter (proposal 012). Compiled into the custom
 # Envoy via //:envoy AETHER_EXTENSIONS.
@@ -44,5 +44,20 @@ envoy_cc_library(
         ":pkg_cc_proto",
         "@envoy//envoy/registry",
         "@envoy//envoy/server:filter_config_interface",
+    ],
+)
+
+envoy_cc_test(
+    name = "aether_stats_test",
+    srcs = ["aether_stats_test.cc"],
+    repository = "@envoy",
+    deps = [
+        ":aether_stats_lib",
+        ":pkg_cc_proto",
+        "@envoy//source/common/stats:isolated_store_lib",
+        "@envoy//test/mocks/server:server_factory_context_mocks",
+        "@envoy//test/mocks/ssl:ssl_mocks",
+        "@envoy//test/mocks/stream_info:stream_info_mocks",
+        "@envoy//test/mocks/upstream:cluster_info_mocks",
     ],
 )
