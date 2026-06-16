@@ -5,14 +5,13 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
+	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
-	dynamic_modules_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_modules/v3"
 	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestNewInboundListener(t *testing.T) {
@@ -43,7 +42,7 @@ func TestNewInboundListener(t *testing.T) {
 	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_SANITIZE_SET, hcm.GetForwardClientCertDetails())
 	assert.True(t, hcm.GetSetCurrentClientCertDetails().GetUri())
 
-	// Liveness + readiness health-check filters, then the stats module (proposal
+	// Liveness + readiness health-check filters, then the stats filter (proposal
 	// 007 Phase 2), then the router.
 	require.Len(t, hcm.GetHttpFilters(), 4)
 	assert.Equal(t, livenessHealthCheckFilterName, hcm.GetHttpFilters()[0].GetName())
@@ -130,7 +129,7 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 	assert.Equal(t, "app_mp_8080", clusterOf(defaultChain), "default chain → primary port")
 }
 
-// TestInboundChainStatsFilter verifies the stats dynamic module (proposal 007
+// TestInboundChainStatsFilter verifies the stats filter (proposal 007
 // Phase 2) sits after the two health-check filters (so locally-answered probes
 // are not counted) and before the router on the inbound HCM, carrying the local
 // pod's destination identity and reporter=destination in its filter_config.
@@ -154,13 +153,10 @@ func TestInboundChainStatsFilter(t *testing.T) {
 	assert.Equal(t, statsFilterName, filters[2].GetName())
 	assert.Equal(t, httpRouterFilterName, filters[3].GetName())
 
-	dm := &dynamic_modules_filterv3.DynamicModuleFilter{}
-	require.NoError(t, filters[2].GetTypedConfig().UnmarshalTo(dm))
-	assert.Equal(t, statsModuleName, dm.GetDynamicModuleConfig().GetName())
-	assert.Equal(t, statsFilterEntry, dm.GetFilterName())
-
-	cfg := &wrapperspb.StringValue{}
-	require.NoError(t, dm.GetFilterConfig().UnmarshalTo(cfg))
-	assert.Contains(t, cfg.GetValue(), `"reporter":"destination"`)
-	assert.Contains(t, cfg.GetValue(), `"destination_service":"checkout"`)
+	ts := &xdstypev3.TypedStruct{}
+	require.NoError(t, filters[2].GetTypedConfig().UnmarshalTo(ts))
+	assert.Equal(t, statsConfigTypeURL, ts.GetTypeUrl())
+	fields := ts.GetValue().GetFields()
+	assert.Equal(t, "destination", fields["reporter"].GetStringValue())
+	assert.Equal(t, "checkout", fields["destination_service"].GetStringValue())
 }

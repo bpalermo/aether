@@ -58,9 +58,9 @@ spec:
       {{- end }}
       containers:
         - name: proxy
-          # Custom aether-proxy = stock Envoy base + baked aether_stats
-          # module (//proxy:image_push). The module's search path is baked into
-          # the image, so no volume or env is needed.
+          # Custom aether-proxy = Envoy with the compiled-in aether_stats C++
+          # extension (//proxy:image_push, proposal 012). The extension is part
+          # of the binary, so no module volume or search-path env is needed.
           image: {{ .Values.proxy.image.ref | quote }}
           imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
           {{- if .Values.proxy.hotRestart.enabled }}

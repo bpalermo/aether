@@ -5,12 +5,11 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
-	dynamic_modules_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_modules/v3"
+	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
@@ -74,7 +73,7 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 	assert.Equal(t, constants.ProxyReadinessPath, hc.GetHeaders()[0].GetStringMatch().GetExact())
 }
 
-// TestOutboundChainStatsFilter verifies the stats dynamic module (proposal 007)
+// TestOutboundChainStatsFilter verifies the stats filter (proposals 007/012)
 // sits immediately before the router on the outbound HCM, carrying the pod's
 // source identity in its per-instance filter_config.
 func TestOutboundChainStatsFilter(t *testing.T) {
@@ -89,14 +88,12 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 	assert.Equal(t, statsFilterName, filters[3].GetName())
 	assert.Equal(t, httpRouterFilterName, filters[4].GetName())
 
-	// The dynamic module + the source identity travel in the filter config.
-	dm := &dynamic_modules_filterv3.DynamicModuleFilter{}
-	require.NoError(t, filters[3].GetTypedConfig().UnmarshalTo(dm))
-	assert.Equal(t, statsModuleName, dm.GetDynamicModuleConfig().GetName())
-	assert.Equal(t, statsFilterEntry, dm.GetFilterName())
-
-	cfg := &wrapperspb.StringValue{}
-	require.NoError(t, dm.GetFilterConfig().UnmarshalTo(cfg))
-	assert.Contains(t, cfg.GetValue(), `"source_service":"checkout"`)
-	assert.Contains(t, cfg.GetValue(), `"reporter":"source"`)
+	// The source identity travels in the filter's TypedStruct config; Envoy
+	// resolves the native C++ factory by the inner proto type.
+	ts := &xdstypev3.TypedStruct{}
+	require.NoError(t, filters[3].GetTypedConfig().UnmarshalTo(ts))
+	assert.Equal(t, statsConfigTypeURL, ts.GetTypeUrl())
+	fields := ts.GetValue().GetFields()
+	assert.Equal(t, "source", fields["reporter"].GetStringValue())
+	assert.Equal(t, "checkout", fields["source_service"].GetStringValue())
 }
