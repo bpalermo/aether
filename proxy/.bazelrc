@@ -95,6 +95,15 @@ build:rbe-buildbuddy-amd64 --extra_execution_platforms=//bazel/platforms:rbe_bui
 # We do NOT inherit --config=clang directly here because clang sets
 # --host_platform=@clang_platform (the x64 alias) which the rbe-buildbuddy base
 # already pulls in via --config=clang; the --host_platform below overrides it.
+#
+# bootstrap_impl override: envoy.bazelrc sets bootstrap_impl=script globally,
+# which generates a venv-launcher shell script with bash syntax. The arm64 RBE
+# executor containers run /bin/sh = dash, which chokes on that bash syntax
+# (error: "Syntax error: '(' unexpected" from the V8 code_generator py_binary).
+# Switching to system_python bypasses the venv launcher — rules_python calls
+# the system Python3 directly, which is available on the Envoy build image.
+# This is safe: the default (before envoy.bazelrc overrides it) IS system_python.
 build:rbe-buildbuddy-arm64 --config=rbe-buildbuddy
 build:rbe-buildbuddy-arm64 --host_platform=//bazel/platforms:rbe_buildbuddy_arm64
 build:rbe-buildbuddy-arm64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_arm64
+build:rbe-buildbuddy-arm64 --@rules_python//python/config_settings:bootstrap_impl=system_python
