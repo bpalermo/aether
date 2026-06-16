@@ -42,6 +42,16 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      # Envoy's hermetic LLVM clang is linked against libtinfo.so.5, absent on
+      # stock ubuntu-24.04 (ships .so.6). The RBE build container had it; native
+      # runners don't — provide a compat symlink (apt's libtinfo5 is gone on noble).
+      - name: libtinfo5 compat for hermetic clang
+        run: |
+          arch="$(uname -m)"
+          sudo apt-get install -y libtinfo5 2>/dev/null || \
+            sudo ln -sf "/usr/lib/${arch}-linux-gnu/libtinfo.so.6" \
+                        "/usr/lib/${arch}-linux-gnu/libtinfo.so.5"
+
       - name: Test (native ${{ matrix.arch }}, BuildBuddy cache)
         # Native build for the runner's arch; BuildBuddy serves cached actions.
         # //... runs //:image_test (compiles Envoy + validates the image structure).
