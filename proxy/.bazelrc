@@ -87,13 +87,37 @@ build:rbe-buildbuddy-amd64 --config=rbe-buildbuddy
 build:rbe-buildbuddy-amd64 --host_platform=//bazel/platforms:rbe_buildbuddy_amd64
 build:rbe-buildbuddy-amd64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_amd64
 
-# arm64 overlay: host/exec = BuildBuddy's native arm64 pool. CAVEAT: the pool
-# routes correctly (Arch=arm64, validated by a remote `uname -m`), but a native
-# arm64 BUILD needs an arm64-EXEC C++ toolchain — Envoy's hermetic clang
-# (envoy_toolchains) only registers one for the driver host's arch, so on an x64
-# driver there is NO aarch64-exec toolchain and `//:envoy` fails toolchain
-# resolution. Until that's wired, arm64 CI builds on a native arm runner
-# (--config=bb-cache). Kept for that follow-up and for native-arm local dev.
+# arm64 overlay: host/exec = BuildBuddy's native arm64 pool.
+# Uses the aarch64-EXEC hermetic clang-18 toolchain registered in WORKSPACE as
+# @llvm_toolchain_aarch64 (exec_arch=aarch64). That toolchain's
+# cc-toolchain-aarch64-linux has exec_compatible_with=[cpu:aarch64, os:linux],
+# so Bazel resolves it when the exec platform is rbe_buildbuddy_arm64.
+# We do NOT inherit --config=clang directly here because clang sets
+# --host_platform=@clang_platform (the x64 alias) which the rbe-buildbuddy base
+# already pulls in via --config=clang; the --host_platform below overrides it.
+#
+# V8 generated_inspector_files fix: The @v8//:generated_inspector_files genrule has
+# local=1, which forces it to run on the LOCAL (driver) machine (x86_64) even when
+# the exec platform is arm64. However, the Python toolchain ($(PYTHON3)) is resolved
+# for the arm64 exec platform — producing an aarch64 ELF binary. The genrule cmd
+# does `export PATH=$(dirname $(realpath $(PYTHON3))):$PATH` which prepends the
+# arm64 python dir to PATH, then invokes code_generator (a Python script with
+# #!/usr/bin/env python3 shebang) which finds the arm64 python3 first in PATH.
+# On the x86_64 driver machine, the Linux binfmt-misc QEMU handler intercepts the
+# arm64 ELF execution and fails with "Could not open '/lib/ld-linux-aarch64.so.1'".
+#
+# Fix: --modify_execution_info=Genrule=-local removes the "local" execution
+# requirement from all genrules, allowing them to run on the remote arm64 executor
+# where the arm64 python3 ELF runs natively. This is correct for arm64 RBE: all
+# build actions should run remotely. The bootstrap_impl=system_python override is
+# REMOVED (it was addressing a symptom, not the root cause).
 build:rbe-buildbuddy-arm64 --config=rbe-buildbuddy
 build:rbe-buildbuddy-arm64 --host_platform=//bazel/platforms:rbe_buildbuddy_arm64
 build:rbe-buildbuddy-arm64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_arm64
+build:rbe-buildbuddy-arm64 --modify_execution_info=Genrule=-local
+# Rust CargoBuildScriptRun: Envoy's dynamic_modules/sdk/rust build script uses
+# bindgen which needs libclang. Envoy's BUILD rule hardcodes @llvm_toolchain_llvm
+# (x86_64) for LIBCLANG_PATH; on the arm64 RBE executor that file is not present.
+# Fix: bazel/patches/envoy-rust-sdk-aarch64-libclang.patch patches @envoy's BUILD
+# to use @llvm_toolchain_aarch64_llvm//:lib/libclang.so on @platforms//cpu:aarch64,
+# so the arm64 libclang is staged in the action sandbox and LIBCLANG_PATH is correct.

@@ -1,10 +1,11 @@
 name: proxy-release
 
-# Post-merge release for the custom Envoy (//proxy): build per arch — amd64 on
-# BuildBuddy's x64 RBE pool, arm64 NATIVELY on a GitHub arm runner (BuildBuddy as
-# remote cache; no arm64-exec toolchain for RBE yet) — push each arch by DIGEST
-# (no per-arch tags), then assemble one multi-arch manifest tagged with the commit
-# SHA. `bazel run //:push` runs the pusher locally, so each runner arch matches.
+# Post-merge release for the custom Envoy (//proxy): build per arch — both legs
+# offload the Envoy compile to BuildBuddy RBE (amd64 = x64 pool, arm64 = arm64
+# pool via @llvm_toolchain_aarch64). Push each arch by DIGEST (no per-arch tags),
+# then assemble one multi-arch manifest tagged with the commit SHA.
+# `bazel run //:push` runs the pusher locally, so the arm64 leg keeps a native
+# ubuntu-24.04-arm runner (RBE compiles the binary, runner executes the pusher).
 on:
   push:
     branches: [main]
@@ -29,12 +30,13 @@ jobs:
           - arch: amd64
             runner: ubuntu-latest
             bazel_config: rbe-buildbuddy-amd64
-          # arm64 builds NATIVELY on the GitHub arm runner with BuildBuddy as a
-          # remote cache (the proxy has no arm64-exec C++ toolchain for RBE yet —
-          # see --config=rbe-buildbuddy-arm64).
+          # arm64 offloads the heavy compile to BuildBuddy's arm64 RBE pool via
+          # @llvm_toolchain_aarch64. Keeps ubuntu-24.04-arm runner so that
+          # `bazel run //:push` executes the oci_push tool natively (the pusher
+          # binary is built for arm64 by RBE and needs an arm64 runner to run it).
           - arch: arm64
             runner: ubuntu-24.04-arm
-            bazel_config: bb-cache
+            bazel_config: rbe-buildbuddy-arm64
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -49,8 +51,8 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      # The NATIVE (arm64) build compiles locally and needs the hermetic clang's
-      # libtinfo.so.5. The RBE leg compiles remotely, so it doesn't.
+      # Both legs now use RBE; this step is never triggered but kept as a
+      # safety net if bb-cache is ever used as a fallback.
       - name: Setup LLVM runtime libs
         if: matrix.bazel_config == 'bb-cache'
         uses: ./.github/actions/setup-llvm-libs

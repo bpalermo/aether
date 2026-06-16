@@ -29,7 +29,20 @@ def envoy_repository():
         sha256 = ENVOY_SHA256,
         strip_prefix = ENVOY_REPO + "-" + ENVOY_SHA,
         url = "https://github.com/" + ENVOY_ORG + "/" + ENVOY_REPO + "/archive/" + ENVOY_SHA + ".tar.gz",
-        # Source patches to @envoy go here (patch_args = ["-p1"]). None yet — the
-        # first real patch is the proposal-010 follow-up.
-        patches = [],
+        # Source patches applied to @envoy (patch_args = ["-p1"]).
+        patches = [
+            # Teach the Rust dynamic-module build script to use the aarch64 LLVM
+            # toolchain's libclang on arm64 exec platforms (native arm64 RBE pool).
+            # Without this, bindgen fails with "could not open llvm_toolchain_llvm/
+            # lib/libclang.so" because only the x86_64 LLVM is staged on the arm64
+            # executor. See proxy/bazel/patches/ for details.
+            "//bazel/patches:envoy-rust-sdk-aarch64-libclang.patch",
+            # Teach envoy_dynamic_module_prefix_symbols() to use the aarch64 LLVM
+            # toolchain's llvm-objcopy on arm64 exec platforms. Without this, the
+            # _hickory_dns_static_renamed genrule fails with "Exec format error"
+            # because @llvm_toolchain_llvm//:objcopy is an x86_64 ELF that cannot
+            # run on the arm64 RBE executor.
+            "//bazel/patches:envoy-dynamic-modules-aarch64-objcopy.patch",
+        ],
+        patch_args = ["-p1"],
     )

@@ -68,6 +68,38 @@ load("@envoy//bazel:dependency_imports_extra.bzl", "envoy_dependency_imports_ext
 
 envoy_dependency_imports_extra()
 
+# --- aarch64-EXEC hermetic clang toolchain (for RBE arm64 pool) ---
+#
+# Envoy's envoy_toolchains() + envoy_dependency_imports_extra() register Envoy's
+# @llvm_toolchain, which is configured for the DRIVER host's arch (x86_64 when
+# the Bazel server runs on an x64 machine). Its cc-toolchain-aarch64-linux has
+# exec_compatible_with=x86_64 — a cross-compile tool. When the RBE exec platform
+# is //bazel/platforms:rbe_buildbuddy_arm64 (cpu:aarch64), Bazel finds no matching
+# CC toolchain and fails analysis.
+#
+# Fix: register a second llvm_toolchain with exec_arch="aarch64". The toolchain
+# config repo runs with rctx.os.arch overridden to "aarch64", so it generates
+# cc-toolchain-aarch64-linux with exec_compatible_with=[cpu:aarch64, os:linux]
+# and downloads the aarch64 LLVM 18.1.8 distribution for the exec environment.
+# The sysroot mirrors Envoy's @sysroot_linux_arm64 (already fetched above).
+# cxx_cross_lib is omitted — for a native aarch64→aarch64 build the compiler's
+# own libc++ is used (stdlib="builtin-libc++").
+load("@toolchains_llvm//toolchain:rules.bzl", "llvm_toolchain")
+
+llvm_toolchain(
+    name = "llvm_toolchain_aarch64",
+    cxx_standard = {"": "c++20"},
+    exec_arch = "aarch64",
+    llvm_version = "18.1.8",
+    sysroot = {
+        "linux-aarch64": "@sysroot_linux_arm64//:sysroot",
+    },
+)
+
+load("@llvm_toolchain_aarch64//:toolchains.bzl", "llvm_register_toolchains")
+
+llvm_register_toolchains()
+
 # --- Our packaging toolchains (rules_oci + container_structure_test) ---
 # Run after the Envoy chain so Envoy's versions of shared deps (bazel_features,
 # bazel_skylib, …) win; rules_oci's later definitions are no-ops for those.
