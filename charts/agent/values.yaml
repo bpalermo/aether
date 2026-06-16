@@ -83,7 +83,7 @@ proxy:
     # publishing commit SHA (multi-arch manifest). This `ref` is auto-pinned to
     # that SHA by proxy-release (a bump-chart PR) on each proxy release — an
     # immutable pin (the :dev placeholder below is just the pre-first-release seed).
-    ref: "ghcr.io/bpalermo/aether/aether-proxy:a54eef170b9f8439d9c31cc94524fb7e3d212cc9"
+    ref: "ghcr.io/bpalermo/aether/aether-proxy:0d0a5a37a4eb7d75231027a11fe385d9275d265c"
     pullPolicy: Always
   logLevel: info
   # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
