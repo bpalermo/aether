@@ -7,3 +7,11 @@ BUILD.bazel linguist-generated=true
 BUILD linguist-generated=true
 MODULE.bazel.lock linguist-generated=true
 go.sum linguist-generated=true
+
+# The proxy/ tree is a separate Bazel workspace (own WORKSPACE + Bazel 7.7.1,
+# Envoy-derived tooling; //.bazelignore excludes it from the root build). The
+# root formatter discovers files via `git ls-files`, which ignores .bazelignore,
+# so it would otherwise reformat proxy Starlark/shell (e.g. the upstream-mirrored
+# extensions_build_config.bzl) and fight the proxy's own conventions. rules_lint
+# honors `rules-lint-ignored`, so mark the whole tree out of the root format/lint.
+proxy/** rules-lint-ignored=true
