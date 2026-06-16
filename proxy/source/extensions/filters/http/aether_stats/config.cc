@@ -25,10 +25,12 @@ ProtobufTypes::MessagePtr AetherStatsFilterFactory::createEmptyConfigProto() {
   return std::make_unique<ProtoConfig>();
 }
 
-// Compiled into the custom Envoy binary; the agent attaches the filter by name.
-LEGACY_REGISTER_FACTORY(AetherStatsFilterFactory,
-                        Server::Configuration::NamedHttpFilterConfigFactory,
-                        "aether.filters.http.aether_stats");
+// Compiled into the custom Envoy binary; the agent attaches the filter by the
+// config proto type. Registers under factory.name() only —
+// LEGACY_REGISTER_FACTORY adds a *second* (deprecated) name, which aborts at
+// static init with "Double registration" when that name equals name() (the
+// Envoy binary won't boot).
+REGISTER_FACTORY(AetherStatsFilterFactory, Server::Configuration::NamedHttpFilterConfigFactory);
 
 } // namespace AetherStats
 } // namespace HttpFilters

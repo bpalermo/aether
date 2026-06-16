@@ -61,3 +61,19 @@ envoy_cc_test(
         "@envoy//test/mocks/upstream:cluster_info_mocks",
     ],
 )
+
+# Boots a real Envoy with the filter wired as the agent emits it (TypedStruct)
+# and drives a request through it. Catches a static-init abort (the binary won't
+# start) and factory-resolution failures, which the unit test and the tar-driver
+# image_test cannot. Links :config so the factory is registered in the test
+# binary.
+envoy_cc_test(
+    name = "aether_stats_integration_test",
+    srcs = ["aether_stats_integration_test.cc"],
+    repository = "@envoy",
+    deps = [
+        ":config",
+        "@envoy//test/integration:http_integration_lib",
+        "@envoy//test/test_common:utility_lib",
+    ],
+)
