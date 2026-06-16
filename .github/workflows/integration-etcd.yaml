@@ -6,6 +6,7 @@ on:
       - main
     paths-ignore:
       - "proxy/**"
+      - ".github/workflows/proxy-*.yml"
 
 permissions:
   contents: read
