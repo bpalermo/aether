@@ -87,13 +87,14 @@ build:rbe-buildbuddy-amd64 --config=rbe-buildbuddy
 build:rbe-buildbuddy-amd64 --host_platform=//bazel/platforms:rbe_buildbuddy_amd64
 build:rbe-buildbuddy-amd64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_amd64
 
-# arm64 overlay: host/exec = BuildBuddy's native arm64 pool. CAVEAT: the pool
-# routes correctly (Arch=arm64, validated by a remote `uname -m`), but a native
-# arm64 BUILD needs an arm64-EXEC C++ toolchain — Envoy's hermetic clang
-# (envoy_toolchains) only registers one for the driver host's arch, so on an x64
-# driver there is NO aarch64-exec toolchain and `//:envoy` fails toolchain
-# resolution. Until that's wired, arm64 CI builds on a native arm runner
-# (--config=bb-cache). Kept for that follow-up and for native-arm local dev.
+# arm64 overlay: host/exec = BuildBuddy's native arm64 pool.
+# Uses the aarch64-EXEC hermetic clang-18 toolchain registered in WORKSPACE as
+# @llvm_toolchain_aarch64 (exec_arch=aarch64). That toolchain's
+# cc-toolchain-aarch64-linux has exec_compatible_with=[cpu:aarch64, os:linux],
+# so Bazel resolves it when the exec platform is rbe_buildbuddy_arm64.
+# We do NOT inherit --config=clang directly here because clang sets
+# --host_platform=@clang_platform (the x64 alias) which the rbe-buildbuddy base
+# already pulls in via --config=clang; the --host_platform below overrides it.
 build:rbe-buildbuddy-arm64 --config=rbe-buildbuddy
 build:rbe-buildbuddy-arm64 --host_platform=//bazel/platforms:rbe_buildbuddy_arm64
 build:rbe-buildbuddy-arm64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_arm64
