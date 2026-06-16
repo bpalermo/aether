@@ -1,11 +1,10 @@
 load("@rules_oci//oci:pull.bzl", "oci_pull")
 
 # Base for the custom aether-proxy image. distroless/cc ships libstdc++ +
-# libgcc_s + glibc, which the Envoy binary and the aether_stats Rust dynamic
-# module both need at runtime (the Envoy distroless image is built on
-# distroless/base and lacks libgcc_s, so the module's unwinder fails to load
-# there). debian12 matches the Envoy release's glibc. Digest carried over from
-# the aether root MODULE.bazel @distroless_cc pin.
+# libgcc_s + glibc, which the Envoy binary needs at runtime (the upstream Envoy
+# distroless image is built on distroless/base and lacks libgcc_s, so the
+# binary's unwinder fails to load there). debian12 matches the Envoy release's
+# glibc. Digest carried over from the aether root MODULE.bazel @distroless_cc pin.
 def oci_images():
     oci_pull(
         name = "distroless_cc",

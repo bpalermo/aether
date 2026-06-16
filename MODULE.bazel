@@ -24,14 +24,6 @@ bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 bazel_dep(name = "rules_helm", version = "0.29.0")
 
-# Hermetic LLVM C/C++ toolchain (clang/lld + glibc sysroots). The Rust toolchain
-# and the Envoy/proxy-module build that originally drove this moved to the
-# separate //proxy workspace (proposal 010); LLVM is retained here for the C/C++
-# toolchain it provides. (Follow-up: confirm via cquery whether any aether target
-# still resolves it; if nothing does, this and the sysroots/llvm extensions below
-# can be pruned too.)
-bazel_dep(name = "toolchains_llvm", version = "1.7.0")
-
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.2")
 
@@ -159,46 +151,13 @@ pull(
     tag = "nonroot",
 )
 
-# NOTE: the custom aether-proxy image (distroless/cc base + custom Envoy + the
-# aether_stats dynamic module) and all its build wiring — the Rust toolchain, the
-# crate_universe graph, the Envoy abi.h/binary fetches — moved to the separate
-# //proxy workspace (proposal 010), which is listed in //.bazelignore. aether no
-# longer builds the proxy image; the chart references the published image (see
-# charts/agent/values.yaml).
-
-# Hermetic glibc sysroots (chromium bullseye, glibc 2.31 <= the proxy distroless
-# base) for the LLVM toolchain and the SDK bindgen — see //bazel/llvm.
-sysroots = use_extension("//bazel/llvm:extensions.bzl", "sysroots")
-use_repo(sysroots, "sysroot_linux_amd64", "sysroot_linux_arm64")
-
-# Hermetic LLVM C/C++ toolchain (clang 18.1.8 — matches Envoy's hermetic pin;
-# keep in lockstep with //bazel/llvm:version.bzl LLVM_VERSION), registered as the
-# default toolchain for host + linux amd64/arm64, each with its matching glibc
-# sysroot. This is the repo's single C/C++ toolchain (it replaced Zig): the Go
-# and protobuf builds use no cgo / cc_* targets, so making clang the default is
-# transparent to them, while the proxy cdylib cross-compiles against an
-# old-enough glibc to load on the Envoy distroless base.
-llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
-llvm.toolchain(
-    name = "llvm_toolchain",
-    llvm_version = "18.1.8",
-    # The LLVM dist ships only host-arch libc++.a, so its default static libc++
-    # can't satisfy a cross-compile; point the C++ stdlib at the per-arch sysroot
-    # libstdc++ instead. The cdylib is pure Rust, so --as-needed drops libstdc++
-    # entirely anyway — the resulting .so needs only libgcc_s/libc/pthread (max
-    # GLIBC 2.18), matching the prior Zig output.
-    stdlib = {"": "dynamic-stdc++"},
-)
-llvm.sysroot(
-    name = "llvm_toolchain",
-    label = "@sysroot_linux_amd64//:sysroot",
-    targets = ["linux-x86_64"],
-)
-llvm.sysroot(
-    name = "llvm_toolchain",
-    label = "@sysroot_linux_arm64//:sysroot",
-    targets = ["linux-aarch64"],
-)
-use_repo(llvm, "llvm_toolchain", "llvm_toolchain_llvm")
-
-register_toolchains("@llvm_toolchain//:all")
+# NOTE: the custom aether-proxy image (distroless/cc base + custom Envoy with the
+# compiled-in C++ aether_stats extension) and all its build wiring moved to the
+# separate //proxy workspace (proposals 010/012), which is listed in
+# //.bazelignore. aether no longer builds the proxy image; the chart references
+# the published image (see charts/agent/values.yaml). That move took the only
+# C/C++ in the repo with it — aether now has no cgo / cc_* targets (zero C++
+# build actions), so it carries no C/C++ toolchain: Go and protobuf resolve the
+# auto-detected host cc toolchain for the rare analysis-time reference. The
+# hermetic LLVM toolchain, glibc sysroots, and //bazel/llvm bindgen plumbing that
+# served the old proxy cdylib were removed with it.
