@@ -12,18 +12,21 @@ spec:
       {{- include "agent.proxy.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
-    {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod .Values.proxy.hotRestart.surge }}
-    # Strategy B: surge a new pod onto the node before tearing down the old one so
-    # the new Envoy can hot-restart from the old across the pod boundary.
+    # Surge a new pod onto the node before tearing down the old one so the new
+    # Envoy can hot-restart from the old across the pod boundary. maxUnavailable:0
+    # counts only Ready pods, and the successor holds readiness until the handoff
+    # completes (see the readiness probe below), so the predecessor stays until the
+    # new Envoy has taken over.
     #
-    # Only safe once every node already runs a coordinating (Strategy B) Envoy: two
-    # NON-coordinating epoch-0 Envoys with the same --base-id collide on the
-    # hot-restart domain socket in the shared host netns. Bootstrap into B with
-    # surge=false (delete-first) first, then enable surge for B→B upgrades.
+    # NOTE for a brand-new cluster or a migration from a non-supervised proxy: the
+    # very first rollout onto a node with an existing NON-coordinating epoch-0
+    # Envoy would collide on the --base-id hot-restart domain socket in the shared
+    # host netns. Fresh nodes (no prior proxy) are unaffected. There is no longer a
+    # delete-first toggle; bootstrap such a migration by deleting the old proxy
+    # pods first.
     rollingUpdate:
       maxSurge: 1
       maxUnavailable: 0
-    {{- end }}
   template:
     metadata:
       labels:
@@ -33,7 +36,6 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "agent.proxy.serviceAccountName" . }}
       priorityClassName: system-node-critical
-      {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
       # The deleted (old) pod must keep its Envoy alive as the successor's
       # hot-restart parent until the successor's protocol terminates it — the
       # successor's timers start only after its xDS-gated init, which pod churn
@@ -42,12 +44,10 @@ spec:
       # churn). Give the supervisor generous room to wait; the kubelet's
       # SIGKILL here is the hard stop.
       terminationGracePeriodSeconds: 180
-      {{- end }}
-      {{- if .Values.proxy.hotRestart.enabled }}
       initContainers:
-        # SPIKE (Strategy A): the runtime container is the Envoy image (it carries
-        # Envoy and its shared libraries); inject the statically linked supervisor
-        # from the agent image by having it self-copy onto a shared volume.
+        # The runtime container is the Envoy image (it carries Envoy and its
+        # shared libraries); inject the statically linked supervisor from the
+        # agent image by having it self-copy onto a shared volume.
         - name: install-supervisor
           image: {{ .Values.agent.image.ref | quote }}
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
@@ -55,7 +55,6 @@ spec:
           volumeMounts:
             - name: supervisor-bin
               mountPath: /opt/aether
-      {{- end }}
       containers:
         - name: proxy
           # Custom aether-proxy = Envoy with the compiled-in aether_stats C++
@@ -63,7 +62,6 @@ spec:
           # of the binary, so no module volume or search-path env is needed.
           image: {{ .Values.proxy.image.ref | quote }}
           imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
-          {{- if .Values.proxy.hotRestart.enabled }}
           command:
             - "/opt/aether/supervisor"
             - "proxy-supervisor"
@@ -73,13 +71,11 @@ spec:
             - "--base-id={{ .Values.proxy.hotRestart.baseId }}"
             - "--drain-time={{ .Values.proxy.hotRestart.drainTime }}"
             - "--parent-shutdown-time={{ .Values.proxy.hotRestart.parentShutdownTime }}"
-            {{- if .Values.proxy.hotRestart.crossPod }}
             - "--state-dir=/run/aether/hotrestart"
             - "--ready-marker=/var/run/aether-proxy/ready"
             - "--admin-address=127.0.0.1:9901"
             - "--handoff-deadline={{ .Values.proxy.hotRestart.handoffDeadline }}"
             - "--admin-unresponsive-deadline={{ .Values.proxy.hotRestart.adminUnresponsiveDeadline }}"
-            {{- end }}
             {{- with .Values.telemetry.otlpEndpoint }}
             # Push-first: the supervisor exports its hot-restart lifecycle
             # metrics over OTLP; no scrape port to collide on in the host netns.
@@ -93,20 +89,6 @@ spec:
             - "--envoy-arg=$(NODE_NAME)"
             - "--envoy-arg=--service-zone"
             - "--envoy-arg=$(ZONE)"
-          {{- else }}
-          command:
-            - "/usr/local/bin/envoy"
-            - "-c"
-            - "/etc/envoy/envoy.yaml"
-            - "-l"
-            - {{ .Values.proxy.logLevel | quote }}
-            - "--service-cluster"
-            - "aether-proxy"
-            - "--service-node"
-            - "$(NODE_NAME)"
-            - "--service-zone"
-            - "$(ZONE)"
-          {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -126,7 +108,6 @@ spec:
               value: "0"
             - name: ENVOY_GID
               value: "0"
-          {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
           # Ready only once this pod's Envoy is live at the newest epoch (post
           # handoff), so the DaemonSet (maxUnavailable=0) keeps the old pod until
           # the new one has taken over. The distroless Envoy image has no shell, so
@@ -142,7 +123,6 @@ spec:
             periodSeconds: 2
             failureThreshold: 3
             successThreshold: 1
-          {{- end }}
           {{- with .Values.proxy.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -171,25 +151,19 @@ spec:
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
-            {{- if .Values.proxy.hotRestart.enabled }}
             - name: supervisor-bin
               mountPath: /opt/aether
               readOnly: true
             - name: dev-shm
               mountPath: /dev/shm
-            {{- end }}
-            {{- if and .Values.proxy.hotRestart.enabled .Values.proxy.hotRestart.crossPod }}
             - name: ready-marker
               mountPath: /var/run/aether-proxy
-            {{- end }}
       volumes:
-        {{- if .Values.proxy.hotRestart.enabled }}
         - name: supervisor-bin
           emptyDir: {}
-        {{- if .Values.proxy.hotRestart.crossPod }}
-        # Strategy B: /dev/shm must be shared across the overlapping pods on the
-        # node, so it is a hostPath (tmpfs under /run) rather than a pod-local
-        # emptyDir. The hot-restart shared-memory segment lives here.
+        # /dev/shm must be shared across the overlapping pods on the node, so it is
+        # a hostPath (tmpfs under /run) rather than a pod-local emptyDir. The
+        # hot-restart shared-memory segment lives here.
         - name: dev-shm
           hostPath:
             path: {{ .Values.proxy.hotRestart.shmHostPath | quote }}
@@ -197,13 +171,6 @@ spec:
         # Pod-local readiness marker (not shared across pods).
         - name: ready-marker
           emptyDir: {}
-        {{- else }}
-        - name: dev-shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: {{ .Values.proxy.hotRestart.shmSizeLimit }}
-        {{- end }}
-        {{- end }}
         - name: proxy-config
           configMap:
             name: {{ include "agent.proxy.configMapName" . }}

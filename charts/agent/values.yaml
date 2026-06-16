@@ -93,43 +93,32 @@ proxy:
   # `--log-format` CLI flag — Envoy rejects setting both. Set false to fall back
   # to Envoy's default text format.
   jsonLogs: true
-  # SPIKE (Strategy A): run the Envoy hot-restart supervisor (agent
-  # proxy-supervisor) as the proxy entrypoint instead of launching Envoy
-  # directly, so bootstrap-config changes hot-restart in place without dropping
-  # connections. See docs/proposals/001_proxy-hot-restart.md. Off by default.
+  # Envoy hot restart. The proxy DaemonSet always runs the agent's
+  # proxy-supervisor as the container entrypoint (PID 1): it forks Envoy across
+  # restart epochs and, on a surge upgrade, hot-restarts the new pod's Envoy from
+  # the old pod's across the pod boundary (shared host netns + hostPath /dev/shm +
+  # per-node epoch coordination + a readiness gate). The DaemonSet uses a
+  # maxSurge=1/maxUnavailable=0 update strategy so the successor takes over before
+  # the predecessor is removed — connection-preserving. See
+  # docs/proposals/001_proxy-hot-restart.md. Only the tunables below are
+  # configurable; the mechanism itself is not optional.
   hotRestart:
-    enabled: false
-    # Strategy B (cross-pod, true image upgrade): surge a new pod onto the node and
-    # hot-restart the new Envoy from the old across the pod boundary. Adds the
-    # maxSurge update strategy, a shared hostPath /dev/shm, per-node epoch
-    # coordination, and a readiness gate. When false, hot restart is Strategy A
-    # (in-place, bootstrap-config/binary only). See docs/proposals/001.
-    crossPod: false
-    # Surge update strategy (maxSurge=1/maxUnavailable=0) for connection-preserving
-    # B→B image upgrades. Keep false for the one-time bootstrap INTO B (delete-first,
-    # brief per-node gap): two non-coordinating epoch-0 Envoys sharing --base-id in
-    # the host netns collide on the hot-restart domain socket. Flip to true once all
-    # nodes run a Strategy B proxy.
-    surge: false
     # Envoy --base-id, pinned so successive epochs share one shared-memory segment.
     baseId: 0
     # Envoy --drain-time-s / --parent-shutdown-time-s (parent must exceed drain).
-    # For Strategy B the successor pod holds readiness for ~parentShutdownTime
-    # (until its Envoy terminates the predecessor), so keep these modest.
+    # The successor pod holds readiness for ~parentShutdownTime (until its Envoy
+    # terminates the predecessor), so keep these modest.
     drainTime: 10s
     parentShutdownTime: 15s
-    # Watchdogs (Strategy B): a hot-restart epoch that never reaches LIVE within
-    # handoffDeadline of launch, or an admin endpoint unreachable for
-    # adminUnresponsiveDeadline after having been LIVE, means the successor's
-    # main thread is wedged in a blocking hot-restart RPC against a dead parent;
-    # the supervisor exits non-zero so the pod is recreated. 0 = built-in
-    # defaults (2m / 30s).
+    # Watchdogs: a hot-restart epoch that never reaches LIVE within handoffDeadline
+    # of launch, or an admin endpoint unreachable for adminUnresponsiveDeadline
+    # after having been LIVE, means the successor's main thread is wedged in a
+    # blocking hot-restart RPC against a dead parent; the supervisor exits non-zero
+    # so the pod is recreated. 0 = built-in defaults (2m / 30s).
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0
-    # /dev/shm size for the hot-restart shared-memory segment (gauges/counters).
-    # Strategy A only (emptyDir Memory); Strategy B uses shmHostPath instead.
-    shmSizeLimit: 64Mi
-    # Strategy B: host tmpfs dir shared across overlapping pods, mounted at /dev/shm.
+    # Host tmpfs dir shared across overlapping pods on a node, mounted at /dev/shm;
+    # holds the hot-restart shared-memory segment (gauges/counters).
     shmHostPath: /run/aether/shm
   # Proxy container resources. Previously unset (fully unbounded): a leaking
   # Envoy could eat the node until the kubelet itself flapped (observed
