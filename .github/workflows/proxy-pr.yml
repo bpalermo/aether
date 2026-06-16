@@ -1,8 +1,9 @@
 name: proxy-pr
 
 # PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1):
-# `bazel test` built NATIVELY per arch (amd64 on ubuntu-latest, arm64 on the
-# GitHub arm runner), with BuildBuddy as a remote CACHE only (no RBE executor).
+# `bazel test //...` per arch — amd64 on BuildBuddy's x64 RBE pool (ubuntu-latest),
+# arm64 NATIVELY on a GitHub arm runner with BuildBuddy as a remote cache (the
+# proxy has no arm64-exec C++ toolchain for RBE yet — see .bazelrc).
 # Does NOT build/push the image — that happens on merge (proxy-release.yml).
 on:
   pull_request:
@@ -27,12 +28,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # amd64 offloads the heavy compile to BuildBuddy RBE (x64 executors).
+          # amd64 offloads the heavy compile to BuildBuddy's x64 RBE pool.
           - arch: amd64
             runner: ubuntu-latest
-            bazel_config: rbe-buildbuddy
-          # arm64 builds NATIVELY on the GitHub arm runner (BuildBuddy has no arm
-          # pool) with BuildBuddy as a remote cache.
+            bazel_config: rbe-buildbuddy-amd64
+          # arm64 builds NATIVELY on the GitHub arm runner with BuildBuddy as a
+          # remote cache. BuildBuddy now has an arm64 RBE pool, but the proxy lacks
+          # an arm64-exec C++ toolchain (see --config=rbe-buildbuddy-arm64).
           - arch: arm64
             runner: ubuntu-24.04-arm
             bazel_config: bb-cache
@@ -47,10 +49,9 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      # Only the NATIVE (arm64) build compiles locally and needs the hermetic
-      # clang's libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6,
-      # and a symlink fails — clang needs the versioned NCURSES_TINFO_5.0 symbols).
-      # amd64 compiles remotely (RBE), so its runner doesn't need it.
+      # The NATIVE (arm64) build compiles locally and needs the hermetic clang's
+      # libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6). The
+      # RBE leg compiles remotely, so it doesn't.
       - name: Setup LLVM runtime libs
         if: matrix.bazel_config == 'bb-cache'
         uses: ./.github/actions/setup-llvm-libs

@@ -55,20 +55,20 @@ build:bb-cache --noslim_profile
 build:bb-cache --experimental_profile_include_target_label
 build:bb-cache --experimental_profile_include_primary_output
 
-# BuildBuddy Remote Build Execution (RBE) — for LOCAL dev: offload the heavy Envoy
-# compile to BuildBuddy executors (executor + cache + BES). Invoke
-# `--config=rbe-buildbuddy`. CI does NOT use this (it builds natively per-arch with
-# --config=bb-cache); this is the fast path for a single-arch local build.
+# BuildBuddy Remote Build Execution (RBE) — offload the heavy Envoy compile to
+# BuildBuddy executors (executor + cache + BES). Pick an arch overlay:
+#   --config=rbe-buildbuddy-amd64   (x64 pool)
+#   --config=rbe-buildbuddy-arm64   (arm64 pool — see caveat below)
 #
-# Reuses Envoy's hermetic `--config=clang`, whose exec/host platform
-# @clang_platform already declares the container-image + docker capabilities. The
-# only fix is dockerNetwork, which @clang_platform sets to "standard" (an EngFlow
-# value BuildBuddy rejects) — overridden to "off" via //bazel/platforms:rbe_buildbuddy.
+# `rbe-buildbuddy` is the shared BASE (common executor/cache/BES flags, NO
+# platform); the overlays add only the host/exec platform via `--config` chaining.
+# Don't pass `--config=rbe-buildbuddy` on its own — it has no platform. Reuses
+# Envoy's hermetic `--config=clang`; @clang_platform sets dockerNetwork "standard"
+# (an EngFlow value BuildBuddy rejects) — the platforms below override it to "off".
 #
-# Auth (gitignored user.bazelrc): build:rbe-buildbuddy --remote_header=x-buildbuddy-api-key=KEY
+# Auth goes on the base so both overlays inherit it (gitignored user.bazelrc):
+#   build:rbe-buildbuddy --remote_header=x-buildbuddy-api-key=KEY
 build:rbe-buildbuddy --config=clang
-build:rbe-buildbuddy --host_platform=//bazel/platforms:rbe_buildbuddy
-build:rbe-buildbuddy --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy
 build:rbe-buildbuddy --remote_executor=grpcs://remote.buildbuddy.io
 build:rbe-buildbuddy --remote_cache=grpcs://remote.buildbuddy.io
 build:rbe-buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
@@ -81,3 +81,19 @@ build:rbe-buildbuddy --grpc_keepalive_time=30s
 build:rbe-buildbuddy --jobs=200
 build:rbe-buildbuddy --remote_download_toplevel
 build:rbe-buildbuddy --spawn_strategy=remote,local
+
+# x64 overlay: host/exec = BuildBuddy x64 pool.
+build:rbe-buildbuddy-amd64 --config=rbe-buildbuddy
+build:rbe-buildbuddy-amd64 --host_platform=//bazel/platforms:rbe_buildbuddy_amd64
+build:rbe-buildbuddy-amd64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_amd64
+
+# arm64 overlay: host/exec = BuildBuddy's native arm64 pool. CAVEAT: the pool
+# routes correctly (Arch=arm64, validated by a remote `uname -m`), but a native
+# arm64 BUILD needs an arm64-EXEC C++ toolchain — Envoy's hermetic clang
+# (envoy_toolchains) only registers one for the driver host's arch, so on an x64
+# driver there is NO aarch64-exec toolchain and `//:envoy` fails toolchain
+# resolution. Until that's wired, arm64 CI builds on a native arm runner
+# (--config=bb-cache). Kept for that follow-up and for native-arm local dev.
+build:rbe-buildbuddy-arm64 --config=rbe-buildbuddy
+build:rbe-buildbuddy-arm64 --host_platform=//bazel/platforms:rbe_buildbuddy_arm64
+build:rbe-buildbuddy-arm64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_arm64
