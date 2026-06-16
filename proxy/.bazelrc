@@ -115,3 +115,9 @@ build:rbe-buildbuddy-arm64 --config=rbe-buildbuddy
 build:rbe-buildbuddy-arm64 --host_platform=//bazel/platforms:rbe_buildbuddy_arm64
 build:rbe-buildbuddy-arm64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_arm64
 build:rbe-buildbuddy-arm64 --modify_execution_info=Genrule=-local
+# Rust CargoBuildScriptRun: Envoy's dynamic_modules/sdk/rust build script uses
+# bindgen which needs libclang. Envoy's BUILD rule hardcodes @llvm_toolchain_llvm
+# (x86_64) for LIBCLANG_PATH; on the arm64 RBE executor that file is not present.
+# Fix: bazel/patches/envoy-rust-sdk-aarch64-libclang.patch patches @envoy's BUILD
+# to use @llvm_toolchain_aarch64_llvm//:lib/libclang.so on @platforms//cpu:aarch64,
+# so the arm64 libclang is staged in the action sandbox and LIBCLANG_PATH is correct.
