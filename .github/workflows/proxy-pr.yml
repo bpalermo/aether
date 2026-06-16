@@ -27,10 +27,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # amd64 offloads the heavy compile to BuildBuddy RBE (x64 executors).
           - arch: amd64
             runner: ubuntu-latest
+            bazel_config: rbe-buildbuddy
+          # arm64 builds NATIVELY on the GitHub arm runner (BuildBuddy has no arm
+          # pool) with BuildBuddy as a remote cache.
           - arch: arm64
             runner: ubuntu-24.04-arm
+            bazel_config: bb-cache
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -42,20 +47,20 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      # Envoy's hermetic LLVM clang needs libtinfo.so.5 (LLVM 18.1.8 leaks it);
-      # ubuntu-24.04 ships only .so.6 and a symlink fails (clang needs the
-      # versioned NCURSES_TINFO_5.0 symbols). Install the real ncurses5 .deb —
-      # the shared composite action aether's own CI uses.
+      # Only the NATIVE (arm64) build compiles locally and needs the hermetic
+      # clang's libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6,
+      # and a symlink fails — clang needs the versioned NCURSES_TINFO_5.0 symbols).
+      # amd64 compiles remotely (RBE), so its runner doesn't need it.
       - name: Setup LLVM runtime libs
+        if: matrix.bazel_config == 'bb-cache'
         uses: ./.github/actions/setup-llvm-libs
 
-      - name: Test (native ${{ matrix.arch }}, BuildBuddy cache)
-        # Native build for the runner's arch; BuildBuddy serves cached actions.
+      - name: Test (${{ matrix.arch }}, ${{ matrix.bazel_config }})
         # //... runs //:image_test (compiles Envoy + validates the image structure).
         run: |
           bazel test \
             --config=ci \
-            --config=bb-cache \
+            --config=${{ matrix.bazel_config }} \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \

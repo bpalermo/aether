@@ -24,10 +24,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # amd64 offloads the heavy compile to BuildBuddy RBE (x64 executors).
           - arch: amd64
             runner: ubuntu-latest
+            bazel_config: rbe-buildbuddy
+          # arm64 builds NATIVELY on the GitHub arm runner (no BuildBuddy arm pool).
           - arch: arm64
             runner: ubuntu-24.04-arm
+            bazel_config: bb-cache
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -42,11 +46,10 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      # Envoy's hermetic LLVM clang needs libtinfo.so.5 (LLVM 18.1.8 leaks it);
-      # ubuntu-24.04 ships only .so.6 and a symlink fails (versioned
-      # NCURSES_TINFO_5.0 symbols). Install the real ncurses5 .deb — the shared
-      # composite action aether's own CI uses.
+      # Only the NATIVE (arm64) build compiles locally and needs the hermetic
+      # clang's libtinfo.so.5. amd64 compiles remotely (RBE), so it doesn't.
       - name: Setup LLVM runtime libs
+        if: matrix.bazel_config == 'bb-cache'
         uses: ./.github/actions/setup-llvm-libs
 
       - name: Log in to GHCR
@@ -56,14 +59,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build + push ${{ matrix.arch }} by digest (native, BuildBuddy cache)
+      - name: Build + push ${{ matrix.arch }} by digest (${{ matrix.bazel_config }})
         # remote_tags=[] and no --tag → oci_push pushes the image by digest only
         # (no tag lingers in the registry). Capture the pushed manifest digest.
         working-directory: proxy
         run: |
           bazel run \
             --config=ci \
-            --config=bb-cache \
+            --config=${{ matrix.bazel_config }} \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
