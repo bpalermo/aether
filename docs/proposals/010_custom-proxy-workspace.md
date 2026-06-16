@@ -1,7 +1,7 @@
 # Proposal: Custom Envoy proxy as a separate sibling Bazel workspace
 
-**Status:** Design — supersedes proposal 009's "reject Option A" for the
-*separate-workspace* framing
+**Status:** Implemented (proposals 010/011/012) — supersedes
+[proposal 009](009_envoy-in-workspace.md)
 **Author:** Bruno Palermo
 **Date:** 2026-06-15
 
