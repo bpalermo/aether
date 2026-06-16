@@ -1,8 +1,9 @@
 name: proxy-pr
 
 # PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1):
-# `bazel test` built NATIVELY per arch (amd64 on ubuntu-latest, arm64 on the
-# GitHub arm runner), with BuildBuddy as a remote CACHE only (no RBE executor).
+# `bazel test //...` on BuildBuddy RBE, one leg per arch routed to its native
+# executor pool (amd64 + arm64 — no cross-compile). Both legs run on ubuntu-latest
+# since the build/tests execute remotely; the runner only drives Bazel.
 # Does NOT build/push the image — that happens on merge (proxy-release.yml).
 on:
   pull_request:
@@ -27,16 +28,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # amd64 offloads the heavy compile to BuildBuddy RBE (x64 executors).
+          # Both arches offload the heavy compile to BuildBuddy RBE, each to its
+          # native executor pool (no cross-compile). The runner only drives Bazel,
+          # so both use ubuntu-latest (x64); the build runs on remote x64 / arm64.
           - arch: amd64
-            runner: ubuntu-latest
             bazel_config: rbe-buildbuddy
-          # arm64 builds NATIVELY on the GitHub arm runner (BuildBuddy has no arm
-          # pool) with BuildBuddy as a remote cache.
           - arch: arm64
-            runner: ubuntu-24.04-arm
-            bazel_config: bb-cache
-    runs-on: ${{ matrix.runner }}
+            bazel_config: rbe-buildbuddy-arm64
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -46,14 +45,6 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
-
-      # Only the NATIVE (arm64) build compiles locally and needs the hermetic
-      # clang's libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6,
-      # and a symlink fails — clang needs the versioned NCURSES_TINFO_5.0 symbols).
-      # amd64 compiles remotely (RBE), so its runner doesn't need it.
-      - name: Setup LLVM runtime libs
-        if: matrix.bazel_config == 'bb-cache'
-        uses: ./.github/actions/setup-llvm-libs
 
       - name: Test (${{ matrix.arch }}, ${{ matrix.bazel_config }})
         # //... runs //:image_test (compiles Envoy + validates the image structure).

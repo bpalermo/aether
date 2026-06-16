@@ -14,3 +14,20 @@ platform(
     parents = ["@envoy//bazel/platforms/rbe:linux_x64"],
     visibility = ["//visibility:public"],
 )
+
+# RBE execution platform for BuildBuddy's native arm64 (aarch64) pool. Inherits
+# Envoy's arm64 RBE platform (multi-arch worker image + aarch64 cpu constraint)
+# but: drops the EngFlow "arm" Pool (BuildBuddy routes by Arch), sets Arch=arm64
+# to select BuildBuddy's arm64 executors, and forces dockerNetwork "off"
+# (BuildBuddy rejects Envoy's "standard"). Native arm64 build — no cross-compile,
+# so it avoids the LuaJIT host-linker failure that broke the x64-pool attempt.
+platform(
+    name = "rbe_buildbuddy_arm64",
+    exec_properties = {
+        "dockerNetwork": "off",
+        "Pool": "",
+        "Arch": "arm64",
+    },
+    parents = ["@envoy//bazel/platforms/rbe:linux_arm64"],
+    visibility = ["//visibility:public"],
+)

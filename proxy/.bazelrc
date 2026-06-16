@@ -81,3 +81,18 @@ build:rbe-buildbuddy --grpc_keepalive_time=30s
 build:rbe-buildbuddy --jobs=200
 build:rbe-buildbuddy --remote_download_toplevel
 build:rbe-buildbuddy --spawn_strategy=remote,local
+
+# arm64 variant of --config=rbe-buildbuddy: same BuildBuddy RBE, but host/exec
+# platform is the native arm64 pool (//bazel/platforms:rbe_buildbuddy_arm64).
+build:rbe-buildbuddy-arm64 --config=clang
+build:rbe-buildbuddy-arm64 --host_platform=//bazel/platforms:rbe_buildbuddy_arm64
+build:rbe-buildbuddy-arm64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_arm64
+build:rbe-buildbuddy-arm64 --remote_executor=grpcs://remote.buildbuddy.io
+build:rbe-buildbuddy-arm64 --remote_cache=grpcs://remote.buildbuddy.io
+build:rbe-buildbuddy-arm64 --bes_backend=grpcs://remote.buildbuddy.io
+build:rbe-buildbuddy-arm64 --bes_results_url=https://app.buildbuddy.io/invocation/
+build:rbe-buildbuddy-arm64 --nolegacy_important_outputs
+build:rbe-buildbuddy-arm64 --remote_cache_compression
+build:rbe-buildbuddy-arm64 --remote_timeout=3600s
+build:rbe-buildbuddy-arm64 --remote_download_toplevel
+build:rbe-buildbuddy-arm64 --spawn_strategy=remote,local
