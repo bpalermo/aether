@@ -1,8 +1,9 @@
 name: proxy-pr
 
 # PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1):
-# `bazel test` over BuildBuddy RBE. Does NOT build/push the image — that happens
-# on merge (proxy-release.yml). Path-filtered so it only runs when proxy/ changes.
+# `bazel test` built NATIVELY per arch (amd64 on ubuntu-latest, arm64 on the
+# GitHub arm runner), with BuildBuddy as a remote CACHE only (no RBE executor).
+# Does NOT build/push the image — that happens on merge (proxy-release.yml).
 on:
   pull_request:
     branches: [main]
@@ -18,13 +19,24 @@ defaults:
     working-directory: proxy
 
 env:
-  # Envoy's in-tree rust crate index (envoy_rust_crate_index) lockfile digest
-  # doesn't match what our rules_rust computes; repin it.
   CARGO_BAZEL_REPIN: "true"
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # amd64 offloads the heavy compile to BuildBuddy RBE (x64 executors).
+          - arch: amd64
+            runner: ubuntu-latest
+            bazel_config: rbe-buildbuddy
+          # arm64 builds NATIVELY on the GitHub arm runner (BuildBuddy has no arm
+          # pool) with BuildBuddy as a remote cache.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            bazel_config: bb-cache
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,18 +47,22 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      - name: Test (BuildBuddy RBE)
-        # The compile runs remotely on BuildBuddy. //... runs //:image_test (compiles
-        # the amd64 Envoy + validates the image). //:image_index additionally builds
-        # the arm64 cross-compile so multi-arch breakage is caught pre-merge.
-        # --config=ci adds the release build + static BuildBuddy metadata; dynamic
-        # metadata (https://www.buildbuddy.io/docs/guide-metadata) is attached here.
+      # Only the NATIVE (arm64) build compiles locally and needs the hermetic
+      # clang's libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6,
+      # and a symlink fails — clang needs the versioned NCURSES_TINFO_5.0 symbols).
+      # amd64 compiles remotely (RBE), so its runner doesn't need it.
+      - name: Setup LLVM runtime libs
+        if: matrix.bazel_config == 'bb-cache'
+        uses: ./.github/actions/setup-llvm-libs
+
+      - name: Test (${{ matrix.arch }}, ${{ matrix.bazel_config }})
+        # //... runs //:image_test (compiles Envoy + validates the image structure).
         run: |
           bazel test \
             --config=ci \
-            --config=rbe-buildbuddy \
+            --config=${{ matrix.bazel_config }} \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
-            //... //:image_index
+            //...

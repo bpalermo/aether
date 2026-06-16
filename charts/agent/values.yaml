@@ -77,14 +77,12 @@ cniInstall:
 proxy:
   enabled: true
   image:
-    # Custom aether-proxy = distroless/cc base + custom Envoy binary + baked-in
-    # aether_stats dynamic module. Built by the separate //proxy Bazel workspace
-    # (proposal 010) and published to ghcr.io/bpalermo/aether/aether-proxy by the
-    # proxy CI, so it is no longer pinned via an in-workspace {@//proxy:...} stamp.
-    # The module's search path is baked into the image — self-contained, no K8s
-    # image volume.
-    # TODO(proxy-workspace): switch from the :dev tag to an immutable digest that
-    # the proxy CI bumps (proposal 010, option A) to restore digest pinning.
+    # Custom aether-proxy = distroless/cc base + custom Envoy binary. Built by the
+    # separate //proxy Bazel workspace (proposal 010) and published to
+    # ghcr.io/bpalermo/aether/aether-proxy by proxy-release, tagged with the
+    # publishing commit SHA (multi-arch manifest). This `ref` is auto-pinned to
+    # that SHA by proxy-release (a bump-chart PR) on each proxy release — an
+    # immutable pin (the :dev placeholder below is just the pre-first-release seed).
     ref: "ghcr.io/bpalermo/aether/aether-proxy:dev"
     pullPolicy: Always
   logLevel: info
