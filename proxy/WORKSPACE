@@ -88,15 +88,15 @@ load("@toolchains_llvm//toolchain:rules.bzl", "llvm_toolchain")
 
 llvm_toolchain(
     name = "llvm_toolchain_aarch64",
+    cxx_standard = {"": "c++20"},
     exec_arch = "aarch64",
     llvm_version = "18.1.8",
-    cxx_standard = {"": "c++20"},
     sysroot = {
         "linux-aarch64": "@sysroot_linux_arm64//:sysroot",
     },
 )
 
-load("@llvm_toolchain_aarch64//:toolchains.bzl", "llvm_register_toolchains" )
+load("@llvm_toolchain_aarch64//:toolchains.bzl", "llvm_register_toolchains")
 
 llvm_register_toolchains()
 
