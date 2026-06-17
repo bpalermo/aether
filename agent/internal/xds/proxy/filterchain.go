@@ -20,7 +20,7 @@ import (
 // module .so on the proxy unconditionally; Envoy rejects the listener if the
 // referenced dynamic module is absent.
 func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager("outbound_http", nil)
+	hcm := buildHTTPConnectionManager("outbound_http", ReporterSource, nil)
 
 	// strip_any_host_port stays OFF: the authority port is a first-class routing
 	// selector (FQDN:port → that port's cluster, proposal 005). The default-port

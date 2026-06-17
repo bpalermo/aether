@@ -31,6 +31,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -98,6 +99,8 @@ func init() {
 	// Mesh routing configuration
 	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
 	rootCmd.Flags().BoolVar(&cfg.EmitStatsPod, "stats-emit-pod", cfg.EmitStatsPod, "emit per-pod labels (source_pod/destination_pod) on the aether_stats request counter (raises cardinality)")
+	rootCmd.Flags().BoolVar(&cfg.AccessLogsEnabled, "access-logs-enabled", cfg.AccessLogsEnabled, "attach the OTel access logger to every HCM, pushing per-request OTLP logs to the collector (proposal 014)")
+	rootCmd.Flags().Uint32Var(&cfg.AccessLogSuccessSampleRate, "access-log-success-sample-rate", 100, "percent (0-100) of successful requests logged; failures are always logged")
 
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
@@ -183,6 +186,11 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
+	// Global access-log config, set once before the cache builds any listener.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
+		Enabled:           cfg.AccessLogsEnabled,
+		SuccessSampleRate: cfg.AccessLogSuccessSampleRate,
+	})
 
 	// Tracks Envoy's delta-xDS ACK/NACKs so the CNI server can confirm (and
 	// diagnose) config delivery without polling the Envoy admin interface.

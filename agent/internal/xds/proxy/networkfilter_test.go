@@ -46,7 +46,7 @@ func TestBuildHTTPConnectionManager(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hcm := buildHTTPConnectionManager(tt.statPrefix, tt.routeConfig)
+			hcm := buildHTTPConnectionManager(tt.statPrefix, ReporterSource, tt.routeConfig)
 
 			require.NotNil(t, hcm)
 			assert.Equal(t, tt.statPrefix, hcm.GetStatPrefix())
@@ -58,7 +58,7 @@ func TestBuildHTTPConnectionManager(t *testing.T) {
 }
 
 func TestBuildHTTPConnectionManagerFilter(t *testing.T) {
-	hcm := buildHTTPConnectionManager("test", nil)
+	hcm := buildHTTPConnectionManager("test", ReporterSource, nil)
 	filter := buildHTTPConnectionManagerFilter(hcm)
 
 	require.NotNil(t, filter)
@@ -83,7 +83,7 @@ func TestBuildSetFilterState(t *testing.T) {
 // downstream idle timeout backstop (Envoy default is 1h, which let a peer's
 // leaked upstream connections pin thousands of inbound connections).
 func TestHCMDownstreamIdleTimeout(t *testing.T) {
-	hcm := buildHTTPConnectionManager("test", nil)
+	hcm := buildHTTPConnectionManager("test", ReporterSource, nil)
 	idle := hcm.GetCommonHttpProtocolOptions().GetIdleTimeout()
 	require.NotNil(t, idle, "downstream idle timeout must be set")
 	assert.Equal(t, downstreamIdleTimeout, idle.AsDuration())
