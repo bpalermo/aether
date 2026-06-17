@@ -1,0 +1,19 @@
+apiVersion: v2
+name: prober
+description: |
+  Aether synthetic mesh-availability prober (proposal 013). Deploys a per-node
+  DaemonSet that black-box probes the mesh data plane from the client side
+  (a proxy local-reply liveness endpoint) and emits its own pass/fail SLI,
+  capturing the connection-level failures the proxy-emitted aether_stats metric
+  is structurally blind to during hot restarts.
+type: application
+# Stamped at package time when built with `--stamp` (see registrar Chart.yaml).
+version: "0.1.0-{GIT_COMMIT}"
+appVersion: "{STABLE_GIT_VERSION}"
+keywords:
+  - aether
+  - service-mesh
+  - prober
+  - sli
+sources:
+  - https://github.com/bpalermo/aether

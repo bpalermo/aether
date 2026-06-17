@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "prober",
+    srcs = ["prober.go"],
+    importpath = "github.com/bpalermo/aether/prober/internal/prober",
+    visibility = ["//prober:__subpackages__"],
+    deps = [
+        "@com_github_go_logr_logr//:logr",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel//semconv/v1.30.0:v1_30_0",
+        "@io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetricgrpc//:otlpmetricgrpc",
+        "@io_opentelemetry_go_otel_metric//:metric",
+        "@io_opentelemetry_go_otel_metric//noop",
+        "@io_opentelemetry_go_otel_sdk//resource",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+    ],
+)
+
+go_test(
+    name = "prober_test",
+    srcs = ["prober_test.go"],
+    embed = [":prober"],
+    deps = ["@com_github_go_logr_logr//:logr"],
+)
