@@ -46,3 +46,4 @@ jobs:
         run: |
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/agent:agent.push
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/registrar:registrar.push
+          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/prober:prober.push

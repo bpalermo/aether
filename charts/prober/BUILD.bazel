@@ -1,0 +1,29 @@
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+
+# prober Helm chart (published as ghcr.io/bpalermo/aether/charts/prober).
+#
+# Publish targets (GitHub Container Registry, OCI):
+#   bazel run //charts/prober:prober.push           # chart + image
+#   bazel run //charts/prober:prober.push_registry  # chart only
+# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+helm_chart(
+    name = "prober",
+    chart = "Chart.yaml",
+    images = [
+        "//prober/cmd/prober:image_push",
+    ],
+    login_url = "ghcr.io",
+    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+)
+
+helm_lint_test(
+    name = "prober_lint_test",
+    chart = ":prober",
+)
+
+helm_template_test(
+    name = "prober_template_test",
+    chart = ":prober",
+)

@@ -1,0 +1,47 @@
+# Default values for the prober chart.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace the prober DaemonSet is deployed into. Must be a namespace whose pods
+# are mesh-managed so the CNI plumbs the local egress listener (e.g. aether-test).
+namespace:
+  create: false
+  name: ""
+
+image:
+  # Substituted at package time with the digest-pinned reference produced by
+  # //prober/cmd/prober:image_push.
+  ref: "{@//prober/cmd/prober:image_push}"
+  pullPolicy: Always
+
+# Probe settings (see prober flags).
+probe:
+  # Local mesh egress listener the prober dials.
+  egress: "127.0.0.1:18081"
+  # Proxy local-reply liveness route (agent emits a direct_response 200 here).
+  livenessPath: "/-/-/live"
+  # Reserved, non-service Host authority for the liveness probe.
+  livenessAuthority: "liveness.aether.internal"
+  # Probes/sec per target.
+  rate: 5
+  # Per-probe timeout.
+  timeout: "2s"
+  # Mesh authority suffix for the reachability tier.
+  meshDomain: "aether.internal"
+  # Optional reachability tier: echo upstream service names. When non-empty, the
+  # pod gets config.aether.io/upstreams so the agent programs those clusters.
+  reachabilityTargets: []
+
+# OTel: push the probe SLI to the collector (host:port, insecure). Empty disables
+# telemetry (the prober still runs but emits nothing).
+telemetry:
+  otlpEndpoint: ""
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 50m
+    memory: 64Mi

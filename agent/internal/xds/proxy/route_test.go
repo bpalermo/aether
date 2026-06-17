@@ -46,12 +46,15 @@ func TestBuildOutboundRouteConfiguration(t *testing.T) {
 			require.Len(t, routeConfig.GetVirtualHosts(), tt.expectLen+1)
 			catchAll := routeConfig.GetVirtualHosts()[tt.expectLen]
 			assert.Equal(t, []string{"*"}, catchAll.GetDomains())
-			// Route 1: mesh-shaped authority (regex) -> ODCDS cluster_header.
-			// Route 2: everything else -> instant 404.
-			require.Len(t, catchAll.GetRoutes(), 2)
-			assert.Equal(t, onDemandClusterHeader, catchAll.GetRoutes()[0].GetRoute().GetClusterHeader())
-			assert.NotEmpty(t, catchAll.GetRoutes()[0].GetMatch().GetHeaders(), "mesh-authority regex gate")
-			assert.Equal(t, uint32(404), catchAll.GetRoutes()[1].GetDirectResponse().GetStatus())
+			// Route 1: liveness local-reply 200 on MeshLivePath (proposal 013).
+			// Route 2: mesh-shaped authority (regex) -> ODCDS cluster_header.
+			// Route 3: everything else -> instant 404.
+			require.Len(t, catchAll.GetRoutes(), 3)
+			assert.Equal(t, MeshLivePath, catchAll.GetRoutes()[0].GetMatch().GetPath())
+			assert.Equal(t, uint32(200), catchAll.GetRoutes()[0].GetDirectResponse().GetStatus())
+			assert.Equal(t, onDemandClusterHeader, catchAll.GetRoutes()[1].GetRoute().GetClusterHeader())
+			assert.NotEmpty(t, catchAll.GetRoutes()[1].GetMatch().GetHeaders(), "mesh-authority regex gate")
+			assert.Equal(t, uint32(404), catchAll.GetRoutes()[2].GetDirectResponse().GetStatus())
 		})
 	}
 }
@@ -90,7 +93,15 @@ func TestOutboundRetryPolicy(t *testing.T) {
 		"cluster vhost":   BuildOutboundClusterVirtualHost("svc-1.aether.internal", []string{"svc-1.aether.internal"}),
 		"catch-all vhost": buildOnDemandCatchAllVirtualHost("aether.internal"),
 	} {
-		rp := vh.GetRoutes()[0].GetRoute().GetRetryPolicy()
+		// Find the routed (non-direct-response) route; the catch-all leads with a
+		// liveness direct_response route (see TestEgressLivenessRoute).
+		var rp *routev3.RetryPolicy
+		for _, r := range vh.GetRoutes() {
+			if r.GetRoute() != nil {
+				rp = r.GetRoute().GetRetryPolicy()
+				break
+			}
+		}
 		require.NotNil(t, rp, name)
 		assert.Equal(t, "connect-failure,refused-stream,reset-before-request,retriable-status-codes", rp.GetRetryOn(), name)
 		assert.Equal(t, []uint32{503}, rp.GetRetriableStatusCodes(), name)
@@ -98,4 +109,16 @@ func TestOutboundRetryPolicy(t *testing.T) {
 		require.Len(t, rp.GetRetryHostPredicate(), 1, name)
 		assert.Equal(t, "envoy.retry_host_predicates.previous_hosts", rp.GetRetryHostPredicate()[0].GetName(), name)
 	}
+}
+
+// TestEgressLivenessRoute: the outbound catch-all leads with a local-reply 200 on
+// MeshLivePath (proposal 013 prober), matched by exact path before the
+// authority-regex/404 routes, so it wins regardless of authority.
+func TestEgressLivenessRoute(t *testing.T) {
+	vh := buildOnDemandCatchAllVirtualHost("aether.internal")
+	require.NotEmpty(t, vh.GetRoutes())
+	live := vh.GetRoutes()[0]
+	assert.Equal(t, MeshLivePath, live.GetMatch().GetPath(), "liveness must be an exact-path match")
+	require.NotNil(t, live.GetDirectResponse(), "liveness must be a direct_response")
+	assert.Equal(t, uint32(200), live.GetDirectResponse().GetStatus())
 }

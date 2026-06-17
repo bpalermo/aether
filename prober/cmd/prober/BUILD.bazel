@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+
+go_library(
+    name = "prober_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/prober/cmd/prober",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//prober/internal/cmd",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ],
+)
+
+go_binary(
+    name = "prober",
+    embed = [":prober_lib"],
+    visibility = ["//visibility:public"],
+    x_defs = {
+        "github.com/bpalermo/aether/prober/internal/cmd.Version": "{STABLE_GIT_VERSION}",
+    },
+)
+
+go_multi_arch_image(
+    name = "prober_image",
+    binary = ":prober",
+    repository = "bpalermo/aether/prober",
+)

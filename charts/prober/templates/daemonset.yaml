@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "prober.fullname" . }}
+  namespace: {{ include "prober.namespace" . }}
+  labels:
+    {{- include "prober.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "prober.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "prober.labels" . | nindent 8 }}
+        # Mesh injection: the CNI intercepts this pod and the agent plumbs the
+        # per-pod egress listener at {{ .Values.probe.egress }}.
+        aether.io/managed: "true"
+      {{- with .Values.probe.reachabilityTargets }}
+      annotations:
+        # Reachability tier only: authorize the echo upstream clusters (proposal 004).
+        config.aether.io/upstreams: {{ join "," . | quote }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "prober.serviceAccountName" . }}
+      containers:
+        - name: prober
+          image: {{ .Values.image.ref | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--egress={{ .Values.probe.egress }}"
+            - "--liveness-path={{ .Values.probe.livenessPath }}"
+            - "--liveness-authority={{ .Values.probe.livenessAuthority }}"
+            - "--mesh-domain={{ .Values.probe.meshDomain }}"
+            - "--rate={{ .Values.probe.rate }}"
+            - "--timeout={{ .Values.probe.timeout }}"
+            {{- with .Values.probe.reachabilityTargets }}
+            - "--reachability-targets={{ join "," . }}"
+            {{- end }}
+            {{- with .Values.telemetry.otlpEndpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+          env:
+            # Per-node de-collapse: stamp the node onto the OTel resource so probe
+            # series are one-per-node (see PR #210 / the collector transform/promote).
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.node.name=$(NODE_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME)"
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+                  divisor: "1"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

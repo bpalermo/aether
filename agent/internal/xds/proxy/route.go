@@ -73,6 +73,20 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string) *routev3.VirtualHost {
 		Name:    "on_demand_catch_all",
 		Domains: []string{"*"},
 		Routes: []*routev3.Route{
+			// Egress liveness: a local-reply 200 on MeshLivePath, answered without
+			// leaving the proxy (no upstream, no app), for the synthetic mesh
+			// availability prober (proposal 013). First so it wins for this exact
+			// path regardless of authority; the prober uses a reserved non-service
+			// authority so it lands on this catch-all vhost. A 200 proves this
+			// node's egress listener is serving + config loaded; a connection error
+			// proves it is not — the signal aether_stats (proxy-emitted) is
+			// structurally blind to during hot restarts.
+			{
+				Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Path{Path: MeshLivePath}},
+				Action: &routev3.Route_DirectResponse{
+					DirectResponse: &routev3.DirectResponseAction{Status: 200},
+				},
+			},
 			{
 				Match: &routev3.RouteMatch{
 					PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
