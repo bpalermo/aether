@@ -39,6 +39,12 @@ telemetry:
   # OTLP gRPC collector endpoint (host:port, insecure), e.g.
   # "otel-collector.observability.svc:4317". Empty disables push everywhere.
   otlpEndpoint: ""
+  # Emit per-pod labels (source_pod on source-reported series, destination_pod
+  # on destination-reported series) on the aether_stats request counter
+  # (`--stats-emit-pod`). Off by default — raises metric cardinality by the
+  # local pod count. The metric itself ships regardless; this only adds the pod
+  # dimension.
+  statsEmitPod: false
   tracing:
     # Enables OTLP trace export on the agent (`--tracing-enabled`);
     # requires otlpEndpoint.
