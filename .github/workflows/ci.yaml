@@ -2,10 +2,10 @@ name: ci
 
 # Always triggers on every PR (no path filters) so the `ci` gate check below
 # always reports — a required check that is skipped by a path filter would block
-# merges forever. The `changes` job does the path scoping instead: control-plane
-# jobs only run when non-proxy paths change; on a proxy-only PR they skip and the
-# `ci` gate still reports success. The proxy workspace has its own `proxy`
-# workflow with the symmetric `proxy` gate.
+# merges forever. The `changes` job does the coarse path scoping (proxy vs
+# control-plane); the `diff` job then uses bazel-diff to scope the build/test
+# legs to only the targets a PR actually impacts. The proxy workspace has its own
+# `proxy` workflow with the symmetric `proxy` gate.
 on:
   pull_request:
     branches:
@@ -19,8 +19,8 @@ env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
 
 jobs:
-  # Path scoping lives here (not in `on:`) so the workflow always runs and the
-  # `ci` gate always reports. control_plane = any changed file outside proxy/.
+  # Coarse path scoping lives here (not in `on:`) so the workflow always runs and
+  # the `ci` gate always reports. control_plane = any changed file outside proxy/.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -36,6 +36,60 @@ jobs:
               - '!.github/workflows/proxy.yml'
               - '!.github/workflows/proxy-release.yml'
 
+  # Fine-grained scoping: bazel-diff computes the targets impacted by this PR and
+  # splits the impacted tests into unit/integration/e2e. The legs below build/test
+  # only what changed and skip entirely when nothing they cover is impacted. Falls
+  # back to a full run if the base is unreachable or bazel-diff fails (see the
+  # script). Analysis only — no BuildBuddy key needed here.
+  diff:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      has_any: ${{ steps.impacted.outputs.has_any }}
+      has_unit: ${{ steps.impacted.outputs.has_unit }}
+      has_integration: ${{ steps.impacted.outputs.has_integration }}
+      has_e2e: ${{ steps.impacted.outputs.has_e2e }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Full history so the base commit is reachable for the diff.
+          fetch-depth: 0
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Download bazel-diff
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/bazel-diff.jar" \
+            https://github.com/Tinder/bazel-diff/releases/download/v26.0.1/bazel-diff_deploy.jar
+      - name: Compute impacted targets
+        id: impacted
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BAZEL_DIFF_JAR: ${{ runner.temp }}/bazel-diff.jar
+          OUT_DIR: ${{ runner.temp }}/bazel-diff-out
+        run: |
+          # Run from a copy outside the tree: the script git-checkouts the base and
+          # head revisions, which would otherwise swap the script file mid-run.
+          cp scripts/ci-impacted-targets.sh "$RUNNER_TEMP/impacted.sh"
+          bash "$RUNNER_TEMP/impacted.sh"
+      - name: Upload impacted target lists
+        uses: actions/upload-artifact@v4
+        with:
+          name: impacted-targets
+          path: ${{ runner.temp }}/bazel-diff-out/impacted_*.txt
+          if-no-files-found: error
+
   chart-version-bump:
     needs: changes
     if: needs.changes.outputs.control_plane == 'true'
@@ -50,11 +104,11 @@ jobs:
       - name: Require a Chart.yaml version bump for chart changes
         run: scripts/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
 
-  # Compile + lint + unit tests on BuildBuddy RBE; warms the remote cache the
-  # integration/e2e legs reuse.
+  # Build every impacted target (compile + lint on BuildBuddy RBE; warms the
+  # remote cache the integration/e2e legs reuse) and run the impacted unit tests.
   test:
-    needs: changes
-    if: needs.changes.outputs.control_plane == 'true'
+    needs: [changes, diff]
+    if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_any == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -63,19 +117,29 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.18.0
         with:
           bazelisk-cache: true
-      - name: Test
+      - name: Download impacted target lists
+        uses: actions/download-artifact@v4
+        with:
+          name: impacted-targets
+          path: ${{ runner.temp }}/impacted
+      - name: Build impacted targets
         run: |
-          bazel test --config=ci \
+          bazel build --config=ci \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
-            --test_tag_filters=-integration \
-            //...
+            --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
+      - name: Unit tests
+        if: needs.diff.outputs.has_unit == 'true'
+        run: |
+          bazel test --config=ci \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --target_pattern_file=${{ runner.temp }}/impacted/impacted_unit.txt
 
   integration:
-    needs: [changes, test]
-    if: needs.changes.outputs.control_plane == 'true'
+    needs: [changes, diff, test]
+    if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_integration == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -84,16 +148,20 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.18.0
         with:
           bazelisk-cache: true
-      - name: Test
+      - name: Download impacted target lists
+        uses: actions/download-artifact@v4
+        with:
+          name: impacted-targets
+          path: ${{ runner.temp }}/impacted
+      - name: Integration tests
         run: |
           bazel test --config=ci \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
-            --test_tag_filters=integration \
-            //...
+            --target_pattern_file=${{ runner.temp }}/impacted/impacted_integration.txt
 
   e2e:
-    needs: [changes, test]
-    if: needs.changes.outputs.control_plane == 'true'
+    needs: [changes, diff, test]
+    if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_e2e == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -152,7 +220,7 @@ jobs:
   # the main branch ruleset.
   ci:
     if: always()
-    needs: [changes, chart-version-bump, test, integration, e2e]
+    needs: [changes, diff, chart-version-bump, test, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled
