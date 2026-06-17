@@ -95,6 +95,37 @@ spec:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+            # Per-node/pod identity for the OTLP stats Resource, using OTel k8s.*
+            # semantic-convention attribute names. The environment resource
+            # detector (configmap.yaml stats_sinks) parses OTEL_RESOURCE_ATTRIBUTES
+            # into the Resource; the collector promotes k8s.node.name -> a `node`
+            # label ONLY on the static infra clusters (agent_xds, otel_collector),
+            # whose one-series-per-node counters otherwise collide into a single
+            # identityless series and make rate()/increase() fabricate resets and
+            # connect-failures. Mesh clusters carry the resource attrs but are not
+            # promoted, so they stay collapsed (cardinality bounded at the node
+            # target). k8s.node.name (not k8s.pod.name) is promoted: it is stable
+            # across proxy hot-restarts, so the per-node counter series — and its
+            # rate() — survive restarts cleanly. (k8s.deployment.name and
+            # k8s.pod.start_time are omitted: N/A for a DaemonSet pod / not
+            # available via the downward API.) $(VAR) expands from the env above.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.node.name=$(NODE_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.pod.uid=$(POD_UID)"
             - name: REGION
               valueFrom:
                 fieldRef:

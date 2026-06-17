@@ -45,6 +45,23 @@ data:
           grpc_service:
             envoy_grpc:
               cluster_name: otel_collector
+          # Populate the OTLP Resource with this proxy's k8s identity (OTel
+          # semantic-convention k8s.* attributes: node/namespace/pod/uid), sourced
+          # from OTEL_RESOURCE_ATTRIBUTES on the container (see proxy.yaml). Without
+          # a resource_detector the sink emits an EMPTY resource
+          # (open_telemetry_impl.cc builds the resource solely from these
+          # detectors), so every proxy's stats land on one identityless series per
+          # aether.cluster. That collapse is correct for per-service mesh clusters
+          # (bounds cardinality at the node-count target) but breaks the static
+          # infra clusters (agent_xds, otel_collector): one such cluster exists per
+          # node, so N proxies multiplex N cumulative counters onto a single series
+          # and rate()/increase() fabricate phantom resets/cx-fails. The collector
+          # promotes k8s.node.name -> a `node` label ONLY for those infra clusters
+          # (selective transform/promote), so mesh stats stay collapsed.
+          resource_detectors:
+            - name: envoy.tracers.opentelemetry.resource_detectors.environment
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
           prefix: envoy
           # Export the tag-extracted name with tags as OTLP attributes: one
           # metric family per stat, labeled by aether.cluster (see stats_tags)
