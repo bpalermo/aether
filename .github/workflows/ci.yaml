@@ -25,7 +25,7 @@ jobs:
           # Full history so the PR base commit is reachable for the diff.
           fetch-depth: 0
       - name: Require a Chart.yaml version bump for chart changes
-        run: hack/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
+        run: scripts/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
 
   ci:
     runs-on: ubuntu-latest

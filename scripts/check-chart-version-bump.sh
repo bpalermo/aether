@@ -5,7 +5,7 @@
 # The in-repo version is "MAJOR.MINOR.PATCH-{GIT_COMMIT}" (the suffix is a literal
 # placeholder stamped only at publish time), so the SemVer base is what we compare.
 #
-# Usage: hack/check-chart-version-bump.sh [BASE_REF]
+# Usage: scripts/check-chart-version-bump.sh [BASE_REF]
 #   BASE_REF defaults to origin/main. CI passes the PR base SHA.
 set -euo pipefail
 
