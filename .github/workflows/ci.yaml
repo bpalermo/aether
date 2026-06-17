@@ -15,6 +15,18 @@ env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
 
 jobs:
+  chart-version-bump:
+    # Any change under charts/<name>/ must bump that chart's Chart.yaml version.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Full history so the PR base commit is reachable for the diff.
+          fetch-depth: 0
+      - name: Require a Chart.yaml version bump for chart changes
+        run: hack/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
+
   ci:
     runs-on: ubuntu-latest
     steps:
