@@ -30,6 +30,10 @@ type AgentConfig struct {
 	// (<service>.<mesh-domain>); see constants.DefaultMeshDomain.
 	MeshDomain string
 
+	// EmitStatsPod enables per-pod labels (source_pod/destination_pod) on the
+	// aether_stats request counter. Off by default to bound cardinality.
+	EmitStatsPod bool
+
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket

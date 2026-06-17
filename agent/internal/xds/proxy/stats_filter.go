@@ -33,6 +33,7 @@ type statsFilterConfig struct {
 	SourceService      string
 	SourcePod          string
 	DestinationService string
+	DestinationPod     string
 	MeshDomain         string
 	EmitPod            bool
 }
@@ -41,15 +42,15 @@ type statsFilterConfig struct {
 // pod's outbound HCM. The pod's identity (service account = mesh service name,
 // pod name) is constant for this listener, so it travels in the per-instance
 // config; the destination is derived per request from the routed cluster.
-func outboundStatsFilter(cniPod *cniv1.CNIPod, meshDomain string) *http_connection_managerv3.HttpFilter {
-	// source_pod is omitted from the emitted series by default (emit_pod=false)
-	// to bound cardinality; the filter still receives it for future use.
+func outboundStatsFilter(cniPod *cniv1.CNIPod, meshDomain string, emitPod bool) *http_connection_managerv3.HttpFilter {
+	// source_pod is emitted only when emitPod is set (--stats-emit-pod); off by
+	// default to bound cardinality. The filter still receives it either way.
 	return statsFilter(statsFilterConfig{
 		Reporter:      "source",
 		SourceService: cniPod.GetServiceAccount(),
 		SourcePod:     cniPod.GetName(),
 		MeshDomain:    meshDomain,
-		EmitPod:       false,
+		EmitPod:       emitPod,
 	})
 }
 
@@ -59,11 +60,14 @@ func outboundStatsFilter(cniPod *cniv1.CNIPod, meshDomain string) *http_connecti
 // by parsing the verified peer SVID's URI SAN (proposal 007 Phase 2). The mesh
 // domain is not needed here — the source is path-parsed from the SPIFFE SAN, not
 // stripped from a cluster name.
-func inboundStatsFilter(cniPod *cniv1.CNIPod) *http_connection_managerv3.HttpFilter {
+func inboundStatsFilter(cniPod *cniv1.CNIPod, emitPod bool) *http_connection_managerv3.HttpFilter {
+	// destination_pod is the local pod (same value as the listener aether_pod
+	// tag); emitted only when emitPod is set (--stats-emit-pod) to bound cardinality.
 	return statsFilter(statsFilterConfig{
 		Reporter:           "destination",
 		DestinationService: cniPod.GetServiceAccount(),
-		EmitPod:            false,
+		DestinationPod:     cniPod.GetName(),
+		EmitPod:            emitPod,
 	})
 }
 
@@ -81,6 +85,7 @@ func statsFilter(cfg statsFilterConfig) *http_connection_managerv3.HttpFilter {
 		"source_service":      cfg.SourceService,
 		"source_pod":          cfg.SourcePod,
 		"destination_service": cfg.DestinationService,
+		"destination_pod":     cfg.DestinationPod,
 		"mesh_domain":         cfg.MeshDomain,
 		"emit_pod":            cfg.EmitPod,
 	})

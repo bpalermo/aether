@@ -32,7 +32,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "aether.internal")
+			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "aether.internal", false)
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())
@@ -47,7 +47,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 // non-pass-through health_check readiness filter ahead of the router, matched
 // on the shared readiness path probed by the CNI plugin from inside the netns.
 func TestOutboundChainReadinessFilter(t *testing.T) {
-	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "aether.internal")
+	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "aether.internal", false)
 	require.Len(t, fc.GetFilters(), 2)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
@@ -80,7 +80,7 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "my-pod", ServiceAccount: "checkout"}
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	fc := buildDefaultOutboundHTTPFilterChain(pod, "aether.internal")
+	fc := buildDefaultOutboundHTTPFilterChain(pod, "aether.internal", false)
 	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
 
 	filters := hcm.GetHttpFilters()
@@ -96,4 +96,8 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 	fields := ts.GetValue().GetFields()
 	assert.Equal(t, "source", fields["reporter"].GetStringValue())
 	assert.Equal(t, "checkout", fields["source_service"].GetStringValue())
+	// source_pod always travels in the config; the C++ filter drops it unless
+	// emit_pod is set (off by default here).
+	assert.Equal(t, "my-pod", fields["source_pod"].GetStringValue())
+	assert.False(t, fields["emit_pod"].GetBoolValue())
 }
