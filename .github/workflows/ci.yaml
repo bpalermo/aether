@@ -17,10 +17,6 @@ permissions:
 
 env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
-  # BuildBuddy RBE (see .bazelrc `--config=remote`). The header carries the org
-  # API key; absent on fork PRs, where `--remote_local_fallback` keeps the build
-  # working without the executor.
-  REMOTE_HEADER: --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }}
 
 jobs:
   # Path scoping lives here (not in `on:`) so the workflow always runs and the
@@ -70,7 +66,7 @@ jobs:
       - name: Test
         run: |
           bazel test --config=ci \
-            ${{ env.REMOTE_HEADER }} \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
@@ -90,7 +86,10 @@ jobs:
           bazelisk-cache: true
       - name: Test
         run: |
-          bazel test --config=ci ${{ env.REMOTE_HEADER }} --test_tag_filters=integration //...
+          bazel test --config=ci \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --test_tag_filters=integration \
+            //...
 
   e2e:
     needs: [changes, test]
@@ -105,16 +104,18 @@ jobs:
           bazelisk-cache: true
       - name: Build and load container images
         run: |
-          bazel run --config=ci ${{ env.REMOTE_HEADER }} //agent/cmd/agent:image_load
-          bazel run --config=ci ${{ env.REMOTE_HEADER }} //cni/cmd/cni-install:image_load
-          bazel run --config=ci ${{ env.REMOTE_HEADER }} //registrar/cmd/registrar:image_load
+          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //agent/cmd/agent:image_load
+          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //cni/cmd/cni-install:image_load
+          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //registrar/cmd/registrar:image_load
       - name: Setup kind
         uses: helm/kind-action@v1
         with:
           install_only: true
       - name: Run e2e tests
         run: |
-          bazel test --config=ci ${{ env.REMOTE_HEADER }} --test_output=streamed //test/e2e:e2e_test --test_arg=-test.v
+          bazel test --config=ci \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --test_output=streamed //test/e2e:e2e_test --test_arg=-test.v
       - name: Collect logs on failure
         if: failure()
         run: |
@@ -154,12 +155,8 @@ jobs:
     needs: [changes, chart-version-bump, test, integration, e2e]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify control-plane jobs passed (or were skipped)
+      - name: Fail if any control-plane job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
-          results='${{ join(needs.*.result, ",") }}'
-          echo "job results: ${results}"
-          if echo "${results}" | grep -qE 'failure|cancelled'; then
-            echo "::error::a required control-plane job failed or was cancelled"
-            exit 1
-          fi
-          echo "all control-plane jobs passed or were skipped"
+          echo "::error::a required control-plane job failed or was cancelled"
+          exit 1

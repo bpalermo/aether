@@ -93,12 +93,8 @@ jobs:
     needs: [changes, test]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify proxy jobs passed (or were skipped)
+      - name: Fail if any proxy job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
-          results='${{ join(needs.*.result, ",") }}'
-          echo "job results: ${results}"
-          if echo "${results}" | grep -qE 'failure|cancelled'; then
-            echo "::error::a required proxy job failed or was cancelled"
-            exit 1
-          fi
-          echo "all proxy jobs passed or were skipped"
+          echo "::error::a required proxy job failed or was cancelled"
+          exit 1
