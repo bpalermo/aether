@@ -1,40 +1,59 @@
 # Aether
 
-A Kubernetes service mesh data plane built in Go. Aether runs a per-node agent (DaemonSet) that manages an Envoy xDS control plane and a CNI plugin for transparent traffic interception. An in-cluster Registrar service proxies all registry operations, caches an endpoint snapshot, and streams changes to agents. It supports pluggable external registry backends (DynamoDB, etcd) and integrates with SPIRE for workload identity and mTLS.
+A Kubernetes service mesh data plane built in Go. Aether runs a per-node agent (DaemonSet) that drives a custom Envoy build (`aether-proxy`) via an xDS control plane, plus a CNI plugin that sets up pod network namespaces and registers their endpoints. Config is **demand-scoped**: each agent generates only the clusters, registry watches, and endpoints its local pods actually depend on (declared via the `aether.io/upstreams` annotation), with on-demand CDS for the cold path. An in-cluster Registrar service proxies all registry operations, caches a versioned endpoint snapshot, and streams changes to agents. It integrates with SPIRE for workload identity and mTLS, supports zero-drop proxy rollouts via Envoy hot restart, and exports OpenTelemetry metrics and traces. Pluggable external registry backends: DynamoDB, etcd, and Kubernetes.
 
 ## Architecture
 
+Solid arrows are the workload **data path**; dashed arrows are **control plane / telemetry**.
+
 ```mermaid
 graph TD
-    subgraph Node
-        CNI["CNI Plugin<br/><i>traffic interception</i>"]
-        Agent["Agent<br/><i>DaemonSet</i>"]
-        Envoy["Envoy<br/><i>listeners, clusters, endpoints, routes</i>"]
+    subgraph node["Node (DaemonSet)"]
+        Pod["Workload Pod"]
+        CNI["CNI Plugin<br/><i>netns setup · endpoint registration</i>"]
+        Agent["Agent<br/><i>xDS · CNI server · proxy supervisor</i>"]
+        Proxy["aether-proxy<br/><i>custom Envoy, hot-restart supervised</i>"]
         SPIRE["SPIRE Agent<br/><i>workload identity</i>"]
 
-        CNI -- "gRPC<br/>Unix socket" --> Agent
-        Agent -- "xDS<br/>LDS, CDS, EDS, RDS, SDS" --> Envoy
-        Agent -- "Delegated Identity API" --> SPIRE
+        Pod == "pod traffic" ==> Proxy
+        CNI -. "register (gRPC/UDS)" .-> Agent
+        Agent -. "xDS, demand-scoped<br/>LDS·CDS·EDS·RDS·SDS·ODCDS" .-> Proxy
+        Agent -. "Delegated Identity API" .-> SPIRE
+        SPIRE -. "X.509 SVIDs (via SDS)" .-> Proxy
     end
 
-    Registrar["Registrar<br/><i>in-cluster Deployment</i>"]
-    Agent -- "gRPC<br/>register, watch, list" --> Registrar
+    Peer["Peer node<br/><i>aether-proxy → workload pod</i>"]
+    Proxy == "mTLS (SPIFFE)" ==> Peer
 
-    Registry["External Registry<br/><i>DynamoDB · etcd</i>"]
-    Registrar -- "sync + persist" --> Registry
+    Registrar["Registrar<br/><i>in-cluster, 1 per cluster</i>"]
+    Agent -. "register · watch · list" .-> Registrar
+
+    Registry[("External Registry<br/>DynamoDB · etcd · Kubernetes")]
+    Registrar -. "sync + persist" .-> Registry
+
+    OTel["OTel Collector<br/><i>metrics · traces</i>"]
+    Agent -. "OTLP push" .-> OTel
+    Proxy -. "stats sink + aether_stats" .-> OTel
 ```
 
-**Agent** — Runs on each node via `controller-runtime`. Manages the xDS server, CNI gRPC server, SPIRE bridge, and registrar client as runnables. Generates Envoy configuration (listeners, clusters, endpoints, routes) from local pod data and the endpoint cache populated by the Registrar's push stream.
+**Agent** — Runs on each node via `controller-runtime`. Manages the xDS server, CNI gRPC server, SPIRE bridge, registrar client, and the proxy hot-restart supervisor as runnables. Generates Envoy configuration (listeners, clusters, endpoints, routes) from local pod data and the endpoint cache populated by the Registrar's push stream. Config is **demand-scoped** to each node's dependency set (see below).
+
+**aether-proxy** — A custom Envoy build maintained in a separate sibling Bazel workspace under `proxy/` (pinned to its own Bazel 7.7.1, built from Envoy source) with a compiled-in C++ `aether_stats` extension that records source→destination request metrics. The agent supervises it with cross-pod hot restart for hitless rollouts and two-phase connection draining. See [`proxy/README.md`](proxy/README.md) and proposals [010](docs/proposals/010_custom-proxy-workspace.md) / [012](docs/proposals/012_aether_stats_cpp_extension.md).
+
+**Demand-scoped distribution** — Each agent generates only the clusters, registry watches, and endpoints its local pods declare a dependency on via the `aether.io/upstreams` annotation, with on-demand CDS (ODCDS) serving the cold path. This bounds per-node config to the node's actual footprint and replaces fleet-wide CDS and client-side active health checking. Multi-port and FQDN upstreams are demuxed via SNI with per-port EDS. See proposals [004](docs/proposals/004_demand-scoped-distribution.md) / [005](docs/proposals/005_multi-port-routing.md).
 
 **Registrar** — In-cluster Deployment that acts as the sole bridge between agents and the external registry. Receives endpoint registrations from agents, persists them externally, maintains a versioned in-memory snapshot via periodic sync, and streams changes to all agents via gRPC server-streaming. Reduces external connections from N (one per node) to 1 per cluster.
 
-**CNI Plugin** — Implements the CNI spec (Add/Del/Check/GC/Status) for transparent traffic interception. Communicates with the agent over a Unix domain socket for pod registration.
+**CNI Plugin** — Implements the CNI spec (Add/Del/Check/GC/Status) to set up each pod's network namespace. Communicates with the agent over a Unix domain socket to register the pod's endpoints on Add and deregister them on Del.
 
 **SPIRE Bridge** — Connects to the SPIRE agent via the Delegated Identity API to obtain X.509 SVIDs and trust bundles. Converts them into Envoy SDS (Secret Discovery Service) resources for automatic mTLS between workloads.
 
 **External Registry** — Pluggable backend for durable endpoint storage, selected on the Registrar via `--registry-backend`:
 - **DynamoDB** — single-table design for AWS-native deployments
-- **etcd** — hierarchical key structure with protobuf serialization
+- **etcd** — hierarchical key structure with protobuf serialization, native Watch for change streaming
+- **Kubernetes** — registry backed by the cluster API
+
+**Observability** — Push-first OpenTelemetry. When `telemetry.otlpEndpoint` is set, the agent, CNI, and registrar export OTLP metrics (`--otel-enabled`) and optionally traces (`--tracing-enabled`) to a collector. The proxy ships its Envoy stats over the same sink, and the compiled-in `aether_stats` extension emits per-source/destination request counters.
 
 ## Getting Started
 
