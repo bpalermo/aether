@@ -43,6 +43,7 @@ TagProducerPtr prodTagProducer() {
   add("source_service", "(\\.source_service\\.([^.]*))");
   add("source_pod", "(\\.source_pod\\.([^.]*))");
   add("destination_service", "(\\.destination_service\\.([^.]*))");
+  add("destination_pod", "(\\.destination_pod\\.([^.]*))");
   add("response_code", "(\\.response_code\\.([^.]*))");
   add("response_flags", "(\\.response_flags\\.([^.]*))");
   return TagProducerImpl::createTagProducer(config, {}).value();
@@ -58,32 +59,38 @@ std::map<std::string, std::string> extract(const std::string& name, std::string&
   return m;
 }
 
-// Inbound (destination reporter): empty source_pod, response_flags "-".
+// Inbound (destination reporter): empty source_pod, populated destination_pod
+// (the local pod), response_flags "-".
 TEST(AetherStatsTagExtraction, RecoversDestinationTags) {
   std::string extracted;
   auto m = extract("aether.requests_total.reporter.destination.source_service.loadgen.source_pod."
-                   ".destination_service.svc-1.response_code.200.response_flags.-",
+                   ".destination_service.svc-1.destination_pod.svc-1-abc123.response_code.200."
+                   "response_flags.-",
                    extracted);
   EXPECT_EQ(extracted, "aether.requests_total");
   EXPECT_EQ(m["reporter"], "destination");
   EXPECT_EQ(m["source_service"], "loadgen");
   EXPECT_EQ(m["source_pod"], "");
   EXPECT_EQ(m["destination_service"], "svc-1");
+  EXPECT_EQ(m["destination_pod"], "svc-1-abc123");
   EXPECT_EQ(m["response_code"], "200");
   EXPECT_EQ(m["response_flags"], "-");
 }
 
-// Outbound (source reporter): populated source_pod.
+// Outbound (source reporter): populated source_pod, empty destination_pod (the
+// peer's pod is not known from the routed cluster name).
 TEST(AetherStatsTagExtraction, RecoversSourceTags) {
   std::string extracted;
   auto m = extract("aether.requests_total.reporter.source.source_service.checkout.source_pod."
-                   "checkout-abc123.destination_service.payments.response_code.503.response_flags.UF",
+                   "checkout-abc123.destination_service.payments.destination_pod..response_code.503."
+                   "response_flags.UF",
                    extracted);
   EXPECT_EQ(extracted, "aether.requests_total");
   EXPECT_EQ(m["reporter"], "source");
   EXPECT_EQ(m["source_service"], "checkout");
   EXPECT_EQ(m["source_pod"], "checkout-abc123");
   EXPECT_EQ(m["destination_service"], "payments");
+  EXPECT_EQ(m["destination_pod"], "");
   EXPECT_EQ(m["response_code"], "503");
   EXPECT_EQ(m["response_flags"], "UF");
 }

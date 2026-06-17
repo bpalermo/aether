@@ -47,11 +47,13 @@ FilterConfig::FilterConfig(const ProtoConfig& proto,
       source_service_(proto.source_service()),
       source_pod_(proto.emit_pod() ? proto.source_pod() : ""),
       destination_service_(proto.destination_service()),
+      destination_pod_(proto.emit_pod() ? proto.destination_pod() : ""),
       mesh_domain_(proto.mesh_domain().empty() ? "aether.internal" : proto.mesh_domain()),
       scope_(context.scope()), pool_(scope_.symbolTable()),
       requests_total_(pool_.add("aether.requests_total")), tag_reporter_(pool_.add("reporter")),
       tag_source_service_(pool_.add("source_service")), tag_source_pod_(pool_.add("source_pod")),
       tag_destination_service_(pool_.add("destination_service")),
+      tag_destination_pod_(pool_.add("destination_pod")),
       tag_response_code_(pool_.add("response_code")),
       tag_response_flags_(pool_.add("response_flags")) {}
 
@@ -73,12 +75,14 @@ void FilterConfig::record(const StreamInfo::StreamInfo& info) const {
   std::string source_service;
   std::string source_pod;
   std::string destination_service;
+  std::string destination_pod;
   absl::string_view reporter;
 
   if (is_destination_) {
     // Inbound: destination from config, source parsed from the verified peer SVID.
     reporter = "destination";
     source_service = "unknown";
+    destination_pod = destination_pod_;
     const auto ssl = info.downstreamAddressProvider().sslConnection();
     if (ssl != nullptr) {
       const auto sans = ssl->uriSanPeerCertificate();
@@ -115,6 +119,7 @@ void FilterConfig::record(const StreamInfo::StreamInfo& info) const {
       {tag_source_service_, dyn.add(source_service)},
       {tag_source_pod_, dyn.add(source_pod)},
       {tag_destination_service_, dyn.add(destination_service)},
+      {tag_destination_pod_, dyn.add(destination_pod)},
       {tag_response_code_, dyn.add(response_code)},
       {tag_response_flags_, dyn.add(response_flags)},
   };
