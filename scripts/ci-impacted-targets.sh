@@ -67,7 +67,14 @@ EOF
 
 generate() { # ref outfile
 	git checkout -q --detach "$1" || return 1
-	java -jar "$BAZEL_DIFF_JAR" generate-hashes -w "$PWD" -b "$BAZEL" -s "$SEED" "$2"
+	# bazel-diff errors on a seed path that doesn't exist at the checked-out rev,
+	# so pass only the seed files present here. A seed file present in one rev but
+	# not the other still flips every target's hash (-> full run), which is the
+	# intended behavior for a newly added/removed infra file.
+	local rev_seed="$SEED.rev"
+	: >"$rev_seed"
+	while IFS= read -r p; do [ -e "$p" ] && printf '%s\n' "$p" >>"$rev_seed"; done <"$SEED"
+	java -jar "$BAZEL_DIFF_JAR" generate-hashes -w "$PWD" -b "$BAZEL" -s "$rev_seed" "$2"
 }
 
 orig_ref="$(git rev-parse --abbrev-ref HEAD)"
