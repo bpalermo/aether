@@ -60,6 +60,9 @@ spec:
             {{- with .Values.telemetry.otlpEndpoint }}
             - "--otlp-endpoint={{ . }}"
             {{- end }}
+            {{- if .Values.telemetry.statsEmitPod }}
+            - "--stats-emit-pod"
+            {{- end }}
             {{- if .Values.telemetry.tracing.enabled }}
             - "--tracing-enabled=true"
             - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"
