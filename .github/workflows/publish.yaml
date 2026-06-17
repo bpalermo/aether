@@ -11,6 +11,9 @@ permissions:
 
 env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
+  # BuildBuddy RBE (see .bazelrc `--config=remote`) — runs the build on the hosted
+  # executor pool and reuses the cache warmed by PR `ci` builds.
+  REMOTE_HEADER: --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }}
 
 jobs:
   publish:
@@ -20,13 +23,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Setup LLVM runtime libs
-        uses: ./.github/actions/setup-llvm-libs
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.18.0
         with:
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
           repository-cache: true
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -36,7 +36,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build
         run: |
-          bazel build --stamp //...
+          bazel build --stamp --config=remote ${{ env.REMOTE_HEADER }} //...
       # `*.push` publishes each chart together with the images it references
       # (agent.push -> agent + cni-install images; registrar.push -> registrar
       # image), so a single GHCR login covers both images and charts.
@@ -45,5 +45,5 @@ jobs:
           HELM_REGISTRY_USERNAME: ${{ github.actor }}
           HELM_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          bazel run --stamp //charts/agent:agent.push
-          bazel run --stamp //charts/registrar:registrar.push
+          bazel run --stamp --config=remote ${{ env.REMOTE_HEADER }} //charts/agent:agent.push
+          bazel run --stamp --config=remote ${{ env.REMOTE_HEADER }} //charts/registrar:registrar.push

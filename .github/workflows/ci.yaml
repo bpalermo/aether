@@ -1,21 +1,48 @@
 name: ci
 
+# Always triggers on every PR (no path filters) so the `ci` gate check below
+# always reports — a required check that is skipped by a path filter would block
+# merges forever. The `changes` job does the path scoping instead: control-plane
+# jobs only run when non-proxy paths change; on a proxy-only PR they skip and the
+# `ci` gate still reports success. The proxy workspace has its own `proxy`
+# workflow with the symmetric `proxy` gate.
 on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - "proxy/**"
-      - ".github/workflows/proxy-*.yml"
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
+  # BuildBuddy RBE (see .bazelrc `--config=remote`). The header carries the org
+  # API key; absent on fork PRs, where `--remote_local_fallback` keeps the build
+  # working without the executor.
+  REMOTE_HEADER: --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }}
 
 jobs:
+  # Path scoping lives here (not in `on:`) so the workflow always runs and the
+  # `ci` gate always reports. control_plane = any changed file outside proxy/.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      control_plane: ${{ steps.filter.outputs.control_plane }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            control_plane:
+              - '**'
+              - '!proxy/**'
+              - '!.github/workflows/proxy.yml'
+              - '!.github/workflows/proxy-release.yml'
+
   chart-version-bump:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true'
     # Any change under charts/<name>/ must bump that chart's Chart.yaml version.
     runs-on: ubuntu-latest
     steps:
@@ -27,19 +54,112 @@ jobs:
       - name: Require a Chart.yaml version bump for chart changes
         run: scripts/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
 
-  ci:
+  # Compile + lint + unit tests on BuildBuddy RBE; warms the remote cache the
+  # integration/e2e legs reuse.
+  test:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Setup LLVM runtime libs
-        uses: ./.github/actions/setup-llvm-libs
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.18.0
         with:
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
       - name: Test
         run: |
-          bazel test --config=ci --test_output=errors --test_tag_filters=-integration //...
+          bazel test --config=ci \
+            ${{ env.REMOTE_HEADER }} \
+            --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --test_tag_filters=-integration \
+            //...
+
+  integration:
+    needs: [changes, test]
+    if: needs.changes.outputs.control_plane == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+      - name: Test
+        run: |
+          bazel test --config=ci ${{ env.REMOTE_HEADER }} --test_tag_filters=integration //...
+
+  e2e:
+    needs: [changes, test]
+    if: needs.changes.outputs.control_plane == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+      - name: Build and load container images
+        run: |
+          bazel run --config=ci ${{ env.REMOTE_HEADER }} //agent/cmd/agent:image_load
+          bazel run --config=ci ${{ env.REMOTE_HEADER }} //cni/cmd/cni-install:image_load
+          bazel run --config=ci ${{ env.REMOTE_HEADER }} //registrar/cmd/registrar:image_load
+      - name: Setup kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Run e2e tests
+        run: |
+          bazel test --config=ci ${{ env.REMOTE_HEADER }} --test_output=streamed //test/e2e:e2e_test --test_arg=-test.v
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          # The e2e framework destroys the cluster after tests, so logs
+          # may not be available. Attempt collection best-effort.
+          if kind get clusters 2>/dev/null | grep -q aether-e2e; then
+            kind export logs /tmp/e2e-logs --name aether-e2e || true
+            echo "=== aether-system pods ==="
+            kubectl --context kind-aether-e2e get pods -n aether-system -o wide 2>/dev/null || true
+            echo "=== registrar logs ==="
+            kubectl --context kind-aether-e2e logs -n aether-system -l app=aether-registrar --all-containers --tail=100 2>/dev/null || true
+            echo "=== agent logs ==="
+            kubectl --context kind-aether-e2e logs -n aether-system -l app=aether-agent --all-containers --tail=100 2>/dev/null || true
+            echo "=== events ==="
+            kubectl --context kind-aether-e2e get events -n aether-system --sort-by='.lastTimestamp' 2>/dev/null || true
+          else
+            echo "kind cluster already destroyed by test teardown"
+          fi
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: /tmp/e2e-logs
+          if-no-files-found: ignore
+      - name: Cleanup kind cluster
+        if: always()
+        run: |
+          kind delete cluster --name aether-e2e || true
+
+  # Single required status check. Always runs (if: always()) so it reports on
+  # every PR — including proxy-only PRs where the control-plane jobs skip — and
+  # fails only if a job that actually ran failed. This is the context required by
+  # the main branch ruleset.
+  ci:
+    if: always()
+    needs: [changes, chart-version-bump, test, integration, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify control-plane jobs passed (or were skipped)
+        run: |
+          results='${{ join(needs.*.result, ",") }}'
+          echo "job results: ${results}"
+          if echo "${results}" | grep -qE 'failure|cancelled'; then
+            echo "::error::a required control-plane job failed or was cancelled"
+            exit 1
+          fi
+          echo "all control-plane jobs passed or were skipped"

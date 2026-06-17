@@ -24,6 +24,12 @@ bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 bazel_dep(name = "rules_helm", version = "0.29.0")
 
+# BuildBuddy RBE toolchain — provides the hosted-executor platform and a matching
+# Ubuntu CC toolchain for remote execution (--config=remote). aether is pure-Go,
+# but RBE actions still resolve a CC toolchain for the exec platform, which this
+# registers (see the extension block below).
+bazel_dep(name = "toolchains_buildbuddy", version = "0.0.4")
+
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.2")
 
@@ -139,6 +145,15 @@ helm.host_tools()
 use_repo(helm, "helm", "helm_toolchains")
 
 register_toolchains("@helm_toolchains//:all")
+
+# BuildBuddy RBE: generates @buildbuddy_toolchain with the hosted-executor
+# platform (//:platform_linux_x86_64) and CC toolchain (//:ubuntu_cc_toolchain),
+# both wired in via --config=remote in .bazelrc. Ubuntu 22.04 image so the
+# hermetic Go SDK + prebuilt buf/buildifier/shellcheck/helm tools run against a
+# modern glibc.
+buildbuddy = use_extension("@toolchains_buildbuddy//:extensions.bzl", "buildbuddy")
+buildbuddy.platform(buildbuddy_container_image = "UBUNTU22_04_IMAGE")
+use_repo(buildbuddy, "buildbuddy_toolchain")
 
 pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
 

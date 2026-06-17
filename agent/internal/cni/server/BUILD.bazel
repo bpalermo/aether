@@ -95,7 +95,10 @@ go_test(
         "server_integration_test.go",
     ],
     embed = [":server"],
-    tags = ["integration"],
+    tags = [
+        "integration",
+        "no-remote-exec",  # testcontainers needs local Docker, not a remote executor
+    ],
     deps = [
         "//agent/constants",
         "//agent/internal/spire",

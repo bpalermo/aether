@@ -1,29 +1,44 @@
-name: proxy-pr
+name: proxy
 
-# PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1):
-# `bazel test //...` per arch — both legs offload the heavy Envoy compile to
-# BuildBuddy RBE: amd64 uses the x64 pool, arm64 uses the native arm64 pool
-# (via the @llvm_toolchain_aarch64 hermetic clang-18 registered in WORKSPACE).
-# Does NOT build/push the image — that happens on merge (proxy-release.yml).
+# PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1).
+# Always triggers on every PR (no path filters) so the `proxy` gate check below
+# always reports — symmetric with the control-plane `ci` workflow. The `changes`
+# job scopes the work: the heavy Envoy compile only runs when proxy/ changes; on
+# a control-plane-only PR the matrix skips and the `proxy` gate reports success.
+# Both legs offload the compile to BuildBuddy RBE (amd64 = x64 pool, arm64 = arm64
+# pool via @llvm_toolchain_aarch64). Does NOT build/push the image — that happens
+# on merge (proxy-release.yml).
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "proxy/**"
-      - ".github/workflows/proxy-pr.yml"
 
 permissions:
   contents: read
-
-defaults:
-  run:
-    working-directory: proxy
+  pull-requests: read
 
 env:
   CARGO_BAZEL_REPIN: "true"
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      proxy: ${{ steps.filter.outputs.proxy }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            proxy:
+              - 'proxy/**'
+              - '.github/workflows/proxy.yml'
+
   test:
+    needs: changes
+    if: needs.changes.outputs.proxy == 'true'
+    defaults:
+      run:
+        working-directory: proxy
     strategy:
       fail-fast: false
       matrix:
@@ -69,3 +84,21 @@ jobs:
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
             //...
+
+  # Single required status check — symmetric with the control-plane `ci` gate.
+  # Always runs so it reports on every PR (including control-plane-only PRs where
+  # the matrix skips); fails only if a leg that actually ran failed.
+  proxy:
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify proxy jobs passed (or were skipped)
+        run: |
+          results='${{ join(needs.*.result, ",") }}'
+          echo "job results: ${results}"
+          if echo "${results}" | grep -qE 'failure|cancelled'; then
+            echo "::error::a required proxy job failed or was cancelled"
+            exit 1
+          fi
+          echo "all proxy jobs passed or were skipped"

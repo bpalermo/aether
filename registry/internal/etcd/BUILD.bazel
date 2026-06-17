@@ -17,7 +17,10 @@ go_test(
     name = "etcd_test",
     size = "medium",
     srcs = ["etcd_test.go"],
-    tags = ["integration"],
+    tags = [
+        "integration",
+        "no-remote-exec",  # testcontainers needs local Docker, not a remote executor
+    ],
     deps = [
         ":etcd",
         "//api/aether/registry/v1:registry",
