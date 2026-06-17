@@ -42,12 +42,14 @@ protected:
     return p;
   }
 
-  // "destination" reporter: destination is config-supplied, source derives from
-  // the verified peer SVID.
+  // "destination" reporter: destination (service + pod) is config-supplied,
+  // source derives from the verified peer SVID.
   ProtoConfig destConfig() {
     ProtoConfig p;
     p.set_reporter("destination");
     p.set_destination_service("payments");
+    p.set_destination_pod("payments-xyz789");
+    p.set_emit_pod(true);
     p.set_mesh_domain("aether.internal");
     return p;
   }
@@ -112,6 +114,8 @@ TEST_F(AetherStatsTest, SourceReporterDerivesDestinationFromCluster) {
   EXPECT_EQ(tags.at("source_service"), "checkout");
   EXPECT_EQ(tags.at("source_pod"), "checkout-abc123");
   EXPECT_EQ(tags.at("destination_service"), "payments");
+  // Source reporter never knows the peer's pod.
+  EXPECT_EQ(tags.at("destination_pod"), "");
   EXPECT_EQ(tags.at("response_code"), "200");
   // No flags set on a clean stream.
   EXPECT_EQ(tags.at("response_flags"),
@@ -156,8 +160,20 @@ TEST_F(AetherStatsTest, DestinationReporterParsesPeerSvid) {
   EXPECT_EQ(tags.at("reporter"), "destination");
   EXPECT_EQ(tags.at("source_service"), "checkout");
   EXPECT_EQ(tags.at("destination_service"), "payments");
+  EXPECT_EQ(tags.at("destination_pod"), "payments-xyz789");
   // Destination reporter never emits a source pod.
   EXPECT_EQ(tags.at("source_pod"), "");
+}
+
+// emit_pod=false blanks destination_pod even when config supplies it.
+TEST_F(AetherStatsTest, DestinationReporterOmitsPodWhenDisabled) {
+  setPeerUriSan("spiffe://aether.internal/ns/shop/sa/checkout");
+  auto proto = destConfig();
+  proto.set_emit_pod(false);
+
+  auto counter = recordOnce(proto);
+  ASSERT_NE(counter, nullptr);
+  EXPECT_EQ(tagsOf(*counter).at("destination_pod"), "");
 }
 
 // No client certificate -> source service is "unknown".
