@@ -25,7 +25,7 @@ graph TD
     Peer["Peer node<br/><i>aether-proxy → workload pod</i>"]
     Proxy == "mTLS (SPIFFE)" ==> Peer
 
-    Registrar["Registrar<br/><i>in-cluster, 1 per cluster</i>"]
+    Registrar["Registrar<br/><i>in-cluster Deployment, active/active</i>"]
     Agent -. "register · watch · list" .-> Registrar
 
     Registry[("External Registry<br/>DynamoDB · etcd · Kubernetes")]
@@ -42,7 +42,7 @@ graph TD
 
 **Demand-scoped distribution** — Each agent generates only the clusters, registry watches, and endpoints its local pods declare a dependency on via the `aether.io/upstreams` annotation, with on-demand CDS (ODCDS) serving the cold path. This bounds per-node config to the node's actual footprint and replaces fleet-wide CDS and client-side active health checking. Multi-port and FQDN upstreams are demuxed via SNI with per-port EDS. See proposals [004](docs/proposals/004_demand-scoped-distribution.md) / [005](docs/proposals/005_multi-port-routing.md).
 
-**Registrar** — In-cluster Deployment that acts as the sole bridge between agents and the external registry. Receives endpoint registrations from agents, persists them externally, maintains a versioned in-memory snapshot via periodic sync, and streams changes to all agents via gRPC server-streaming. Reduces external connections from N (one per node) to 1 per cluster.
+**Registrar** — In-cluster Deployment that acts as the sole bridge between agents and the external registry. Receives endpoint registrations from agents, persists them externally, maintains a versioned in-memory snapshot via periodic sync, and streams changes to all agents via gRPC server-streaming. Runs as an active/active Deployment (every replica serves gRPC and syncs; peers converge through the external registry), collapsing per-node external connections down to the registrar tier.
 
 **CNI Plugin** — Implements the CNI spec (Add/Del/Check/GC/Status) to set up each pod's network namespace. Communicates with the agent over a Unix domain socket to register the pod's endpoints on Add and deregister them on Del.
 
