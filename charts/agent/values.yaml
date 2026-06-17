@@ -45,6 +45,15 @@ telemetry:
   # local pod count. The metric itself ships regardless; this only adds the pod
   # dimension.
   statsEmitPod: false
+  # Per-request access logs as OTLP logs to the collector (proposal 014). When
+  # enabled, every HCM gets an OTel access logger (reporter=source on egress,
+  # destination on inbound). Failures (any response flag / status >= 500) are
+  # always logged; successSampleRate is the percent (0-100) of successful
+  # requests logged. Requires otlpEndpoint (uses the proxy's otel_collector
+  # cluster). Off by default.
+  accessLogs:
+    enabled: false
+    successSampleRate: 100
   tracing:
     # Enables OTLP trace export on the agent (`--tracing-enabled`);
     # requires otlpEndpoint.

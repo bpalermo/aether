@@ -34,6 +34,13 @@ type AgentConfig struct {
 	// aether_stats request counter. Off by default to bound cardinality.
 	EmitStatsPod bool
 
+	// AccessLogsEnabled attaches the OTel access logger to every HCM (proposal
+	// 014), pushing per-request OTLP logs to the collector. Off by default.
+	AccessLogsEnabled bool
+	// AccessLogSuccessSampleRate is the percent (0-100) of successful requests
+	// logged; failures (any response flag / status >= 500) are always logged.
+	AccessLogSuccessSampleRate uint32
+
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket

@@ -16,6 +16,7 @@ go_library(
         "//agent/internal/spire",
         "//agent/internal/xds/ack",
         "//agent/internal/xds/cache",
+        "//agent/internal/xds/proxy",
         "//agent/internal/xds/server",
         "//agent/storage",
         "//api/aether/cni/v1:cni",
