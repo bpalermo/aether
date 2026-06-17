@@ -97,6 +97,7 @@ func init() {
 
 	// Mesh routing configuration
 	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
+	rootCmd.Flags().BoolVar(&cfg.EmitStatsPod, "stats-emit-pod", cfg.EmitStatsPod, "emit per-pod labels (source_pod/destination_pod) on the aether_stats request counter (raises cardinality)")
 
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
@@ -181,6 +182,7 @@ func runAgent(ctx context.Context) (retErr error) {
 
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
+	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 
 	// Tracks Envoy's delta-xDS ACK/NACKs so the CNI server can confirm (and
 	// diagnose) config delivery without polling the Envoy admin interface.

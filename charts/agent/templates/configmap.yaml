@@ -51,6 +51,41 @@ data:
           # instead of a name per cluster.
           emit_tags_as_attributes: true
           use_tag_extracted_name: true
+          # Drop the "envoy" prefix from JUST the aether_stats request counter so
+          # it exports as `aether_requests_total` (not envoy_aether_requests_total)
+          # while every standard envoy_* stat keeps the prefix. Envoy's OTLP sink
+          # applies ConversionAction.metric_name verbatim — no prefix prepend (see
+          # getMetricName in open_telemetry_impl.cc) — so this both strips the
+          # prefix and collapses the per-request inlined-name variants into one
+          # attribute-labeled metric. Istio's custom-stat-namespace trick is admin
+          # /stats/prometheus-only and does not apply to the OTLP sink; this is the
+          # OTLP-native equivalent.
+          # NOTE: any custom_metric_conversions turns on sink-wide metric
+          # AGGREGATION (one Metric, attribute-keyed data points) for ALL stats
+          # (enable_metric_aggregation_ = has_custom_metric_conversions). Distinct
+          # tag sets stay distinct data points, so Prometheus output is unchanged —
+          # validate in e2e before relying on it.
+          custom_metric_conversions:
+            matcher_list:
+              matchers:
+                - predicate:
+                    single_predicate:
+                      input:
+                        name: stat_full_name_match_input
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.matching.common_inputs.stats.v3.StatFullNameMatchInput
+                      value_match:
+                        safe_regex:
+                          google_re2: {}
+                          # Full stat name carries the inlined tag values
+                          # (aether.requests_total.reporter.<v>.…); match them all.
+                          regex: "aether\\.requests_total.*"
+                  on_match:
+                    action:
+                      name: otlp_metric_conversion
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.stat_sinks.open_telemetry.v3.SinkConfig.ConversionAction
+                        metric_name: aether.requests_total
 {{- end }}
 
     # Bound stats-memory growth (measured 2026-06-11: ~5.1k stats/proxy at
@@ -104,8 +139,8 @@ data:
         # gone and the values collapse into the metric name with empty labels
         # (the talos-main symptom). These regexes re-derive the six tags from
         # the name exactly the way aether.cluster survives — tag_name MUST match
-        # the programmatic keys in aether_stats.cc so fresh and merged counters
-        # export identical labels. Values are dot-free, so [^.]* is exact.
+        # the seven programmatic keys in aether_stats.cc so fresh and merged
+        # counters export identical labels. Values are dot-free, so [^.]* is exact.
         # Guarded by //source/extensions/filters/http/aether_stats:tag_extraction_test.
         - tag_name: reporter
           regex: "(\\.reporter\\.([^.]*))"
@@ -115,6 +150,8 @@ data:
           regex: "(\\.source_pod\\.([^.]*))"
         - tag_name: destination_service
           regex: "(\\.destination_service\\.([^.]*))"
+        - tag_name: destination_pod
+          regex: "(\\.destination_pod\\.([^.]*))"
         - tag_name: response_code
           regex: "(\\.response_code\\.([^.]*))"
         - tag_name: response_flags

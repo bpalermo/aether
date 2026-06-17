@@ -16,11 +16,15 @@ message Config {
 
   // Local identity, injected on the inbound side (the destination).
   string destination_service = 4;
+  string destination_pod = 7;
 
   // Mesh domain suffix stripped from the routed cluster name. Default
   // "aether.internal".
   string mesh_domain = 5;
 
-  // When false, source_pod is reported as "" to bound metric cardinality.
+  // When false, source_pod/destination_pod are reported as "" to bound metric
+  // cardinality. source_pod is set only on the source (outbound) side and
+  // destination_pod only on the destination (inbound) side; the peer's pod is
+  // not carried in the SVID, so the opposite end stays "".
   bool emit_pod = 6;
 }

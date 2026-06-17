@@ -41,6 +41,7 @@ private:
   const std::string source_service_;
   const std::string source_pod_; // already "" when emit_pod is false
   const std::string destination_service_;
+  const std::string destination_pod_; // already "" when emit_pod is false
   const std::string mesh_domain_;
 
   Stats::Scope& scope_;
@@ -51,6 +52,7 @@ private:
   const Stats::StatName tag_source_service_;
   const Stats::StatName tag_source_pod_;
   const Stats::StatName tag_destination_service_;
+  const Stats::StatName tag_destination_pod_;
   const Stats::StatName tag_response_code_;
   const Stats::StatName tag_response_flags_;
 };

@@ -49,7 +49,7 @@ func InboundListenerName(cniPod *cniv1.CNIPod) string {
 // verified peer (SANITIZE_SET), and forwards the request to the pod's application
 // on loopback (app_<pod>). Because the listener lives in the pod's netns, it follows
 // the pod's lifecycle (drains on removal) and pod-scoped network policy applies to it.
-func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.Listener, error) {
+func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod bool) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -83,7 +83,7 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 		StatPrefix:       fmt.Sprintf("inbound_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
 		ListenerFilters:  buildInboundListenerFilters(),
-		FilterChains:     buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName),
+		FilterChains:     buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName, emitStatsPod),
 	}, nil
 }
 
@@ -93,17 +93,17 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string) (*listenerv3.L
 // (no-SNI) chain targeting the primary port for back-compat and clients that
 // send no SNI. Each port's chain can run its own codec, so ports may differ in
 // protocol. SNI is routing only — identity stays the terminated mTLS SVID.
-func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string) []*listenerv3.FilterChain {
+func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string, emitStatsPod bool) []*listenerv3.FilterChain {
 	defaultPort := AppPortFromPod(cniPod)
 	ports := AppPortsFromPod(cniPod)
 
 	chains := make([]*listenerv3.FilterChain, 0, len(ports)+1)
 	// Default chain (no server_names): primary port. Matches no-SNI clients and
 	// any SNI that doesn't match a port chain.
-	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName))
+	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, emitStatsPod))
 	// One chain per served port, SNI-matched on the port number.
 	for _, port := range ports {
-		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName))
+		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, emitStatsPod))
 	}
 	return chains
 }
@@ -114,7 +114,7 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 // sni is non-empty the chain is SNI-matched (server_names); the empty-sni chain
 // is the default (no match criteria). chainPort selects both the app cluster
 // and the chain name suffix.
-func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
+func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName string, emitStatsPod bool) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("inbound", buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort)))
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application. The stats filter sits after the
@@ -124,7 +124,7 @@ func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16,
 	hcm.HttpFilters = []*http_connection_managerv3.HttpFilter{
 		buildLivenessHealthCheckFilter(),
 		buildReadinessHealthCheckFilter(HealthProbeClusterName(cniPod)),
-		inboundStatsFilter(cniPod),
+		inboundStatsFilter(cniPod, emitStatsPod),
 		routerHttpFilter(),
 	}
 	// SANITIZE_SET replaces any client-supplied XFCC with details derived from the

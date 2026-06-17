@@ -23,7 +23,7 @@ func TestNewInboundListener(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	l, err := NewInboundListener(pod, "example.org")
+	l, err := NewInboundListener(pod, "example.org", false)
 	require.NoError(t, err)
 	assert.Equal(t, InboundListenerName(pod), l.GetName())
 
@@ -70,10 +70,10 @@ func TestNewInboundListener(t *testing.T) {
 }
 
 func TestNewInboundListener_Errors(t *testing.T) {
-	_, err := NewInboundListener(nil, "example.org")
+	_, err := NewInboundListener(nil, "example.org", false)
 	require.Error(t, err)
 
-	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org")
+	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false)
 	require.Error(t, err)
 }
 
@@ -103,7 +103,7 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 		Annotations:      map[string]string{constants.AnnotationEndpointPorts: "8080,9090"},
 	}
-	l, err := NewInboundListener(pod, "example.org")
+	l, err := NewInboundListener(pod, "example.org", false)
 	require.NoError(t, err)
 
 	bySNI := map[string]*listenerv3.FilterChain{}
@@ -141,7 +141,7 @@ func TestInboundChainStatsFilter(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-a",
 		Ips:              []string{"10.0.0.1"},
 	}
-	l, err := NewInboundListener(pod, "aether.internal")
+	l, err := NewInboundListener(pod, "aether.internal", false)
 	require.NoError(t, err)
 	require.NotEmpty(t, l.GetFilterChains())
 
@@ -159,4 +159,8 @@ func TestInboundChainStatsFilter(t *testing.T) {
 	fields := ts.GetValue().GetFields()
 	assert.Equal(t, "destination", fields["reporter"].GetStringValue())
 	assert.Equal(t, "checkout", fields["destination_service"].GetStringValue())
+	// destination_pod (the local pod) always travels; the C++ filter drops it
+	// unless emit_pod is set (off by default here).
+	assert.Equal(t, "checkout-abc", fields["destination_pod"].GetStringValue())
+	assert.False(t, fields["emit_pod"].GetBoolValue())
 }

@@ -71,6 +71,12 @@ type SnapshotCache struct {
 	// runtime.
 	meshDomain string
 
+	// emitStatsPod enables per-pod labels (source_pod/destination_pod) on the
+	// aether_stats request counter. Off by default to bound cardinality; set
+	// once before the manager starts (SetEmitStatsPod) and read without locking
+	// on every listener build.
+	emitStatsPod bool
+
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace
 
@@ -238,6 +244,13 @@ func (c *SnapshotCache) SetMeshDomain(domain string) {
 // MeshDomain returns the configured mesh domain.
 func (c *SnapshotCache) MeshDomain() string {
 	return c.meshDomain
+}
+
+// SetEmitStatsPod enables per-pod labels on the aether_stats request counter
+// (--stats-emit-pod flag). Must be called before the manager starts; the flag
+// is read without locking on every listener build.
+func (c *SnapshotCache) SetEmitStatsPod(enabled bool) {
+	c.emitStatsPod = enabled
 }
 
 // setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping
