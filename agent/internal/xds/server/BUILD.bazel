@@ -68,7 +68,10 @@ go_test(
         "server_test.go",  # needed for mockRegistry defined in unit test file
     ],
     embed = [":server"],
-    tags = ["integration"],
+    tags = [
+        "integration",
+        "no-remote-exec",  # testcontainers needs local Docker, not a remote executor
+    ],
     deps = [
         "//agent/internal/xds/cache",
         "//agent/internal/xds/config",

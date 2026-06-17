@@ -22,6 +22,51 @@ build:lint --aspects=//bazel/lint:linters.bzl%buf,//bazel/lint:linters.bzl%build
 build:ci --config=lint
 build:ci --@aspect_rules_lint//lint:fail_on_violation
 
+build:ci --config=remote
+build:ci --build_metadata=ROLE=CI
+build:ci --build_metadata=VISIBILITY=PUBLIC
+build:ci --color=yes
+common:ci --noshow_progress
+common:ci --noshow_loading_progress
+common:ci --test_output=errors
+
+# BuildBuddy Remote Build Execution (opt-in: --config=remote, pulled in by
+# --config=ci). Compile + hermetic test actions run on BuildBuddy's hosted x64
+# executor pool (platform + CC toolchain from @buildbuddy_toolchain, see
+# MODULE.bazel). aether is pure-Go, so a single x64 pool cross-compiles every
+# target. Docker-bound tests stay local (integration tests tagged no-remote-exec,
+# e2e tagged local). Pass the org key on the CLI:
+#   --remote_header=x-buildbuddy-api-key=YOUR_ORG_API_KEY
+build:remote --remote_executor=grpcs://remote.buildbuddy.io
+build:remote --remote_cache=grpcs://remote.buildbuddy.io
+build:remote --bes_backend=grpcs://remote.buildbuddy.io
+build:remote --bes_results_url=https://app.buildbuddy.io/invocation/
+build:remote --platforms=@buildbuddy_toolchain//:platform_linux_x86_64
+build:remote --extra_execution_platforms=@buildbuddy_toolchain//:platform_linux_x86_64
+build:remote --extra_toolchains=@buildbuddy_toolchain//:ubuntu_cc_toolchain
+build:remote --remote_cache_compression
+build:remote --experimental_remote_cache_compression_threshold=100
+build:remote --remote_timeout=3600s
+build:remote --grpc_keepalive_time=30s
+build:remote --jobs=200
+# Fetch only top-level outputs locally (build-without-the-bytes) — keeps the
+# e2e image_load tars retrievable while skipping intermediate downloads.
+build:remote --remote_download_toplevel
+# Run actions remotely, but fall back to local execution if the executor is
+# unreachable or the key is absent (e.g. fork PRs) so CI degrades gracefully.
+build:remote --spawn_strategy=remote,local
+build:remote --remote_local_fallback
+# Test EXECUTION stays on the runner: the BuildBuddy executor sandbox runs as
+# root with no privileged capabilities, so permission- and netns-sensitive tests
+# (CNI netns bind-mounts need CAP_SYS_ADMIN; read-only-dir checks are bypassed by
+# root) fail remotely. Compiles still run on the executor; only the test action
+# runs local. This also covers the Docker-bound integration/e2e tests.
+build:remote --strategy=TestRunner=local
+# Base-image layer fetches (rules_img DownloadBlob) need registry egress, which
+# the executor sandbox (dockerNetwork=off) lacks — pin them to the runner so
+# image builds (incl. publish) work on a cold cache.
+build:remote --modify_execution_info=DownloadBlob=+no-remote-exec
+
 # Race detector (usage: --config=race)
 test:race --@rules_go//go/config:race
 
