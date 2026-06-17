@@ -102,12 +102,13 @@ TEST_P(AetherStatsIntegrationTest, RecordsRequestCounterUnderProdStatsConfig) {
     t2->set_regex("^listener\\.(?:inbound|out_http)(_([^.]+))\\.");
     // The aether_stats hot-restart fallback regexes (see configmap.yaml). On the
     // fresh write path the programmatic tags win (these run only on the no-tags
-    // name), so the counter must still carry exactly the 6 real tags.
+    // name), so the counter must still carry exactly the 7 real tags.
     for (const auto& [name, re] : std::vector<std::pair<std::string, std::string>>{
              {"reporter", "(\\.reporter\\.([^.]*))"},
              {"source_service", "(\\.source_service\\.([^.]*))"},
              {"source_pod", "(\\.source_pod\\.([^.]*))"},
              {"destination_service", "(\\.destination_service\\.([^.]*))"},
+             {"destination_pod", "(\\.destination_pod\\.([^.]*))"},
              {"response_code", "(\\.response_code\\.([^.]*))"},
              {"response_flags", "(\\.response_flags\\.([^.]*))"}}) {
       auto* t = sc->add_stats_tags();
@@ -146,7 +147,7 @@ TEST_P(AetherStatsIntegrationTest, RecordsRequestCounterUnderProdStatsConfig) {
   ASSERT_NE(counter, nullptr)
       << "no counter with clean tag_extracted_name 'aether.requests_total' — tags were baked into "
          "the name (see AETHER_REPRO log lines above)";
-  EXPECT_EQ(counter->tags().size(), 6) << "expected 6 stats tags on the counter";
+  EXPECT_EQ(counter->tags().size(), 7) << "expected 7 stats tags on the counter";
 }
 
 } // namespace
