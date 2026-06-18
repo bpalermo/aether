@@ -28,4 +28,7 @@ type Config struct {
 	LogsEnabled bool
 	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0)
 	TraceSampleRate float64
+	// TracingExport attaches the OTLP span exporter; without it tracing still
+	// gives logs their trace_id but exports no spans (no trace backend needed)
+	TracingExport bool
 }

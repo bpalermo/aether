@@ -27,6 +27,7 @@ func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion stri
 		ServiceVersion:  serviceVersion,
 		OTLPEndpoint:    cfg.OTLPEndpoint,
 		TraceSampleRate: cfg.TraceSampleRate,
+		TraceExport:     cfg.TracingExport,
 	}
 
 	var shutdowns []func(context.Context) error

@@ -32,6 +32,9 @@ spec:
             {{- if .Values.telemetry.tracing.enabled }}
             - "--tracing-enabled=true"
             - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"
+            {{- if .Values.telemetry.tracing.export }}
+            - "--trace-export=true"
+            {{- end }}
             {{- end }}
             {{- if .Values.telemetry.logs.enabled }}
             - "--logs-enabled=true"

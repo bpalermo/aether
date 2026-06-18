@@ -23,10 +23,15 @@ telemetry:
   # OTLP gRPC collector endpoint (host:port, insecure). Empty disables push.
   otlpEndpoint: ""
   tracing:
-    # Enables OTLP trace export (`--tracing-enabled`); requires otlpEndpoint.
+    # Installs the OTel TracerProvider (`--tracing-enabled`) so logs emitted in a
+    # span carry trace_id/span_id. Does NOT export spans on its own.
     enabled: false
     # Head-sampling ratio for traces (`--trace-sample-rate`).
     sampleRate: 0.1
+    # Export spans over OTLP (`--trace-export`). Leave false unless the collector
+    # has a traces pipeline/backend, else the SDK floods stderr with
+    # "Unimplemented TraceService" errors. trace_id on logs works without it.
+    export: false
   logs:
     # Export the registrar's own application logs over OTLP to the collector
     # (`--logs-enabled`), tee'd into stderr (kubectl logs is unchanged).
