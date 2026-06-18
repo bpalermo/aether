@@ -1,0 +1,17 @@
+apiVersion: v2
+name: crds
+description: |
+  Aether CustomResourceDefinitions. A standalone chart so the CRDs can be
+  installed (and upgraded) ahead of the controllers that use them. Currently
+  ships the MeshConfig CRD (config.aether.io/v1); see
+  docs/proposals/015_mesh-config.md.
+type: application
+# Stamped at package time when built with `--stamp` (see other charts).
+version: "0.1.0-{GIT_COMMIT}"
+appVersion: "{STABLE_GIT_VERSION}"
+keywords:
+  - aether
+  - service-mesh
+  - crds
+sources:
+  - https://github.com/bpalermo/aether

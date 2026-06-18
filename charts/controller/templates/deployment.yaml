@@ -1,48 +1,40 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "registrar.fullname" . }}
-  namespace: {{ include "registrar.namespace" . }}
+  name: {{ include "controller.fullname" . }}
+  namespace: {{ include "controller.namespace" . }}
   labels:
-    {{- include "registrar.labels" . | nindent 4 }}
+    {{- include "controller.labels" . | nindent 4 }}
 spec:
+  # Leader election is on, so extra replicas are warm standbys.
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "registrar.selectorLabels" . | nindent 6 }}
+      {{- include "controller.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "registrar.labels" . | nindent 8 }}
+        {{- include "controller.labels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "registrar.serviceAccountName" . }}
+      serviceAccountName: {{ include "controller.serviceAccountName" . }}
       containers:
-        - name: registrar
+        - name: controller
           image: {{ .Values.image.ref | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            - "--cluster-name={{ .Values.clusterName }}"
-            # Mesh-wide policy (telemetry, SPIRE on/off) is read from the mounted
-            # MeshConfig ConfigMap (projected from the MeshConfig CR by the
-            # aether-controller), default path /etc/aether/mesh-config.yaml.
-            - "--registry-backend={{ .Values.registryBackend }}"
-            {{- if eq .Values.registryBackend "etcd" }}
-            - "--etcd-endpoints={{ join "," .Values.etcd.endpoints }}"
-            {{- end }}
-            - "--grpc-address=:{{ .Values.service.targetPort }}"
+            - "--mesh-config-configmap={{ .Values.meshConfig.configMapName }}"
             {{- if .Values.spire.enabled }}
-            {{- with .Values.spire.trustDomain }}
-            - "--spire-trust-domain={{ . }}"
-            {{- end }}
+            - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
+            - "--webhook-config-name={{ include "controller.clusterScopedName" . }}"
             {{- end }}
           ports:
-            - name: grpc
-              containerPort: {{ .Values.service.targetPort }}
+            - name: webhook
+              containerPort: 9443
               protocol: TCP
             - name: metrics
-              containerPort: 8081
+              containerPort: 8080
               protocol: TCP
             - name: health
               containerPort: 8082
@@ -59,16 +51,7 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
-          {{- with .Values.aws.credentialsSecret }}
-          envFrom:
-            - secretRef:
-                name: {{ . }}
-          {{- end }}
           env:
-            {{- with .Values.aws.region }}
-            - name: AWS_REGION
-              value: {{ . | quote }}
-            {{- end }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -77,9 +60,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Stamped onto every OTel signal (metrics/traces/logs) via
-            # resource.WithFromEnv(), so logs are filterable per pod in
-            # VictoriaLogs. Refs the env vars defined above ($(VAR) expansion).
+            # Stamped onto every OTel signal so logs are filterable per pod.
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
             - name: GOMEMLIMIT
@@ -101,25 +82,25 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            - name: mesh-config
-              mountPath: /etc/aether
-              readOnly: true
             {{- if .Values.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            {{- else }}
+            - name: webhook-cert
+              mountPath: /tmp/k8s-webhook-server/serving-certs
               readOnly: true
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
-        - name: mesh-config
-          # Projected from the MeshConfig CR by the aether-controller. The pod
-          # waits in ContainerCreating until it exists. See proposal 015.
-          configMap:
-            name: {{ .Values.meshConfig.configMapName }}
         {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:
             driver: "csi.spiffe.io"
             readOnly: true
+        {{- else }}
+        - name: webhook-cert
+          secret:
+            secretName: {{ include "controller.webhookServiceName" . }}-cert
         {{- end }}

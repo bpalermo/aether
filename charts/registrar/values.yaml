@@ -15,27 +15,15 @@ namespace:
 # Cluster name passed to the registrar (`--cluster-name`).
 clusterName: talos-main
 
-# OTel telemetry, push-first: when otlpEndpoint is set, the registrar pushes
-# metrics (and logs/traces when their export is enabled) to the collector.
-telemetry:
-  # Enables the OTel MeterProvider (`--otel-enabled`).
-  enabled: false
-  # OTLP gRPC collector endpoint (host:port, insecure). Empty disables push.
-  otlpEndpoint: ""
-  tracing:
-    # The OTel TracerProvider is always installed in the binary so logs emitted in
-    # a span carry trace_id/span_id — there is no enable flag. Head-sampling ratio
-    # (`--trace-sample-rate`); only bounds exported spans (trace_id is unaffected).
-    sampleRate: 0.1
-    # Export spans over OTLP (`--trace-export`). Leave false unless the collector
-    # has a traces pipeline/backend, else the SDK floods stderr with
-    # "Unimplemented TraceService" errors. trace_id on logs works without it.
-    export: false
-  logs:
-    # Export the registrar's own application logs over OTLP to the collector
-    # (`--logs-enabled`), tee'd into stderr (kubectl logs is unchanged).
-    # Requires otlpEndpoint. Off by default.
-    enabled: false
+# Mesh-wide policy (telemetry posture, SPIRE on/off) is NO LONGER set here — it
+# lives in the MeshConfig custom resource owned by the aether-controller chart,
+# which projects it into a ConfigMap the registrar mounts. See
+# docs/proposals/015_mesh-config.md.
+meshConfig:
+  # Name of the ConfigMap the aether-controller projects the MeshConfig CR into
+  # and that the registrar mounts at /etc/aether. Must match the controller
+  # chart's meshConfig.configMapName (and share the registrar's namespace).
+  configMapName: aether-mesh-config
 
 # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
 registryBackend: kubernetes

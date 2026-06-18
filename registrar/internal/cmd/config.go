@@ -13,9 +13,21 @@ const (
 	defaultGRPCAddress  = ":8443"
 )
 
+// DefaultMeshConfigPath is where the chart mounts the projected MeshConfig
+// ConfigMap (written by the aether-controller).
+const DefaultMeshConfigPath = "/etc/aether/mesh-config.yaml"
+
 // RegistrarConfig holds configuration for the Aether registrar.
+//
+// Mesh-wide policy (the embedded manager telemetry fields and SpireEnabled) is
+// loaded from the mounted MeshConfig ConfigMap — projected from the MeshConfig
+// CR by the aether-controller — exactly like the agent. Only per-instance/
+// topology fields below are flags. See docs/proposals/015_mesh-config.md.
 type RegistrarConfig struct {
 	manager.Config
+
+	// MeshConfigPath is the path to the mounted MeshConfig YAML (ConfigMap).
+	MeshConfigPath string
 
 	// ClusterName is the Kubernetes cluster name
 	ClusterName string
@@ -55,6 +67,7 @@ func NewRegistrarConfig() *RegistrarConfig {
 			HealthProbeBindAddress: ":8082",
 			MetricsBindAddress:     ":8081",
 		},
+		MeshConfigPath:          DefaultMeshConfigPath,
 		RegistryBackend:         "kubernetes",
 		EtcdEndpoints:           []string{"localhost:2379"},
 		SyncInterval:            defaultSyncInterval,

@@ -31,6 +31,8 @@ spec:
             {{- with .Values.telemetry.otlpEndpoint }}
             # Written into the netconf: the CNI plugin binary runs under the
             # container runtime, so the endpoint cannot reach it via pod env.
+            # This is the Envoy/CNI plumbing endpoint (template-time), distinct
+            # from the agent's runtime OTLP in the MeshConfig CR.
             - "--otlp-endpoint={{ . }}"
             {{- end }}
           securityContext:
@@ -53,34 +55,10 @@ spec:
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
-            - "--mesh-domain={{ .Values.meshDomain }}"
-            {{- if .Values.telemetry.enabled }}
-            - "--otel-enabled=true"
-            {{- end }}
-            {{- with .Values.telemetry.otlpEndpoint }}
-            - "--otlp-endpoint={{ . }}"
-            {{- end }}
-            {{- if .Values.telemetry.statsEmitPod }}
-            - "--stats-emit-pod"
-            {{- end }}
-            {{- if .Values.telemetry.accessLogs.enabled }}
-            - "--access-logs-enabled"
-            - "--access-log-success-sample-rate={{ .Values.telemetry.accessLogs.successSampleRate }}"
-            {{- end }}
-            {{- if .Values.telemetry.proxyTracing.enabled }}
-            - "--proxy-tracing-enabled"
-            - "--proxy-trace-sample-rate={{ .Values.telemetry.proxyTracing.sampleRate }}"
-            {{- end }}
-            # Tracing (the TracerProvider for trace_id on logs) is always on in the
-            # binary; only the sample rate and span export are configurable.
-            - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"
-            {{- if .Values.telemetry.tracing.export }}
-            - "--trace-export=true"
-            {{- end }}
-            {{- if .Values.telemetry.logs.enabled }}
-            - "--logs-enabled=true"
-            {{- end }}
-            - "--spire-enabled={{ .Values.spire.enabled }}"
+            # Mesh-wide policy (mesh domain, telemetry, SPIRE on/off) is read from
+            # the mounted MeshConfig ConfigMap at the default path
+            # /etc/aether/mesh-config.yaml (projected from the MeshConfig CR by the
+            # aether-controller). Only per-instance flags remain here.
             {{- if .Values.spire.enabled }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--spire-admin-socket={{ .Values.spire.adminSocket.mountPath }}/{{ .Values.spire.adminSocket.socketName }}"
@@ -172,6 +150,9 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: mesh-config
+              mountPath: /etc/aether
+              readOnly: true
             {{- if .Values.spire.enabled }}
             - name: spire-workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
@@ -215,6 +196,12 @@ spec:
             type: Socket
         - name: tmp
           emptyDir: {}
+        - name: mesh-config
+          # Projected from the MeshConfig CR by the registrar's controller
+          # (config.aether.io). The pod stays in ContainerCreating until it
+          # exists — no Helm-rendered ConfigMap. See proposal 015.
+          configMap:
+            name: {{ .Values.meshConfig.configMapName }}
         {{- if .Values.spire.enabled }}
         - name: spire-workload-socket
           csi:

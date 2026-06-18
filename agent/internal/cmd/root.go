@@ -36,6 +36,8 @@ import (
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"github.com/bpalermo/aether/common/config"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
@@ -72,6 +74,14 @@ var rootCmd = &cobra.Command{
 	Long:         "Runs the Aether agent on a Kubernetes node to manage an Envoy xDS control plane and transparent traffic interception via CNI.",
 	SilenceUsage: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) (err error) {
+		// Load mesh-wide policy before logging setup: the OTLP endpoint and log
+		// export it configures both live in the MeshConfig now.
+		mc, err := config.Load(cfg.MeshConfigPath)
+		if err != nil {
+			return err
+		}
+		applyMeshConfig(mc)
+
 		l, logShutdown, err = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
 		return err
 	},
@@ -88,6 +98,10 @@ func GetCommand() *cobra.Command {
 func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
+	// Mesh-wide policy (mesh domain, telemetry, SPIRE on/off) comes from the
+	// MeshConfig ConfigMap, not flags.
+	rootCmd.Flags().StringVar(&cfg.MeshConfigPath, "mesh-config", cfg.MeshConfigPath, "Path to the mounted MeshConfig YAML (ConfigMap) with mesh-wide policy")
+
 	// Kubernetes and cluster identity (required)
 	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name where the agent runs (required)")
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name, used for service discovery (required)")
@@ -99,16 +113,7 @@ func init() {
 	// Registrar configuration
 	rootCmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
 
-	// Mesh routing configuration
-	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
-	rootCmd.Flags().BoolVar(&cfg.EmitStatsPod, "stats-emit-pod", cfg.EmitStatsPod, "emit per-pod labels (source_pod/destination_pod) on the aether_stats request counter (raises cardinality)")
-	rootCmd.Flags().BoolVar(&cfg.AccessLogsEnabled, "access-logs-enabled", cfg.AccessLogsEnabled, "attach the OTel access logger to every HCM, pushing per-request OTLP logs to the collector (proposal 014)")
-	rootCmd.Flags().Uint32Var(&cfg.AccessLogSuccessSampleRate, "access-log-success-sample-rate", 100, "percent (0-100) of successful requests logged; failures are always logged")
-	rootCmd.Flags().BoolVar(&cfg.ProxyTracingEnabled, "proxy-tracing-enabled", cfg.ProxyTracingEnabled, "add an OpenTelemetry tracer to every proxy HCM so the data plane generates/propagates W3C trace context and exports spans")
-	rootCmd.Flags().Float64Var(&cfg.ProxyTraceSampleRate, "proxy-trace-sample-rate", 0.01, "fraction (0.0-1.0) of requests traced by the proxy; keep low at high QPS")
-
-	// SPIRE and security configuration
-	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
+	// SPIRE socket paths (per-instance; the SPIRE on/off policy is mesh-wide).
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
 
@@ -116,6 +121,22 @@ func init() {
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 	must.NoError(rootCmd.MarkFlagRequired("node-name"))
 	must.NoError(rootCmd.MarkFlagRequired("proxy-id"))
+}
+
+// applyMeshConfig copies the mesh-wide policy from a loaded MeshConfig onto the
+// agent config. Per-instance fields (identity, sockets, addresses) are untouched.
+func applyMeshConfig(mc *configv1.MeshConfig) {
+	cfg.MeshDomain = mc.GetMeshDomain()
+
+	t := mc.GetTelemetry()
+	manager.ApplyTelemetry(&cfg.Config, t)
+	cfg.EmitStatsPod = t.GetStatsEmitPod()
+	cfg.AccessLogsEnabled = t.GetAccessLogs().GetEnabled()
+	cfg.AccessLogSuccessSampleRate = t.GetAccessLogs().GetSuccessSampleRate()
+	cfg.ProxyTracingEnabled = t.GetProxyTracing().GetEnabled()
+	cfg.ProxyTraceSampleRate = t.GetProxyTracing().GetSampleRate()
+
+	cfg.SpireEnabled = mc.GetSecurity().GetSpireEnabled()
 }
 
 // runAgent initializes and runs the Aether agent. It sets up the controller-runtime Manager,

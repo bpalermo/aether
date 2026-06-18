@@ -1,0 +1,23 @@
+{{- if .Values.meshConfig.createDefault }}
+{{- /*
+  Seed the singleton MeshConfig ONCE and never overwrite it. lookup skips
+  rendering when a MeshConfig/default already exists, and resource-policy: keep
+  stops Helm deleting it once it drops out of the rendered manifest on later
+  upgrades. Net effect: a `helm upgrade` is a no-op for mesh config — operators
+  own the CR via kubectl, and new chart versions (with new config defaults) never
+  clobber it. See docs/proposals/015_mesh-config.md.
+*/ -}}
+{{- $existing := lookup "config.aether.io/v1" "MeshConfig" "" "default" -}}
+{{- if not $existing }}
+apiVersion: config.aether.io/v1
+kind: MeshConfig
+metadata:
+  name: default
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  {{- toYaml .Values.meshConfig.default | nindent 2 }}
+{{- end }}
+{{- end }}

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/aws/aws-sdk-go-v2/config"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"github.com/bpalermo/aether/common/config"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	"github.com/bpalermo/aether/common/spire"
@@ -40,6 +42,14 @@ var rootCmd = &cobra.Command{
 	Long:         "Runs the Aether registrar that proxies registry operations, caches endpoints, and streams changes to agents.",
 	SilenceUsage: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) (err error) {
+		// Load mesh-wide policy before logging setup: the OTLP endpoint and log
+		// export it configures both live in the MeshConfig now.
+		mc, err := config.Load(cfg.MeshConfigPath)
+		if err != nil {
+			return err
+		}
+		applyMeshConfig(mc)
+
 		l, logShutdown, err = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
 		return err
 	},
@@ -56,17 +66,30 @@ func GetCommand() *cobra.Command {
 func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
+	// Mesh-wide policy (telemetry, SPIRE on/off) comes from the mounted MeshConfig
+	// ConfigMap (projected from the MeshConfig CR by the aether-controller).
+	rootCmd.Flags().StringVar(&cfg.MeshConfigPath, "mesh-config", cfg.MeshConfigPath, "Path to the mounted MeshConfig YAML (ConfigMap) with mesh-wide policy")
+
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
 
-	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE mTLS for the gRPC server")
+	// SPIRE socket path and trust domain are per-instance; the on/off policy is
+	// mesh-wide (MeshConfig.security.spire_enabled).
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
 	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", cfg.SpireTrustDomain, "SPIFFE trust domain authorized for mTLS peers")
 
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
+}
+
+// applyMeshConfig copies the mesh-wide policy from a loaded MeshConfig onto the
+// registrar config. Per-instance fields (identity, sockets, addresses) are
+// untouched. The registrar only consumes the telemetry and security subsets.
+func applyMeshConfig(mc *configv1.MeshConfig) {
+	manager.ApplyTelemetry(&cfg.Config, mc.GetTelemetry())
+	cfg.SpireEnabled = mc.GetSecurity().GetSpireEnabled()
 }
 
 func runRegistrar(ctx context.Context) (retErr error) {
@@ -175,7 +198,7 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 		// Region comes from the standard AWS chain (AWS_REGION env — set by the
 		// chart's aws.region value — shared config, IMDS), falling back to
 		// us-east-1 so bare runs keep the historical default.
-		awsCfg, err := config.LoadDefaultConfig(ctx)
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load AWS config: %w", err)
 		}

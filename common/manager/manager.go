@@ -10,9 +10,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
-// defaultTraceSampleRate is the default head-sampling ratio for traces.
-const defaultTraceSampleRate = 0.1
-
 // Result holds the bootstrapped manager and an optional telemetry shutdown function.
 type Result struct {
 	Manager  ctrl.Manager
@@ -20,8 +17,10 @@ type Result struct {
 }
 
 // Bootstrap sets up telemetry (if enabled), creates a controller-runtime Manager,
-// and registers the standard health and readiness probes.
-func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion string) (*Result, error) {
+// and registers the standard health and readiness probes. Optional opts mutate
+// the ctrl.Options before the manager is built (e.g. to supply a custom webhook
+// server backed by SPIRE).
+func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion string, optFns ...func(*ctrl.Options)) (*Result, error) {
 	telemetryCfg := telemetry.Config{
 		ServiceName:     serviceName,
 		ServiceVersion:  serviceVersion,
@@ -62,9 +61,14 @@ func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion stri
 	opts := ctrl.Options{
 		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
 		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
+		LeaderElection:         cfg.LeaderElection,
+		LeaderElectionID:       cfg.LeaderElectionID,
 	}
 	if cfg.CacheOptions != nil {
 		opts.Cache = *cfg.CacheOptions
+	}
+	for _, opt := range optFns {
+		opt(&opts)
 	}
 	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
 	if err != nil {

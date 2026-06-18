@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cmd",
+    srcs = [
+        "config.go",
+        "root.go",
+    ],
+    importpath = "github.com/bpalermo/aether/controller/internal/cmd",
+    visibility = ["//controller:__subpackages__"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "//common/manager",
+        "//common/spire",
+        "//controller/internal/meshconfig",
+        "@com_github_spf13_cobra//:cobra",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+        "@io_k8s_sigs_controller_runtime//pkg/webhook",
+    ],
+)

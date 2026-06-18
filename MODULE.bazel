@@ -115,6 +115,7 @@ use_repo(
     "io_k8s_cri_api",
     "io_k8s_sigs_controller_runtime",
     "io_k8s_sigs_e2e_framework",
+    "io_k8s_sigs_yaml",
     "io_opentelemetry_go_contrib_bridges_otelslog",
     "io_opentelemetry_go_contrib_instrumentation_google_golang_org_grpc_otelgrpc",
     "io_opentelemetry_go_contrib_instrumentation_runtime",

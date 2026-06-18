@@ -1,0 +1,76 @@
+{{/*
+Webhook serving trust. Two modes:
+
+  spire.enabled=true  — the controller serves the webhook with a SPIRE SVID and
+    injects the SPIRE trust bundle into this config's caBundle at runtime, so no
+    Secret is rendered and caBundle starts empty (failurePolicy: Ignore keeps the
+    webhook fail-open until the controller injects the bundle).
+
+  spire.enabled=false — a Helm self-signed cert (generated once, reused on upgrade
+    via lookup) is rendered as a Secret and its CA baked into caBundle.
+*/}}
+{{- $svc := include "controller.webhookServiceName" . -}}
+{{- $ns := include "controller.namespace" . -}}
+{{- $caBundle := "" -}}
+{{- if not .Values.spire.enabled -}}
+{{- $cn := printf "%s.%s.svc" $svc $ns -}}
+{{- $altNames := list $cn (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
+{{- $secretName := printf "%s-cert" $svc -}}
+{{- $existing := lookup "v1" "Secret" $ns $secretName -}}
+{{- $tlsCert := "" -}}
+{{- $tlsKey := "" -}}
+{{- if and $existing $existing.data (index $existing.data "ca.crt") -}}
+{{- $caBundle = index $existing.data "ca.crt" -}}
+{{- $tlsCert = index $existing.data "tls.crt" -}}
+{{- $tlsKey = index $existing.data "tls.key" -}}
+{{- else -}}
+{{- $ca := genCA "aether-controller-ca" 3650 -}}
+{{- $cert := genSignedCert $cn nil $altNames 3650 $ca -}}
+{{- $caBundle = $ca.Cert | b64enc -}}
+{{- $tlsCert = $cert.Cert | b64enc -}}
+{{- $tlsKey = $cert.Key | b64enc -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $caBundle }}
+  tls.crt: {{ $tlsCert }}
+  tls.key: {{ $tlsKey }}
+---
+{{- end }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "controller.clusterScopedName" . }}
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+webhooks:
+  - name: meshconfig.config.aether.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # Ignore so a down/un-injected webhook (e.g. during the controller's own
+    # rollout, or before the SPIRE caBundle is injected) never wedges MeshConfig
+    # writes; the reconciler re-validates before projecting.
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /validate-config-aether-io-v1-meshconfig
+        port: 443
+      {{- if not .Values.spire.enabled }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
+    rules:
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["meshconfigs"]
+        scope: "Cluster"

@@ -62,6 +62,44 @@ func ServerTLSConfig(src *Source, trustDomain string) (*tls.Config, error) {
 	return tlsconfig.MTLSServerConfig(src, src, auth), nil
 }
 
+// WebhookServerCert returns a tls.Config mutator (suitable for
+// controller-runtime's webhook.Options.TLSOpts) that makes the server present the
+// workload SVID from src via GetCertificate, with no client-certificate
+// requirement. The caller of a webhook is the kube-apiserver — not a SPIFFE peer
+// — so this is one-way TLS: the apiserver verifies the SVID against the SPIRE
+// trust bundle (injected as the webhook caBundle) and the Service DNS name, which
+// the SVID must carry as a DNS SAN (set dnsNames on the SPIRE registration
+// entry). Setting GetCertificate here makes controller-runtime skip its CertDir
+// file watcher entirely.
+func WebhookServerCert(src *Source) func(*tls.Config) {
+	return func(cfg *tls.Config) {
+		cfg.GetCertificate = tlsconfig.GetCertificate(src)
+		cfg.ClientAuth = tls.NoClientCert
+		if cfg.MinVersion < tls.VersionTLS12 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
+	}
+}
+
+// TrustBundlePEM returns the PEM-encoded X.509 trust bundle for the SVID's own
+// trust domain, suitable for use as a webhook/CRD caBundle. It reflects the
+// current bundle in src and should be re-read after each rotation (src.Updated()).
+func TrustBundlePEM(src *Source) ([]byte, error) {
+	svid, err := src.GetX509SVID()
+	if err != nil {
+		return nil, fmt.Errorf("fetching workload SVID for trust bundle: %w", err)
+	}
+	bundle, err := src.GetX509BundleForTrustDomain(svid.ID.TrustDomain())
+	if err != nil {
+		return nil, fmt.Errorf("fetching X.509 bundle: %w", err)
+	}
+	pem, err := bundle.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("marshalling X.509 bundle: %w", err)
+	}
+	return pem, nil
+}
+
 // ClientTLSConfig returns a mutual-TLS client config that presents the workload
 // SVID from src and authorizes peers belonging to trustDomain (or any valid peer
 // when trustDomain is empty / RootCATrustDomain).

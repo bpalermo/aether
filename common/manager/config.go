@@ -17,6 +17,11 @@ type Config struct {
 	MetricsEnabled bool
 	// MetricsBindAddress is the address for the metrics HTTP server
 	MetricsBindAddress string
+	// LeaderElection enables controller-runtime leader election so only one
+	// replica is active (used by the aether-controller singleton).
+	LeaderElection bool
+	// LeaderElectionID is the name of the lease resource used for leader election.
+	LeaderElectionID string
 	// OTelEnabled enables the OTel MeterProvider with Prometheus exporter bridge
 	OTelEnabled bool
 	// OTLPEndpoint is the OTLP gRPC collector endpoint (e.g. "localhost:4317"); empty disables OTLP export

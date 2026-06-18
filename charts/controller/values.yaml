@@ -1,0 +1,93 @@
+# Default values for the controller chart.
+
+# Override the chart name / fully-qualified resource name.
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace the controller resources deploy into. Defaults to the release
+# namespace. The agent chart owns the aether namespace by default, so creation is
+# off here; enable it for a standalone controller install.
+namespace:
+  create: false
+  name: ""
+
+# Enable verbose logging (`--debug`).
+debug: true
+
+# Leader election is always on in the binary; a single replica is enough, extra
+# replicas are warm standbys.
+replicaCount: 1
+
+image:
+  # Substituted at package time with the digest-pinned reference produced by the
+  # in-repo `//controller/cmd/controller:image_push` target.
+  ref: "{@//controller/cmd/controller:image_push}"
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+# Webhook serving certificate.
+#   spire.enabled=true  -> serve the webhook with a SPIRE X.509 SVID over the
+#     csi.spiffe.io Workload API socket, and let the controller inject the SPIRE
+#     trust bundle into the webhook caBundle (auto-rotating, no cert files). The
+#     SPIRE registration entry for the controller MUST list the webhook Service
+#     DNS name (<release>-controller-webhook.<namespace>.svc) in its dnsNames, or
+#     the apiserver's TLS hostname check fails.
+#   spire.enabled=false -> a Helm-generated self-signed cert (genSignedCert),
+#     reused across upgrades via lookup; caBundle baked into the webhook config.
+spire:
+  enabled: true
+  # SPIRE Workload API socket path (the csi.spiffe.io mount + socket filename).
+  workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
+
+# Mesh-wide configuration. The controller projects the MeshConfig CR into a
+# ConfigMap the agent and registrar mount; it also reads the CR for its own
+# telemetry. See docs/proposals/015_mesh-config.md.
+meshConfig:
+  # Name of the projected ConfigMap. Must match the agent/registrar charts'
+  # meshConfig.configMapName, in the same namespace.
+  configMapName: aether-mesh-config
+
+  # Seed the singleton MeshConfig CR (name "default") on first install only. The
+  # CR is created once and NEVER overwritten on upgrade (lookup-skip + Helm
+  # resource-policy: keep), so operators own it via kubectl thereafter and new
+  # chart versions never reset it. Set false to manage the CR entirely yourself.
+  createDefault: true
+
+  # The spec for the seeded default MeshConfig CR. Keys are the protojson field
+  # names of aether.config.v1.MeshConfig; the webhook protovalidate's this. Only
+  # used at first-install seeding — edits here do NOT re-apply on upgrade.
+  default:
+    # DNS-style domain mesh authorities live under (<service>.<meshDomain>).
+    meshDomain: aether.internal
+    telemetry:
+      # Enable the OTel MeterProvider (Prometheus bridge) on the control plane.
+      enabled: false
+      # OTLP gRPC collector endpoint (host:port); empty disables OTLP export.
+      otlpEndpoint: ""
+      # Per-pod labels on the aether_stats request counter (raises cardinality).
+      statsEmitPod: false
+      # Per-request OTLP access logs from the proxies (proposal 014).
+      accessLogs:
+        enabled: false
+        successSampleRate: 100
+      # Data-plane (proxy) request tracing.
+      proxyTracing:
+        enabled: false
+        sampleRate: 0.01
+      # Control-plane span sampling/export.
+      tracing:
+        sampleRate: 0.1
+        export: false
+      # Control-plane application-log export over OTLP.
+      logs:
+        enabled: false
+    security:
+      # Whether the mesh uses SPIRE mTLS.
+      spireEnabled: true

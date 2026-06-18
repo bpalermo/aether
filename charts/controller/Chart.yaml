@@ -1,0 +1,19 @@
+apiVersion: v2
+name: controller
+description: |
+  Aether mesh-config controller. Deploys the aether-controller: a validating
+  admission webhook (protovalidate) plus a reconciler that projects the singleton
+  MeshConfig custom resource into the ConfigMap the agent and registrar mount for
+  mesh-wide configuration. The MeshConfig CRD ships in the separate `crds` chart,
+  which must be installed first.
+type: application
+# Stamped at package time when built with `--stamp` (see other charts).
+version: "0.1.0-{GIT_COMMIT}"
+appVersion: "{STABLE_GIT_VERSION}"
+keywords:
+  - aether
+  - service-mesh
+  - controller
+  - meshconfig
+sources:
+  - https://github.com/bpalermo/aether

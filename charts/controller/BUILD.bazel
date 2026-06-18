@@ -1,0 +1,32 @@
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+
+# controller Helm chart (published as ghcr.io/bpalermo/aether/charts/controller).
+#
+# Installs the MeshConfig CRD and the aether-controller (validating webhook +
+# CR→ConfigMap reconciler). See docs/proposals/015_mesh-config.md.
+#
+# Publish targets (GitHub Container Registry, OCI):
+#   bazel run //charts/controller:controller.push           # chart + image
+#   bazel run //charts/controller:controller.push_registry  # chart only
+# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+helm_chart(
+    name = "controller",
+    chart = "Chart.yaml",
+    images = [
+        "//controller/cmd/controller:image_push",
+    ],
+    login_url = "ghcr.io",
+    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+)
+
+helm_lint_test(
+    name = "controller_lint_test",
+    chart = ":controller",
+)
+
+helm_template_test(
+    name = "controller_template_test",
+    chart = ":controller",
+)
