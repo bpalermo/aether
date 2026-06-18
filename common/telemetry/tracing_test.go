@@ -13,10 +13,17 @@ import (
 	"google.golang.org/grpc/stats"
 )
 
-func TestSetupTracing_RequiresEndpoint(t *testing.T) {
-	if _, err := SetupTracing(context.Background(), Config{ServiceName: "test"}); err == nil {
-		t.Fatal("SetupTracing() with empty OTLPEndpoint should fail")
+func TestSetupTracing_ExportRequiresEndpoint(t *testing.T) {
+	// Export on + no endpoint -> error.
+	if _, err := SetupTracing(context.Background(), Config{ServiceName: "test", TraceExport: true}); err == nil {
+		t.Fatal("SetupTracing() with TraceExport and empty OTLPEndpoint should fail")
 	}
+	// No export + no endpoint -> fine (provider installed for trace_id, no exporter).
+	shutdown, err := SetupTracing(context.Background(), Config{ServiceName: "test"})
+	if err != nil {
+		t.Fatalf("SetupTracing() without export should not require an endpoint: %v", err)
+	}
+	_ = shutdown(context.Background())
 }
 
 func TestSetupTracing_SetsGlobals(t *testing.T) {

@@ -67,9 +67,11 @@ spec:
             - "--access-logs-enabled"
             - "--access-log-success-sample-rate={{ .Values.telemetry.accessLogs.successSampleRate }}"
             {{- end }}
-            {{- if .Values.telemetry.tracing.enabled }}
-            - "--tracing-enabled=true"
+            # Tracing (the TracerProvider for trace_id on logs) is always on in the
+            # binary; only the sample rate and span export are configurable.
             - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"
+            {{- if .Values.telemetry.tracing.export }}
+            - "--trace-export=true"
             {{- end }}
             {{- if .Values.telemetry.logs.enabled }}
             - "--logs-enabled=true"

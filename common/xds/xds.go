@@ -54,7 +54,8 @@ func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.Snapshot
 			PermitWithoutStream: true,              // Allow pings even without active streams
 		}),
 		grpc.MaxConcurrentStreams(1000),
-		// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+		// The TracerProvider is always installed, so this records real RPC spans (whose
+		// trace_id flows to logs); spans export only with --trace-export.
 		grpc.StatsHandler(telemetry.ServerStatsHandler()),
 	)
 	xdsSrv := serverv3.NewServer(ctx, cache, callbacks)

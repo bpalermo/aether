@@ -21,11 +21,15 @@ type Config struct {
 	OTelEnabled bool
 	// OTLPEndpoint is the OTLP gRPC collector endpoint (e.g. "localhost:4317"); empty disables OTLP export
 	OTLPEndpoint string
-	// TracingEnabled enables the OTel TracerProvider with OTLP trace export (requires OTLPEndpoint)
-	TracingEnabled bool
 	// LogsEnabled enables the OTel LoggerProvider with OTLP log export, tee'd into
-	// the component's zap logger (requires OTLPEndpoint); stderr logging is unaffected
+	// the component's slog logger (requires OTLPEndpoint); stderr logging is unaffected
 	LogsEnabled bool
-	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0)
+	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0). The
+	// TracerProvider is always installed (for trace_id on logs); this only bounds
+	// what gets exported when TracingExport is set.
 	TraceSampleRate float64
+	// TracingExport attaches the OTLP span exporter; without it the always-on
+	// TracerProvider still gives logs their trace_id but exports no spans (no
+	// trace backend needed)
+	TracingExport bool
 }

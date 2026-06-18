@@ -16,17 +16,21 @@ namespace:
 clusterName: talos-main
 
 # OTel telemetry, push-first: when otlpEndpoint is set, the registrar pushes
-# metrics (and traces when tracing.enabled) to the collector.
+# metrics (and logs/traces when their export is enabled) to the collector.
 telemetry:
   # Enables the OTel MeterProvider (`--otel-enabled`).
   enabled: false
   # OTLP gRPC collector endpoint (host:port, insecure). Empty disables push.
   otlpEndpoint: ""
   tracing:
-    # Enables OTLP trace export (`--tracing-enabled`); requires otlpEndpoint.
-    enabled: false
-    # Head-sampling ratio for traces (`--trace-sample-rate`).
+    # The OTel TracerProvider is always installed in the binary so logs emitted in
+    # a span carry trace_id/span_id — there is no enable flag. Head-sampling ratio
+    # (`--trace-sample-rate`); only bounds exported spans (trace_id is unaffected).
     sampleRate: 0.1
+    # Export spans over OTLP (`--trace-export`). Leave false unless the collector
+    # has a traces pipeline/backend, else the SDK floods stderr with
+    # "Unimplemented TraceService" errors. trace_id on logs works without it.
+    export: false
   logs:
     # Export the registrar's own application logs over OTLP to the collector
     # (`--logs-enabled`), tee'd into stderr (kubectl logs is unchanged).

@@ -27,6 +27,7 @@ func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion stri
 		ServiceVersion:  serviceVersion,
 		OTLPEndpoint:    cfg.OTLPEndpoint,
 		TraceSampleRate: cfg.TraceSampleRate,
+		TraceExport:     cfg.TracingExport,
 	}
 
 	var shutdowns []func(context.Context) error
@@ -37,13 +38,15 @@ func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion stri
 		}
 		shutdowns = append(shutdowns, metricsShutdown)
 	}
-	if cfg.TracingEnabled {
-		tracingShutdown, err := telemetry.SetupTracing(ctx, telemetryCfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to setup tracing: %w", err)
-		}
-		shutdowns = append(shutdowns, tracingShutdown)
+	// Tracing is always installed: a TracerProvider issues the span contexts that
+	// give logs their trace_id/span_id (the slog/otelslog correlation), which is
+	// useful regardless of other telemetry. Span EXPORT stays opt-in (TraceExport)
+	// — see SetupTracing.
+	tracingShutdown, err := telemetry.SetupTracing(ctx, telemetryCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup tracing: %w", err)
 	}
+	shutdowns = append(shutdowns, tracingShutdown)
 
 	var shutdown func(context.Context) error
 	if len(shutdowns) > 0 {

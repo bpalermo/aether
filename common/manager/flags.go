@@ -9,7 +9,7 @@ func RegisterFlags(cmd *cobra.Command, cfg *Config) {
 	cmd.Flags().StringVar(&cfg.MetricsBindAddress, "metrics-bind-address", cfg.MetricsBindAddress, "Address for the metrics HTTP server")
 	cmd.Flags().BoolVar(&cfg.OTelEnabled, "otel-enabled", cfg.OTelEnabled, "Enable OTel MeterProvider with Prometheus exporter bridge (requires --metrics-enabled)")
 	cmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", cfg.OTLPEndpoint, "OTLP gRPC collector endpoint (e.g. localhost:4317); empty disables OTLP export")
-	cmd.Flags().BoolVar(&cfg.TracingEnabled, "tracing-enabled", cfg.TracingEnabled, "Enable OTel tracing with OTLP export (requires --otlp-endpoint)")
 	cmd.Flags().BoolVar(&cfg.LogsEnabled, "logs-enabled", cfg.LogsEnabled, "Enable OTel log export over OTLP, tee'd into stderr logging (requires --otlp-endpoint)")
-	cmd.Flags().Float64Var(&cfg.TraceSampleRate, "trace-sample-rate", defaultTraceSampleRate, "Head-sampling ratio for traces (0.0-1.0)")
+	cmd.Flags().Float64Var(&cfg.TraceSampleRate, "trace-sample-rate", defaultTraceSampleRate, "Head-sampling ratio for traces (0.0-1.0); only bounds exported spans (the provider is always on for trace_id)")
+	cmd.Flags().BoolVar(&cfg.TracingExport, "trace-export", cfg.TracingExport, "Export spans over OTLP (requires a collector traces pipeline); off keeps trace_id on logs without exporting")
 }

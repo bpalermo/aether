@@ -33,6 +33,9 @@ type Config struct {
 	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0). Only
 	// used by SetupTracing.
 	TraceSampleRate float64
+	// TraceExport attaches the OTLP span exporter. When false, SetupTracing still
+	// installs a TracerProvider (so logs get trace_id) but exports no spans.
+	TraceExport bool
 }
 
 // newResource builds the OTel Resource shared by the meter and tracer

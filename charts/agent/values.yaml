@@ -55,11 +55,15 @@ telemetry:
     enabled: false
     successSampleRate: 100
   tracing:
-    # Enables OTLP trace export on the agent (`--tracing-enabled`);
-    # requires otlpEndpoint.
-    enabled: false
-    # Head-sampling ratio for traces (`--trace-sample-rate`).
+    # The OTel TracerProvider is always installed in the binary so spans exist and
+    # logs emitted within them carry trace_id/span_id — there is no enable flag.
+    # Head-sampling ratio for traces (`--trace-sample-rate`); only bounds exported
+    # spans (trace_id on logs is unaffected by the rate).
     sampleRate: 0.1
+    # Export spans over OTLP (`--trace-export`). Leave false unless the collector
+    # has a traces pipeline/backend — otherwise the SDK floods stderr with
+    # "Unimplemented TraceService" errors. trace_id on logs works without it.
+    export: false
   logs:
     # Export the agent's own application logs over OTLP to the collector
     # (`--logs-enabled`), tee'd into stderr (kubectl logs is unchanged).
