@@ -16,17 +16,16 @@ namespace:
 clusterName: talos-main
 
 # OTel telemetry, push-first: when otlpEndpoint is set, the registrar pushes
-# metrics (and traces when tracing.enabled) to the collector.
+# metrics (and logs/traces when their export is enabled) to the collector.
 telemetry:
   # Enables the OTel MeterProvider (`--otel-enabled`).
   enabled: false
   # OTLP gRPC collector endpoint (host:port, insecure). Empty disables push.
   otlpEndpoint: ""
   tracing:
-    # Installs the OTel TracerProvider (`--tracing-enabled`) so logs emitted in a
-    # span carry trace_id/span_id. Does NOT export spans on its own.
-    enabled: false
-    # Head-sampling ratio for traces (`--trace-sample-rate`).
+    # The OTel TracerProvider is always installed in the binary so logs emitted in
+    # a span carry trace_id/span_id — there is no enable flag. Head-sampling ratio
+    # (`--trace-sample-rate`); only bounds exported spans (trace_id is unaffected).
     sampleRate: 0.1
     # Export spans over OTLP (`--trace-export`). Leave false unless the collector
     # has a traces pipeline/backend, else the SDK floods stderr with

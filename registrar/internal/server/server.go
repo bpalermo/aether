@@ -80,7 +80,8 @@ func NewRegistrarServer(
 	cfg.Network = "tcp"
 	cfg.Address = address
 
-	// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+	// The TracerProvider is always installed, so this records real RPC spans (whose
+	// trace_id flows to logs); spans export only with --trace-export.
 	grpcOpts = append(grpcOpts, grpc.StatsHandler(telemetry.ServerStatsHandler()))
 	grpcSrv := grpc.NewServer(grpcOpts...)
 

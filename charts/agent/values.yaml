@@ -55,11 +55,10 @@ telemetry:
     enabled: false
     successSampleRate: 100
   tracing:
-    # Installs the OTel TracerProvider (`--tracing-enabled`) so spans exist and
-    # logs emitted within them carry trace_id/span_id. Does NOT export spans on
-    # its own.
-    enabled: false
-    # Head-sampling ratio for traces (`--trace-sample-rate`).
+    # The OTel TracerProvider is always installed in the binary so spans exist and
+    # logs emitted within them carry trace_id/span_id — there is no enable flag.
+    # Head-sampling ratio for traces (`--trace-sample-rate`); only bounds exported
+    # spans (trace_id on logs is unaffected by the rate).
     sampleRate: 0.1
     # Export spans over OTLP (`--trace-export`). Leave false unless the collector
     # has a traces pipeline/backend — otherwise the SDK floods stderr with
