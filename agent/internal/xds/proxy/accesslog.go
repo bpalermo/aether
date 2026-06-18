@@ -52,11 +52,12 @@ var accessLogConfig AccessLogConfig
 // the manager starts.
 func SetAccessLogConfig(c AccessLogConfig) { accessLogConfig = c }
 
-// buildAccessLog returns the OTel access logger for an HCM, tagged with reporter,
-// or nil when access logging is disabled. The logger pushes OTLP logs to the
-// collector cluster; the filter logs all failures plus a SuccessSampleRate sample
-// of successes.
-func buildAccessLog(reporter string) []*accesslogv3.AccessLog {
+// buildAccessLog returns the OTel access logger for an HCM, tagged with reporter
+// and the local pod this listener serves (the source pod on egress, the
+// destination pod on inbound — disambiguate via reporter), or nil when access
+// logging is disabled. The logger pushes OTLP logs to the collector cluster; the
+// filter logs all failures plus a SuccessSampleRate sample of successes.
+func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.AccessLog {
 	if !accessLogConfig.Enabled {
 		return nil
 	}
@@ -84,6 +85,10 @@ func buildAccessLog(reporter string) []*accesslogv3.AccessLog {
 		// propagates trace context; "-" until then).
 		Attributes: &otlpcommonv1.KeyValueList{Values: []*otlpcommonv1.KeyValue{
 			kv("reporter", reporter),
+			// Literal pod identity baked in per-pod listener: the local pod this hop
+			// serves (source pod on egress, destination pod on inbound).
+			kv("pod_name", podName),
+			kv("pod_namespace", podNamespace),
 			kv("start_time", "%START_TIME%"),
 			kv("method", "%REQ(:METHOD)%"),
 			kv("path", "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"),

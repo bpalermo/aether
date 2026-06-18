@@ -75,14 +75,14 @@ const downstreamIdleTimeout = 5 * time.Minute
 // If routeConfig is nil, routes will be retrieved via RDS. reporter tags the OTel
 // access logger (ReporterSource for egress, ReporterDestination for inbound); the
 // logger is attached only when access logging is enabled (buildAccessLog → nil).
-func buildHTTPConnectionManager(name, reporter string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
+func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
 	return &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: name,
 		CodecType:  http_connection_managerv3.HttpConnectionManager_AUTO,
 		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
 			IdleTimeout: durationpb.New(downstreamIdleTimeout),
 		},
-		AccessLog: buildAccessLog(reporter),
+		AccessLog: buildAccessLog(reporter, podName, podNamespace),
 		HttpFilters: []*http_connection_managerv3.HttpFilter{
 			routerHttpFilter(),
 		},

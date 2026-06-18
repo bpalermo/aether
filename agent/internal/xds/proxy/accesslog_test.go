@@ -12,14 +12,14 @@ import (
 func TestBuildAccessLogDisabled(t *testing.T) {
 	t.Cleanup(func() { SetAccessLogConfig(AccessLogConfig{}) })
 	SetAccessLogConfig(AccessLogConfig{Enabled: false})
-	assert.Nil(t, buildAccessLog(ReporterSource))
+	assert.Nil(t, buildAccessLog(ReporterSource, "svc-1-abc", "aether-test"))
 }
 
 func TestBuildAccessLogEnabled(t *testing.T) {
 	t.Cleanup(func() { SetAccessLogConfig(AccessLogConfig{}) })
 	SetAccessLogConfig(AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
 
-	logs := buildAccessLog(ReporterDestination)
+	logs := buildAccessLog(ReporterDestination, "svc-2-xyz", "aether-test")
 	require.Len(t, logs, 1)
 	al := logs[0]
 	assert.Equal(t, "envoy.access_loggers.open_telemetry", al.GetName())
@@ -49,6 +49,9 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 		attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
 	}
 	assert.Equal(t, ReporterDestination, attrs["reporter"])
+	// Literal pod identity for the listener's local pod.
+	assert.Equal(t, "svc-2-xyz", attrs["pod_name"])
+	assert.Equal(t, "aether-test", attrs["pod_namespace"])
 
 	// The full Istio default field set plus the W3C traceparent must be present as
 	// structured attributes.
