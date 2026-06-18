@@ -115,7 +115,7 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 // is the default (no match criteria). chainPort selects both the app cluster
 // and the chain name suffix.
 func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName string, emitStatsPod bool) *listenerv3.FilterChain {
-	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort)))
+	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort)))
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application. The stats filter sits after the
 	// health-check filters (so locally-answered probe requests are not counted)

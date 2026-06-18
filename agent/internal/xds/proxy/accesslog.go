@@ -52,11 +52,12 @@ var accessLogConfig AccessLogConfig
 // the manager starts.
 func SetAccessLogConfig(c AccessLogConfig) { accessLogConfig = c }
 
-// buildAccessLog returns the OTel access logger for an HCM, tagged with reporter,
-// or nil when access logging is disabled. The logger pushes OTLP logs to the
-// collector cluster; the filter logs all failures plus a SuccessSampleRate sample
-// of successes.
-func buildAccessLog(reporter string) []*accesslogv3.AccessLog {
+// buildAccessLog returns the OTel access logger for an HCM, tagged with reporter
+// and the local pod this listener serves (the source pod on egress, the
+// destination pod on inbound — disambiguate via reporter), or nil when access
+// logging is disabled. The logger pushes OTLP logs to the collector cluster; the
+// filter logs all failures plus a SuccessSampleRate sample of successes.
+func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.AccessLog {
 	if !accessLogConfig.Enabled {
 		return nil
 	}
@@ -74,23 +75,43 @@ func buildAccessLog(reporter string) []*accesslogv3.AccessLog {
 				EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: cluster},
 			},
 		},
-		// Human-readable line; structured fields go in attributes for querying.
+		// Concise human-readable _msg for eyeballing; the full queryable field set
+		// (Istio's defaults + more) lives in attributes, not duplicated in the body.
 		Body: stringValue("%RESPONSE_CODE% %RESPONSE_FLAGS% %REQ(:METHOD)% %REQ(:AUTHORITY)%%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %DURATION%ms -> %UPSTREAM_HOST%"),
+		// Full Istio default field set as structured attributes, plus aether's
+		// reporter/pod identity/source_netns and the W3C traceparent (populates once
+		// the mesh propagates trace context; "-" until then).
 		Attributes: &otlpcommonv1.KeyValueList{Values: []*otlpcommonv1.KeyValue{
 			kv("reporter", reporter),
-			kv("response_code", "%RESPONSE_CODE%"),
-			kv("response_flags", "%RESPONSE_FLAGS%"),
+			// Literal pod identity baked in per-pod listener: the local pod this hop
+			// serves (source pod on egress, destination pod on inbound).
+			kv("pod_name", podName),
+			kv("pod_namespace", podNamespace),
+			kv("start_time", "%START_TIME%"),
 			kv("method", "%REQ(:METHOD)%"),
-			kv("authority", "%REQ(:AUTHORITY)%"),
 			kv("path", "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"),
 			kv("protocol", "%PROTOCOL%"),
+			kv("response_code", "%RESPONSE_CODE%"),
+			kv("response_flags", "%RESPONSE_FLAGS%"),
+			kv("response_code_details", "%RESPONSE_CODE_DETAILS%"),
+			kv("connection_termination_details", "%CONNECTION_TERMINATION_DETAILS%"),
+			kv("upstream_transport_failure_reason", "%UPSTREAM_TRANSPORT_FAILURE_REASON%"),
+			kv("bytes_received", "%BYTES_RECEIVED%"),
+			kv("bytes_sent", "%BYTES_SENT%"),
 			kv("duration_ms", "%DURATION%"),
 			kv("upstream_service_time", "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"),
-			kv("bytes_sent", "%BYTES_SENT%"),
-			kv("bytes_received", "%BYTES_RECEIVED%"),
+			kv("x_forwarded_for", "%REQ(X-FORWARDED-FOR)%"),
+			kv("user_agent", "%REQ(USER-AGENT)%"),
+			kv("x_request_id", "%REQ(X-REQUEST-ID)%"),
+			kv("authority", "%REQ(:AUTHORITY)%"),
 			kv("upstream_host", "%UPSTREAM_HOST%"),
 			kv("upstream_cluster", "%UPSTREAM_CLUSTER%"),
-			kv("x_request_id", "%REQ(X-REQUEST-ID)%"),
+			kv("upstream_local_address", "%UPSTREAM_LOCAL_ADDRESS%"),
+			kv("downstream_local_address", "%DOWNSTREAM_LOCAL_ADDRESS%"),
+			kv("downstream_remote_address", "%DOWNSTREAM_REMOTE_ADDRESS%"),
+			kv("requested_server_name", "%REQUESTED_SERVER_NAME%"),
+			kv("route_name", "%ROUTE_NAME%"),
+			kv("traceparent", "%REQ(TRACEPARENT)%"),
 			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
 		}},
 	}
