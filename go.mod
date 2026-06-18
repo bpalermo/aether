@@ -208,5 +208,12 @@ require (
 	sigs.k8s.io/e2e-framework v0.7.0
 )
 
+require (
+	go.opentelemetry.io/contrib/bridges/otelzap v0.19.0
+	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.20.0
+	go.opentelemetry.io/otel/log v0.20.0 // indirect
+	go.opentelemetry.io/otel/sdk/log v0.20.0
+)
+
 // https://github.com/lyft/protoc-gen-star/pull/132
 replace github.com/lyft/protoc-gen-star/v2 => github.com/pquerna/protoc-gen-star/v2 v2.0.0-20250415201647-653a078eb414

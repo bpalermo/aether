@@ -23,6 +23,9 @@ type Config struct {
 	OTLPEndpoint string
 	// TracingEnabled enables the OTel TracerProvider with OTLP trace export (requires OTLPEndpoint)
 	TracingEnabled bool
+	// LogsEnabled enables the OTel LoggerProvider with OTLP log export, tee'd into
+	// the component's zap logger (requires OTLPEndpoint); stderr logging is unaffected
+	LogsEnabled bool
 	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0)
 	TraceSampleRate float64
 }

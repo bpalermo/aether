@@ -10,7 +10,7 @@ type: application
 #                 OCI tag, unlike `+build` metadata which helm rewrites to `_`)
 #   appVersion -> the `git describe` version, matching the binary's embedded Version
 # Without `--stamp` the braces are stripped, yielding literal placeholder text.
-version: "0.2.4-{GIT_COMMIT}"
+version: "0.2.5-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

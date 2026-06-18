@@ -60,6 +60,11 @@ telemetry:
     enabled: false
     # Head-sampling ratio for traces (`--trace-sample-rate`).
     sampleRate: 0.1
+  logs:
+    # Export the agent's own application logs over OTLP to the collector
+    # (`--logs-enabled`), tee'd into stderr (kubectl logs is unchanged).
+    # Requires otlpEndpoint. Off by default.
+    enabled: false
 
 agent:
   image:
