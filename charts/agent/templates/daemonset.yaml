@@ -28,7 +28,7 @@ spec:
           imagePullPolicy: {{ .Values.cniInstall.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            {{- with .Values.telemetry.otlpEndpoint }}
+            {{- with .Values.meshConfig.telemetry.otlpEndpoint }}
             # Written into the netconf: the CNI plugin binary runs under the
             # container runtime, so the endpoint cannot reach it via pod env.
             # This is the Envoy/CNI plumbing endpoint (template-time), distinct

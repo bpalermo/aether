@@ -76,7 +76,7 @@ spec:
             - "--admin-address=127.0.0.1:9901"
             - "--handoff-deadline={{ .Values.proxy.hotRestart.handoffDeadline }}"
             - "--admin-unresponsive-deadline={{ .Values.proxy.hotRestart.adminUnresponsiveDeadline }}"
-            {{- with .Values.telemetry.otlpEndpoint }}
+            {{- with .Values.meshConfig.telemetry.otlpEndpoint }}
             # Push-first: the supervisor exports its hot-restart lifecycle
             # metrics over OTLP; no scrape port to collide on in the host netns.
             - "--otlp-endpoint={{ . }}"

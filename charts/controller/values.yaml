@@ -60,34 +60,34 @@ meshConfig:
   # chart versions never reset it. Set false to manage the CR entirely yourself.
   createDefault: true
 
-  # The spec for the seeded default MeshConfig CR. Keys are the protojson field
+  # The MeshConfig spec seeded into the default CR. Keys are the protojson field
   # names of aether.config.v1.MeshConfig; the webhook protovalidate's this. Only
   # used at first-install seeding — edits here do NOT re-apply on upgrade.
-  default:
-    # DNS-style domain mesh authorities live under (<service>.<meshDomain>).
-    meshDomain: aether.internal
-    telemetry:
-      # Enable the OTel MeterProvider (Prometheus bridge) on the control plane.
+  #
+  # DNS-style domain mesh authorities live under (<service>.<meshDomain>).
+  meshDomain: aether.internal
+  telemetry:
+    # Enable the OTel MeterProvider (Prometheus bridge) on the control plane.
+    enabled: false
+    # OTLP gRPC collector endpoint (host:port); empty disables OTLP export.
+    otlpEndpoint: ""
+    # Per-pod labels on the aether_stats request counter (raises cardinality).
+    statsEmitPod: false
+    # Per-request OTLP access logs from the proxies (proposal 014).
+    accessLogs:
       enabled: false
-      # OTLP gRPC collector endpoint (host:port); empty disables OTLP export.
-      otlpEndpoint: ""
-      # Per-pod labels on the aether_stats request counter (raises cardinality).
-      statsEmitPod: false
-      # Per-request OTLP access logs from the proxies (proposal 014).
-      accessLogs:
-        enabled: false
-        successSampleRate: 100
-      # Data-plane (proxy) request tracing.
-      proxyTracing:
-        enabled: false
-        sampleRate: 0.01
-      # Control-plane span sampling/export.
-      tracing:
-        sampleRate: 0.1
-        export: false
-      # Control-plane application-log export over OTLP.
-      logs:
-        enabled: false
-    security:
-      # Whether the mesh uses SPIRE mTLS.
-      spireEnabled: true
+      successSampleRate: 100
+    # Data-plane (proxy) request tracing.
+    proxyTracing:
+      enabled: false
+      sampleRate: 0.01
+    # Control-plane span sampling/export.
+    tracing:
+      sampleRate: 0.1
+      export: false
+    # Control-plane application-log export over OTLP.
+    logs:
+      enabled: false
+  security:
+    # Whether the mesh uses SPIRE mTLS.
+    spireEnabled: true
