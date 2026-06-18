@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
@@ -12,7 +13,6 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -83,7 +83,7 @@ func TestHandlePodTerminating(t *testing.T) {
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
 
@@ -109,7 +109,7 @@ func TestHandlePodTerminatingFallsBackToRemoval(t *testing.T) {
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
 	reg.registerEndpointErr = assert.AnError
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
 
@@ -125,7 +125,7 @@ func TestHandlePodTerminatingScope(t *testing.T) {
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "other-node"))
 	assert.Zero(t, reg.registered+reg.unregistered, "another node's pod must be ignored")
@@ -147,7 +147,7 @@ func TestHandlePodTerminatingMarksEvenWhenRegistryFails(t *testing.T) {
 	reg := &unregisterRecordingRegistry{}
 	reg.registerEndpointErr = assert.AnError
 	reg.unregisterEndpointsErr = assert.AnError
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
 
@@ -169,7 +169,7 @@ func TestReconcileLivenessSkipsTerminatingPod(t *testing.T) {
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
 	reg := &unregisterRecordingRegistry{}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 	s.reconcileLiveness(ctx, newLivenessState())
 
@@ -186,7 +186,7 @@ func TestHandlePodTerminatingPoolClosePhase(t *testing.T) {
 	store := storage.NewMockStorage[*cniv1.CNIPod]()
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-2p"), pod))
 	reg := &unregisterRecordingRegistry{}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.drainPoolCloseDelay = 10 * time.Millisecond
 
@@ -212,7 +212,7 @@ func TestHandlePodTerminatingPoolClosePhase(t *testing.T) {
 // (close 1s before SIGTERM), capped by the deletion grace, with the
 // conservative floor for hookless/opaque pods.
 func TestDrainDelayForPod(t *testing.T) {
-	s := newTestCNIServer(nil, storage.NewMockStorage[*cniv1.CNIPod](), &unregisterRecordingRegistry{}, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, storage.NewMockStorage[*cniv1.CNIPod](), &unregisterRecordingRegistry{}, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 	s.drainPoolCloseDelay = 2 * time.Second // production floor
 
 	withSleep := func(seconds int64, grace *int64) *corev1.Pod {

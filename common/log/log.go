@@ -1,78 +1,99 @@
 // Package log provides structured logging configuration for Aether components.
 //
-// It wraps controller-runtime's zap logger to provide consistent JSON-formatted
-// logging across the agent, CNI plugin, and other Aether services. Logs include
-// structured fields (timestamp, level, logger name, caller, message) for easier
-// parsing and analysis in production environments.
+// Logging is built on the standard library's log/slog. Records are emitted as
+// JSON to stderr (parsed via kubectl logs) and, when an OTLP handler is supplied,
+// fanned out to the OpenTelemetry logs bridge as well. slog's context-aware
+// Handle is what lets the otelslog bridge populate trace_id/span_id natively from
+// the ctx passed to the *Context log methods.
 //
 // Log levels can be controlled via the debug flag:
 //   - debug=false: Info level (default production setting)
-//   - debug=true: Debug level (for troubleshooting)
+//   - debug=true: Trace level (enables the V(1)/V(2)-equivalent debug output)
 package log
 
 import (
-	"github.com/go-logr/logr"
-	zapraw "go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strconv"
 )
 
-// DefaultOptions returns the default Zap logger options for Aether.
-// Logs are formatted as JSON with ISO8601 timestamps, capital log levels,
-// and short caller information.
-func DefaultOptions() zap.Options {
-	opts := zap.Options{
-		Development: false, // Set to false for production
-		TimeEncoder: zapcore.ISO8601TimeEncoder,
-		EncoderConfigOptions: []zap.EncoderConfigOption{
-			func(ec *zapcore.EncoderConfig) {
-				ec.EncodeLevel = zapcore.CapitalLevelEncoder
-				ec.EncodeDuration = zapcore.StringDurationEncoder
-				ec.EncodeCaller = zapcore.ShortCallerEncoder
-			},
+// LevelTrace is the most verbose level, mapping the old logr V(2) calls. logr
+// V(1) maps to slog.LevelDebug (-4); V(2) needs something lower.
+const LevelTrace slog.Level = -8
+
+// loggerKey is the attribute key carrying a component name (replacing logr's
+// WithName), preserving the "logger" field in the JSON output.
+const loggerKey = "logger"
+
+// levelFor returns the handler threshold: Info in production, Trace under --debug
+// so the V(1)/V(2)-equivalent records are emitted.
+func levelFor(debug bool) slog.Level {
+	if debug {
+		return LevelTrace
+	}
+	return slog.LevelInfo
+}
+
+// options returns the slog handler options shared by every sink: source location
+// plus key/format parity with the previous zap JSON output
+// (timestamp/level/logger/caller/message, uppercase levels).
+func options(level slog.Level) *slog.HandlerOptions {
+	return &slog.HandlerOptions{
+		AddSource: true,
+		Level:     level,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			switch a.Key {
+			case slog.TimeKey:
+				a.Key = "timestamp"
+			case slog.MessageKey:
+				a.Key = "message"
+			case slog.LevelKey:
+				// Default slog levels already render uppercase (DEBUG/INFO/...);
+				// only the sub-debug Trace level needs a friendly name.
+				if lv, ok := a.Value.Any().(slog.Level); ok && lv < slog.LevelDebug {
+					a.Value = slog.StringValue("TRACE")
+				}
+			case slog.SourceKey:
+				if src, ok := a.Value.Any().(*slog.Source); ok {
+					a.Key = "caller"
+					a.Value = slog.StringValue(shortCaller(src))
+				}
+			}
+			return a
 		},
 	}
-
-	// Use JSON encoder
-	opts.Encoder = zapcore.NewJSONEncoder(zapcore.EncoderConfig{
-		TimeKey:        "timestamp",
-		LevelKey:       "level",
-		NameKey:        "logger",
-		CallerKey:      "caller",
-		FunctionKey:    "function",
-		MessageKey:     "message",
-		StacktraceKey:  "stacktrace",
-		LineEnding:     zapcore.DefaultLineEnding,
-		EncodeLevel:    zapcore.CapitalLevelEncoder,
-		EncodeTime:     zapcore.ISO8601TimeEncoder,
-		EncodeDuration: zapcore.StringDurationEncoder,
-		EncodeCaller:   zapcore.ShortCallerEncoder,
-	})
-
-	return opts
 }
 
-// NewLogger creates a new structured logger with Aether's default configuration.
-// If debug is true, the logger is configured for debug-level output; otherwise,
-// it logs at info level. Returns a logr.Logger interface compatible with
-// controller-runtime components.
-func NewLogger(debug bool) logr.Logger {
-	return NewLoggerWithCore(debug, nil)
+// shortCaller renders a zap-style "<dir>/<file>:<line>" caller.
+func shortCaller(src *slog.Source) string {
+	if src == nil || src.File == "" {
+		return ""
+	}
+	dir, file := filepath.Split(src.File)
+	return filepath.Base(filepath.Clean(dir)) + "/" + file + ":" + strconv.Itoa(src.Line)
 }
 
-// NewLoggerWithCore is like NewLogger but, when extra is non-nil, tees every log
-// record to that additional zapcore.Core in addition to the default stderr JSON
-// core. This is how the OTel logs bridge (otelzap) is attached: stderr logging
-// (kubectl logs) is unchanged and the same records are also exported over OTLP.
-func NewLoggerWithCore(debug bool, extra zapcore.Core) logr.Logger {
-	opts := DefaultOptions()
-	if debug {
-		opts.Level = zapcore.DebugLevel
+// NewLogger creates a structured logger writing JSON to stderr.
+func NewLogger(debug bool) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stderr, options(levelFor(debug))))
+}
+
+// NewLoggerWithHandler is like NewLogger but, when extra is non-nil, fans every
+// record out to that additional handler (the otelslog OTLP bridge) in addition to
+// the stderr JSON sink. The extra sink inherits the same level threshold so both
+// outputs stay consistent.
+func NewLoggerWithHandler(debug bool, extra slog.Handler) *slog.Logger {
+	level := levelFor(debug)
+	stderr := slog.NewJSONHandler(os.Stderr, options(level))
+	if extra == nil {
+		return slog.New(stderr)
 	}
-	if extra != nil {
-		opts.ZapOpts = append(opts.ZapOpts, zapraw.WrapCore(func(c zapcore.Core) zapcore.Core {
-			return zapcore.NewTee(c, extra)
-		}))
-	}
-	return zap.New(zap.UseFlagOptions(&opts))
+	return slog.New(newFanout(stderr, leveled{handler: extra, level: level}))
+}
+
+// Named returns a child logger tagged with a component name under the "logger"
+// field, replacing logr's WithName. Nested naming keeps the most recent name.
+func Named(l *slog.Logger, name string) *slog.Logger {
+	return l.With(loggerKey, name)
 }

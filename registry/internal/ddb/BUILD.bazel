@@ -8,11 +8,11 @@ go_library(
     deps = [
         "//api/aether/registry/v1:registry",
         "//common/constants",
+        "//common/log",
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_aws_aws_sdk_go_v2_feature_dynamodb_attributevalue//:attributevalue",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//types",
-        "@com_github_go_logr_logr//:logr",
     ],
 )
 
@@ -31,7 +31,6 @@ go_test(
         "@com_github_aws_aws_sdk_go_v2_credentials//:credentials",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//types",
-        "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@com_github_testcontainers_testcontainers_go_modules_dynamodb//:dynamodb",

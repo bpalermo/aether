@@ -2,10 +2,11 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
-	"github.com/go-logr/logr"
+	commonlog "github.com/bpalermo/aether/common/log"
 )
 
 const (
@@ -38,18 +39,18 @@ type Broadcaster struct {
 	// fan-out; fullWatchers holds the watchers with no filter.
 	byService    map[string]map[string]*watcher
 	fullWatchers map[string]*watcher
-	log          logr.Logger
+	log          *slog.Logger
 	metrics      *Metrics
 }
 
 // NewBroadcaster creates a Broadcaster. metrics may be nil to disable
 // instrumentation.
-func NewBroadcaster(log logr.Logger, metrics *Metrics) *Broadcaster {
+func NewBroadcaster(log *slog.Logger, metrics *Metrics) *Broadcaster {
 	return &Broadcaster{
 		watchers:     make(map[string]*watcher),
 		byService:    make(map[string]map[string]*watcher),
 		fullWatchers: make(map[string]*watcher),
-		log:          log.WithName("broadcaster"),
+		log:          commonlog.Named(log, "broadcaster"),
 		metrics:      metrics,
 	}
 }
@@ -82,7 +83,7 @@ func (b *Broadcaster) Subscribe(id string, services []string) <-chan *registrarv
 		b.metrics.watcherSubscribed(context.Background())
 	}
 	b.metrics.filteredWatchers(context.Background(), b.filteredCountLocked())
-	b.log.V(1).Info("watcher subscribed", "id", id, "filtered", w.services != nil, "services", len(services))
+	b.log.Debug("watcher subscribed", "id", id, "filtered", w.services != nil, "services", len(services))
 	return w.ch
 }
 
@@ -104,7 +105,7 @@ func (b *Broadcaster) Unsubscribe(id string, ch <-chan *registrarv1.WatchEndpoin
 	delete(b.watchers, id)
 	b.metrics.watcherUnsubscribed(context.Background())
 	b.metrics.filteredWatchers(context.Background(), b.filteredCountLocked())
-	b.log.V(1).Info("watcher unsubscribed", "id", id)
+	b.log.Debug("watcher unsubscribed", "id", id)
 }
 
 // addToIndexLocked inserts the watcher into the fan-out index. Caller must

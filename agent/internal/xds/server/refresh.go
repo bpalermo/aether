@@ -2,11 +2,12 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -31,7 +32,7 @@ const observedPruneInterval = time.Minute
 // a no-op for the lifetime of the process (the initial snapshot built during
 // the xDS server's PreListen still applies).
 type RegistryRefresher struct {
-	log      logr.Logger
+	log      *slog.Logger
 	cache    *cache.SnapshotCache
 	registry registry.Registry
 
@@ -65,9 +66,9 @@ func AssertWatchFilter(c *cache.SnapshotCache, reg registry.Registry) {
 }
 
 // NewRegistryRefresher creates a RegistryRefresher.
-func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.SnapshotCache, reg registry.Registry, log logr.Logger) *RegistryRefresher {
+func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.SnapshotCache, reg registry.Registry, log *slog.Logger) *RegistryRefresher {
 	r := &RegistryRefresher{
-		log:         log.WithName("registry-refresher"),
+		log:         commonlog.Named(log, "registry-refresher"),
 		cache:       snapshotCache,
 		registry:    reg,
 		clusterName: clusterName,
@@ -81,11 +82,11 @@ func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.Sna
 	var err error
 	if r.coalesced, err = meter.Int64Counter("aether.agent.refresher.coalesced",
 		metric.WithDescription("Registry change signals absorbed into an already-armed debounce window")); err != nil {
-		r.log.Error(err, "failed to create coalesced counter; continuing without instrumentation")
+		r.log.Error("failed to create coalesced counter; continuing without instrumentation", "error", err)
 	}
 	if r.refreshErrors, err = meter.Int64Counter("aether.agent.refresher.errors",
 		metric.WithDescription("Failed cluster reloads from the registry (snapshot left stale until the next change signal)")); err != nil {
-		r.log.Error(err, "failed to create refresh errors counter; continuing without instrumentation")
+		r.log.Error("failed to create refresh errors counter; continuing without instrumentation", "error", err)
 	}
 
 	return r
@@ -104,7 +105,7 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 	if ok {
 		changes = notifier.Changes()
 	} else {
-		r.log.Info("registry does not support change notifications; clusters refresh on dependency-set changes only")
+		r.log.InfoContext(ctx, "registry does not support change notifications; clusters refresh on dependency-set changes only")
 	}
 
 	// Debounce timer, created stopped: it is (re)armed on each change signal and
@@ -119,7 +120,7 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 	pruneTicker := time.NewTicker(observedPruneInterval)
 	defer pruneTicker.Stop()
 
-	r.log.V(1).Info("watching registry for endpoint changes")
+	r.log.DebugContext(ctx, "watching registry for endpoint changes")
 
 	// arm (re)arms the debounce window. Stop+drain before Reset so a prior
 	// expiry doesn't leave a stale tick queued. Stop reporting true means the
@@ -149,13 +150,13 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 		// unchanged; the resulting watch events trigger the next reload).
 		AssertWatchFilter(r.cache, r.registry)
 		if err := r.cache.LoadClustersFromRegistry(ctx, r.clusterName, r.nodeName, r.registry); err != nil {
-			r.log.Error(err, "failed to refresh clusters from registry")
+			r.log.ErrorContext(ctx, "failed to refresh clusters from registry", "error", err)
 			if r.refreshErrors != nil {
 				r.refreshErrors.Add(ctx, 1)
 			}
 			return
 		}
-		r.log.V(1).Info("refreshed clusters from registry")
+		r.log.DebugContext(ctx, "refreshed clusters from registry")
 	}
 
 	for {

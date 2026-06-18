@@ -21,6 +21,7 @@ package hotrestart
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -30,8 +31,8 @@ import (
 	"syscall"
 	"time"
 
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/fsnotify/fsnotify"
-	"github.com/go-logr/logr"
 )
 
 const (
@@ -129,7 +130,7 @@ type childExit struct {
 // Supervisor owns the Envoy process lifecycle and performs hot restarts.
 type Supervisor struct {
 	cfg     Config
-	log     logr.Logger
+	log     *slog.Logger
 	metrics *SupervisorMetrics // nil disables instrumentation
 
 	mu        sync.Mutex
@@ -189,10 +190,10 @@ func (s *Supervisor) gateReadinessIfSuccessor() {
 const readyGateBuffer = 3 * time.Second
 
 // New creates a Supervisor. metrics may be nil to disable instrumentation.
-func New(cfg Config, log logr.Logger, metrics *SupervisorMetrics) *Supervisor {
+func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 	return &Supervisor{
 		cfg:           cfg,
-		log:           log.WithName("proxy-supervisor"),
+		log:           commonlog.Named(log, "proxy-supervisor"),
 		metrics:       metrics,
 		children:      make(map[int]*exec.Cmd),
 		childExited:   make(chan childExit, 8),
@@ -233,7 +234,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	bindRetries := 0
 
 	arm := func(reason string) {
-		s.log.V(1).Info("hot restart armed", "reason", reason, "debounce", debounceDelay)
+		s.log.DebugContext(ctx, "hot restart armed", "reason", reason, "debounce", debounceDelay)
 		s.metrics.restartTriggered(reason)
 		debounce.Reset(debounceDelay)
 		debounceC = debounce.C
@@ -256,11 +257,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			// cross-pod configuration); the guard keeps unit-test supervisors that
 			// run without coordination state on the plain shutdown path.
 			if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
-				s.log.Info("termination requested mid-handoff; waiting for successor to terminate our envoy")
+				s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy")
 				s.awaitProtocolTermination()
 				return nil
 			}
-			s.log.Info("termination requested, shutting down all envoy epochs")
+			s.log.InfoContext(ctx, "termination requested, shutting down all envoy epochs")
 			s.shutdown()
 			return nil
 
@@ -284,7 +285,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			// data-plane gap). Re-arm and retry once N is LIVE. Skipped when no
 			// admin address is configured.
 			if s.cfg.AdminAddress != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
-				s.log.V(1).Info("current epoch not yet live; deferring hot restart", "epoch", s.currentEpoch())
+				s.log.DebugContext(ctx, "current epoch not yet live; deferring hot restart", "epoch", s.currentEpoch())
 				arm("deferred_not_live")
 				continue
 			}
@@ -302,19 +303,19 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			// and wait for the next config change.
 			if err := s.validateConfig(ctx); err != nil {
 				s.metrics.configValidationFailed()
-				s.log.Error(err, "changed bootstrap config failed node-local validation; KEEPING current epoch (hot restart skipped)")
+				s.log.ErrorContext(ctx, "changed bootstrap config failed node-local validation; KEEPING current epoch (hot restart skipped)", "error", err)
 				continue
 			}
-			s.log.Info("performing hot restart")
+			s.log.InfoContext(ctx, "performing hot restart")
 			if err := s.hotRestart(); err != nil {
-				s.log.Error(err, "hot restart failed; keeping current epoch")
+				s.log.ErrorContext(ctx, "hot restart failed; keeping current epoch", "error", err)
 			}
 
 		case err := <-s.watchdogFired:
 			// The newest Envoy is wedged (see watchLiveness): kill everything and
 			// exit non-zero. Kubernetes recreates the pod; the fresh supervisor
 			// re-probes the (now dead) predecessor and recovers at epoch 0.
-			s.log.Error(err, "liveness watchdog fired; terminating for container restart")
+			s.log.ErrorContext(ctx, "liveness watchdog fired; terminating for container restart", "error", err)
 			s.shutdown()
 			return err
 
@@ -329,7 +330,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					// successor publishes its epoch only once LIVE, which may be
 					// after it terminates us. Don't exit (restartPolicy=Always would
 					// relaunch and collide): await deletion by the DaemonSet.
-					s.log.Info("newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
+					s.log.InfoContext(ctx, "newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
 					s.reap(exit.epoch)
 					<-ctx.Done()
 					return nil
@@ -344,7 +345,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					bindRetries++
 					s.metrics.childExited(exitBindCollision)
 					s.reap(exit.epoch)
-					s.log.Info("suspected base-id bind collision with a live predecessor; retrying epoch detection in-process",
+					s.log.InfoContext(ctx, "suspected base-id bind collision with a live predecessor; retrying epoch detection in-process",
 						"epoch", exit.epoch, "attempt", bindRetries, "error", exit.err.Error())
 					select {
 					case <-ctx.Done():
@@ -422,17 +423,17 @@ func (s *Supervisor) hotRestart() error {
 func (s *Supervisor) watchConfig(ctx context.Context, trigger chan<- struct{}) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		s.log.Error(err, "config watcher disabled")
+		s.log.ErrorContext(ctx, "config watcher disabled", "error", err)
 		return
 	}
 	defer func() { _ = w.Close() }()
 
 	dir := filepath.Dir(s.cfg.ConfigPath)
 	if err := w.Add(dir); err != nil {
-		s.log.Error(err, "failed to watch config dir; watcher disabled", "dir", dir)
+		s.log.ErrorContext(ctx, "failed to watch config dir; watcher disabled", "error", err, "dir", dir)
 		return
 	}
-	s.log.Info("watching bootstrap config for changes", "dir", dir, "config", s.cfg.ConfigPath)
+	s.log.InfoContext(ctx, "watching bootstrap config for changes", "dir", dir, "config", s.cfg.ConfigPath)
 
 	for {
 		select {
@@ -452,7 +453,7 @@ func (s *Supervisor) watchConfig(ctx context.Context, trigger chan<- struct{}) {
 			if !ok {
 				return
 			}
-			s.log.Error(err, "config watch error")
+			s.log.ErrorContext(ctx, "config watch error", "error", err)
 		}
 	}
 }
@@ -582,7 +583,7 @@ func (s *Supervisor) signalEpoch(epoch int, sig syscall.Signal) {
 		return
 	}
 	if err := cmd.Process.Signal(sig); err != nil {
-		s.log.V(1).Error(err, "failed to signal envoy epoch", "epoch", epoch, "signal", sig)
+		s.log.Error("failed to signal envoy epoch", "error", err, "epoch", epoch, "signal", sig)
 	}
 }
 

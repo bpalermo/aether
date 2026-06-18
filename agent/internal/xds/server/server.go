@@ -5,16 +5,17 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/xds"
 	"github.com/bpalermo/aether/registry"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/go-logr/logr"
 )
 
 // AgentXdsServer is an xDS server that generates Envoy configuration from local pod storage
@@ -26,7 +27,7 @@ import (
 type AgentXdsServer struct {
 	xds.XdsServer
 
-	log logr.Logger
+	log *slog.Logger
 
 	clusterName string
 	nodeName    string
@@ -44,7 +45,7 @@ type AgentXdsServer struct {
 // The server listens on a Unix domain socket at the default xDS socket path.
 // callbacks (optional, may be nil) observe the discovery streams — the agent
 // passes the ACK tracker's callbacks so pod lifecycle can await Envoy ACKs.
-func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, callbacks serverv3.Callbacks, log logr.Logger) (*AgentXdsServer, error) {
+func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string, trustDomain string, registry registry.Registry, storage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, callbacks serverv3.Callbacks, log *slog.Logger) (*AgentXdsServer, error) {
 	cfg := xds.NewServerConfig(
 		xds.WithUDS(constants.DefaultXdsSocketPath),
 	)
@@ -59,7 +60,7 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 
 	aXdsServer := &AgentXdsServer{
 		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, combined, log),
-		log:         log.WithName("agent-xds"),
+		log:         commonlog.Named(log, "agent-xds"),
 		clusterName: clusterName,
 		nodeName:    nodeName,
 		trustDomain: trustDomain,
@@ -77,10 +78,10 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 // It creates listeners, clusters, endpoints, and routes, then sets the snapshot in the cache
 // before the server starts accepting xDS client connections.
 func (s *AgentXdsServer) PreListen(ctx context.Context) error {
-	s.log.V(1).Info("generating initial snapshot")
+	s.log.DebugContext(ctx, "generating initial snapshot")
 
 	if err := s.cache.LoadListenersFromStorage(ctx, s.storage, s.trustDomain); err != nil {
-		s.log.Error(err, "failed to load listeners from storage")
+		s.log.ErrorContext(ctx, "failed to load listeners from storage", "error", err)
 		return err
 	}
 
@@ -99,7 +100,7 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	if rw, ok := s.registry.(registry.ReadyWaiter); ok {
 		waitCtx, cancel := context.WithTimeout(ctx, registryReadyTimeout)
 		if err := rw.WaitReady(waitCtx); err != nil {
-			s.log.Info("registry watch cache not complete in time; proceeding (RPC fallback / background retry will fill in)", "timeout", registryReadyTimeout.String(), "error", err.Error())
+			s.log.InfoContext(ctx, "registry watch cache not complete in time; proceeding (RPC fallback / background retry will fill in)", "timeout", registryReadyTimeout.String(), "error", err.Error())
 		}
 		cancel()
 	}
@@ -111,7 +112,7 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	// fill in registry-derived clusters/endpoints as soon as the registry
 	// answers; the registry refresher keeps it current afterwards.
 	if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
-		s.log.Error(err, "registry unavailable for initial snapshot; starting with local-only config and retrying in background")
+		s.log.ErrorContext(ctx, "registry unavailable for initial snapshot; starting with local-only config and retrying in background", "error", err)
 		go s.retryInitialRegistryLoad(ctx)
 	}
 
@@ -136,13 +137,13 @@ func (s *AgentXdsServer) retryInitialRegistryLoad(ctx context.Context) {
 		case <-time.After(backoff):
 		}
 		if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
-			s.log.V(1).Info("registry still unavailable; will retry", "backoff", backoff.String(), "error", err)
+			s.log.DebugContext(ctx, "registry still unavailable; will retry", "backoff", backoff.String(), "error", err)
 			if backoff < maxBackoff {
 				backoff *= 2
 			}
 			continue
 		}
-		s.log.Info("registry recovered; snapshot now includes registry-derived config")
+		s.log.InfoContext(ctx, "registry recovered; snapshot now includes registry-derived config")
 		return
 	}
 }

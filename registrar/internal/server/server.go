@@ -3,13 +3,14 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/common/xds"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -24,7 +25,7 @@ type RegistrarServer struct {
 	registry    registry.Registry
 	snapshot    *Snapshot
 	broadcaster *Broadcaster
-	log         logr.Logger
+	log         *slog.Logger
 	metrics     *Metrics
 
 	// writeBehind, when set (UseWriteBehind), makes RegisterEndpoint /
@@ -71,7 +72,7 @@ func NewRegistrarServer(
 	snapshot *Snapshot,
 	broadcaster *Broadcaster,
 	address string,
-	log logr.Logger,
+	log *slog.Logger,
 	metrics *Metrics,
 	grpcOpts ...grpc.ServerOption,
 ) *RegistrarServer {
@@ -87,7 +88,7 @@ func NewRegistrarServer(
 		registry:    reg,
 		snapshot:    snapshot,
 		broadcaster: broadcaster,
-		log:         log.WithName("registrar-server"),
+		log:         commonlog.Named(log, "registrar-server"),
 		metrics:     metrics,
 		Server:      xds.NewServer(cfg, log, xds.WithGRPCServer(grpcSrv)),
 	}
@@ -104,7 +105,7 @@ func NewRegistrarServer(
 // roll regression). Without a queue (tests/legacy) the write is synchronous
 // and failures fail the RPC.
 func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1.RegisterEndpointRequest) (*registrarv1.RegisterEndpointResponse, error) {
-	s.log.V(1).Info("RegisterEndpoint", "service", req.GetServiceName(), "ip", req.GetEndpoint().GetIp())
+	s.log.DebugContext(ctx, "RegisterEndpoint", "service", req.GetServiceName(), "ip", req.GetEndpoint().GetIp())
 
 	if s.writeBehind != nil {
 		s.writeBehind.EnqueueRegister(req.GetServiceName(), req.GetProtocol(), req.GetEndpoint())
@@ -134,7 +135,7 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 // immediately, then writes the external registry (write-behind when enabled;
 // see RegisterEndpoint).
 func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrarv1.UnregisterEndpointRequest) (*registrarv1.UnregisterEndpointResponse, error) {
-	s.log.V(1).Info("UnregisterEndpoint", "service", req.GetServiceName(), "ips", req.GetIps())
+	s.log.DebugContext(ctx, "UnregisterEndpoint", "service", req.GetServiceName(), "ips", req.GetIps())
 
 	ips := req.GetIps()
 	if s.writeBehind != nil {
@@ -196,7 +197,7 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 			filterSet[svc] = struct{}{}
 		}
 	}
-	s.log.V(1).Info("WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion(),
+	s.log.DebugContext(stream.Context(), "WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion(),
 		"filtered", filterSet != nil, "filterServices", len(filterServices))
 
 	// Never serve a snapshot before the first sync has populated it.
@@ -272,7 +273,7 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 
 // ListAllEndpoints returns all endpoints from the local snapshot.
 func (s *RegistrarServer) ListAllEndpoints(ctx context.Context, req *registrarv1.ListAllEndpointsRequest) (*registrarv1.ListAllEndpointsResponse, error) {
-	s.log.V(1).Info("ListAllEndpoints", "protocol", req.GetProtocol())
+	s.log.DebugContext(ctx, "ListAllEndpoints", "protocol", req.GetProtocol())
 
 	// Never serve a snapshot before the first sync has populated it (agents
 	// fall back to this RPC at startup when their watch cache is empty).

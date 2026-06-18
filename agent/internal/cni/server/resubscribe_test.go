@@ -2,19 +2,20 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/go-logr/logr"
+
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestRunResubscribeStoredPods(t *testing.T) {
 	t.Run("nil bridge returns immediately", func(t *testing.T) {
-		srv := newTestCNIServer(fake.NewClientBuilder().Build(), storage.NewMockStorage[*cniv1.CNIPod](), &testRegistry{}, cache.NewSnapshotCache("test-node", logr.Discard()), "")
+		srv := newTestCNIServer(fake.NewClientBuilder().Build(), storage.NewMockStorage[*cniv1.CNIPod](), &testRegistry{}, cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler)), "")
 		srv.spireBridge = nil
 
 		done := make(chan struct{})
@@ -30,7 +31,7 @@ func TestRunResubscribeStoredPods(t *testing.T) {
 	})
 
 	t.Run("returns when context is canceled before the bridge starts", func(t *testing.T) {
-		srv := newTestCNIServer(fake.NewClientBuilder().Build(), storage.NewMockStorage[*cniv1.CNIPod](), &testRegistry{}, cache.NewSnapshotCache("test-node", logr.Discard()), "")
+		srv := newTestCNIServer(fake.NewClientBuilder().Build(), storage.NewMockStorage[*cniv1.CNIPod](), &testRegistry{}, cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler)), "")
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()

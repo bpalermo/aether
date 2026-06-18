@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/xds"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -22,7 +24,6 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -53,7 +54,7 @@ type testServer struct {
 // newTestXdsServer creates an xds.XdsServer bound to a temporary UDS. It does
 // not register any PreListen callback so the caller has full control over what
 // snapshots are loaded before (or after) starting the server.
-func newTestXdsServer(ctx context.Context, t *testing.T, snapshotCache cachev3.SnapshotCache, log logr.Logger) testServer {
+func newTestXdsServer(ctx context.Context, t *testing.T, snapshotCache cachev3.SnapshotCache, log *slog.Logger) testServer {
 	t.Helper()
 
 	sockPath := integrationSocketPath(t)
@@ -164,7 +165,7 @@ func TestIntegration_ServerStartsAndAcceptsConnections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log := logr.Discard()
+	log := slog.New(slog.DiscardHandler)
 	snapshotCache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 	setConsistentSnapshot(t, ctx, snapshotCache, nodeName)
 
@@ -209,7 +210,7 @@ func TestIntegration_SnapshotServedViaXDS(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log := logr.Discard()
+	log := slog.New(slog.DiscardHandler)
 	snapshotCache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 	setConsistentSnapshot(t, ctx, snapshotCache, nodeName)
 
@@ -263,7 +264,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log := logr.Discard()
+	log := slog.New(slog.DiscardHandler)
 	snapshotCache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 	setConsistentSnapshot(t, ctx, snapshotCache, nodeName)
 
@@ -318,7 +319,7 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log := logr.Discard()
+	log := slog.New(slog.DiscardHandler)
 	agentCache := cache.NewSnapshotCache(nodeName, log)
 
 	// Storage returns an error, which causes PreListen to fail before
@@ -337,7 +338,7 @@ func TestIntegration_PreListenFailsPreventsServerStart(t *testing.T) {
 
 	srv := &AgentXdsServer{
 		XdsServer:   xds.NewXdsServer(ctx, cfg, agentCache, nil, log),
-		log:         log.WithName("agent-xds"),
+		log:         commonlog.Named(log, "agent-xds"),
 		clusterName: clusterName,
 		nodeName:    nodeName,
 		trustDomain: "example.org",

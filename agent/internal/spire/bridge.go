@@ -17,12 +17,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"time"
 
+	commonlog "github.com/bpalermo/aether/common/log"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	"github.com/go-logr/logr"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
@@ -71,7 +72,7 @@ type Bridge struct {
 	socketPath string
 	client     *Client
 	store      SecretStore
-	log        logr.Logger
+	log        *slog.Logger
 	metrics    *bridgeMetrics
 
 	// Stream re-subscribe backoff bounds; set to the package constants in
@@ -114,19 +115,19 @@ type podSubscription struct {
 // NewBridge creates a new SPIRE bridge. nodeSource is the agent's own Workload
 // API SVID source used to serve the node identity; it may be nil to disable
 // node-SVID serving.
-func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, log logr.Logger) *Bridge {
+func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, log *slog.Logger) *Bridge {
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the bridge.
 	metrics, err := newBridgeMetrics(otel.Meter(meterName))
 	if err != nil {
-		log.Error(err, "failed to create SPIRE bridge metrics; continuing without instrumentation")
+		log.Error("failed to create SPIRE bridge metrics; continuing without instrumentation", "error", err)
 	}
 
 	return &Bridge{
 		socketPath:     socketPath,
 		store:          store,
 		nodeSource:     nodeSource,
-		log:            log.WithName("spire-bridge"),
+		log:            commonlog.Named(log, "spire-bridge"),
 		metrics:        metrics,
 		backoffInitial: initialStreamBackoff,
 		backoffMax:     maxStreamBackoff,
@@ -166,18 +167,18 @@ func (b *Bridge) Start(ctx context.Context) error {
 	b.client = client
 	defer func() {
 		if closeErr := client.Close(); closeErr != nil {
-			b.log.V(1).Info("failed to close SPIRE client", "error", closeErr)
+			b.log.DebugContext(ctx, "failed to close SPIRE client", "error", closeErr)
 		}
 	}()
 
-	b.log.Info("connected to SPIRE agent", "socket", b.socketPath)
+	b.log.InfoContext(ctx, "connected to SPIRE agent", "socket", b.socketPath)
 	close(b.started)
 
 	// Serve the agent's own node SVID (for node-originated upstream mTLS and the
 	// node-health listener) and keep it refreshed on rotation.
 	if b.nodeSource != nil {
 		if err := b.refreshNodeSVID(ctx); err != nil {
-			b.log.Error(err, "serving initial node SVID")
+			b.log.ErrorContext(ctx, "serving initial node SVID", "error", err)
 		}
 		go b.runNodeSVIDRefresh(ctx)
 	}
@@ -194,14 +195,14 @@ func (b *Bridge) Start(ctx context.Context) error {
 		bundleCh, subErr := client.SubscribeBundles(ctx)
 		if subErr != nil {
 			if ctx.Err() != nil {
-				b.log.Info("shutting down SPIRE bridge")
+				b.log.InfoContext(ctx, "shutting down SPIRE bridge")
 				return nil
 			}
 			b.metrics.streamFailed(ctx, streamBundle)
 			wait := jitteredBackoff(backoff)
-			b.log.Error(subErr, "subscribing to X.509 bundles failed; retrying", "backoff", wait)
+			b.log.ErrorContext(ctx, "subscribing to X.509 bundles failed; retrying", "error", subErr, "backoff", wait)
 			if !sleepCtx(ctx, wait) {
-				b.log.Info("shutting down SPIRE bridge")
+				b.log.InfoContext(ctx, "shutting down SPIRE bridge")
 				return nil
 			}
 			backoff = min(backoff*2, b.backoffMax)
@@ -209,18 +210,18 @@ func (b *Bridge) Start(ctx context.Context) error {
 			continue
 		}
 		if first {
-			b.log.Info("subscribed to X.509 bundles")
+			b.log.InfoContext(ctx, "subscribed to X.509 bundles")
 			first = false
 		} else {
 			b.metrics.streamReconnected(ctx, streamBundle)
-			b.log.Info("re-subscribed to X.509 bundles")
+			b.log.InfoContext(ctx, "re-subscribed to X.509 bundles")
 		}
 
 	receive:
 		for {
 			select {
 			case <-ctx.Done():
-				b.log.Info("shutting down SPIRE bridge")
+				b.log.InfoContext(ctx, "shutting down SPIRE bridge")
 				return nil
 			case resp, ok := <-bundleCh:
 				if !ok {
@@ -229,16 +230,16 @@ func (b *Bridge) Start(ctx context.Context) error {
 				// Receiving proves the stream is healthy; reset the backoff.
 				backoff = b.backoffInitial
 				if err := b.handleBundleUpdate(ctx, resp); err != nil {
-					b.log.Error(err, "handling bundle update")
+					b.log.ErrorContext(ctx, "handling bundle update", "error", err)
 				}
 			}
 		}
 
 		b.metrics.streamFailed(ctx, streamBundle)
 		wait := jitteredBackoff(backoff)
-		b.log.Info("bundle subscription stream closed; re-subscribing", "backoff", wait)
+		b.log.InfoContext(ctx, "bundle subscription stream closed; re-subscribing", "backoff", wait)
 		if !sleepCtx(ctx, wait) {
-			b.log.Info("shutting down SPIRE bridge")
+			b.log.InfoContext(ctx, "shutting down SPIRE bridge")
 			return nil
 		}
 		backoff = min(backoff*2, b.backoffMax)
@@ -297,7 +298,7 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 	select {
 	case <-b.started:
 	default:
-		b.log.V(1).Info("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
+		b.log.Debug("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
 		return nil
 	}
 
@@ -342,7 +343,7 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 					// from CmdAdd, whose context is cancelled as soon as it returns —
 					// pushing the SVID into the snapshot must outlive that request.
 					if handleErr := b.handleSVIDUpdate(subCtx, resp); handleErr != nil {
-						b.log.Error(handleErr, "handling SVID update", "spiffeID", spiffeID)
+						b.log.Error("handling SVID update", "error", handleErr, "spiffeID", spiffeID)
 					}
 				}
 			}
@@ -364,7 +365,7 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 				newCh, subErr := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
 				if subErr != nil {
 					b.metrics.streamFailed(subCtx, streamSVID)
-					b.log.Error(subErr, "re-subscribing to SVIDs failed; retrying", "spiffeID", spiffeID)
+					b.log.Error("re-subscribing to SVIDs failed; retrying", "error", subErr, "spiffeID", spiffeID)
 					continue
 				}
 				ch = newCh
@@ -440,7 +441,7 @@ func (b *Bridge) handleBundleUpdate(ctx context.Context, resp *delegatedidentity
 	}
 	b.mu.Unlock()
 
-	b.log.V(1).Info("processed bundle update", "trustDomains", len(resp.GetCaCertificates()))
+	b.log.DebugContext(ctx, "processed bundle update", "trustDomains", len(resp.GetCaCertificates()))
 
 	return b.pushSecrets(ctx)
 }
@@ -459,7 +460,7 @@ func (b *Bridge) handleSVIDUpdate(ctx context.Context, resp *delegatedidentityv1
 	}
 	b.mu.Unlock()
 
-	b.log.V(1).Info("processed SVID update", "svids", len(resp.GetX509Svids()))
+	b.log.DebugContext(ctx, "processed SVID update", "svids", len(resp.GetX509Svids()))
 
 	return b.pushSecrets(ctx)
 }
@@ -475,7 +476,7 @@ func (b *Bridge) runNodeSVIDRefresh(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := b.refreshNodeSVID(ctx); err != nil {
-				b.log.V(1).Info("refreshing node SVID", "error", err)
+				b.log.DebugContext(ctx, "refreshing node SVID", "error", err)
 			}
 		}
 	}
@@ -515,12 +516,12 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 	if firstServe {
 		if sink, ok := b.store.(NodeIdentitySink); ok {
 			if err := sink.SetNodeIdentity(ctx, secret.GetName()); err != nil {
-				b.log.Error(err, "setting node identity on cache", "spiffeID", secret.GetName())
+				b.log.ErrorContext(ctx, "setting node identity on cache", "error", err, "spiffeID", secret.GetName())
 			}
 		}
 	}
 
-	b.log.V(1).Info("served node SVID", "spiffeID", secret.GetName())
+	b.log.DebugContext(ctx, "served node SVID", "spiffeID", secret.GetName())
 	return b.pushSecrets(ctx)
 }
 

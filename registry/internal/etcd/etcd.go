@@ -6,14 +6,15 @@ package etcd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/go-logr/logr"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 )
 
 const (
@@ -38,7 +39,7 @@ type Config struct {
 // It stores service endpoints in etcd with a hierarchical key structure:
 // /aether/services/<serviceName>/protocols/<protocol>/endpoints/<ip>
 type EtcdRegistry struct {
-	log       logr.Logger
+	log       *slog.Logger
 	config    Config
 	client    *clientv3.Client
 	keyPrefix string
@@ -56,7 +57,7 @@ type EtcdRegistry struct {
 
 // NewEtcdRegistry creates a new etcd-backed Registry.
 // Call Initialize before using the registry to establish the etcd client connection.
-func NewEtcdRegistry(log logr.Logger, cfg Config) *EtcdRegistry {
+func NewEtcdRegistry(log *slog.Logger, cfg Config) *EtcdRegistry {
 	keyPrefix := cfg.KeyPrefix
 	if keyPrefix == "" {
 		keyPrefix = DefaultKeyPrefix
@@ -69,7 +70,7 @@ func NewEtcdRegistry(log logr.Logger, cfg Config) *EtcdRegistry {
 	cfg.DialTimeout = dialTimeout
 
 	return &EtcdRegistry{
-		log:       log.WithName("registry-etcd"),
+		log:       commonlog.Named(log, "registry-etcd"),
 		config:    cfg,
 		keyPrefix: keyPrefix,
 		notify:    make(chan struct{}, 1),
@@ -79,14 +80,14 @@ func NewEtcdRegistry(log logr.Logger, cfg Config) *EtcdRegistry {
 // Initialize creates the etcd client connection and verifies connectivity.
 // It must be called before any registry operations.
 func (r *EtcdRegistry) Initialize(ctx context.Context) error {
-	r.log.V(1).Info("initializing etcd client", "endpoints", r.config.Endpoints)
+	r.log.DebugContext(ctx, "initializing etcd client", "endpoints", r.config.Endpoints)
 
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   r.config.Endpoints,
 		DialTimeout: r.config.DialTimeout,
 	})
 	if err != nil {
-		r.log.Error(err, "failed to create etcd client")
+		r.log.ErrorContext(ctx, "failed to create etcd client", "error", err)
 		return fmt.Errorf("failed to create etcd client: %w", err)
 	}
 	r.client = client
@@ -98,10 +99,10 @@ func (r *EtcdRegistry) Initialize(ctx context.Context) error {
 	_, err = r.client.Status(statusCtx, r.config.Endpoints[0])
 	if err != nil {
 		if closeErr := client.Close(); closeErr != nil {
-			r.log.V(1).Info("failed to close etcd client during cleanup", "error", closeErr)
+			r.log.DebugContext(ctx, "failed to close etcd client during cleanup", "error", closeErr)
 		}
 		r.client = nil
-		r.log.Error(err, "failed to verify etcd connectivity")
+		r.log.ErrorContext(ctx, "failed to verify etcd connectivity", "error", err)
 		return fmt.Errorf("failed to verify etcd connectivity: %w", err)
 	}
 
@@ -113,7 +114,7 @@ func (r *EtcdRegistry) Initialize(ctx context.Context) error {
 	r.watchCancel = cancel
 	go r.watchLoop(watchCtx)
 
-	r.log.Info("etcd registry initialized", "endpoints", r.config.Endpoints)
+	r.log.InfoContext(ctx, "etcd registry initialized", "endpoints", r.config.Endpoints)
 	return nil
 }
 
@@ -145,11 +146,11 @@ func (r *EtcdRegistry) watchLoop(ctx context.Context) {
 		// WithPrevKV is unnecessary (consumers re-read), WithPrefix watches the
 		// whole registry subtree. The watch starts from the current revision.
 		wch := r.client.Watch(ctx, r.keyPrefix, clientv3.WithPrefix())
-		r.log.V(1).Info("etcd change watch established", "prefix", r.keyPrefix)
+		r.log.DebugContext(ctx, "etcd change watch established", "prefix", r.keyPrefix)
 
 		for resp := range wch {
 			if err := resp.Err(); err != nil {
-				r.log.V(1).Info("etcd watch error; will re-establish", "error", err.Error())
+				r.log.DebugContext(ctx, "etcd watch error; will re-establish", "error", err.Error())
 				break
 			}
 			if len(resp.Events) > 0 {
@@ -172,7 +173,7 @@ func (r *EtcdRegistry) watchLoop(ctx context.Context) {
 // <keyPrefix>/<serviceName>/protocols/<protocol>/endpoints/<ip>
 func (r *EtcdRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
 	ip := endpoint.GetIp()
-	r.log.V(1).Info(
+	r.log.DebugContext(ctx,
 		"registering endpoint",
 		"service", serviceName,
 		"protocol", protocol,
@@ -183,18 +184,18 @@ func (r *EtcdRegistry) RegisterEndpoint(ctx context.Context, serviceName string,
 	// Marshal endpoint to protobuf binary format
 	data, err := proto.Marshal(endpoint)
 	if err != nil {
-		r.log.Error(err, "failed to marshal endpoint", "ip", ip)
+		r.log.ErrorContext(ctx, "failed to marshal endpoint", "error", err, "ip", ip)
 		return fmt.Errorf("failed to marshal endpoint for IP %s: %w", ip, err)
 	}
 
 	key := r.endpointKey(serviceName, protocol, ip)
 	_, err = r.client.Put(ctx, key, string(data))
 	if err != nil {
-		r.log.Error(err, "failed to register endpoint", "ip", ip, "key", key)
+		r.log.ErrorContext(ctx, "failed to register endpoint", "error", err, "ip", ip, "key", key)
 		return fmt.Errorf("failed to register endpoint for IP %s: %w", ip, err)
 	}
 
-	r.log.Info(
+	r.log.InfoContext(ctx,
 		"endpoint registered successfully",
 		"service", serviceName,
 		"cluster", endpoint.GetClusterName(),
@@ -211,7 +212,7 @@ func (r *EtcdRegistry) UnregisterEndpoint(ctx context.Context, serviceName strin
 // UnregisterEndpoints removes multiple endpoints from the registry for all protocols.
 // It queries all protocol directories for the service and removes the specified IPs from each.
 func (r *EtcdRegistry) UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error {
-	r.log.V(1).Info("unregistering endpoints",
+	r.log.DebugContext(ctx, "unregistering endpoints",
 		"service", serviceName,
 		"count", len(ips),
 	)
@@ -224,7 +225,7 @@ func (r *EtcdRegistry) UnregisterEndpoints(ctx context.Context, serviceName stri
 	protocolsPrefix := r.protocolsPrefix(serviceName)
 	resp, err := r.client.Get(ctx, protocolsPrefix, clientv3.WithPrefix(), clientv3.WithKeysOnly())
 	if err != nil {
-		r.log.Error(err, "failed to list protocols", "service", serviceName)
+		r.log.ErrorContext(ctx, "failed to list protocols", "error", err, "service", serviceName)
 		return fmt.Errorf("failed to list protocols: %w", err)
 	}
 
@@ -249,24 +250,24 @@ func (r *EtcdRegistry) UnregisterEndpoints(ctx context.Context, serviceName stri
 			key := r.endpointKey(serviceName, protocol, ip)
 			_, err := r.client.Delete(ctx, key)
 			if err != nil {
-				r.log.Error(err, "failed to delete endpoint", "key", key)
+				r.log.ErrorContext(ctx, "failed to delete endpoint", "error", err, "key", key)
 				return fmt.Errorf("failed to delete endpoint %s: %w", key, err)
 			}
 		}
 	}
 
-	r.log.Info("endpoints unregistered successfully", "service", serviceName, "count", len(ips))
+	r.log.InfoContext(ctx, "endpoints unregistered successfully", "service", serviceName, "count", len(ips))
 	return nil
 }
 
 // ListEndpoints retrieves all endpoints for a specific service and protocol from etcd.
 func (r *EtcdRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
-	r.log.V(1).Info("listing endpoints", "service", service, "protocol", protocol)
+	r.log.DebugContext(ctx, "listing endpoints", "service", service, "protocol", protocol)
 
 	prefix := r.endpointsPrefix(service, protocol)
 	resp, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
-		r.log.Error(err, "failed to list endpoints", "service", service)
+		r.log.ErrorContext(ctx, "failed to list endpoints", "error", err, "service", service)
 		return nil, fmt.Errorf("failed to list endpoints: %w", err)
 	}
 
@@ -274,25 +275,25 @@ func (r *EtcdRegistry) ListEndpoints(ctx context.Context, service string, protoc
 	for _, kv := range resp.Kvs {
 		var endpoint registryv1.ServiceEndpoint
 		if err := proto.Unmarshal(kv.Value, &endpoint); err != nil {
-			r.log.Error(err, "failed to unmarshal endpoint", "key", string(kv.Key))
+			r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err, "key", string(kv.Key))
 			continue
 		}
 		endpoints = append(endpoints, &endpoint)
 	}
 
-	r.log.V(1).Info("listed endpoints", "service", service, "protocol", protocol, "count", len(endpoints))
+	r.log.DebugContext(ctx, "listed endpoints", "service", service, "protocol", protocol, "count", len(endpoints))
 	return endpoints, nil
 }
 
 // ListAllEndpoints retrieves all endpoints for the given protocol across all services from etcd.
 // Endpoints are organized by service name in the returned map.
 func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-	r.log.V(1).Info("listing all endpoints for protocol", "protocol", protocol)
+	r.log.DebugContext(ctx, "listing all endpoints for protocol", "protocol", protocol)
 
 	// Get all keys under the prefix
 	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
 	if err != nil {
-		r.log.Error(err, "failed to list all endpoints", "protocol", protocol)
+		r.log.ErrorContext(ctx, "failed to list all endpoints", "error", err, "protocol", protocol)
 		return nil, fmt.Errorf("failed to list all endpoints: %w", err)
 	}
 
@@ -315,14 +316,14 @@ func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 
 		var endpoint registryv1.ServiceEndpoint
 		if err := proto.Unmarshal(kv.Value, &endpoint); err != nil {
-			r.log.Error(err, "failed to unmarshal endpoint", "key", key)
+			r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err, "key", key)
 			continue
 		}
 
 		endpointsByService[serviceName] = append(endpointsByService[serviceName], &endpoint)
 	}
 
-	r.log.V(1).Info("listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
+	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
 	return endpointsByService, nil
 }
 

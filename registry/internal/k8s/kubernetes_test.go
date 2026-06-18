@@ -2,9 +2,9 @@ package k8s
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +28,7 @@ func newTestRegistry(clusterName string, objects ...any) *KubernetesRegistry {
 		}
 	}
 	reader := b.Build()
-	return NewKubernetesRegistry(logr.Discard(), reader, Config{ClusterName: clusterName})
+	return NewKubernetesRegistry(slog.New(slog.DiscardHandler), reader, Config{ClusterName: clusterName})
 }
 
 // managedPod returns a running pod with a PodIP and the aether managed label.

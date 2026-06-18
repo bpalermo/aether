@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
-	"github.com/go-logr/logr"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -89,7 +89,7 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 
 func TestBroadcaster_DropIncrementsCounter(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	b := NewBroadcaster(logr.Discard(), m)
+	b := NewBroadcaster(slog.New(slog.DiscardHandler), m)
 
 	ch := b.Subscribe("slow-watcher", nil)
 	_ = ch // never drained: fills to capacity, then drops
@@ -115,7 +115,7 @@ func TestBroadcaster_DropIncrementsCounter(t *testing.T) {
 
 func TestBroadcaster_WatcherCountMetric(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	b := NewBroadcaster(logr.Discard(), m)
+	b := NewBroadcaster(slog.New(slog.DiscardHandler), m)
 
 	ch1 := b.Subscribe("a", nil)
 	b.Subscribe("b", nil)

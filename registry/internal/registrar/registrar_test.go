@@ -3,12 +3,12 @@ package registrar
 import (
 	"context"
 	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -16,7 +16,7 @@ import (
 )
 
 func newTestRegistry() *RegistrarRegistry {
-	return NewRegistrarRegistry(logr.Discard(), Config{Address: "localhost:0"})
+	return NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "localhost:0"})
 }
 
 func makeEndpoint(ip string, port uint32) *registryv1.ServiceEndpoint {
@@ -568,7 +568,7 @@ func TestReconnectSignal(t *testing.T) {
 // cancels the active stream only when the effective set changes (order
 // -insensitive), and that the generation bump clears the resume token path.
 func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
-	r := NewRegistrarRegistry(logr.Discard(), Config{Address: "test"})
+	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
 
 	cancels := 0
 	r.filterMu.Lock()
@@ -602,7 +602,7 @@ func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
 // state), stale names from a previous connection are dropped by the swap,
 // and post-marker transitions apply incrementally.
 func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
-	r := NewRegistrarRegistry(logr.Discard(), Config{Address: "test"})
+	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
 
 	ev := func(t registrarv1.WatchEndpointsResponse_EventType, svc, version string) *registrarv1.WatchEndpointsResponse {
 		return &registrarv1.WatchEndpointsResponse{Type: t, ServiceName: svc, Version: version}
@@ -649,7 +649,7 @@ func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
 // out-of-scope services, and a stale entry would poison the cold path's
 // RPC fill (ListEndpoints serves the cache before falling back to RPC).
 func TestSetServiceFilter_PurgesOutOfScopeCache(t *testing.T) {
-	r := NewRegistrarRegistry(logr.Discard(), Config{Address: "test"})
+	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
 	r.mu.Lock()
 	r.cache["svc-a"] = []*registryv1.ServiceEndpoint{{Ip: "10.0.0.1"}}
 	r.cache["svc-b"] = []*registryv1.ServiceEndpoint{{Ip: "10.0.0.2"}}

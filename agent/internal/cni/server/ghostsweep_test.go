@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -9,7 +10,6 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -89,7 +89,7 @@ func TestSweepGhostEndpoints(t *testing.T) {
 			sweepEndpoint("10.0.0.2", "test-node", "pod-term"),
 		},
 	}}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.sweepGhostEndpoints(ctx)
 
@@ -112,7 +112,7 @@ func TestSweepRegistersMissingEndpoint(t *testing.T) {
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-missing"), missing))
 
 	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.sweepGhostEndpoints(ctx)
 
@@ -163,7 +163,7 @@ func TestSweepPrefersAuthoritativeListing(t *testing.T) {
 		// ...but the registrar's real snapshot is empty.
 		authoritative: map[string][]*registryv1.ServiceEndpoint{},
 	}
-	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "")
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
 	s.sweepGhostEndpoints(ctx)
 

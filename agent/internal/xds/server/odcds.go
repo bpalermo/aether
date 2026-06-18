@@ -2,15 +2,16 @@ package server
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/registry"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -24,7 +25,7 @@ import (
 type onDemandObserver struct {
 	cache    *cache.SnapshotCache
 	registry registry.Registry
-	log      logr.Logger
+	log      *slog.Logger
 	// rejected counts on-demand requests refused because the service does
 	// not exist in the catalog (nil if instrumentation disabled).
 	rejected metric.Int64Counter
@@ -33,16 +34,16 @@ type onDemandObserver struct {
 // newOnDemandObserver creates an onDemandObserver over the snapshot cache.
 // reg provides the service catalog (registry.ServiceCatalog capability) used
 // to reject nonexistent services before they pollute the dependency set.
-func newOnDemandObserver(snapshotCache *cache.SnapshotCache, reg registry.Registry, log logr.Logger) *onDemandObserver {
+func newOnDemandObserver(snapshotCache *cache.SnapshotCache, reg registry.Registry, log *slog.Logger) *onDemandObserver {
 	o := &onDemandObserver{
 		cache:    snapshotCache,
 		registry: reg,
-		log:      log.WithName("odcds"),
+		log:      commonlog.Named(log, "odcds"),
 	}
 	var err error
 	if o.rejected, err = otel.Meter("aether/agent-odcds").Int64Counter("aether.agent.upstreams.rejected",
 		metric.WithDescription("On-demand requests refused: the service has no endpoints anywhere in the mesh (catalog miss)")); err != nil {
-		o.log.Error(err, "failed to create rejected counter; continuing without instrumentation")
+		o.log.Error("failed to create rejected counter; continuing without instrumentation", "error", err)
 	}
 	return o
 }
@@ -73,7 +74,7 @@ func (o *onDemandObserver) onDeltaRequest(_ int64, req *discoveryv3.DeltaDiscove
 		}
 		service, ok := proxy.ServiceFromClusterName(name, o.cache.MeshDomain())
 		if !ok {
-			o.log.V(1).Info("ignoring on-demand subscription outside the mesh domain", "name", name)
+			o.log.Debug("ignoring on-demand subscription outside the mesh domain", "name", name)
 			continue
 		}
 		// Existence gate: the local service catalog (full mesh index, every

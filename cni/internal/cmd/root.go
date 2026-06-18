@@ -11,6 +11,9 @@ import (
 )
 
 var (
+	// The cni-install init container has no request spans, so it stays on logr
+	// (the install package uses the controller-runtime global logger). The base
+	// logger is still the shared slog handler, bridged to logr for the installer.
 	l logr.Logger
 
 	cfg = install.NewInstallerConfig()
@@ -21,7 +24,7 @@ var rootCmd = &cobra.Command{
 	Short:        "Installs the CNI binaries into the current host.",
 	SilenceUsage: true,
 	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-		l = log.NewLogger(cfg.Debug).WithName(cmd.Name())
+		l = logr.FromSlogHandler(log.Named(log.NewLogger(cfg.Debug), cmd.Name()).Handler())
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runInstall(cmd.Context())

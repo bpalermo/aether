@@ -7,14 +7,15 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	commonlog "github.com/bpalermo/aether/common/log"
 )
 
 // Config holds the configuration for the Kubernetes registry backend.
@@ -27,7 +28,7 @@ type Config struct {
 // It reads pods labeled with aether.io/managed=true and converts them to ServiceEndpoints.
 // Write operations (Register/Unregister) are no-ops since the API server is the source of truth.
 type KubernetesRegistry struct {
-	log         logr.Logger
+	log         *slog.Logger
 	clusterName string
 	reader      client.Reader
 }
@@ -35,9 +36,9 @@ type KubernetesRegistry struct {
 // NewKubernetesRegistry creates a new Kubernetes API server backed Registry.
 // The reader should be a direct API reader (e.g., manager.GetAPIReader()) to avoid
 // cache synchronization issues during startup.
-func NewKubernetesRegistry(log logr.Logger, reader client.Reader, cfg Config) *KubernetesRegistry {
+func NewKubernetesRegistry(log *slog.Logger, reader client.Reader, cfg Config) *KubernetesRegistry {
 	return &KubernetesRegistry{
-		log:         log.WithName("registry-kubernetes"),
+		log:         commonlog.Named(log, "registry-kubernetes"),
 		clusterName: cfg.ClusterName,
 		reader:      reader,
 	}
@@ -73,7 +74,7 @@ func (r *KubernetesRegistry) UnregisterEndpoints(_ context.Context, _ string, _ 
 // ListEndpoints returns all endpoints for a service by listing managed pods whose ServiceAccount
 // matches the given service name. Node topology labels are used for locality information.
 func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, _ registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
-	r.log.V(1).Info("listing endpoints", "service", service)
+	r.log.DebugContext(ctx, "listing endpoints", "service", service)
 
 	pods, err := r.listManagedPods(ctx)
 	if err != nil {
@@ -93,20 +94,20 @@ func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, 
 		}
 		ep, err := r.podToEndpoint(pod, nodeLocalities)
 		if err != nil {
-			r.log.Error(err, "failed to convert pod to endpoint", "pod", pod.Name, "namespace", pod.Namespace)
+			r.log.ErrorContext(ctx, "failed to convert pod to endpoint", "error", err, "pod", pod.Name, "namespace", pod.Namespace)
 			continue
 		}
 		endpoints = append(endpoints, ep)
 	}
 
-	r.log.V(1).Info("listed endpoints", "service", service, "count", len(endpoints))
+	r.log.DebugContext(ctx, "listed endpoints", "service", service, "count", len(endpoints))
 	return endpoints, nil
 }
 
 // ListAllEndpoints returns all endpoints for all services, grouped by service name (ServiceAccount).
 // It lists all managed pods, resolves node localities, and converts each pod to a ServiceEndpoint.
 func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-	r.log.V(1).Info("listing all endpoints")
+	r.log.DebugContext(ctx, "listing all endpoints")
 
 	pods, err := r.listManagedPods(ctx)
 	if err != nil {
@@ -123,19 +124,19 @@ func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, _ registryv1.
 		pod := &pods[i]
 		serviceName := pod.Spec.ServiceAccountName
 		if serviceName == "" {
-			r.log.V(1).Info("skipping pod without service account", "pod", pod.Name, "namespace", pod.Namespace)
+			r.log.DebugContext(ctx, "skipping pod without service account", "pod", pod.Name, "namespace", pod.Namespace)
 			continue
 		}
 
 		ep, err := r.podToEndpoint(pod, nodeLocalities)
 		if err != nil {
-			r.log.Error(err, "failed to convert pod to endpoint", "pod", pod.Name, "namespace", pod.Namespace)
+			r.log.ErrorContext(ctx, "failed to convert pod to endpoint", "error", err, "pod", pod.Name, "namespace", pod.Namespace)
 			continue
 		}
 		endpointsByService[serviceName] = append(endpointsByService[serviceName], ep)
 	}
 
-	r.log.V(1).Info("listed all endpoints", "services", len(endpointsByService))
+	r.log.DebugContext(ctx, "listed all endpoints", "services", len(endpointsByService))
 	return endpointsByService, nil
 }
 
@@ -152,7 +153,7 @@ func (r *KubernetesRegistry) listManagedPods(ctx context.Context) ([]corev1.Pod,
 		client.MatchingLabels{constants.LabelAetherManaged: "true"},
 	)
 	if err != nil {
-		r.log.Error(err, "failed to list managed pods")
+		r.log.ErrorContext(ctx, "failed to list managed pods", "error", err)
 		return nil, fmt.Errorf("failed to list managed pods: %w", err)
 	}
 
@@ -183,7 +184,7 @@ func (r *KubernetesRegistry) buildNodeLocalities(ctx context.Context, pods []cor
 	for nodeName := range nodeNames {
 		var node corev1.Node
 		if err := r.reader.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
-			r.log.Error(err, "failed to get node for locality", "node", nodeName)
+			r.log.ErrorContext(ctx, "failed to get node for locality", "error", err, "node", nodeName)
 			return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
 		}
 		localities[nodeName] = locality{

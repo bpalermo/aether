@@ -56,7 +56,7 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 	for {
 		epoch, hb, ok := s.readState()
 		if !ok || time.Since(hb) >= predecessorStale {
-			s.log.Info("no live predecessor; starting fresh at epoch 0", "statePresent", ok)
+			s.log.InfoContext(ctx, "no live predecessor; starting fresh at epoch 0", "statePresent", ok)
 			s.metrics.predecessorFound(false)
 			return
 		}
@@ -65,11 +65,11 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 			s.nextEpoch = epoch + 1
 			s.mu.Unlock()
 			s.metrics.predecessorFound(true)
-			s.log.Info("live predecessor confirmed; starting cross-pod hot restart",
+			s.log.InfoContext(ctx, "live predecessor confirmed; starting cross-pod hot restart",
 				"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
 			return
 		}
-		s.log.V(1).Info("fresh heartbeat but admin not confirming predecessor; re-probing",
+		s.log.DebugContext(ctx, "fresh heartbeat but admin not confirming predecessor; re-probing",
 			"epoch", epoch, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
 		select {
 		case <-ctx.Done():
@@ -107,7 +107,7 @@ func (s *Supervisor) readState() (epoch int, heartbeat time.Time, ok bool) {
 // overwritten so a fresh node can reset to 0.
 func (s *Supervisor) writeState(epoch int) {
 	if err := os.MkdirAll(s.cfg.StateDir, 0o755); err != nil {
-		s.log.V(1).Error(err, "creating state dir")
+		s.log.Error("creating state dir", "error", err)
 		return
 	}
 
@@ -128,11 +128,11 @@ func (s *Supervisor) writeState(epoch int) {
 	tmp := s.statePath() + ".tmp"
 	data := fmt.Sprintf("%d %d\n", epoch, time.Now().UnixMilli())
 	if err := os.WriteFile(tmp, []byte(data), 0o644); err != nil {
-		s.log.V(1).Error(err, "writing state")
+		s.log.Error("writing state", "error", err)
 		return
 	}
 	if err := os.Rename(tmp, s.statePath()); err != nil {
-		s.log.V(1).Error(err, "renaming state")
+		s.log.Error("renaming state", "error", err)
 	}
 }
 
@@ -195,7 +195,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 					s.setReady()
 					ready = true
 					s.metrics.readyTransition(true)
-					s.log.Info("pod ready: envoy live at newest epoch", "epoch", epoch)
+					s.log.InfoContext(ctx, "pod ready: envoy live at newest epoch", "epoch", epoch)
 				}
 				continue
 			}
@@ -214,14 +214,14 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			hold := ready && reachable && s.childTracked(epoch)
 			if hold && !holding {
 				holding = true
-				s.log.Info("holding readiness: serving as hot-restart parent mid-handoff", "epoch", epoch)
+				s.log.InfoContext(ctx, "holding readiness: serving as hot-restart parent mid-handoff", "epoch", epoch)
 			}
 			if ready && !hold {
 				s.clearReady()
 				ready = false
 				holding = false
 				s.metrics.readyTransition(false)
-				s.log.Info("pod not ready: envoy not live at newest epoch", "epoch", epoch)
+				s.log.InfoContext(ctx, "pod not ready: envoy not live at newest epoch", "epoch", epoch)
 			}
 
 			launched, wasLive := s.epochProgress()
@@ -245,7 +245,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 
 func (s *Supervisor) setReady() {
 	if err := os.WriteFile(s.cfg.ReadyMarkerPath, []byte("ready\n"), 0o644); err != nil {
-		s.log.V(1).Error(err, "writing ready marker")
+		s.log.Error("writing ready marker", "error", err)
 	}
 }
 

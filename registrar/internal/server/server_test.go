@@ -2,12 +2,12 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -36,7 +36,7 @@ func newGateTestServer(t *testing.T) *RegistrarServer {
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
 		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.1"},
 	}})
-	return NewRegistrarServer(nil, snap, NewBroadcaster(logr.Discard(), nil), "127.0.0.1:0", logr.Discard(), nil)
+	return NewRegistrarServer(nil, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", slog.New(slog.DiscardHandler), nil)
 }
 
 // TestWatchEndpointsSendsSnapshotComplete verifies the snapshot boundary
@@ -115,7 +115,7 @@ func TestListAllEndpointsGatedOnFirstSync(t *testing.T) {
 func TestRegisterEndpointSnapshotFirst(t *testing.T) {
 	reg := &flakyRegistry{failing: true}
 	s := newGateTestServer(t)
-	q := NewWriteBehindQueue(reg, logr.Discard(), nil)
+	q := NewWriteBehindQueue(reg, slog.New(slog.DiscardHandler), nil)
 	s.UseWriteBehind(q)
 
 	_, err := s.RegisterEndpoint(context.Background(), &registrarv1.RegisterEndpointRequest{
@@ -150,7 +150,7 @@ func TestWatchEndpointsFilteredSnapshot(t *testing.T) {
 			Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.2"},
 		},
 	})
-	s := NewRegistrarServer(nil, snap, NewBroadcaster(logr.Discard(), nil), "127.0.0.1:0", logr.Discard(), nil)
+	s := NewRegistrarServer(nil, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", slog.New(slog.DiscardHandler), nil)
 
 	run := func(req *registrarv1.WatchEndpointsRequest) []*registrarv1.WatchEndpointsResponse {
 		ctx, cancel := context.WithCancel(context.Background())

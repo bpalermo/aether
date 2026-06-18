@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -14,8 +15,8 @@ import (
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/telemetry"
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -51,7 +52,7 @@ type Config struct {
 // Registrar gRPC service. Reads are served from a local cache populated by a
 // WatchEndpoints stream. Writes are delegated to the Registrar.
 type RegistrarRegistry struct {
-	log     logr.Logger
+	log     *slog.Logger
 	config  Config
 	metrics *clientMetrics
 
@@ -103,16 +104,16 @@ type RegistrarRegistry struct {
 }
 
 // NewRegistrarRegistry creates a new RegistrarRegistry.
-func NewRegistrarRegistry(log logr.Logger, cfg Config) *RegistrarRegistry {
+func NewRegistrarRegistry(log *slog.Logger, cfg Config) *RegistrarRegistry {
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the client.
 	metrics, err := newClientMetrics(otel.Meter(meterName))
 	if err != nil {
-		log.Error(err, "failed to create registrar client metrics; continuing without instrumentation")
+		log.Error("failed to create registrar client metrics; continuing without instrumentation", "error", err)
 	}
 
 	return &RegistrarRegistry{
-		log:         log.WithName("registrar-registry"),
+		log:         commonlog.Named(log, "registrar-registry"),
 		config:      cfg,
 		metrics:     metrics,
 		cache:       make(map[string][]*registryv1.ServiceEndpoint),
@@ -207,7 +208,7 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 		r.mu.Unlock()
 	}
 
-	r.log.V(1).Info("watch service filter updated; re-asserting on stream", "services", len(services))
+	r.log.Debug("watch service filter updated; re-asserting on stream", "services", len(services))
 	if cancelStream != nil {
 		cancelStream()
 	}
@@ -271,7 +272,7 @@ func (r *RegistrarRegistry) Initialize(ctx context.Context) error {
 	r.cancel = cancel
 	go r.watchLoop(watchCtx)
 
-	r.log.Info("initialized registrar registry", "address", r.config.Address)
+	r.log.InfoContext(ctx, "initialized registrar registry", "address", r.config.Address)
 	return nil
 }
 
@@ -434,7 +435,7 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 			r.metrics.streamFailed(ctx)
 			jitter := time.Duration(float64(backoff) * jitterFraction * rand.Float64())
 			wait := backoff + jitter
-			r.log.Error(err, "failed to start watch stream, retrying", "backoff", wait)
+			r.log.ErrorContext(ctx, "failed to start watch stream, retrying", "error", err, "backoff", wait)
 			select {
 			case <-ctx.Done():
 				return
@@ -447,7 +448,7 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		// Reset backoff on successful connection.
 		backoff = initialBackoff
 		r.metrics.streamReconnected(ctx)
-		r.log.V(1).Info("watch stream connected", "filtered", services != nil, "filterServices", len(services))
+		r.log.DebugContext(ctx, "watch stream connected", "filtered", services != nil, "filterServices", len(services))
 		r.signalReconnect()
 
 		lastVersion = r.processStream(ctx, stream, lastVersion)
@@ -475,17 +476,17 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			// match the current version while events were still dropped. Clear
 			// the resume token so the reconnect receives a full snapshot.
 			if status.Code(err) == codes.DataLoss {
-				r.log.Info("registrar forced a resync; requesting full snapshot on reconnect")
+				r.log.InfoContext(ctx, "registrar forced a resync; requesting full snapshot on reconnect")
 				return ""
 			}
 			if status.Code(err) == codes.Canceled && ctx.Err() == nil {
 				// The stream was cancelled locally (SetServiceFilter
 				// re-asserting a changed filter), not a registrar failure.
-				r.log.V(1).Info("watch stream ended for filter re-assertion")
+				r.log.DebugContext(ctx, "watch stream ended for filter re-assertion")
 				return lastVersion
 			}
 			if err != io.EOF && ctx.Err() == nil {
-				r.log.Error(err, "watch stream disconnected")
+				r.log.ErrorContext(ctx, "watch stream disconnected", "error", err)
 			}
 			return lastVersion
 		}

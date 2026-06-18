@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -17,7 +18,6 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -62,10 +63,10 @@ func startCNIServer(t *testing.T, ctx context.Context, sockPath string, stor sto
 	}
 	k8sClient := builder.Build()
 
-	sc := cache.NewSnapshotCache("test-node", logr.Discard())
+	sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
 	cfg := &CNIServerConfig{SocketPath: sockPath}
 
-	srv, err := NewCNIServer("test-cluster", "test-node", "test-node", "example.org", stor, reg, sc, ack.NewTracker(logr.Discard()), spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()), logr.Discard(), k8sClient, nil, cfg)
+	srv, err := NewCNIServer("test-cluster", "test-node", "test-node", "example.org", stor, reg, sc, ack.NewTracker(slog.New(slog.DiscardHandler)), spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, slog.New(slog.DiscardHandler)), slog.New(slog.DiscardHandler), k8sClient, nil, cfg)
 	require.NoError(t, err)
 
 	errCh := make(chan error, 1)

@@ -3,12 +3,12 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,7 +45,7 @@ func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 // for use in tests. It returns the Syncer, Snapshot, and Broadcaster so tests
 // can inspect post-sync state directly.
 func newTestSyncer(reg *mockRegistry, interval time.Duration) (*Syncer, *Snapshot, *Broadcaster) {
-	log := logr.Discard()
+	log := slog.New(slog.DiscardHandler)
 	snap := NewSnapshot()
 	bc := NewBroadcaster(log, nil)
 	s := NewSyncer(reg, snap, bc, interval, log, nil)
@@ -378,7 +378,7 @@ func (n *notifyMockRegistry) Changes() <-chan struct{} { return n.ch }
 // a sync via the watch signal (debounced) well before the poll interval would.
 func TestSyncer_ChangeDrivenSync(t *testing.T) {
 	snap := NewSnapshot()
-	bc := NewBroadcaster(logr.Discard(), nil)
+	bc := NewBroadcaster(slog.New(slog.DiscardHandler), nil)
 	var calls atomic.Int64
 	base := &mockRegistry{listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 		calls.Add(1)
@@ -387,7 +387,7 @@ func TestSyncer_ChangeDrivenSync(t *testing.T) {
 	reg := &notifyMockRegistry{mockRegistry: base, ch: make(chan struct{}, 1)}
 
 	// Long poll interval so any timely sync must come from the change signal.
-	s := NewSyncer(reg, snap, bc, 1*time.Hour, logr.Discard(), nil)
+	s := NewSyncer(reg, snap, bc, 1*time.Hour, slog.New(slog.DiscardHandler), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = s.Start(ctx) }()

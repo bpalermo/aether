@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
@@ -39,12 +40,12 @@ import (
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
+
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -61,7 +62,7 @@ var Version = "dev"
 var (
 	cfg = NewAgentConfig()
 
-	l           logr.Logger
+	l           *slog.Logger
 	logShutdown func(context.Context) error
 )
 
@@ -120,7 +121,7 @@ func init() {
 // CNI gRPC server, and optionally the SPIRE bridge as runnables. The agent then waits
 // for local storage to become ready before starting the manager's event loop.
 func runAgent(ctx context.Context) (retErr error) {
-	l.Info("starting aether agent",
+	l.InfoContext(ctx, "starting aether agent",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,
@@ -134,7 +135,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	if logShutdown != nil {
 		defer func() {
 			if shutdownErr := logShutdown(ctx); shutdownErr != nil {
-				l.Error(shutdownErr, "failed to flush OTel logs")
+				l.ErrorContext(ctx, "failed to flush OTel logs", "error", shutdownErr)
 			}
 		}()
 	}
@@ -156,7 +157,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	if result.Shutdown != nil {
 		defer func() {
 			if shutdownErr := result.Shutdown(ctx); shutdownErr != nil {
-				l.Error(shutdownErr, "failed to shutdown telemetry")
+				l.ErrorContext(ctx, "failed to shutdown telemetry", "error", shutdownErr)
 			}
 		}()
 	}
@@ -187,7 +188,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
 		}
-		l.Info("resolved workload trust domain from SPIRE", "trustDomain", identityTrustDomain)
+		l.InfoContext(ctx, "resolved workload trust domain from SPIRE", "trustDomain", identityTrustDomain)
 	}
 
 	reg, err := setupRegistrarClient(ctx, spireSource)
@@ -217,7 +218,7 @@ func runAgent(ctx context.Context) (retErr error) {
 			return fmt.Errorf("failed to add SPIRE bridge: %w", err)
 		}
 	} else {
-		l.Info("SPIRE integration disabled")
+		l.InfoContext(ctx, "SPIRE integration disabled")
 	}
 
 	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain); err != nil {
@@ -236,12 +237,12 @@ func runAgent(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	l.V(1).Info("waiting for local storage to be ready")
+	l.DebugContext(ctx, "waiting for local storage to be ready")
 	if err = localStorage.WaitUntilReady(ctx); err != nil {
 		return err
 	}
 
-	l.V(1).Info("local storage is ready, starting manager")
+	l.DebugContext(ctx, "local storage is ready, starting manager")
 	return m.Start(ctx)
 }
 
@@ -327,9 +328,9 @@ func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registr
 			return nil, err
 		}
 		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
-		l.Info("registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.MeshDomain)
+		l.InfoContext(ctx, "registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.MeshDomain)
 	} else {
-		l.Info("registrar client using insecure transport")
+		l.InfoContext(ctx, "registrar client using insecure transport")
 	}
 
 	reg := registry.NewRegistrarRegistry(l, regCfg)

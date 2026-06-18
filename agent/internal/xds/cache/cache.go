@@ -17,18 +17,19 @@
 package cache
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/bpalermo/aether/common/constants"
 
+	commonlog "github.com/bpalermo/aether/common/log"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.uber.org/atomic"
 )
@@ -45,7 +46,7 @@ import (
 type SnapshotCache struct {
 	cachev3.SnapshotCache
 
-	log     logr.Logger
+	log     *slog.Logger
 	metrics *cacheMetrics
 
 	nodeName string
@@ -181,17 +182,17 @@ type clusterEntry struct {
 
 // NewSnapshotCache creates and returns a new SnapshotCache for the given node.
 // The nodeName is used as the xDS node identifier when updating snapshots.
-func NewSnapshotCache(nodeName string, log logr.Logger) *SnapshotCache {
+func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the cache.
 	metrics, err := newCacheMetrics(otel.Meter(meterName))
 	if err != nil {
-		log.Error(err, "failed to create snapshot cache metrics; continuing without instrumentation")
+		log.Error("failed to create snapshot cache metrics; continuing without instrumentation", "error", err)
 	}
 
 	return &SnapshotCache{
 		SnapshotCache: cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),
-		log:           log.WithName("cache"),
+		log:           commonlog.Named(log, "cache"),
 		nodeName:      nodeName,
 		meshDomain:    constants.DefaultMeshDomain,
 		metrics:       metrics,
