@@ -75,14 +75,12 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 				EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: cluster},
 			},
 		},
-		// Human-readable line: Envoy/Istio's default access-log text format, so the
-		// _msg is the familiar one-liner. Structured fields go in attributes for
-		// querying. Absent operators render as "-" (the OTel logger has no
-		// omit-empty), matching Istio.
-		Body: stringValue(`[%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% %CONNECTION_TERMINATION_DETAILS% "%UPSTREAM_TRANSPORT_FAILURE_REASON%" %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%" "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%" %UPSTREAM_CLUSTER_RAW% %UPSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_REMOTE_ADDRESS% %REQUESTED_SERVER_NAME% %ROUTE_NAME%`),
+		// Concise human-readable _msg for eyeballing; the full queryable field set
+		// (Istio's defaults + more) lives in attributes, not duplicated in the body.
+		Body: stringValue("%RESPONSE_CODE% %RESPONSE_FLAGS% %REQ(:METHOD)% %REQ(:AUTHORITY)%%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %DURATION%ms -> %UPSTREAM_HOST%"),
 		// Full Istio default field set as structured attributes, plus aether's
-		// reporter/source_netns and the W3C traceparent (populates once the mesh
-		// propagates trace context; "-" until then).
+		// reporter/pod identity/source_netns and the W3C traceparent (populates once
+		// the mesh propagates trace context; "-" until then).
 		Attributes: &otlpcommonv1.KeyValueList{Values: []*otlpcommonv1.KeyValue{
 			kv("reporter", reporter),
 			// Literal pod identity baked in per-pod listener: the local pod this hop
