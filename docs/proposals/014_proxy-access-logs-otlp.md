@@ -51,8 +51,10 @@ and the `otel_collector` cluster + batching + per-node resource are already wire
 
 Add an `envoy.access_loggers.open_telemetry`
 (`OpenTelemetryAccessLogConfig`) to `buildHTTPConnectionManager`, gated on a new
-value (`telemetry.accessLogs.enabled`). `common_config.grpc_service` →
-`envoy_grpc{ cluster_name: otel_collector }`. Map the rich format we already use
+value (`telemetry.accessLogs.enabled`). `grpc_service` →
+`envoy_grpc{ cluster_name: otel_collector }` (the top-level field; the older
+`common_config` wrapper is deprecated), with `log_name: aether_access_logs`. Map
+the rich format we already use
 in the e2e Envoy configs to OTLP:
 
 - **body**: the human-readable line (`%RESPONSE_CODE% %RESPONSE_FLAGS% …`).
@@ -77,6 +79,12 @@ At thousands of req/s, logging every request is untenable. Use Envoy access-log
   `status_code_filter` (>= 500) OR connect failures.
 - **sample** the rest: `runtime_filter` / `extension_filter` at a low rate
   (e.g. 1–5%), configurable.
+- **never** log health/liveness probes: AND a `not_health_check_filter` (drops the
+  inbound live/ready `health_check` filters and the per-pod health gateway) with a
+  `header_filter` that inverts a `:path` prefix match on `/-/-/` (drops the egress
+  liveness local-reply, which is not health_check-marked). Probes are dropped
+  unconditionally — including failures — so the proposal-013 prober's own
+  connection-error signal stays the source of truth, not access logs.
 
 This keeps the failure signal complete (the cases we built the prober/flag-SLI
 for) while bounding steady-state volume.
