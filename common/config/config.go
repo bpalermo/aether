@@ -1,7 +1,8 @@
-// Package config loads the mesh-wide aether configuration (aether.config.v1.
-// MeshConfig) from a YAML document — typically a mounted ConfigMap — validating
-// it with protovalidate. Per-instance/topology settings stay command-line flags
-// and are not part of MeshConfig; see docs/proposals/015_mesh-config.md.
+// Package config loads the proxy MeshConfig (aether.config.v1.MeshConfig) from a
+// YAML document — typically a mounted ConfigMap projected from the MeshConfig CR
+// — validating it with protovalidate. System-wide settings (OTEL, SPIRE, mesh
+// domain) are aether (umbrella-chart) config inherited as flags, not part of
+// MeshConfig; see docs/proposals/015_mesh-config.md.
 package config
 
 import (
@@ -14,16 +15,12 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const (
-	defaultAccessLogSuccessSampleRate  uint32  = 100
-	defaultProxyTraceSampleRate        float64 = 0.01
-	defaultControlPlaneTraceSampleRate float64 = 0.1
-)
-
-// Load reads, parses, validates and defaults a MeshConfig from the file at path.
+// Load reads, parses and validates a MeshConfig from the file at path.
 //
 // The pipeline is YAML -> JSON -> protojson (strict: unknown fields are an
-// error, so a typo or stale key fails loudly) -> protovalidate -> defaults.
+// error, so a typo or stale key fails loudly) -> protovalidate. Inheritance of
+// unset proxy overrides from the aether system config is the caller's job (the
+// agent), which is the only place that holds both.
 func Load(path string) (*configv1.MeshConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -32,9 +29,9 @@ func Load(path string) (*configv1.MeshConfig, error) {
 	return Parse(raw)
 }
 
-// Parse runs the YAML->proto->validate->default pipeline on an in-memory
-// document. Load is the file-backed wrapper; Parse exists for tests and for
-// callers that already hold the bytes.
+// Parse runs the YAML->proto->validate pipeline on an in-memory document. Load is
+// the file-backed wrapper; Parse exists for tests and for callers that already
+// hold the bytes.
 func Parse(raw []byte) (*configv1.MeshConfig, error) {
 	jsonBytes, err := yaml.YAMLToJSON(raw)
 	if err != nil {
@@ -52,28 +49,5 @@ func Parse(raw []byte) (*configv1.MeshConfig, error) {
 		return nil, fmt.Errorf("mesh config failed validation: %w", err)
 	}
 
-	withDefaults(cfg)
 	return cfg, nil
 }
-
-// withDefaults fills the optional rate/percentage fields that have a non-zero
-// historical default. Booleans and strings default to their zero value, which
-// matches the previous flag defaults (all off / empty). Only the proto3
-// `optional` fields need this — an explicit 0 in the document is preserved.
-func withDefaults(cfg *configv1.MeshConfig) {
-	t := cfg.GetTelemetry()
-	if t == nil {
-		return
-	}
-	if al := t.GetAccessLogs(); al != nil && al.SuccessSampleRate == nil {
-		al.SuccessSampleRate = ptr(defaultAccessLogSuccessSampleRate)
-	}
-	if pt := t.GetProxyTracing(); pt != nil && pt.SampleRate == nil {
-		pt.SampleRate = ptr(defaultProxyTraceSampleRate)
-	}
-	if tr := t.GetTracing(); tr != nil && tr.SampleRate == nil {
-		tr.SampleRate = ptr(defaultControlPlaneTraceSampleRate)
-	}
-}
-
-func ptr[T any](v T) *T { return &v }

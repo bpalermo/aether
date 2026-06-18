@@ -21,14 +21,11 @@ import (
 	"log/slog"
 	"os"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
@@ -50,16 +47,6 @@ var rootCmd = &cobra.Command{
 	Long:         "Runs the aether-controller: the MeshConfig validating webhook and the reconciler that projects the MeshConfig CR into a ConfigMap.",
 	SilenceUsage: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) (err error) {
-		// Configure the controller's own telemetry from the MeshConfig CR before
-		// logging setup. The controller owns the CR and never mounts the projected
-		// ConfigMap, so reading the CR here is deadlock-free. A missing CR yields
-		// telemetry-off defaults until the CR appears (and a restart).
-		mc, err := loadOwnConfig(cmd.Context())
-		if err != nil {
-			return err
-		}
-		manager.ApplyTelemetry(&cfg.Config, mc.GetTelemetry())
-
 		l, logShutdown, err = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
 		return err
 	},
@@ -80,24 +67,6 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Serve the validating webhook with a SPIRE X.509 SVID and inject the SPIRE trust bundle into the webhook caBundle (instead of a static cert)")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
 	rootCmd.Flags().StringVar(&cfg.WebhookConfigName, "webhook-config-name", cfg.WebhookConfigName, "ValidatingWebhookConfiguration to patch with the SPIRE caBundle (SPIRE mode)")
-}
-
-// loadOwnConfig reads the singleton MeshConfig CR for the controller's own
-// telemetry. A missing CR returns empty defaults so the controller still starts
-// and can project the CR once it exists.
-func loadOwnConfig(ctx context.Context) (*configv1.MeshConfig, error) {
-	c, err := client.New(ctrl.GetConfigOrDie(), client.Options{})
-	if err != nil {
-		return nil, fmt.Errorf("build client for MeshConfig: %w", err)
-	}
-	mc, err := meshconfig.LoadCR(ctx, c, meshconfig.SingletonName)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return &configv1.MeshConfig{}, nil
-		}
-		return nil, err
-	}
-	return mc, nil
 }
 
 func runController(ctx context.Context) (retErr error) {

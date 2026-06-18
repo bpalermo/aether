@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "cabundle.go",
         "gvk.go",
-        "loader.go",
         "meshconfig.go",
         "reconciler.go",
         "webhook.go",

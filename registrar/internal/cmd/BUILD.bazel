@@ -9,8 +9,6 @@ go_library(
     importpath = "github.com/bpalermo/aether/registrar/internal/cmd",
     visibility = ["//registrar:__subpackages__"],
     deps = [
-        "//api/aether/config/v1:config",
-        "//common/config",
         "//common/manager",
         "//common/must",
         "//common/spire",

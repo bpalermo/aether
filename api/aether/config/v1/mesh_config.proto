@@ -6,104 +6,43 @@ import "buf/validate/validate.proto";
 
 option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
 
-// MeshConfig is the mesh-wide policy shared by every aether component (agent,
-// proxy, registrar). It is delivered as a YAML document in a ConfigMap and
-// validated with protovalidate at load. Per-instance/topology settings (node
-// identity, socket paths, bind addresses, registry backend) are intentionally
-// NOT part of this message; they stay command-line flags.
+// MeshConfig is the proxy data-plane observability override, delivered as a YAML
+// document in a ConfigMap (projected from the MeshConfig CR by the
+// aether-controller) and validated with protovalidate.
+//
+// Aether is one system: enabling OTEL or SPIRE, the OTLP collector endpoint, and
+// the mesh domain are system-wide settings inherited by every component
+// (registrar, agent, proxy) from the aether (umbrella) chart — they are NOT in
+// this message. MeshConfig only lets the proxy data plane *override* its own
+// access-log / tracing / metrics policy; unset fields inherit the aether config.
+// See docs/proposals/015_mesh-config.md.
 message MeshConfig {
-  // DNS-style domain mesh authorities live under: clients address services as
-  // <service>.<mesh_domain>, and workload identity is spiffe://<mesh_domain>/...
-  string mesh_domain = 1 [
-    (buf.validate.field).required = true,
-    (buf.validate.field).string.hostname = true
-  ];
-
-  // Observability posture (OTel metrics/traces/logs, access logs).
-  Telemetry telemetry = 2;
-
-  // Mesh security posture (mTLS via SPIRE).
-  Security security = 3;
+  // Proxy data-plane observability overrides.
+  ProxyTelemetry proxy = 1;
 }
 
-// Telemetry is the mesh-wide observability configuration.
-message Telemetry {
-  // Enable the OTel MeterProvider with the Prometheus exporter bridge on the
-  // control plane.
-  bool enabled = 1;
+// ProxyTelemetry overrides the proxy data plane's observability policy. Every
+// field is optional: when unset, the proxy inherits the aether system config
+// (OTEL enable + collector endpoint, control-plane trace sample rate).
+message ProxyTelemetry {
+  // Attach the OTel access logger to every HCM (proposal 014). Unset inherits the
+  // aether default (off).
+  optional bool access_logs_enabled = 1;
+  // Percent (0-100) of successful requests logged; failures are always logged.
+  // Unset defaults to 100.
+  optional uint32 access_log_success_sample_rate = 2 [(buf.validate.field).uint32.lte = 100];
 
-  // OTLP gRPC collector endpoint (host:port, e.g. "otel-collector.o11y.svc:4317").
-  // Empty disables OTLP export everywhere.
-  string otlp_endpoint = 2 [(buf.validate.field).cel = {
-    id: "otlp_endpoint.hostport"
-    message: "otlp_endpoint must be empty or host:port"
-    expression: "this == '' || this.matches('^[^:/]+:[0-9]+$')"
+  // Generate/propagate W3C trace context and export proxy request spans. Unset
+  // inherits the aether default (off).
+  optional bool tracing_enabled = 3;
+  // Fraction (0.0-1.0) of requests traced by the proxy. Unset inherits the aether
+  // control-plane trace sample rate.
+  optional double trace_sample_rate = 4 [(buf.validate.field).double = {
+    gte: 0.0
+    lte: 1.0
   }];
 
   // Emit per-pod labels (source_pod/destination_pod) on the aether_stats request
-  // counter. Off by default; raises cardinality by the local pod count.
-  bool stats_emit_pod = 3;
-
-  // Per-request OTLP access logs from the data-plane proxies (proposal 014).
-  AccessLogs access_logs = 4;
-
-  // Data-plane (proxy) request tracing.
-  ProxyTracing proxy_tracing = 5;
-
-  // Control-plane (agent/registrar) span sampling and export.
-  Tracing tracing = 6;
-
-  // Control-plane application-log export over OTLP.
-  Logs logs = 7;
-}
-
-// AccessLogs configures the proxy OTLP access logger.
-message AccessLogs {
-  // Attach the OTel access logger to every HCM.
-  bool enabled = 1;
-
-  // Percent (0-100) of successful requests logged; failures (any response flag /
-  // status >= 500) are always logged. Unset defaults to 100.
-  optional uint32 success_sample_rate = 2 [(buf.validate.field).uint32.lte = 100];
-}
-
-// ProxyTracing configures data-plane request tracing.
-message ProxyTracing {
-  // Add an OpenTelemetry tracer to every proxy HCM (generate/propagate W3C trace
-  // context and export request spans).
-  bool enabled = 1;
-
-  // Fraction (0.0-1.0) of requests traced by the proxy. Keep low at high QPS.
-  // Unset defaults to 0.01.
-  optional double sample_rate = 2 [(buf.validate.field).double = {
-    gte: 0.0
-    lte: 1.0
-  }];
-}
-
-// Tracing configures control-plane span sampling/export. The TracerProvider is
-// always installed (so logs carry trace_id); this only bounds exported spans.
-message Tracing {
-  // Head-sampling ratio for control-plane traces (0.0-1.0). Unset defaults to 0.1.
-  optional double sample_rate = 1 [(buf.validate.field).double = {
-    gte: 0.0
-    lte: 1.0
-  }];
-
-  // Export spans over OTLP (requires a collector traces pipeline). Off keeps
-  // trace_id on logs without exporting spans.
-  bool export = 2;
-}
-
-// Logs configures control-plane application-log export.
-message Logs {
-  // Export the component's own application logs over OTLP, tee'd into stderr.
-  bool enabled = 1;
-}
-
-// Security is the mesh-wide security posture. Socket paths and the trust domain
-// remain per-binary flags; this carries only the mesh-wide on/off policy.
-message Security {
-  // Whether the mesh uses SPIRE for X.509 SVID management and mTLS.
-  bool spire_enabled = 1;
+  // counter (raises cardinality). Unset inherits the aether default (off).
+  optional bool emit_stats_pod = 5;
 }

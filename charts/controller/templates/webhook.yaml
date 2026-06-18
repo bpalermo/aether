@@ -12,7 +12,7 @@ Webhook serving trust. Two modes:
 {{- $svc := include "controller.webhookServiceName" . -}}
 {{- $ns := include "controller.namespace" . -}}
 {{- $caBundle := "" -}}
-{{- if not .Values.spire.enabled -}}
+{{- if not .Values.global.spire.enabled -}}
 {{- $cn := printf "%s.%s.svc" $svc $ns -}}
 {{- $altNames := list $cn (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
 {{- $secretName := printf "%s-cert" $svc -}}
@@ -65,7 +65,7 @@ webhooks:
         namespace: {{ $ns }}
         path: /validate-config-aether-io-v1-meshconfig
         port: 443
-      {{- if not .Values.spire.enabled }}
+      {{- if not .Values.global.spire.enabled }}
       caBundle: {{ $caBundle }}
       {{- end }}
     rules:

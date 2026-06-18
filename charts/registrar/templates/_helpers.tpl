@@ -72,12 +72,3 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
-
-{{/*
-Name of the MeshConfig ConfigMap, projected by the aether-controller and mounted
-by the registrar. Derived from the release name (a convention shared with the
-controller and agent charts), so the registrar carries no MeshConfig values.
-*/}}
-{{- define "registrar.meshConfigMapName" -}}
-{{- printf "%s-mesh-config" .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- end -}}

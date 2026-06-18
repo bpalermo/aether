@@ -21,25 +21,35 @@ namespace:
 # Cluster name passed to the agent (`--cluster-name`).
 clusterName: talos-main
 
-# Mesh-wide policy (mesh domain, telemetry posture, SPIRE on/off) is NOT set in
-# this chart — it lives in the MeshConfig custom resource owned by the
-# aether-controller chart, which projects it into a ConfigMap the agent mounts.
-# The agent has NO MeshConfig values; it derives the projected ConfigMap name
-# from the release name (see the agent.meshConfigMapName helper) and mounts it.
+# Aether system config — set ONCE for the whole system (registrar, agent, proxy
+# all inherit). When installed via the `aether` umbrella chart, these come from
+# the umbrella's top-level `global:` block; the defaults below apply only to a
+# standalone agent install. The proxy data plane can OVERRIDE its own access-log /
+# tracing / metrics policy via the MeshConfig CR (owned by the controller chart),
+# which the agent mounts as a release-named ConfigMap (see agent.meshConfigMapName).
 # See docs/proposals/015_mesh-config.md.
+global:
+  # DNS-style domain mesh authorities live under (<service>.<meshDomain>).
+  meshDomain: aether.internal
+  otel:
+    # Enable the OTel MeterProvider + push telemetry to the collector everywhere.
+    enabled: false
+    # OTLP gRPC collector endpoint (host:port, insecure), e.g.
+    # "otel-collector.observability.svc:4317". Empty disables OTLP export and the
+    # proxy/CNI stat sink.
+    endpoint: ""
+    # Export component application logs over OTLP (tee'd into stderr).
+    logs: false
+    # Head-sampling ratio for traces (0.0-1.0); bounds exported spans only.
+    traceSampleRate: 0.1
+    # Export spans over OTLP (needs a collector traces pipeline).
+    traceExport: false
+  spire:
+    # Enable SPIRE mTLS across the system (agent, registrar, controller webhook).
+    enabled: true
 
 # Enable verbose logging on the agent and cni-install containers (`--debug`).
 debug: true
-
-# Envoy/CNI data-plane plumbing (template-time, NOT MeshConfig and NOT a runtime
-# agent flag): the proxy bootstrap stats sink and the CNI plugin netconf push to
-# this OTLP collector. Distinct from the mesh telemetry posture in the MeshConfig
-# CR; this only wires Envoy's/the CNI plugin's own export.
-telemetry:
-  # OTLP gRPC collector endpoint (host:port, insecure), e.g.
-  # "otel-collector.observability.svc:4317". Empty disables the proxy stat sink
-  # and the CNI netconf endpoint.
-  otlpEndpoint: ""
 
 agent:
   image:
@@ -154,13 +164,14 @@ awsCredentials:
   accessKeyId: ""
   secretAccessKey: ""
 
-# SPIRE integration. When enabled, the agent:
+# SPIRE per-instance plumbing (socket paths). Whether SPIRE is ENABLED is a
+# system-wide decision in global.spire.enabled, inherited from the aether umbrella.
+# When enabled, the agent:
 #   * fetches its own X.509 SVID over the csi.spiffe.io Workload API socket for
 #     mTLS to the registrar (workloadSocketPath), and
 #   * connects to the SPIRE agent admin socket and uses the Delegated Identity
 #     API to mint SVIDs for the local Envoy proxies, serving them over SDS.
 spire:
-  enabled: true
   # SPIFFE trust domain authorized for mTLS peers. Leave empty to omit the flag
   # The SPIFFE trust domain is always meshDomain: mesh addressing
   # (<svc>.<meshDomain>) and workload identity (spiffe://<meshDomain>/...)

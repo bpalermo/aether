@@ -1,0 +1,35 @@
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+
+# aether umbrella Helm chart (published as ghcr.io/bpalermo/aether/charts/aether).
+#
+# Bundles the crds, controller, registrar and agent subcharts and sets system-wide
+# config once via `global`. See docs/proposals/015_mesh-config.md.
+#
+# Publish targets (GitHub Container Registry, OCI):
+#   bazel run //charts/aether:aether.push           # chart + subchart images
+#   bazel run //charts/aether:aether.push_registry  # chart only
+# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+helm_chart(
+    name = "aether",
+    chart = "Chart.yaml",
+    login_url = "ghcr.io",
+    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//charts/agent",
+        "//charts/controller",
+        "//charts/crds",
+        "//charts/registrar",
+    ],
+)
+
+helm_lint_test(
+    name = "aether_lint_test",
+    chart = ":aether",
+)
+
+helm_template_test(
+    name = "aether_template_test",
+    chart = ":aether",
+)

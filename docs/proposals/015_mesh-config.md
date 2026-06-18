@@ -1,10 +1,55 @@
-# Proposal: mesh-wide configuration via a proto-backed ConfigMap (+ CRD)
+# Proposal: aether system config (umbrella globals) + proxy MeshConfig CRD
 
 **Status:** Design — 2026-06-18
 **Relates:** every telemetry/security proposal that added a flag (007, 012, 013,
 014); [[project_observability_otel]], [[project_telemetry_edge_filter]]
 
-## Why
+## Final architecture (authoritative)
+
+> This section reflects what ships and supersedes the longer exploration below
+> (kept for rationale). The design landed in several steps; read this first.
+
+Aether is treated as **one system**. There are two config scopes:
+
+1. **Aether system config** — set ONCE and inherited by every component
+   (registrar, agent, proxy, controller): **OTEL** (enable, OTLP endpoint, logs,
+   trace sample rate/export), **SPIRE** (enable), and the **mesh domain**. It is
+   expressed as Helm **`global`** values in an umbrella **`aether`** chart and
+   passed to each component as flags. Enable OTEL or SPIRE once → the whole
+   system inherits it.
+2. **Proxy MeshConfig (CRD)** — the proxy data plane may **override** its own
+   observability (access logs, tracing, metrics/stats-pod). Unset fields
+   **inherit** the aether system config. This is the only thing in the
+   `MeshConfig` proto/CRD.
+
+Charts:
+
+- **`charts/aether`** (umbrella): bundles the subcharts and holds `global`
+  (otel/spire/meshDomain). One place to configure the system.
+- **`charts/crds`**: the `meshconfigs.config.aether.io` **v1** CRD, installable
+  ahead of time (`spec` is `x-kubernetes-preserve-unknown-fields`; the webhook is
+  the authoritative validator).
+- **`charts/controller`** (`aether-controller`): validating webhook
+  (protovalidate) + reconciler that projects the singleton `MeshConfig` CR into a
+  release-named ConfigMap (`<release>-mesh-config`) the **agent** mounts. Seeds
+  the default CR **once** (`lookup` + `resource-policy: keep`) so `helm upgrade`
+  never re-stamps it. Webhook serving cert is the **SPIRE SVID** when
+  `global.spire.enabled` (controller injects the trust bundle into `caBundle`),
+  else a Helm self-signed cert.
+- **`charts/agent`**, **`charts/registrar`**: consume `global` for their flags;
+  the agent additionally mounts the projected MeshConfig ConfigMap and applies the
+  proxy overrides on top of the inherited system config. The registrar (control
+  plane) does not use MeshConfig.
+
+`MeshConfig` proto (`api/aether/config/v1`): a single `proxy` message of
+**optional** fields — `access_logs_enabled`, `access_log_success_sample_rate`,
+`tracing_enabled`, `trace_sample_rate`, `emit_stats_pod` — where unset = inherit.
+`common/config.{Load,Parse}` is the one validator (YAML/JSON → protojson strict →
+protovalidate), reused at agent file-load, controller reconcile, and admission.
+
+---
+
+## Why (original exploration)
 
 Mesh-wide behavior is currently configured by a steadily growing set of CLI
 flags, fanned out by the charts into `args:` lists and mirrored field-for-field

@@ -1,0 +1,15 @@
+Aether installed as one system (release {{ .Release.Name }}).
+
+System-wide config (from .Values.global):
+  meshDomain : {{ .Values.global.meshDomain }}
+  OTEL       : enabled={{ .Values.global.otel.enabled }} endpoint={{ .Values.global.otel.endpoint | default "<none>" }}
+  SPIRE      : enabled={{ .Values.global.spire.enabled }}
+
+Subcharts: crds, controller, registrar, agent.
+
+The proxy data plane inherits the system config above; override its access-log /
+tracing / metrics policy by editing the MeshConfig CR:
+
+  kubectl edit meshconfig default
+
+See docs/proposals/015_mesh-config.md.

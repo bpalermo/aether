@@ -15,12 +15,26 @@ namespace:
 # Cluster name passed to the registrar (`--cluster-name`).
 clusterName: talos-main
 
-# Mesh-wide policy (telemetry posture, SPIRE on/off) is NOT set in this chart — it
-# lives in the MeshConfig custom resource owned by the aether-controller chart,
-# which projects it into a ConfigMap the registrar mounts. The registrar has NO
-# MeshConfig values; it derives the projected ConfigMap name from the release name
-# (see the registrar.meshConfigMapName helper) and mounts it. See
-# docs/proposals/015_mesh-config.md.
+# Aether system config — set ONCE for the whole system and inherited by every
+# component. Via the `aether` umbrella chart these come from the umbrella's
+# top-level `global:` block; the defaults below apply only to a standalone
+# registrar install. MeshConfig (proxy observability) does not apply to the
+# registrar. See docs/proposals/015_mesh-config.md.
+global:
+  otel:
+    # Enable the OTel MeterProvider + push telemetry to the collector everywhere.
+    enabled: false
+    # OTLP gRPC collector endpoint (host:port, insecure). Empty disables export.
+    endpoint: ""
+    # Export component application logs over OTLP (tee'd into stderr).
+    logs: false
+    # Head-sampling ratio for traces (0.0-1.0); bounds exported spans only.
+    traceSampleRate: 0.1
+    # Export spans over OTLP (needs a collector traces pipeline).
+    traceExport: false
+  spire:
+    # Enable SPIRE mTLS across the system.
+    enabled: true
 
 # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
 registryBackend: kubernetes
@@ -69,7 +83,6 @@ service:
 # Workload API socket is mounted and the registrar fetches its X.509 SVID over it
 # (no certificate files / sidecar needed).
 spire:
-  enabled: true
   # SPIFFE trust domain authorized for mTLS peers. Leave empty to omit the flag
   # and let the binary default (ROOTCA) authorize any peer chaining to the SPIRE
   # root CA; set e.g. "aether.internal" to restrict peers to that trust domain.

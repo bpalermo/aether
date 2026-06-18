@@ -23,15 +23,27 @@ spec:
           args:
             - "--debug={{ .Values.debug }}"
             - "--cluster-name={{ .Values.clusterName }}"
-            # Mesh-wide policy (telemetry, SPIRE on/off) is read from the mounted
-            # MeshConfig ConfigMap (projected from the MeshConfig CR by the
-            # aether-controller), default path /etc/aether/mesh-config.yaml.
+            # Aether system config, inherited from the umbrella global block.
+            {{- if .Values.global.otel.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.global.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.global.otel.logs }}
+            - "--logs-enabled=true"
+            {{- end }}
+            - "--trace-sample-rate={{ .Values.global.otel.traceSampleRate }}"
+            {{- if .Values.global.otel.traceExport }}
+            - "--trace-export=true"
+            {{- end }}
             - "--registry-backend={{ .Values.registryBackend }}"
             {{- if eq .Values.registryBackend "etcd" }}
             - "--etcd-endpoints={{ join "," .Values.etcd.endpoints }}"
             {{- end }}
             - "--grpc-address=:{{ .Values.service.targetPort }}"
-            {{- if .Values.spire.enabled }}
+            - "--spire-enabled={{ .Values.global.spire.enabled }}"
+            {{- if .Values.global.spire.enabled }}
             {{- with .Values.spire.trustDomain }}
             - "--spire-trust-domain={{ . }}"
             {{- end }}
@@ -100,27 +112,18 @@ spec:
             capabilities:
               drop:
                 - ALL
+          {{- if .Values.global.spire.enabled }}
           volumeMounts:
-            - name: mesh-config
-              mountPath: /etc/aether
-              readOnly: true
-            {{- if .Values.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
-            {{- end }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.global.spire.enabled }}
       volumes:
-        - name: mesh-config
-          # Projected from the MeshConfig CR by the aether-controller. The name is
-          # derived from the release (no chart value); the pod waits in
-          # ContainerCreating until it exists. See proposal 015.
-          configMap:
-            name: {{ include "registrar.meshConfigMapName" . }}
-        {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:
             driver: "csi.spiffe.io"
             readOnly: true
-        {{- end }}
+      {{- end }}

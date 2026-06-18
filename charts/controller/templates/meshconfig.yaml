@@ -18,10 +18,7 @@ metadata:
   annotations:
     helm.sh/resource-policy: keep
 spec:
-  meshDomain: {{ .Values.meshConfig.meshDomain | quote }}
-  telemetry:
-    {{- toYaml .Values.meshConfig.telemetry | nindent 4 }}
-  security:
-    {{- toYaml .Values.meshConfig.security | nindent 4 }}
+  proxy:
+    {{- toYaml .Values.meshConfig.proxy | nindent 4 }}
 {{- end }}
 {{- end }}

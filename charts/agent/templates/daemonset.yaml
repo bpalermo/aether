@@ -28,7 +28,7 @@ spec:
           imagePullPolicy: {{ .Values.cniInstall.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            {{- with .Values.telemetry.otlpEndpoint }}
+            {{- with .Values.global.otel.endpoint }}
             # Written into the netconf: the CNI plugin binary runs under the
             # container runtime, so the endpoint cannot reach it via pod env.
             # This is the Envoy/CNI plumbing endpoint (template-time), distinct
@@ -55,11 +55,26 @@ spec:
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
-            # Mesh-wide policy (mesh domain, telemetry, SPIRE on/off) is read from
-            # the mounted MeshConfig ConfigMap at the default path
-            # /etc/aether/mesh-config.yaml (projected from the MeshConfig CR by the
-            # aether-controller). Only per-instance flags remain here.
-            {{- if .Values.spire.enabled }}
+            # Aether system config, inherited from the umbrella global block.
+            - "--mesh-domain={{ .Values.global.meshDomain }}"
+            {{- if .Values.global.otel.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.global.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.global.otel.logs }}
+            - "--logs-enabled=true"
+            {{- end }}
+            - "--trace-sample-rate={{ .Values.global.otel.traceSampleRate }}"
+            {{- if .Values.global.otel.traceExport }}
+            - "--trace-export=true"
+            {{- end }}
+            - "--spire-enabled={{ .Values.global.spire.enabled }}"
+            # Proxy access-log / tracing / metrics overrides come from the mounted
+            # MeshConfig ConfigMap (projected from the MeshConfig CR), defaulting to
+            # the system config above.
+            {{- if .Values.global.spire.enabled }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--spire-admin-socket={{ .Values.spire.adminSocket.mountPath }}/{{ .Values.spire.adminSocket.socketName }}"
             {{- end }}
@@ -130,7 +145,7 @@ spec:
                 - ALL
               add:
                 - NET_ADMIN
-                {{- if .Values.spire.enabled }}
+                {{- if .Values.global.spire.enabled }}
                 # Access the SPIRE agent admin socket (owned by the spire-agent
                 # uid) from this root-but-capability-dropped container.
                 - DAC_OVERRIDE
@@ -153,7 +168,7 @@ spec:
             - name: mesh-config
               mountPath: /etc/aether
               readOnly: true
-            {{- if .Values.spire.enabled }}
+            {{- if .Values.global.spire.enabled }}
             - name: spire-workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
@@ -202,7 +217,7 @@ spec:
           # ContainerCreating until it exists. See proposal 015.
           configMap:
             name: {{ include "agent.meshConfigMapName" . }}
-        {{- if .Values.spire.enabled }}
+        {{- if .Values.global.spire.enabled }}
         - name: spire-workload-socket
           csi:
             driver: csi.spiffe.io

@@ -24,7 +24,21 @@ spec:
           args:
             - "--debug={{ .Values.debug }}"
             - "--mesh-config-configmap={{ include "controller.meshConfigMapName" . }}"
-            {{- if .Values.spire.enabled }}
+            # Aether system config, inherited from the umbrella global block.
+            {{- if .Values.global.otel.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.global.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.global.otel.logs }}
+            - "--logs-enabled=true"
+            {{- end }}
+            - "--trace-sample-rate={{ .Values.global.otel.traceSampleRate }}"
+            {{- if .Values.global.otel.traceExport }}
+            - "--trace-export=true"
+            {{- end }}
+            {{- if .Values.global.spire.enabled }}
             - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--webhook-config-name={{ include "controller.clusterScopedName" . }}"
@@ -82,7 +96,7 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            {{- if .Values.spire.enabled }}
+            {{- if .Values.global.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
@@ -94,7 +108,7 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
-        {{- if .Values.spire.enabled }}
+        {{- if .Values.global.spire.enabled }}
         - name: workload-socket
           csi:
             driver: "csi.spiffe.io"

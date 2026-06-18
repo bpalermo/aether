@@ -98,9 +98,13 @@ func GetCommand() *cobra.Command {
 func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
-	// Mesh-wide policy (mesh domain, telemetry, SPIRE on/off) comes from the
-	// MeshConfig ConfigMap, not flags.
-	rootCmd.Flags().StringVar(&cfg.MeshConfigPath, "mesh-config", cfg.MeshConfigPath, "Path to the mounted MeshConfig YAML (ConfigMap) with mesh-wide policy")
+	// Aether system config (OTEL enable/endpoint via manager.RegisterFlags, mesh
+	// domain, SPIRE on/off) is inherited from the aether umbrella chart's globals
+	// as flags. The proxy data plane can override its own observability via the
+	// MeshConfig ConfigMap.
+	rootCmd.Flags().StringVar(&cfg.MeshConfigPath, "mesh-config", cfg.MeshConfigPath, "Path to the mounted proxy MeshConfig YAML (ConfigMap) with proxy observability overrides")
+	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
+	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE integration for X.509 SVID management and mTLS")
 
 	// Kubernetes and cluster identity (required)
 	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name where the agent runs (required)")
@@ -113,7 +117,7 @@ func init() {
 	// Registrar configuration
 	rootCmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
 
-	// SPIRE socket paths (per-instance; the SPIRE on/off policy is mesh-wide).
+	// SPIRE socket paths (per-instance; the SPIRE on/off policy is system-wide).
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
 
@@ -123,20 +127,27 @@ func init() {
 	must.NoError(rootCmd.MarkFlagRequired("proxy-id"))
 }
 
-// applyMeshConfig copies the mesh-wide policy from a loaded MeshConfig onto the
-// agent config. Per-instance fields (identity, sockets, addresses) are untouched.
+// applyMeshConfig applies the proxy observability overrides from the MeshConfig
+// onto the agent config. Unset overrides inherit the aether system config: the
+// enable toggles default off, the trace sample rate inherits --trace-sample-rate,
+// and the access-log success sample rate defaults to 100. System config (mesh
+// domain, OTEL, SPIRE) comes from flags and is not touched here.
 func applyMeshConfig(mc *configv1.MeshConfig) {
-	cfg.MeshDomain = mc.GetMeshDomain()
+	p := mc.GetProxy()
 
-	t := mc.GetTelemetry()
-	manager.ApplyTelemetry(&cfg.Config, t)
-	cfg.EmitStatsPod = t.GetStatsEmitPod()
-	cfg.AccessLogsEnabled = t.GetAccessLogs().GetEnabled()
-	cfg.AccessLogSuccessSampleRate = t.GetAccessLogs().GetSuccessSampleRate()
-	cfg.ProxyTracingEnabled = t.GetProxyTracing().GetEnabled()
-	cfg.ProxyTraceSampleRate = t.GetProxyTracing().GetSampleRate()
+	cfg.AccessLogsEnabled = p.GetAccessLogsEnabled()
+	cfg.AccessLogSuccessSampleRate = 100
+	if p != nil && p.AccessLogSuccessSampleRate != nil {
+		cfg.AccessLogSuccessSampleRate = p.GetAccessLogSuccessSampleRate()
+	}
 
-	cfg.SpireEnabled = mc.GetSecurity().GetSpireEnabled()
+	cfg.ProxyTracingEnabled = p.GetTracingEnabled()
+	cfg.ProxyTraceSampleRate = cfg.TraceSampleRate // inherit the aether trace rate
+	if p != nil && p.TraceSampleRate != nil {
+		cfg.ProxyTraceSampleRate = p.GetTraceSampleRate()
+	}
+
+	cfg.EmitStatsPod = p.GetEmitStatsPod()
 }
 
 // runAgent initializes and runs the Aether agent. It sets up the controller-runtime Manager,

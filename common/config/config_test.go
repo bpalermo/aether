@@ -7,94 +7,55 @@ import (
 
 func TestParse_Valid(t *testing.T) {
 	doc := []byte(`
-meshDomain: aether.internal
-telemetry:
-  enabled: true
-  otlpEndpoint: otel-collector.o11y.svc:4317
-  statsEmitPod: true
-  accessLogs:
-    enabled: true
-    successSampleRate: 25
-  proxyTracing:
-    enabled: true
-    sampleRate: 0.5
-  tracing:
-    sampleRate: 0.2
-    export: true
-  logs:
-    enabled: true
-security:
-  spireEnabled: true
+proxy:
+  accessLogsEnabled: true
+  accessLogSuccessSampleRate: 25
+  tracingEnabled: true
+  traceSampleRate: 0.5
+  emitStatsPod: true
 `)
 
 	cfg, err := Parse(doc)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-
-	if got := cfg.GetMeshDomain(); got != "aether.internal" {
-		t.Errorf("meshDomain = %q, want aether.internal", got)
+	p := cfg.GetProxy()
+	if !p.GetAccessLogsEnabled() {
+		t.Error("accessLogsEnabled = false, want true")
 	}
-	if !cfg.GetTelemetry().GetEnabled() {
-		t.Error("telemetry.enabled = false, want true")
+	if got := p.GetAccessLogSuccessSampleRate(); got != 25 {
+		t.Errorf("accessLogSuccessSampleRate = %d, want 25", got)
 	}
-	if got := cfg.GetTelemetry().GetOtlpEndpoint(); got != "otel-collector.o11y.svc:4317" {
-		t.Errorf("otlpEndpoint = %q", got)
+	if got := p.GetTraceSampleRate(); got != 0.5 {
+		t.Errorf("traceSampleRate = %v, want 0.5", got)
 	}
-	if got := cfg.GetTelemetry().GetAccessLogs().GetSuccessSampleRate(); got != 25 {
-		t.Errorf("successSampleRate = %d, want 25", got)
-	}
-	if got := cfg.GetTelemetry().GetProxyTracing().GetSampleRate(); got != 0.5 {
-		t.Errorf("proxyTracing.sampleRate = %v, want 0.5", got)
-	}
-	if !cfg.GetSecurity().GetSpireEnabled() {
-		t.Error("security.spireEnabled = false, want true")
+	if !p.GetEmitStatsPod() {
+		t.Error("emitStatsPod = false, want true")
 	}
 }
 
-func TestParse_Defaults(t *testing.T) {
-	// Sub-messages present but rate/percent fields unset -> historical defaults.
-	doc := []byte(`
-meshDomain: aether.internal
-telemetry:
-  accessLogs:
-    enabled: true
-  proxyTracing:
-    enabled: true
-  tracing:
-    export: false
-`)
-
-	cfg, err := Parse(doc)
+func TestParse_Empty(t *testing.T) {
+	// An empty doc is valid: the proxy inherits everything from the aether config.
+	cfg, err := Parse([]byte("{}"))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if got := cfg.GetTelemetry().GetAccessLogs().GetSuccessSampleRate(); got != 100 {
-		t.Errorf("default successSampleRate = %d, want 100", got)
-	}
-	if got := cfg.GetTelemetry().GetProxyTracing().GetSampleRate(); got != 0.01 {
-		t.Errorf("default proxyTracing.sampleRate = %v, want 0.01", got)
-	}
-	if got := cfg.GetTelemetry().GetTracing().GetSampleRate(); got != 0.1 {
-		t.Errorf("default tracing.sampleRate = %v, want 0.1", got)
+	if cfg.GetProxy() != nil {
+		t.Errorf("expected nil proxy override, got %v", cfg.GetProxy())
 	}
 }
 
-func TestParse_ExplicitZeroPreserved(t *testing.T) {
-	// An explicit 0 must NOT be overwritten by the default.
-	doc := []byte(`
-meshDomain: aether.internal
-telemetry:
-  proxyTracing:
-    enabled: true
-    sampleRate: 0
-`)
-	cfg, err := Parse(doc)
+func TestParse_PresenceDistinguished(t *testing.T) {
+	// An explicit false must be distinguishable from unset (optional fields).
+	cfg, err := Parse([]byte("proxy:\n  tracingEnabled: false\n"))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if got := cfg.GetTelemetry().GetProxyTracing().GetSampleRate(); got != 0 {
-		t.Errorf("explicit sampleRate = %v, want 0", got)
+	if cfg.GetProxy().TracingEnabled == nil {
+		t.Fatal("tracingEnabled should be present (explicit false), got nil")
+	}
+	if cfg.GetProxy().GetTracingEnabled() {
+		t.Error("tracingEnabled = true, want explicit false")
 	}
 }
 
@@ -105,33 +66,18 @@ func TestParse_Errors(t *testing.T) {
 		want string
 	}{
 		{
-			name: "missing mesh domain",
-			doc:  "telemetry:\n  enabled: true\n",
-			want: "validation",
-		},
-		{
-			name: "invalid mesh domain",
-			doc:  "meshDomain: not a hostname!\n",
-			want: "validation",
-		},
-		{
 			name: "unknown field",
-			doc:  "meshDomain: aether.internal\nbogusKey: 1\n",
+			doc:  "proxy:\n  bogusKey: 1\n",
 			want: "MeshConfig schema",
 		},
 		{
 			name: "percent over 100",
-			doc:  "meshDomain: aether.internal\ntelemetry:\n  accessLogs:\n    successSampleRate: 101\n",
+			doc:  "proxy:\n  accessLogSuccessSampleRate: 101\n",
 			want: "validation",
 		},
 		{
 			name: "sample rate over 1",
-			doc:  "meshDomain: aether.internal\ntelemetry:\n  proxyTracing:\n    sampleRate: 1.5\n",
-			want: "validation",
-		},
-		{
-			name: "otlp endpoint without port",
-			doc:  "meshDomain: aether.internal\ntelemetry:\n  otlpEndpoint: justahost\n",
+			doc:  "proxy:\n  traceSampleRate: 1.5\n",
 			want: "validation",
 		},
 		{
