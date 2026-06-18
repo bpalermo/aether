@@ -71,6 +71,9 @@ spec:
             - "--tracing-enabled=true"
             - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"
             {{- end }}
+            {{- if .Values.telemetry.logs.enabled }}
+            - "--logs-enabled=true"
+            {{- end }}
             - "--spire-enabled={{ .Values.spire.enabled }}"
             {{- if .Values.spire.enabled }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
@@ -119,6 +122,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Stamped onto every OTel signal (metrics/traces/logs) via
+            # resource.WithFromEnv(), so logs are filterable per node/pod in
+            # VictoriaLogs. Refs the env vars defined above ($(VAR) expansion).
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.node.name=$(NODE_NAME),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

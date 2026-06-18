@@ -61,7 +61,8 @@ var Version = "dev"
 var (
 	cfg = NewAgentConfig()
 
-	l logr.Logger
+	l           logr.Logger
+	logShutdown func(context.Context) error
 )
 
 var rootCmd = &cobra.Command{
@@ -69,8 +70,9 @@ var rootCmd = &cobra.Command{
 	Short:        "Runs the aether node agent.",
 	Long:         "Runs the Aether agent on a Kubernetes node to manage an Envoy xDS control plane and transparent traffic interception via CNI.",
 	SilenceUsage: true,
-	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-		l = manager.SetupLogging(cfg.Debug, cmd.Name())
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) (err error) {
+		l, logShutdown, err = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
+		return err
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runAgent(cmd.Context())
@@ -125,6 +127,17 @@ func runAgent(ctx context.Context) (retErr error) {
 		"metricsEnabled", cfg.MetricsEnabled,
 		"otelEnabled", cfg.OTelEnabled,
 	)
+
+	// Flush and stop the OTLP log exporter last (registered first → runs last),
+	// so records emitted during the rest of shutdown are still exported. No-op
+	// when OTLP logging is disabled.
+	if logShutdown != nil {
+		defer func() {
+			if shutdownErr := logShutdown(ctx); shutdownErr != nil {
+				l.Error(shutdownErr, "failed to flush OTel logs")
+			}
+		}()
+	}
 
 	// Scope the manager's Pod informer to this node: the agent only ever reads
 	// (CNI ADD enrichment) and watches (termination drain) its own node's pods,

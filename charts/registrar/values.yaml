@@ -27,6 +27,11 @@ telemetry:
     enabled: false
     # Head-sampling ratio for traces (`--trace-sample-rate`).
     sampleRate: 0.1
+  logs:
+    # Export the registrar's own application logs over OTLP to the collector
+    # (`--logs-enabled`), tee'd into stderr (kubectl logs is unchanged).
+    # Requires otlpEndpoint. Off by default.
+    enabled: false
 
 # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
 registryBackend: kubernetes

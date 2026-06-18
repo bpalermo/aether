@@ -12,6 +12,7 @@ package log
 
 import (
 	"github.com/go-logr/logr"
+	zapraw "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -56,9 +57,22 @@ func DefaultOptions() zap.Options {
 // it logs at info level. Returns a logr.Logger interface compatible with
 // controller-runtime components.
 func NewLogger(debug bool) logr.Logger {
+	return NewLoggerWithCore(debug, nil)
+}
+
+// NewLoggerWithCore is like NewLogger but, when extra is non-nil, tees every log
+// record to that additional zapcore.Core in addition to the default stderr JSON
+// core. This is how the OTel logs bridge (otelzap) is attached: stderr logging
+// (kubectl logs) is unchanged and the same records are also exported over OTLP.
+func NewLoggerWithCore(debug bool, extra zapcore.Core) logr.Logger {
 	opts := DefaultOptions()
 	if debug {
 		opts.Level = zapcore.DebugLevel
+	}
+	if extra != nil {
+		opts.ZapOpts = append(opts.ZapOpts, zapraw.WrapCore(func(c zapcore.Core) zapcore.Core {
+			return zapcore.NewTee(c, extra)
+		}))
 	}
 	return zap.New(zap.UseFlagOptions(&opts))
 }
