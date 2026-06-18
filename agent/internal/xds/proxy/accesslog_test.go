@@ -44,11 +44,24 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 	assert.Equal(t, defaultCollectorName, cfg.GetGrpcService().GetEnvoyGrpc().GetClusterName())
 	assert.Equal(t, accessLogName, cfg.GetLogName())
 
-	var reporter string
+	attrs := map[string]string{}
 	for _, kv := range cfg.GetAttributes().GetValues() {
-		if kv.GetKey() == "reporter" {
-			reporter = kv.GetValue().GetStringValue()
-		}
+		attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
 	}
-	assert.Equal(t, ReporterDestination, reporter)
+	assert.Equal(t, ReporterDestination, attrs["reporter"])
+
+	// The full Istio default field set plus the W3C traceparent must be present as
+	// structured attributes.
+	for _, key := range []string{
+		"start_time", "method", "path", "protocol", "response_code", "response_flags",
+		"response_code_details", "connection_termination_details",
+		"upstream_transport_failure_reason", "bytes_received", "bytes_sent", "duration_ms",
+		"upstream_service_time", "x_forwarded_for", "user_agent", "x_request_id",
+		"authority", "upstream_host", "upstream_cluster", "upstream_local_address",
+		"downstream_local_address", "downstream_remote_address", "requested_server_name",
+		"route_name", "traceparent", "source_netns",
+	} {
+		assert.Contains(t, attrs, key, "missing access-log attribute %q", key)
+	}
+	assert.Equal(t, "%REQ(TRACEPARENT)%", attrs["traceparent"])
 }

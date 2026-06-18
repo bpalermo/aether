@@ -74,23 +74,41 @@ func buildAccessLog(reporter string) []*accesslogv3.AccessLog {
 				EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: cluster},
 			},
 		},
-		// Human-readable line; structured fields go in attributes for querying.
-		Body: stringValue("%RESPONSE_CODE% %RESPONSE_FLAGS% %REQ(:METHOD)% %REQ(:AUTHORITY)%%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %DURATION%ms -> %UPSTREAM_HOST%"),
+		// Human-readable line: Envoy/Istio's default access-log text format, so the
+		// _msg is the familiar one-liner. Structured fields go in attributes for
+		// querying. Absent operators render as "-" (the OTel logger has no
+		// omit-empty), matching Istio.
+		Body: stringValue(`[%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% %CONNECTION_TERMINATION_DETAILS% "%UPSTREAM_TRANSPORT_FAILURE_REASON%" %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%" "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%" %UPSTREAM_CLUSTER_RAW% %UPSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_REMOTE_ADDRESS% %REQUESTED_SERVER_NAME% %ROUTE_NAME%`),
+		// Full Istio default field set as structured attributes, plus aether's
+		// reporter/source_netns and the W3C traceparent (populates once the mesh
+		// propagates trace context; "-" until then).
 		Attributes: &otlpcommonv1.KeyValueList{Values: []*otlpcommonv1.KeyValue{
 			kv("reporter", reporter),
-			kv("response_code", "%RESPONSE_CODE%"),
-			kv("response_flags", "%RESPONSE_FLAGS%"),
+			kv("start_time", "%START_TIME%"),
 			kv("method", "%REQ(:METHOD)%"),
-			kv("authority", "%REQ(:AUTHORITY)%"),
 			kv("path", "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"),
 			kv("protocol", "%PROTOCOL%"),
+			kv("response_code", "%RESPONSE_CODE%"),
+			kv("response_flags", "%RESPONSE_FLAGS%"),
+			kv("response_code_details", "%RESPONSE_CODE_DETAILS%"),
+			kv("connection_termination_details", "%CONNECTION_TERMINATION_DETAILS%"),
+			kv("upstream_transport_failure_reason", "%UPSTREAM_TRANSPORT_FAILURE_REASON%"),
+			kv("bytes_received", "%BYTES_RECEIVED%"),
+			kv("bytes_sent", "%BYTES_SENT%"),
 			kv("duration_ms", "%DURATION%"),
 			kv("upstream_service_time", "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"),
-			kv("bytes_sent", "%BYTES_SENT%"),
-			kv("bytes_received", "%BYTES_RECEIVED%"),
+			kv("x_forwarded_for", "%REQ(X-FORWARDED-FOR)%"),
+			kv("user_agent", "%REQ(USER-AGENT)%"),
+			kv("x_request_id", "%REQ(X-REQUEST-ID)%"),
+			kv("authority", "%REQ(:AUTHORITY)%"),
 			kv("upstream_host", "%UPSTREAM_HOST%"),
 			kv("upstream_cluster", "%UPSTREAM_CLUSTER%"),
-			kv("x_request_id", "%REQ(X-REQUEST-ID)%"),
+			kv("upstream_local_address", "%UPSTREAM_LOCAL_ADDRESS%"),
+			kv("downstream_local_address", "%DOWNSTREAM_LOCAL_ADDRESS%"),
+			kv("downstream_remote_address", "%DOWNSTREAM_REMOTE_ADDRESS%"),
+			kv("requested_server_name", "%REQUESTED_SERVER_NAME%"),
+			kv("route_name", "%ROUTE_NAME%"),
+			kv("traceparent", "%REQ(TRACEPARENT)%"),
 			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
 		}},
 	}
