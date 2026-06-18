@@ -28,7 +28,7 @@ spec:
           imagePullPolicy: {{ .Values.cniInstall.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            {{- with .Values.meshConfig.telemetry.otlpEndpoint }}
+            {{- with .Values.telemetry.otlpEndpoint }}
             # Written into the netconf: the CNI plugin binary runs under the
             # container runtime, so the endpoint cannot reach it via pod env.
             # This is the Envoy/CNI plumbing endpoint (template-time), distinct
@@ -197,11 +197,11 @@ spec:
         - name: tmp
           emptyDir: {}
         - name: mesh-config
-          # Projected from the MeshConfig CR by the registrar's controller
-          # (config.aether.io). The pod stays in ContainerCreating until it
-          # exists — no Helm-rendered ConfigMap. See proposal 015.
+          # Projected from the MeshConfig CR by the aether-controller. The name is
+          # derived from the release (no chart value); the pod stays in
+          # ContainerCreating until it exists. See proposal 015.
           configMap:
-            name: {{ .Values.meshConfig.configMapName }}
+            name: {{ include "agent.meshConfigMapName" . }}
         {{- if .Values.spire.enabled }}
         - name: spire-workload-socket
           csi:

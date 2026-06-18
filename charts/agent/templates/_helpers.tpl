@@ -122,3 +122,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
+
+{{/*
+Name of the MeshConfig ConfigMap, projected by the aether-controller and mounted
+by the agent. Derived from the release name (a convention shared with the
+controller and registrar charts), so the agent carries no MeshConfig values.
+*/}}
+{{- define "agent.meshConfigMapName" -}}
+{{- printf "%s-mesh-config" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}

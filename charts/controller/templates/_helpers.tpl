@@ -77,3 +77,12 @@ Webhook serving Service name.
 {{- define "controller.webhookServiceName" -}}
 {{- printf "%s-webhook" (include "controller.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+
+{{/*
+Name of the MeshConfig ConfigMap the controller projects into. Derived from the
+release name (a convention shared with the agent and registrar charts), so the
+name never needs to be kept in sync as a value across charts.
+*/}}
+{{- define "controller.meshConfigMapName" -}}
+{{- printf "%s-mesh-config" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}

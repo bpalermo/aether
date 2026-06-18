@@ -50,9 +50,9 @@ spire:
 # ConfigMap the agent and registrar mount; it also reads the CR for its own
 # telemetry. See docs/proposals/015_mesh-config.md.
 meshConfig:
-  # Name of the projected ConfigMap. Must match the agent/registrar charts'
-  # meshConfig.configMapName, in the same namespace.
-  configMapName: aether-mesh-config
+  # The projected ConfigMap name is derived from the release name (see the
+  # controller.meshConfigMapName helper), matching what the agent and registrar
+  # charts mount — there is no name value to keep in sync.
 
   # Seed the singleton MeshConfig CR (name "default") on first install only. The
   # CR is created once and NEVER overwritten on upgrade (lookup-skip + Helm

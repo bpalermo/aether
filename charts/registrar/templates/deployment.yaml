@@ -113,10 +113,11 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: mesh-config
-          # Projected from the MeshConfig CR by the aether-controller. The pod
-          # waits in ContainerCreating until it exists. See proposal 015.
+          # Projected from the MeshConfig CR by the aether-controller. The name is
+          # derived from the release (no chart value); the pod waits in
+          # ContainerCreating until it exists. See proposal 015.
           configMap:
-            name: {{ .Values.meshConfig.configMapName }}
+            name: {{ include "registrar.meshConfigMapName" . }}
         {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:

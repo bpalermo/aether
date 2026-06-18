@@ -23,7 +23,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            - "--mesh-config-configmap={{ .Values.meshConfig.configMapName }}"
+            - "--mesh-config-configmap={{ include "controller.meshConfigMapName" . }}"
             {{- if .Values.spire.enabled }}
             - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"

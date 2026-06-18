@@ -32,7 +32,7 @@ data:
           message: "%j"
 {{- end }}
 
-{{- if .Values.meshConfig.telemetry.otlpEndpoint }}
+{{- if .Values.telemetry.otlpEndpoint }}
     # Push Envoy stats to the OTel collector over OTLP. Push-first like the
     # rest of the mesh telemetry: the admin /stats endpoint renders on Envoy's
     # MAIN thread (100-500ms at scale), so it must never be scraped — the sink
@@ -301,8 +301,8 @@ data:
                 initial_stream_window_size: 1048576    # 1 MiB
                 initial_connection_window_size: 1048576 # 1 MiB
                 max_concurrent_streams: 10
-{{- if .Values.meshConfig.telemetry.otlpEndpoint }}
-{{- $otlp := splitList ":" .Values.meshConfig.telemetry.otlpEndpoint }}
+{{- if .Values.telemetry.otlpEndpoint }}
+{{- $otlp := splitList ":" .Values.telemetry.otlpEndpoint }}
       - name: otel_collector
         type: STRICT_DNS
         connect_timeout: 2s

@@ -21,27 +21,25 @@ namespace:
 # Cluster name passed to the agent (`--cluster-name`).
 clusterName: talos-main
 
-# Mesh-wide policy (mesh domain, telemetry posture, SPIRE on/off) is NO LONGER
-# set here — it lives in the MeshConfig custom resource owned by the
+# Mesh-wide policy (mesh domain, telemetry posture, SPIRE on/off) is NOT set in
+# this chart — it lives in the MeshConfig custom resource owned by the
 # aether-controller chart, which projects it into a ConfigMap the agent mounts.
+# The agent has NO MeshConfig values; it derives the projected ConfigMap name
+# from the release name (see the agent.meshConfigMapName helper) and mounts it.
 # See docs/proposals/015_mesh-config.md.
-meshConfig:
-  # Name of the ConfigMap the aether-controller projects the MeshConfig CR into
-  # and that the agent mounts at /etc/aether. Must match the controller chart's
-  # meshConfig.configMapName (and share the agent's namespace).
-  configMapName: aether-mesh-config
-  # Envoy/CNI data-plane plumbing (template-time, NOT a runtime agent flag): the
-  # proxy bootstrap stats sink and the CNI plugin netconf push to this OTLP
-  # collector. The agent's OWN runtime OTLP posture lives in the MeshConfig CR;
-  # keep this consistent with that CR's telemetry.otlpEndpoint.
-  telemetry:
-    # OTLP gRPC collector endpoint (host:port, insecure), e.g.
-    # "otel-collector.observability.svc:4317". Empty disables the proxy stat sink
-    # and the CNI netconf endpoint.
-    otlpEndpoint: ""
 
 # Enable verbose logging on the agent and cni-install containers (`--debug`).
 debug: true
+
+# Envoy/CNI data-plane plumbing (template-time, NOT MeshConfig and NOT a runtime
+# agent flag): the proxy bootstrap stats sink and the CNI plugin netconf push to
+# this OTLP collector. Distinct from the mesh telemetry posture in the MeshConfig
+# CR; this only wires Envoy's/the CNI plugin's own export.
+telemetry:
+  # OTLP gRPC collector endpoint (host:port, insecure), e.g.
+  # "otel-collector.observability.svc:4317". Empty disables the proxy stat sink
+  # and the CNI netconf endpoint.
+  otlpEndpoint: ""
 
 agent:
   image:
