@@ -37,7 +37,6 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
-        "@com_github_envoyproxy_go_control_plane_envoy//extensions/access_loggers/grpc/v3:grpc",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/access_loggers/open_telemetry/v3:open_telemetry",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/common/set_filter_state/v3:set_filter_state",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",

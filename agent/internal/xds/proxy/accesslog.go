@@ -4,18 +4,26 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	grpcaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	otelaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/open_telemetry/v3"
+	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	otlpcommonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 )
 
 const (
-	accessLogName        = "aether_access"
+	accessLogName        = "aether_access_logs"
 	accessLogStatusKey   = "aether.access_log.min_status"
 	accessLogSampleKey   = "aether.access_log.sample"
 	accessLogMinStatus   = 500
 	defaultCollectorName = "otel_collector"
+
+	// meshProbePathPrefix is the reserved path prefix for the in-mesh
+	// liveness/readiness probes (MeshLivePath, MeshReadyPath). Both the inbound
+	// health_check filters and the egress local-reply liveness route answer
+	// these; the access-log filter drops them so probe traffic never reaches
+	// VictoriaLogs. No real service path uses this prefix.
+	meshProbePathPrefix = "/-/-/"
 
 	// ReporterSource/ReporterDestination tag an access log entry with the hop that
 	// emitted it (egress client side vs per-pod inbound server side), mirroring the
@@ -58,14 +66,13 @@ func buildAccessLog(reporter string) []*accesslogv3.AccessLog {
 	}
 
 	otelCfg := &otelaccesslogv3.OpenTelemetryAccessLogConfig{
-		CommonConfig: &grpcaccesslogv3.CommonGrpcAccessLogConfig{
-			LogName: accessLogName,
-			GrpcService: &corev3.GrpcService{
-				TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-					EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: cluster},
-				},
+		// GrpcService + LogName are the current fields; the older common_config
+		// (CommonGrpcAccessLogConfig) wrapper is deprecated. Transport is V3 only.
+		LogName: accessLogName,
+		GrpcService: &corev3.GrpcService{
+			TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
+				EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: cluster},
 			},
-			TransportApiVersion: corev3.ApiVersion_V3,
 		},
 		// Human-readable line; structured fields go in attributes for querying.
 		Body: stringValue("%RESPONSE_CODE% %RESPONSE_FLAGS% %REQ(:METHOD)% %REQ(:AUTHORITY)%%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %DURATION%ms -> %UPSTREAM_HOST%"),
@@ -95,9 +102,59 @@ func buildAccessLog(reporter string) []*accesslogv3.AccessLog {
 	}}
 }
 
-// accessLogFilter logs every failure (any response flag OR status >= 500) plus a
-// SuccessSampleRate% sample of everything else.
+// accessLogFilter keeps a log entry only when it is NOT a health/liveness probe
+// AND it is log-worthy (a failure, or part of the success sample). Health checks
+// are dropped unconditionally — including failing ones — so probe traffic
+// (proposal 013 mesh prober + inbound live/ready) never reaches VictoriaLogs.
 func accessLogFilter() *accesslogv3.AccessLogFilter {
+	return &accesslogv3.AccessLogFilter{
+		FilterSpecifier: &accesslogv3.AccessLogFilter_AndFilter{
+			AndFilter: &accesslogv3.AndFilter{
+				Filters: []*accesslogv3.AccessLogFilter{
+					notHealthCheckFilter(),
+					notProbePathFilter(),
+					logWorthyFilter(),
+				},
+			},
+		},
+	}
+}
+
+// notHealthCheckFilter drops requests Envoy marked as health checks — the inbound
+// live/ready HTTP health_check filters and the per-pod health gateway. The egress
+// liveness route is a local-reply (not health_check-marked), so notProbePathFilter
+// covers it by path.
+func notHealthCheckFilter() *accesslogv3.AccessLogFilter {
+	return &accesslogv3.AccessLogFilter{
+		FilterSpecifier: &accesslogv3.AccessLogFilter_NotHealthCheckFilter{
+			NotHealthCheckFilter: &accesslogv3.NotHealthCheckFilter{},
+		},
+	}
+}
+
+// notProbePathFilter drops any request whose :path is under the reserved mesh
+// probe prefix (MeshLivePath/MeshReadyPath), regardless of how it was answered.
+func notProbePathFilter() *accesslogv3.AccessLogFilter {
+	return &accesslogv3.AccessLogFilter{
+		FilterSpecifier: &accesslogv3.AccessLogFilter_HeaderFilter{
+			HeaderFilter: &accesslogv3.HeaderFilter{
+				Header: &routev3.HeaderMatcher{
+					Name: ":path",
+					HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
+						StringMatch: &matcherv3.StringMatcher{
+							MatchPattern: &matcherv3.StringMatcher_Prefix{Prefix: meshProbePathPrefix},
+						},
+					},
+					InvertMatch: true,
+				},
+			},
+		},
+	}
+}
+
+// logWorthyFilter logs every failure (any response flag OR status >= 500) plus a
+// SuccessSampleRate% sample of everything else.
+func logWorthyFilter() *accesslogv3.AccessLogFilter {
 	return &accesslogv3.AccessLogFilter{
 		FilterSpecifier: &accesslogv3.AccessLogFilter_OrFilter{
 			OrFilter: &accesslogv3.OrFilter{
