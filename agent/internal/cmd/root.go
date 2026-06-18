@@ -104,6 +104,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.EmitStatsPod, "stats-emit-pod", cfg.EmitStatsPod, "emit per-pod labels (source_pod/destination_pod) on the aether_stats request counter (raises cardinality)")
 	rootCmd.Flags().BoolVar(&cfg.AccessLogsEnabled, "access-logs-enabled", cfg.AccessLogsEnabled, "attach the OTel access logger to every HCM, pushing per-request OTLP logs to the collector (proposal 014)")
 	rootCmd.Flags().Uint32Var(&cfg.AccessLogSuccessSampleRate, "access-log-success-sample-rate", 100, "percent (0-100) of successful requests logged; failures are always logged")
+	rootCmd.Flags().BoolVar(&cfg.ProxyTracingEnabled, "proxy-tracing-enabled", cfg.ProxyTracingEnabled, "add an OpenTelemetry tracer to every proxy HCM so the data plane generates/propagates W3C trace context and exports spans")
+	rootCmd.Flags().Float64Var(&cfg.ProxyTraceSampleRate, "proxy-trace-sample-rate", 0.01, "fraction (0.0-1.0) of requests traced by the proxy; keep low at high QPS")
 
 	// SPIRE and security configuration
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", true, "Whether to enable SPIRE integration for X.509 SVID management and mTLS")
@@ -204,6 +206,11 @@ func runAgent(ctx context.Context) (retErr error) {
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
 		Enabled:           cfg.AccessLogsEnabled,
 		SuccessSampleRate: cfg.AccessLogSuccessSampleRate,
+	})
+	// Global proxy data-plane tracing config, likewise set once up front.
+	proxy.SetTracingConfig(proxy.TracingConfig{
+		Enabled:    cfg.ProxyTracingEnabled,
+		SampleRate: cfg.ProxyTraceSampleRate,
 	})
 
 	// Tracks Envoy's delta-xDS ACK/NACKs so the CNI server can confirm (and

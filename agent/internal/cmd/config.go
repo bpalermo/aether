@@ -41,6 +41,13 @@ type AgentConfig struct {
 	// logged; failures (any response flag / status >= 500) are always logged.
 	AccessLogSuccessSampleRate uint32
 
+	// ProxyTracingEnabled adds an OpenTelemetry tracer to every proxy HCM so the
+	// data plane generates/propagates W3C trace context and exports spans.
+	ProxyTracingEnabled bool
+	// ProxyTraceSampleRate is the fraction (0.0-1.0) of requests traced. Keep low
+	// at high data-plane QPS.
+	ProxyTraceSampleRate float64
+
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
 	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
