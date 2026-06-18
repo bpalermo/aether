@@ -93,7 +93,13 @@ func NewLoggerWithHandler(debug bool, extra slog.Handler) *slog.Logger {
 }
 
 // Named returns a child logger tagged with a component name under the "logger"
-// field, replacing logr's WithName. Nested naming keeps the most recent name.
+// field, replacing logr's WithName. Naming is hierarchical and dot-joined
+// (e.g. "aether-agent" then "cache" -> "aether-agent.cache"), and always emits a
+// single "logger" key — unlike a plain With(loggerKey, …), which would append a
+// second "logger" attribute on every re-name and produce duplicate JSON keys.
 func Named(l *slog.Logger, name string) *slog.Logger {
-	return l.With(loggerKey, name)
+	if nh, ok := l.Handler().(*nameHandler); ok {
+		return slog.New(&nameHandler{inner: nh.inner, name: nh.name + "." + name})
+	}
+	return slog.New(&nameHandler{inner: l.Handler(), name: name})
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -64,6 +65,19 @@ func TestNamed(t *testing.T) {
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &m))
 	assert.Equal(t, "syncer", m["logger"])
+}
+
+func TestNamed_NestedDotJoinsSingleKey(t *testing.T) {
+	var buf bytes.Buffer
+	base := slog.New(slog.NewJSONHandler(&buf, options(slog.LevelInfo)))
+	l := Named(Named(base, "aether-agent"), "cache")
+	l.InfoContext(context.Background(), "msg")
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &m))
+	assert.Equal(t, "aether-agent.cache", m["logger"])
+	// Exactly one "logger" key in the raw JSON (json.Unmarshal would hide dupes).
+	assert.Equal(t, 1, strings.Count(buf.String(), `"logger":`))
 }
 
 func TestLevelGate(t *testing.T) {

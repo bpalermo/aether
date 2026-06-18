@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "fanout.go",
         "log.go",
+        "named.go",
     ],
     importpath = "github.com/bpalermo/aether/common/log",
     visibility = ["//visibility:public"],
