@@ -54,6 +54,14 @@ telemetry:
   accessLogs:
     enabled: false
     successSampleRate: 100
+  # Data-plane (proxy) tracing: add an OpenTelemetry tracer to every proxy HCM so
+  # the proxies generate/propagate W3C trace context (traceparent populates in
+  # access logs) and export request spans to the collector's traces pipeline.
+  # Distinct from `tracing` below, which is the AGENT's own (control-plane) spans.
+  proxyTracing:
+    enabled: false
+    # Fraction (0.0-1.0) of requests traced. Keep low at high data-plane QPS.
+    sampleRate: 0.01
   tracing:
     # The OTel TracerProvider is always installed in the binary so spans exist and
     # logs emitted within them carry trace_id/span_id — there is no enable flag.

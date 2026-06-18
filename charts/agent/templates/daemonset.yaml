@@ -67,6 +67,10 @@ spec:
             - "--access-logs-enabled"
             - "--access-log-success-sample-rate={{ .Values.telemetry.accessLogs.successSampleRate }}"
             {{- end }}
+            {{- if .Values.telemetry.proxyTracing.enabled }}
+            - "--proxy-tracing-enabled"
+            - "--proxy-trace-sample-rate={{ .Values.telemetry.proxyTracing.sampleRate }}"
+            {{- end }}
             # Tracing (the TracerProvider for trace_id on logs) is always on in the
             # binary; only the sample rate and span export are configurable.
             - "--trace-sample-rate={{ .Values.telemetry.tracing.sampleRate }}"

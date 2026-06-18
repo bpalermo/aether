@@ -83,6 +83,7 @@ func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, ro
 			IdleTimeout: durationpb.New(downstreamIdleTimeout),
 		},
 		AccessLog: buildAccessLog(reporter, podName, podNamespace),
+		Tracing:   buildTracing(),
 		HttpFilters: []*http_connection_managerv3.HttpFilter{
 			routerHttpFilter(),
 		},
