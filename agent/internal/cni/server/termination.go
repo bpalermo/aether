@@ -2,15 +2,16 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	toolscache "k8s.io/client-go/tools/cache"
+
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
@@ -36,12 +37,12 @@ import (
 // is cancelled. With a nil cache (tests, degraded wiring) the watch is skipped.
 func (s *CNIServer) runTerminationWatch(ctx context.Context, informers ctrlcache.Informers) {
 	if informers == nil {
-		s.log.V(1).Info("termination watch disabled: no informer cache")
+		s.log.DebugContext(ctx, "termination watch disabled: no informer cache")
 		return
 	}
 	informer, err := informers.GetInformer(ctx, &corev1.Pod{})
 	if err != nil {
-		s.log.Error(err, "termination watch disabled: failed to get pod informer")
+		s.log.ErrorContext(ctx, "termination watch disabled: failed to get pod informer", "error", err)
 		return
 	}
 
@@ -71,10 +72,10 @@ func (s *CNIServer) runTerminationWatch(ctx context.Context, informers ctrlcache
 		},
 	})
 	if err != nil {
-		s.log.Error(err, "termination watch disabled: failed to add event handler")
+		s.log.ErrorContext(ctx, "termination watch disabled: failed to add event handler", "error", err)
 		return
 	}
-	s.log.V(1).Info("termination watch started")
+	s.log.DebugContext(ctx, "termination watch started")
 
 	<-ctx.Done()
 	_ = informer.RemoveEventHandler(reg)
@@ -95,7 +96,7 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	if stored == nil || isIgnorablePod(stored) || stored.GetTerminating() {
 		return
 	}
-	log := s.log.WithValues("pod", pod.Name, "namespace", pod.Namespace)
+	log := s.log.With("pod", pod.Name, "namespace", pod.Namespace)
 
 	// Same critical section as RemovePod / the liveness loop: a concurrent
 	// liveness tick must not re-register the endpoint after we unregister it.
@@ -112,7 +113,7 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	// it at teardown).
 	cur.Terminating = true
 	if err := s.storage.AddResource(ctx, types.ContainerID(cur.GetContainerId()), cur); err != nil {
-		log.Error(err, "termination: failed to persist terminating flag")
+		log.ErrorContext(ctx, "termination: failed to persist terminating flag", "error", err)
 	}
 
 	// Mark the endpoint DRAINING rather than removing it: Envoy excludes
@@ -121,21 +122,21 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	// outright removal. CNI DEL performs the final removal.
 	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cur)
 	if err != nil {
-		log.Error(err, "termination: failed to build endpoint")
+		log.ErrorContext(ctx, "termination: failed to build endpoint", "error", err)
 		return
 	}
 	endpoint.Health = registryv1.ServiceEndpoint_HEALTH_DRAINING
 	if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
-		log.Error(err, "termination: failed to mark endpoint draining; falling back to deregistration")
+		log.ErrorContext(ctx, "termination: failed to mark endpoint draining; falling back to deregistration", "error", err)
 		// Removal is strictly safer than leaving the endpoint selectable.
 		if _, ips, exErr := registry.ExtractCNIPodInformation(cur); exErr == nil {
 			if unregErr := s.registry.UnregisterEndpoints(ctx, serviceName, ips); unregErr != nil {
-				log.Error(unregErr, "termination: fallback deregistration also failed; CNI DEL will retry")
+				log.ErrorContext(ctx, "termination: fallback deregistration also failed; CNI DEL will retry", "error", unregErr)
 			}
 		}
 		return
 	}
-	log.Info("pod terminating: endpoint marked draining ahead of shutdown", "service", serviceName)
+	log.InfoContext(ctx, "pod terminating: endpoint marked draining ahead of shutdown", "service", serviceName)
 
 	// Phase 2: after the drain delay, re-register UNHEALTHY so clients'
 	// close_connections_on_host_health_failure shuts the by-then-idle pools
@@ -192,7 +193,7 @@ func (s *CNIServer) drainDelayForPod(pod *corev1.Pod) time.Duration {
 // schedulePoolClose re-registers the endpoint UNHEALTHY after the given drain
 // delay, unless CNI DEL has already removed the pod — never resurrect a
 // deregistered endpoint.
-func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, containerID, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint, log logr.Logger) {
+func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, containerID, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint, log *slog.Logger) {
 	select {
 	case <-ctx.Done():
 		return
@@ -211,10 +212,10 @@ func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, 
 
 	endpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 	if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
-		log.Error(err, "termination: failed to mark draining endpoint unhealthy; pools close at app exit instead")
+		log.ErrorContext(ctx, "termination: failed to mark draining endpoint unhealthy; pools close at app exit instead", "error", err)
 		return
 	}
-	log.V(1).Info("pod terminating: drain pool-close phase engaged", "service", serviceName)
+	log.DebugContext(ctx, "pod terminating: drain pool-close phase engaged", "service", serviceName)
 }
 
 // findStoredPod scans local storage for the CNIPod with the given name and
@@ -222,7 +223,7 @@ func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, 
 func (s *CNIServer) findStoredPod(ctx context.Context, name, namespace string) *cniv1.CNIPod {
 	pods, err := s.storage.GetAll(ctx)
 	if err != nil {
-		s.log.V(1).Info("termination: failed to list local pods", "error", err)
+		s.log.DebugContext(ctx, "termination: failed to list local pods", "error", err)
 		return nil
 	}
 	for _, p := range pods {

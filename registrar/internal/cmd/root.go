@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/bpalermo/aether/common/manager"
@@ -11,11 +12,11 @@ import (
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/registrar/internal/server"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -29,7 +30,7 @@ var Version = "dev"
 var (
 	cfg = NewRegistrarConfig()
 
-	l           logr.Logger
+	l           *slog.Logger
 	logShutdown func(context.Context) error
 )
 
@@ -69,7 +70,7 @@ func init() {
 }
 
 func runRegistrar(ctx context.Context) (retErr error) {
-	l.Info("starting aether registrar",
+	l.InfoContext(ctx, "starting aether registrar",
 		"clusterName", cfg.ClusterName,
 		"registryBackend", cfg.RegistryBackend,
 		"syncInterval", cfg.SyncInterval,
@@ -85,7 +86,7 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	if logShutdown != nil {
 		defer func() {
 			if shutdownErr := logShutdown(ctx); shutdownErr != nil {
-				l.Error(shutdownErr, "failed to flush OTel logs")
+				l.ErrorContext(ctx, "failed to flush OTel logs", "error", shutdownErr)
 			}
 		}()
 	}
@@ -97,7 +98,7 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	if result.Shutdown != nil {
 		defer func() {
 			if shutdownErr := result.Shutdown(ctx); shutdownErr != nil {
-				l.Error(shutdownErr, "failed to shutdown telemetry")
+				l.ErrorContext(ctx, "failed to shutdown telemetry", "error", shutdownErr)
 			}
 		}()
 	}
@@ -137,9 +138,9 @@ func runRegistrar(ctx context.Context) (retErr error) {
 			return tlsErr
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
-		l.Info("SPIRE mTLS enabled for gRPC server", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
+		l.InfoContext(ctx, "SPIRE mTLS enabled for gRPC server", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
 	} else {
-		l.Info("SPIRE disabled, gRPC server will use insecure transport")
+		l.InfoContext(ctx, "SPIRE disabled, gRPC server will use insecure transport")
 	}
 
 	grpcSrv := server.NewRegistrarServer(reg, snapshot, broadcaster, cfg.GRPCAddress, l, serverMetrics, grpcOpts...)

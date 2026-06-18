@@ -2,12 +2,12 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,8 +17,8 @@ import (
 // lands in the dependency set, while wildcard subscriptions, per-pod cluster
 // names, and other type URLs are ignored.
 func TestOnDemandObserver_RecordsNamedCDSSubscriptions(t *testing.T) {
-	c := cache.NewSnapshotCache("node-1", logr.Discard())
-	o := newOnDemandObserver(c, &mockRegistry{}, logr.Discard())
+	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
+	o := newOnDemandObserver(c, &mockRegistry{}, slog.New(slog.DiscardHandler))
 
 	// Named CDS subscription for a mesh authority: observed under the bare
 	// service name (the suffix is the deterministic bridge between the
@@ -48,11 +48,11 @@ func TestOnDemandObserver_RecordsNamedCDSSubscriptions(t *testing.T) {
 
 // TestCombinedCallbacks_Dispatch verifies the combiner reaches every member.
 func TestCombinedCallbacks_Dispatch(t *testing.T) {
-	c1 := cache.NewSnapshotCache("node-1", logr.Discard())
-	c2 := cache.NewSnapshotCache("node-1", logr.Discard())
+	c1 := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
+	c2 := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 	combined := combinedCallbacks{
-		newOnDemandObserver(c1, &mockRegistry{}, logr.Discard()).Callbacks(),
-		newOnDemandObserver(c2, &mockRegistry{}, logr.Discard()).Callbacks(),
+		newOnDemandObserver(c1, &mockRegistry{}, slog.New(slog.DiscardHandler)).Callbacks(),
+		newOnDemandObserver(c2, &mockRegistry{}, slog.New(slog.DiscardHandler)).Callbacks(),
 	}
 
 	require.NoError(t, combined.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
@@ -78,9 +78,9 @@ func (c *catalogRegistry) HasService(name string) bool { return c.known[name] }
 // TestOnDemandObserver_CatalogGate verifies nonexistent services are rejected
 // before touching the dependency set, while known services are observed.
 func TestOnDemandObserver_CatalogGate(t *testing.T) {
-	c := cache.NewSnapshotCache("node-1", logr.Discard())
+	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 	reg := &catalogRegistry{mockRegistry: &mockRegistry{}, known: map[string]bool{"svc-real": true}}
-	o := newOnDemandObserver(c, reg, logr.Discard())
+	o := newOnDemandObserver(c, reg, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,

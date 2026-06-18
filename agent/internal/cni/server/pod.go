@@ -49,7 +49,7 @@ func startStepSpan(ctx context.Context, name string, pod *cniv1.CNIPod) (context
 // stores the pod locally, and registers its endpoints in the service registry.
 func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
 	cniPod := req.GetPod()
-	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
+	log := s.log.With("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
 
 	podUID, err := s.enhanceCNIPod(ctx, cniPod)
 	if err != nil {
@@ -61,7 +61,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, err
 	}
 	if ignorable {
-		log.V(1).Info("ignoring pod")
+		log.DebugContext(ctx, "ignoring pod")
 		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS}, nil
 	}
 
@@ -70,7 +70,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	containerdID := types.ContainerID(cniPod.GetContainerId())
 	_, getErr := s.storage.GetResource(ctx, containerdID)
 	fresh := getErr != nil
-	log.Info("adding pod to storage", "containerID", containerdID)
+	log.InfoContext(ctx, "adding pod to storage", "containerID", containerdID)
 	if err := s.storage.AddResource(ctx, containerdID, cniPod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
@@ -78,7 +78,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	if cniPod.GetTerminating() {
 		// Deletion already requested (CNI CHECK re-add, or ADD racing a delete):
 		// keep storage/xDS for drain, but never (re-)register the endpoint.
-		log.V(1).Info("pod is terminating; skipping endpoint registration")
+		log.DebugContext(ctx, "pod is terminating; skipping endpoint registration")
 	} else {
 		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cniPod)
 		if err != nil {
@@ -99,7 +99,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		err = s.registry.RegisterEndpoint(regCtx, serviceName, protocol, sEndpoint)
 		telemetry.EndSpan(regSpan, err)
 		if err != nil {
-			log.Error(err, "failed to register endpoint; reconciliation sweep will retry", "service", serviceName)
+			log.ErrorContext(ctx, "failed to register endpoint; reconciliation sweep will retry", "error", err, "service", serviceName)
 		}
 	}
 
@@ -111,7 +111,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
 		selectors := spire.PodSelectors(cniPod.GetNamespace(), cniPod.GetServiceAccount(), cniPod.GetName(), podUID)
 		if err = s.spireBridge.SubscribePod(cniPod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
-			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+			log.ErrorContext(ctx, "failed to subscribe to SVID", "error", err, "spiffeID", spiffeID)
 		}
 	}
 
@@ -131,7 +131,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	waitErr := s.ackTracker.WaitListenerPresent(waitCtx, proxy.OutboundListenerName(cniPod))
 	telemetry.EndSpan(waitSpan, waitErr)
 	if waitErr != nil {
-		log.V(1).Info("envoy did not ack listener", "listener", proxy.OutboundListenerName(cniPod), "error", waitErr)
+		log.DebugContext(ctx, "envoy did not ack listener", "listener", proxy.OutboundListenerName(cniPod), "error", waitErr)
 	}
 
 	return &cniv1.AddPodResponse{
@@ -147,14 +147,14 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	containerId := req.GetContainerId()
 	podName := req.GetName()
 	namespace := req.GetNamespace()
-	log := s.log.WithValues("pod", podName, "namespace", namespace)
+	log := s.log.With("pod", podName, "namespace", namespace)
 
 	containerID := types.ContainerID(containerId)
 
 	storedPod, err := s.storage.GetResource(ctx, containerID)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.V(1).Info("resource was not found locally. we assume it was either already removed or ignored during registration")
+			log.DebugContext(ctx, "resource was not found locally. we assume it was either already removed or ignored during registration")
 			return &cniv1.RemovePodResponse{
 				Result: cniv1.RemovePodResponse_RESULT_SUCCESS,
 			}, nil
@@ -167,7 +167,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, err
 	}
 	if ignorable {
-		log.V(1).Info("ignoring pod")
+		log.DebugContext(ctx, "ignoring pod")
 		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS}, nil
 	}
 
@@ -189,7 +189,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	// Unsubscribe from SVID for this pod (keyed by its network namespace).
 	if s.spireBridge != nil {
 		if unsubErr := s.spireBridge.UnsubscribePod(ctx, storedPod.GetNetworkNamespace()); unsubErr != nil {
-			log.Error(unsubErr, "failed to unsubscribe from SVID", "netns", storedPod.GetNetworkNamespace())
+			log.ErrorContext(ctx, "failed to unsubscribe from SVID", "error", unsubErr, "netns", storedPod.GetNetworkNamespace())
 		}
 	}
 
@@ -221,7 +221,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 	telemetry.EndSpan(waitSpan, waitErr)
 	if waitErr != nil {
-		log.V(1).Info("envoy did not ack listener removal", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
+		log.DebugContext(ctx, "envoy did not ack listener removal", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
 	}
 
 	return &cniv1.RemovePodResponse{

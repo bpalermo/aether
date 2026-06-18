@@ -3,13 +3,13 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,7 +70,7 @@ func state(svcEps map[string][]*registryv1.ServiceEndpoint) map[string]map[regis
 // retried (not failed through to the caller) and eventually flushed.
 func TestWriteBehindFlushRetriesUntilSuccess(t *testing.T) {
 	reg := &flakyRegistry{failing: true}
-	q := NewWriteBehindQueue(reg, logr.Discard(), nil)
+	q := NewWriteBehindQueue(reg, slog.New(slog.DiscardHandler), nil)
 	q.EnqueueRegister("svc-a", registryv1.Service_PROTOCOL_HTTP, &registryv1.ServiceEndpoint{Ip: "10.0.0.1"})
 
 	q.flushDue(context.Background()) // fails; rescheduled with backoff
@@ -95,7 +95,7 @@ func TestWriteBehindFlushRetriesUntilSuccess(t *testing.T) {
 // op is released.
 func TestWriteBehindOverlayShieldsAndReleases(t *testing.T) {
 	reg := &flakyRegistry{failing: true}
-	q := NewWriteBehindQueue(reg, logr.Discard(), nil)
+	q := NewWriteBehindQueue(reg, slog.New(slog.DiscardHandler), nil)
 	ep := &registryv1.ServiceEndpoint{Ip: "10.0.0.1", Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY}
 	q.EnqueueRegister("svc-a", registryv1.Service_PROTOCOL_HTTP, ep)
 
@@ -127,7 +127,7 @@ func TestWriteBehindOverlayShieldsAndReleases(t *testing.T) {
 // external registry reflects the removal.
 func TestWriteBehindUnregisterTombstone(t *testing.T) {
 	reg := &flakyRegistry{failing: true}
-	q := NewWriteBehindQueue(reg, logr.Discard(), nil)
+	q := NewWriteBehindQueue(reg, slog.New(slog.DiscardHandler), nil)
 	ep := &registryv1.ServiceEndpoint{Ip: "10.0.0.2"}
 	q.EnqueueUnregister("svc-a", registryv1.Service_PROTOCOL_HTTP, "10.0.0.2")
 
@@ -151,7 +151,7 @@ func TestWriteBehindUnregisterTombstone(t *testing.T) {
 // older one (register then unregister -> only the unregister flushes).
 func TestWriteBehindSupersede(t *testing.T) {
 	reg := &flakyRegistry{}
-	q := NewWriteBehindQueue(reg, logr.Discard(), nil)
+	q := NewWriteBehindQueue(reg, slog.New(slog.DiscardHandler), nil)
 	q.EnqueueRegister("svc-a", registryv1.Service_PROTOCOL_HTTP, &registryv1.ServiceEndpoint{Ip: "10.0.0.3"})
 	q.EnqueueUnregister("svc-a", registryv1.Service_PROTOCOL_HTTP, "10.0.0.3")
 

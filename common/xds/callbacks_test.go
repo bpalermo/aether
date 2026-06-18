@@ -2,9 +2,9 @@ package xds
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,7 +36,7 @@ func TestAddCallback_RegistersCallback(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewServerConfig()
-			srv := NewServer(cfg, logr.Discard())
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler))
 
 			cb := &stubCallback{}
 			srv.AddCallback(cb)
@@ -59,7 +59,7 @@ func TestAddCallback_ReplacesExistingCallback(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewServerConfig()
-			srv := NewServer(cfg, logr.Discard())
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler))
 
 			first := &stubCallback{}
 			second := &stubCallback{}

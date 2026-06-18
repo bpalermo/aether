@@ -18,7 +18,7 @@ import (
 // snapshot generation fails.
 func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
 	netns := cniPod.GetNetworkNamespace()
-	c.log.V(2).Info("adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
+	c.log.DebugContext(ctx, "adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
 
 	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod)
 	if err != nil {
@@ -133,13 +133,13 @@ func clustersToResources(clusters []*clusterv3.Cluster) []types.Resource {
 // processing other pods. Returns an error with all accumulated errors if at
 // least one pod failed, or if snapshot generation fails.
 func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store storage.Storage[*cniv1.CNIPod], trustDomain string) error {
-	c.log.V(2).Info("generating listeners")
+	c.log.DebugContext(ctx, "generating listeners")
 
 	pods, err := store.GetAll(ctx)
 	if err != nil {
 		return err
 	}
-	c.log.V(1).Info("found pods in local storage", "count", len(pods))
+	c.log.DebugContext(ctx, "found pods in local storage", "count", len(pods))
 
 	var errs []error
 	local := make(map[string]string, len(pods))
@@ -147,11 +147,11 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	c.listenerMu.Lock()
 	for _, pod := range pods {
 		netns := pod.GetNetworkNamespace()
-		c.log.V(2).Info("generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
+		c.log.DebugContext(ctx, "generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
 		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod)
 		if listenerErr != nil {
-			c.log.V(1).Error(listenerErr, "failed to generate listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace())
+			c.log.ErrorContext(ctx, "failed to generate listeners for pod", "error", listenerErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)
 			continue
 		}
@@ -187,7 +187,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	}
 
 	listeners := c.Listeners()
-	c.log.V(1).Info("generated listeners", "count", len(listeners))
+	c.log.DebugContext(ctx, "generated listeners", "count", len(listeners))
 
 	return c.generateListenerSnapshot(ctx)
 }

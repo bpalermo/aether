@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -15,14 +16,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
-	"github.com/go-logr/logr"
+	commonlog "github.com/bpalermo/aether/common/log"
 )
 
 // DynamoDBRegistry is a Registry implementation backed by AWS DynamoDB.
 // It stores service endpoints in a DynamoDB table with partition key (service name)
 // and sort key (protocol), and endpoints are organized in a map attribute.
 type DynamoDBRegistry struct {
-	log logr.Logger
+	log *slog.Logger
 
 	client *dynamodb.Client
 
@@ -42,9 +43,9 @@ func WithTableName(name string) Option {
 // NewDynamoDBRegistry creates a new DynamoDB-backed Registry.
 // It uses the AWS SDK client from the provided configuration and connects to
 // the default service table name.
-func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config, opts ...Option) *DynamoDBRegistry {
+func NewDynamoDBRegistry(log *slog.Logger, awsCfg aws.Config, opts ...Option) *DynamoDBRegistry {
 	r := &DynamoDBRegistry{
-		log:       log.WithName("registry-dynamodb"),
+		log:       commonlog.Named(log, "registry-dynamodb"),
 		client:    dynamodb.NewFromConfig(awsCfg),
 		tableName: constants.DefaultDynamoDBServiceTableName,
 	}
@@ -56,22 +57,22 @@ func NewDynamoDBRegistry(log logr.Logger, awsCfg aws.Config, opts ...Option) *Dy
 
 // Initialize initializes the DynamoDB registry by verifying that the service table exists.
 func (r *DynamoDBRegistry) Initialize(ctx context.Context) error {
-	r.log.V(1).Info("starting registry and checking for table existence", "table", r.tableName)
+	r.log.DebugContext(ctx, "starting registry and checking for table existence", "table", r.tableName)
 
 	_, err := r.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(r.tableName),
 	})
 	if err != nil {
 		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
-			r.log.Info("table does not exist", "table", r.tableName)
+			r.log.InfoContext(ctx, "table does not exist", "table", r.tableName)
 			return fmt.Errorf("table %s does not exist", r.tableName)
 		}
-		r.log.Error(err, "failed to verify table exists", "table", r.tableName)
+		r.log.ErrorContext(ctx, "failed to verify table exists", "error", err, "table", r.tableName)
 		return fmt.Errorf("table %s is not accessible: %w", r.tableName, err)
 	}
 
-	r.log.V(1).Info("registry table exists", "table", r.tableName)
-	r.log.Info("DynamoDB registry started", "table", r.tableName)
+	r.log.DebugContext(ctx, "registry table exists", "table", r.tableName)
+	r.log.InfoContext(ctx, "DynamoDB registry started", "table", r.tableName)
 	return nil
 }
 
@@ -85,7 +86,7 @@ func (r *DynamoDBRegistry) Close() error {
 // If the endpoints map doesn't exist, it is created first.
 func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
 	ip := endpoint.GetIp()
-	r.log.V(1).Info(
+	r.log.DebugContext(ctx,
 		"registering endpoint",
 		"service", serviceName,
 		"protocol", protocol,
@@ -96,7 +97,7 @@ func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName str
 	// Marshal endpoint to DynamoDB attribute value
 	av, err := attributevalue.Marshal(endpoint)
 	if err != nil {
-		r.log.Error(err, "failed to marshal endpoint", "ip", ip)
+		r.log.ErrorContext(ctx, "failed to marshal endpoint", "error", err, "ip", ip)
 		return fmt.Errorf("failed to marshal endpoint for IP %s: %w", ip, err)
 	}
 
@@ -113,7 +114,7 @@ func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName str
 		},
 	})
 	if err != nil {
-		r.log.Error(err, "failed to initialize endpoints map", "ip", ip)
+		r.log.ErrorContext(ctx, "failed to initialize endpoints map", "error", err, "ip", ip)
 		return fmt.Errorf("failed to initialize endpoints map for IP %s: %w", ip, err)
 	}
 
@@ -133,11 +134,11 @@ func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName str
 		},
 	})
 	if err != nil {
-		r.log.Error(err, "failed to register endpoint", "ip", ip)
+		r.log.ErrorContext(ctx, "failed to register endpoint", "error", err, "ip", ip)
 		return fmt.Errorf("failed to register endpoint for IP %s: %w", ip, err)
 	}
 
-	r.log.Info(
+	r.log.InfoContext(ctx,
 		"endpoint registered successfully",
 		"service", serviceName,
 		"cluster", endpoint.GetClusterName(),
@@ -154,7 +155,7 @@ func (r *DynamoDBRegistry) UnregisterEndpoint(ctx context.Context, serviceName s
 // UnregisterEndpoints removes multiple endpoints from the registry for all protocols.
 // It queries all protocol items for the service and removes the specified IPs from each.
 func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error {
-	r.log.V(1).Info("unregistering endpoints",
+	r.log.DebugContext(ctx, "unregistering endpoints",
 		"service", serviceName,
 		"count", len(ips),
 	)
@@ -176,7 +177,7 @@ func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName 
 
 	result, err := r.client.Query(ctx, queryInput)
 	if err != nil {
-		r.log.Error(err, "failed to query protocols", "service", serviceName)
+		r.log.ErrorContext(ctx, "failed to query protocols", "error", err, "service", serviceName)
 		return fmt.Errorf("failed to query protocols: %w", err)
 	}
 
@@ -202,18 +203,18 @@ func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName 
 			ExpressionAttributeNames: exprAttrNames,
 		})
 		if err != nil {
-			r.log.Error(err, "failed to unregister endpoints", "service", serviceName)
+			r.log.ErrorContext(ctx, "failed to unregister endpoints", "error", err, "service", serviceName)
 			return fmt.Errorf("failed to unregister endpoints: %w", err)
 		}
 	}
 
-	r.log.Info("endpoints unregistered successfully", "service", serviceName, "count", len(ips))
+	r.log.InfoContext(ctx, "endpoints unregistered successfully", "service", serviceName, "count", len(ips))
 	return nil
 }
 
 // ListEndpoints retrieves all endpoints for a specific service and protocol from DynamoDB.
 func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
-	r.log.V(1).Info("listing endpoints", "service", service, "protocol", protocol)
+	r.log.DebugContext(ctx, "listing endpoints", "service", service, "protocol", protocol)
 
 	input := &dynamodb.QueryInput{
 		TableName:              aws.String(r.tableName),
@@ -226,7 +227,7 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 
 	result, err := r.client.Query(ctx, input)
 	if err != nil {
-		r.log.Error(err, "failed to query endpoints", "service", service)
+		r.log.ErrorContext(ctx, "failed to query endpoints", "error", err, "service", service)
 		return nil, fmt.Errorf("failed to query endpoints: %w", err)
 	}
 
@@ -240,14 +241,14 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 		for _, epAttr := range endpointsAttr.Value {
 			var endpoint registryv1.ServiceEndpoint
 			if err := attributevalue.Unmarshal(epAttr, &endpoint); err != nil {
-				r.log.Error(err, "failed to unmarshal endpoint")
+				r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err)
 				continue
 			}
 			endpoints = append(endpoints, &endpoint)
 		}
 	}
 
-	r.log.V(1).Info("listed endpoints", "service", service, "protocol", protocol, "count", len(endpoints))
+	r.log.DebugContext(ctx, "listed endpoints", "service", service, "protocol", protocol, "count", len(endpoints))
 	return endpoints, nil
 }
 
@@ -255,7 +256,7 @@ func (r *DynamoDBRegistry) ListEndpoints(ctx context.Context, service string, pr
 // Endpoints are organized by service name in the returned map.
 // It uses pagination to handle large result sets.
 func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-	r.log.V(1).Info("listing all endpoints for protocol", "protocol", protocol)
+	r.log.DebugContext(ctx, "listing all endpoints for protocol", "protocol", protocol)
 
 	input := &dynamodb.ScanInput{
 		TableName:        aws.String(r.tableName),
@@ -272,7 +273,7 @@ func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol regist
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			r.log.Error(err, "failed to scan endpoints", "protocol", protocol)
+			r.log.ErrorContext(ctx, "failed to scan endpoints", "error", err, "protocol", protocol)
 			return nil, fmt.Errorf("failed to scan endpoints: %w", err)
 		}
 
@@ -291,7 +292,7 @@ func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol regist
 			for _, epAttr := range endpointsAttr.Value {
 				var endpoint registryv1.ServiceEndpoint
 				if err := attributevalue.Unmarshal(epAttr, &endpoint); err != nil {
-					r.log.Error(err, "failed to unmarshal endpoint")
+					r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err)
 					continue
 				}
 				endpointsByService[serviceName] = append(endpointsByService[serviceName], &endpoint)
@@ -299,6 +300,6 @@ func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol regist
 		}
 	}
 
-	r.log.V(1).Info("listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
+	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
 	return endpointsByService, nil
 }

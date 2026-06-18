@@ -2,11 +2,11 @@ package cache
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -46,7 +46,7 @@ func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 
 // newTestCache creates a SnapshotCache with a discard logger for tests.
 func newTestCache(nodeName string) *SnapshotCache {
-	return NewSnapshotCache(nodeName, logr.Discard())
+	return NewSnapshotCache(nodeName, slog.New(slog.DiscardHandler))
 }
 
 // declareDeps seeds the node dependency set with the given services, as if a
@@ -99,7 +99,7 @@ func TestNewSnapshotCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewSnapshotCache(tt.nodeName, logr.Discard())
+			c := NewSnapshotCache(tt.nodeName, slog.New(slog.DiscardHandler))
 			require.NotNil(t, c)
 			assert.Equal(t, tt.nodeName, c.nodeName)
 			assert.NotNil(t, c.SnapshotCache)

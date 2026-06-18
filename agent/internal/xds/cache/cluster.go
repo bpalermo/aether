@@ -164,7 +164,7 @@ func (c *SnapshotCache) VirtualHosts() []types.Resource {
 // and sets a new cluster snapshot.
 // Returns an error if registry listing fails or snapshot generation fails.
 func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterName string, nodeName string, reg registry.Registry) error {
-	c.log.V(2).Info("generating clusters and endpoints from registry")
+	c.log.DebugContext(ctx, "generating clusters and endpoints from registry")
 
 	serviceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
@@ -191,7 +191,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			}
 			eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_HTTP)
 			if err != nil {
-				c.log.Info("cold-path endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
+				c.log.InfoContext(ctx, "cold-path endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
 				continue
 			}
 			if len(eps) > 0 {
@@ -200,7 +200,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 	}
 
-	c.log.V(1).Info("found service endpoints in registry",
+	c.log.DebugContext(ctx, "found service endpoints in registry",
 		"count", len(serviceEndpoints), "dependencySet", len(deps))
 
 	c.clusterMu.Lock()
@@ -350,17 +350,17 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		// bare service for the dependency-set check, so a service's default and
 		// per-port clusters are retained/dropped together.
 		if _, inScope := deps[entry.service]; !inScope {
-			c.log.Info("service left dependency set; dropping cluster/vhost (cold path takes over)", "cluster", name, "service", entry.service)
+			c.log.InfoContext(ctx, "service left dependency set; dropping cluster/vhost (cold path takes over)", "cluster", name, "service", entry.service)
 			continue
 		}
 		if entry.absentSince.IsZero() {
 			entry.absentSince = now
 			entry.loadAssignment = proxy.NewClusterLoadAssignment(name)
 			entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
-			c.log.Info("service disappeared from registry; retaining empty cluster/vhost for grace period",
+			c.log.InfoContext(ctx, "service disappeared from registry; retaining empty cluster/vhost for grace period",
 				"service", name, "grace", c.retentionGrace().String())
 		} else if now.Sub(entry.absentSince) > c.retentionGrace() {
-			c.log.Info("service absent past grace period; pruning", "service", name)
+			c.log.InfoContext(ctx, "service absent past grace period; pruning", "service", name)
 			continue
 		}
 		c.clusters[name] = entry
@@ -373,7 +373,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.subsetHeaderKeys = proxy.SortSubsetKeys(nodeSubsetKeys)
 	c.subsetMu.Unlock()
 
-	c.log.V(1).Info("loaded clusters from registry", "count", len(c.clusters))
+	c.log.DebugContext(ctx, "loaded clusters from registry", "count", len(c.clusters))
 
 	return c.generateClusterSnapshot(ctx)
 }
@@ -406,7 +406,7 @@ func (c *SnapshotCache) SignalIfRetentionExpired() {
 	c.clusterMu.RUnlock()
 
 	if expired {
-		c.log.V(1).Info("retained service past grace in steady state; triggering prune reload")
+		c.log.Debug("retained service past grace in steady state; triggering prune reload")
 		c.signalDependencyChange()
 	}
 }

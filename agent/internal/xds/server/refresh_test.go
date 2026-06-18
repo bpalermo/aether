@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -11,7 +12,6 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +27,7 @@ func (n *notifyRegistry) Changes() <-chan struct{} { return n.ch }
 var _ registry.ChangeNotifier = (*notifyRegistry)(nil)
 
 func TestRegistryRefresher_ReloadsOnChange(t *testing.T) {
-	c := cache.NewSnapshotCache("node-1", logr.Discard())
+	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 
 	// A local pod declaring "echo" as an upstream puts it in the node
 	// dependency set — only in-scope services are distributed.
@@ -52,7 +52,7 @@ func TestRegistryRefresher_ReloadsOnChange(t *testing.T) {
 		ch: make(chan struct{}, 1),
 	}
 
-	r := NewRegistryRefresher("cluster-1", "node-1", c, reg, logr.Discard())
+	r := NewRegistryRefresher("cluster-1", "node-1", c, reg, slog.New(slog.DiscardHandler))
 	r.debounce = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,7 +87,7 @@ func TestRegistryRefresher_ReloadsOnChange(t *testing.T) {
 // change (pod added with a new declared upstream) triggers a scoped reload
 // even when the registry itself reported no change.
 func TestRegistryRefresher_ReloadsOnDependencyChange(t *testing.T) {
-	c := cache.NewSnapshotCache("node-1", logr.Discard())
+	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 
 	data := map[string][]*registryv1.ServiceEndpoint{
 		"echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
@@ -101,7 +101,7 @@ func TestRegistryRefresher_ReloadsOnDependencyChange(t *testing.T) {
 		ch: make(chan struct{}, 1),
 	}
 
-	r := NewRegistryRefresher("cluster-1", "node-1", c, reg, logr.Discard())
+	r := NewRegistryRefresher("cluster-1", "node-1", c, reg, slog.New(slog.DiscardHandler))
 	r.debounce = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -135,9 +135,9 @@ func TestRegistryRefresher_ReloadsOnDependencyChange(t *testing.T) {
 }
 
 func TestRegistryRefresher_NoNotifier_StopsOnContext(t *testing.T) {
-	c := cache.NewSnapshotCache("node-1", logr.Discard())
+	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 	// mockRegistry does not implement registry.ChangeNotifier.
-	r := NewRegistryRefresher("cluster-1", "node-1", c, &mockRegistry{}, logr.Discard())
+	r := NewRegistryRefresher("cluster-1", "node-1", c, &mockRegistry{}, slog.New(slog.DiscardHandler))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -156,7 +156,7 @@ func TestRegistryRefresher_NoNotifier_StopsOnContext(t *testing.T) {
 // change fires the reload immediately (an ODCDS observation has a paused
 // request behind it), not after the trailing debounce.
 func TestRegistryRefresher_LeadingEdgeDependencyChange(t *testing.T) {
-	c := cache.NewSnapshotCache("node-1", logr.Discard())
+	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 
 	data := map[string][]*registryv1.ServiceEndpoint{
 		"echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
@@ -170,7 +170,7 @@ func TestRegistryRefresher_LeadingEdgeDependencyChange(t *testing.T) {
 		ch: make(chan struct{}, 1),
 	}
 
-	r := NewRegistryRefresher("cluster-1", "node-1", c, reg, logr.Discard())
+	r := NewRegistryRefresher("cluster-1", "node-1", c, reg, slog.New(slog.DiscardHandler))
 	r.debounce = 2 * time.Second // long: leading edge must NOT wait this out
 
 	ctx, cancel := context.WithCancel(context.Background())

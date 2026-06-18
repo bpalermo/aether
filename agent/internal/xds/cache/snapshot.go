@@ -83,7 +83,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain)}
 	}
 
-	c.log.V(1).Info("setting snapshot", "version", v,
+	c.log.DebugContext(ctx, "setting snapshot", "version", v,
 		"listeners", len(listeners), "clusters", len(clusters),
 		"endpoints", len(endpoints), "vhosts", len(vhosts), "secrets", len(secrets))
 	span.SetAttributes(

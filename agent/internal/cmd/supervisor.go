@@ -58,15 +58,15 @@ var proxySupervisorCmd = &cobra.Command{
 			supervisorTelemetryCfg.ServiceVersion = Version
 			telemetry, telErr := hotrestart.NewTelemetry(cmd.Context(), supervisorTelemetryCfg)
 			if telErr != nil {
-				log.Error(telErr, "failed to set up supervisor telemetry; continuing without metrics")
+				log.Error("failed to set up supervisor telemetry; continuing without metrics", "error", telErr)
 			} else {
 				defer func() {
 					if shutdownErr := telemetry.Shutdown(); shutdownErr != nil {
-						log.V(1).Error(shutdownErr, "failed to flush supervisor metrics")
+						log.Error("failed to flush supervisor metrics", "error", shutdownErr)
 					}
 				}()
 				if metrics, telErr = hotrestart.NewSupervisorMetrics(telemetry.Meter()); telErr != nil {
-					log.Error(telErr, "failed to create supervisor metrics; continuing without metrics")
+					log.Error("failed to create supervisor metrics; continuing without metrics", "error", telErr)
 				}
 			}
 		}

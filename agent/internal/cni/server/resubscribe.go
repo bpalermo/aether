@@ -36,7 +36,7 @@ func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 
 	pods, err := s.storage.GetAll(ctx)
 	if err != nil {
-		s.log.Error(err, "resubscribe: failed to list stored pods")
+		s.log.ErrorContext(ctx, "resubscribe: failed to list stored pods", "error", err)
 		return
 	}
 
@@ -45,18 +45,18 @@ func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 		if isIgnorablePod(pod) {
 			continue
 		}
-		log := s.log.WithValues("pod", pod.GetName(), "namespace", pod.GetNamespace())
+		log := s.log.With("pod", pod.GetName(), "namespace", pod.GetNamespace())
 
 		var k8sPod corev1.Pod
 		if err := s.k8sClient.Get(ctx, client.ObjectKey{Namespace: pod.GetNamespace(), Name: pod.GetName()}, &k8sPod); err != nil {
-			log.V(1).Info("resubscribe: pod not found in API server; skipping", "error", err)
+			log.DebugContext(ctx, "resubscribe: pod not found in API server; skipping", "error", err)
 			continue
 		}
 
 		spiffeID := proxy.SpiffeIDFromPod(pod, s.trustDomain)
 		selectors := spire.PodSelectors(pod.GetNamespace(), pod.GetServiceAccount(), pod.GetName(), string(k8sPod.UID))
 		if err := s.spireBridge.SubscribePod(pod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
-			log.Error(err, "resubscribe: failed to subscribe SVID", "spiffeID", spiffeID)
+			log.ErrorContext(ctx, "resubscribe: failed to subscribe SVID", "error", err, "spiffeID", spiffeID)
 			continue
 		}
 
@@ -65,15 +65,15 @@ func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 		// subscription just created would leak for the agent's lifetime. Re-check
 		// storage and undo if the pod is gone.
 		if _, getErr := s.storage.GetResource(ctx, types.ContainerID(pod.GetContainerId())); getErr != nil {
-			log.V(1).Info("resubscribe: pod removed concurrently; unsubscribing", "spiffeID", spiffeID)
+			log.DebugContext(ctx, "resubscribe: pod removed concurrently; unsubscribing", "spiffeID", spiffeID)
 			if unsubErr := s.spireBridge.UnsubscribePod(ctx, pod.GetNetworkNamespace()); unsubErr != nil {
-				log.Error(unsubErr, "resubscribe: failed to unsubscribe removed pod")
+				log.ErrorContext(ctx, "resubscribe: failed to unsubscribe removed pod", "error", unsubErr)
 			}
 			continue
 		}
 		resubscribed++
-		log.V(1).Info("resubscribed stored pod SVID", "spiffeID", spiffeID)
+		log.DebugContext(ctx, "resubscribed stored pod SVID", "spiffeID", spiffeID)
 	}
 
-	s.log.Info("resubscribed stored pod SVIDs", "count", resubscribed, "stored", len(pods))
+	s.log.InfoContext(ctx, "resubscribed stored pod SVIDs", "count", resubscribed, "stored", len(pods))
 }

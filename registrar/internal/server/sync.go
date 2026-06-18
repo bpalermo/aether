@@ -2,16 +2,17 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"time"
 
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 )
 
 // tracerName identifies this instrumentation scope in trace backends.
@@ -25,7 +26,7 @@ type Syncer struct {
 	snapshot     *Snapshot
 	broadcaster  *Broadcaster
 	syncInterval time.Duration
-	log          logr.Logger
+	log          *slog.Logger
 	metrics      *Metrics
 	firstSync    bool
 	// writeBehind, when set, overlays still-pending snapshot-first intents
@@ -41,13 +42,13 @@ type Syncer struct {
 
 // NewSyncer creates a Syncer that polls the external registry at the given
 // interval. metrics may be nil to disable instrumentation.
-func NewSyncer(reg registry.Registry, snapshot *Snapshot, broadcaster *Broadcaster, syncInterval time.Duration, log logr.Logger, metrics *Metrics) *Syncer {
+func NewSyncer(reg registry.Registry, snapshot *Snapshot, broadcaster *Broadcaster, syncInterval time.Duration, log *slog.Logger, metrics *Metrics) *Syncer {
 	return &Syncer{
 		registry:     reg,
 		snapshot:     snapshot,
 		broadcaster:  broadcaster,
 		syncInterval: syncInterval,
-		log:          log.WithName("syncer"),
+		log:          commonlog.Named(log, "syncer"),
 		metrics:      metrics,
 		firstSync:    true,
 		synced:       make(chan struct{}),
@@ -74,7 +75,7 @@ const changeDebounce = 200 * time.Millisecond
 // missed during a watch re-establish. Backends without notifications (e.g.
 // DynamoDB) fall back to poll-only, unchanged.
 func (s *Syncer) Start(ctx context.Context) error {
-	s.log.Info("starting sync loop", "interval", s.syncInterval)
+	s.log.InfoContext(ctx, "starting sync loop", "interval", s.syncInterval)
 
 	// Perform an initial sync immediately.
 	s.sync(ctx)
@@ -82,7 +83,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 	var changes <-chan struct{}
 	if n, ok := s.registry.(registry.ChangeNotifier); ok {
 		changes = n.Changes()
-		s.log.Info("registry supports change notifications; syncing at watch speed (poll is backstop)")
+		s.log.InfoContext(ctx, "registry supports change notifications; syncing at watch speed (poll is backstop)")
 	}
 
 	ticker := time.NewTicker(s.syncInterval)
@@ -97,7 +98,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.log.Info("sync loop stopped")
+			s.log.InfoContext(ctx, "sync loop stopped")
 			return nil
 		case <-ticker.C:
 			s.sync(ctx)
@@ -120,7 +121,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 // sync performs a single sync cycle: fetches all endpoints from the external
 // registry, diffs against the snapshot, applies changes, and broadcasts deltas.
 func (s *Syncer) sync(ctx context.Context) {
-	s.log.V(1).Info("starting sync cycle")
+	s.log.DebugContext(ctx, "starting sync cycle")
 
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "registrar.sync_loop")
 	var retErr error
@@ -129,7 +130,7 @@ func (s *Syncer) sync(ctx context.Context) {
 
 	endpoints, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
-		s.log.Error(err, "failed to list endpoints from registry")
+		s.log.ErrorContext(ctx, "failed to list endpoints from registry", "error", err)
 		s.metrics.syncFailed(ctx, time.Since(start).Seconds())
 		retErr = err
 		return
@@ -168,11 +169,11 @@ func (s *Syncer) sync(ctx context.Context) {
 	s.metrics.syncCompleted(ctx, time.Since(start).Seconds(), versionNum, eventsByType)
 
 	if s.firstSync {
-		s.log.Info("initial sync complete", "version", version, "endpoints", countEndpoints(newState))
+		s.log.InfoContext(ctx, "initial sync complete", "version", version, "endpoints", countEndpoints(newState))
 		s.firstSync = false
 		close(s.synced)
 	} else if len(events) > 0 {
-		s.log.V(1).Info("sync detected changes", "version", version, "events", len(events))
+		s.log.DebugContext(ctx, "sync detected changes", "version", version, "events", len(events))
 	}
 
 	// Stamp version on events and broadcast.

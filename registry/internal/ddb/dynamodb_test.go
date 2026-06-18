@@ -3,6 +3,7 @@ package ddb_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -13,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry/internal/ddb"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcdynamodb "github.com/testcontainers/testcontainers-go/modules/dynamodb"
@@ -83,7 +83,7 @@ func setupRegistry(ctx context.Context, t *testing.T) *ddb.DynamoDBRegistry {
 	table := tableName(t)
 	createTable(ctx, t, table)
 
-	registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName(table))
+	registry := ddb.NewDynamoDBRegistry(slog.New(slog.DiscardHandler), testAWSCfg, ddb.WithTableName(table))
 	require.NoError(t, registry.Initialize(ctx))
 
 	return registry
@@ -100,13 +100,13 @@ func TestDynamoDBRegistry_Initialize(t *testing.T) {
 		table := tableName(t)
 		createTable(ctx, t, table)
 
-		registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName(table))
+		registry := ddb.NewDynamoDBRegistry(slog.New(slog.DiscardHandler), testAWSCfg, ddb.WithTableName(table))
 		err := registry.Initialize(ctx)
 		assert.NoError(t, err)
 	})
 
 	t.Run("fails when table does not exist", func(t *testing.T) {
-		registry := ddb.NewDynamoDBRegistry(logr.Discard(), testAWSCfg, ddb.WithTableName("nonexistent"))
+		registry := ddb.NewDynamoDBRegistry(slog.New(slog.DiscardHandler), testAWSCfg, ddb.WithTableName("nonexistent"))
 		err := registry.Initialize(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "does not exist")

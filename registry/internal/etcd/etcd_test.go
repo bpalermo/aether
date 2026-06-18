@@ -3,6 +3,7 @@ package etcd_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -10,7 +11,6 @@ import (
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry/internal/etcd"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcetcd "github.com/testcontainers/testcontainers-go/modules/etcd"
@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 	}
 
 	// Verify etcd is ready before running tests
-	ready := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	ready := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 30 * time.Second,
 	})
@@ -61,7 +61,7 @@ func keyPrefix(t *testing.T) string {
 func setupRegistry(ctx context.Context, t *testing.T) *etcd.EtcdRegistry {
 	t.Helper()
 
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   keyPrefix(t),
@@ -80,7 +80,7 @@ func TestEtcdRegistry_Initialize(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("successful connection", func(t *testing.T) {
-		registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 			Endpoints:   []string{testEndpoint},
 			DialTimeout: 5 * time.Second,
 			KeyPrefix:   keyPrefix(t),
@@ -92,7 +92,7 @@ func TestEtcdRegistry_Initialize(t *testing.T) {
 	})
 
 	t.Run("invalid endpoint", func(t *testing.T) {
-		registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 			Endpoints:   []string{"localhost:99999"},
 			DialTimeout: 1 * time.Second,
 		})
@@ -361,7 +361,7 @@ func TestEtcdRegistry_CustomKeyPrefix(t *testing.T) {
 
 	ctx := context.Background()
 
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   "/custom/prefix",
@@ -392,7 +392,7 @@ func TestEtcdRegistry_Close(t *testing.T) {
 
 	ctx := context.Background()
 
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   keyPrefix(t),
@@ -408,7 +408,7 @@ func TestEtcdRegistry_Close(t *testing.T) {
 }
 
 func TestEtcdRegistry_CloseWithoutStart(t *testing.T) {
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{"localhost:2379"},
 		DialTimeout: 5 * time.Second,
 	})

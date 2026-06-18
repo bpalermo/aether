@@ -2,6 +2,7 @@ package spire
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	"github.com/go-logr/logr"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -98,7 +98,7 @@ func startFakeSpire(t *testing.T) (*fakeDelegatedIdentity, string) {
 // newReconnectTestBridge creates a bridge against the fake SPIRE socket with
 // backoff shortened so reconnects happen within the test budget.
 func newReconnectTestBridge(sock string) *Bridge {
-	b := NewBridge(sock, nopStore{}, nil, logr.Discard())
+	b := NewBridge(sock, nopStore{}, nil, slog.New(slog.DiscardHandler))
 	b.backoffInitial = 10 * time.Millisecond
 	b.backoffMax = 50 * time.Millisecond
 	return b

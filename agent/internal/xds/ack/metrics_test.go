@@ -2,11 +2,11 @@ package ack
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -23,7 +23,7 @@ func newTestTracker(t *testing.T) (*Tracker, *sdkmetric.ManualReader) {
 	metrics, err := newTrackerMetrics(provider.Meter("test"))
 	require.NoError(t, err)
 
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	tr.metrics = metrics
 	return tr, reader
 }
@@ -97,7 +97,7 @@ func TestMetrics_WaitFailures(t *testing.T) {
 }
 
 func TestMetrics_NilSafe(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	tr.metrics = nil
 
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)

@@ -2,12 +2,12 @@ package ack
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -44,7 +44,7 @@ func ackDelta(t *Tracker, streamID int64, nonce, errMsg string) {
 }
 
 func TestWaitListenerPresent_AckedBeforeWait(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)
 	ackDelta(tr, 1, "n1", "")
 
@@ -54,7 +54,7 @@ func TestWaitListenerPresent_AckedBeforeWait(t *testing.T) {
 }
 
 func TestWaitListenerPresent_AckedWhileWaiting(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)
 
 	done := make(chan error, 1)
@@ -72,7 +72,7 @@ func TestWaitListenerPresent_AckedWhileWaiting(t *testing.T) {
 }
 
 func TestWaitListenerPresent_TimesOutWithoutAck(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	// Response sent but never acknowledged.
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)
 
@@ -84,7 +84,7 @@ func TestWaitListenerPresent_TimesOutWithoutAck(t *testing.T) {
 }
 
 func TestWaitListenerPresent_NackSurfacesEnvoyError(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)
 
 	done := make(chan error, 1)
@@ -104,7 +104,7 @@ func TestWaitListenerPresent_NackSurfacesEnvoyError(t *testing.T) {
 }
 
 func TestNackClearedBySubsequentAck(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)
 	ackDelta(tr, 1, "n1", "bad config")
 
@@ -118,7 +118,7 @@ func TestNackClearedBySubsequentAck(t *testing.T) {
 }
 
 func TestWaitListenerAbsent(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 
 	t.Run("never-known listener is absent immediately", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -146,7 +146,7 @@ func TestWaitListenerAbsent(t *testing.T) {
 }
 
 func TestStreamCloseDropsInflight(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)
 	tr.onDeltaStreamClosed(1, nil)
 
@@ -159,7 +159,7 @@ func TestStreamCloseDropsInflight(t *testing.T) {
 }
 
 func TestAckOnOneStreamDoesNotResolveAnother(t *testing.T) {
-	tr := NewTracker(logr.Discard())
+	tr := NewTracker(slog.New(slog.DiscardHandler))
 	sendDelta(tr, 1, "n1", []string{testListener}, nil)
 	// Same nonce value on a different stream must not resolve stream 1's response.
 	ackDelta(tr, 2, "n1", "")

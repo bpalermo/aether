@@ -2,6 +2,7 @@ package hotrestart
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +22,7 @@ func TestBuildEnvoyCmd(t *testing.T) {
 		DrainTime:          45 * time.Second,
 		ParentShutdownTime: 60 * time.Second,
 		ExtraArgs:          []string{"-l", "info", "--service-cluster", "aether-proxy"},
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 
 	cmd := s.buildEnvoyCmd(3)
 
@@ -100,7 +100,7 @@ func TestSupervisorConfigChangeTriggersHotRestart(t *testing.T) {
 		DrainTime:          1 * time.Second,
 		ParentShutdownTime: 1 * time.Second,
 		WatchConfig:        true,
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
@@ -150,7 +150,7 @@ func TestHotRestartDeferredWhileEpochNotLive(t *testing.T) {
 		WatchConfig:        true,
 		// Admin reports the current epoch as still initializing.
 		AdminAddress: fakeAdmin(t, "PRE_INITIALIZING", 0),
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -226,7 +226,7 @@ func TestBindCollisionRetriedInProcess(t *testing.T) {
 		DrainTime:          1 * time.Second,
 		ParentShutdownTime: 1 * time.Second,
 		StateDir:           t.TempDir(), // cross-pod mode; no state file = stale/absent heartbeat
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -326,7 +326,7 @@ func TestPoisonedConfigDoesNotHotRestart(t *testing.T) {
 		DrainTime:          1 * time.Second,
 		ParentShutdownTime: 1 * time.Second,
 		WatchConfig:        true,
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

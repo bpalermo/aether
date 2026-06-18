@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -16,7 +17,6 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -89,7 +89,7 @@ func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 			return []*cniv1.CNIPod{pod}, nil
 		})
 		reg := &recordingRegistry{}
-		srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
+		srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 		state := servedState(pod.GetContainerId())
 		srvr.reconcileLiveness(context.Background(), state)
@@ -104,7 +104,7 @@ func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 		})
 		require.NoError(t, store.AddResource(context.Background(), types.ContainerID(pod.GetContainerId()), pod))
 		reg := &recordingRegistry{}
-		srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
+		srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 		state := servedState(pod.GetContainerId())
 		srvr.reconcileLiveness(context.Background(), state)
@@ -128,7 +128,7 @@ func TestReconcileLivenessEDSPromotion(t *testing.T) {
 	})
 	require.NoError(t, store.AddResource(context.Background(), types.ContainerID(pod.GetContainerId()), pod))
 	reg := &recordingRegistry{}
-	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
+	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 	state := newLivenessState()
 	srvr.reconcileLiveness(context.Background(), state)
@@ -158,7 +158,7 @@ func TestReconcileLivenessWarmupGrace(t *testing.T) {
 
 	t.Run("503 within grace is warm-up, not a transition", func(t *testing.T) {
 		reg := &recordingRegistry{}
-		srvr := newTestCNIServer(nil, newStore(), reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
+		srvr := newTestCNIServer(nil, newStore(), reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 		state := newLivenessState()
 		srvr.reconcileLiveness(context.Background(), state)
@@ -169,7 +169,7 @@ func TestReconcileLivenessWarmupGrace(t *testing.T) {
 
 	t.Run("503 after grace marks the never-serving app unhealthy", func(t *testing.T) {
 		reg := &recordingRegistry{}
-		srvr := newTestCNIServer(nil, newStore(), reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
+		srvr := newTestCNIServer(nil, newStore(), reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 		state := newLivenessState()
 		state.firstSeen[pod.GetContainerId()] = time.Now().Add(-livenessWarmupGrace - time.Second)
@@ -193,7 +193,7 @@ func TestReconcileLivenessUnprogrammedPodSkipped(t *testing.T) {
 	})
 	require.NoError(t, store.AddResource(context.Background(), types.ContainerID(pod.GetContainerId()), pod))
 	reg := &recordingRegistry{}
-	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), sock)
+	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 	state := newLivenessState()
 	srvr.reconcileLiveness(context.Background(), state)
@@ -213,7 +213,7 @@ func TestReconcileLivenessGatewayUnreachable(t *testing.T) {
 	})
 	require.NoError(t, store.AddResource(context.Background(), types.ContainerID(pod.GetContainerId()), pod))
 	reg := &recordingRegistry{}
-	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", logr.Discard()), "/nonexistent/health.sock")
+	srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "/nonexistent/health.sock")
 
 	state := servedState(pod.GetContainerId())
 	srvr.reconcileLiveness(context.Background(), state)

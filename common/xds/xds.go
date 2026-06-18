@@ -2,6 +2,7 @@ package xds
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/bpalermo/aether/common/telemetry"
@@ -13,7 +14,6 @@ import (
 	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
@@ -37,7 +37,7 @@ type XdsServer struct {
 // It configures the gRPC server with keepalive parameters suitable for long-lived
 // client connections, registers all Envoy discovery services (LDS, CDS, EDS, RDS, ADS),
 // and returns an XdsServer ready to be started.
-func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.SnapshotCache, callbacks serverv3.Callbacks, log logr.Logger) XdsServer {
+func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.SnapshotCache, callbacks serverv3.Callbacks, log *slog.Logger) XdsServer {
 	keepAliveTime := 30 * time.Second
 	grpcServer := grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{

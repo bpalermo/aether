@@ -2,12 +2,13 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -71,7 +72,7 @@ type wbOp struct {
 // It implements controller-runtime's Runnable (all replicas).
 type WriteBehindQueue struct {
 	registry registry.Registry
-	log      logr.Logger
+	log      *slog.Logger
 	metrics  *Metrics
 
 	mu  sync.Mutex
@@ -79,10 +80,10 @@ type WriteBehindQueue struct {
 }
 
 // NewWriteBehindQueue creates the queue. metrics may be nil.
-func NewWriteBehindQueue(reg registry.Registry, log logr.Logger, metrics *Metrics) *WriteBehindQueue {
+func NewWriteBehindQueue(reg registry.Registry, log *slog.Logger, metrics *Metrics) *WriteBehindQueue {
 	return &WriteBehindQueue{
 		registry: reg,
-		log:      log.WithName("write-behind"),
+		log:      commonlog.Named(log, "write-behind"),
 		metrics:  metrics,
 		ops:      make(map[wbKey]*wbOp),
 	}
@@ -117,7 +118,7 @@ func (q *WriteBehindQueue) enqueue(key wbKey, op *wbOp) {
 
 // Start runs the flush loop until ctx ends. Implements Runnable.
 func (q *WriteBehindQueue) Start(ctx context.Context) error {
-	q.log.Info("write-behind queue started")
+	q.log.InfoContext(ctx, "write-behind queue started")
 	ticker := time.NewTicker(wbTick)
 	defer ticker.Stop()
 	for {
@@ -141,7 +142,7 @@ func (q *WriteBehindQueue) flushDue(ctx context.Context) {
 			continue
 		}
 		if now.Sub(op.enqueued) > wbMaxAge {
-			q.log.Error(nil, "write-behind op exceeded max age; dropping (agent re-assertion/sweep will repair)",
+			q.log.ErrorContext(ctx, "write-behind op exceeded max age; dropping (agent re-assertion/sweep will repair)", "error", nil,
 				"service", key.service, "ip", key.ip, "kind", int(op.kind), "attempts", op.attempts)
 			q.metrics.wbDropped(ctx)
 			delete(q.ops, key)
@@ -180,7 +181,7 @@ func (q *WriteBehindQueue) flushDue(ctx context.Context) {
 
 		if err != nil {
 			q.metrics.wbFlushFailed(ctx)
-			q.log.V(1).Info("write-behind flush failed; will retry",
+			q.log.DebugContext(ctx, "write-behind flush failed; will retry",
 				"service", key.service, "ip", key.ip, "error", err.Error())
 		}
 	}
@@ -223,7 +224,7 @@ func (q *WriteBehindQueue) Overlay(state map[string]map[registryv1.Service_Proto
 	}
 	if shielded > 0 {
 		q.metrics.wbShielded(context.Background(), shielded)
-		q.log.V(1).Info("overlaid pending write-behind intents onto sync state", "count", shielded)
+		q.log.Debug("overlaid pending write-behind intents onto sync state", "count", shielded)
 	}
 	q.metrics.wbDepth(context.Background(), len(q.ops))
 }

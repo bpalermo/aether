@@ -86,7 +86,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 
 	pods, err := s.storage.GetAll(ctx)
 	if err != nil {
-		s.log.V(1).Info("liveness: failed to list local pods", "error", err)
+		s.log.DebugContext(ctx, "liveness: failed to list local pods", "error", err)
 		return
 	}
 
@@ -99,7 +99,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 		if err != nil {
 			// The gateway itself is unreachable (proxy down / restarting): no
 			// probe this tick can succeed, abort instead of logging per pod.
-			s.log.V(1).Info("liveness: health gateway unreachable", "error", err)
+			s.log.DebugContext(ctx, "liveness: health gateway unreachable", "error", err)
 			return
 		}
 		if !known {
@@ -150,7 +150,7 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 
 		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, pod)
 		if err != nil {
-			s.log.V(1).Info("liveness: failed to build endpoint", "pod", pod.GetName(), "error", err)
+			s.log.DebugContext(ctx, "liveness: failed to build endpoint", "pod", pod.GetName(), "error", err)
 			continue
 		}
 		endpoint.Health = want
@@ -176,14 +176,14 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 			s.lifecycleMu.Unlock()
 			span.End()
 			state.forget(key)
-			s.log.V(1).Info("liveness: pod gone or terminating; skipping health update", "pod", pod.GetName())
+			s.log.DebugContext(ctx, "liveness: pod gone or terminating; skipping health update", "pod", pod.GetName())
 			continue
 		}
 		err = s.registry.RegisterEndpoint(spanCtx, serviceName, protocol, endpoint)
 		s.lifecycleMu.Unlock()
 		telemetry.EndSpan(span, err)
 		if err != nil {
-			s.log.Error(err, "liveness: failed to re-register endpoint health", "pod", pod.GetName())
+			s.log.ErrorContext(ctx, "liveness: failed to re-register endpoint health", "error", err, "pod", pod.GetName())
 			continue
 		}
 		s.metrics.healthTransition(ctx, prev.String(), want.String())
@@ -194,6 +194,6 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 			s.metrics.promotionDelayObserved(ctx, time.Since(state.firstSeen[key]).Seconds())
 		}
 		state.last[key] = want
-		s.log.V(1).Info("liveness: updated endpoint health", "pod", pod.GetName(), "health", want.String())
+		s.log.DebugContext(ctx, "liveness: updated endpoint health", "pod", pod.GetName(), "health", want.String())
 	}
 }

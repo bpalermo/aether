@@ -1,8 +1,9 @@
 package registry
 
 import (
+	"log/slog"
+
 	"github.com/bpalermo/aether/registry/internal/registrar"
-	"github.com/go-logr/logr"
 )
 
 // RegistrarConfig is the configuration for the registrar registry backend.
@@ -14,6 +15,6 @@ type RegistrarRegistry = registrar.RegistrarRegistry
 // NewRegistrarRegistry creates a new Registry implementation that delegates to the
 // in-cluster Registrar gRPC service. It caches endpoints locally from a watch stream
 // and delegates writes to the Registrar for external persistence.
-func NewRegistrarRegistry(log logr.Logger, cfg RegistrarConfig) *RegistrarRegistry {
+func NewRegistrarRegistry(log *slog.Logger, cfg RegistrarConfig) *RegistrarRegistry {
 	return registrar.NewRegistrarRegistry(log, cfg)
 }

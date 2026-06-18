@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -17,11 +18,11 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -65,7 +66,7 @@ func (r *testRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_
 // never reaches the liveness probe).
 func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache, healthSocket string) *CNIServer {
 	return &CNIServer{
-		log:           logr.Discard(),
+		log:           slog.New(slog.DiscardHandler),
 		clusterName:   "test-cluster",
 		nodeName:      "test-node",
 		trustDomain:   "example.org",
@@ -74,8 +75,8 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		storage:       stor,
 		registry:      reg,
 		snapshotCache: sc,
-		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()),
-		ackTracker:    ack.NewTracker(logr.Discard()),
+		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, slog.New(slog.DiscardHandler)),
+		ackTracker:    ack.NewTracker(slog.New(slog.DiscardHandler)),
 		healthClient:  newHealthGatewayClient(healthSocket),
 		// Effectively disables drain phase 2 so unrelated tests never race the
 		// pool-close goroutine; tests of phase 2 override this explicitly.
@@ -388,7 +389,7 @@ func TestAddPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sc := cache.NewSnapshotCache("test-node", logr.Discard())
+			sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
 			srv := newTestCNIServer(tt.setupK8s(), tt.setupStorage(), tt.setupRegistry(), sc, "")
 
 			got, err := srv.AddPod(context.Background(), tt.req)
@@ -546,7 +547,7 @@ func TestRemovePod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sc := cache.NewSnapshotCache("test-node", logr.Discard())
+			sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
 			k8sClient := fake.NewClientBuilder().Build()
 			srv := newTestCNIServer(k8sClient, tt.setupStorage(), tt.setupRegistry(), sc, "")
 

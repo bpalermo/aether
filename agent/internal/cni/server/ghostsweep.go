@@ -54,7 +54,7 @@ func (s *CNIServer) runGhostSweepLoop(ctx context.Context) {
 		case <-ticker.C:
 			s.sweepGhostEndpoints(ctx)
 		case <-reconnects:
-			s.log.V(1).Info("registry watch reconnected; re-asserting this node's registrations")
+			s.log.DebugContext(ctx, "registry watch reconnected; re-asserting this node's registrations")
 			s.sweepGhostEndpoints(ctx)
 		}
 	}
@@ -116,7 +116,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		all, err = s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	}
 	if err != nil {
-		s.log.V(1).Info("ghost sweep: failed to list registry endpoints", "error", err)
+		s.log.DebugContext(ctx, "ghost sweep: failed to list registry endpoints", "error", err)
 		retErr = err
 		return
 	}
@@ -128,7 +128,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 
 	pods, err := s.storage.GetAll(ctx)
 	if err != nil {
-		s.log.V(1).Info("ghost sweep: failed to list local pods", "error", err)
+		s.log.DebugContext(ctx, "ghost sweep: failed to list local pods", "error", err)
 		retErr = err
 		return
 	}
@@ -172,12 +172,12 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 				continue // draining; CNI DEL owns the final removal
 			}
 			if err := s.registry.UnregisterEndpoint(ctx, service, ep.GetIp()); err != nil {
-				s.log.Error(err, "ghost sweep: failed to deregister ghost endpoint",
+				s.log.ErrorContext(ctx, "ghost sweep: failed to deregister ghost endpoint", "error", err,
 					"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
 				continue
 			}
 			ghostsRemoved++
-			s.log.Info("ghost sweep: deregistered ghost endpoint",
+			s.log.InfoContext(ctx, "ghost sweep: deregistered ghost endpoint",
 				"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
 		}
 	}
@@ -192,20 +192,20 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		}
 		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, pod)
 		if err != nil {
-			s.log.V(1).Info("ghost sweep: failed to build endpoint for missing pod", "pod", pod.GetName(), "error", err)
+			s.log.DebugContext(ctx, "ghost sweep: failed to build endpoint for missing pod", "pod", pod.GetName(), "error", err)
 			continue
 		}
 		if endpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
 			endpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 		}
 		if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
-			s.log.Error(err, "ghost sweep: failed to register missing endpoint",
+			s.log.ErrorContext(ctx, "ghost sweep: failed to register missing endpoint", "error", err,
 				"service", serviceName, "ip", ip, "pod", pod.GetName())
 			continue
 		}
 		s.forgetLiveness(pod.GetContainerId())
 		missingRegistered++
-		s.log.Info("ghost sweep: registered missing endpoint",
+		s.log.InfoContext(ctx, "ghost sweep: registered missing endpoint",
 			"service", serviceName, "ip", ip, "pod", pod.GetName())
 	}
 }

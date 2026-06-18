@@ -21,7 +21,6 @@ go_library(
         "//registry/internal/k8s",
         "//registry/internal/registrar",
         "@com_github_aws_aws_sdk_go_v2//aws",
-        "@com_github_go_logr_logr//:logr",
         "@io_k8s_sigs_controller_runtime//pkg/client",
     ],
 )

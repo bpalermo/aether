@@ -7,7 +7,7 @@ go_library(
     visibility = ["//registry:__subpackages__"],
     deps = [
         "//api/aether/registry/v1:registry",
-        "@com_github_go_logr_logr//:logr",
+        "//common/log",
         "@io_etcd_go_etcd_client_v3//:client",
         "@org_golang_google_protobuf//proto",
     ],
@@ -24,7 +24,6 @@ go_test(
     deps = [
         ":etcd",
         "//api/aether/registry/v1:registry",
-        "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@com_github_testcontainers_testcontainers_go_modules_etcd//:etcd",

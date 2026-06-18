@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -56,7 +56,7 @@ func TestNewServer_Defaults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewServerConfig()
-			srv := NewServer(cfg, logr.Discard())
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler))
 
 			assert.NotNil(t, srv.Log)
 			assert.Equal(t, cfg, srv.cfg)
@@ -85,7 +85,7 @@ func TestNewServer_WithGRPCServer(t *testing.T) {
 			grpcSrv := grpc.NewServer()
 			defer grpcSrv.Stop()
 
-			srv := NewServer(cfg, logr.Discard(), WithGRPCServer(grpcSrv))
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler), WithGRPCServer(grpcSrv))
 
 			assert.Equal(t, grpcSrv, srv.gSrv)
 		})
@@ -106,7 +106,7 @@ func TestStart_InvokesPreListenCallback(t *testing.T) {
 			cfg := newUDSConfig(t)
 			grpcSrv := grpc.NewServer()
 
-			srv := NewServer(cfg, logr.Discard(), WithGRPCServer(grpcSrv))
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler), WithGRPCServer(grpcSrv))
 
 			cb := &stubCallback{}
 			srv.AddCallback(cb)
@@ -150,7 +150,7 @@ func TestStart_CallbackError_AbortsStart(t *testing.T) {
 			grpcSrv := grpc.NewServer()
 			defer grpcSrv.Stop()
 
-			srv := NewServer(cfg, logr.Discard(), WithGRPCServer(grpcSrv))
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler), WithGRPCServer(grpcSrv))
 			srv.AddCallback(&stubCallback{err: tt.callbackErr})
 
 			err := srv.Start(context.Background())
@@ -174,7 +174,7 @@ func TestStart_ContextCancellation_GracefulShutdown(t *testing.T) {
 			cfg := newUDSConfig(t)
 			grpcSrv := grpc.NewServer()
 
-			srv := NewServer(cfg, logr.Discard(), WithGRPCServer(grpcSrv))
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler), WithGRPCServer(grpcSrv))
 
 			ctx, cancel := context.WithCancel(context.Background())
 
@@ -214,7 +214,7 @@ func TestServerLifecycle_LivenessAndReadiness(t *testing.T) {
 			cfg := newUDSConfig(t)
 			grpcSrv := grpc.NewServer()
 
-			srv := NewServer(cfg, logr.Discard(), WithGRPCServer(grpcSrv))
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler), WithGRPCServer(grpcSrv))
 
 			// Before start: not live, not ready.
 			assert.False(t, srv.liveness.Load(), "should not be live before Start")
