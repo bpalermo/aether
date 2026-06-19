@@ -1,11 +1,9 @@
-edition = "2023";
+edition = "2024";
 
 package aether.config.v1;
 
 import "buf/validate/validate.proto";
-import "google/protobuf/go_features.proto";
 
-option features.(pb.go).api_level = API_OPAQUE;
 option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
 
 // MeshConfigSpec is the `.spec` of the MeshConfig custom resource — the proxy
