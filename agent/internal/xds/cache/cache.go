@@ -88,6 +88,11 @@ type SnapshotCache struct {
 	edge bool
 	// edgeHTTPPort is the port the edge listener binds (edge mode only).
 	edgeHTTPPort uint32
+	// edgeTLSCert/edgeTLSKey, when both set, terminate downstream TLS on the edge
+	// listener from those mounted cert/key files (edge mode only); empty = plain
+	// HTTP.
+	edgeTLSCert string
+	edgeTLSKey  string
 
 	// edgeMu guards edgeRoutes: the external-host -> mesh-service mappings the
 	// edge serves (derived from EdgeRoute CRs). The edge route config is built
@@ -283,6 +288,14 @@ func (c *SnapshotCache) SetEmitStatsPod(enabled bool) {
 func (c *SnapshotCache) SetEdgeMode(httpPort uint32) {
 	c.edge = true
 	c.edgeHTTPPort = httpPort
+}
+
+// SetEdgeTLS enables downstream TLS termination on the edge listener from the
+// given mounted cert/key files. Both empty = plain HTTP. Must be called before
+// the manager starts.
+func (c *SnapshotCache) SetEdgeTLS(certPath, keyPath string) {
+	c.edgeTLSCert = certPath
+	c.edgeTLSKey = keyPath
 }
 
 // SetEdgeIdentity records the edge proxy's single SVID name and trust domain so

@@ -42,7 +42,11 @@ const (
 // destination pods directly over single-identity mTLS. No on_demand/subset
 // filters: the edge's routable set is its explicit exposed services, not the
 // whole mesh.
-func BuildEdgeListener(port uint32) *listenerv3.Listener {
+//
+// When tls is non-nil the filter chain terminates downstream TLS from the
+// mounted certificate (a Kubernetes TLS Secret); otherwise the edge serves plain
+// HTTP. Either way the upstream (edge -> pod) hop stays mTLS.
+func BuildEdgeListener(port uint32, tls *EdgeTLS) *listenerv3.Listener {
 	hcm := buildHTTPConnectionManager(EdgeListenerName, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
@@ -50,6 +54,14 @@ func BuildEdgeListener(port uint32) *listenerv3.Listener {
 			RouteConfigName: EdgeHTTPRouteName,
 			ConfigSource:    config.XDSConfigSourceADS(),
 		},
+	}
+
+	filterChain := &listenerv3.FilterChain{
+		Name:    EdgeListenerName,
+		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+	}
+	if tls != nil {
+		filterChain.TransportSocket = edgeDownstreamTLS(tls.CertPath, tls.KeyPath)
 	}
 
 	return &listenerv3.Listener{
@@ -68,13 +80,15 @@ func BuildEdgeListener(port uint32) *listenerv3.Listener {
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		StatPrefix:                    EdgeListenerName,
 		TrafficDirection:              corev3.TrafficDirection_INBOUND,
-		FilterChains: []*listenerv3.FilterChain{
-			{
-				Name:    EdgeListenerName,
-				Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
-			},
-		},
+		FilterChains:                  []*listenerv3.FilterChain{filterChain},
 	}
+}
+
+// EdgeTLS holds the mounted certificate/key file paths for terminating external
+// TLS at the edge (a Kubernetes TLS Secret projected into the Envoy container).
+type EdgeTLS struct {
+	CertPath string
+	KeyPath  string
 }
 
 // BuildEdgeRouteConfiguration builds the edge listener's route table from the

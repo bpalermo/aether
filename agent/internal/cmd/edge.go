@@ -50,6 +50,8 @@ func init() {
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
 	edgeCmd.Flags().StringSliceVar(&cfg.EdgeExposes, "expose", nil, "Mesh service names the edge always routes to at their mesh FQDN (comma-separated or repeated); merged with the EdgeRoute CRs")
 	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch EdgeRoute CRs in (empty = the edge pod's own namespace)")
+	edgeCmd.Flags().StringVar(&cfg.EdgeTLSCertFile, "edge-tls-cert-file", "", "Path to the mounted TLS certificate chain; with --edge-tls-key-file, the edge listener terminates downstream TLS (else plain HTTP)")
+	edgeCmd.Flags().StringVar(&cfg.EdgeTLSKeyFile, "edge-tls-key-file", "", "Path to the mounted TLS private key (pairs with --edge-tls-cert-file)")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -147,6 +149,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetEdgeMode(cfg.EdgeHTTPPort)
+	snapshotCache.SetEdgeTLS(cfg.EdgeTLSCertFile, cfg.EdgeTLSKeyFile)
 	snapshotCache.SetEdgeIdentity(edgeSpiffeID, identityTrustDomain)
 	// Static seed: --expose services routed at their mesh FQDN. The EdgeRoute
 	// reconciler merges these with the CRs and re-applies on every change; seed
