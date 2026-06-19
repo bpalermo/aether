@@ -149,9 +149,12 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// Prune storage entries whose network namespace no longer exists: a missed
 	// CNI DEL left the file behind. Keeping it both re-registers a dead endpoint
 	// (the missing-direction loop would treat it as a live local pod) and makes
-	// Envoy fault opening the gone netns when the per-pod cluster is programmed
-	// (talos worker-01, 2026-06-19). Drop the storage entry and its listener; its
-	// registry endpoints then fall through to ghost deregistration below.
+	// Envoy fault creating a connection in the gone netns when the per-pod app
+	// cluster is programmed (talos worker-01, 2026-06-19). RemovePod drops the
+	// whole listenerEntry — inbound/outbound listeners AND the per-pod app/health
+	// clusters (which carry the netns) — so the dead-netns cluster leaves the
+	// snapshot. The pruned pod's registry endpoints then fall through to ghost
+	// deregistration below.
 	fresh := pods[:0]
 	for _, p := range pods {
 		netns := p.GetNetworkNamespace()
