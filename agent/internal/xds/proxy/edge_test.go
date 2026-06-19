@@ -53,7 +53,7 @@ func TestNewServiceCluster_EdgePoolingOff(t *testing.T) {
 // interfaces at the configured port, RDS-driven, with the readiness filter
 // ahead of the router.
 func TestBuildEdgeListener(t *testing.T) {
-	l := BuildEdgeListener(8080)
+	l := BuildEdgeListener(8080, nil)
 
 	assert.Equal(t, EdgeListenerName, l.GetName())
 	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
@@ -73,6 +73,33 @@ func TestBuildEdgeListener(t *testing.T) {
 	require.GreaterOrEqual(t, len(hcm.GetHttpFilters()), 2)
 	assert.Equal(t, httpHealthCheckFilterName, hcm.GetHttpFilters()[0].GetName())
 	assert.Equal(t, httpRouterFilterName, hcm.GetHttpFilters()[len(hcm.GetHttpFilters())-1].GetName())
+}
+
+// TestBuildEdgeListenerTLS verifies downstream TLS termination: the filter chain
+// gets a TLS transport socket serving the mounted cert/key, and it does NOT
+// require a client certificate (external callers have no mesh identity).
+func TestBuildEdgeListenerTLS(t *testing.T) {
+	l := BuildEdgeListener(8443, &EdgeTLS{CertPath: "/etc/aether/edge-tls/tls.crt", KeyPath: "/etc/aether/edge-tls/tls.key"})
+
+	ts := l.GetFilterChains()[0].GetTransportSocket()
+	require.NotNil(t, ts, "TLS filter chain has a transport socket")
+	assert.Equal(t, tlsTransportSocketName, ts.GetName())
+
+	dtc := &transport_sockets_v3.DownstreamTlsContext{}
+	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(dtc))
+	assert.False(t, dtc.GetRequireClientCertificate().GetValue(), "external clients present no cert")
+
+	certs := dtc.GetCommonTlsContext().GetTlsCertificates()
+	require.Len(t, certs, 1)
+	assert.Equal(t, "/etc/aether/edge-tls/tls.crt", certs[0].GetCertificateChain().GetFilename())
+	assert.Equal(t, "/etc/aether/edge-tls/tls.key", certs[0].GetPrivateKey().GetFilename())
+}
+
+// TestBuildEdgeListenerNoTLS verifies the plain-HTTP edge listener has no
+// transport socket.
+func TestBuildEdgeListenerNoTLS(t *testing.T) {
+	l := BuildEdgeListener(8080, nil)
+	assert.Nil(t, l.GetFilterChains()[0].GetTransportSocket())
 }
 
 // TestBuildEdgeRouteConfiguration verifies the edge route table: the exposed

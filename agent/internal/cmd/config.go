@@ -83,6 +83,12 @@ type AgentConfig struct {
 	// EdgeRouteNamespace is the namespace the edge watches EdgeRoute CRs in
 	// (edge subcommand only); empty means the edge pod's own namespace.
 	EdgeRouteNamespace string
+
+	// EdgeTLSCertFile / EdgeTLSKeyFile, when both set, make the edge listener
+	// terminate downstream TLS from those mounted files (a k8s TLS Secret);
+	// empty = plain HTTP (edge subcommand only).
+	EdgeTLSCertFile string
+	EdgeTLSKeyFile  string
 }
 
 // NewAgentConfig creates a new AgentConfig with default values.

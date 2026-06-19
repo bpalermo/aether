@@ -179,6 +179,14 @@ edge:
   # Static services always routed at their mesh FQDN (merged with the EdgeRoute
   # CRs); handy for bring-up before any EdgeRoute exists.
   expose: []
+  # Downstream (external-facing) TLS termination from a Kubernetes TLS Secret
+  # (type kubernetes.io/tls: tls.crt + tls.key). Disabled = plain HTTP. The edge
+  # ->pod upstream hop stays mTLS either way. Rotating the Secret takes effect on
+  # the next edge pod roll (the cert is mounted as files, no SDS).
+  tls:
+    enabled: false
+    secretName: ""
+    mountPath: /etc/aether/edge-tls
   service:
     type: LoadBalancer
     port: 80

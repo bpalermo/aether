@@ -112,6 +112,29 @@ func upstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{CommonTlsContext: common, Sni: sni})
 }
 
+// edgeDownstreamTLS terminates external (north-south) TLS at the edge listener
+// from a mounted certificate/key (a Kubernetes TLS Secret). It does NOT require a
+// client certificate — external callers have no mesh identity; the edge presents
+// its own SVID on the separate upstream (edge -> pod) mTLS hop. The cert/key are
+// inline file data sources; rotating the Secret takes effect on the next edge pod
+// roll (no SDS dependency for the downstream cert).
+func edgeDownstreamTLS(certPath, keyPath string) *corev3.TransportSocket {
+	return transportSocket(&transport_sockets_v3.DownstreamTlsContext{
+		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
+			TlsCertificates: []*transport_sockets_v3.TlsCertificate{
+				{
+					CertificateChain: &corev3.DataSource{
+						Specifier: &corev3.DataSource_Filename{Filename: certPath},
+					},
+					PrivateKey: &corev3.DataSource{
+						Specifier: &corev3.DataSource_Filename{Filename: keyPath},
+					},
+				},
+			},
+		},
+	})
+}
+
 // transportSocket creates a TLS transport socket from the given TLS context message.
 func transportSocket(msg proto.Message) *corev3.TransportSocket {
 	return &corev3.TransportSocket{

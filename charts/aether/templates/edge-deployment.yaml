@@ -47,6 +47,10 @@ spec:
             - "--mesh-domain={{ .Values.meshDomain }}"
             - "--edge-http-port={{ .Values.edge.httpPort }}"
             - "--edge-route-namespace={{ $routeNamespace }}"
+            {{- if .Values.edge.tls.enabled }}
+            - "--edge-tls-cert-file={{ .Values.edge.tls.mountPath }}/tls.crt"
+            - "--edge-tls-key-file={{ .Values.edge.tls.mountPath }}/tls.key"
+            {{- end }}
             {{- range .Values.edge.expose }}
             - "--expose={{ . }}"
             {{- end }}
@@ -156,6 +160,9 @@ spec:
             httpGet:
               path: /aether/readyz
               port: http
+              {{- if .Values.edge.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 2
             periodSeconds: 2
             failureThreshold: 3
@@ -171,6 +178,11 @@ spec:
             - name: edge-config
               mountPath: /etc/envoy
               readOnly: true
+            {{- if .Values.edge.tls.enabled }}
+            - name: edge-tls
+              mountPath: {{ .Values.edge.tls.mountPath }}
+              readOnly: true
+            {{- end }}
             {{- if .Values.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
@@ -190,6 +202,11 @@ spec:
             items:
               - key: envoy.yaml
                 path: envoy.yaml
+        {{- if .Values.edge.tls.enabled }}
+        - name: edge-tls
+          secret:
+            secretName: {{ required "edge.tls.secretName is required when edge.tls.enabled" .Values.edge.tls.secretName }}
+        {{- end }}
         {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:
