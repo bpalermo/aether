@@ -1,9 +1,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "controller.clusterScopedName" . }}
+  name: {{ include "aether.controller.clusterScopedName" . }}
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
 rules:
   # Watch and report on the cluster-scoped MeshConfig CRs.
   - apiGroups: ["config.aether.io"]
@@ -12,7 +12,7 @@ rules:
   - apiGroups: ["config.aether.io"]
     resources: ["meshconfigs/status"]
     verbs: ["get", "update", "patch"]
-  {{- if .Values.global.spire.enabled }}
+  {{- if .Values.spire.enabled }}
   # Inject the SPIRE trust bundle into the webhook's caBundle (by name).
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingwebhookconfigurations"]
@@ -22,25 +22,25 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "controller.clusterScopedName" . }}
+  name: {{ include "aether.controller.clusterScopedName" . }}
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "controller.clusterScopedName" . }}
+  name: {{ include "aether.controller.clusterScopedName" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "controller.serviceAccountName" . }}
-    namespace: {{ include "controller.namespace" . }}
+    name: {{ include "aether.controller.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "controller.fullname" . }}
-  namespace: {{ include "controller.namespace" . }}
+  name: {{ include "aether.controller.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
 rules:
   # Project the MeshConfig into the mounted ConfigMap.
   - apiGroups: [""]
@@ -57,15 +57,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "controller.fullname" . }}
-  namespace: {{ include "controller.namespace" . }}
+  name: {{ include "aether.controller.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "controller.fullname" . }}
+  name: {{ include "aether.controller.fullname" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "controller.serviceAccountName" . }}
-    namespace: {{ include "controller.namespace" . }}
+    name: {{ include "aether.controller.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}

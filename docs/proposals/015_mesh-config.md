@@ -22,24 +22,29 @@ Aether is treated as **one system**. There are two config scopes:
    **inherit** the aether system config. This is the only thing in the
    `MeshConfig` proto/CRD.
 
-Charts:
+Charts (consolidated — agent/registrar/controller always deploy together, so
+they're **one chart**, not separate charts or an umbrella):
 
-- **`charts/aether`** (umbrella): bundles the subcharts and holds `global`
-  (otel/spire/meshDomain). One place to configure the system.
 - **`charts/crds`**: the `meshconfigs.config.aether.io` **v1** CRD, installable
   ahead of time (`spec` is `x-kubernetes-preserve-unknown-fields`; the webhook is
   the authoritative validator).
-- **`charts/controller`** (`aether-controller`): validating webhook
-  (protovalidate) + reconciler that projects the singleton `MeshConfig` CR into a
-  release-named ConfigMap (`<release>-mesh-config`) the **agent** mounts. Seeds
-  the default CR **once** (`lookup` + `resource-policy: keep`) so `helm upgrade`
-  never re-stamps it. Webhook serving cert is the **SPIRE SVID** when
-  `global.spire.enabled` (controller injects the trust bundle into `caBundle`),
-  else a Helm self-signed cert.
-- **`charts/agent`**, **`charts/registrar`**: consume `global` for their flags;
-  the agent additionally mounts the projected MeshConfig ConfigMap and applies the
-  proxy overrides on top of the inherited system config. The registrar (control
-  plane) does not use MeshConfig.
+- **`charts/aether`**: the whole system in one flat chart — agent DaemonSet +
+  per-node Envoy proxy, registrar Deployment, and the `aether-controller`
+  (validating webhook + reconciler). System config (otel/spire/meshDomain) is
+  top-level `values` referenced directly by each component — no umbrella, no
+  `global` indirection, no cross-chart name conventions. The controller projects
+  the singleton `MeshConfig` CR into a release-named ConfigMap
+  (`<release>-mesh-config`) the agent mounts; it seeds the default CR **once**
+  (`lookup` + `resource-policy: keep`) so `helm upgrade` never re-stamps it. The
+  webhook serving cert is the **SPIRE SVID** when `spire.enabled` (controller
+  injects the trust bundle into `caBundle`), else a Helm self-signed cert. The
+  registrar (control plane) does not use MeshConfig.
+
+Images are `repository` + `digest` (in-repo, digest-pinned) or `repository` +
+`tag` (the external proxy image); override `repository` to mirror to a private
+registry. CNI and the Envoy bootstrap take **deterministic, deploy-time**
+config (chart-templated), never a runtime ConfigMap — a config change can't
+break CNI on freshly-rolled nodes while old nodes keep working.
 
 `MeshConfig` proto (`api/aether/config/v1`): a single `proxy` message of
 **optional** fields — `access_logs_enabled`, `access_log_success_sample_rate`,

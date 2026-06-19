@@ -9,10 +9,10 @@ Webhook serving trust. Two modes:
   spire.enabled=false — a Helm self-signed cert (generated once, reused on upgrade
     via lookup) is rendered as a Secret and its CA baked into caBundle.
 */}}
-{{- $svc := include "controller.webhookServiceName" . -}}
-{{- $ns := include "controller.namespace" . -}}
+{{- $svc := include "aether.controller.webhookServiceName" . -}}
+{{- $ns := include "aether.namespace" . -}}
 {{- $caBundle := "" -}}
-{{- if not .Values.global.spire.enabled -}}
+{{- if not .Values.spire.enabled -}}
 {{- $cn := printf "%s.%s.svc" $svc $ns -}}
 {{- $altNames := list $cn (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
 {{- $secretName := printf "%s-cert" $svc -}}
@@ -36,7 +36,7 @@ metadata:
   name: {{ $secretName }}
   namespace: {{ $ns }}
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
 type: kubernetes.io/tls
 data:
   ca.crt: {{ $caBundle }}
@@ -47,9 +47,9 @@ data:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  name: {{ include "controller.clusterScopedName" . }}
+  name: {{ include "aether.controller.clusterScopedName" . }}
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
 webhooks:
   - name: meshconfig.config.aether.io
     admissionReviewVersions: ["v1"]
@@ -65,7 +65,7 @@ webhooks:
         namespace: {{ $ns }}
         path: /validate-config-aether-io-v1-meshconfig
         port: 443
-      {{- if not .Values.global.spire.enabled }}
+      {{- if not .Values.spire.enabled }}
       caBundle: {{ $caBundle }}
       {{- end }}
     rules:

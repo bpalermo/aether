@@ -1,37 +1,206 @@
-# Aether umbrella values.
+# Default values for the aether chart.
 #
-# `global` is the single source of truth for system-wide config: every subchart
-# (controller, registrar, agent) inherits it. Enable OTEL or SPIRE here once and
-# the whole system picks it up. Per-subchart settings live under the subchart's
-# name (agent:, registrar:, controller:). The proxy data plane can override its
-# own access-log / tracing / metrics policy via the MeshConfig CR — see
-# controller.meshConfig — defaulting to the global config below.
-global:
-  # DNS-style domain mesh authorities live under (<service>.<meshDomain>).
-  meshDomain: aether.internal
-  otel:
-    # Enable the OTel MeterProvider + push telemetry to the collector everywhere.
-    enabled: false
-    # OTLP gRPC collector endpoint (host:port), e.g.
-    # "otel-collector.observability.svc:4317". Empty disables OTLP export.
-    endpoint: ""
-    # Export component application logs over OTLP (tee'd into stderr).
-    logs: false
-    # Head-sampling ratio for traces (0.0-1.0); bounds exported spans only.
-    traceSampleRate: 0.1
-    # Export spans over OTLP (needs a collector traces pipeline).
-    traceExport: false
-  spire:
-    # Enable SPIRE mTLS across the whole system (agent, registrar, controller
-    # webhook serving cert).
-    enabled: true
+# Aether is one system: the agent (DaemonSet), the per-node Envoy proxy, the
+# in-cluster registrar, and the mesh-config controller deploy together from this
+# single chart. System config (OTEL, SPIRE, mesh domain) is set ONCE at the top
+# level and referenced by every component — no umbrella/globals indirection. The
+# proxy data plane is the only thing whose observability can be retuned at runtime
+# (via the MeshConfig CR); everything else is deterministic deploy-time config.
+# See docs/proposals/015_mesh-config.md.
 
-# Per-subchart overrides go under the subchart name, e.g.:
-# agent:
-#   clusterName: talos-main
-# registrar:
-#   replicaCount: 2
-# controller:
-#   meshConfig:
-#     proxy:
-#       tracingEnabled: true
+# Override the chart name / fully-qualified resource name.
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace all aether resources deploy into. Defaults to the release namespace.
+# Rendered with privileged pod-security labels (required by the agent's
+# hostNetwork + NET_ADMIN privileges) when create is true.
+namespace:
+  create: true
+  name: ""
+
+# Cluster name passed to the agent and registrar (`--cluster-name`).
+clusterName: talos-main
+
+# Enable verbose logging on all components (`--debug`).
+debug: true
+
+# DNS-style domain mesh authorities live under (<service>.<meshDomain>): clients
+# address services as <service>.<meshDomain>; also the ODCDS catch-all suffix.
+meshDomain: aether.internal
+
+# System-wide OTEL config — enable once, every component inherits it. The proxy
+# data plane may OVERRIDE its own access-log / tracing / metrics policy via the
+# MeshConfig CR (see meshConfig below), defaulting to this.
+otel:
+  # Enable the OTel MeterProvider + push telemetry to the collector everywhere.
+  enabled: false
+  # OTLP gRPC collector endpoint (host:port, insecure), e.g.
+  # "otel-collector.observability.svc:4317". Empty disables OTLP export and the
+  # proxy/CNI stat sink. NOTE: this is a deterministic, deploy-time value — the
+  # CNI plugin and Envoy bootstrap bake it in; it is never read from a runtime
+  # ConfigMap, so the fleet rolls atomically and a config change can't break CNI.
+  endpoint: ""
+  # Export component application logs over OTLP (tee'd into stderr).
+  logs: false
+  # Head-sampling ratio for traces (0.0-1.0); bounds exported spans only.
+  traceSampleRate: 0.1
+  # Export spans over OTLP (needs a collector traces pipeline).
+  traceExport: false
+
+# System-wide SPIRE config. `enabled` is the mesh-wide mTLS switch (agent,
+# registrar, and the controller webhook serving cert); the socket paths / trust
+# domain / admin socket are per-component plumbing.
+spire:
+  enabled: true
+  # Workload API socket path (the csi.spiffe.io mount + socket filename), shared
+  # by agent, registrar and controller.
+  workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
+  # SPIFFE trust domain authorized for the registrar's mTLS peers. Empty = ROOTCA.
+  trustDomain: ""
+  # SPIRE agent admin socket (Delegated Identity API) used by the agent to mint
+  # proxy SVIDs. hostPath is bind-mounted at mountPath; the socket is socketName.
+  adminSocket:
+    hostPath: /run/spire/agent/sockets/csi.spiffe.io/admin
+    mountPath: /run/spire/admin-sockets
+    socketName: admin.sock
+
+# Proxy MeshConfig — the controller seeds and projects the singleton MeshConfig CR
+# into a ConfigMap the agent mounts. The CR ONLY overrides the proxy data plane's
+# observability; everything else is inherited from the system config above.
+meshConfig:
+  # Seed the singleton MeshConfig CR (name "default") on first install only — it
+  # is created once and NEVER overwritten on upgrade (lookup-skip + Helm
+  # resource-policy: keep), so operators own it via kubectl thereafter. Set false
+  # to manage the CR entirely yourself.
+  createDefault: true
+  # The MeshConfig spec.proxy seeded into the default CR (protojson field names of
+  # aether.config.v1.MeshConfig.proxy). An empty block means the proxy inherits
+  # everything from the system config. Used only at first-install seeding.
+  proxy: {}
+    # accessLogsEnabled: false
+    # accessLogSuccessSampleRate: 100
+    # tracingEnabled: false
+    # traceSampleRate: 0.01
+    # emitStatsPod: false
+
+# --------------------------------------------------------------------- agent
+agent:
+  # Image as repository + digest (digest-pinned for immutability). Mirror to a
+  # private registry by overriding `repository` alone; the digest is preserved.
+  image:
+    repository: "{@//agent/cmd/agent:image_push.repository}"
+    digest: "{@//agent/cmd/agent:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 200m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+  # AWS credentials for the DynamoDB registry backend. By default references an
+  # existing secret; set create: true + the keys to have the chart render it.
+  awsCredentials:
+    create: false
+    secretName: ""
+    accessKeyId: ""
+    secretAccessKey: ""
+
+# CNI installer (init container). Its config is deterministic deploy-time data.
+cniInstall:
+  image:
+    repository: "{@//cni/cmd/cni-install:image_push.repository}"
+    digest: "{@//cni/cmd/cni-install:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 100m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 32Mi
+
+# Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
+proxy:
+  enabled: true
+  # External image (built by the //proxy workspace), tag-pinned to the publishing
+  # commit SHA. Mirror by overriding `repository`.
+  image:
+    repository: ghcr.io/bpalermo/aether/aether-proxy
+    tag: d86328b772ee5f6bf86fcd725eff0e2ff3e645f3
+    digest: ""
+    pullPolicy: Always
+  logLevel: info
+  # Emit Envoy's own application logs as one JSON object per line (bootstrap
+  # application_log_config). Set false for Envoy's default text format.
+  jsonLogs: true
+  # Envoy hot restart tunables (the mechanism itself is not optional). See
+  # docs/proposals/001_proxy-hot-restart.md.
+  hotRestart:
+    baseId: 0
+    drainTime: 10s
+    parentShutdownTime: 15s
+    handoffDeadline: 0
+    adminUnresponsiveDeadline: 0
+    shmHostPath: /run/aether/shm
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 512Mi
+  # Envoy overload manager graceful-degradation ladder; engages before the OOM
+  # kill. Keep maxHeapSizeBytes at ~75% of resources.limits.memory.
+  overload:
+    enabled: true
+    maxHeapSizeBytes: 402653184 # 384Mi = 75% of 512Mi
+
+# ----------------------------------------------------------------- registrar
+registrar:
+  image:
+    repository: "{@//registrar/cmd/registrar:image_push.repository}"
+    digest: "{@//registrar/cmd/registrar:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  # 2 replicas ALWAYS (directive 2026-06-11): exercises the multi-replica
+  # write-behind topology permanently.
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  service:
+    port: 443
+    targetPort: 8443
+  # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
+  registryBackend: kubernetes
+  # etcd client endpoints (used when registryBackend == etcd).
+  etcd:
+    endpoints: []
+  # AWS config for the dynamodb registry backend.
+  aws:
+    region: us-east-1
+    credentialsSecret: ""
+
+# ---------------------------------------------------------------- controller
+controller:
+  image:
+    repository: "{@//controller/cmd/controller:image_push.repository}"
+    digest: "{@//controller/cmd/controller:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  # Leader election is on; extra replicas are warm standbys.
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

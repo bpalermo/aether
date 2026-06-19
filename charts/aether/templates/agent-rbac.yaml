@@ -1,9 +1,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "registrar.clusterScopedName" . }}
+  name: {{ include "aether.agent.clusterScopedName" . }}
   labels:
-    {{- include "registrar.labels" . | nindent 4 }}
+    {{- include "aether.agent.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -15,14 +15,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "registrar.clusterScopedName" . }}
+  name: {{ include "aether.agent.clusterScopedName" . }}
   labels:
-    {{- include "registrar.labels" . | nindent 4 }}
+    {{- include "aether.agent.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "registrar.clusterScopedName" . }}
+  name: {{ include "aether.agent.clusterScopedName" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "registrar.serviceAccountName" . }}
-    namespace: {{ include "registrar.namespace" . }}
+    name: {{ include "aether.agent.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}

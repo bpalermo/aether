@@ -1,34 +1,34 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "agent.fullname" . }}
-  namespace: {{ include "agent.namespace" . }}
+  name: {{ include "aether.agent.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
   labels:
-    {{- include "agent.labels" . | nindent 4 }}
+    {{- include "aether.agent.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "agent.selectorLabels" . | nindent 6 }}
+      {{- include "aether.agent.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
   template:
     metadata:
       labels:
-        {{- include "agent.labels" . | nindent 8 }}
+        {{- include "aether.agent.labels" . | nindent 8 }}
     spec:
       hostNetwork: true
       # Resolve in-cluster Service names (e.g. the registrar) while on hostNetwork;
       # plain ClusterFirst is ignored for hostNetwork pods.
       dnsPolicy: ClusterFirstWithHostNet
-      serviceAccountName: {{ include "agent.serviceAccountName" . }}
+      serviceAccountName: {{ include "aether.agent.serviceAccountName" . }}
       priorityClassName: system-node-critical
       initContainers:
         - name: cni-install
-          image: {{ .Values.cniInstall.image.ref | quote }}
+          image: {{ include "aether.image" .Values.cniInstall.image | quote }}
           imagePullPolicy: {{ .Values.cniInstall.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            {{- with .Values.global.otel.endpoint }}
+            {{- with .Values.otel.endpoint }}
             # Written into the netconf: the CNI plugin binary runs under the
             # container runtime, so the endpoint cannot reach it via pod env.
             # This is the Envoy/CNI plumbing endpoint (template-time), distinct
@@ -48,7 +48,7 @@ spec:
             {{- toYaml .Values.cniInstall.resources | nindent 12 }}
       containers:
         - name: agent
-          image: {{ .Values.agent.image.ref | quote }}
+          image: {{ include "aether.image" .Values.agent.image | quote }}
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
@@ -56,25 +56,25 @@ spec:
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
             # Aether system config, inherited from the umbrella global block.
-            - "--mesh-domain={{ .Values.global.meshDomain }}"
-            {{- if .Values.global.otel.enabled }}
+            - "--mesh-domain={{ .Values.meshDomain }}"
+            {{- if .Values.otel.enabled }}
             - "--otel-enabled=true"
             {{- end }}
-            {{- with .Values.global.otel.endpoint }}
+            {{- with .Values.otel.endpoint }}
             - "--otlp-endpoint={{ . }}"
             {{- end }}
-            {{- if .Values.global.otel.logs }}
+            {{- if .Values.otel.logs }}
             - "--logs-enabled=true"
             {{- end }}
-            - "--trace-sample-rate={{ .Values.global.otel.traceSampleRate }}"
-            {{- if .Values.global.otel.traceExport }}
+            - "--trace-sample-rate={{ .Values.otel.traceSampleRate }}"
+            {{- if .Values.otel.traceExport }}
             - "--trace-export=true"
             {{- end }}
-            - "--spire-enabled={{ .Values.global.spire.enabled }}"
+            - "--spire-enabled={{ .Values.spire.enabled }}"
             # Proxy access-log / tracing / metrics overrides come from the mounted
             # MeshConfig ConfigMap (projected from the MeshConfig CR), defaulting to
             # the system config above.
-            {{- if .Values.global.spire.enabled }}
+            {{- if .Values.spire.enabled }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--spire-admin-socket={{ .Values.spire.adminSocket.mountPath }}/{{ .Values.spire.adminSocket.socketName }}"
             {{- end }}
@@ -129,12 +129,12 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agent.awsSecretName" . }}
+                  name: {{ include "aether.agent.awsSecretName" . }}
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agent.awsSecretName" . }}
+                  name: {{ include "aether.agent.awsSecretName" . }}
                   key: AWS_SECRET_ACCESS_KEY
           securityContext:
             readOnlyRootFilesystem: true
@@ -145,7 +145,7 @@ spec:
                 - ALL
               add:
                 - NET_ADMIN
-                {{- if .Values.global.spire.enabled }}
+                {{- if .Values.spire.enabled }}
                 # Access the SPIRE agent admin socket (owned by the spire-agent
                 # uid) from this root-but-capability-dropped container.
                 - DAC_OVERRIDE
@@ -168,7 +168,7 @@ spec:
             - name: mesh-config
               mountPath: /etc/aether
               readOnly: true
-            {{- if .Values.global.spire.enabled }}
+            {{- if .Values.spire.enabled }}
             - name: spire-workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
@@ -216,8 +216,8 @@ spec:
           # derived from the release (no chart value); the pod stays in
           # ContainerCreating until it exists. See proposal 015.
           configMap:
-            name: {{ include "agent.meshConfigMapName" . }}
-        {{- if .Values.global.spire.enabled }}
+            name: {{ include "aether.meshConfigMapName" . }}
+        {{- if .Values.spire.enabled }}
         - name: spire-workload-socket
           csi:
             driver: csi.spiffe.io

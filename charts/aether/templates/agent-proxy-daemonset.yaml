@@ -2,14 +2,14 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "agent.proxy.fullname" . }}
-  namespace: {{ include "agent.namespace" . }}
+  name: {{ include "aether.proxy.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
   labels:
-    {{- include "agent.proxy.labels" . | nindent 4 }}
+    {{- include "aether.proxy.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "agent.proxy.selectorLabels" . | nindent 6 }}
+      {{- include "aether.proxy.selectorLabels" . | nindent 6 }}
   updateStrategy:
     type: RollingUpdate
     # Surge a new pod onto the node before tearing down the old one so the new
@@ -30,11 +30,11 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "agent.proxy.labels" . | nindent 8 }}
+        {{- include "aether.proxy.labels" . | nindent 8 }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      serviceAccountName: {{ include "agent.proxy.serviceAccountName" . }}
+      serviceAccountName: {{ include "aether.proxy.serviceAccountName" . }}
       priorityClassName: system-node-critical
       # The deleted (old) pod must keep its Envoy alive as the successor's
       # hot-restart parent until the successor's protocol terminates it — the
@@ -49,7 +49,7 @@ spec:
         # shared libraries); inject the statically linked supervisor from the
         # agent image by having it self-copy onto a shared volume.
         - name: install-supervisor
-          image: {{ .Values.agent.image.ref | quote }}
+          image: {{ include "aether.image" .Values.agent.image | quote }}
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
           args: ["proxy-supervisor", "--install-path=/opt/aether/supervisor"]
           volumeMounts:
@@ -60,7 +60,7 @@ spec:
           # Custom aether-proxy = Envoy with the compiled-in aether_stats C++
           # extension (//proxy:image_push, proposal 012). The extension is part
           # of the binary, so no module volume or search-path env is needed.
-          image: {{ .Values.proxy.image.ref | quote }}
+          image: {{ include "aether.image" .Values.proxy.image | quote }}
           imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
           command:
             - "/opt/aether/supervisor"
@@ -76,7 +76,7 @@ spec:
             - "--admin-address=127.0.0.1:9901"
             - "--handoff-deadline={{ .Values.proxy.hotRestart.handoffDeadline }}"
             - "--admin-unresponsive-deadline={{ .Values.proxy.hotRestart.adminUnresponsiveDeadline }}"
-            {{- with .Values.global.otel.endpoint }}
+            {{- with .Values.otel.endpoint }}
             # Push-first: the supervisor exports its hot-restart lifecycle
             # metrics over OTLP; no scrape port to collide on in the host netns.
             - "--otlp-endpoint={{ . }}"
@@ -204,7 +204,7 @@ spec:
           emptyDir: {}
         - name: proxy-config
           configMap:
-            name: {{ include "agent.proxy.configMapName" . }}
+            name: {{ include "aether.proxy.configMapName" . }}
             items:
               - key: envoy.yaml
                 path: envoy.yaml

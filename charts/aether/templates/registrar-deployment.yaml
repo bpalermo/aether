@@ -1,49 +1,49 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "registrar.fullname" . }}
-  namespace: {{ include "registrar.namespace" . }}
+  name: {{ include "aether.registrar.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
   labels:
-    {{- include "registrar.labels" . | nindent 4 }}
+    {{- include "aether.registrar.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.registrar.replicaCount }}
   selector:
     matchLabels:
-      {{- include "registrar.selectorLabels" . | nindent 6 }}
+      {{- include "aether.registrar.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "registrar.labels" . | nindent 8 }}
+        {{- include "aether.registrar.labels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "registrar.serviceAccountName" . }}
+      serviceAccountName: {{ include "aether.registrar.serviceAccountName" . }}
       containers:
         - name: registrar
-          image: {{ .Values.image.ref | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "aether.image" .Values.registrar.image | quote }}
+          imagePullPolicy: {{ .Values.registrar.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
             - "--cluster-name={{ .Values.clusterName }}"
             # Aether system config, inherited from the umbrella global block.
-            {{- if .Values.global.otel.enabled }}
+            {{- if .Values.otel.enabled }}
             - "--otel-enabled=true"
             {{- end }}
-            {{- with .Values.global.otel.endpoint }}
+            {{- with .Values.otel.endpoint }}
             - "--otlp-endpoint={{ . }}"
             {{- end }}
-            {{- if .Values.global.otel.logs }}
+            {{- if .Values.otel.logs }}
             - "--logs-enabled=true"
             {{- end }}
-            - "--trace-sample-rate={{ .Values.global.otel.traceSampleRate }}"
-            {{- if .Values.global.otel.traceExport }}
+            - "--trace-sample-rate={{ .Values.otel.traceSampleRate }}"
+            {{- if .Values.otel.traceExport }}
             - "--trace-export=true"
             {{- end }}
-            - "--registry-backend={{ .Values.registryBackend }}"
-            {{- if eq .Values.registryBackend "etcd" }}
-            - "--etcd-endpoints={{ join "," .Values.etcd.endpoints }}"
+            - "--registry-backend={{ .Values.registrar.registryBackend }}"
+            {{- if eq .Values.registrar.registryBackend "etcd" }}
+            - "--etcd-endpoints={{ join "," .Values.registrar.etcd.endpoints }}"
             {{- end }}
-            - "--grpc-address=:{{ .Values.service.targetPort }}"
-            - "--spire-enabled={{ .Values.global.spire.enabled }}"
-            {{- if .Values.global.spire.enabled }}
+            - "--grpc-address=:{{ .Values.registrar.service.targetPort }}"
+            - "--spire-enabled={{ .Values.spire.enabled }}"
+            {{- if .Values.spire.enabled }}
             {{- with .Values.spire.trustDomain }}
             - "--spire-trust-domain={{ . }}"
             {{- end }}
@@ -51,7 +51,7 @@ spec:
             {{- end }}
           ports:
             - name: grpc
-              containerPort: {{ .Values.service.targetPort }}
+              containerPort: {{ .Values.registrar.service.targetPort }}
               protocol: TCP
             - name: metrics
               containerPort: 8081
@@ -71,13 +71,13 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
-          {{- with .Values.aws.credentialsSecret }}
+          {{- with .Values.registrar.aws.credentialsSecret }}
           envFrom:
             - secretRef:
                 name: {{ . }}
           {{- end }}
           env:
-            {{- with .Values.aws.region }}
+            {{- with .Values.registrar.aws.region }}
             - name: AWS_REGION
               value: {{ . | quote }}
             {{- end }}
@@ -112,15 +112,15 @@ spec:
             capabilities:
               drop:
                 - ALL
-          {{- if .Values.global.spire.enabled }}
+          {{- if .Values.spire.enabled }}
           volumeMounts:
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
           {{- end }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-      {{- if .Values.global.spire.enabled }}
+            {{- toYaml .Values.registrar.resources | nindent 12 }}
+      {{- if .Values.spire.enabled }}
       volumes:
         - name: workload-socket
           csi:

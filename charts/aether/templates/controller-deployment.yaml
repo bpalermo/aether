@@ -1,47 +1,47 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "controller.fullname" . }}
-  namespace: {{ include "controller.namespace" . }}
+  name: {{ include "aether.controller.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
 spec:
   # Leader election is on, so extra replicas are warm standbys.
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.controller.replicaCount }}
   selector:
     matchLabels:
-      {{- include "controller.selectorLabels" . | nindent 6 }}
+      {{- include "aether.controller.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "controller.labels" . | nindent 8 }}
+        {{- include "aether.controller.labels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "controller.serviceAccountName" . }}
+      serviceAccountName: {{ include "aether.controller.serviceAccountName" . }}
       containers:
         - name: controller
-          image: {{ .Values.image.ref | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "aether.image" .Values.controller.image | quote }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            - "--mesh-config-configmap={{ include "controller.meshConfigMapName" . }}"
+            - "--mesh-config-configmap={{ include "aether.meshConfigMapName" . }}"
             # Aether system config, inherited from the umbrella global block.
-            {{- if .Values.global.otel.enabled }}
+            {{- if .Values.otel.enabled }}
             - "--otel-enabled=true"
             {{- end }}
-            {{- with .Values.global.otel.endpoint }}
+            {{- with .Values.otel.endpoint }}
             - "--otlp-endpoint={{ . }}"
             {{- end }}
-            {{- if .Values.global.otel.logs }}
+            {{- if .Values.otel.logs }}
             - "--logs-enabled=true"
             {{- end }}
-            - "--trace-sample-rate={{ .Values.global.otel.traceSampleRate }}"
-            {{- if .Values.global.otel.traceExport }}
+            - "--trace-sample-rate={{ .Values.otel.traceSampleRate }}"
+            {{- if .Values.otel.traceExport }}
             - "--trace-export=true"
             {{- end }}
-            {{- if .Values.global.spire.enabled }}
+            {{- if .Values.spire.enabled }}
             - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
-            - "--webhook-config-name={{ include "controller.clusterScopedName" . }}"
+            - "--webhook-config-name={{ include "aether.controller.clusterScopedName" . }}"
             {{- end }}
           ports:
             - name: webhook
@@ -96,7 +96,7 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            {{- if .Values.global.spire.enabled }}
+            {{- if .Values.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
@@ -106,9 +106,9 @@ spec:
               readOnly: true
             {{- end }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml .Values.controller.resources | nindent 12 }}
       volumes:
-        {{- if .Values.global.spire.enabled }}
+        {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:
             driver: "csi.spiffe.io"
@@ -116,5 +116,5 @@ spec:
         {{- else }}
         - name: webhook-cert
           secret:
-            secretName: {{ include "controller.webhookServiceName" . }}-cert
+            secretName: {{ include "aether.controller.webhookServiceName" . }}-cert
         {{- end }}

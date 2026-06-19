@@ -1,19 +1,18 @@
 apiVersion: v2
 name: aether
 description: |
-  Aether service mesh — umbrella chart. Treats the whole system (CRDs, controller,
-  registrar, agent) as one unit and sets system-wide config (OTEL, SPIRE, mesh
-  domain) ONCE via the top-level `global:` block, inherited by every subchart. The
-  proxy data plane can override its own observability via the MeshConfig CR (owned
-  by the controller subchart). See docs/proposals/015_mesh-config.md.
+  Aether service mesh — the whole system in one chart: the node agent (DaemonSet)
+  + per-node Envoy proxy, the in-cluster registrar, and the mesh-config controller
+  (MeshConfig validating webhook + CR→ConfigMap reconciler). System config (OTEL,
+  SPIRE, mesh domain) is set once at the top level. The MeshConfig CRD ships in the
+  separate `crds` chart, which must be installed first. See
+  docs/proposals/015_mesh-config.md.
 type: application
-version: "0.1.0-{GIT_COMMIT}"
+# Stamped at package time when built with `--stamp` (see other charts).
+version: "0.4.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether
   - service-mesh
 sources:
   - https://github.com/bpalermo/aether
-# Subchart dependencies (crds, controller, registrar, agent) are injected by the
-# Bazel helm packager from the `deps` attribute in BUILD.bazel; do not list them
-# here or the versions must be kept in lockstep with each subchart.

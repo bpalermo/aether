@@ -14,7 +14,7 @@ kind: MeshConfig
 metadata:
   name: default
   labels:
-    {{- include "controller.labels" . | nindent 4 }}
+    {{- include "aether.controller.labels" . | nindent 4 }}
   annotations:
     helm.sh/resource-policy: keep
 spec:
