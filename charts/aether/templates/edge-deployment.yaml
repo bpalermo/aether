@@ -177,6 +177,12 @@ spec:
             capabilities:
               drop:
                 - ALL
+              {{- if lt (int .Values.edge.httpPort) 1024 }}
+              # Bind the privileged listener port as non-root. NET_BIND_SERVICE
+              # is the only added cap; the pod still runs unprivileged.
+              add:
+                - NET_BIND_SERVICE
+              {{- end }}
           volumeMounts:
             - name: xds-sock
               mountPath: /run/aether
