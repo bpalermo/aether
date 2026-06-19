@@ -119,6 +119,11 @@ spec:
               mountPath: /run/aether
             - name: registry-dir
               mountPath: /var/lib/aether/registry
+            # MeshConfig overrides (access logs / tracing / stats-pod) so the edge
+            # honors the same proxy observability policy as the node proxies.
+            - name: mesh-config
+              mountPath: /etc/aether
+              readOnly: true
             {{- if .Values.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
@@ -204,6 +209,11 @@ spec:
           emptyDir: {}
         - name: registry-dir
           emptyDir: {}
+        # Projected from the MeshConfig CR by the aether-controller (release-derived
+        # name; the pod waits for it, like the node agent). See proposal 015.
+        - name: mesh-config
+          configMap:
+            name: {{ include "aether.meshConfigMapName" . }}
         - name: edge-config
           configMap:
             name: {{ include "aether.edge.configMapName" . }}
