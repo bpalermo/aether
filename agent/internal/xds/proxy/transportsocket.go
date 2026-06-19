@@ -14,11 +14,20 @@ const (
 	tlsTransportSocketName = "envoy.transport_sockets.tls"
 )
 
-// sdsSecretConfig creates an SDS secret config that fetches secrets via ADS.
+// sdsSecretConfig creates an SDS secret config that fetches secrets via ADS
+// (the agent-served snapshot secrets used by the node proxy).
 func sdsSecretConfig(secretName string) *transport_sockets_v3.SdsSecretConfig {
+	return sdsSecretConfigFrom(secretName, config.XDSConfigSourceADS())
+}
+
+// sdsSecretConfigFrom creates an SDS secret config that fetches the named
+// secret over the given config source. The edge proxy passes a source pointing
+// at the static spire_agent SDS cluster (config.SDSConfigSourceFromCluster) so
+// secrets come straight from SPIRE instead of the agent's ADS stream.
+func sdsSecretConfigFrom(secretName string, source *corev3.ConfigSource) *transport_sockets_v3.SdsSecretConfig {
 	return &transport_sockets_v3.SdsSecretConfig{
 		Name:      secretName,
-		SdsConfig: config.XDSConfigSourceADS(),
+		SdsConfig: source,
 	}
 }
 
@@ -50,18 +59,31 @@ func DownstreamTransportSocket(tlsCertificateSecretName string, validationContex
 // leaves registry poisoning able to impersonate a service (an attacker-
 // registered endpoint would present a valid but WRONG identity).
 func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS())
+}
+
+// EdgeUpstreamTransportSocket is UpstreamTransportSocket for the edge proxy: it
+// fetches the (single) edge SVID and trust bundle over the SPIRE Agent's native
+// SDS API (the static spire_agent cluster) instead of the agent's ADS stream.
+// SAN pinning is unchanged — match_typed_subject_alt_names is inline static
+// config; only the validation-context bundle comes over SDS.
+func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName))
+}
+
+func upstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string, sdsSource *corev3.ConfigSource) *corev3.TransportSocket {
 	common := &transport_sockets_v3.CommonTlsContext{
 		// Clusters speak HTTP/2 upstream; advertise it so the mTLS handshake
 		// negotiates h2 (matches the inbound listener's codec).
 		AlpnProtocols: []string{"h2"},
 		TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
-			sdsSecretConfig(tlsCertificateSecretName),
+			sdsSecretConfigFrom(tlsCertificateSecretName, sdsSource),
 		},
 	}
 
 	if len(sanURIs) == 0 {
 		common.ValidationContextType = &transport_sockets_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
-			ValidationContextSdsSecretConfig: sdsSecretConfig(validationContextName),
+			ValidationContextSdsSecretConfig: sdsSecretConfigFrom(validationContextName, sdsSource),
 		}
 	} else {
 		matchers := make([]*transport_sockets_v3.SubjectAltNameMatcher, 0, len(sanURIs))
@@ -78,7 +100,7 @@ func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 				DefaultValidationContext: &transport_sockets_v3.CertificateValidationContext{
 					MatchTypedSubjectAltNames: matchers,
 				},
-				ValidationContextSdsSecretConfig: sdsSecretConfig(validationContextName),
+				ValidationContextSdsSecretConfig: sdsSecretConfigFrom(validationContextName, sdsSource),
 			},
 		}
 	}

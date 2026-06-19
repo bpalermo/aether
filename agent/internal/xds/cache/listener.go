@@ -78,6 +78,12 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 // health_<pod> clusters, probed by the liveness loop) as a flat slice.
 // Thread-safe.
 func (c *SnapshotCache) Listeners() []types.Resource {
+	// Edge mode: a single public-facing HTTP listener (no per-pod inbound/
+	// outbound listeners, no health gateway — the edge runs no local workloads).
+	if c.edge {
+		return []types.Resource{proxy.BuildEdgeListener(c.edgeHTTPPort)}
+	}
+
 	c.listenerMu.RLock()
 	defer c.listenerMu.RUnlock()
 

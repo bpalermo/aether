@@ -78,6 +78,17 @@ type SnapshotCache struct {
 	// on every listener build.
 	emitStatsPod bool
 
+	// edge marks this cache as backing an edge (north-south ingress) proxy
+	// rather than a node proxy. In edge mode the snapshot carries a single
+	// public-facing listener (no per-pod inbound/outbound or health gateway),
+	// service clusters use a single-identity transport socket whose SDS points
+	// at SPIRE directly (no per-source matcher, no per-downstream pooling), and
+	// the route table is the explicit exposed set (no ODCDS catch-all). Set once
+	// before the manager starts (SetEdgeMode); read without locking.
+	edge bool
+	// edgeHTTPPort is the port the edge listener binds (edge mode only).
+	edgeHTTPPort uint32
+
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace
 
@@ -106,6 +117,11 @@ type SnapshotCache struct {
 	// service name with the last observation time; entries idle past
 	// observedTTL are pruned.
 	observedDeps map[string]time.Time
+	// staticDeps is a fixed dependency set (edge mode): the services the edge
+	// exposes. Unioned into the dependency set so the scoped registry watch
+	// carries exactly the exposed services; updated by SetStaticDependencies
+	// when the exposed set changes (e.g. an EdgeRoute add/remove).
+	staticDeps map[string]struct{}
 	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
 	observedTTL time.Duration
 	// depChanged receives a (coalesced) signal when the dependency set
@@ -205,6 +221,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		localWorkloads: make(map[string]string),
 		podDeps:        make(map[string]podDependencies),
 		observedDeps:   make(map[string]time.Time),
+		staticDeps:     make(map[string]struct{}),
 		depChanged:     make(chan struct{}, 1),
 		version:        atomic.NewUint64(0),
 	}
@@ -252,6 +269,55 @@ func (c *SnapshotCache) MeshDomain() string {
 // is read without locking on every listener build.
 func (c *SnapshotCache) SetEmitStatsPod(enabled bool) {
 	c.emitStatsPod = enabled
+}
+
+// SetEdgeMode switches the cache to edge (north-south ingress) snapshot
+// composition and binds the edge listener to httpPort. Must be called before
+// the manager starts; the mode is read without locking on every snapshot build.
+func (c *SnapshotCache) SetEdgeMode(httpPort uint32) {
+	c.edge = true
+	c.edgeHTTPPort = httpPort
+}
+
+// SetEdgeIdentity records the edge proxy's single SVID name and trust domain so
+// the edge service clusters' upstream mTLS presents that identity and validates
+// the trust-domain bundle (served by SPIRE over the spire_agent SDS cluster).
+// The node proxy sets these via the SPIRE bridge instead. Must be called before
+// the manager starts.
+func (c *SnapshotCache) SetEdgeIdentity(spiffeID, trustDomain string) {
+	c.localMu.Lock()
+	c.nodeSpiffeID = spiffeID
+	c.trustDomain = trustDomain
+	c.localMu.Unlock()
+}
+
+// perDownstreamConnectionPool reports whether service clusters should key
+// upstream pools by the downstream connection. True for the node proxy (many
+// workload identities); false for the single-identity edge (full multiplexing).
+func (c *SnapshotCache) perDownstreamConnectionPool() bool {
+	return !c.edge
+}
+
+// SetStaticDependencies replaces the fixed (edge) dependency set with the given
+// services and signals a dependency change if it differs, so the scoped
+// registry watch and the cluster snapshot rebuild to exactly the exposed set.
+func (c *SnapshotCache) SetStaticDependencies(services []string) {
+	next := make(map[string]struct{}, len(services))
+	for _, s := range services {
+		if s != "" {
+			next[s] = struct{}{}
+		}
+	}
+
+	c.depMu.Lock()
+	before := c.dependencySetLocked()
+	c.staticDeps = next
+	after := c.dependencySetLocked()
+	c.depMu.Unlock()
+
+	if !equalSets(before, after) {
+		c.signalDependencyChange()
+	}
 }
 
 // setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping

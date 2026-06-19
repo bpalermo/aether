@@ -133,7 +133,11 @@ func (c *SnapshotCache) DependencySet() map[string]struct{} {
 
 // dependencySetLocked builds the dependency set. Caller must hold depMu.
 func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
-	set := make(map[string]struct{}, len(c.podDeps)*4+len(c.observedDeps))
+	set := make(map[string]struct{}, len(c.podDeps)*4+len(c.observedDeps)+len(c.staticDeps))
+	// Static (edge) dependencies: the explicitly exposed services.
+	for svc := range c.staticDeps {
+		set[svc] = struct{}{}
+	}
 	for _, deps := range c.podDeps {
 		if deps.service != "" {
 			set[deps.service] = struct{}{}

@@ -97,34 +97,45 @@ func GetCommand() *cobra.Command {
 
 func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
+	registerSharedFlags(rootCmd)
 
+	// Local storage configuration (node proxy only — the edge runs no CNI/storage).
+	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
+
+	// SPIRE admin socket (node proxy only — delegated identity for many local
+	// workloads; the edge presents a single identity served by SPIRE directly).
+	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
+}
+
+// registerSharedFlags registers the flags common to the node agent (root) and
+// the edge subcommand: cluster/proxy identity, the registrar address, the mesh
+// system config inherited from the umbrella chart, and the SPIRE workload
+// socket. Each command binds them onto the shared cfg; cobra runs the root's
+// PersistentPreRunE (mesh-config load + logging) for the subcommand too.
+func registerSharedFlags(cmd *cobra.Command) {
 	// Aether system config (OTEL enable/endpoint via manager.RegisterFlags, mesh
 	// domain, SPIRE on/off) is inherited from the aether umbrella chart's globals
 	// as flags. The proxy data plane can override its own observability via the
 	// MeshConfig ConfigMap.
-	rootCmd.Flags().StringVar(&cfg.MeshConfigPath, "mesh-config", cfg.MeshConfigPath, "Path to the mounted proxy MeshConfig YAML (ConfigMap) with proxy observability overrides")
-	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
-	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE integration for X.509 SVID management and mTLS")
+	cmd.Flags().StringVar(&cfg.MeshConfigPath, "mesh-config", cfg.MeshConfigPath, "Path to the mounted proxy MeshConfig YAML (ConfigMap) with proxy observability overrides")
+	cmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under (clients call <service>.<mesh-domain>)")
+	cmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE integration for X.509 SVID management and mTLS")
 
 	// Kubernetes and cluster identity (required)
-	rootCmd.Flags().StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name where the agent runs (required)")
-	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name, used for service discovery (required)")
-	rootCmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "Unique identifier for this Envoy proxy instance in the xDS server (required)")
-
-	// Local storage configuration
-	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
+	cmd.Flags().StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name (node agent) or edge pod identity (edge); used as the xDS/watch identity (required)")
+	cmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name, used for service discovery (required)")
+	cmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "Unique identifier for this Envoy proxy instance in the xDS server (required)")
 
 	// Registrar configuration
-	rootCmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
+	cmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
 
-	// SPIRE socket paths (per-instance; the SPIRE on/off policy is system-wide).
-	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
-	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
+	// SPIRE workload socket (per-instance; the SPIRE on/off policy is system-wide).
+	cmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
 
 	// These calls only fail if the flag name is not registered, which would be a programming error.
-	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
-	must.NoError(rootCmd.MarkFlagRequired("node-name"))
-	must.NoError(rootCmd.MarkFlagRequired("proxy-id"))
+	must.NoError(cmd.MarkFlagRequired("cluster-name"))
+	must.NoError(cmd.MarkFlagRequired("node-name"))
+	must.NoError(cmd.MarkFlagRequired("proxy-id"))
 }
 
 // applyMeshConfig applies the proxy observability overrides from the MeshConfig

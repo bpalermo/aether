@@ -79,7 +79,12 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		resourcev3.SecretType:          secrets,
 		resourcev3.ExtensionConfigType: {subsetExt},
 	}
-	if len(vhosts) > 0 {
+	if c.edge {
+		// The edge always serves a route config (even with zero exposed
+		// services) so the listener's RDS reference resolves; the catch-all
+		// 404 vhost handles unmatched authorities. No ODCDS catch-all.
+		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(vhosts)}
+	} else if len(vhosts) > 0 {
 		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain)}
 	}
 

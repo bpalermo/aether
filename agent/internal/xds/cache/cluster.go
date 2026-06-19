@@ -114,7 +114,14 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			cl, _ := proto.Clone(entry.cluster).(*clusterv3.Cluster)
 			// entry.sni carries the destination port so the peer's inbound
 			// demuxes to the right loopback port (multi-port routing).
-			proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, entry.sni)
+			if c.edge {
+				// The edge has one identity and no local workloads: a single
+				// transport socket presenting the edge SVID, fetched over the
+				// spire_agent SDS cluster (SPIRE directly, no bridge).
+				cl.TransportSocket = proxy.EdgeUpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, entry.sni)
+			} else {
+				proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, entry.sni)
+			}
 			cluster = cl
 		}
 		clusters = append(clusters, cluster)
@@ -304,7 +311,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		proxy.SortLocalityLbEndpoints(defaultCla.Endpoints)
 
 		c.clusters[serviceName] = clusterEntry{
-			cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys),
+			cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
 			loadAssignment: defaultCla,
 			endpoints:      defaultEpMap,
 			vhost:          proxy.BuildOutboundClusterVirtualHost(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}),
@@ -320,7 +327,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			pcla.Endpoints = b.eps
 			proxy.SortLocalityLbEndpoints(pcla.Endpoints)
 			c.clusters[portName] = clusterEntry{
-				cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys),
+				cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
 				loadAssignment: pcla,
 				endpoints:      b.epMap,
 				vhost:          proxy.BuildOutboundClusterVirtualHost(portName, []string{portName}),

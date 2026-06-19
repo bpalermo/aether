@@ -157,6 +157,6 @@ func TestPerConnectionBufferLimits(t *testing.T) {
 	assert.Equal(t, want, outbound.GetPerConnectionBufferLimitBytes().GetValue(), "outbound listener")
 	assert.Equal(t, want, appCluster.GetPerConnectionBufferLimitBytes().GetValue(), "app cluster")
 	assert.Equal(t, want, healthCluster.GetPerConnectionBufferLimitBytes().GetValue(), "health cluster")
-	assert.Equal(t, want, NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil).GetPerConnectionBufferLimitBytes().GetValue(), "service cluster")
+	assert.Equal(t, want, NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil, true).GetPerConnectionBufferLimitBytes().GetValue(), "service cluster")
 	assert.Equal(t, want, BuildHealthGatewayListener("/run/aether/health.sock", nil).GetPerConnectionBufferLimitBytes().GetValue(), "health gateway")
 }
