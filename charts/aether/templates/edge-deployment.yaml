@@ -45,6 +45,14 @@ spec:
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(POD_NAME)"
             - "--mesh-domain={{ .Values.meshDomain }}"
+            # Point the (always-empty) local store at the pod-local emptyDir below.
+            # Passed explicitly: the edge subcommand shares --mounted-registry-dir
+            # with the root command, whose default (the node hostPath) would
+            # otherwise win and not exist in the edge pod.
+            - "--mounted-registry-dir=/var/lib/aether/registry"
+            # The agent sidecar shares the pod netns with Envoy; keep its metrics
+            # server off the edge HTTP listener port (default 8080).
+            - "--metrics-bind-address=:8081"
             - "--edge-http-port={{ .Values.edge.httpPort }}"
             - "--edge-route-namespace={{ $routeNamespace }}"
             {{- if .Values.edge.tls.enabled }}
@@ -86,7 +94,7 @@ spec:
                   divisor: "1"
           ports:
             - name: metrics
-              containerPort: 8080
+              containerPort: 8081
               protocol: TCP
             - name: health
               containerPort: 8082
