@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "accesslog.go",
         "cluster.go",
+        "edge.go",
         "egress.go",
         "endpoint.go",
         "filterchain.go",
@@ -66,6 +67,7 @@ go_test(
     name = "proxy_test",
     srcs = [
         "accesslog_test.go",
+        "edge_test.go",
         "egress_test.go",
         "endpoint_test.go",
         "filterchain_test.go",

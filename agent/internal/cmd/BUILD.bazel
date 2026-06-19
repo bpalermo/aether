@@ -4,6 +4,7 @@ go_library(
     name = "cmd",
     srcs = [
         "config.go",
+        "edge.go",
         "root.go",
         "supervisor.go",
     ],

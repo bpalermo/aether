@@ -4,6 +4,7 @@ package cmd
 import (
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
 )
@@ -69,6 +70,15 @@ type AgentConfig struct {
 
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
+
+	// EdgeHTTPPort is the port the edge proxy's public-facing HTTP listener
+	// binds (edge subcommand only).
+	EdgeHTTPPort uint32
+
+	// EdgeExposes is the static list of mesh service names the edge proxy
+	// routes to (edge subcommand only). PR1 seeds the exposed set from this
+	// flag; a later PR replaces it with an EdgeRoute CRD watch.
+	EdgeExposes []string
 }
 
 // NewAgentConfig creates a new AgentConfig with default values.
@@ -81,6 +91,7 @@ func NewAgentConfig() *AgentConfig {
 		},
 		MeshConfigPath:          DefaultMeshConfigPath,
 		ProxyServiceNodeID:      constants.DefaultProxyID,
+		EdgeHTTPPort:            proxy.DefaultEdgeHTTPPort,
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",

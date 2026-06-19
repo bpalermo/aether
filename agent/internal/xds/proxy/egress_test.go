@@ -12,7 +12,7 @@ import (
 )
 
 func TestNewServiceCluster(t *testing.T) {
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
 
 	// FQDN-only: the cluster name IS the mesh authority; the bare service
 	// name stays the stats key (alt_stat_name) and the EDS resource name.
@@ -60,7 +60,7 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	ids := []string{"spiffe://example.org/ns/test/sa/pod-a", "spiffe://example.org/ns/test/sa/pod-b"}
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
 	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "")
 
 	// Per-source mTLS: a match per workload identity + the node identity, and
@@ -91,7 +91,7 @@ func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
 		"only invalid entries": {"": "spiffe://example.org/x", "/ns/a": ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
+			c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
 			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org", nil, "")
 
 			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
@@ -162,7 +162,7 @@ func TestEndpointHealthStatus(t *testing.T) {
 // connections close on (EDS) health failure, panic routing is off, and the
 // retry circuit breaker has headroom for the drain-time reset burst.
 func TestServiceClusterDrainPoolClose(t *testing.T) {
-	c := NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil)
+	c := NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil, true)
 	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
 		"pools must close at drain-mark, not at the app-exit GOAWAY race")
 	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
@@ -206,7 +206,7 @@ func TestServiceFromClusterName(t *testing.T) {
 // TestNewServiceCluster_DerivedSubsetSelectors verifies provider-defined keys
 // become single-key NO_FALLBACK selectors after the fixed ip/pod pair.
 func TestNewServiceCluster_DerivedSubsetSelectors(t *testing.T) {
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"})
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"}, true)
 	selectors := c.GetLbSubsetConfig().GetSubsetSelectors()
 	require.Len(t, selectors, 5)
 	assert.Equal(t, []string{"shard"}, selectors[2].GetKeys())
@@ -275,7 +275,7 @@ func TestSubsetKeyCombos(t *testing.T) {
 // ip/pod singletons (single_host_per_subset, never combined) followed by the
 // derived-key power set, all NO_FALLBACK.
 func TestSubsetSelectors_MultiKey(t *testing.T) {
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"})
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"}, true)
 	sel := c.GetLbSubsetConfig().GetSubsetSelectors()
 	require.Len(t, sel, 2+3)
 

@@ -149,7 +149,13 @@ func subsetKeyCombos(keys []string) [][]string {
 	return combos
 }
 
-func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []string) *clusterv3.Cluster {
+// NewServiceCluster builds an EDS service cluster. perDownstreamConnectionPool
+// keys upstream connection pools by the downstream connection so a source pod's
+// connection (and its client certificate) is never reused for another source —
+// required on the node proxy, which multiplexes many workload identities. The
+// edge proxy carries a single identity and passes false for full upstream
+// multiplexing (immune to the per-downstream-pool leak class).
+func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []string, perDownstreamConnectionPool bool) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name: name,
 		// Stats stay keyed by the bare service name (cardinality rounds 1-2
@@ -157,7 +163,7 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 		AltStatName:                           altStatName,
 		ConnectTimeout:                        durationpb.New(2 * time.Second),
 		PerConnectionBufferLimitBytes:         wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		ConnectionPoolPerDownstreamConnection: true,
+		ConnectionPoolPerDownstreamConnection: perDownstreamConnectionPool,
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_EDS,
 		},
