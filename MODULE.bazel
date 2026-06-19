@@ -115,6 +115,7 @@ use_repo(
     "io_k8s_cri_api",
     "io_k8s_sigs_controller_runtime",
     "io_k8s_sigs_e2e_framework",
+    "io_k8s_sigs_yaml",
     "io_opentelemetry_go_contrib_bridges_otelslog",
     "io_opentelemetry_go_contrib_instrumentation_google_golang_org_grpc_otelgrpc",
     "io_opentelemetry_go_contrib_instrumentation_runtime",
@@ -174,7 +175,7 @@ pull(
 # compiled-in C++ aether_stats extension) and all its build wiring moved to the
 # separate //proxy workspace (proposals 010/012), which is listed in
 # //.bazelignore. aether no longer builds the proxy image; the chart references
-# the published image (see charts/agent/values.yaml). That move took the only
+# the published image (see charts/aether/values.yaml). That move took the only
 # C/C++ in the repo with it — aether now has no cgo / cc_* targets (zero C++
 # build actions), so it carries no C/C++ toolchain: Go and protobuf resolve the
 # auto-detected host cc toolchain for the rare analysis-time reference. The

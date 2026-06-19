@@ -1,0 +1,40 @@
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+
+# aether Helm chart (published as ghcr.io/bpalermo/aether/charts/aether).
+#
+# The whole system in one chart: agent + cni-install + per-node proxy, registrar,
+# and the mesh-config controller. The MeshConfig CRD ships in //charts/crds
+# (install ahead of time). See docs/proposals/015_mesh-config.md.
+#
+# `images` wires the in-repo image_push targets so the `{@//...:image_push}`
+# placeholders in values.yaml are digest-pinned at package time and published with
+# the chart.
+#
+# Publish targets (GitHub Container Registry, OCI):
+#   bazel run //charts/aether:aether.push           # chart + images
+#   bazel run //charts/aether:aether.push_registry  # chart only
+# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+helm_chart(
+    name = "aether",
+    chart = "Chart.yaml",
+    images = [
+        "//agent/cmd/agent:image_push",
+        "//cni/cmd/cni-install:image_push",
+        "//registrar/cmd/registrar:image_push",
+        "//controller/cmd/controller:image_push",
+    ],
+    login_url = "ghcr.io",
+    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+)
+
+helm_lint_test(
+    name = "aether_lint_test",
+    chart = ":aether",
+)
+
+helm_template_test(
+    name = "aether_template_test",
+    chart = ":aether",
+)

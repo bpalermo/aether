@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "config",
+    srcs = ["config.go"],
+    importpath = "github.com/bpalermo/aether/common/config",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "@build_buf_go_protovalidate//:protovalidate",
+        "@io_k8s_sigs_yaml//:yaml",
+        "@org_golang_google_protobuf//encoding/protojson",
+    ],
+)
+
+go_test(
+    name = "config_test",
+    srcs = ["config_test.go"],
+    embed = [":config"],
+)

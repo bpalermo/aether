@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "meshconfig",
+    srcs = [
+        "cabundle.go",
+        "meshconfig.go",
+        "reconciler.go",
+        "webhook.go",
+    ],
+    importpath = "github.com/bpalermo/aether/controller/internal/meshconfig",
+    visibility = ["//controller:__subpackages__"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
+        "//common/spire",
+        "@build_buf_go_protovalidate//:protovalidate",
+        "@io_k8s_api//admissionregistration/v1:admissionregistration",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+        "@io_k8s_sigs_controller_runtime//pkg/reconcile",
+        "@io_k8s_sigs_controller_runtime//pkg/webhook/admission",
+        "@io_k8s_sigs_yaml//:yaml",
+        "@org_golang_google_protobuf//encoding/protojson",
+    ],
+)
+
+go_test(
+    name = "meshconfig_test",
+    srcs = ["meshconfig_test.go"],
+    embed = [":meshconfig"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
+        "//common/config",
+        "@org_golang_google_protobuf//proto",
+    ],
+)

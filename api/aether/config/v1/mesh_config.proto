@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package aether.config.v1;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+
+// MeshConfigSpec is the `.spec` of the MeshConfig custom resource — the proxy
+// data-plane observability override. It is also what the controller projects into
+// the ConfigMap the agent mounts, and is validated with protovalidate.
+//
+// Aether is one system: enabling OTEL or SPIRE, the OTLP collector endpoint, and
+// the mesh domain are system-wide settings inherited by every component
+// (registrar, agent, proxy) from the aether chart — they are NOT in this message.
+// MeshConfigSpec only lets the proxy data plane *override* its own access-log /
+// tracing / metrics policy; unset fields inherit the aether config. The typed
+// MeshConfig CRD wrapper (TypeMeta/ObjectMeta/Spec/Status) is hand-written in
+// meshconfig_types.go. See docs/proposals/015_mesh-config.md.
+message MeshConfigSpec {
+  // Proxy data-plane observability overrides.
+  ProxyTelemetry proxy = 1;
+}
+
+// ProxyTelemetry overrides the proxy data plane's observability policy. Every
+// field is optional: when unset, the proxy inherits the aether system config
+// (OTEL enable + collector endpoint, control-plane trace sample rate).
+message ProxyTelemetry {
+  // Attach the OTel access logger to every HCM (proposal 014). Unset inherits the
+  // aether default (off).
+  optional bool access_logs_enabled = 1;
+  // Percent (0-100) of successful requests logged; failures are always logged.
+  // Unset defaults to 100.
+  optional uint32 access_log_success_sample_rate = 2 [(buf.validate.field).uint32.lte = 100];
+
+  // Generate/propagate W3C trace context and export proxy request spans. Unset
+  // inherits the aether default (off).
+  optional bool tracing_enabled = 3;
+  // Fraction (0.0-1.0) of requests traced by the proxy. Unset inherits the aether
+  // control-plane trace sample rate.
+  optional double trace_sample_rate = 4 [(buf.validate.field).double = {
+    gte: 0.0
+    lte: 1.0
+  }];
+
+  // Emit per-pod labels (source_pod/destination_pod) on the aether_stats request
+  // counter (raises cardinality). Unset inherits the aether default (off).
+  optional bool emit_stats_pod = 5;
+}

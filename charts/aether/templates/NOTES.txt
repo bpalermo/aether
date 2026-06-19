@@ -1,0 +1,16 @@
+Aether installed as one system (release {{ .Release.Name }}).
+
+System config:
+  meshDomain : {{ .Values.meshDomain }}
+  OTEL       : enabled={{ .Values.otel.enabled }} endpoint={{ .Values.otel.endpoint | default "<none>" }}
+  SPIRE      : enabled={{ .Values.spire.enabled }}
+
+Components: agent (+ Envoy proxy), registrar, controller.
+CRD: install //charts/crds first (the MeshConfig CRD).
+
+The proxy data plane inherits the system config above; override its access-log /
+tracing / metrics policy at runtime by editing the MeshConfig CR:
+
+  kubectl edit meshconfig default
+
+See docs/proposals/015_mesh-config.md.

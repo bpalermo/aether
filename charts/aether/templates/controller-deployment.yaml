@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aether.controller.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+spec:
+  # Leader election is on, so extra replicas are warm standbys.
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aether.controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aether.controller.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "aether.controller.serviceAccountName" . }}
+      containers:
+        - name: controller
+          image: {{ include "aether.image" .Values.controller.image | quote }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          args:
+            - "--debug={{ .Values.debug }}"
+            - "--mesh-config-configmap={{ include "aether.meshConfigMapName" . }}"
+            # Aether system config, inherited from the umbrella global block.
+            {{- if .Values.otel.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.otel.logs }}
+            - "--logs-enabled=true"
+            {{- end }}
+            - "--trace-sample-rate={{ .Values.otel.traceSampleRate }}"
+            {{- if .Values.otel.traceExport }}
+            - "--trace-export=true"
+            {{- end }}
+            {{- if .Values.spire.enabled }}
+            - "--spire-enabled=true"
+            - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
+            - "--webhook-config-name={{ include "aether.controller.clusterScopedName" . }}"
+            {{- end }}
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Stamped onto every OTel signal so logs are filterable per pod.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+                  divisor: "1"
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.cpu
+                  divisor: "1"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            {{- if .Values.spire.enabled }}
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            {{- else }}
+            - name: webhook-cert
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.spire.enabled }}
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+        {{- else }}
+        - name: webhook-cert
+          secret:
+            secretName: {{ include "aether.controller.webhookServiceName" . }}-cert
+        {{- end }}

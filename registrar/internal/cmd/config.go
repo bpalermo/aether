@@ -14,6 +14,11 @@ const (
 )
 
 // RegistrarConfig holds configuration for the Aether registrar.
+//
+// The registrar is a control-plane component: its telemetry (OTEL) and SPIRE
+// posture are aether system config, inherited from the aether umbrella chart's
+// globals as flags. MeshConfig is proxy-only and does not apply here. See
+// docs/proposals/015_mesh-config.md.
 type RegistrarConfig struct {
 	manager.Config
 

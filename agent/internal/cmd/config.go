@@ -8,9 +8,21 @@ import (
 	"github.com/bpalermo/aether/common/manager"
 )
 
+// DefaultMeshConfigPath is where the chart mounts the MeshConfig ConfigMap.
+const DefaultMeshConfigPath = "/etc/aether/mesh-config.yaml"
+
 // AgentConfig holds configuration for the Aether agent.
+//
+// Aether system config (mesh domain, SPIRE on/off, and the embedded manager OTEL
+// fields) is inherited from the aether umbrella chart's globals as flags. The
+// proxy data-plane observability fields (access logs, tracing, stats-pod) are the
+// only ones loaded from the MeshConfig ConfigMap at MeshConfigPath, defaulting to
+// the system config when unset. See docs/proposals/015_mesh-config.md.
 type AgentConfig struct {
 	manager.Config
+
+	// MeshConfigPath is the path to the mounted proxy MeshConfig YAML (ConfigMap).
+	MeshConfigPath string
 
 	// ProxyServiceNodeID is the xDS node ID for identifying the Envoy proxy instance
 	ProxyServiceNodeID string
@@ -67,6 +79,7 @@ func NewAgentConfig() *AgentConfig {
 			MetricsEnabled:         true,
 			MetricsBindAddress:     ":8080",
 		},
+		MeshConfigPath:          DefaultMeshConfigPath,
 		ProxyServiceNodeID:      constants.DefaultProxyID,
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
