@@ -1,0 +1,199 @@
+{{- if .Values.edge.enabled }}
+{{- $routeNamespace := default (include "aether.namespace" .) .Values.edge.routeNamespace }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.edge.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aether.edge.selectorLabels" . | nindent 6 }}
+  # Standard rolling update behind the Service: the readiness probe (Envoy's
+  # /aether/readyz health_check filter, drain-aware) gates each replica, so no
+  # hot-restart supervisor is needed — nothing node-local to preserve.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "aether.edge.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "aether.edge.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        # Edge control plane: serves xDS to the co-located Envoy over a pod-local
+        # socket. Subtractive agent mode — no CNI, no per-pod listeners, no SPIRE
+        # bridge (Envoy talks to SPIRE SDS directly).
+        - name: agent
+          image: {{ include "aether.image" .Values.agent.image | quote }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          args:
+            - "edge"
+            - "--debug={{ .Values.debug }}"
+            - "--proxy-id=$(POD_NAME)"
+            - "--cluster-name={{ .Values.clusterName }}"
+            - "--node-name=$(POD_NAME)"
+            - "--mesh-domain={{ .Values.meshDomain }}"
+            - "--edge-http-port={{ .Values.edge.httpPort }}"
+            - "--edge-route-namespace={{ $routeNamespace }}"
+            {{- range .Values.edge.expose }}
+            - "--expose={{ . }}"
+            {{- end }}
+            {{- if .Values.otel.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.otel.logs }}
+            - "--logs-enabled=true"
+            {{- end }}
+            - "--trace-sample-rate={{ .Values.otel.traceSampleRate }}"
+            {{- if .Values.otel.traceExport }}
+            - "--trace-export=true"
+            {{- end }}
+            - "--spire-enabled={{ .Values.spire.enabled }}"
+            {{- if .Values.spire.enabled }}
+            - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+                  divisor: "1"
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: xds-sock
+              mountPath: /run/aether
+            - name: registry-dir
+              mountPath: /var/lib/aether/registry
+            {{- if .Values.spire.enabled }}
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+        # Public-facing Envoy. Plain entrypoint (no supervisor): the edge has no
+        # node-local state to preserve across restarts.
+        - name: envoy
+          image: {{ include "aether.image" .Values.proxy.image | quote }}
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          command:
+            - "/usr/local/bin/envoy"
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            - "-l"
+            - "{{ .Values.proxy.logLevel }}"
+            - "--service-cluster"
+            - "aether-edge"
+            - "--service-node"
+            - "$(POD_NAME)"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME)"
+          ports:
+            - name: http
+              containerPort: {{ .Values.edge.httpPort }}
+              protocol: TCP
+          readinessProbe:
+            # Envoy's /aether/readyz health_check filter (on the edge listener):
+            # 200 while serving, 503 while draining. Probed over the listener port.
+            httpGet:
+              path: /aether/readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: xds-sock
+              mountPath: /run/aether
+            - name: edge-config
+              mountPath: /etc/envoy
+              readOnly: true
+            {{- if .Values.spire.enabled }}
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+      volumes:
+        # Pod-local: the agent serves xDS on /run/aether/xds.sock, Envoy dials it.
+        - name: xds-sock
+          emptyDir: {}
+        - name: registry-dir
+          emptyDir: {}
+        - name: edge-config
+          configMap:
+            name: {{ include "aether.edge.configMapName" . }}
+            items:
+              - key: envoy.yaml
+                path: envoy.yaml
+        {{- if .Values.spire.enabled }}
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+        {{- end }}
+{{- end }}

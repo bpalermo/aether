@@ -158,6 +158,51 @@ proxy:
     enabled: true
     maxHeapSizeBytes: 402653184 # 384Mi = 75% of 512Mi
 
+# ----------------------------------------------------------------------- edge
+# North-south ingress gateway (proposal 003): an unprivileged Deployment running
+# Envoy + an `agent edge` sidecar that serves it xDS. The edge dials mesh pods
+# DIRECTLY over mTLS (no node DaemonSet in the path) and routes external traffic
+# by EdgeRoute CRs (config.aether.io/v1). Envoy fetches its single SVID straight
+# from SPIRE over the workload socket (no agent SPIRE bridge). Disabled by default.
+edge:
+  enabled: false
+  # Gateway replicas behind the Service; rolled with the standard RollingUpdate
+  # + readiness gate (no hot-restart supervisor — nothing node-local to preserve).
+  replicaCount: 2
+  # The edge reuses the agent image (run as `agent edge`) and the proxy image
+  # (plain Envoy entrypoint). Override agent.image / proxy.image to mirror.
+  # Port the edge's public-facing HTTP listener binds (north-south). TLS
+  # termination is a separate, later addition.
+  httpPort: 8080
+  # Namespace the edge watches EdgeRoute CRs in. Empty = the edge's own namespace.
+  routeNamespace: ""
+  # Static services always routed at their mesh FQDN (merged with the EdgeRoute
+  # CRs); handy for bring-up before any EdgeRoute exists.
+  expose: []
+  service:
+    type: LoadBalancer
+    port: 80
+    annotations: {}
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  # The edge pod is unprivileged (private cgroup namespace), so the cgroup_memory
+  # overload monitor — fatal in the privileged node DaemonSet — works here.
+  overload:
+    enabled: true
+    maxHeapSizeBytes: 201326592 # 192Mi = 75% of 256Mi
+  # SPIRE identity for the edge (when spire.enabled): create a ClusterSPIFFEID so
+  # SPIRE issues the edge pod its SVID. Mirrors controller.webhook.clusterSpiffeID.
+  spire:
+    clusterSpiffeID:
+      create: true
+      # spire-controller-manager class name (e.g. "spire-mgmt-spire"). REQUIRED
+      # when create=true; empty = not rendered (manage the ClusterSPIFFEID yourself).
+      className: ""
+
 # ----------------------------------------------------------------- registrar
 registrar:
   image:

@@ -1,0 +1,35 @@
+{{- if .Values.edge.enabled }}
+{{- $routeNamespace := default (include "aether.namespace" .) .Values.edge.routeNamespace }}
+# Namespaced: the edge only reads EdgeRoutes (and their status) in the namespace
+# it watches. No cluster-wide access — exposure is delegable per namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  namespace: {{ $routeNamespace }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["config.aether.io"]
+    resources: ["edgeroutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["config.aether.io"]
+    resources: ["edgeroutes/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  namespace: {{ $routeNamespace }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "aether.edge.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.edge.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}
+{{- end }}

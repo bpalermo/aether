@@ -1,0 +1,23 @@
+{{- if and .Values.edge.enabled .Values.spire.enabled .Values.edge.spire.clusterSpiffeID.create .Values.edge.spire.clusterSpiffeID.className }}
+{{- /*
+  The edge presents a single SPIFFE SVID (spiffe://<td>/ns/<ns>/sa/<edge-sa>) to
+  every upstream pod. This ClusterSPIFFEID has spire-controller-manager issue it
+  to the edge pods. The {{ }} inside the template strings are
+  spire-controller-manager fields, escaped from Helm.
+*/}}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+spec:
+  className: {{ .Values.edge.spire.clusterSpiffeID.className | quote }}
+  spiffeIDTemplate: "spiffe://{{ `{{ .TrustDomain }}` }}/ns/{{ `{{ .PodMeta.Namespace }}` }}/sa/{{ `{{ .PodSpec.ServiceAccountName }}` }}"
+  podSelector:
+    matchLabels:
+      {{- include "aether.edge.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ include "aether.namespace" . }}
+{{- end }}
