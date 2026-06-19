@@ -130,7 +130,7 @@ proxy:
   # commit SHA. Mirror by overriding `repository`.
   image:
     repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: d86328b772ee5f6bf86fcd725eff0e2ff3e645f3
+    tag: 0b405c39320881e6d6b06bc29bd39be9d8bbd400
     digest: ""
     pullPolicy: Always
   logLevel: info
