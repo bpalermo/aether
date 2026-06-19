@@ -75,7 +75,7 @@ metadata:
   name: api
   namespace: aether-edge
 spec:
-  hosts: [api.example.com]   # external Host/SNI; empty = the service mesh FQDN
+  hosts: [api.example.com]   # external Host/SNI (required) — at least one
   service: svc-1             # mesh service = ServiceAccount = registry key
   port: 8080                 # optional; omit = default port
 ```
@@ -89,8 +89,10 @@ GatewayClass-conformance controller), and reuses the `config.aether.io` machiner
 from proposal 015. Gateway API is the v2 once the L7 vocabulary (path/header
 matching, weighted backends) is wanted — the EdgeRoute spec is shaped to migrate.
 
-`--expose <svc>` is a static seed (routed at the service FQDN), merged with the
-CRs; handy for bring-up before any EdgeRoute exists.
+The edge routes **only** by explicit external host. The internal mesh FQDN
+(`<service>.<mesh-domain>`) is deliberately NOT routable from the edge — it is the
+mesh's east-west addressing scheme, not a north-south entrypoint. So `hosts` is
+required (≥1); a route without hosts exposes nothing.
 
 ## Data plane
 

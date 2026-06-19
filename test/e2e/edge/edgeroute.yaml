@@ -7,8 +7,8 @@ metadata:
   name: svc-1
   namespace: aether-edge
 spec:
-  # External hostnames routed to the mesh service. Empty would route the service
-  # at its mesh FQDN (svc-1.aether.internal) only.
+  # External hostnames routed to the mesh service (required, >=1). The internal
+  # mesh FQDN (svc-1.aether.internal) is deliberately NOT routable from the edge.
   hosts:
     - api.example.com
   # The mesh service name = its ServiceAccount = the registry key. The edge dials

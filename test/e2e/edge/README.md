@@ -15,7 +15,6 @@ Add to the `helm upgrade aether ...` values (no `--reuse-values`):
 ```yaml
 edge:
   enabled: true
-  expose: [svc-1]                 # optional static seed; EdgeRoutes work too
   service:
     type: LoadBalancer            # or NodePort for a quick test
   spire:
@@ -32,7 +31,8 @@ render only when `edge.enabled=true`.
 
 ## 2. Expose a service
 
-Apply `edgeroute.yaml` (host-based) and/or rely on the `--expose` seed:
+Apply `edgeroute.yaml` (host-based). The edge exposes a service ONLY at the
+external hostnames its EdgeRoute lists:
 
 ```bash
 kubectl apply -f test/e2e/edge/edgeroute.yaml
@@ -48,8 +48,8 @@ EDGE=$(kubectl get svc -n aether-edge aether-edge -o jsonpath='{.status.loadBala
 # Host-routed (matches EdgeRoute.spec.hosts):
 curl -sS -H 'Host: api.example.com' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'   # 200
 
-# FQDN-routed (the --expose seed / hostless EdgeRoute):
-curl -sS -H 'Host: svc-1.aether.internal' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'  # 200
+# The internal mesh FQDN is NOT routable from the edge -> 404:
+curl -sS -H 'Host: svc-1.aether.internal' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'  # 404
 
 # Unmatched authority -> 404 (the edge serves only its exposed set):
 curl -sS -H 'Host: nope.example.com' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'   # 404
