@@ -113,3 +113,8 @@ make push-all              # Push all images to registry
 bazel run @rules_go//go get <package>
 bazel run //:gazelle
 ```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](./LICENSE). See [NOTICE](./NOTICE)
+for attribution.
