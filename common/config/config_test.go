@@ -59,17 +59,24 @@ func TestParse_PresenceDistinguished(t *testing.T) {
 	}
 }
 
+// Unknown fields are ignored, not rejected: forward-compatibility for rolling
+// upgrades (an older binary loading a newer projected config).
+func TestParse_UnknownFieldIgnored(t *testing.T) {
+	cfg, err := Parse([]byte("proxy:\n  tracingEnabled: true\n  futureKnob: 42\n"))
+	if err != nil {
+		t.Fatalf("Parse with unknown field should not error: %v", err)
+	}
+	if !cfg.GetProxy().GetTracingEnabled() {
+		t.Error("known field tracingEnabled should still be parsed")
+	}
+}
+
 func TestParse_Errors(t *testing.T) {
 	tests := []struct {
 		name string
 		doc  string
 		want string
 	}{
-		{
-			name: "unknown field",
-			doc:  "proxy:\n  bogusKey: 1\n",
-			want: "MeshConfig schema",
-		},
 		{
 			name: "percent over 100",
 			doc:  "proxy:\n  accessLogSuccessSampleRate: 101\n",

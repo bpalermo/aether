@@ -21,7 +21,7 @@ import (
 	"log/slog"
 	"os"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
@@ -94,7 +94,7 @@ func runController(ctx context.Context) (retErr error) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("register client-go scheme: %w", err)
 	}
-	if err := configv1.AddToScheme(scheme); err != nil {
+	if err := crdv1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("register MeshConfig scheme: %w", err)
 	}
 

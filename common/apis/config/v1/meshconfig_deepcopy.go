@@ -1,10 +1,10 @@
-package configv1
+package v1
 
 import (
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-
-	"google.golang.org/protobuf/proto"
 )
 
 // DeepCopyInto copies the receiver into out. The proto spec is cloned via
@@ -13,7 +13,7 @@ func (in *MeshConfig) DeepCopyInto(out *MeshConfig) {
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	if in.Spec != nil {
-		out.Spec = proto.Clone(in.Spec).(*MeshConfigSpec)
+		out.Spec = proto.Clone(in.Spec).(*configv1.MeshConfigSpec)
 	} else {
 		out.Spec = nil
 	}

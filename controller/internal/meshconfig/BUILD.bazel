@@ -12,6 +12,7 @@ go_library(
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
         "//common/spire",
         "@build_buf_go_protovalidate//:protovalidate",
         "@io_k8s_api//admissionregistration/v1:admissionregistration",
@@ -35,6 +36,7 @@ go_test(
     embed = [":meshconfig"],
     deps = [
         "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
         "//common/config",
         "@org_golang_google_protobuf//proto",
     ],

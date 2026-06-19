@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/config"
 	"google.golang.org/protobuf/proto"
 )
@@ -63,7 +64,7 @@ func TestRenderConfigMapData_NilSpec(t *testing.T) {
 // The typed MeshConfig jsonshim must round-trip the proto spec through protojson
 // (camelCase field names, optional presence), not encoding/json.
 func TestMeshConfigJSONShim(t *testing.T) {
-	mc := &configv1.MeshConfig{Spec: &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{
+	mc := &crdv1.MeshConfig{Spec: &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{
 		AccessLogsEnabled: proto.Bool(true),
 		TraceSampleRate:   proto.Float64(0.1),
 	}}}
@@ -75,7 +76,7 @@ func TestMeshConfigJSONShim(t *testing.T) {
 		t.Errorf("expected camelCase protojson field in:\n%s", raw)
 	}
 
-	var got configv1.MeshConfig
+	var got crdv1.MeshConfig
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
@@ -86,8 +87,13 @@ func TestMeshConfigJSONShim(t *testing.T) {
 		t.Errorf("round-tripped traceSampleRate = %v, want 0.1", got.Spec.GetProxy().GetTraceSampleRate())
 	}
 
-	// Unknown spec field is rejected (strict protojson).
-	if err := json.Unmarshal([]byte(`{"spec":{"bogus":1}}`), &configv1.MeshConfig{}); err == nil {
-		t.Error("expected error for unknown spec field")
+	// Unknown spec fields are IGNORED, not rejected (protobuf forward-compat for
+	// rolling upgrades): an older decoder must tolerate a newer CR.
+	var fwd crdv1.MeshConfig
+	if err := json.Unmarshal([]byte(`{"spec":{"proxy":{"tracingEnabled":true,"futureKnob":42}}}`), &fwd); err != nil {
+		t.Fatalf("unknown spec field should be ignored, got error: %v", err)
+	}
+	if !fwd.Spec.GetProxy().GetTracingEnabled() {
+		t.Error("known field should still decode alongside an unknown one")
 	}
 }

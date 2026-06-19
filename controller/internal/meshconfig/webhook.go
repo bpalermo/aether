@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -31,7 +31,7 @@ func (v *Validator) SetupWithManager(mgr ctrl.Manager) {
 
 // Handle validates the incoming MeshConfig's spec.
 func (v *Validator) Handle(ctx context.Context, req admission.Request) admission.Response {
-	mc := &configv1.MeshConfig{}
+	mc := &crdv1.MeshConfig{}
 	// Decode via the typed object's jsonshim (protojson on .spec), so an unknown
 	// or malformed spec field is rejected here rather than reaching the binaries.
 	if err := json.Unmarshal(req.Object.Raw, mc); err != nil {

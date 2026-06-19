@@ -9,7 +9,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/controller/internal/cmd",
     visibility = ["//controller:__subpackages__"],
     deps = [
-        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
         "//common/manager",
         "//common/spire",
         "//controller/internal/meshconfig",

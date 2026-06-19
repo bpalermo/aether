@@ -53,14 +53,23 @@ Types (`api/aether/config/v1`):
   `trace_sample_rate`, `emit_stats_pod` — where unset = inherit.
 - **`MeshConfig`** is a hand-written typed Kubernetes CRD object
   (TypeMeta/ObjectMeta/`Spec *MeshConfigSpec`/Status) with a **manual jsonshim**
-  (`.spec` (un)marshalled via protojson — strict) and **manual DeepCopy** (proto
+  (`.spec` (un)marshalled via protojson — lenient, see below) and **manual DeepCopy** (proto
   `Spec` cloned via `proto.Clone`), registered on a scheme. The controller and
   webhook work against this typed object — **no `unstructured`**. API version is
   `config.aether.io/v1` (proto field-number evolution guarantees compatibility).
 
-`common/config.{Load,Parse}` is the one validator (YAML/JSON → protojson strict →
+`common/config.{Load,Parse}` is the one validator (YAML/JSON → protojson →
 protovalidate on `MeshConfigSpec`), reused at agent file-load, controller
 reconcile, and admission. The validating webhook is served at `/validate`.
+
+**Forward-compatibility:** all proto decode (the jsonshim and `config.Parse`) is
+**lenient** (`DiscardUnknown: true`) — unknown fields are ignored, never an
+error. This is the protobuf compatibility contract and is what makes rolling
+controller/agent upgrades safe: an older binary decoding a CR/ConfigMap that a
+newer version wrote (with a field it doesn't know) succeeds and ignores the new
+field, rather than failing to reconcile or load. `protovalidate` still enforces
+constraints on every known field; the tradeoff is that a misspelled key is
+silently ignored rather than rejected.
 
 ---
 

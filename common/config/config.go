@@ -17,8 +17,8 @@ import (
 
 // Load reads, parses and validates a MeshConfig from the file at path.
 //
-// The pipeline is YAML -> JSON -> protojson (strict: unknown fields are an
-// error, so a typo or stale key fails loudly) -> protovalidate. Inheritance of
+// The pipeline is YAML -> JSON -> protojson (lenient: unknown fields are ignored
+// for forward-compatibility across versions) -> protovalidate. Inheritance of
 // unset proxy overrides from the aether system config is the caller's job (the
 // agent), which is the only place that holds both.
 func Load(path string) (*configv1.MeshConfigSpec, error) {
@@ -39,9 +39,11 @@ func Parse(raw []byte) (*configv1.MeshConfigSpec, error) {
 	}
 
 	cfg := &configv1.MeshConfigSpec{}
-	// DiscardUnknown defaults to false: an unrecognized field is rejected rather
-	// than silently dropped, so typos and removed keys surface at startup.
-	if err := protojson.Unmarshal(jsonBytes, cfg); err != nil {
+	// DiscardUnknown: ignore unknown fields rather than reject them. This is the
+	// protobuf forward-compatibility contract — an older agent must not fail to
+	// load a ConfigMap a newer controller projected with a field it doesn't know
+	// (mixed versions during a rollout). protovalidate checks the known fields.
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(jsonBytes, cfg); err != nil {
 		return nil, fmt.Errorf("mesh config does not match the MeshConfig schema: %w", err)
 	}
 

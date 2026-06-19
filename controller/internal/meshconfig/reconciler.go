@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +29,7 @@ type Reconciler struct {
 // SetupWithManager registers the reconciler to watch the MeshConfig CR.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&configv1.MeshConfig{}).
+		For(&crdv1.MeshConfig{}).
 		Named("meshconfig").
 		Complete(r)
 }
@@ -43,7 +43,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, nil
 	}
 
-	mc := &configv1.MeshConfig{}
+	mc := &crdv1.MeshConfig{}
 	if err := r.Get(ctx, req.NamespacedName, mc); err != nil {
 		if apierrors.IsNotFound(err) {
 			// CR deleted: leave the last-good ConfigMap in place so already-running
@@ -88,7 +88,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 
 // setProjected records the "Projected" status condition. Best-effort: a status
 // write failure is logged, not surfaced.
-func (r *Reconciler) setProjected(ctx context.Context, mc *configv1.MeshConfig, ok bool, msg string) {
+func (r *Reconciler) setProjected(ctx context.Context, mc *crdv1.MeshConfig, ok bool, msg string) {
 	cond := metav1.Condition{
 		Type:               "Projected",
 		ObservedGeneration: mc.GetGeneration(),
