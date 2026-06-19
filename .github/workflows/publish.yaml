@@ -37,13 +37,14 @@ jobs:
         run: |
           bazel build --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //...
       # `*.push` publishes each chart together with the images it references
-      # (agent.push -> agent + cni-install images; registrar.push -> registrar
-      # image), so a single GHCR login covers both images and charts.
+      # (aether.push -> agent + cni-install + registrar + controller images +
+      # the aether chart; crds.push -> the MeshConfig CRD chart; prober.push ->
+      # prober chart + image), so a single GHCR login covers images and charts.
       - name: Push charts + images
         env:
           HELM_REGISTRY_USERNAME: ${{ github.actor }}
           HELM_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/agent:agent.push
-          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/registrar:registrar.push
+          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/crds:crds.push
+          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/aether:aether.push
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/prober:prober.push
