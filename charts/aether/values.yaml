@@ -197,6 +197,16 @@ controller:
     pullPolicy: Always
   # Leader election is on; extra replicas are warm standbys.
   replicaCount: 1
+  webhook:
+    # Webhook serving cert source — DECOUPLED from mesh SPIRE (spire.enabled).
+    #   false (default): a Helm self-signed cert (genSignedCert, caBundle baked
+    #     into the webhook config). Validates out of the box, no SPIRE setup.
+    #   true: serve with the controller's SPIRE X.509 SVID and inject the trust
+    #     bundle into the caBundle at runtime. Requires a ClusterSPIFFEID granting
+    #     the controller the webhook Service DNS name
+    #     (<release>-controller-webhook.<ns>.svc) in its dnsNames, else the
+    #     apiserver's TLS hostname check fails.
+    spire: false
   resources:
     requests:
       cpu: 50m
