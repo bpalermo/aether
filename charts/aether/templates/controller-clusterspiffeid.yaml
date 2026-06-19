@@ -1,0 +1,28 @@
+{{- if and .Values.controller.webhook.spire .Values.controller.webhook.clusterSpiffeID.create .Values.controller.webhook.clusterSpiffeID.className }}
+{{- /*
+  In SPIRE webhook mode the controller serves with its SPIRE SVID, which must
+  carry the webhook Service DNS name as a SAN or the apiserver's TLS hostname
+  check fails. This ClusterSPIFFEID grants exactly that. It is non-fallback, so it
+  takes precedence over the default (fallback) ClusterSPIFFEID for the controller
+  pod — the controller then gets a single SVID with the DNS SANs. The {{ }} inside
+  the templates are spire-controller-manager fields, escaped from Helm.
+*/}}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ include "aether.controller.fullname" . }}-webhook
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+spec:
+  className: {{ .Values.controller.webhook.clusterSpiffeID.className | quote }}
+  spiffeIDTemplate: "spiffe://{{ `{{ .TrustDomain }}` }}/ns/{{ `{{ .PodMeta.Namespace }}` }}/sa/{{ `{{ .PodSpec.ServiceAccountName }}` }}"
+  dnsNameTemplates:
+    - {{ printf "%s.%s.svc" (include "aether.controller.webhookServiceName" .) (include "aether.namespace" .) | quote }}
+    - {{ printf "%s.%s.svc.cluster.local" (include "aether.controller.webhookServiceName" .) (include "aether.namespace" .) | quote }}
+  podSelector:
+    matchLabels:
+      {{- include "aether.controller.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ include "aether.namespace" . }}
+{{- end }}

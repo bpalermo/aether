@@ -1,13 +1,13 @@
 package meshconfig
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/bpalermo/aether/common/spire"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -47,33 +47,35 @@ func (i *CABundleInjector) Start(ctx context.Context) error {
 	}
 }
 
+// inject sets the current SPIRE trust bundle as the caBundle on every webhook in
+// the ValidatingWebhookConfiguration via read-modify-write (Update), NOT
+// Server-Side Apply: the `webhooks` list is atomic for SSA, so a partial apply
+// would replace the whole entry and drop Helm-owned required fields
+// (sideEffects, admissionReviewVersions). This is the standard caBundle-injection
+// pattern (cf. cert-manager's cainjector).
 func (i *CABundleInjector) inject(ctx context.Context) error {
 	bundle, err := spire.TrustBundlePEM(i.Source)
 	if err != nil {
 		return err
 	}
 
-	// Read the existing webhook names so the Server-Side Apply targets the real
-	// list entries (webhooks is a list-map keyed by name) rather than creating a
-	// phantom one. The controller's field manager then owns ONLY each webhook's
-	// caBundle; Helm keeps ownership of the rest of the config.
-	var existing admissionregistrationv1.ValidatingWebhookConfiguration
-	if err := i.Client.Get(ctx, types.NamespacedName{Name: i.WebhookConfigName}, &existing); err != nil {
+	var vwc admissionregistrationv1.ValidatingWebhookConfiguration
+	if err := i.Client.Get(ctx, types.NamespacedName{Name: i.WebhookConfigName}, &vwc); err != nil {
 		return fmt.Errorf("get ValidatingWebhookConfiguration %q: %w", i.WebhookConfigName, err)
 	}
 
-	apply := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "admissionregistration.k8s.io/v1", Kind: "ValidatingWebhookConfiguration"},
-		ObjectMeta: metav1.ObjectMeta{Name: i.WebhookConfigName},
+	changed := false
+	for idx := range vwc.Webhooks {
+		if !bytes.Equal(vwc.Webhooks[idx].ClientConfig.CABundle, bundle) {
+			vwc.Webhooks[idx].ClientConfig.CABundle = bundle
+			changed = true
+		}
 	}
-	for _, w := range existing.Webhooks {
-		apply.Webhooks = append(apply.Webhooks, admissionregistrationv1.ValidatingWebhook{
-			Name:         w.Name,
-			ClientConfig: admissionregistrationv1.WebhookClientConfig{CABundle: bundle},
-		})
+	if !changed {
+		return nil
 	}
-	if err := i.Client.Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
-		return fmt.Errorf("apply webhook caBundle: %w", err)
+	if err := i.Client.Update(ctx, &vwc); err != nil {
+		return fmt.Errorf("update webhook caBundle: %w", err)
 	}
 	i.Log.InfoContext(ctx, "injected SPIRE trust bundle into webhook caBundle", "webhookConfig", i.WebhookConfigName)
 	return nil
