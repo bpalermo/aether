@@ -202,11 +202,18 @@ controller:
     #   false (default): a Helm self-signed cert (genSignedCert, caBundle baked
     #     into the webhook config). Validates out of the box, no SPIRE setup.
     #   true: serve with the controller's SPIRE X.509 SVID and inject the trust
-    #     bundle into the caBundle at runtime. Requires a ClusterSPIFFEID granting
-    #     the controller the webhook Service DNS name
-    #     (<release>-controller-webhook.<ns>.svc) in its dnsNames, else the
-    #     apiserver's TLS hostname check fails.
+    #     bundle into the caBundle at runtime. Requires the ClusterSPIFFEID below
+    #     (or an equivalent) granting the controller the webhook Service DNS name
+    #     in its dnsNames, else the apiserver's TLS hostname check fails.
     spire: false
+    # When spire=true, have the chart create the controller's ClusterSPIFFEID with
+    # the webhook Service DNS SANs, so SPIRE mode works without a manual entry.
+    clusterSpiffeID:
+      create: true
+      # spire-controller-manager class name for your SPIRE install (e.g.
+      # "spire-mgmt-spire"). REQUIRED when create=true; if empty the resource is
+      # not rendered (manage the ClusterSPIFFEID yourself).
+      className: ""
   resources:
     requests:
       cpu: 50m
