@@ -137,13 +137,13 @@ func applyMeshConfig(mc *configv1.MeshConfigSpec) {
 
 	cfg.AccessLogsEnabled = p.GetAccessLogsEnabled()
 	cfg.AccessLogSuccessSampleRate = 100
-	if p != nil && p.AccessLogSuccessSampleRate != nil {
+	if p != nil && p.HasAccessLogSuccessSampleRate() {
 		cfg.AccessLogSuccessSampleRate = p.GetAccessLogSuccessSampleRate()
 	}
 
 	cfg.ProxyTracingEnabled = p.GetTracingEnabled()
 	cfg.ProxyTraceSampleRate = cfg.TraceSampleRate // inherit the aether trace rate
-	if p != nil && p.TraceSampleRate != nil {
+	if p != nil && p.HasTraceSampleRate() {
 		cfg.ProxyTraceSampleRate = p.GetTraceSampleRate()
 	}
 

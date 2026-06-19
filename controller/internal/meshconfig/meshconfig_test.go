@@ -17,22 +17,22 @@ func TestValidate(t *testing.T) {
 		t.Errorf("Validate(nil) = %v, want nil", err)
 	}
 	// in-range values are valid.
-	ok := &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{TraceSampleRate: proto.Float64(0.5)}}
+	ok := configv1.MeshConfigSpec_builder{Proxy: configv1.ProxyTelemetry_builder{TraceSampleRate: proto.Float64(0.5)}.Build()}.Build()
 	if err := Validate(ok); err != nil {
 		t.Errorf("Validate(valid) = %v, want nil", err)
 	}
 	// out-of-range trace rate is rejected.
-	bad := &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{TraceSampleRate: proto.Float64(1.5)}}
+	bad := configv1.MeshConfigSpec_builder{Proxy: configv1.ProxyTelemetry_builder{TraceSampleRate: proto.Float64(1.5)}.Build()}.Build()
 	if err := Validate(bad); err == nil {
 		t.Error("Validate(traceSampleRate=1.5) = nil, want error")
 	}
 }
 
 func TestRenderConfigMapData_RoundTrips(t *testing.T) {
-	spec := &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{
+	spec := configv1.MeshConfigSpec_builder{Proxy: configv1.ProxyTelemetry_builder{
 		TracingEnabled:  proto.Bool(true),
 		TraceSampleRate: proto.Float64(0.25),
-	}}
+	}.Build()}.Build()
 	data, err := RenderConfigMapData(spec)
 	if err != nil {
 		t.Fatalf("RenderConfigMapData: %v", err)
@@ -64,10 +64,10 @@ func TestRenderConfigMapData_NilSpec(t *testing.T) {
 // The typed MeshConfig jsonshim must round-trip the proto spec through protojson
 // (camelCase field names, optional presence), not encoding/json.
 func TestMeshConfigJSONShim(t *testing.T) {
-	mc := &crdv1.MeshConfig{Spec: &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{
+	mc := &crdv1.MeshConfig{Spec: configv1.MeshConfigSpec_builder{Proxy: configv1.ProxyTelemetry_builder{
 		AccessLogsEnabled: proto.Bool(true),
 		TraceSampleRate:   proto.Float64(0.1),
-	}}}
+	}.Build()}.Build()}
 	raw, err := json.Marshal(mc)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)

@@ -1,4 +1,4 @@
-syntax = "proto3";
+edition = "2024";
 
 package aether.config.v1;
 
@@ -28,22 +28,22 @@ message MeshConfigSpec {
 message ProxyTelemetry {
   // Attach the OTel access logger to every HCM (proposal 014). Unset inherits the
   // aether default (off).
-  optional bool access_logs_enabled = 1;
+  bool access_logs_enabled = 1;
   // Percent (0-100) of successful requests logged; failures are always logged.
   // Unset defaults to 100.
-  optional uint32 access_log_success_sample_rate = 2 [(buf.validate.field).uint32.lte = 100];
+  uint32 access_log_success_sample_rate = 2 [(buf.validate.field).uint32.lte = 100];
 
   // Generate/propagate W3C trace context and export proxy request spans. Unset
   // inherits the aether default (off).
-  optional bool tracing_enabled = 3;
+  bool tracing_enabled = 3;
   // Fraction (0.0-1.0) of requests traced by the proxy. Unset inherits the aether
   // control-plane trace sample rate.
-  optional double trace_sample_rate = 4 [(buf.validate.field).double = {
+  double trace_sample_rate = 4 [(buf.validate.field).double = {
     gte: 0.0
     lte: 1.0
   }];
 
   // Emit per-pod labels (source_pod/destination_pod) on the aether_stats request
   // counter (raises cardinality). Unset inherits the aether default (off).
-  optional bool emit_stats_pod = 5;
+  bool emit_stats_pod = 5;
 }

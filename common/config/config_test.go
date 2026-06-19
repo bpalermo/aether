@@ -51,7 +51,7 @@ func TestParse_PresenceDistinguished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.GetProxy().TracingEnabled == nil {
+	if !cfg.GetProxy().HasTracingEnabled() {
 		t.Fatal("tracingEnabled should be present (explicit false), got nil")
 	}
 	if cfg.GetProxy().GetTracingEnabled() {

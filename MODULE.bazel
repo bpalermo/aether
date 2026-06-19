@@ -140,7 +140,7 @@ use_repo(
 )
 
 buf = use_extension("@rules_buf//buf:extensions.bzl", "buf")
-buf.toolchains(version = "v1.67.0")
+buf.toolchains(version = "v1.71.0")
 use_repo(buf, "rules_buf_toolchains")
 
 # Hermetic Helm toolchain (downloads helm) plus a @helm//:helm host alias for
