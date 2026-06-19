@@ -171,9 +171,11 @@ edge:
   replicaCount: 2
   # The edge reuses the agent image (run as `agent edge`) and the proxy image
   # (plain Envoy entrypoint). Override agent.image / proxy.image to mirror.
-  # Port the edge's public-facing HTTP listener binds (north-south). TLS
-  # termination is a separate, later addition.
-  httpPort: 8080
+  # Port the edge's public-facing HTTP listener binds (north-south). Privileged
+  # ports (<1024, e.g. 80) are bound by granting the Envoy container
+  # NET_BIND_SERVICE — the pod still runs unprivileged. TLS termination is a
+  # separate, later addition.
+  httpPort: 80
   # Namespace the edge watches EdgeRoute CRs in. Empty = the edge's own namespace.
   routeNamespace: ""
   # Downstream (external-facing) TLS termination from a Kubernetes TLS Secret
