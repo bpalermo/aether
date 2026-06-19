@@ -76,6 +76,13 @@ const (
 	bindCollisionWindow     = 5 * time.Second
 	bindCollisionRetryPause = 3 * time.Second
 	maxBindCollisionRetries = 90
+	// maxCrashRetries bounds in-process retries of an epoch that died on a fatal
+	// SIGNAL (SIGSEGV/SIGABRT) rather than a clean bind-collision exit. A crash is
+	// not a transient socket race, so it gets a small budget: a deterministically
+	// crashing Envoy (e.g. a CDS referencing a gone netns — talos worker-01,
+	// 2026-06-19) surfaces as CrashLoopBackOff in ~15s instead of looping silently
+	// for the full 4.5-min bind-collision budget while masquerading as a collision.
+	maxCrashRetries = 5
 )
 
 // Config configures the Envoy hot-restart supervisor.
@@ -232,6 +239,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	debounce.Stop()
 	var debounceC <-chan time.Time
 	bindRetries := 0
+	crashRetries := 0
 
 	arm := func(reason string) {
 		s.log.DebugContext(ctx, "hot restart armed", "reason", reason, "debounce", debounceDelay)
@@ -335,31 +343,47 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					<-ctx.Done()
 					return nil
 				}
-				// Suspected base-id bind collision (see the bindCollision*
-				// constants): a fresh epoch that died non-LIVE within seconds of
-				// launch while a predecessor may still hold the domain socket.
-				// Retry epoch detection in-process — the predecessor keeps
-				// serving meanwhile — instead of exiting into the kubelet's
-				// CrashLoopBackOff.
-				if s.quickNonLiveExit() && bindRetries < maxBindCollisionRetries {
-					bindRetries++
-					s.metrics.childExited(exitBindCollision)
-					s.reap(exit.epoch)
-					s.log.InfoContext(ctx, "suspected base-id bind collision with a live predecessor; retrying epoch detection in-process",
-						"epoch", exit.epoch, "attempt", bindRetries, "error", exit.err.Error())
-					select {
-					case <-ctx.Done():
-						s.shutdown()
-						return nil
-					case <-time.After(bindCollisionRetryPause):
+				// A fresh epoch that died non-LIVE within seconds: either a base-id
+				// bind collision (a predecessor still holds the domain socket; exits
+				// errno 98, no signal) or a genuine Envoy crash (a fatal SIGNAL).
+				// Retry epoch detection in-process — a predecessor keeps serving
+				// meanwhile — instead of exiting into CrashLoopBackOff. A crash gets
+				// a much smaller budget so a deterministically crashing Envoy
+				// surfaces fast instead of masquerading as a collision for minutes.
+				if s.quickNonLiveExit() {
+					crash := isCrashSignal(exit.err)
+					attempt, budget := bindRetries+1, maxBindCollisionRetries
+					if crash {
+						attempt, budget = crashRetries+1, maxCrashRetries
 					}
-					s.resetEpochForRetry()
-					s.initStartEpoch(ctx)
-					s.gateReadinessIfSuccessor()
-					if err := s.hotRestart(); err != nil {
-						return fmt.Errorf("relaunching envoy after bind-collision retry: %w", err)
+					if attempt <= budget {
+						if crash {
+							crashRetries++
+						} else {
+							bindRetries++
+						}
+						s.metrics.childExited(exitBindCollision)
+						s.reap(exit.epoch)
+						kind := "suspected base-id bind collision with a live predecessor"
+						if crash {
+							kind = "envoy crashed on launch (fatal signal)"
+						}
+						s.log.InfoContext(ctx, kind+"; retrying epoch detection in-process",
+							"epoch", exit.epoch, "attempt", attempt, "budget", budget, "crashSignal", crash, "error", exit.err.Error())
+						select {
+						case <-ctx.Done():
+							s.shutdown()
+							return nil
+						case <-time.After(bindCollisionRetryPause):
+						}
+						s.resetEpochForRetry()
+						s.initStartEpoch(ctx)
+						s.gateReadinessIfSuccessor()
+						if err := s.hotRestart(); err != nil {
+							return fmt.Errorf("relaunching envoy after retry: %w", err)
+						}
+						continue
 					}
-					continue
 				}
 				// The newest epoch died unexpectedly: nothing left serving traffic.
 				// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).

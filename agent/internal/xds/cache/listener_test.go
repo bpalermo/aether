@@ -13,6 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Tests use synthetic netns paths that don't exist on disk; treat them as
+// present so the missing-netns guard in LoadListenersFromStorage doesn't skip
+// them. TestLoadListenersFromStorage_SkipsMissingNetns overrides this locally.
+func init() { netnsExists = func(string) bool { return true } }
+
 // makeCNIPod builds a minimal CNIPod that satisfies proxy.GenerateListenersFromRegistryPod.
 // A non-empty NetworkNamespace is the only field required for listener generation.
 func makeCNIPod(name, namespace, networkNamespace string) *cniv1.CNIPod {
@@ -235,6 +240,29 @@ func TestLoadListenersFromStorage_EmptyStorage(t *testing.T) {
 	assert.Empty(t, c.listeners)
 	// Only the always-present health gateway listener remains.
 	assert.Len(t, c.Listeners(), 1)
+}
+
+// TestLoadListenersFromStorage_SkipsMissingNetns verifies that a stored pod
+// whose network namespace is gone (a missed CNI DEL) is excluded from listener
+// generation, so its dead-netns cluster never enters the snapshot.
+func TestLoadListenersFromStorage_SkipsMissingNetns(t *testing.T) {
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(path string) bool { return path != "/proc/dead/ns/net" }
+
+	c := newTestCache("node-1")
+	initListeners(c)
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(context.Background(), "live", makeCNIPod("pod-live", "default", "/proc/100/ns/net")))
+	require.NoError(t, store.AddResource(context.Background(), "dead", makeCNIPod("pod-dead", "default", "/proc/dead/ns/net")))
+
+	_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
+
+	require.Len(t, c.listeners, 1, "only the live-netns pod produces a listener entry")
+	_, ok := c.listeners["/proc/100/ns/net"]
+	assert.True(t, ok, "live pod kept")
+	_, ok = c.listeners["/proc/dead/ns/net"]
+	assert.False(t, ok, "missing-netns pod skipped")
 }
 
 // TestLoadListenersFromStorage_ValidPodsMapPopulation verifies that valid pods

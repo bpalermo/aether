@@ -54,8 +54,8 @@ func metricSum(t *testing.T, reader *sdkmetric.ManualReader, name string) (int64
 func TestCNIMetrics_NilReceiverSafe(t *testing.T) {
 	var m *cniMetrics
 	ctx := context.Background()
-	m.sweepCompleted(ctx, 1, 1, 1, nil)
-	m.sweepCompleted(ctx, 0, 0, 0, errors.New("boom"))
+	m.sweepCompleted(ctx, 1, 1, 1, 1, nil)
+	m.sweepCompleted(ctx, 0, 0, 0, 0, errors.New("boom"))
 	m.healthTransition(ctx, "HEALTH_UNHEALTHY", "HEALTH_HEALTHY")
 }
 
@@ -63,7 +63,7 @@ func TestCNIMetrics_SweepCompleted(t *testing.T) {
 	m, reader := newTestCNIMetrics(t)
 	ctx := context.Background()
 
-	m.sweepCompleted(ctx, 2, 1, 7, nil)
+	m.sweepCompleted(ctx, 2, 1, 3, 7, nil)
 
 	if got, _ := metricSum(t, reader, "aether.agent.ghost_sweep.ghosts_removed"); got != 2 {
 		t.Errorf("ghosts_removed = %d, want 2", got)
@@ -79,7 +79,7 @@ func TestCNIMetrics_SweepCompleted(t *testing.T) {
 func TestCNIMetrics_SweepFailed(t *testing.T) {
 	m, reader := newTestCNIMetrics(t)
 
-	m.sweepCompleted(context.Background(), 0, 0, 0, errors.New("registry down"))
+	m.sweepCompleted(context.Background(), 0, 0, 0, 0, errors.New("registry down"))
 
 	if got, _ := metricSum(t, reader, "aether.agent.ghost_sweep.errors"); got != 1 {
 		t.Errorf("sweep errors = %d, want 1", got)

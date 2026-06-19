@@ -3,6 +3,8 @@ package cache
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 
 	agentconstants "github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -11,6 +13,14 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
+
+// netnsExists reports whether a pod's network-namespace path is still present.
+// Overridable in tests (which use synthetic netns paths). A pod whose netns is
+// gone is excluded from listener generation — see LoadListenersFromStorage.
+var netnsExists = func(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
 
 // AddPod generates the inbound and outbound listeners and per-pod clusters for the
 // given pod and adds them to the cache keyed by the pod's network namespace, then
@@ -162,6 +172,16 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	c.listenerMu.Lock()
 	for _, pod := range pods {
 		netns := pod.GetNetworkNamespace()
+
+		// Skip a pod whose network namespace no longer exists: a missed CNI DEL
+		// left the storage entry behind, and programming its per-pod cluster
+		// (NetworkNamespaceFilepath) faults Envoy opening the dead netns (talos
+		// worker-01, 2026-06-19). The ghost sweep prunes the stale entry; this
+		// keeps the bad config out of the snapshot at startup, before that runs.
+		if netns != "" && !netnsExists(netns) {
+			c.log.WarnContext(ctx, "skipping pod with missing network namespace (stale storage; CNI DEL likely missed)", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
+			continue
+		}
 		c.log.DebugContext(ctx, "generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
 		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod)

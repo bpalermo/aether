@@ -14,6 +14,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Sweep tests use synthetic netns paths that don't exist on disk; treat them as
+// present so the stale-prune step doesn't remove them. TestSweepPrunesStalePods
+// overrides this locally to exercise the prune.
+func init() { netnsExists = func(string) bool { return true } }
+
 // sweepRegistry serves a fixed endpoint listing and records UnregisterEndpoint calls.
 type sweepRegistry struct {
 	testRegistry
@@ -97,6 +102,43 @@ func TestSweepGhostEndpoints(t *testing.T) {
 		"svc-a": {"10.0.0.9"},
 	}, reg.unregistered)
 	assert.Empty(t, reg.registered, "all live pods were present in the registry")
+}
+
+// TestSweepPrunesStalePods: a stored pod whose network namespace no longer
+// exists (a missed CNI DEL) is removed from storage and its registry endpoint
+// deregistered; a live pod is untouched.
+func TestSweepPrunesStalePods(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	// Only the stale pod's netns is "missing".
+	netnsExists = func(path string) bool { return path != "/run/aether/netns/gone" }
+
+	stale := validCNIPod("pod-stale", "default", "container-stale")
+	stale.NetworkNamespace = "/run/aether/netns/gone"
+	stale.Ips = []string{"10.0.0.5"}
+	live := validCNIPod("pod-live", "default", "container-live") // 10.0.0.1, netns present
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-stale"), stale))
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-live"), live))
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{
+		"default": {
+			sweepEndpoint("10.0.0.5", "test-node", "pod-stale"), // pruned -> deregistered as ghost
+			sweepEndpoint("10.0.0.1", "test-node", "pod-live"),  // live -> kept
+		},
+	}}
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	s.sweepGhostEndpoints(ctx)
+
+	_, err := store.GetResource(ctx, types.ContainerID("container-stale"))
+	require.Error(t, err, "stale pod pruned from storage")
+	_, err = store.GetResource(ctx, types.ContainerID("container-live"))
+	require.NoError(t, err, "live pod kept")
+	assert.Equal(t, map[string][]string{"default": {"10.0.0.5"}}, reg.unregistered)
 }
 
 // TestSweepRegistersMissingEndpoint: a live local pod absent from the registry
