@@ -381,14 +381,22 @@ telemetry; it never mounts the CM it produces, so there is no deadlock.
 
 ### Projection reconciler
 
-- Watches the singleton `MeshConfig` CR, validates with `config.Parse`, and
-  upserts the **`aether-mesh-config`** ConfigMap (key `mesh-config.yaml` = the
-  validated config re-serialized) in the controller's namespace. Agent and
-  registrar mount it by name (shared `aether-system`). They need **no** CRD RBAC.
+- Watches the singleton `MeshConfig` CR, validates with protovalidate, and
+  **server-side-applies** (SSA, field manager `aether-controller`, force
+  ownership) the **`aether-mesh-config`** ConfigMap (key `mesh-config.yaml` = the
+  validated config re-serialized) in the controller's namespace — no
+  read-modify-write. Agent and registrar mount it by name (shared
+  `aether-system`); they need **no** CRD RBAC.
+- Status (`Projected` condition) and the SPIRE caBundle injection are likewise
+  written via SSA. caBundle injection reads the existing webhook names first so it
+  owns only each webhook's `caBundle`, leaving the rest to Helm.
 - On validation failure it sets a `False` `Projected` status condition and leaves
   the last-good ConfigMap untouched. A unit test asserts the projected document
   round-trips back through `config.Parse` (what the controller writes is exactly
   what the binaries accept).
+- The agent **tolerates a missing mesh-config file** (proxy overrides are
+  optional → inherit everything), so it never hard-fails if the ConfigMap isn't
+  mounted/projected yet (and bare deployments like e2e run without one).
 
 ### No re-stamp on upgrade (the core requirement)
 

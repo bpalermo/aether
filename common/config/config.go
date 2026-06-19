@@ -6,7 +6,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"buf.build/go/protovalidate"
@@ -21,8 +23,16 @@ import (
 // for forward-compatibility across versions) -> protovalidate. Inheritance of
 // unset proxy overrides from the aether system config is the caller's job (the
 // agent), which is the only place that holds both.
+//
+// A missing file is NOT an error: the MeshConfig (proxy observability overrides)
+// is optional, so its absence means "inherit everything from the aether system
+// config". This decouples startup from the controller having projected the
+// ConfigMap yet, and lets deployments without a mounted config (e.g. e2e) run.
 func Load(path string) (*configv1.MeshConfigSpec, error) {
 	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &configv1.MeshConfigSpec{}, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read mesh config %q: %w", path, err)
 	}

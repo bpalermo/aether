@@ -11,9 +11,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+// fieldOwner is the Server-Side Apply field manager for everything the controller
+// writes (the projected ConfigMap and the MeshConfig status).
+const fieldOwner = "aether-controller"
 
 // Reconciler projects the singleton MeshConfig CR into a ConfigMap that the agent
 // mounts and loads. It re-validates with protovalidate before writing, so an
@@ -65,29 +68,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, err
 	}
 
+	// Server-Side Apply: declare the desired ConfigMap and let the apiserver merge.
+	// The controller owns the `data` field (force ownership), so it converges the
+	// projection without a read-modify-write and without fighting other managers.
 	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.ConfigMapName,
-			Namespace: r.ConfigMapNamespace,
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: r.ConfigMapName, Namespace: r.ConfigMapNamespace},
+		Data:       data,
 	}
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.Data = data
-		return nil
-	})
-	if err != nil {
+	if err := r.serverApply(ctx, cm); err != nil {
 		r.setProjected(ctx, mc, false, err.Error())
-		return reconcile.Result{}, fmt.Errorf("project MeshConfig ConfigMap: %w", err)
+		return reconcile.Result{}, fmt.Errorf("apply MeshConfig ConfigMap: %w", err)
 	}
 
 	r.Log.InfoContext(ctx, "projected MeshConfig into ConfigMap",
-		"configMap", r.ConfigMapNamespace+"/"+r.ConfigMapName, "operation", op)
+		"configMap", r.ConfigMapNamespace+"/"+r.ConfigMapName)
 	r.setProjected(ctx, mc, true, "projected to "+r.ConfigMapName)
 	return reconcile.Result{}, nil
 }
 
-// setProjected records the "Projected" status condition. Best-effort: a status
-// write failure is logged, not surfaced.
+// serverApply server-side-applies an object owned by the controller's field
+// manager (force ownership of the fields it sets).
+func (r *Reconciler) serverApply(ctx context.Context, obj client.Object) error {
+	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(fieldOwner), client.ForceOwnership)
+}
+
+// setProjected records the "Projected" status condition via Server-Side Apply on
+// the status subresource. The apply object carries only TypeMeta, the name and
+// status (no spec), so the controller's field manager owns just the status.
+// Best-effort: a write failure is logged, not surfaced.
 func (r *Reconciler) setProjected(ctx context.Context, mc *crdv1.MeshConfig, ok bool, msg string) {
 	cond := metav1.Condition{
 		Type:               "Projected",
@@ -101,8 +110,12 @@ func (r *Reconciler) setProjected(ctx context.Context, mc *crdv1.MeshConfig, ok 
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "InvalidConfig"
 	}
-	mc.Status.Conditions = []metav1.Condition{cond}
-	if err := r.Status().Update(ctx, mc); err != nil {
-		r.Log.WarnContext(ctx, "failed to update MeshConfig status", "error", err)
+	apply := &crdv1.MeshConfig{
+		TypeMeta:   metav1.TypeMeta{APIVersion: crdv1.GroupVersion.String(), Kind: crdv1.MeshConfigKind},
+		ObjectMeta: metav1.ObjectMeta{Name: mc.GetName()},
+		Status:     crdv1.MeshConfigStatus{Conditions: []metav1.Condition{cond}},
+	}
+	if err := r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
+		r.Log.WarnContext(ctx, "failed to apply MeshConfig status", "error", err)
 	}
 }

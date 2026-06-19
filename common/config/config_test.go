@@ -71,6 +71,20 @@ func TestParse_UnknownFieldIgnored(t *testing.T) {
 	}
 }
 
+// A missing mesh-config file is not an error: the proxy inherits everything.
+func TestLoad_MissingFile(t *testing.T) {
+	cfg, err := Load("/nonexistent/aether/mesh-config.yaml")
+	if err != nil {
+		t.Fatalf("Load(missing) should not error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("Load(missing) returned nil config")
+	}
+	if cfg.GetProxy() != nil {
+		t.Errorf("expected empty (inherit) spec, got proxy=%v", cfg.GetProxy())
+	}
+}
+
 func TestParse_Errors(t *testing.T) {
 	tests := []struct {
 		name string
