@@ -21,9 +21,9 @@ type RouteSink interface {
 }
 
 // Reconciler watches EdgeRoute CRs in a namespace and pushes the complete route
-// set (every CR plus the static seed) into the cache on any change. It is
-// level-based: each reconcile re-lists, so adds, updates and deletes all
-// converge to the same projection without tracking deltas.
+// set into the cache on any change. It is level-based: each reconcile re-lists,
+// so adds, updates and deletes all converge to the same projection without
+// tracking deltas.
 type Reconciler struct {
 	client.Client
 
@@ -31,10 +31,7 @@ type Reconciler struct {
 	Sink RouteSink
 	// Namespace is the namespace EdgeRoutes are read from.
 	Namespace string
-	// Seed is always included in the projection (the --expose static routes),
-	// so the edge exposes them even with zero EdgeRoute CRs.
-	Seed []cache.EdgeRoute
-	Log  *slog.Logger
+	Log       *slog.Logger
 }
 
 // SetupWithManager registers the reconciler to watch EdgeRoute CRs.
@@ -54,12 +51,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return reconcile.Result{}, err
 	}
 
-	routes := make([]cache.EdgeRoute, 0, len(r.Seed)+len(list.Items))
-	routes = append(routes, r.Seed...)
+	routes := make([]cache.EdgeRoute, 0, len(list.Items))
 	for i := range list.Items {
 		spec := list.Items[i].Spec
-		if spec == nil || spec.GetService() == "" {
-			// An inert/invalid route (no service) routes nowhere; skip it.
+		// A route routes nowhere without a service or without an explicit
+		// external host — the edge never exposes a service at its mesh FQDN.
+		if spec == nil || spec.GetService() == "" || len(spec.GetHosts()) == 0 {
 			continue
 		}
 		routes = append(routes, cache.EdgeRoute{

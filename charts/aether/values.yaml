@@ -176,9 +176,6 @@ edge:
   httpPort: 8080
   # Namespace the edge watches EdgeRoute CRs in. Empty = the edge's own namespace.
   routeNamespace: ""
-  # Static services always routed at their mesh FQDN (merged with the EdgeRoute
-  # CRs); handy for bring-up before any EdgeRoute exists.
-  expose: []
   # Downstream (external-facing) TLS termination from a Kubernetes TLS Secret
   # (type kubernetes.io/tls: tls.crt + tls.key). Disabled = plain HTTP. The edge
   # ->pod upstream hop stays mTLS either way. Rotating the Secret takes effect on

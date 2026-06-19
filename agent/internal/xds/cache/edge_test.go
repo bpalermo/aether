@@ -44,19 +44,21 @@ func TestSetEdgeRoutesDependencySet(t *testing.T) {
 
 	c.SetEdgeRoutes([]EdgeRoute{
 		{Hosts: []string{"api.example.com"}, Service: "svc-1"},
-		{Service: "svc-2", Port: 9090},
-		{Service: ""}, // inert, ignored
+		{Hosts: []string{"grpc.example.com"}, Service: "svc-2", Port: 9090},
+		{Service: "svc-3"}, // no hosts -> inert, never pulled into scope
+		{Service: ""},      // inert, ignored
 	})
 
 	deps := c.DependencySet()
 	assert.Len(t, deps, 2)
 	assert.Contains(t, deps, "svc-1")
 	assert.Contains(t, deps, "svc-2")
+	assert.NotContains(t, deps, "svc-3", "a hostless route exposes nothing and must not scope its service")
 }
 
 // TestEdgeRouteVhosts checks host->cluster resolution: external hosts map to the
-// default cluster, a route without hosts falls back to the service FQDN, and a
-// non-default port targets the per-port cluster.
+// default cluster and a non-default port targets the per-port cluster. A route
+// without hosts is NOT routable — the mesh FQDN is never an edge entrypoint.
 func TestEdgeRouteVhosts(t *testing.T) {
 	c := newTestCache("edge-1")
 
@@ -67,20 +69,25 @@ func TestEdgeRouteVhosts(t *testing.T) {
 
 	c.SetEdgeRoutes([]EdgeRoute{
 		{Hosts: []string{"api.example.com", "api2.example.com"}, Service: "svc-1"},
-		{Service: "svc-3"}, // no hosts -> FQDN
-		{Service: "svc-2", Port: 9090},
+		{Service: "svc-3"}, // no hosts -> NOT routable (no vhost)
+		{Hosts: []string{"grpc.example.com"}, Service: "svc-2", Port: 9090},
 	})
 
 	vhosts := c.edgeRouteVhosts()
-	require.Len(t, vhosts, 3)
+	require.Len(t, vhosts, 2)
 
 	assert.Equal(t, "svc-1.aether.internal", vhosts[0].GetName())
 	assert.Equal(t, []string{"api.example.com", "api2.example.com"}, vhosts[0].GetDomains())
 
-	assert.Equal(t, "svc-3.aether.internal", vhosts[1].GetName())
-	assert.Equal(t, []string{"svc-3.aether.internal"}, vhosts[1].GetDomains())
+	assert.Equal(t, "svc-2.aether.internal:9090", vhosts[1].GetName())
+	assert.Equal(t, []string{"grpc.example.com"}, vhosts[1].GetDomains())
 
-	assert.Equal(t, "svc-2.aether.internal:9090", vhosts[2].GetName())
+	// No vhost exposes a mesh FQDN as a routable domain.
+	for _, vh := range vhosts {
+		for _, d := range vh.GetDomains() {
+			assert.NotContains(t, d, ".aether.internal", "the mesh FQDN must not be routable from the edge")
+		}
+	}
 }
 
 // TestEdgeRouteVhostsMergeByCluster verifies multiple routes to the same service

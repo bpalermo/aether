@@ -51,9 +51,6 @@ spec:
             - "--edge-tls-cert-file={{ .Values.edge.tls.mountPath }}/tls.crt"
             - "--edge-tls-key-file={{ .Values.edge.tls.mountPath }}/tls.key"
             {{- end }}
-            {{- range .Values.edge.expose }}
-            - "--expose={{ . }}"
-            {{- end }}
             {{- if .Values.otel.enabled }}
             - "--otel-enabled=true"
             {{- end }}
