@@ -48,7 +48,6 @@ func init() {
 	// at a pod-local emptyDir so PreListen's load is a no-op.
 	edgeCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", "/var/lib/aether/registry", "Pod-local directory for the edge's (empty) local store")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
-	edgeCmd.Flags().StringSliceVar(&cfg.EdgeExposes, "expose", nil, "Mesh service names the edge always routes to at their mesh FQDN (comma-separated or repeated); merged with the EdgeRoute CRs")
 	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch EdgeRoute CRs in (empty = the edge pod's own namespace)")
 	edgeCmd.Flags().StringVar(&cfg.EdgeTLSCertFile, "edge-tls-cert-file", "", "Path to the mounted TLS certificate chain; with --edge-tls-key-file, the edge listener terminates downstream TLS (else plain HTTP)")
 	edgeCmd.Flags().StringVar(&cfg.EdgeTLSKeyFile, "edge-tls-key-file", "", "Path to the mounted TLS private key (pairs with --edge-tls-cert-file)")
@@ -68,7 +67,6 @@ func runEdge(ctx context.Context) (retErr error) {
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,
 		"edgeHTTPPort", cfg.EdgeHTTPPort,
-		"exposes", cfg.EdgeExposes,
 	)
 
 	if logShutdown != nil {
@@ -151,15 +149,9 @@ func runEdge(ctx context.Context) (retErr error) {
 	snapshotCache.SetEdgeMode(cfg.EdgeHTTPPort)
 	snapshotCache.SetEdgeTLS(cfg.EdgeTLSCertFile, cfg.EdgeTLSKeyFile)
 	snapshotCache.SetEdgeIdentity(edgeSpiffeID, identityTrustDomain)
-	// Static seed: --expose services routed at their mesh FQDN. The EdgeRoute
-	// reconciler merges these with the CRs and re-applies on every change; seed
-	// them once up front so the edge exposes them before the first reconcile (and
-	// with zero EdgeRoute CRs, when no reconcile fires).
-	seedRoutes := make([]cache.EdgeRoute, 0, len(cfg.EdgeExposes))
-	for _, svc := range cfg.EdgeExposes {
-		seedRoutes = append(seedRoutes, cache.EdgeRoute{Service: svc})
-	}
-	snapshotCache.SetEdgeRoutes(seedRoutes)
+	// Routes come exclusively from EdgeRoute CRs via the reconciler below; the
+	// initial snapshot (PreListen) serves a 404-only edge route table until the
+	// first reconcile. The edge exposes ONLY explicitly-routed services.
 
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
 		Enabled:           cfg.AccessLogsEnabled,
@@ -199,7 +191,6 @@ func runEdge(ctx context.Context) (retErr error) {
 		Client:    m.GetClient(),
 		Sink:      snapshotCache,
 		Namespace: routeNamespace,
-		Seed:      seedRoutes,
 		Log:       l,
 	}
 	if err = edgeReconciler.SetupWithManager(m); err != nil {

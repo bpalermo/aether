@@ -18,9 +18,14 @@ option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
 // (TypeMeta/ObjectMeta/Spec/Status) is hand-written in edgeroute_types.go. See
 // docs/proposals/003_edge-proxy.md.
 message EdgeRouteSpec {
-  // External hostnames (Host/SNI) routed to the service. Empty means the route is
-  // reachable at the service's mesh FQDN (<service>.<mesh-domain>) only.
-  repeated string hosts = 1 [(buf.validate.field).repeated.items.string.hostname = true];
+  // External hostnames (Host/SNI) routed to the service. At least one is
+  // required: the edge routes ONLY by explicit external host. The internal mesh
+  // FQDN (<service>.<mesh-domain>) is deliberately NOT routable from the edge —
+  // it is the mesh's east-west addressing scheme, not a north-south entrypoint.
+  repeated string hosts = 1 [(buf.validate.field).repeated = {
+    min_items: 1
+    items: {string: {hostname: true}}
+  }];
 
   // Mesh service name (= ServiceAccount = registry key) this route exposes.
   string service = 2 [(buf.validate.field).string = {

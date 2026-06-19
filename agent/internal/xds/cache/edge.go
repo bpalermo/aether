@@ -29,12 +29,14 @@ func (c *SnapshotCache) SetEdgeRoutes(routes []EdgeRoute) {
 	c.edgeRoutes = routes
 	c.edgeMu.Unlock()
 
-	// Dependency set = the distinct referenced services (signals a reload when
-	// the set changed).
+	// Dependency set = the distinct services of ROUTABLE routes (those with at
+	// least one external host). A route without hosts exposes nothing — it must
+	// not pull its service into scope, and it never becomes routable at the mesh
+	// FQDN. Signals a reload when the set changed.
 	seen := make(map[string]struct{}, len(routes))
 	services := make([]string, 0, len(routes))
 	for _, r := range routes {
-		if r.Service == "" {
+		if r.Service == "" || len(r.Hosts) == 0 {
 			continue
 		}
 		if _, ok := seen[r.Service]; ok {
@@ -55,10 +57,11 @@ func (c *SnapshotCache) SetEdgeRoutes(routes []EdgeRoute) {
 
 // edgeRouteVhosts builds the edge listener's virtual hosts from the configured
 // routes: one vhost per target cluster, with the union of its routes' external
-// hostnames as domains (a route without hosts is reachable at the service FQDN).
-// Routes targeting the same cluster are merged so the vhost name (the cluster
-// name) and the domain set stay unique — Envoy NACKs duplicate vhost names or
-// domains.
+// hostnames as domains. The edge routes ONLY by explicit external host — a route
+// without hosts is skipped (the internal mesh FQDN is never routable from the
+// edge). Routes targeting the same cluster are merged so the vhost name (the
+// cluster name) and the domain set stay unique — Envoy NACKs duplicate vhost
+// names or domains.
 func (c *SnapshotCache) edgeRouteVhosts() []*routev3.VirtualHost {
 	c.edgeMu.RLock()
 	routes := slices.Clone(c.edgeRoutes)
@@ -70,18 +73,14 @@ func (c *SnapshotCache) edgeRouteVhosts() []*routev3.VirtualHost {
 	byCluster := make(map[string][]string)
 	order := make([]string, 0, len(routes))
 	for _, r := range routes {
-		if r.Service == "" {
+		if r.Service == "" || len(r.Hosts) == 0 {
 			continue
 		}
 		clusterName := c.edgeClusterNameLocked(r)
-		domains := r.Hosts
-		if len(domains) == 0 {
-			domains = []string{proxy.ServiceClusterName(r.Service, c.meshDomain)}
-		}
 		if _, ok := byCluster[clusterName]; !ok {
 			order = append(order, clusterName)
 		}
-		byCluster[clusterName] = append(byCluster[clusterName], domains...)
+		byCluster[clusterName] = append(byCluster[clusterName], r.Hosts...)
 	}
 
 	vhosts := make([]*routev3.VirtualHost, 0, len(order))
