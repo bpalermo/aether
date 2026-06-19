@@ -4,6 +4,7 @@ go_library(
     name = "hotrestart",
     srcs = [
         "coordination.go",
+        "crash.go",
         "metrics.go",
         "supervisor.go",
         "telemetry.go",
@@ -26,6 +27,7 @@ go_test(
     name = "hotrestart_test",
     srcs = [
         "coordination_test.go",
+        "crash_test.go",
         "metrics_test.go",
         "supervisor_test.go",
     ],

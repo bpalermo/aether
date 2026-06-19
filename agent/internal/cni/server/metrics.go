@@ -26,6 +26,7 @@ const (
 type cniMetrics struct {
 	ghostsRemoved     metric.Int64Counter
 	missingRegistered metric.Int64Counter
+	stalePruned       metric.Int64Counter
 	sweepErrors       metric.Int64Counter
 	storagePods       metric.Int64Gauge
 	healthTransitions metric.Int64Counter
@@ -44,6 +45,10 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	if m.missingRegistered, err = meter.Int64Counter("aether.agent.ghost_sweep.missing_registered",
 		metric.WithDescription("Live local pods re-registered because the registry was missing them (missed CNI ADD registration)")); err != nil {
 		return nil, fmt.Errorf("missing registered: %w", err)
+	}
+	if m.stalePruned, err = meter.Int64Counter("aether.agent.ghost_sweep.stale_pruned",
+		metric.WithDescription("Local storage pod entries pruned because their network namespace no longer exists (missed CNI DEL); keeping them faults Envoy on the dead netns")); err != nil {
+		return nil, fmt.Errorf("stale pruned: %w", err)
 	}
 	if m.sweepErrors, err = meter.Int64Counter("aether.agent.ghost_sweep.errors",
 		metric.WithDescription("Ghost sweep cycles that failed before reconciling")); err != nil {
@@ -66,7 +71,7 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	return m, nil
 }
 
-func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, storedPods int, err error) {
+func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, stalePruned, storedPods int, err error) {
 	if m == nil {
 		return
 	}
@@ -79,6 +84,9 @@ func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingR
 	}
 	if missingRegistered > 0 {
 		m.missingRegistered.Add(ctx, int64(missingRegistered))
+	}
+	if stalePruned > 0 {
+		m.stalePruned.Add(ctx, int64(stalePruned))
 	}
 	m.storagePods.Record(ctx, int64(storedPods))
 }

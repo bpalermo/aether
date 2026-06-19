@@ -2,8 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io/fs"
+	"os"
 	"time"
 
+	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/telemetry"
@@ -31,6 +35,14 @@ import (
 // registering pod cannot be judged a ghost mid-flight.
 
 const ghostSweepInterval = 60 * time.Second
+
+// netnsExists reports whether a pod's network-namespace path is still present.
+// Overridable in tests (which use synthetic netns paths). A stored pod whose
+// netns is gone is a stale entry from a missed CNI DEL — see sweepGhostEndpoints.
+var netnsExists = func(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
 
 // runGhostSweepLoop periodically reconciles this node's registry endpoints
 // against local pod storage, and additionally runs an immediate sweep after
@@ -90,13 +102,14 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// pipeline, so each iteration is traced with the corrections it made.
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.ghost_sweep")
 	var retErr error
-	ghostsRemoved, missingRegistered, storedPods := 0, 0, 0
+	ghostsRemoved, missingRegistered, stalePruned, storedPods := 0, 0, 0, 0
 	defer func() {
 		span.SetAttributes(
 			attribute.Int("aether.sweep.ghosts_removed", ghostsRemoved),
 			attribute.Int("aether.sweep.missing_registered", missingRegistered),
+			attribute.Int("aether.sweep.stale_pruned", stalePruned),
 		)
-		s.metrics.sweepCompleted(ctx, ghostsRemoved, missingRegistered, storedPods, retErr)
+		s.metrics.sweepCompleted(ctx, ghostsRemoved, missingRegistered, stalePruned, storedPods, retErr)
 		telemetry.EndSpan(span, retErr)
 	}()
 
@@ -133,6 +146,40 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		return
 	}
 	storedPods = len(pods)
+	// Prune storage entries whose network namespace no longer exists: a missed
+	// CNI DEL left the file behind. Keeping it both re-registers a dead endpoint
+	// (the missing-direction loop would treat it as a live local pod) and makes
+	// Envoy fault creating a connection in the gone netns when the per-pod app
+	// cluster is programmed (talos worker-01, 2026-06-19). RemovePod drops the
+	// whole listenerEntry — inbound/outbound listeners AND the per-pod app/health
+	// clusters (which carry the netns) — so the dead-netns cluster leaves the
+	// snapshot. The pruned pod's registry endpoints then fall through to ghost
+	// deregistration below.
+	fresh := pods[:0]
+	for _, p := range pods {
+		netns := p.GetNetworkNamespace()
+		if netns == "" {
+			fresh = append(fresh, p)
+			continue
+		}
+		if netnsExists(netns) {
+			fresh = append(fresh, p)
+			continue
+		}
+		if err := s.storage.RemoveResource(ctx, types.ContainerID(p.GetContainerId())); err != nil {
+			s.log.ErrorContext(ctx, "ghost sweep: failed to prune stale pod storage", "pod", p.GetName(), "netns", netns, "error", err)
+			fresh = append(fresh, p) // keep it; retry next sweep
+			continue
+		}
+		if err := s.snapshotCache.RemovePod(ctx, netns); err != nil {
+			s.log.ErrorContext(ctx, "ghost sweep: failed to drop listener for pruned pod", "pod", p.GetName(), "netns", netns, "error", err)
+		}
+		stalePruned++
+		s.log.InfoContext(ctx, "ghost sweep: pruned stale pod (network namespace gone; CNI DEL missed)",
+			"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
+	}
+	pods = fresh
+
 	// Live local pods by IP. Terminating pods are tracked separately: their
 	// endpoints are deliberately still registered (marked DRAINING by the
 	// termination watch, removed at CNI DEL) — they are neither ghosts to
