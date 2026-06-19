@@ -24,9 +24,21 @@ go_proto_library(
 
 go_library(
     name = "config",
+    srcs = [
+        "meshconfig_deepcopy.go",
+        "meshconfig_jsonshim.go",
+        "meshconfig_types.go",
+    ],
     embed = [":configv1_go_proto"],
     importpath = "github.com/bpalermo/aether/api/aether/config/v1",
     visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//proto",
+    ],
 )
 
 buf_test(

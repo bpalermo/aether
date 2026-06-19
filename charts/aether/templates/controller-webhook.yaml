@@ -63,7 +63,7 @@ webhooks:
       service:
         name: {{ $svc }}
         namespace: {{ $ns }}
-        path: /validate-config-aether-io-v1-meshconfig
+        path: /validate
         port: 443
       {{- if not .Values.spire.enabled }}
       caBundle: {{ $caBundle }}

@@ -1,70 +1,46 @@
 package meshconfig
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	"github.com/bpalermo/aether/common/config"
+	"google.golang.org/protobuf/proto"
 )
 
-func TestProtoFromSpec_Valid(t *testing.T) {
-	spec := map[string]any{
-		"proxy": map[string]any{
-			"accessLogsEnabled": true,
-			"tracingEnabled":    true,
-			"traceSampleRate":   0.25,
-		},
+func TestValidate(t *testing.T) {
+	// nil spec (inherit everything) is valid.
+	if err := Validate(nil); err != nil {
+		t.Errorf("Validate(nil) = %v, want nil", err)
 	}
-
-	cfg, err := ProtoFromSpec(spec)
-	if err != nil {
-		t.Fatalf("ProtoFromSpec: %v", err)
+	// in-range values are valid.
+	ok := &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{TraceSampleRate: proto.Float64(0.5)}}
+	if err := Validate(ok); err != nil {
+		t.Errorf("Validate(valid) = %v, want nil", err)
 	}
-	if !cfg.GetProxy().GetAccessLogsEnabled() {
-		t.Error("accessLogsEnabled = false, want true")
-	}
-	if got := cfg.GetProxy().GetTraceSampleRate(); got != 0.25 {
-		t.Errorf("traceSampleRate = %v, want 0.25", got)
+	// out-of-range trace rate is rejected.
+	bad := &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{TraceSampleRate: proto.Float64(1.5)}}
+	if err := Validate(bad); err == nil {
+		t.Error("Validate(traceSampleRate=1.5) = nil, want error")
 	}
 }
 
-func TestProtoFromSpec_Invalid(t *testing.T) {
-	spec := map[string]any{"proxy": map[string]any{"traceSampleRate": 1.5}}
-	if _, err := ProtoFromSpec(spec); err == nil {
-		t.Fatal("expected validation error for traceSampleRate > 1")
-	}
-}
-
-func TestProtoFromSpec_UnknownField(t *testing.T) {
-	spec := map[string]any{"proxy": map[string]any{"bogus": 1}}
-	if _, err := ProtoFromSpec(spec); err == nil {
-		t.Fatal("expected error for unknown field")
-	}
-}
-
-// The projected ConfigMap must round-trip back through the file loader the agent
-// uses, so what the controller writes is exactly what the agent accepts.
 func TestRenderConfigMapData_RoundTrips(t *testing.T) {
-	spec := map[string]any{
-		"proxy": map[string]any{
-			"tracingEnabled":  true,
-			"traceSampleRate": 0.25,
-		},
-	}
-	cfg, err := ProtoFromSpec(spec)
-	if err != nil {
-		t.Fatalf("ProtoFromSpec: %v", err)
-	}
-
-	data, err := RenderConfigMapData(cfg)
+	spec := &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{
+		TracingEnabled:  proto.Bool(true),
+		TraceSampleRate: proto.Float64(0.25),
+	}}
+	data, err := RenderConfigMapData(spec)
 	if err != nil {
 		t.Fatalf("RenderConfigMapData: %v", err)
 	}
 	doc, ok := data[ConfigMapKey]
 	if !ok {
-		t.Fatalf("missing key %q in projected data", ConfigMapKey)
+		t.Fatalf("missing key %q", ConfigMapKey)
 	}
-
+	// What the controller projects must load through the agent's loader.
 	loaded, err := config.Parse([]byte(doc))
 	if err != nil {
 		t.Fatalf("projected ConfigMap does not load: %v\n%s", err, doc)
@@ -72,7 +48,46 @@ func TestRenderConfigMapData_RoundTrips(t *testing.T) {
 	if got := loaded.GetProxy().GetTraceSampleRate(); got != 0.25 {
 		t.Errorf("round-tripped traceSampleRate = %v, want 0.25", got)
 	}
-	if !strings.Contains(doc, "traceSampleRate") {
-		t.Errorf("projected document missing proxy override:\n%s", doc)
+}
+
+func TestRenderConfigMapData_NilSpec(t *testing.T) {
+	data, err := RenderConfigMapData(nil)
+	if err != nil {
+		t.Fatalf("RenderConfigMapData(nil): %v", err)
+	}
+	if _, err := config.Parse([]byte(data[ConfigMapKey])); err != nil {
+		t.Errorf("empty projection does not load: %v", err)
+	}
+}
+
+// The typed MeshConfig jsonshim must round-trip the proto spec through protojson
+// (camelCase field names, optional presence), not encoding/json.
+func TestMeshConfigJSONShim(t *testing.T) {
+	mc := &configv1.MeshConfig{Spec: &configv1.MeshConfigSpec{Proxy: &configv1.ProxyTelemetry{
+		AccessLogsEnabled: proto.Bool(true),
+		TraceSampleRate:   proto.Float64(0.1),
+	}}}
+	raw, err := json.Marshal(mc)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), "accessLogsEnabled") {
+		t.Errorf("expected camelCase protojson field in:\n%s", raw)
+	}
+
+	var got configv1.MeshConfig
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !got.Spec.GetProxy().GetAccessLogsEnabled() {
+		t.Error("round-tripped accessLogsEnabled = false, want true")
+	}
+	if got.Spec.GetProxy().GetTraceSampleRate() != 0.1 {
+		t.Errorf("round-tripped traceSampleRate = %v, want 0.1", got.Spec.GetProxy().GetTraceSampleRate())
+	}
+
+	// Unknown spec field is rejected (strict protojson).
+	if err := json.Unmarshal([]byte(`{"spec":{"bogus":1}}`), &configv1.MeshConfig{}); err == nil {
+		t.Error("expected error for unknown spec field")
 	}
 }

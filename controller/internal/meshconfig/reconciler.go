@@ -5,24 +5,22 @@ import (
 	"fmt"
 	"log/slog"
 
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// Reconciler projects the singleton MeshConfig CR into a ConfigMap that the
-// agent DaemonSet (and any other consumer) mounts and loads. It re-validates
-// with protovalidate before writing, so an invalid CR that slipped past the
-// (best-effort) webhook never overwrites the last-good ConfigMap — the failure
-// surfaces on the CR's status instead.
+// Reconciler projects the singleton MeshConfig CR into a ConfigMap that the agent
+// mounts and loads. It re-validates with protovalidate before writing, so an
+// invalid CR that slipped past the (best-effort) webhook never overwrites the
+// last-good ConfigMap — the failure surfaces on the CR's status instead.
 type Reconciler struct {
 	client.Client
-	// ConfigMapName / ConfigMapNamespace identify the projected ConfigMap.
 	ConfigMapName      string
 	ConfigMapNamespace string
 	Log                *slog.Logger
@@ -31,7 +29,7 @@ type Reconciler struct {
 // SetupWithManager registers the reconciler to watch the MeshConfig CR.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(NewUnstructured()).
+		For(&configv1.MeshConfig{}).
 		Named("meshconfig").
 		Complete(r)
 }
@@ -45,8 +43,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, nil
 	}
 
-	u := NewUnstructured()
-	if err := r.Get(ctx, req.NamespacedName, u); err != nil {
+	mc := &configv1.MeshConfig{}
+	if err := r.Get(ctx, req.NamespacedName, mc); err != nil {
 		if apierrors.IsNotFound(err) {
 			// CR deleted: leave the last-good ConfigMap in place so already-running
 			// pods keep their config. Recreating the CR re-projects.
@@ -55,19 +53,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, err
 	}
 
-	spec, _, err := unstructured.NestedMap(u.Object, "spec")
-	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("read MeshConfig spec: %w", err)
-	}
-	cfg, validateErr := ProtoFromSpec(spec)
-	if validateErr != nil {
+	if err := Validate(mc.Spec); err != nil {
 		r.Log.ErrorContext(ctx, "MeshConfig is invalid; keeping last-good ConfigMap",
-			"name", req.Name, "error", validateErr)
-		r.setProjected(ctx, u, false, validateErr.Error())
+			"name", req.Name, "error", err)
+		r.setProjected(ctx, mc, false, err.Error())
 		return reconcile.Result{}, nil
 	}
 
-	data, err := RenderConfigMapData(cfg)
+	data, err := RenderConfigMapData(mc.Spec)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -83,37 +76,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return nil
 	})
 	if err != nil {
-		r.setProjected(ctx, u, false, err.Error())
+		r.setProjected(ctx, mc, false, err.Error())
 		return reconcile.Result{}, fmt.Errorf("project MeshConfig ConfigMap: %w", err)
 	}
 
 	r.Log.InfoContext(ctx, "projected MeshConfig into ConfigMap",
 		"configMap", r.ConfigMapNamespace+"/"+r.ConfigMapName, "operation", op)
-	r.setProjected(ctx, u, true, "projected to "+r.ConfigMapName)
+	r.setProjected(ctx, mc, true, "projected to "+r.ConfigMapName)
 	return reconcile.Result{}, nil
 }
 
-// setProjected records a single status condition reporting the last projection
-// result. Best-effort: a status write failure is logged, not surfaced.
-func (r *Reconciler) setProjected(ctx context.Context, u *unstructured.Unstructured, ok bool, msg string) {
-	status := metav1.ConditionTrue
-	reason := "Projected"
+// setProjected records the "Projected" status condition. Best-effort: a status
+// write failure is logged, not surfaced.
+func (r *Reconciler) setProjected(ctx context.Context, mc *configv1.MeshConfig, ok bool, msg string) {
+	cond := metav1.Condition{
+		Type:               "Projected",
+		ObservedGeneration: mc.GetGeneration(),
+		LastTransitionTime: metav1.Now(),
+		Status:             metav1.ConditionTrue,
+		Reason:             "Projected",
+		Message:            msg,
+	}
 	if !ok {
-		status = metav1.ConditionFalse
-		reason = "InvalidConfig"
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "InvalidConfig"
 	}
-	cond := map[string]any{
-		"type":               "Projected",
-		"status":             string(status),
-		"reason":             reason,
-		"message":            msg,
-		"lastTransitionTime": metav1.Now().Format("2006-01-02T15:04:05Z07:00"),
-	}
-	if err := unstructured.SetNestedSlice(u.Object, []any{cond}, "status", "conditions"); err != nil {
-		r.Log.WarnContext(ctx, "failed to build MeshConfig status", "error", err)
-		return
-	}
-	if err := r.Status().Update(ctx, u); err != nil {
+	mc.Status.Conditions = []metav1.Condition{cond}
+	if err := r.Status().Update(ctx, mc); err != nil {
 		r.Log.WarnContext(ctx, "failed to update MeshConfig status", "error", err)
 	}
 }

@@ -6,17 +6,18 @@ import "buf/validate/validate.proto";
 
 option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
 
-// MeshConfig is the proxy data-plane observability override, delivered as a YAML
-// document in a ConfigMap (projected from the MeshConfig CR by the
-// aether-controller) and validated with protovalidate.
+// MeshConfigSpec is the `.spec` of the MeshConfig custom resource — the proxy
+// data-plane observability override. It is also what the controller projects into
+// the ConfigMap the agent mounts, and is validated with protovalidate.
 //
 // Aether is one system: enabling OTEL or SPIRE, the OTLP collector endpoint, and
 // the mesh domain are system-wide settings inherited by every component
-// (registrar, agent, proxy) from the aether (umbrella) chart — they are NOT in
-// this message. MeshConfig only lets the proxy data plane *override* its own
-// access-log / tracing / metrics policy; unset fields inherit the aether config.
-// See docs/proposals/015_mesh-config.md.
-message MeshConfig {
+// (registrar, agent, proxy) from the aether chart — they are NOT in this message.
+// MeshConfigSpec only lets the proxy data plane *override* its own access-log /
+// tracing / metrics policy; unset fields inherit the aether config. The typed
+// MeshConfig CRD wrapper (TypeMeta/ObjectMeta/Spec/Status) is hand-written in
+// meshconfig_types.go. See docs/proposals/015_mesh-config.md.
+message MeshConfigSpec {
   // Proxy data-plane observability overrides.
   ProxyTelemetry proxy = 1;
 }

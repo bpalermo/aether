@@ -21,7 +21,7 @@ import (
 // error, so a typo or stale key fails loudly) -> protovalidate. Inheritance of
 // unset proxy overrides from the aether system config is the caller's job (the
 // agent), which is the only place that holds both.
-func Load(path string) (*configv1.MeshConfig, error) {
+func Load(path string) (*configv1.MeshConfigSpec, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read mesh config %q: %w", path, err)
@@ -32,13 +32,13 @@ func Load(path string) (*configv1.MeshConfig, error) {
 // Parse runs the YAML->proto->validate pipeline on an in-memory document. Load is
 // the file-backed wrapper; Parse exists for tests and for callers that already
 // hold the bytes.
-func Parse(raw []byte) (*configv1.MeshConfig, error) {
+func Parse(raw []byte) (*configv1.MeshConfigSpec, error) {
 	jsonBytes, err := yaml.YAMLToJSON(raw)
 	if err != nil {
 		return nil, fmt.Errorf("mesh config is not valid YAML: %w", err)
 	}
 
-	cfg := &configv1.MeshConfig{}
+	cfg := &configv1.MeshConfigSpec{}
 	// DiscardUnknown defaults to false: an unrecognized field is rejected rather
 	// than silently dropped, so typos and removed keys surface at startup.
 	if err := protojson.Unmarshal(jsonBytes, cfg); err != nil {

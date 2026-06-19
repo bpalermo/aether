@@ -132,7 +132,7 @@ func init() {
 // enable toggles default off, the trace sample rate inherits --trace-sample-rate,
 // and the access-log success sample rate defaults to 100. System config (mesh
 // domain, OTEL, SPIRE) comes from flags and is not touched here.
-func applyMeshConfig(mc *configv1.MeshConfig) {
+func applyMeshConfig(mc *configv1.MeshConfigSpec) {
 	p := mc.GetProxy()
 
 	cfg.AccessLogsEnabled = p.GetAccessLogsEnabled()

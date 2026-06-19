@@ -21,10 +21,13 @@ import (
 	"log/slog"
 	"os"
 
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
@@ -85,12 +88,22 @@ func runController(ctx context.Context) (retErr error) {
 		}()
 	}
 
+	// Manager scheme = client-go built-ins + the typed MeshConfig CRD, so the
+	// reconciler and webhook work against the typed object (no unstructured).
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register client-go scheme: %w", err)
+	}
+	if err := configv1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register MeshConfig scheme: %w", err)
+	}
+
 	// When SPIRE is enabled, serve the validating webhook with a SPIRE X.509 SVID
 	// (one-way TLS; the apiserver verifies against the SPIRE bundle injected as the
 	// caBundle). Otherwise controller-runtime serves from the Helm-provisioned cert
 	// in the default CertDir.
 	var spireSource *spire.Source
-	var bootstrapOpts []func(*ctrl.Options)
+	bootstrapOpts := []func(*ctrl.Options){func(o *ctrl.Options) { o.Scheme = scheme }}
 	if cfg.SpireEnabled {
 		src, srcErr := spire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
 		if srcErr != nil {
