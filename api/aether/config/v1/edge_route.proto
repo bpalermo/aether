@@ -1,0 +1,34 @@
+edition = "2024";
+
+package aether.config.v1;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+
+// EdgeRouteSpec is the `.spec` of the EdgeRoute custom resource: one external
+// (north-south) hostname -> mesh service mapping consumed by the edge proxy. The
+// edge watches EdgeRoutes, routes each `hosts` entry to the named mesh `service`
+// (optionally a specific `port`), and scopes its registrar watch to exactly the
+// referenced services. It is validated with protovalidate.
+//
+// The mesh `service` is the service's ServiceAccount name (the registry key), not
+// a Kubernetes Service object — the edge dials the service's pods directly over
+// mTLS, the same path every mesh client uses. The typed EdgeRoute CRD wrapper
+// (TypeMeta/ObjectMeta/Spec/Status) is hand-written in edgeroute_types.go. See
+// docs/proposals/003_edge-proxy.md.
+message EdgeRouteSpec {
+  // External hostnames (Host/SNI) routed to the service. Empty means the route is
+  // reachable at the service's mesh FQDN (<service>.<mesh-domain>) only.
+  repeated string hosts = 1 [(buf.validate.field).repeated.items.string.hostname = true];
+
+  // Mesh service name (= ServiceAccount = registry key) this route exposes.
+  string service = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 253
+  }];
+
+  // Destination port. Unset (0) routes to the service's default port; a non-zero
+  // value routes to that advertised port (multi-port routing, proposal 005).
+  uint32 port = 3 [(buf.validate.field).uint32.lte = 65535];
+}

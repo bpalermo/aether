@@ -80,10 +80,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		resourcev3.ExtensionConfigType: {subsetExt},
 	}
 	if c.edge {
-		// The edge always serves a route config (even with zero exposed
-		// services) so the listener's RDS reference resolves; the catch-all
-		// 404 vhost handles unmatched authorities. No ODCDS catch-all.
-		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(vhosts)}
+		// The edge route table maps external hosts (from EdgeRoutes) to the
+		// service clusters — NOT the FQDN cluster vhosts the node proxy uses.
+		// Always emitted (even empty) so the listener's RDS reference resolves;
+		// the catch-all 404 vhost handles unmatched authorities. No ODCDS.
+		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(c.edgeRouteVhosts())}
 	} else if len(vhosts) > 0 {
 		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain)}
 	}

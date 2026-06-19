@@ -4,14 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
+	"github.com/bpalermo/aether/agent/internal/edge"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
+	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/manager"
 	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
 // edgeName is the controller/logging name for the edge proxy control plane.
@@ -38,7 +45,8 @@ func init() {
 	registerSharedFlags(edgeCmd)
 
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
-	edgeCmd.Flags().StringSliceVar(&cfg.EdgeExposes, "expose", nil, "Mesh service names the edge routes to (comma-separated or repeated); seeds the exposed set until the EdgeRoute CRD watch lands")
+	edgeCmd.Flags().StringSliceVar(&cfg.EdgeExposes, "expose", nil, "Mesh service names the edge always routes to at their mesh FQDN (comma-separated or repeated); merged with the EdgeRoute CRs")
+	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch EdgeRoute CRs in (empty = the edge pod's own namespace)")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -66,7 +74,28 @@ func runEdge(ctx context.Context) (retErr error) {
 		}()
 	}
 
-	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version)
+	// Watch EdgeRoute CRs in the edge's own namespace (or an override). Scope the
+	// manager's informer cache to that namespace so the edge needs only namespaced
+	// RBAC, not cluster-wide.
+	routeNamespace := cfg.EdgeRouteNamespace
+	if routeNamespace == "" {
+		routeNamespace = currentNamespace()
+	}
+	cfg.CacheOptions = &ctrlcache.Options{
+		DefaultNamespaces: map[string]ctrlcache.Config{routeNamespace: {}},
+	}
+
+	// Manager scheme = client-go built-ins + the typed EdgeRoute CRD so the
+	// reconciler reads typed objects (no unstructured).
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register client-go scheme: %w", err)
+	}
+	if err := crdv1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register config.aether.io scheme: %w", err)
+	}
+
+	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) { o.Scheme = scheme })
 	if err != nil {
 		return err
 	}
@@ -116,9 +145,15 @@ func runEdge(ctx context.Context) (retErr error) {
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetEdgeMode(cfg.EdgeHTTPPort)
 	snapshotCache.SetEdgeIdentity(edgeSpiffeID, identityTrustDomain)
-	// Seed the exposed set (PR1: a static flag; a later PR swaps in an EdgeRoute
-	// watch). The scoped registrar watch and cluster snapshot follow this set.
-	snapshotCache.SetStaticDependencies(cfg.EdgeExposes)
+	// Static seed: --expose services routed at their mesh FQDN. The EdgeRoute
+	// reconciler merges these with the CRs and re-applies on every change; seed
+	// them once up front so the edge exposes them before the first reconcile (and
+	// with zero EdgeRoute CRs, when no reconcile fires).
+	seedRoutes := make([]cache.EdgeRoute, 0, len(cfg.EdgeExposes))
+	for _, svc := range cfg.EdgeExposes {
+		seedRoutes = append(seedRoutes, cache.EdgeRoute{Service: svc})
+	}
+	snapshotCache.SetEdgeRoutes(seedRoutes)
 
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
 		Enabled:           cfg.AccessLogsEnabled,
@@ -152,6 +187,19 @@ func runEdge(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
+	// Watch EdgeRoute CRs and project them (merged with the static seed) into the
+	// cache as the edge's routes + scoped dependency set.
+	edgeReconciler := &edge.Reconciler{
+		Client:    m.GetClient(),
+		Sink:      snapshotCache,
+		Namespace: routeNamespace,
+		Seed:      seedRoutes,
+		Log:       l,
+	}
+	if err = edgeReconciler.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up EdgeRoute reconciler: %w", err)
+	}
+
 	l.DebugContext(ctx, "waiting for local storage to be ready")
 	if err = emptyStorage.WaitUntilReady(ctx); err != nil {
 		return err
@@ -159,4 +207,18 @@ func runEdge(ctx context.Context) (retErr error) {
 
 	l.DebugContext(ctx, "starting edge manager")
 	return m.Start(ctx)
+}
+
+// currentNamespace returns the namespace the edge pod runs in (the default
+// namespace to watch EdgeRoutes in). It reads POD_NAMESPACE (set via the
+// downward API by the chart) and falls back to the service-account namespace
+// file.
+func currentNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		return string(data)
+	}
+	return "default"
 }
