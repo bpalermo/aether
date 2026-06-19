@@ -89,6 +89,12 @@ type SnapshotCache struct {
 	// edgeHTTPPort is the port the edge listener binds (edge mode only).
 	edgeHTTPPort uint32
 
+	// edgeMu guards edgeRoutes: the external-host -> mesh-service mappings the
+	// edge serves (derived from EdgeRoute CRs). The edge route config is built
+	// from them, and their service set scopes the dependency set.
+	edgeMu     sync.RWMutex
+	edgeRoutes []EdgeRoute
+
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace
 

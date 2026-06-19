@@ -39,6 +39,65 @@ func TestEdgeModeListeners(t *testing.T) {
 	assert.Equal(t, uint32(8080), l.GetAddress().GetSocketAddress().GetPortValue())
 }
 
+func TestSetEdgeRoutesDependencySet(t *testing.T) {
+	c := newTestCache("edge-1")
+
+	c.SetEdgeRoutes([]EdgeRoute{
+		{Hosts: []string{"api.example.com"}, Service: "svc-1"},
+		{Service: "svc-2", Port: 9090},
+		{Service: ""}, // inert, ignored
+	})
+
+	deps := c.DependencySet()
+	assert.Len(t, deps, 2)
+	assert.Contains(t, deps, "svc-1")
+	assert.Contains(t, deps, "svc-2")
+}
+
+// TestEdgeRouteVhosts checks host->cluster resolution: external hosts map to the
+// default cluster, a route without hosts falls back to the service FQDN, and a
+// non-default port targets the per-port cluster.
+func TestEdgeRouteVhosts(t *testing.T) {
+	c := newTestCache("edge-1")
+
+	// A per-port cluster must exist for the explicit-port route to resolve to it.
+	c.clusterMu.Lock()
+	c.clusters["svc-2.aether.internal:9090"] = clusterEntry{service: "svc-2", sni: "9090"}
+	c.clusterMu.Unlock()
+
+	c.SetEdgeRoutes([]EdgeRoute{
+		{Hosts: []string{"api.example.com", "api2.example.com"}, Service: "svc-1"},
+		{Service: "svc-3"}, // no hosts -> FQDN
+		{Service: "svc-2", Port: 9090},
+	})
+
+	vhosts := c.edgeRouteVhosts()
+	require.Len(t, vhosts, 3)
+
+	assert.Equal(t, "svc-1.aether.internal", vhosts[0].GetName())
+	assert.Equal(t, []string{"api.example.com", "api2.example.com"}, vhosts[0].GetDomains())
+
+	assert.Equal(t, "svc-3.aether.internal", vhosts[1].GetName())
+	assert.Equal(t, []string{"svc-3.aether.internal"}, vhosts[1].GetDomains())
+
+	assert.Equal(t, "svc-2.aether.internal:9090", vhosts[2].GetName())
+}
+
+// TestEdgeRouteVhostsMergeByCluster verifies multiple routes to the same service
+// collapse into one vhost with the union of hostnames (Envoy NACKs duplicate
+// vhost names/domains).
+func TestEdgeRouteVhostsMergeByCluster(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeRoutes([]EdgeRoute{
+		{Hosts: []string{"a.example.com"}, Service: "svc-1"},
+		{Hosts: []string{"b.example.com", "a.example.com"}, Service: "svc-1"},
+	})
+
+	vhosts := c.edgeRouteVhosts()
+	require.Len(t, vhosts, 1)
+	assert.Equal(t, []string{"a.example.com", "b.example.com"}, vhosts[0].GetDomains())
+}
+
 func TestPerDownstreamConnectionPool(t *testing.T) {
 	node := newTestCache("node-1")
 	assert.True(t, node.perDownstreamConnectionPool(), "node proxy pools per downstream")

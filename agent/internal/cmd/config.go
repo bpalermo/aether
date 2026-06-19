@@ -75,10 +75,14 @@ type AgentConfig struct {
 	// binds (edge subcommand only).
 	EdgeHTTPPort uint32
 
-	// EdgeExposes is the static list of mesh service names the edge proxy
-	// routes to (edge subcommand only). PR1 seeds the exposed set from this
-	// flag; a later PR replaces it with an EdgeRoute CRD watch.
+	// EdgeExposes is a static list of mesh service names the edge proxy always
+	// routes to at their mesh FQDN (edge subcommand only); merged with the
+	// EdgeRoute CRs.
 	EdgeExposes []string
+
+	// EdgeRouteNamespace is the namespace the edge watches EdgeRoute CRs in
+	// (edge subcommand only); empty means the edge pod's own namespace.
+	EdgeRouteNamespace string
 }
 
 // NewAgentConfig creates a new AgentConfig with default values.
