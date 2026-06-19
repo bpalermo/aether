@@ -50,9 +50,6 @@ spec:
             # with the root command, whose default (the node hostPath) would
             # otherwise win and not exist in the edge pod.
             - "--mounted-registry-dir=/var/lib/aether/registry"
-            # The agent sidecar shares the pod netns with Envoy; keep its metrics
-            # server off the edge HTTP listener port (default 8080).
-            - "--metrics-bind-address=:8081"
             - "--edge-http-port={{ .Values.edge.httpPort }}"
             - "--edge-route-namespace={{ $routeNamespace }}"
             {{- if .Values.edge.tls.enabled }}
@@ -94,7 +91,7 @@ spec:
                   divisor: "1"
           ports:
             - name: metrics
-              containerPort: 8081
+              containerPort: 8080
               protocol: TCP
             - name: health
               containerPort: 8082
