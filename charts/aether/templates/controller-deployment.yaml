@@ -38,7 +38,7 @@ spec:
             {{- if .Values.otel.traceExport }}
             - "--trace-export=true"
             {{- end }}
-            {{- if .Values.spire.enabled }}
+            {{- if .Values.controller.webhook.spire }}
             - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--webhook-config-name={{ include "aether.controller.clusterScopedName" . }}"
@@ -96,7 +96,7 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            {{- if .Values.spire.enabled }}
+            {{- if .Values.controller.webhook.spire }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
@@ -108,7 +108,7 @@ spec:
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
       volumes:
-        {{- if .Values.spire.enabled }}
+        {{- if .Values.controller.webhook.spire }}
         - name: workload-socket
           csi:
             driver: "csi.spiffe.io"

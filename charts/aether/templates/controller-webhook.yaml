@@ -1,18 +1,19 @@
 {{/*
-Webhook serving trust. Two modes:
+Webhook serving trust (controller.webhook.spire — decoupled from mesh SPIRE):
 
-  spire.enabled=true  — the controller serves the webhook with a SPIRE SVID and
-    injects the SPIRE trust bundle into this config's caBundle at runtime, so no
-    Secret is rendered and caBundle starts empty (failurePolicy: Ignore keeps the
-    webhook fail-open until the controller injects the bundle).
+  controller.webhook.spire=true  — the controller serves the webhook with a SPIRE
+    SVID and injects the SPIRE trust bundle into this config's caBundle at runtime,
+    so no Secret is rendered and caBundle starts empty (failurePolicy: Ignore keeps
+    the webhook fail-open until the controller injects the bundle).
 
-  spire.enabled=false — a Helm self-signed cert (generated once, reused on upgrade
-    via lookup) is rendered as a Secret and its CA baked into caBundle.
+  controller.webhook.spire=false (default) — a Helm self-signed cert (generated
+    once, reused on upgrade via lookup) is rendered as a Secret and its CA baked
+    into caBundle. Validates out of the box, independent of mesh SPIRE.
 */}}
 {{- $svc := include "aether.controller.webhookServiceName" . -}}
 {{- $ns := include "aether.namespace" . -}}
 {{- $caBundle := "" -}}
-{{- if not .Values.spire.enabled -}}
+{{- if not .Values.controller.webhook.spire -}}
 {{- $cn := printf "%s.%s.svc" $svc $ns -}}
 {{- $altNames := list $cn (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
 {{- $secretName := printf "%s-cert" $svc -}}
@@ -65,7 +66,7 @@ webhooks:
         namespace: {{ $ns }}
         path: /validate
         port: 443
-      {{- if not .Values.spire.enabled }}
+      {{- if not .Values.controller.webhook.spire }}
       caBundle: {{ $caBundle }}
       {{- end }}
     rules:
