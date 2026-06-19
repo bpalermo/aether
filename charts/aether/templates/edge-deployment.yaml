@@ -53,8 +53,8 @@ spec:
             - "--edge-http-port={{ .Values.edge.httpPort }}"
             - "--edge-route-namespace={{ $routeNamespace }}"
             {{- if .Values.edge.tls.enabled }}
-            - "--edge-tls-cert-file={{ .Values.edge.tls.mountPath }}/tls.crt"
-            - "--edge-tls-key-file={{ .Values.edge.tls.mountPath }}/tls.key"
+            - "--edge-tls"
+            - "--edge-https-port={{ .Values.edge.httpsPort }}"
             {{- end }}
             {{- if .Values.otel.enabled }}
             - "--otel-enabled=true"
@@ -161,14 +161,22 @@ spec:
             - name: http
               containerPort: {{ .Values.edge.httpPort }}
               protocol: TCP
+            {{- if .Values.edge.tls.enabled }}
+            - name: https
+              containerPort: {{ .Values.edge.httpsPort }}
+              protocol: TCP
+            {{- end }}
           readinessProbe:
-            # Envoy's /aether/readyz health_check filter (on the edge listener):
-            # 200 while serving, 503 while draining. Probed over the listener port.
+            # Envoy's /aether/readyz health_check filter rides the main route
+            # listener: 200 while serving, 503 while draining. With TLS that is the
+            # HTTPS listener (the :80 listener only redirects); else plain HTTP.
             httpGet:
               path: /aether/readyz
-              port: http
               {{- if .Values.edge.tls.enabled }}
+              port: https
               scheme: HTTPS
+              {{- else }}
+              port: http
               {{- end }}
             initialDelaySeconds: 2
             periodSeconds: 2
@@ -179,8 +187,8 @@ spec:
             capabilities:
               drop:
                 - ALL
-              {{- if lt (int .Values.edge.httpPort) 1024 }}
-              # Bind the privileged listener port as non-root. NET_BIND_SERVICE
+              {{- if or (lt (int .Values.edge.httpPort) 1024) (and .Values.edge.tls.enabled (lt (int .Values.edge.httpsPort) 1024)) }}
+              # Bind the privileged listener port(s) as non-root. NET_BIND_SERVICE
               # is the only added cap; the pod still runs unprivileged.
               add:
                 - NET_BIND_SERVICE
@@ -191,11 +199,6 @@ spec:
             - name: edge-config
               mountPath: /etc/envoy
               readOnly: true
-            {{- if .Values.edge.tls.enabled }}
-            - name: edge-tls
-              mountPath: {{ .Values.edge.tls.mountPath }}
-              readOnly: true
-            {{- end }}
             {{- if .Values.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
@@ -220,11 +223,6 @@ spec:
             items:
               - key: envoy.yaml
                 path: envoy.yaml
-        {{- if .Values.edge.tls.enabled }}
-        - name: edge-tls
-          secret:
-            secretName: {{ required "edge.tls.secretName is required when edge.tls.enabled" .Values.edge.tls.secretName }}
-        {{- end }}
         {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:

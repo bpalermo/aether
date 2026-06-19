@@ -76,10 +76,10 @@ func TestBuildEdgeListener(t *testing.T) {
 }
 
 // TestBuildEdgeListenerTLS verifies downstream TLS termination: the filter chain
-// gets a TLS transport socket serving the mounted cert/key, and it does NOT
-// require a client certificate (external callers have no mesh identity).
+// gets a TLS transport socket serving the named SDS certs (SNI-selected), does
+// NOT require a client certificate, and sets the TLS floor + ALPN.
 func TestBuildEdgeListenerTLS(t *testing.T) {
-	l := BuildEdgeListener(8443, &EdgeTLS{CertPath: "/etc/aether/edge-tls/tls.crt", KeyPath: "/etc/aether/edge-tls/tls.key"})
+	l := BuildEdgeListener(8443, []string{"kubernetes/api-tls", "kubernetes/foo-tls"})
 
 	ts := l.GetFilterChains()[0].GetTransportSocket()
 	require.NotNil(t, ts, "TLS filter chain has a transport socket")
@@ -89,10 +89,39 @@ func TestBuildEdgeListenerTLS(t *testing.T) {
 	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(dtc))
 	assert.False(t, dtc.GetRequireClientCertificate().GetValue(), "external clients present no cert")
 
-	certs := dtc.GetCommonTlsContext().GetTlsCertificates()
-	require.Len(t, certs, 1)
-	assert.Equal(t, "/etc/aether/edge-tls/tls.crt", certs[0].GetCertificateChain().GetFilename())
-	assert.Equal(t, "/etc/aether/edge-tls/tls.key", certs[0].GetPrivateKey().GetFilename())
+	common := dtc.GetCommonTlsContext()
+	sds := common.GetTlsCertificateSdsSecretConfigs()
+	require.Len(t, sds, 2)
+	assert.Equal(t, "kubernetes/api-tls", sds[0].GetName())
+	assert.Equal(t, "kubernetes/foo-tls", sds[1].GetName())
+	// Certs come over ADS (the agent-served cache secrets), not a file/SPIRE source.
+	_, isAds := sds[0].GetSdsConfig().GetConfigSourceSpecifier().(*corev3.ConfigSource_Ads)
+	assert.True(t, isAds, "downstream certs served over ADS SDS")
+	assert.Equal(t, transport_sockets_v3.TlsParameters_TLSv1_2, common.GetTlsParams().GetTlsMinimumProtocolVersion())
+	assert.Equal(t, []string{"h2", "http/1.1"}, common.GetAlpnProtocols())
+}
+
+// TestNewDownstreamTLSSecret verifies the SDS secret carries inline cert/key.
+func TestNewDownstreamTLSSecret(t *testing.T) {
+	s := NewDownstreamTLSSecret("kubernetes/api-tls", []byte("CERT"), []byte("KEY"))
+	assert.Equal(t, "kubernetes/api-tls", s.GetName())
+	assert.Equal(t, []byte("CERT"), s.GetTlsCertificate().GetCertificateChain().GetInlineBytes())
+	assert.Equal(t, []byte("KEY"), s.GetTlsCertificate().GetPrivateKey().GetInlineBytes())
+}
+
+// TestBuildEdgeRedirectListener verifies the :80 listener 301-redirects to https.
+func TestBuildEdgeRedirectListener(t *testing.T) {
+	l := BuildEdgeRedirectListener(8080)
+	assert.Equal(t, EdgeRedirectListenerName, l.GetName())
+	assert.Equal(t, uint32(8080), l.GetAddress().GetSocketAddress().GetPortValue())
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	rc := hcm.GetRouteConfig()
+	require.NotNil(t, rc, "redirect uses an inline route config")
+	red := rc.GetVirtualHosts()[0].GetRoutes()[0].GetRedirect()
+	require.NotNil(t, red)
+	assert.True(t, red.GetHttpsRedirect())
 }
 
 // TestBuildEdgeListenerNoTLS verifies the plain-HTTP edge listener has no

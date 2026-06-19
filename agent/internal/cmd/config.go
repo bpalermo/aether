@@ -79,11 +79,12 @@ type AgentConfig struct {
 	// (edge subcommand only); empty means the edge pod's own namespace.
 	EdgeRouteNamespace string
 
-	// EdgeTLSCertFile / EdgeTLSKeyFile, when both set, make the edge listener
-	// terminate downstream TLS from those mounted files (a k8s TLS Secret);
-	// empty = plain HTTP (edge subcommand only).
-	EdgeTLSCertFile string
-	EdgeTLSKeyFile  string
+	// EdgeTLS enables downstream TLS termination: the edge serves an HTTPS
+	// listener on EdgeHTTPSPort (certs per EdgeRoute via SDS) and an HTTP->HTTPS
+	// redirect on the plain port (edge subcommand only).
+	EdgeTLS bool
+	// EdgeHTTPSPort is the port the edge TLS listener binds when EdgeTLS is set.
+	EdgeHTTPSPort uint32
 }
 
 // NewAgentConfig creates a new AgentConfig with default values.
@@ -97,6 +98,7 @@ func NewAgentConfig() *AgentConfig {
 		MeshConfigPath:          DefaultMeshConfigPath,
 		ProxyServiceNodeID:      constants.DefaultProxyID,
 		EdgeHTTPPort:            proxy.DefaultEdgeHTTPPort,
+		EdgeHTTPSPort:           proxy.DefaultEdgeHTTPSPort,
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",

@@ -86,13 +86,13 @@ type SnapshotCache struct {
 	// the route table is the explicit exposed set (no ODCDS catch-all). Set once
 	// before the manager starts (SetEdgeMode); read without locking.
 	edge bool
-	// edgeHTTPPort is the port the edge listener binds (edge mode only).
+	// edgeHTTPPort is the port the edge plain-HTTP / redirect listener binds.
 	edgeHTTPPort uint32
-	// edgeTLSCert/edgeTLSKey, when both set, terminate downstream TLS on the edge
-	// listener from those mounted cert/key files (edge mode only); empty = plain
-	// HTTP.
-	edgeTLSCert string
-	edgeTLSKey  string
+	// edgeTLSEnabled serves a TLS-terminating listener on edgeHTTPSPort (certs
+	// per EdgeRoute via SDS) plus an HTTP->HTTPS redirect on edgeHTTPPort.
+	edgeTLSEnabled bool
+	// edgeHTTPSPort is the port the edge TLS listener binds when edgeTLSEnabled.
+	edgeHTTPSPort uint32
 
 	// edgeMu guards edgeRoutes: the external-host -> mesh-service mappings the
 	// edge serves (derived from EdgeRoute CRs). The edge route config is built
@@ -290,12 +290,12 @@ func (c *SnapshotCache) SetEdgeMode(httpPort uint32) {
 	c.edgeHTTPPort = httpPort
 }
 
-// SetEdgeTLS enables downstream TLS termination on the edge listener from the
-// given mounted cert/key files. Both empty = plain HTTP. Must be called before
-// the manager starts.
-func (c *SnapshotCache) SetEdgeTLS(certPath, keyPath string) {
-	c.edgeTLSCert = certPath
-	c.edgeTLSKey = keyPath
+// SetEdgeTLSMode enables downstream TLS termination: the edge serves a TLS
+// listener on httpsPort (certs per EdgeRoute via SDS) and an HTTP->HTTPS redirect
+// on the plain port. Must be called before the manager starts.
+func (c *SnapshotCache) SetEdgeTLSMode(httpsPort uint32) {
+	c.edgeTLSEnabled = true
+	c.edgeHTTPSPort = httpsPort
 }
 
 // SetEdgeIdentity records the edge proxy's single SVID name and trust domain so

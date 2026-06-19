@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/bpalermo/aether/agent/internal/edge"
+	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -49,8 +50,8 @@ func init() {
 	edgeCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", "/var/lib/aether/registry", "Pod-local directory for the edge's (empty) local store")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
 	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch EdgeRoute CRs in (empty = the edge pod's own namespace)")
-	edgeCmd.Flags().StringVar(&cfg.EdgeTLSCertFile, "edge-tls-cert-file", "", "Path to the mounted TLS certificate chain; with --edge-tls-key-file, the edge listener terminates downstream TLS (else plain HTTP)")
-	edgeCmd.Flags().StringVar(&cfg.EdgeTLSKeyFile, "edge-tls-key-file", "", "Path to the mounted TLS private key (pairs with --edge-tls-cert-file)")
+	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per EdgeRoute via SDS) + an HTTP->HTTPS redirect")
+	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -147,7 +148,9 @@ func runEdge(ctx context.Context) (retErr error) {
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetEdgeMode(cfg.EdgeHTTPPort)
-	snapshotCache.SetEdgeTLS(cfg.EdgeTLSCertFile, cfg.EdgeTLSKeyFile)
+	if cfg.EdgeTLS {
+		snapshotCache.SetEdgeTLSMode(cfg.EdgeHTTPSPort)
+	}
 	snapshotCache.SetEdgeIdentity(edgeSpiffeID, identityTrustDomain)
 	// Routes come exclusively from EdgeRoute CRs via the reconciler below; the
 	// initial snapshot (PreListen) serves a 404-only edge route table until the
@@ -185,12 +188,18 @@ func runEdge(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	// Watch EdgeRoute CRs and project them (merged with the static seed) into the
-	// cache as the edge's routes + scoped dependency set.
+	// Watch EdgeRoute CRs and project them into the cache as the edge's routes +
+	// scoped dependency set. With TLS enabled, also resolve per-route certs via
+	// the SecretProvider registry (kubernetes provider) and watch their Secrets.
+	var secretRegistry *secret.Registry
+	if cfg.EdgeTLS {
+		secretRegistry = secret.NewRegistry(secret.NewKubernetesProvider(m.GetClient(), routeNamespace))
+	}
 	edgeReconciler := &edge.Reconciler{
 		Client:    m.GetClient(),
 		Sink:      snapshotCache,
 		Namespace: routeNamespace,
+		Secrets:   secretRegistry,
 		Log:       l,
 	}
 	if err = edgeReconciler.SetupWithManager(m); err != nil {
