@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -8,6 +9,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestEdgeTLSModeListeners verifies that with TLS enabled the cache serves a TLS
+// listener on the https port (referencing the route's SDS cert) plus an
+// HTTP->HTTPS redirect on the plain port; the certs ride the SecretType channel.
+func TestEdgeTLSModeListeners(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+	c.SetEdgeTLSMode(443)
+	c.SetEdgeRoutes([]EdgeRoute{
+		{Hosts: []string{"api.example.com"}, Service: "svc-1", TLSSecret: "kubernetes/api-tls"},
+	})
+	require.NoError(t, c.SetEdgeTLSSecrets(context.Background(), map[string]EdgeTLSCert{
+		"kubernetes/api-tls": {Cert: []byte("CERT"), Key: []byte("KEY")},
+	}))
+
+	ls := c.Listeners()
+	require.Len(t, ls, 2)
+	names := map[string]*listenerv3.Listener{}
+	for _, r := range ls {
+		l := r.(*listenerv3.Listener)
+		names[l.GetName()] = l
+	}
+	tls := names[proxy.EdgeListenerName]
+	redirect := names[proxy.EdgeRedirectListenerName]
+	require.NotNil(t, tls)
+	require.NotNil(t, redirect)
+	assert.Equal(t, uint32(443), tls.GetAddress().GetSocketAddress().GetPortValue())
+	assert.Equal(t, uint32(80), redirect.GetAddress().GetSocketAddress().GetPortValue())
+	require.NotNil(t, tls.GetFilterChains()[0].GetTransportSocket(), "https listener terminates TLS")
+
+	// The cert rides the snapshot SecretType channel under its SDS name.
+	c.secretMu.RLock()
+	sec := c.secrets["kubernetes/api-tls"]
+	c.secretMu.RUnlock()
+	require.NotNil(t, sec)
+	assert.Equal(t, []byte("CERT"), sec.GetTlsCertificate().GetCertificateChain().GetInlineBytes())
+}
 
 func TestSetStaticDependencies(t *testing.T) {
 	c := newTestCache("edge-1")

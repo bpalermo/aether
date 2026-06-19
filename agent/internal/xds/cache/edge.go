@@ -1,11 +1,13 @@
 package cache
 
 import (
+	"context"
 	"slices"
 	"strconv"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 )
 
 // EdgeRoute is one external-host -> mesh-service mapping the edge proxy serves
@@ -16,6 +18,48 @@ type EdgeRoute struct {
 	Hosts   []string
 	Service string
 	Port    uint32
+	// TLSSecret is the provider-prefixed SDS name of the cert presented for this
+	// route's hosts (empty = no cert for these hosts). Cert bytes are supplied
+	// separately via SetEdgeTLSSecrets.
+	TLSSecret string
+}
+
+// EdgeTLSCert is raw certificate material for an edge downstream TLS secret,
+// keyed by its provider-prefixed SDS name.
+type EdgeTLSCert struct {
+	Cert []byte
+	Key  []byte
+}
+
+// SetEdgeTLSSecrets replaces the edge's downstream TLS certs (keyed by SDS name)
+// and serves them over the ADS SecretType channel for Envoy to select by SNI.
+func (c *SnapshotCache) SetEdgeTLSSecrets(ctx context.Context, certs map[string]EdgeTLSCert) error {
+	secrets := make([]*tlsv3.Secret, 0, len(certs))
+	for name, cert := range certs {
+		secrets = append(secrets, proxy.NewDownstreamTLSSecret(name, cert.Cert, cert.Key))
+	}
+	return c.SetSecrets(ctx, secrets)
+}
+
+// edgeTLSSecretNames returns the distinct SDS cert names referenced by the
+// current edge routes, sorted for deterministic listener bytes.
+func (c *SnapshotCache) edgeTLSSecretNames() []string {
+	c.edgeMu.RLock()
+	defer c.edgeMu.RUnlock()
+	seen := make(map[string]struct{}, len(c.edgeRoutes))
+	names := make([]string, 0, len(c.edgeRoutes))
+	for _, r := range c.edgeRoutes {
+		if r.TLSSecret == "" {
+			continue
+		}
+		if _, ok := seen[r.TLSSecret]; ok {
+			continue
+		}
+		seen[r.TLSSecret] = struct{}{}
+		names = append(names, r.TLSSecret)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // SetEdgeRoutes replaces the edge's exposed routes. It scopes the dependency set
@@ -132,7 +176,8 @@ func equalEdgeRoutes(a, b []EdgeRoute) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Service != b[i].Service || a[i].Port != b[i].Port || !slices.Equal(a[i].Hosts, b[i].Hosts) {
+		if a[i].Service != b[i].Service || a[i].Port != b[i].Port ||
+			a[i].TLSSecret != b[i].TLSSecret || !slices.Equal(a[i].Hosts, b[i].Hosts) {
 			return false
 		}
 	}

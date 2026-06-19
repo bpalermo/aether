@@ -19,4 +19,10 @@ spec:
       port: {{ .Values.edge.service.port }}
       targetPort: http
       protocol: TCP
+    {{- if .Values.edge.tls.enabled }}
+    - name: https
+      port: {{ .Values.edge.service.httpsPort }}
+      targetPort: https
+      protocol: TCP
+    {{- end }}
 {{- end }}

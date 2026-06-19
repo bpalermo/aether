@@ -112,27 +112,44 @@ func upstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{CommonTlsContext: common, Sni: sni})
 }
 
-// edgeDownstreamTLS terminates external (north-south) TLS at the edge listener
-// from a mounted certificate/key (a Kubernetes TLS Secret). It does NOT require a
-// client certificate — external callers have no mesh identity; the edge presents
-// its own SVID on the separate upstream (edge -> pod) mTLS hop. The cert/key are
-// inline file data sources; rotating the Secret takes effect on the next edge pod
-// roll (no SDS dependency for the downstream cert).
-func edgeDownstreamTLS(certPath, keyPath string) *corev3.TransportSocket {
+// edgeDownstreamTLSFromSDS terminates external (north-south) TLS at the edge
+// listener, presenting one of the named certs (selected by SNI) served over the
+// agent's ADS SDS. It does NOT require a client certificate — external callers
+// have no mesh identity; the edge presents its own SVID on the separate upstream
+// (edge -> pod) mTLS hop. Certs are SDS-served so rotation needs no pod roll.
+func edgeDownstreamTLSFromSDS(sdsSecretNames []string) *corev3.TransportSocket {
+	certs := make([]*transport_sockets_v3.SdsSecretConfig, 0, len(sdsSecretNames))
+	for _, name := range sdsSecretNames {
+		certs = append(certs, sdsSecretConfig(name)) // ADS-served (the cache secrets)
+	}
 	return transportSocket(&transport_sockets_v3.DownstreamTlsContext{
 		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
-			TlsCertificates: []*transport_sockets_v3.TlsCertificate{
-				{
-					CertificateChain: &corev3.DataSource{
-						Specifier: &corev3.DataSource_Filename{Filename: certPath},
-					},
-					PrivateKey: &corev3.DataSource{
-						Specifier: &corev3.DataSource_Filename{Filename: keyPath},
-					},
+			TlsCertificateSdsSecretConfigs: certs,
+			TlsParams: &transport_sockets_v3.TlsParameters{
+				TlsMinimumProtocolVersion: transport_sockets_v3.TlsParameters_TLSv1_2,
+			},
+			AlpnProtocols: []string{"h2", "http/1.1"},
+		},
+	})
+}
+
+// NewDownstreamTLSSecret builds an Envoy SDS Secret carrying an inline
+// certificate/key (read by the edge from a provider-backed source). name is the
+// provider-prefixed SDS name the edge listener references.
+func NewDownstreamTLSSecret(name string, cert, key []byte) *transport_sockets_v3.Secret {
+	return &transport_sockets_v3.Secret{
+		Name: name,
+		Type: &transport_sockets_v3.Secret_TlsCertificate{
+			TlsCertificate: &transport_sockets_v3.TlsCertificate{
+				CertificateChain: &corev3.DataSource{
+					Specifier: &corev3.DataSource_InlineBytes{InlineBytes: cert},
+				},
+				PrivateKey: &corev3.DataSource{
+					Specifier: &corev3.DataSource_InlineBytes{InlineBytes: key},
 				},
 			},
 		},
-	})
+	}
 }
 
 // transportSocket creates a TLS transport socket from the given TLS context message.

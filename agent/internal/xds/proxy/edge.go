@@ -21,13 +21,21 @@ const (
 	// under it.
 	EdgeHTTPRouteName = "edge_http"
 
-	// EdgeListenerName is the name of the edge proxy's public-facing HTTP listener.
+	// EdgeListenerName is the name of the edge proxy's public-facing listener
+	// (plain HTTP, or HTTPS-terminating when TLS is enabled).
 	EdgeListenerName = "edge_http"
 
-	// DefaultEdgeHTTPPort is the port the edge listener binds for external
-	// (north-south) HTTP traffic. TLS termination (a separate port/listener)
-	// lands in a later PR; v1 is plain HTTP behind a Service/LoadBalancer.
+	// EdgeRedirectListenerName is the :80 listener that 301-redirects to https
+	// when TLS is enabled.
+	EdgeRedirectListenerName = "edge_redirect"
+
+	// DefaultEdgeHTTPPort is the port the edge plain-HTTP / redirect listener
+	// binds for external (north-south) traffic.
 	DefaultEdgeHTTPPort = 8080
+
+	// DefaultEdgeHTTPSPort is the port the edge TLS-terminating listener binds
+	// when downstream TLS is enabled.
+	DefaultEdgeHTTPSPort = 8443
 
 	// defaultEdgeAddress binds the edge listener on all interfaces (it fronts
 	// external traffic, unlike the node proxy's loopback-only outbound listener).
@@ -43,10 +51,10 @@ const (
 // filters: the edge's routable set is its explicit exposed services, not the
 // whole mesh.
 //
-// When tls is non-nil the filter chain terminates downstream TLS from the
-// mounted certificate (a Kubernetes TLS Secret); otherwise the edge serves plain
-// HTTP. Either way the upstream (edge -> pod) hop stays mTLS.
-func BuildEdgeListener(port uint32, tls *EdgeTLS) *listenerv3.Listener {
+// When tlsSecretNames is non-empty the filter chain terminates downstream TLS,
+// presenting one of those SDS-served certs selected by SNI; otherwise the edge
+// serves plain HTTP. Either way the upstream (edge -> pod) hop stays mTLS.
+func BuildEdgeListener(port uint32, tlsSecretNames []string) *listenerv3.Listener {
 	hcm := buildHTTPConnectionManager(EdgeListenerName, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
@@ -60,12 +68,29 @@ func BuildEdgeListener(port uint32, tls *EdgeTLS) *listenerv3.Listener {
 		Name:    EdgeListenerName,
 		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
 	}
-	if tls != nil {
-		filterChain.TransportSocket = edgeDownstreamTLS(tls.CertPath, tls.KeyPath)
+	if len(tlsSecretNames) > 0 {
+		filterChain.TransportSocket = edgeDownstreamTLSFromSDS(tlsSecretNames)
 	}
 
+	return edgeListener(EdgeListenerName, port, filterChain)
+}
+
+// BuildEdgeRedirectListener builds the :80 listener that 301-redirects every
+// request to its https URL (used alongside the TLS listener when downstream TLS
+// is enabled).
+func BuildEdgeRedirectListener(port uint32) *listenerv3.Listener {
+	hcm := buildHTTPConnectionManager(EdgeRedirectListenerName, ReporterSource, "", "", buildEdgeRedirectRouteConfig())
+	filterChain := &listenerv3.FilterChain{
+		Name:    EdgeRedirectListenerName,
+		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+	}
+	return edgeListener(EdgeRedirectListenerName, port, filterChain)
+}
+
+// edgeListener wraps a filter chain in a 0.0.0.0:<port> INBOUND listener.
+func edgeListener(name string, port uint32, fc *listenerv3.FilterChain) *listenerv3.Listener {
 	return &listenerv3.Listener{
-		Name: EdgeListenerName,
+		Name: name,
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
@@ -78,17 +103,34 @@ func BuildEdgeListener(port uint32, tls *EdgeTLS) *listenerv3.Listener {
 			},
 		},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		StatPrefix:                    EdgeListenerName,
+		StatPrefix:                    name,
 		TrafficDirection:              corev3.TrafficDirection_INBOUND,
-		FilterChains:                  []*listenerv3.FilterChain{filterChain},
+		FilterChains:                  []*listenerv3.FilterChain{fc},
 	}
 }
 
-// EdgeTLS holds the mounted certificate/key file paths for terminating external
-// TLS at the edge (a Kubernetes TLS Secret projected into the Envoy container).
-type EdgeTLS struct {
-	CertPath string
-	KeyPath  string
+// buildEdgeRedirectRouteConfig is the inline route table for the redirect
+// listener: a catch-all that rewrites the scheme to https (301).
+func buildEdgeRedirectRouteConfig() *routev3.RouteConfiguration {
+	return &routev3.RouteConfiguration{
+		Name: EdgeRedirectListenerName,
+		VirtualHosts: []*routev3.VirtualHost{
+			{
+				Name:    EdgeRedirectListenerName,
+				Domains: []string{"*"},
+				Routes: []*routev3.Route{
+					{
+						Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+						Action: &routev3.Route_Redirect{
+							Redirect: &routev3.RedirectAction{
+								SchemeRewriteSpecifier: &routev3.RedirectAction_HttpsRedirect{HttpsRedirect: true},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // BuildEdgeRouteConfiguration builds the edge listener's route table from the

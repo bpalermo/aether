@@ -78,15 +78,19 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 // health_<pod> clusters, probed by the liveness loop) as a flat slice.
 // Thread-safe.
 func (c *SnapshotCache) Listeners() []types.Resource {
-	// Edge mode: a single public-facing listener (no per-pod inbound/outbound
-	// listeners, no health gateway — the edge runs no local workloads). It
-	// terminates downstream TLS when a cert/key pair is configured.
+	// Edge mode: public-facing listener(s) (no per-pod inbound/outbound
+	// listeners, no health gateway — the edge runs no local workloads). With TLS
+	// enabled it serves a TLS-terminating listener on the https port (certs
+	// SNI-selected from SDS) plus an HTTP->HTTPS redirect on the plain port;
+	// otherwise a single plain-HTTP listener.
 	if c.edge {
-		var tls *proxy.EdgeTLS
-		if c.edgeTLSCert != "" && c.edgeTLSKey != "" {
-			tls = &proxy.EdgeTLS{CertPath: c.edgeTLSCert, KeyPath: c.edgeTLSKey}
+		if c.edgeTLSEnabled {
+			return []types.Resource{
+				proxy.BuildEdgeListener(c.edgeHTTPSPort, c.edgeTLSSecretNames()),
+				proxy.BuildEdgeRedirectListener(c.edgeHTTPPort),
+			}
 		}
-		return []types.Resource{proxy.BuildEdgeListener(c.edgeHTTPPort, tls)}
+		return []types.Resource{proxy.BuildEdgeListener(c.edgeHTTPPort, nil)}
 	}
 
 	c.listenerMu.RLock()

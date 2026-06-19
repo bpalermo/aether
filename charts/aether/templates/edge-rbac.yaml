@@ -16,6 +16,13 @@ rules:
   - apiGroups: ["config.aether.io"]
     resources: ["edgeroutes/status"]
     verbs: ["get", "update", "patch"]
+  {{- if .Values.edge.tls.enabled }}
+  # Read the kubernetes.io/tls Secrets EdgeRoutes reference (downstream certs,
+  # served to Envoy over SDS); watch for hot rotation.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
