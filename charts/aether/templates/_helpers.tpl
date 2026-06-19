@@ -119,6 +119,29 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
 
+{{/* ------------------------------------------------------------------- edge */}}
+{{- define "aether.edge.fullname" -}}
+{{- printf "%s-edge" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- define "aether.edge.serviceAccountName" -}}{{ include "aether.edge.fullname" . }}{{- end -}}
+{{- define "aether.edge.configMapName" -}}
+{{- printf "%s-config" (include "aether.edge.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- define "aether.edge.selectorLabels" -}}
+app.kubernetes.io/name: aether-edge
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: edge
+{{- end -}}
+{{- define "aether.edge.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.edge.selectorLabels" . }}
+app.kubernetes.io/part-of: aether
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Chart.AppVersion }}
+app.kubernetes.io/version: {{ . | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* ------------------------------------------------------------- controller */}}
 {{- define "aether.controller.fullname" -}}
 {{- printf "%s-controller" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}

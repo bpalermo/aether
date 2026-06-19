@@ -44,6 +44,9 @@ func init() {
 	manager.RegisterFlags(edgeCmd, &cfg.Config)
 	registerSharedFlags(edgeCmd)
 
+	// The edge has no CNI/pod storage; it points the (always-empty) local store
+	// at a pod-local emptyDir so PreListen's load is a no-op.
+	edgeCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", "/var/lib/aether/registry", "Pod-local directory for the edge's (empty) local store")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
 	edgeCmd.Flags().StringSliceVar(&cfg.EdgeExposes, "expose", nil, "Mesh service names the edge always routes to at their mesh FQDN (comma-separated or repeated); merged with the EdgeRoute CRs")
 	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch EdgeRoute CRs in (empty = the edge pod's own namespace)")

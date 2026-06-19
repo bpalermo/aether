@@ -1,0 +1,149 @@
+{{- if .Values.edge.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aether.edge.configMapName" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 9901
+
+{{- if .Values.proxy.jsonLogs }}
+    application_log_config:
+      log_format:
+        json_format:
+          time: "%Y-%m-%dT%T.%e%z"
+          level: "%l"
+          name: "%n"
+          thread: "%t"
+          source: "%g:%#"
+          message: "%j"
+{{- end }}
+
+{{- if .Values.otel.endpoint }}
+    # Push the edge Envoy's stats to the collector over OTLP, like the rest of
+    # the mesh telemetry (no scrape port). The edge listener carries no
+    # aether_stats filter, so no custom stat conversions are needed.
+    stats_sinks:
+      - name: envoy.stat_sinks.open_telemetry
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.stat_sinks.open_telemetry.v3.SinkConfig
+          grpc_service:
+            envoy_grpc:
+              cluster_name: otel_collector
+          resource_detectors:
+            - name: envoy.tracers.opentelemetry.resource_detectors.environment
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
+          prefix: envoy
+          emit_tags_as_attributes: true
+          use_tag_extracted_name: true
+{{- end }}
+
+{{- if .Values.edge.overload.enabled }}
+    # Graceful degradation before the container memory limit OOM-kills Envoy.
+    # The edge pod is unprivileged (private cgroup namespace), so unlike the
+    # node DaemonSet it COULD use cgroup_memory; fixed_heap is used here too for
+    # parity and to stay independent of the cgroup layout. Keep maxHeapSizeBytes
+    # at ~75% of edge.resources.limits.memory.
+    overload_manager:
+      refresh_interval: 0.25s
+      resource_monitors:
+        - name: "envoy.resource_monitors.fixed_heap"
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+            max_heap_size_bytes: {{ int64 .Values.edge.overload.maxHeapSizeBytes }}
+      actions:
+        - name: "envoy.overload_actions.shrink_heap"
+          triggers:
+            - name: "envoy.resource_monitors.fixed_heap"
+              threshold:
+                value: 0.80
+        - name: "envoy.overload_actions.stop_accepting_requests"
+          triggers:
+            - name: "envoy.resource_monitors.fixed_heap"
+              threshold:
+                value: 0.95
+{{- end }}
+
+    dynamic_resources:
+      ads_config:
+        api_type: DELTA_GRPC
+        grpc_services:
+          - envoy_grpc:
+              cluster_name: agent_xds
+      cds_config:
+        ads: {}
+      lds_config:
+        ads: {}
+
+    static_resources:
+      clusters:
+      # The edge agent sidecar serves LDS/CDS/EDS/RDS over this pod-local socket.
+      - name: agent_xds
+        type: STATIC
+        load_assignment:
+          cluster_name: agent_xds
+          endpoints:
+            - lb_endpoints:
+                - endpoint:
+                    address:
+                      pipe:
+                        path: /run/aether/xds.sock
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options:
+                connection_keepalive:
+                  interval: 15s
+                  timeout: 5s
+{{- if .Values.spire.enabled }}
+      # SPIRE Agent's native Envoy SDS API (served on the Workload API socket):
+      # the edge fetches its single SVID + trust bundle straight from SPIRE. The
+      # service clusters' SDS config sources reference this cluster by name
+      # (proxy.SpireAgentSDSClusterName = "spire_agent").
+      - name: spire_agent
+        type: STATIC
+        connect_timeout: 2s
+        load_assignment:
+          cluster_name: spire_agent
+          endpoints:
+            - lb_endpoints:
+                - endpoint:
+                    address:
+                      pipe:
+                        path: {{ .Values.spire.workloadSocketPath }}
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
+{{- end }}
+{{- if .Values.otel.endpoint }}
+{{- $otlp := splitList ":" .Values.otel.endpoint }}
+      - name: otel_collector
+        type: STRICT_DNS
+        connect_timeout: 2s
+        load_assignment:
+          cluster_name: otel_collector
+          endpoints:
+            - lb_endpoints:
+                - endpoint:
+                    address:
+                      socket_address:
+                        address: {{ index $otlp 0 }}
+                        port_value: {{ index $otlp 1 }}
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
+{{- end }}
+{{- end }}
