@@ -1,6 +1,15 @@
 // Package etcd implements the Registry interface using etcd as the backend.
-// Service endpoints are organized hierarchically by service name and protocol,
-// with each endpoint stored as a protobuf-serialized value keyed by IP address.
+//
+// Keys are region-scoped and origin-first (proposal 006): each region owns a
+// contiguous authoritative subtree, so a cross-region replicator mirrors one
+// deterministic prefix and partitions stay disjoint regardless of pod-CIDR
+// overlap across clusters. Full key layout:
+//
+//	<root>/<region>/clusters/<cluster>/services/<service>/protocols/<protocol>/endpoints/<ip>
+//
+// A registry instance OWNS one (region, cluster): it writes/deletes only under
+// its own partition, but reads (List*, watch) range the whole root so consumers
+// see the union of every region's local-authoritative and mirrored-in endpoints.
 package etcd
 
 import (
@@ -18,8 +27,15 @@ import (
 )
 
 const (
-	// DefaultKeyPrefix is the default prefix for all registry keys in etcd.
-	DefaultKeyPrefix = "/aether/services"
+	// DefaultKeyPrefix is the default root prefix for all registry keys in etcd.
+	// Every region's subtree hangs off this root; see the package doc for the
+	// full key layout.
+	DefaultKeyPrefix = "/aether/v1/regions"
+
+	// DefaultRegion and DefaultCluster scope a registry's OWN authoritative
+	// partition when the caller leaves them unset (single-region/single-cluster).
+	DefaultRegion  = "local"
+	DefaultCluster = "local"
 
 	// DefaultDialTimeout is the default timeout for connecting to etcd.
 	DefaultDialTimeout = 5 * time.Second
@@ -31,18 +47,28 @@ type Config struct {
 	Endpoints []string
 	// DialTimeout is the timeout for establishing a connection.
 	DialTimeout time.Duration
-	// KeyPrefix is the prefix for all registry keys. Defaults to DefaultKeyPrefix.
+	// KeyPrefix is the root prefix for all registry keys. Defaults to DefaultKeyPrefix.
 	KeyPrefix string
+	// Region and Cluster identify this registry's OWN authoritative partition
+	// (proposal 006). Writes/deletes go under <KeyPrefix>/<Region>/clusters/<Cluster>/;
+	// reads range the whole root. One registry instance owns one (region, cluster):
+	// Region is shared by every registrar on the same regional etcd, Cluster is the
+	// per-cluster name. Default to DefaultRegion/DefaultCluster when unset.
+	Region  string
+	Cluster string
 }
 
-// EtcdRegistry is a Registry implementation backed by etcd.
-// It stores service endpoints in etcd with a hierarchical key structure:
-// /aether/services/<serviceName>/protocols/<protocol>/endpoints/<ip>
+// EtcdRegistry is a Registry implementation backed by etcd. See the package doc
+// for the region-scoped, origin-first key layout.
 type EtcdRegistry struct {
-	log       *slog.Logger
-	config    Config
-	client    *clientv3.Client
+	log    *slog.Logger
+	config Config
+	client *clientv3.Client
+	// keyPrefix is the root over all regions — used for reads and the watch.
 	keyPrefix string
+	// ownPrefix is this instance's authoritative partition
+	// (<keyPrefix>/<region>/clusters/<cluster>) — used for writes and deletes.
+	ownPrefix string
 
 	// notify coalesces change signals from the etcd watch for consumers (the
 	// registrar Syncer). Buffered cap-1, non-blocking send: a burst of watch
@@ -62,6 +88,14 @@ func NewEtcdRegistry(log *slog.Logger, cfg Config) *EtcdRegistry {
 	if keyPrefix == "" {
 		keyPrefix = DefaultKeyPrefix
 	}
+	region := cfg.Region
+	if region == "" {
+		region = DefaultRegion
+	}
+	cluster := cfg.Cluster
+	if cluster == "" {
+		cluster = DefaultCluster
+	}
 
 	dialTimeout := cfg.DialTimeout
 	if dialTimeout == 0 {
@@ -73,6 +107,7 @@ func NewEtcdRegistry(log *slog.Logger, cfg Config) *EtcdRegistry {
 		log:       commonlog.Named(log, "registry-etcd"),
 		config:    cfg,
 		keyPrefix: keyPrefix,
+		ownPrefix: fmt.Sprintf("%s/%s/clusters/%s", keyPrefix, region, cluster),
 		notify:    make(chan struct{}, 1),
 	}
 }
@@ -168,9 +203,10 @@ func (r *EtcdRegistry) watchLoop(ctx context.Context) {
 	}
 }
 
-// RegisterEndpoint registers an endpoint to a service and protocol in etcd.
-// The endpoint is serialized using protobuf and stored at:
-// <keyPrefix>/<serviceName>/protocols/<protocol>/endpoints/<ip>
+// RegisterEndpoint registers an endpoint to a service and protocol in etcd,
+// under THIS registry's own authoritative partition. The endpoint is serialized
+// using protobuf and stored at:
+// <ownPrefix>/services/<serviceName>/protocols/<protocol>/endpoints/<ip>
 func (r *EtcdRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
 	ip := endpoint.GetIp()
 	r.log.DebugContext(ctx,
@@ -233,7 +269,7 @@ func (r *EtcdRegistry) UnregisterEndpoints(ctx context.Context, serviceName stri
 	protocols := make(map[string]bool)
 	for _, kv := range resp.Kvs {
 		key := string(kv.Key)
-		// Key format: <prefix>/<service>/protocols/<protocol>/endpoints/<ip>
+		// Key format: <ownPrefix>/services/<service>/protocols/<protocol>/endpoints/<ip>
 		parts := strings.Split(key, "/")
 		for i, part := range parts {
 			if part == "protocols" && i+1 < len(parts) {
@@ -260,19 +296,25 @@ func (r *EtcdRegistry) UnregisterEndpoints(ctx context.Context, serviceName stri
 	return nil
 }
 
-// ListEndpoints retrieves all endpoints for a specific service and protocol from etcd.
+// ListEndpoints retrieves all endpoints for a specific service and protocol,
+// ACROSS every origin (region/cluster) — a consumer wants every endpoint of the
+// service, not just this instance's own partition. Since the origin precedes the
+// service in the key, this ranges the whole root and filters by service+protocol.
 func (r *EtcdRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing endpoints", "service", service, "protocol", protocol)
 
-	prefix := r.endpointsPrefix(service, protocol)
-	resp, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
+	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
 	if err != nil {
 		r.log.ErrorContext(ctx, "failed to list endpoints", "error", err, "service", service)
 		return nil, fmt.Errorf("failed to list endpoints: %w", err)
 	}
 
+	match := endpointsMatch(service, protocol)
 	endpoints := make([]*registryv1.ServiceEndpoint, 0, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
+		if !strings.Contains(string(kv.Key), match) {
+			continue
+		}
 		var endpoint registryv1.ServiceEndpoint
 		if err := proto.Unmarshal(kv.Value, &endpoint); err != nil {
 			r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err, "key", string(kv.Key))
@@ -303,7 +345,8 @@ func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 	for _, kv := range resp.Kvs {
 		key := string(kv.Key)
 
-		// Filter by protocol - key format: <prefix>/<service>/protocols/<protocol>/endpoints/<ip>
+		// Filter by protocol - key format:
+		// <root>/<region>/clusters/<cluster>/services/<service>/protocols/<protocol>/endpoints/<ip>
 		if !strings.Contains(key, fmt.Sprintf("/protocols/%s/endpoints/", protocolStr)) {
 			continue
 		}
@@ -341,29 +384,39 @@ func (r *EtcdRegistry) Close() error {
 	return nil
 }
 
-// endpointKey builds the full key for an endpoint.
-// Format: <keyPrefix>/<serviceName>/protocols/<protocol>/endpoints/<ip>
+// serviceMarker delimits the service-name segment within a key, after the
+// origin (region/cluster) prefix.
+const serviceMarker = "/services/"
+
+// endpointKey builds the full key for one of THIS registry's own endpoints,
+// under its authoritative partition.
+// Format: <ownPrefix>/services/<serviceName>/protocols/<protocol>/endpoints/<ip>
 func (r *EtcdRegistry) endpointKey(serviceName string, protocol registryv1.Service_Protocol, ip string) string {
-	return fmt.Sprintf("%s/%s/protocols/%s/endpoints/%s", r.keyPrefix, serviceName, protocol.String(), ip)
+	return fmt.Sprintf("%s%s%s/protocols/%s/endpoints/%s", r.ownPrefix, serviceMarker, serviceName, protocol.String(), ip)
 }
 
-// endpointsPrefix builds the prefix for all endpoints of a service and protocol.
-func (r *EtcdRegistry) endpointsPrefix(serviceName string, protocol registryv1.Service_Protocol) string {
-	return fmt.Sprintf("%s/%s/protocols/%s/endpoints/", r.keyPrefix, serviceName, protocol.String())
+// endpointsMatch is the substring an endpoint key carries for a given service
+// and protocol, used to filter a root-range read across all origins.
+func endpointsMatch(serviceName string, protocol registryv1.Service_Protocol) string {
+	return fmt.Sprintf("%s%s/protocols/%s/endpoints/", serviceMarker, serviceName, protocol.String())
 }
 
-// protocolsPrefix builds the prefix for all protocols of a service.
+// protocolsPrefix builds the prefix for all protocols of one of THIS registry's
+// own services (used to enumerate protocols before deleting own endpoints).
 func (r *EtcdRegistry) protocolsPrefix(serviceName string) string {
-	return fmt.Sprintf("%s/%s/protocols/", r.keyPrefix, serviceName)
+	return fmt.Sprintf("%s%s%s/protocols/", r.ownPrefix, serviceMarker, serviceName)
 }
 
-// extractServiceName extracts the service name from a full key path.
+// extractServiceName extracts the service name from a full key path, regardless
+// of which origin (region/cluster) partition it lives under.
 func (r *EtcdRegistry) extractServiceName(key string) string {
-	// Remove prefix and split
-	trimmed := strings.TrimPrefix(key, r.keyPrefix+"/")
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) > 0 {
-		return parts[0]
+	i := strings.Index(key, serviceMarker)
+	if i < 0 {
+		return ""
+	}
+	rest := key[i+len(serviceMarker):]
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		return rest[:j]
 	}
 	return ""
 }

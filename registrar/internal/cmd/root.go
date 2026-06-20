@@ -57,6 +57,7 @@ func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
+	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006)")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
@@ -188,6 +189,8 @@ func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, erro
 	case "etcd":
 		reg = registry.NewEtcdRegistry(l, registry.EtcdConfig{
 			Endpoints: cfg.EtcdEndpoints,
+			Region:    cfg.Region,
+			Cluster:   cfg.ClusterName,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported registry backend: %s (supported: kubernetes, dynamodb, etcd)", cfg.RegistryBackend)

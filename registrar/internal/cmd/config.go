@@ -22,8 +22,14 @@ const (
 type RegistrarConfig struct {
 	manager.Config
 
-	// ClusterName is the Kubernetes cluster name
+	// ClusterName is the Kubernetes cluster name. For the etcd backend it is also
+	// this registrar's authoritative cluster partition (proposal 006).
 	ClusterName string
+
+	// Region is this registrar's region — the etcd backend's authoritative
+	// partition root (proposal 006). Shared by every registrar on the same
+	// regional etcd; empty falls back to the etcd backend's default.
+	Region string
 
 	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", or "etcd")
 	RegistryBackend string

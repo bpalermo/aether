@@ -234,6 +234,10 @@ registrar:
     targetPort: 8443
   # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
   registryBackend: kubernetes
+  # Region owning this registrar's etcd partition (etcd backend; proposal 006).
+  # Keys are origin-first /aether/v1/regions/<region>/clusters/<clusterName>/…;
+  # shared by every registrar on the same regional etcd.
+  region: local
   # etcd client endpoints (used when registryBackend == etcd).
   etcd:
     endpoints: []
