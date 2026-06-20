@@ -4,10 +4,29 @@ import (
 	"context"
 	"errors"
 	"net"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
 )
+
+var traceparentRe = regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-00$`)
+
+func TestNotSampledTraceparent(t *testing.T) {
+	tp := notSampledTraceparent()
+	if !traceparentRe.MatchString(tp) {
+		t.Fatalf("traceparent %q does not match the W3C not-sampled form", tp)
+	}
+	// The trace-id must be nonzero or Envoy rejects it and re-enables sampling.
+	if strings.HasPrefix(tp, "00-00000000000000000000000000000000-") {
+		t.Fatalf("traceparent has an all-zero trace-id: %q", tp)
+	}
+	// Two calls should differ (random ids), not a constant.
+	if tp == notSampledTraceparent() {
+		t.Fatalf("traceparent is not randomized: %q", tp)
+	}
+}
 
 func TestClassifyErr(t *testing.T) {
 	t.Run("connection refused -> connection_error", func(t *testing.T) {
