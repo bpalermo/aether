@@ -171,17 +171,21 @@ three objections to a single shared etcd:
 The mesh's existing discipline — *registrar per cluster, none authoritative,
 cluster-scoped reconciliation, no unilateral GC* — is exactly what makes
 multi-master replication conflict-free: **each region is authoritative only for
-its own `cluster_name` endpoints.** Encode that in the key so the partitions
-are truly disjoint regardless of pod-CIDR overlap across regions:
+its own subtree.** Encode the origin **region-first** in the key so each region
+owns one contiguous partition, disjoint regardless of pod-CIDR overlap across
+regions:
 
 ```
-# prerequisite schema change — origin (cluster) goes IN the key, not just the value
-/aether/services/<service>/clusters/<cluster>/endpoints/<ip>
+# prerequisite schema change — origin (region, then cluster) goes IN the key, front-most
+/aether/v1/regions/<region>/clusters/<cluster>/services/<service>/protocols/<proto>/endpoints/<ip>
 ```
 
-Each region authoritatively writes only `clusters/<self>`; peers' endpoints
-arrive mirrored into `clusters/<peer>`. Disjoint partitions ⇒ one writer per
-partition ⇒ last-write-wins is a no-op ⇒ eventual consistency is trivial.
+Each region authoritatively writes only `/regions/<self>/`; peers' endpoints
+arrive mirrored into `/regions/<peer>/` (read-only locally). Disjoint partitions
+⇒ one writer per partition ⇒ last-write-wins is a no-op ⇒ eventual consistency is
+trivial. Origin **first** (not buried under `services/<svc>/`) is what gives the
+replicator a single deterministic base prefix to mirror — see
+[proposal 006](proposals/006_multi-region-etcd-federation.md).
 
 ### The replication mechanism
 
@@ -193,7 +197,7 @@ Region B: agents → registrar(B) → etcd(B) ──own-prefix mirror──▶ e
 - The registrar stays **region-local** and store-shaped: it Watches only its
   local etcd, which now contains local-authoritative *plus* mirrored-foreign
   endpoints. It never knows about other regions.
-- A per-region **replicator** watches its own `clusters/<self>` prefix and
+- A per-region **replicator** watches its own `/regions/<self>/` prefix and
   replays changes into peer regions' etcd. This is etcd↔etcd replication, *not*
   registrar-to-registrar federation — deliberately, to avoid cross-trust-domain
   mTLS (SPIFFE federation) and a WAN gossip mesh.
@@ -209,9 +213,10 @@ Region B: agents → registrar(B) → etcd(B) ──own-prefix mirror──▶ e
 `etcdctl make-mirror` fits the one-directional-per-origin-prefix shape as a
 starting point but lacks lease management and origin-filtering, so the
 replicator is a thin purpose-built component (or a registrar mode). This is
-scoped as **proposal 006 (multi-region etcd federation)**: the key-schema
-change, the replicator spec (lease/tombstone/resume/compaction-resync, HA), and
-a region-failover e2e — not yet built.
+specified in **[proposal 006 — multi-region etcd federation](proposals/006_multi-region-etcd-federation.md)**:
+the region-scoped key schema (Phase 1, buildable now with no behavior change),
+the replicator spec (lease/tombstone/resume/compaction-resync, HA), and a
+region-failover e2e — not yet built.
 
 **Net:** etcd is the substrate single- *and* multi-region. DynamoDB global
 tables are an alternative, not a requirement.
