@@ -9,6 +9,8 @@ package prober
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -221,6 +223,14 @@ func (p *Prober) probe(ctx context.Context, t target) {
 		return
 	}
 	req.Host = t.authority
+	// Mark the probe not-sampled so the mesh proxy's HCM doesn't create and export
+	// a span per probe. The proxy's tracing is parent-based: a request that already
+	// carries a trace context honors its sampled decision instead of rolling
+	// random_sampling, so a cleared flag suppresses the span. Without this, at the
+	// probe rate with proxy tracing enabled every probe becomes a synthetic
+	// liveness-probe trace in Tempo (the access-log health-check exclusion has no
+	// tracing equivalent for the direct_response liveness route).
+	req.Header.Set("traceparent", notSampledTraceparent())
 	start := time.Now()
 	resp, err := p.client.Do(req)
 	elapsed := time.Since(start).Seconds()
@@ -234,6 +244,21 @@ func (p *Prober) probe(ctx context.Context, t target) {
 		return
 	}
 	p.record(t, resultHTTPError, elapsed)
+}
+
+// notSampledTraceparent builds a W3C traceparent with the sampled flag clear
+// ("-00"). Because the proxy honors a propagated decision over its own
+// random_sampling, this keeps every probe out of the proxy's exported spans. The
+// trace-id and parent-id are random: an all-zero trace-id is invalid per W3C and
+// would be rejected, re-enabling sampling and defeating the suppression.
+func notSampledTraceparent() string {
+	var buf [24]byte // 16-byte trace-id followed by 8-byte parent-id
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand.Read does not fail on supported platforms; fall back to a
+		// fixed nonzero id so the cleared flag is still honored.
+		return "00-0000000000000000000000000000ace0-00000000000000a1-00"
+	}
+	return "00-" + hex.EncodeToString(buf[0:16]) + "-" + hex.EncodeToString(buf[16:24]) + "-00"
 }
 
 // classifyErr maps a request error to a result. connection_error is the class the
