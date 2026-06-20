@@ -33,22 +33,23 @@ A practical guide to installing Aether and onboarding your first workload.
 <a name="how-it-works"></a>
 ## 1. How it works (the 2-minute model)
 
-```
-                         ┌─────────────────── registrar (Deployment ×2) ───────────────────┐
-                         │  watches the registry backend, fans endpoint changes to agents   │
-                         └───────────────▲──────────────────────────────────┬──────────────┘
-   register/deregister  ┌────────────────┘                                  │ endpoint stream
-   at CNI ADD/DEL       │                                                   ▼
-        ┌───────────────┴─────────────── per node ─────────────────────────────────────┐
-        │  agent (DaemonSet): CNI plugin + xDS control plane (over a Unix socket)        │
-        │            │ builds Envoy snapshot (listeners/clusters/endpoints/routes)       │
-        │            ▼                                                                    │
-        │  Envoy proxy (DaemonSet): binds an outbound listener at 127.0.0.1:18081        │
-        │            inside EACH managed pod's network namespace                          │
-        └───────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    backend[("Registry backend<br/>(kubernetes / dynamodb / etcd)")]
+    registrar["registrar (Deployment ×2)<br/>watches the backend,<br/>fans endpoint changes to agents"]
+    backend <--> registrar
 
-   app pod ──HTTP──▶ 127.0.0.1:18081  (Host: my-svc.aether.internal)
-                       └─ mTLS to the destination pod (SPIFFE identity per workload)
+    subgraph node["per node"]
+        agent["agent (DaemonSet)<br/>CNI plugin + xDS control plane (Unix socket)<br/>builds the Envoy snapshot<br/>(listeners / clusters / endpoints / routes)"]
+        proxy["Envoy proxy (DaemonSet)<br/>binds outbound listener 127.0.0.1:18081<br/>inside EACH managed pod's netns"]
+        app["app pod"]
+        agent -->|xDS snapshot| proxy
+        app -->|"HTTP → 127.0.0.1:18081<br/>(Host: my-svc.aether.internal)"| proxy
+    end
+
+    agent -->|"register / deregister<br/>at CNI ADD / DEL"| registrar
+    registrar -->|endpoint stream| agent
+    proxy -->|"mTLS — SPIFFE identity per workload"| dest["destination pod<br/>(this or another node)"]
 ```
 
 - **Identity = ServiceAccount.** A pod's mesh service name is its
