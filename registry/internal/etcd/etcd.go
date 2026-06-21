@@ -298,8 +298,20 @@ func (r *EtcdRegistry) UnregisterEndpoints(ctx context.Context, serviceName stri
 
 // ListEndpoints retrieves all endpoints for a specific service and protocol,
 // ACROSS every origin (region/cluster) — a consumer wants every endpoint of the
-// service, not just this instance's own partition. Since the origin precedes the
-// service in the key, this ranges the whole root and filters by service+protocol.
+// service, not just this instance's own partition.
+//
+// Cost: because origin precedes service in the key (proposal 006, origin-first so
+// the replicator mirrors one contiguous prefix), a single service's endpoints are
+// NOT a contiguous range — this ranges the whole root and filters in memory, i.e.
+// O(all endpoints) per call. That is acceptable and NOT worth a per-service
+// secondary index: the only caller is the agent's COLD path (an ODCDS-observed
+// service the re-filtered watch hasn't delivered yet, agent/internal/xds/cache/
+// cluster.go), gated by the service catalog (nonexistent services cost nothing),
+// hit at most once per service, and failure-tolerant (the watch catch-up repairs).
+// In the deployed topology the agent uses the registrar backend (an in-memory
+// per-service cache), so this etcd path runs only with --registry-backend=etcd
+// directly. An index would add write-amplification to every register for a rarely
+// taken read; revisit only if a hot direct-to-etcd consumer appears.
 func (r *EtcdRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing endpoints", "service", service, "protocol", protocol)
 

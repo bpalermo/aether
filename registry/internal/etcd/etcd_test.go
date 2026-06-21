@@ -454,3 +454,58 @@ func TestEtcdRegistry_WatchSignalsChanges(t *testing.T) {
 		t.Fatal("watch did not signal a change after UnregisterEndpoint")
 	}
 }
+
+// crossOriginRegistry builds an etcd registry sharing the given key-prefix root
+// but owning a distinct (region, cluster) partition, so several can write
+// disjoint origin subtrees into one etcd (proposal 006).
+func crossOriginRegistry(ctx context.Context, t *testing.T, prefix, region, cluster string) *etcd.EtcdRegistry {
+	t.Helper()
+	r := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
+		Endpoints:   []string{testEndpoint},
+		DialTimeout: 5 * time.Second,
+		KeyPrefix:   prefix,
+		Region:      region,
+		Cluster:     cluster,
+	})
+	require.NoError(t, r.Initialize(ctx))
+	t.Cleanup(func() { _ = r.Close() })
+	return r
+}
+
+// TestEtcdRegistry_ListEndpointsCrossOrigin verifies the origin-first key schema:
+// ListEndpoints returns the UNION of a service's endpoints across origins, two
+// origins sharing an IP (overlapping pod CIDRs across clusters) do NOT clobber
+// each other, and each origin's unregister touches only its own partition.
+func TestEtcdRegistry_ListEndpointsCrossOrigin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+	prefix := keyPrefix(t)
+	regA := crossOriginRegistry(ctx, t, prefix, "us-east", "cluster-a")
+	regB := crossOriginRegistry(ctx, t, prefix, "us-west", "cluster-b")
+
+	// SAME IP in both origins: origin-first keys keep the partitions disjoint, so
+	// neither write clobbers the other despite the shared IP.
+	const ip = "10.244.0.5"
+	require.NoError(t, regA.RegisterEndpoint(ctx, "svc", registryv1.Service_PROTOCOL_HTTP,
+		&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-a", Port: 8080}))
+	require.NoError(t, regB.RegisterEndpoint(ctx, "svc", registryv1.Service_PROTOCOL_HTTP,
+		&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-b", Port: 8080}))
+
+	// ListEndpoints ranges every origin and returns the union (from either reader).
+	eps, err := regA.ListEndpoints(ctx, "svc", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, eps, 2, "both origins' endpoints are returned despite the shared IP")
+	assert.ElementsMatch(t, []string{"cluster-a", "cluster-b"},
+		[]string{eps[0].GetClusterName(), eps[1].GetClusterName()})
+
+	// Each origin writes/deletes ONLY its own partition: A's unregister leaves B's
+	// endpoint intact.
+	require.NoError(t, regA.UnregisterEndpoint(ctx, "svc", ip))
+	eps, err = regB.ListEndpoints(ctx, "svc", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, eps, 1)
+	assert.Equal(t, "cluster-b", eps[0].GetClusterName())
+}
