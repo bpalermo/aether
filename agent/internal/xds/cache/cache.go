@@ -89,16 +89,16 @@ type SnapshotCache struct {
 	// edgeHTTPPort is the port the edge plain-HTTP / redirect listener binds.
 	edgeHTTPPort uint32
 	// edgeTLSEnabled serves a TLS-terminating listener on edgeHTTPSPort (certs
-	// per EdgeRoute via SDS) plus an HTTP->HTTPS redirect on edgeHTTPPort.
+	// per VirtualHost via SDS) plus an HTTP->HTTPS redirect on edgeHTTPPort.
 	edgeTLSEnabled bool
 	// edgeHTTPSPort is the port the edge TLS listener binds when edgeTLSEnabled.
 	edgeHTTPSPort uint32
 
-	// edgeMu guards edgeRoutes: the external-host -> mesh-service mappings the
-	// edge serves (derived from EdgeRoute CRs). The edge route config is built
-	// from them, and their service set scopes the dependency set.
-	edgeMu     sync.RWMutex
-	edgeRoutes []EdgeRoute
+	// edgeMu guards virtualHosts: the external-host -> mesh-service routing the
+	// edge serves (derived from VirtualHost CRs). The edge route config is built
+	// from them, and their backend-service set scopes the dependency set.
+	edgeMu       sync.RWMutex
+	virtualHosts []VirtualHost
 
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace
@@ -291,8 +291,8 @@ func (c *SnapshotCache) SetEdgeMode(httpPort uint32) {
 }
 
 // SetEdgeTLSMode enables downstream TLS termination: the edge serves a TLS
-// listener on httpsPort (certs per EdgeRoute via SDS) and an HTTP->HTTPS redirect
-// on the plain port. Must be called before the manager starts.
+// listener on httpsPort (certs per VirtualHost via SDS) and an HTTP->HTTPS
+// redirect on the plain port. Must be called before the manager starts.
 func (c *SnapshotCache) SetEdgeTLSMode(httpsPort uint32) {
 	c.edgeTLSEnabled = true
 	c.edgeHTTPSPort = httpsPort

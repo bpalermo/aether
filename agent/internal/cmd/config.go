@@ -75,12 +75,12 @@ type AgentConfig struct {
 	// binds (edge subcommand only).
 	EdgeHTTPPort uint32
 
-	// EdgeRouteNamespace is the namespace the edge watches EdgeRoute CRs in
+	// EdgeRouteNamespace is the namespace the edge watches VirtualHost CRs in
 	// (edge subcommand only); empty means the edge pod's own namespace.
 	EdgeRouteNamespace string
 
 	// EdgeTLS enables downstream TLS termination: the edge serves an HTTPS
-	// listener on EdgeHTTPSPort (certs per EdgeRoute via SDS) and an HTTP->HTTPS
+	// listener on EdgeHTTPSPort (certs per VirtualHost via SDS) and an HTTP->HTTPS
 	// redirect on the plain port (edge subcommand only).
 	EdgeTLS bool
 	// EdgeHTTPSPort is the port the edge TLS listener binds when EdgeTLS is set.

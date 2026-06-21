@@ -18,102 +18,112 @@ import (
 )
 
 type fakeSink struct {
-	routes []cache.EdgeRoute
+	vhosts []cache.VirtualHost
 	certs  map[string]cache.EdgeTLSCert
 }
 
-func (f *fakeSink) SetEdgeRoutes(routes []cache.EdgeRoute) { f.routes = routes }
+func (f *fakeSink) SetVirtualHosts(vhosts []cache.VirtualHost) { f.vhosts = vhosts }
 
 func (f *fakeSink) SetEdgeTLSSecrets(_ context.Context, certs map[string]cache.EdgeTLSCert) error {
 	f.certs = certs
 	return nil
 }
 
-func edgeRoute(name, ns, service string, port uint32, hosts ...string) *crdv1.EdgeRoute {
-	er := &crdv1.EdgeRoute{}
-	er.Name = name
-	er.Namespace = ns
-	er.Spec = &configv1.EdgeRouteSpec{}
-	er.Spec.SetService(service)
-	er.Spec.SetPort(port)
-	if len(hosts) > 0 {
-		er.Spec.SetHosts(hosts)
-	}
-	return er
+// prefixRoute builds an HTTPRoute matching a path prefix and forwarding to a
+// (service, port) backend.
+func prefixRoute(prefix, service string, port uint32) *configv1.HTTPRoute {
+	m := &configv1.RouteMatch{}
+	m.SetPrefix(prefix)
+	b := &configv1.RouteBackend{}
+	b.SetService(service)
+	b.SetPort(port)
+	hr := &configv1.HTTPRoute{}
+	hr.SetMatch(m)
+	hr.SetBackend(b)
+	return hr
 }
 
-func TestReconcileProjectsRoutes(t *testing.T) {
+// virtualHost builds a VirtualHost CR with the given hosts and routes.
+func virtualHost(name, ns string, hosts []string, routes ...*configv1.HTTPRoute) *crdv1.VirtualHost {
+	vh := &crdv1.VirtualHost{}
+	vh.Name = name
+	vh.Namespace = ns
+	spec := &configv1.VirtualHostSpec{}
+	if len(hosts) > 0 {
+		spec.SetHosts(hosts)
+	}
+	if len(routes) > 0 {
+		spec.SetRoutes(routes)
+	}
+	vh.Spec = spec
+	return vh
+}
+
+func TestReconcileProjectsVirtualHosts(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, crdv1.AddToScheme(scheme))
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		edgeRoute("api", "aether-edge", "svc-1", 0, "api.example.com"),
-		edgeRoute("grpc", "aether-edge", "svc-2", 9090, "grpc.example.com"),
-		edgeRoute("elsewhere", "other-ns", "svc-9", 0, "x.example.com"), // different namespace, excluded
+		virtualHost("api", "aether-edge", []string{"api.example.com"},
+			prefixRoute("/users", "svc-1", 0), prefixRoute("/", "svc-web", 0)),
+		virtualHost("grpc", "aether-edge", []string{"grpc.example.com"},
+			prefixRoute("/", "svc-2", 9090)),
+		virtualHost("elsewhere", "other-ns", []string{"x.example.com"},
+			prefixRoute("/", "svc-9", 0)), // different namespace, excluded
 	).Build()
 
 	sink := &fakeSink{}
-	r := &Reconciler{
-		Client:    cl,
-		Sink:      sink,
-		Namespace: "aether-edge",
-		Log:       slog.New(slog.DiscardHandler),
-	}
+	r := &Reconciler{Client: cl, Sink: sink, Namespace: "aether-edge", Log: slog.New(slog.DiscardHandler)}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
 
-	// Both in-namespace EdgeRoutes; the other-namespace one is excluded.
-	require.Len(t, sink.routes, 2)
-	got := map[string]cache.EdgeRoute{}
-	for _, rt := range sink.routes {
-		got[rt.Service] = rt
-	}
-	assert.Equal(t, []string{"api.example.com"}, got["svc-1"].Hosts)
-	assert.Equal(t, uint32(9090), got["svc-2"].Port)
-	assert.Equal(t, []string{"grpc.example.com"}, got["svc-2"].Hosts)
-	assert.NotContains(t, got, "svc-9")
+	// Both in-namespace VirtualHosts; the other-namespace one is excluded. Sorted
+	// by name: "api", "grpc".
+	require.Len(t, sink.vhosts, 2)
+	assert.Equal(t, []string{"api.example.com"}, sink.vhosts[0].Hosts)
+	require.Len(t, sink.vhosts[0].Routes, 2)
+	assert.Equal(t, "/users", sink.vhosts[0].Routes[0].Prefix)
+	assert.Equal(t, "svc-1", sink.vhosts[0].Routes[0].Service)
+	assert.Equal(t, "svc-web", sink.vhosts[0].Routes[1].Service)
+
+	assert.Equal(t, []string{"grpc.example.com"}, sink.vhosts[1].Hosts)
+	assert.Equal(t, uint32(9090), sink.vhosts[1].Routes[0].Port)
 }
 
-// TestReconcileSkipsInertRoutes verifies routes that expose nothing are skipped:
-// no service, or no external host (the edge never routes a service at its mesh
-// FQDN).
-func TestReconcileSkipsInertRoutes(t *testing.T) {
+// TestReconcileSkipsInert verifies virtual hosts that expose nothing are skipped:
+// no external host, or no routable route.
+func TestReconcileSkipsInert(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, crdv1.AddToScheme(scheme))
 
-	noService := &crdv1.EdgeRoute{}
-	noService.Name = "no-service"
-	noService.Namespace = "aether-edge"
-	noService.Spec = &configv1.EdgeRouteSpec{}
-	noService.Spec.SetHosts([]string{"x.example.com"})
-
+	noBackend := prefixRoute("/", "", 0) // route with no backend service
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		noService,
-		edgeRoute("no-hosts", "aether-edge", "svc-1", 0), // service but no hosts
+		virtualHost("no-hosts", "aether-edge", nil, prefixRoute("/", "svc-1", 0)),     // routes but no hosts
+		virtualHost("no-routes", "aether-edge", []string{"x.example.com"}, noBackend), // hosts but no routable route
 	).Build()
 	sink := &fakeSink{}
 	r := &Reconciler{Client: cl, Sink: sink, Namespace: "aether-edge", Log: slog.New(slog.DiscardHandler)}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
-	assert.Empty(t, sink.routes)
+	assert.Empty(t, sink.vhosts)
 }
 
-// TestReconcileResolvesTLS verifies a route's referenced kubernetes.io/tls Secret
-// is resolved to a provider-prefixed SDS name + cert bytes, and an unresolvable
-// reference leaves the route without a cert (not an error).
+// TestReconcileResolvesTLS verifies a virtual host's referenced kubernetes.io/tls
+// Secret is resolved to a provider-prefixed SDS name + cert bytes, and an
+// unresolvable reference leaves the host without a cert (not an error).
 func TestReconcileResolvesTLS(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, crdv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 
-	withTLS := edgeRoute("api", "aether-edge", "svc-1", 0, "api.example.com")
-	withTLS.Spec.SetTls(&configv1.EdgeRouteTLS{})
+	withTLS := virtualHost("api", "aether-edge", []string{"api.example.com"}, prefixRoute("/", "svc-1", 0))
+	withTLS.Spec.SetTls(&configv1.VirtualHostTLS{})
 	withTLS.Spec.GetTls().SetSecretName("api-tls")
 
-	missing := edgeRoute("foo", "aether-edge", "svc-2", 0, "foo.example.com")
-	missing.Spec.SetTls(&configv1.EdgeRouteTLS{})
+	missing := virtualHost("foo", "aether-edge", []string{"foo.example.com"}, prefixRoute("/", "svc-2", 0))
+	missing.Spec.SetTls(&configv1.VirtualHostTLS{})
 	missing.Spec.GetTls().SetSecretName("absent-tls")
 
 	tlsSecret := &corev1.Secret{
@@ -136,12 +146,10 @@ func TestReconcileResolvesTLS(t *testing.T) {
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
 
-	got := map[string]cache.EdgeRoute{}
-	for _, rt := range sink.routes {
-		got[rt.Service] = rt
-	}
-	assert.Equal(t, "kubernetes/api-tls", got["svc-1"].TLSSecret)
-	assert.Empty(t, got["svc-2"].TLSSecret, "unresolvable cert leaves the route without one")
+	// Sorted by name: "api" (resolvable), "foo" (unresolvable).
+	require.Len(t, sink.vhosts, 2)
+	assert.Equal(t, "kubernetes/api-tls", sink.vhosts[0].TLSSecret)
+	assert.Empty(t, sink.vhosts[1].TLSSecret, "unresolvable cert leaves the host without one")
 
 	require.Contains(t, sink.certs, "kubernetes/api-tls")
 	assert.Equal(t, []byte("CERT"), sink.certs["kubernetes/api-tls"].Cert)

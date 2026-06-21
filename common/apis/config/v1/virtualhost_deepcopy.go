@@ -9,29 +9,29 @@ import (
 
 // DeepCopyInto copies the receiver into out. The proto spec is cloned via
 // proto.Clone (never shallow-copied — proto messages hold internal state).
-func (in *EdgeRoute) DeepCopyInto(out *EdgeRoute) {
+func (in *VirtualHost) DeepCopyInto(out *VirtualHost) {
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	if in.Spec != nil {
-		out.Spec = proto.Clone(in.Spec).(*configv1.EdgeRouteSpec)
+		out.Spec = proto.Clone(in.Spec).(*configv1.VirtualHostSpec)
 	} else {
 		out.Spec = nil
 	}
 	in.Status.DeepCopyInto(&out.Status)
 }
 
-// DeepCopy returns a deep copy of the EdgeRoute.
-func (in *EdgeRoute) DeepCopy() *EdgeRoute {
+// DeepCopy returns a deep copy of the VirtualHost.
+func (in *VirtualHost) DeepCopy() *VirtualHost {
 	if in == nil {
 		return nil
 	}
-	out := new(EdgeRoute)
+	out := new(VirtualHost)
 	in.DeepCopyInto(out)
 	return out
 }
 
 // DeepCopyObject implements runtime.Object.
-func (in *EdgeRoute) DeepCopyObject() runtime.Object {
+func (in *VirtualHost) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}
@@ -39,7 +39,7 @@ func (in *EdgeRoute) DeepCopyObject() runtime.Object {
 }
 
 // DeepCopyInto copies the status into out.
-func (in *EdgeRouteStatus) DeepCopyInto(out *EdgeRouteStatus) {
+func (in *VirtualHostStatus) DeepCopyInto(out *VirtualHostStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))
@@ -50,29 +50,29 @@ func (in *EdgeRouteStatus) DeepCopyInto(out *EdgeRouteStatus) {
 }
 
 // DeepCopyInto copies the list into out.
-func (in *EdgeRouteList) DeepCopyInto(out *EdgeRouteList) {
+func (in *VirtualHostList) DeepCopyInto(out *VirtualHostList) {
 	out.TypeMeta = in.TypeMeta
 	in.ListMeta.DeepCopyInto(&out.ListMeta)
 	if in.Items != nil {
-		out.Items = make([]EdgeRoute, len(in.Items))
+		out.Items = make([]VirtualHost, len(in.Items))
 		for i := range in.Items {
 			in.Items[i].DeepCopyInto(&out.Items[i])
 		}
 	}
 }
 
-// DeepCopy returns a deep copy of the EdgeRouteList.
-func (in *EdgeRouteList) DeepCopy() *EdgeRouteList {
+// DeepCopy returns a deep copy of the VirtualHostList.
+func (in *VirtualHostList) DeepCopy() *VirtualHostList {
 	if in == nil {
 		return nil
 	}
-	out := new(EdgeRouteList)
+	out := new(VirtualHostList)
 	in.DeepCopyInto(out)
 	return out
 }
 
 // DeepCopyObject implements runtime.Object.
-func (in *EdgeRouteList) DeepCopyObject() runtime.Object {
+func (in *VirtualHostList) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}

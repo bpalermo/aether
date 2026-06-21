@@ -12,8 +12,8 @@ load("//bazel/lint:linters.bzl", "buf_test")
 proto_library(
     name = "configv1_proto",
     srcs = [
-        "edge_route.proto",
         "mesh_config.proto",
+        "virtual_host.proto",
     ],
     visibility = ["//visibility:public"],
     deps = ["@protovalidate//proto/protovalidate/buf/validate:validate_proto"],
