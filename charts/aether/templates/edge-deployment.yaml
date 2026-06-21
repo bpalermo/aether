@@ -51,7 +51,7 @@ spec:
             # otherwise win and not exist in the edge pod.
             - "--mounted-registry-dir=/var/lib/aether/registry"
             - "--edge-http-port={{ .Values.edge.httpPort }}"
-            - "--edge-route-namespace={{ $routeNamespace }}"
+            - "--route-namespace={{ $routeNamespace }}"
             {{- if .Values.edge.tls.enabled }}
             - "--edge-tls"
             - "--edge-https-port={{ .Values.edge.httpsPort }}"

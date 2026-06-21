@@ -43,9 +43,9 @@ func NewXdsServer(ctx context.Context, cfg *ServerConfig, cache cachev3.Snapshot
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle:     15 * time.Minute, // Close idle connections after 15 minutes
 			MaxConnectionAge:      1 * time.Hour,    // Max age of connection
-			MaxConnectionAgeGrace: 10 * time.Second, // Allow 5 seconds for pending RPCs to complete
+			MaxConnectionAgeGrace: 10 * time.Second, // Allow 10 seconds for pending RPCs to complete
 			Time:                  keepAliveTime,    // Ping client if no activity for 30 seconds
-			Timeout:               5 * time.Second,  // Wait 10 seconds for ping ack before closing
+			Timeout:               5 * time.Second,  // Wait 5 seconds for ping ack before closing
 		}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			// Ensure we allow clients has enough time to send keep alive. If this is higher than the client's

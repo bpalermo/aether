@@ -57,7 +57,7 @@ func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
-	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006)")
+	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006). MUST be unique per regional etcd cluster: one region = one etcd. Pointing two etcds at the same region splits the registry; pointing two regions at one etcd collides their writes.")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
@@ -76,6 +76,11 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	l.InfoContext(ctx, "starting aether registrar",
 		"clusterName", cfg.ClusterName,
 		"registryBackend", cfg.RegistryBackend,
+		// region names this registrar's etcd partition (proposal 006). Surfaced at
+		// startup because the region<->etcd 1:1 invariant is not locally enforceable
+		// (a registrar can't see a peer pointing a DIFFERENT etcd at the same region):
+		// an operator spots a misconfiguration by comparing this across registrars.
+		"region", cfg.Region,
 		"syncInterval", cfg.SyncInterval,
 		"grpcAddress", cfg.GRPCAddress,
 		"metricsEnabled", cfg.MetricsEnabled,
