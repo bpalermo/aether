@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "install",
@@ -19,5 +19,15 @@ go_library(
         "@com_github_go_logr_logr//:logr",
         "@com_github_google_renameio_v2//:renameio",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ],
+)
+
+go_test(
+    name = "install_test",
+    srcs = ["cniconfig_test.go"],
+    embed = [":install"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )
