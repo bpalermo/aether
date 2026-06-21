@@ -52,12 +52,17 @@ metadata:
   labels:
     {{- include "aether.controller.labels" . | nindent 4 }}
 webhooks:
-  - name: meshconfig.config.aether.io
+  # One webhook entry, one /validate endpoint for every config.aether.io CRD: the
+  # controller dispatches by Kind (see controller/internal/webhook). Per-resource
+  # rules carry their own scope (MeshConfig is the cluster-scoped singleton;
+  # VirtualHost is namespaced).
+  - name: validate.config.aether.io
     admissionReviewVersions: ["v1"]
     sideEffects: None
     # Ignore so a down/un-injected webhook (e.g. during the controller's own
-    # rollout, or before the SPIRE caBundle is injected) never wedges MeshConfig
-    # writes; the reconciler re-validates before projecting.
+    # rollout, or before the SPIRE caBundle is injected) never wedges writes; the
+    # consumers re-validate (the reconciler for MeshConfig; the edge, which also
+    # runtime-dedups duplicate hosts, for VirtualHost).
     failurePolicy: Ignore
     timeoutSeconds: 5
     clientConfig:
@@ -75,3 +80,8 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["meshconfigs"]
         scope: "Cluster"
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["virtualhosts"]
+        scope: "Namespaced"

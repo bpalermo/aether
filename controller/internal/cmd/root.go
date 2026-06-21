@@ -25,11 +25,14 @@ import (
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
+	"github.com/bpalermo/aether/controller/internal/virtualhost"
+	cwebhook "github.com/bpalermo/aether/controller/internal/webhook"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 const name = "aether-controller"
@@ -149,7 +152,13 @@ func runController(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to set up MeshConfig reconciler: %w", err)
 	}
 
-	(&meshconfig.Validator{Log: l}).SetupWithManager(m)
+	// All CRD validation is served on one /validate endpoint, dispatched by Kind.
+	// The VirtualHost validator uses the API reader for a cluster-wide
+	// duplicate-FQDN list (uncached, correct regardless of the manager cache scope).
+	cwebhook.NewHandler(l, map[string]admission.Handler{
+		crdv1.MeshConfigKind:  &meshconfig.Validator{Log: l},
+		crdv1.VirtualHostKind: &virtualhost.Validator{Reader: m.GetAPIReader(), Log: l},
+	}).SetupWithManager(m)
 
 	// In SPIRE mode the webhook presents an SVID, so the apiserver must trust the
 	// SPIRE CA: keep the ValidatingWebhookConfiguration caBundle in sync with the
@@ -168,7 +177,7 @@ func runController(ctx context.Context) (retErr error) {
 
 	l.InfoContext(ctx, "MeshConfig controller configured",
 		"configMap", cmNamespace+"/"+cfg.MeshConfigMapName,
-		"webhookPath", meshconfig.WebhookPath,
+		"webhookPath", cwebhook.Path,
 	)
 	return m.Start(ctx)
 }
