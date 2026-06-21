@@ -7,26 +7,16 @@ import (
 	"log/slog"
 
 	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// WebhookPath is the URL path the ValidatingWebhookConfiguration points at.
-// Unversioned: the proto spec's field-number evolution guarantees compatibility,
-// so the endpoint never needs a version suffix.
-const WebhookPath = "/validate"
-
 // Validator is an admission webhook that rejects MeshConfig resources whose spec
 // fails protovalidate — the same check the agent's file loader and the reconciler
-// run, so a CR can never describe a config the binaries would refuse to load.
+// run, so a CR can never describe a config the binaries would refuse to load. It
+// is served by the controller's shared /validate dispatcher (see
+// controller/internal/webhook), keyed by the MeshConfig Kind.
 type Validator struct {
 	Log *slog.Logger
-}
-
-// SetupWithManager registers the validating webhook on the manager's webhook
-// server.
-func (v *Validator) SetupWithManager(mgr ctrl.Manager) {
-	mgr.GetWebhookServer().Register(WebhookPath, &admission.Webhook{Handler: v})
 }
 
 // Handle validates the incoming MeshConfig's spec.
