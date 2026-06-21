@@ -49,7 +49,10 @@ func init() {
 	// at a pod-local emptyDir so PreListen's load is a no-op.
 	edgeCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", "/var/lib/aether/registry", "Pod-local directory for the edge's (empty) local store")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
-	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch VirtualHost CRs in (empty = the edge pod's own namespace)")
+	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "route-namespace", "", "Namespace to watch VirtualHost CRs in (empty = the edge pod's own namespace)")
+	// Deprecated alias kept for one release (the flag predates the EdgeRoute->VirtualHost rename).
+	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "edge-route-namespace", "", "Deprecated alias for --route-namespace")
+	_ = edgeCmd.Flags().MarkDeprecated("edge-route-namespace", "use --route-namespace")
 	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per VirtualHost via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
 }
@@ -81,7 +84,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	// Watch VirtualHost CRs in the edge's own namespace (or an override). Scope the
 	// manager's informer cache to that namespace so the edge needs only namespaced
 	// RBAC, not cluster-wide.
-	routeNamespace := cfg.EdgeRouteNamespace
+	routeNamespace := cfg.RouteNamespace
 	if routeNamespace == "" {
 		routeNamespace = currentNamespace()
 	}
