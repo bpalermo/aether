@@ -49,8 +49,8 @@ func init() {
 	// at a pod-local emptyDir so PreListen's load is a no-op.
 	edgeCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", "/var/lib/aether/registry", "Pod-local directory for the edge's (empty) local store")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
-	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch EdgeRoute CRs in (empty = the edge pod's own namespace)")
-	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per EdgeRoute via SDS) + an HTTP->HTTPS redirect")
+	edgeCmd.Flags().StringVar(&cfg.EdgeRouteNamespace, "edge-route-namespace", "", "Namespace to watch VirtualHost CRs in (empty = the edge pod's own namespace)")
+	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per VirtualHost via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
 }
 
@@ -78,7 +78,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		}()
 	}
 
-	// Watch EdgeRoute CRs in the edge's own namespace (or an override). Scope the
+	// Watch VirtualHost CRs in the edge's own namespace (or an override). Scope the
 	// manager's informer cache to that namespace so the edge needs only namespaced
 	// RBAC, not cluster-wide.
 	routeNamespace := cfg.EdgeRouteNamespace
@@ -89,7 +89,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		DefaultNamespaces: map[string]ctrlcache.Config{routeNamespace: {}},
 	}
 
-	// Manager scheme = client-go built-ins + the typed EdgeRoute CRD so the
+	// Manager scheme = client-go built-ins + the typed VirtualHost CRD so the
 	// reconciler reads typed objects (no unstructured).
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -152,7 +152,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		snapshotCache.SetEdgeTLSMode(cfg.EdgeHTTPSPort)
 	}
 	snapshotCache.SetEdgeIdentity(edgeSpiffeID, identityTrustDomain)
-	// Routes come exclusively from EdgeRoute CRs via the reconciler below; the
+	// Routes come exclusively from VirtualHost CRs via the reconciler below; the
 	// initial snapshot (PreListen) serves a 404-only edge route table until the
 	// first reconcile. The edge exposes ONLY explicitly-routed services.
 
@@ -188,9 +188,9 @@ func runEdge(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	// Watch EdgeRoute CRs and project them into the cache as the edge's routes +
-	// scoped dependency set. With TLS enabled, also resolve per-route certs via
-	// the SecretProvider registry (kubernetes provider) and watch their Secrets.
+	// Watch VirtualHost CRs and project them into the cache as the edge's virtual
+	// hosts + scoped dependency set. With TLS enabled, also resolve per-host certs
+	// via the SecretProvider registry (kubernetes provider) and watch their Secrets.
 	var secretRegistry *secret.Registry
 	if cfg.EdgeTLS {
 		secretRegistry = secret.NewRegistry(secret.NewKubernetesProvider(m.GetClient(), routeNamespace))
@@ -203,7 +203,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		Log:       l,
 	}
 	if err = edgeReconciler.SetupWithManager(m); err != nil {
-		return fmt.Errorf("failed to set up EdgeRoute reconciler: %w", err)
+		return fmt.Errorf("failed to set up VirtualHost reconciler: %w", err)
 	}
 
 	l.DebugContext(ctx, "waiting for local storage to be ready")

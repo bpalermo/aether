@@ -4,10 +4,11 @@ description: |
   Aether CustomResourceDefinitions. A standalone chart so the CRDs can be
   installed (and upgraded) ahead of the controllers that use them. Ships the
   MeshConfig CRD (config.aether.io/v1; see docs/proposals/015_mesh-config.md) and
-  the EdgeRoute CRD (config.aether.io/v1; see docs/proposals/003_edge-proxy.md).
+  the VirtualHost CRD (config.aether.io/v1; see
+  docs/proposals/017_virtual-host-l7-routing.md).
 type: application
 # Stamped at package time when built with `--stamp` (see other charts).
-version: "0.2.0-{GIT_COMMIT}"
+version: "0.3.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

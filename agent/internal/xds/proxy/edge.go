@@ -133,6 +133,37 @@ func buildEdgeRedirectRouteConfig() *routev3.RouteConfiguration {
 	}
 }
 
+// BuildEdgeRoute builds one Envoy route for the edge: a path match forwarding to
+// the named cluster with the outbound retry policy. Exactly one of prefix/exact
+// is non-empty (exact takes precedence if both are set). Prefix "/" matches all.
+func BuildEdgeRoute(prefix, exact, cluster string) *routev3.Route {
+	match := &routev3.RouteMatch{}
+	if exact != "" {
+		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
+	} else {
+		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
+	}
+	return &routev3.Route{
+		Match: match,
+		Action: &routev3.Route_Route{
+			Route: &routev3.RouteAction{
+				ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: cluster},
+				RetryPolicy:      outboundRetryPolicy(),
+			},
+		},
+	}
+}
+
+// BuildEdgeVirtualHost builds one edge virtual host: the given external domains
+// with an ordered list of routes (first match wins, per VirtualHost CR order).
+func BuildEdgeVirtualHost(name string, domains []string, routes []*routev3.Route) *routev3.VirtualHost {
+	return &routev3.VirtualHost{
+		Name:    name,
+		Domains: domains,
+		Routes:  routes,
+	}
+}
+
 // BuildEdgeRouteConfiguration builds the edge listener's route table from the
 // exposed-service virtual hosts. Unlike the node proxy's outbound route config,
 // it has NO on-demand catch-all (the edge serves only its explicit exposed set);

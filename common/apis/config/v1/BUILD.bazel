@@ -3,12 +3,12 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "config",
     srcs = [
-        "edgeroute_deepcopy.go",
-        "edgeroute_jsonshim.go",
-        "edgeroute_types.go",
         "meshconfig_deepcopy.go",
         "meshconfig_jsonshim.go",
         "meshconfig_types.go",
+        "virtualhost_deepcopy.go",
+        "virtualhost_jsonshim.go",
+        "virtualhost_types.go",
     ],
     importpath = "github.com/bpalermo/aether/common/apis/config/v1",
     visibility = ["//visibility:public"],
@@ -24,7 +24,7 @@ go_library(
 
 go_test(
     name = "config_test",
-    srcs = ["edgeroute_test.go"],
+    srcs = ["virtualhost_test.go"],
     embed = [":config"],
     deps = [
         "//api/aether/config/v1:config",
