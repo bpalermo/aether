@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/edge"
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
@@ -43,7 +44,7 @@ func init() {
 	// The edge needs the manager flags (logging, metrics, health probe, OTEL)
 	// and the shared identity/registrar/SPIRE flags, bound onto the same cfg.
 	manager.RegisterFlags(edgeCmd, &cfg.Config)
-	registerSharedFlags(edgeCmd)
+	registerSharedFlags(edgeCmd, false)
 
 	// The edge has no CNI/pod storage; it points the (always-empty) local store
 	// at a pod-local emptyDir so PreListen's load is a no-op.
@@ -66,6 +67,22 @@ func init() {
 // the statically exposed services so the registrar watch is scoped to exactly
 // those.
 func runEdge(ctx context.Context) (retErr error) {
+	// The edge's identity is its pod name: derive proxy-id / node-name from the
+	// POD_NAME downward-API env (set by the chart) unless explicitly overridden,
+	// so the deployment needn't wire them. node-name == proxy-id (the edge has no
+	// distinct K8s node identity).
+	if name := currentPodName(); name != "" {
+		if cfg.ProxyServiceNodeID == "" || cfg.ProxyServiceNodeID == constants.DefaultProxyID {
+			cfg.ProxyServiceNodeID = name
+		}
+		if cfg.NodeName == "" {
+			cfg.NodeName = cfg.ProxyServiceNodeID
+		}
+	}
+	if cfg.ProxyServiceNodeID == "" || cfg.NodeName == "" {
+		return fmt.Errorf("edge identity unresolved: set POD_NAME (downward API) or pass --proxy-id/--node-name")
+	}
+
 	l.InfoContext(ctx, "starting aether edge proxy control plane",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug,
@@ -218,8 +235,14 @@ func runEdge(ctx context.Context) (retErr error) {
 	return m.Start(ctx)
 }
 
+// currentPodName returns the edge pod's name from the POD_NAME downward-API env
+// (set by the chart); empty if unset. Used as the edge's xDS/watch identity.
+func currentPodName() string {
+	return os.Getenv("POD_NAME")
+}
+
 // currentNamespace returns the namespace the edge pod runs in (the default
-// namespace to watch EdgeRoutes in). It reads POD_NAMESPACE (set via the
+// namespace to watch VirtualHosts in). It reads POD_NAMESPACE (set via the
 // downward API by the chart) and falls back to the service-account namespace
 // file.
 func currentNamespace() string {

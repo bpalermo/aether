@@ -1,5 +1,4 @@
 {{- if .Values.edge.enabled }}
-{{- $routeNamespace := default (include "aether.namespace" .) .Values.edge.routeNamespace }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,20 +40,24 @@ spec:
           args:
             - "edge"
             - "--debug={{ .Values.debug }}"
-            - "--proxy-id=$(POD_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
-            - "--node-name=$(POD_NAME)"
+            # proxy-id / node-name derive from POD_NAME (downward API, below); the
+            # registry dir, ports, mesh domain, route namespace and SPIRE socket all
+            # use the binary defaults — passed below only when overridden.
+            {{- if ne .Values.meshDomain "aether.internal" }}
             - "--mesh-domain={{ .Values.meshDomain }}"
-            # Point the (always-empty) local store at the pod-local emptyDir below.
-            # Passed explicitly: the edge subcommand shares --mounted-registry-dir
-            # with the root command, whose default (the node hostPath) would
-            # otherwise win and not exist in the edge pod.
-            - "--mounted-registry-dir=/var/lib/aether/registry"
+            {{- end }}
+            {{- if ne (int .Values.edge.httpPort) 80 }}
             - "--edge-http-port={{ .Values.edge.httpPort }}"
-            - "--route-namespace={{ $routeNamespace }}"
+            {{- end }}
+            {{- with .Values.edge.routeNamespace }}
+            - "--route-namespace={{ . }}"
+            {{- end }}
             {{- if .Values.edge.tls.enabled }}
             - "--edge-tls"
+            {{- if ne (int .Values.edge.httpsPort) 443 }}
             - "--edge-https-port={{ .Values.edge.httpsPort }}"
+            {{- end }}
             {{- end }}
             {{- if .Values.otel.enabled }}
             - "--otel-enabled=true"
@@ -70,7 +73,7 @@ spec:
             - "--trace-export=true"
             {{- end }}
             - "--spire-enabled={{ .Values.spire.enabled }}"
-            {{- if .Values.spire.enabled }}
+            {{- if and .Values.spire.enabled (ne .Values.spire.workloadSocketPath "/run/secrets/workload-spiffe-uds/socket") }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             {{- end }}
           env:

@@ -97,7 +97,7 @@ func GetCommand() *cobra.Command {
 
 func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
-	registerSharedFlags(rootCmd)
+	registerSharedFlags(rootCmd, true)
 
 	// Local storage configuration (node proxy only — the edge runs no CNI/storage).
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
@@ -112,7 +112,11 @@ func init() {
 // system config inherited from the umbrella chart, and the SPIRE workload
 // socket. Each command binds them onto the shared cfg; cobra runs the root's
 // PersistentPreRunE (mesh-config load + logging) for the subcommand too.
-func registerSharedFlags(cmd *cobra.Command) {
+// registerSharedFlags binds the identity/registrar/SPIRE/system flags shared by
+// the node agent and the edge. requirePodIdentity marks node-name and proxy-id
+// required (the node agent — node-name is the K8s node, not derivable); the edge
+// passes false and derives both from the POD_NAME downward-API env instead.
+func registerSharedFlags(cmd *cobra.Command, requirePodIdentity bool) {
 	// Aether system config (OTEL enable/endpoint via manager.RegisterFlags, mesh
 	// domain, SPIRE on/off) is inherited from the aether umbrella chart's globals
 	// as flags. The proxy data plane can override its own observability via the
@@ -134,8 +138,10 @@ func registerSharedFlags(cmd *cobra.Command) {
 
 	// These calls only fail if the flag name is not registered, which would be a programming error.
 	must.NoError(cmd.MarkFlagRequired("cluster-name"))
-	must.NoError(cmd.MarkFlagRequired("node-name"))
-	must.NoError(cmd.MarkFlagRequired("proxy-id"))
+	if requirePodIdentity {
+		must.NoError(cmd.MarkFlagRequired("node-name"))
+		must.NoError(cmd.MarkFlagRequired("proxy-id"))
+	}
 }
 
 // applyMeshConfig applies the proxy observability overrides from the MeshConfig
