@@ -246,3 +246,34 @@ func TestServerLifecycle_LivenessAndReadiness(t *testing.T) {
 		})
 	}
 }
+
+// TestStart_RemovesStaleSocket: a leftover Unix socket file from a non-graceful
+// predecessor (SIGKILL/OOM/segfault) must not block startup — the server unlinks
+// it before binding, so it never crash-loops on EADDRINUSE.
+func TestStart_RemovesStaleSocket(t *testing.T) {
+	cfg := newUDSConfig(t)
+	require.Equal(t, "unix", cfg.Network)
+
+	// Simulate the leftover: occupy the bind path. Without unlink-before-bind,
+	// net.Listen("unix", …) would fail with EADDRINUSE.
+	require.NoError(t, os.WriteFile(cfg.Address, []byte{}, 0o600))
+
+	grpcSrv := grpc.NewServer()
+	srv := NewServer(cfg, slog.New(slog.DiscardHandler), WithGRPCServer(grpcSrv))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Start(ctx) }()
+
+	assert.Eventually(t, func() bool {
+		return srv.liveness.Load() && srv.readiness.Load()
+	}, time.Second, 10*time.Millisecond, "server should bind despite a stale socket file")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for server to shut down")
+	}
+}

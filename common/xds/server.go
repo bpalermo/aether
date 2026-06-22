@@ -80,6 +80,19 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	if s.cfg.Network == "unix" {
+		// net.Listen("unix", …) fails with EADDRINUSE if the socket file already
+		// exists. Go unlinks it on a graceful Close, but a non-graceful exit
+		// (SIGKILL, OOM, a segfault) leaves it behind — every subsequent restart
+		// would then crash-loop on bind until the file is cleared by hand. Remove a
+		// stale socket first so the agent restarts cleanly however its predecessor
+		// died. Safe in the node-singleton model: only one process binds this path,
+		// and the roll is delete-then-add, so no live listener is ever displaced.
+		if err := os.Remove(s.cfg.Address); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("failed to remove stale socket %s: %w", s.cfg.Address, err)
+		}
+	}
+
 	listener, err := net.Listen(s.cfg.Network, s.cfg.Address)
 	if err != nil {
 		s.Log.ErrorContext(ctx, "failed to listen", "error", err, "network", s.cfg.Network, "address", s.cfg.Address)
