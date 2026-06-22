@@ -30,12 +30,13 @@ const (
 	EdgeRedirectListenerName = "edge_redirect"
 
 	// DefaultEdgeHTTPPort is the port the edge plain-HTTP / redirect listener
-	// binds for external (north-south) traffic.
-	DefaultEdgeHTTPPort = 8080
+	// binds for external (north-south) traffic. Privileged (the edge is an ingress
+	// gateway); the pod is granted NET_BIND_SERVICE, so it binds unprivileged.
+	DefaultEdgeHTTPPort = 80
 
 	// DefaultEdgeHTTPSPort is the port the edge TLS-terminating listener binds
 	// when downstream TLS is enabled.
-	DefaultEdgeHTTPSPort = 8443
+	DefaultEdgeHTTPSPort = 443
 
 	// defaultEdgeAddress binds the edge listener on all interfaces (it fronts
 	// external traffic, unlike the node proxy's loopback-only outbound listener).
