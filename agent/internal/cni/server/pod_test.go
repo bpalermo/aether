@@ -485,7 +485,10 @@ func TestRemovePod(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "registry unregister failure returns error",
+			// The DEL removes local storage first (durable), then deregisters
+			// best-effort: a registrar failure must NOT fail the DEL — it would
+			// leave a ghost — the ghost sweep reconciles the registry instead.
+			name: "registry unregister failure is tolerated",
 			setupStorage: func() *storage.MockStorage[*cniv1.CNIPod] {
 				s := storage.NewMockStorage[*cniv1.CNIPod]()
 				s.GetResourceFunc = func(_ context.Context, _ types.ContainerID) (*cniv1.CNIPod, error) {
@@ -501,8 +504,8 @@ func TestRemovePod(t *testing.T) {
 				Namespace:   storedPod.GetNamespace(),
 				ContainerId: containerID,
 			},
-			want:    nil,
-			wantErr: true,
+			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS},
+			wantErr: false,
 		},
 		{
 			name: "storage remove failure returns error",
@@ -561,4 +564,40 @@ func TestRemovePod(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestRemovePodDurableDeleteOnCanceledCtx is the guarantee: a CNI DEL removes
+// local storage even when the request context is already canceled (a SIGTERM-
+// aborted RPC or a plugin del-timeout) AND the registrar is unavailable. The
+// durable local delete must not be skipped — otherwise a ghost storage entry
+// (with a lingering netns pin) is left behind (issue #261).
+func TestRemovePodDurableDeleteOnCanceledCtx(t *testing.T) {
+	const containerID = "abc123"
+	storedPod := validCNIPod("my-pod", "default", containerID)
+
+	removed := false
+	st := storage.NewMockStorage[*cniv1.CNIPod]()
+	st.GetResourceFunc = func(_ context.Context, _ types.ContainerID) (*cniv1.CNIPod, error) {
+		return storedPod, nil
+	}
+	st.RemoveResourceFunc = func(_ context.Context, _ types.ContainerID) error {
+		removed = true
+		return nil
+	}
+	reg := &testRegistry{unregisterEndpointsErr: errors.New("registrar unavailable")}
+
+	sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
+	srv := newTestCNIServer(fake.NewClientBuilder().Build(), st, reg, sc, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled, like a SIGTERM-aborted DEL
+
+	resp, err := srv.RemovePod(ctx, &cniv1.RemovePodRequest{
+		Name:        storedPod.GetName(),
+		Namespace:   storedPod.GetNamespace(),
+		ContainerId: containerID,
+	})
+	require.NoError(t, err, "a canceled ctx + down registrar must not fail the DEL")
+	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, resp.GetResult())
+	assert.True(t, removed, "local storage must be removed despite the canceled ctx and down registrar")
 }
