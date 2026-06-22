@@ -23,6 +23,11 @@ spec:
     metadata:
       labels:
         {{- include "aether.edge.labels" . | nindent 8 }}
+        # The edge is an ingress gateway, not a mesh workload: no per-pod proxy,
+        # never CNI-intercepted. It runs in aether-system (which the CNI plugin
+        # already skips), but mark it explicitly unmanaged so the exclusion never
+        # depends on the ignored-namespace list.
+        aether.io/managed: "false"
     spec:
       serviceAccountName: {{ include "aether.edge.serviceAccountName" . }}
       # Tolerate the aether startup taint: the edge is an aether-system ingress
