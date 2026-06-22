@@ -100,13 +100,9 @@ agent:
     limits:
       cpu: 200m
       memory: 64Mi
-  # AWS credentials for the DynamoDB registry backend. By default references an
-  # existing secret; set create: true + the keys to have the chart render it.
-  awsCredentials:
-    create: false
-    secretName: ""
-    accessKeyId: ""
-    secretAccessKey: ""
+  # The agent reaches the registry through the registrar (gRPC), never AWS — so it
+  # carries no AWS credentials. AWS is used only by the registrar's dynamodb
+  # backend (see registrar.aws).
 
 # CNI installer (init container). Its config is deterministic deploy-time data.
 cniInstall:
@@ -242,10 +238,13 @@ registrar:
   # etcd client endpoints (used when registryBackend == etcd).
   etcd:
     endpoints: []
-  # AWS config for the dynamodb registry backend.
+  # AWS config for the dynamodb registry backend (IRSA web-identity, no static
+  # keys; issue #257). roleArn annotates the registrar ServiceAccount with
+  # eks.amazonaws.com/role-arn so the pod-identity webhook injects AWS_ROLE_ARN +
+  # a projected token. Empty = no AWS access (etcd/kubernetes backends).
   aws:
     region: us-east-1
-    credentialsSecret: ""
+    roleArn: ""
 
 # ---------------------------------------------------------------- controller
 controller:
