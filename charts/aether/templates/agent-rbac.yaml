@@ -10,7 +10,8 @@ rules:
     verbs: ["list", "get", "watch"]
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["list", "get", "watch"]
+    # patch: remove the aether.io/agent-not-ready startup taint once CNI is serving.
+    verbs: ["list", "get", "watch", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

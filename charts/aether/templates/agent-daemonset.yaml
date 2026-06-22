@@ -22,6 +22,14 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "aether.agent.serviceAccountName" . }}
       priorityClassName: system-node-critical
+      tolerations:
+        # Tolerate the aether startup taint so the agent — which REMOVES it once
+        # its CNI is serving — runs on a not-yet-ready node. Workload pods do NOT
+        # tolerate it, so they wait until the agent untaints the node (#261). The
+        # operator registers the taint via the kubelet (--register-with-taints).
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
       initContainers:
         - name: cni-install
           image: {{ include "aether.image" .Values.cniInstall.image | quote }}
