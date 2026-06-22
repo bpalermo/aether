@@ -27,6 +27,8 @@ type cniMetrics struct {
 	ghostsRemoved     metric.Int64Counter
 	missingRegistered metric.Int64Counter
 	stalePruned       metric.Int64Counter
+	orphansPruned     metric.Int64Counter
+	missingStorage    metric.Int64Counter
 	sweepErrors       metric.Int64Counter
 	storagePods       metric.Int64Gauge
 	healthTransitions metric.Int64Counter
@@ -50,6 +52,14 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		metric.WithDescription("Local storage pod entries pruned because their network namespace no longer exists (missed CNI DEL); keeping them faults Envoy on the dead netns")); err != nil {
 		return nil, fmt.Errorf("stale pruned: %w", err)
 	}
+	if m.orphansPruned, err = meter.Int64Counter("aether.agent.ghost_sweep.orphans_pruned",
+		metric.WithDescription("Local storage pod entries pruned because the Kubernetes pod no longer exists (missed CNI DEL whose netns pin lingered, so the netns check could not catch it)")); err != nil {
+		return nil, fmt.Errorf("orphans pruned: %w", err)
+	}
+	if m.missingStorage, err = meter.Int64Counter("aether.agent.ghost_sweep.missing_storage",
+		metric.WithDescription("Live mesh-managed pods on this node with no local storage entry (lost CNI ADD); the agent cannot self-heal these — the pod must be rolled")); err != nil {
+		return nil, fmt.Errorf("missing storage: %w", err)
+	}
 	if m.sweepErrors, err = meter.Int64Counter("aether.agent.ghost_sweep.errors",
 		metric.WithDescription("Ghost sweep cycles that failed before reconciling")); err != nil {
 		return nil, fmt.Errorf("sweep errors: %w", err)
@@ -71,7 +81,7 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	return m, nil
 }
 
-func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, stalePruned, storedPods int, err error) {
+func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, storedPods int, err error) {
 	if m == nil {
 		return
 	}
@@ -87,6 +97,12 @@ func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingR
 	}
 	if stalePruned > 0 {
 		m.stalePruned.Add(ctx, int64(stalePruned))
+	}
+	if orphansPruned > 0 {
+		m.orphansPruned.Add(ctx, int64(orphansPruned))
+	}
+	if missingStorage > 0 {
+		m.missingStorage.Add(ctx, int64(missingStorage))
 	}
 	m.storagePods.Record(ctx, int64(storedPods))
 }
