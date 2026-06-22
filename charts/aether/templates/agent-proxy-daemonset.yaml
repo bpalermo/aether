@@ -36,6 +36,13 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "aether.proxy.serviceAccountName" . }}
       priorityClassName: system-node-critical
+      tolerations:
+        # The proxy runs on every node and must tolerate the aether startup taint
+        # (the agent removes it once CNI is serving). Workload pods do NOT — they
+        # wait for a ready node (#261).
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
       # The deleted (old) pod must keep its Envoy alive as the successor's
       # hot-restart parent until the successor's protocol terminates it — the
       # successor's timers start only after its xDS-gated init, which pod churn

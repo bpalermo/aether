@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "node",
+    srcs = ["taint.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/node",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//common/constants",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+    ],
+)
+
+go_test(
+    name = "node_test",
+    srcs = ["taint_test.go"],
+    embed = [":node"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@io_k8s_api//core/v1:core",
+    ],
+)

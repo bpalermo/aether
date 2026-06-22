@@ -29,6 +29,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	"github.com/bpalermo/aether/agent/internal/node"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -105,6 +106,10 @@ func init() {
 	// SPIRE admin socket (node proxy only — delegated identity for many local
 	// workloads; the edge presents a single identity served by SPIRE directly).
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
+
+	// Cold-start gate (node proxy only): remove the aether.io/agent-not-ready
+	// startup taint from this node once the CNI server is serving.
+	rootCmd.Flags().BoolVar(&cfg.RemoveStartupTaint, "remove-startup-taint", cfg.RemoveStartupTaint, "Remove the aether.io/agent-not-ready node taint once the CNI server is serving (needs nodes patch RBAC)")
 }
 
 // registerSharedFlags registers the flags common to the node agent (root) and
@@ -283,6 +288,21 @@ func runAgent(ctx context.Context) (retErr error) {
 
 	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain); err != nil {
 		return err
+	}
+
+	// Remove the aether startup taint from this node once the CNI server is
+	// serving, so workload pods (which don't tolerate it) can schedule here. The
+	// operator registers the taint via the kubelet; this closes the cold-start
+	// window where a pod's CNI ADD would arrive before the agent is ready.
+	if cfg.RemoveStartupTaint {
+		if err = m.Add(&node.TaintRemover{
+			Client:     m.GetClient(),
+			NodeName:   cfg.NodeName,
+			SocketPath: cfg.CNIServerConfig.SocketPath,
+			Log:        l,
+		}); err != nil {
+			return fmt.Errorf("failed to add startup-taint remover: %w", err)
+		}
 	}
 
 	// Rebuild the cluster/endpoint/route snapshot when the registry reports

@@ -71,6 +71,10 @@ type AgentConfig struct {
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
 
+	// RemoveStartupTaint removes the aether.io/agent-not-ready node taint once the
+	// CNI server is serving (node proxy only). Default true.
+	RemoveStartupTaint bool
+
 	// EdgeHTTPPort is the port the edge proxy's public-facing HTTP listener
 	// binds (edge subcommand only).
 	EdgeHTTPPort uint32
@@ -106,5 +110,6 @@ func NewAgentConfig() *AgentConfig {
 		SpireEnabled:            true,
 		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
+		RemoveStartupTaint:      true,
 	}
 }

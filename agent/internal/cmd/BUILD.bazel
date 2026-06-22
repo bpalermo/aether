@@ -15,6 +15,7 @@ go_library(
         "//agent/internal/cni/server",
         "//agent/internal/edge",
         "//agent/internal/edge/secret",
+        "//agent/internal/node",
         "//agent/internal/proxy/hotrestart",
         "//agent/internal/spire",
         "//agent/internal/xds/ack",
