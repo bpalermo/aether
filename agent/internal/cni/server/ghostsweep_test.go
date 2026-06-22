@@ -12,6 +12,8 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // Sweep tests use synthetic netns paths that don't exist on disk; treat them as
@@ -169,6 +171,67 @@ func TestSweepRegistersMissingEndpoint(t *testing.T) {
 	s.drainLivenessForget(state)
 	assert.NotContains(t, state.last, "container-missing")
 	assert.NotContains(t, state.sawHealthy, "container-missing", "forget must clear warm-up memory too")
+}
+
+// TestSweepPrunesOrphanedPods: a stored pod whose Kubernetes pod no longer
+// exists is pruned from storage and its registry endpoint deregistered — even
+// though its netns pin lingers (netnsExists reports present), the case the netns
+// check alone cannot catch (talos worker-01, 2026-06-22: prober-vhbp8). A pod
+// that still exists in Kubernetes is kept.
+func TestSweepPrunesOrphanedPods(t *testing.T) {
+	ctx := context.Background()
+	// netnsExists stays true (package init): the orphan's pin lingers, so only the
+	// pod-existence check can prune it.
+
+	orphan := validCNIPod("pod-orphan", "default", "container-orphan")
+	orphan.Ips = []string{"10.0.0.9"}
+	live := validCNIPod("pod-live", "default", "container-live") // 10.0.0.1
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-orphan"), orphan))
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-live"), live))
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{
+		"default": {
+			sweepEndpoint("10.0.0.9", "test-node", "pod-orphan"), // orphan -> pruned -> ghost-deregistered
+			sweepEndpoint("10.0.0.1", "test-node", "pod-live"),   // live -> kept
+		},
+	}}
+	// Kubernetes has only the live pod; the orphan's pod is gone (missed CNI DEL).
+	k8s := fake.NewClientBuilder().WithObjects(validK8sPod("pod-live", "default")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	s.sweepGhostEndpoints(ctx)
+
+	_, err := store.GetResource(ctx, types.ContainerID("container-orphan"))
+	require.Error(t, err, "orphaned pod pruned from storage despite a lingering netns pin")
+	_, err = store.GetResource(ctx, types.ContainerID("container-live"))
+	require.NoError(t, err, "live pod kept")
+	assert.Equal(t, map[string][]string{"default": {"10.0.0.9"}}, reg.unregistered)
+}
+
+// TestIsMeshManagedK8sPod mirrors the CNIPod ignorable rules for the
+// missing-storage surfacing: only a managed pod in a non-ignored namespace with
+// an assigned IP qualifies.
+func TestIsMeshManagedK8sPod(t *testing.T) {
+	managed := func() *corev1.Pod {
+		p := validK8sPod("p", "default")
+		p.Status.PodIP = "10.0.0.1"
+		return p
+	}
+	assert.True(t, isMeshManagedK8sPod(managed()))
+
+	ignoredNS := managed()
+	ignoredNS.Namespace = "kube-system"
+	assert.False(t, isMeshManagedK8sPod(ignoredNS), "ignored namespace")
+
+	unmanaged := managed()
+	unmanaged.Labels = map[string]string{}
+	assert.False(t, isMeshManagedK8sPod(unmanaged), "missing managed label")
+
+	noIP := managed()
+	noIP.Status.PodIP = ""
+	assert.False(t, isMeshManagedK8sPod(noIP), "no pod IP (not yet networked)")
 }
 
 // authoritativeSweepRegistry simulates the post-backend-switch trap: the
