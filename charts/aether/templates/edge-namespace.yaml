@@ -1,0 +1,14 @@
+{{- if and .Values.edge.enabled .Values.edge.namespaceCreate }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "aether.edge.namespace" . }}
+  labels:
+    # The edge is an unprivileged ingress gateway (runs non-root, drops ALL caps,
+    # adds only NET_BIND_SERVICE) — baseline PSA, unlike the privileged
+    # control-plane namespace the agent/CNI require.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+    {{- include "aether.edge.labels" . | nindent 4 }}
+{{- end }}

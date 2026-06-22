@@ -120,6 +120,11 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- define "aether.edge.fullname" -}}
 {{- printf "%s-edge" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+{{- /* The edge is an ingress gateway, not a mesh workload — it runs in its own
+       namespace (aether-ingress by default), isolated from the control plane. */ -}}
+{{- define "aether.edge.namespace" -}}
+{{- default "aether-ingress" .Values.edge.namespace -}}
+{{- end -}}
 {{- define "aether.edge.serviceAccountName" -}}{{ include "aether.edge.fullname" . }}{{- end -}}
 {{- define "aether.edge.configMapName" -}}
 {{- printf "%s-config" (include "aether.edge.fullname" .) | trunc 63 | trimSuffix "-" -}}

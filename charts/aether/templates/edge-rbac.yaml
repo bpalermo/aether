@@ -1,5 +1,5 @@
 {{- if .Values.edge.enabled }}
-{{- $routeNamespace := default (include "aether.namespace" .) .Values.edge.routeNamespace }}
+{{- $routeNamespace := default (include "aether.edge.namespace" .) .Values.edge.routeNamespace }}
 # Namespaced: the edge only reads VirtualHosts (and their status) in the namespace
 # it watches. No cluster-wide access — exposure is delegable per namespace.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -38,5 +38,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "aether.edge.serviceAccountName" . }}
-    namespace: {{ include "aether.namespace" . }}
+    namespace: {{ include "aether.edge.namespace" . }}
 {{- end }}
