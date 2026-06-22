@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "aether.edge.fullname" . }}
-  namespace: {{ include "aether.namespace" . }}
+  namespace: {{ include "aether.edge.namespace" . }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
 spec:
@@ -23,17 +23,18 @@ spec:
     metadata:
       labels:
         {{- include "aether.edge.labels" . | nindent 8 }}
-        # The edge is an ingress gateway, not a mesh workload: no per-pod proxy,
-        # never CNI-intercepted. It runs in aether-system (which the CNI plugin
-        # already skips), but mark it explicitly unmanaged so the exclusion never
-        # depends on the ignored-namespace list.
+        # The edge is an ingress gateway, not a mesh workload: no per-pod proxy.
+        # It runs in its own (non-aether-system) namespace, so the CNI plugin no
+        # longer skips it by namespace — this label is what keeps the agent's
+        # isIgnorablePod ignoring it. Namespace-agnostic, deliberately.
         aether.io/managed: "false"
     spec:
       serviceAccountName: {{ include "aether.edge.serviceAccountName" . }}
-      # Tolerate the aether startup taint: the edge is an aether-system ingress
-      # gateway, not a mesh workload — it dials pods directly and never uses the
-      # node proxy. The CNI plugin skips aether-system pods, so it has no
-      # node-readiness dependency and must not wait for the agent (#261).
+      # Tolerate the aether startup taint: the edge is an ingress gateway, not a
+      # mesh workload — it dials pods directly and never uses the node proxy, so it
+      # must not wait for a node's agent to become ready. (Its own CNI ADD goes
+      # through the agent, which ignores it via managed=false; fails-closed +
+      # retries, no deadlock.) See #261.
       tolerations:
         - key: aether.io/agent-not-ready
           operator: Exists
@@ -54,6 +55,10 @@ spec:
             - "edge"
             - "--debug={{ .Values.debug }}"
             - "--cluster-name={{ .Values.clusterName }}"
+            # The registrar stays in the release namespace; the edge reaches it
+            # cross-namespace (the binary default assumes aether-system, so pass the
+            # release-namespace-correct address explicitly).
+            - "--registrar-address={{ include "aether.registrar.fullname" . }}.{{ include "aether.namespace" . }}.svc:{{ .Values.registrar.service.port }}"
             # proxy-id / node-name derive from POD_NAME (downward API, below); the
             # registry dir, ports, mesh domain, route namespace and SPIRE socket all
             # use the binary defaults — passed below only when overridden.

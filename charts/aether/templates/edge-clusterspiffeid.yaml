@@ -19,5 +19,5 @@ spec:
       {{- include "aether.edge.selectorLabels" . | nindent 6 }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ include "aether.namespace" . }}
+      kubernetes.io/metadata.name: {{ include "aether.edge.namespace" . }}
 {{- end }}

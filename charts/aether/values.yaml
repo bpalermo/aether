@@ -172,6 +172,11 @@ proxy:
 # from SPIRE over the workload socket (no agent SPIRE bridge). Disabled by default.
 edge:
   enabled: false
+  # The edge is an ingress gateway, not a mesh workload, so it runs in its own
+  # namespace, isolated from the control plane. namespaceCreate lets the chart
+  # create it (with baseline PSA); set false if you manage the namespace yourself.
+  namespace: aether-ingress
+  namespaceCreate: true
   # Gateway replicas behind the Service; rolled with the standard RollingUpdate
   # + readiness gate (no hot-restart supervisor — nothing node-local to preserve).
   replicaCount: 2

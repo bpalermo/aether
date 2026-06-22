@@ -1,0 +1,23 @@
+{{- if and .Values.edge.enabled .Values.meshConfig.createDefault }}
+{{- /*
+  The edge's own namespace-scoped MeshConfig. An empty spec inherits the
+  control-plane (release namespace) MeshConfig field-by-field via the controller's
+  fallback, so the edge's projected ConfigMap mirrors the mesh by default. Seeded
+  ONCE (lookup) + resource-policy: keep, like the control-plane CR — operators edit
+  it via kubectl to give the edge its own observability policy. See
+  docs/proposals/015_mesh-config.md.
+*/ -}}
+{{- $existing := lookup "config.aether.io/v1" "MeshConfig" (include "aether.edge.namespace" .) "default" -}}
+{{- if not $existing }}
+apiVersion: config.aether.io/v1
+kind: MeshConfig
+metadata:
+  name: default
+  namespace: {{ include "aether.edge.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec: {}
+{{- end }}
+{{- end }}

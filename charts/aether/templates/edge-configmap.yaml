@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "aether.edge.configMapName" . }}
-  namespace: {{ include "aether.namespace" . }}
+  namespace: {{ include "aether.edge.namespace" . }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
 data:
