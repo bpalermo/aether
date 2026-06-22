@@ -7,12 +7,13 @@
   own the CR via kubectl, and new chart versions (with new config defaults) never
   clobber it. See docs/proposals/015_mesh-config.md.
 */ -}}
-{{- $existing := lookup "config.aether.io/v1" "MeshConfig" "" "default" -}}
+{{- $existing := lookup "config.aether.io/v1" "MeshConfig" (include "aether.namespace" .) "default" -}}
 {{- if not $existing }}
 apiVersion: config.aether.io/v1
 kind: MeshConfig
 metadata:
   name: default
+  namespace: {{ include "aether.namespace" . }}
   labels:
     {{- include "aether.controller.labels" . | nindent 4 }}
   annotations:
