@@ -17,6 +17,16 @@ spec:
         {{- include "aether.controller.labels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "aether.controller.serviceAccountName" . }}
+      # Tolerate the aether startup taint. The controller MUST tolerate it or a
+      # fresh cluster deadlocks: it projects the MeshConfig ConfigMap the agent
+      # mounts and blocks on at startup, and the agent only removes the taint once
+      # its CNI is serving — so a non-tolerating controller could never schedule
+      # to break that cycle. It is also an aether-system pod, which the CNI plugin
+      # skips, so it has no node-readiness dependency anyway (#261).
+      tolerations:
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: controller
           image: {{ include "aether.image" .Values.controller.image | quote }}

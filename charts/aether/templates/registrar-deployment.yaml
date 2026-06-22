@@ -16,6 +16,14 @@ spec:
         {{- include "aether.registrar.labels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "aether.registrar.serviceAccountName" . }}
+      # Tolerate the aether startup taint: the registrar is an aether-system
+      # control-plane pod, not a mesh workload. The CNI plugin skips aether-system
+      # pods (they never touch the agent), so it has no node-readiness dependency
+      # and must not wait for the agent to untaint a node (#261).
+      tolerations:
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: registrar
           image: {{ include "aether.image" .Values.registrar.image | quote }}

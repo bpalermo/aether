@@ -25,6 +25,14 @@ spec:
         {{- include "aether.edge.labels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "aether.edge.serviceAccountName" . }}
+      # Tolerate the aether startup taint: the edge is an aether-system ingress
+      # gateway, not a mesh workload — it dials pods directly and never uses the
+      # node proxy. The CNI plugin skips aether-system pods, so it has no
+      # node-readiness dependency and must not wait for the agent (#261).
+      tolerations:
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
