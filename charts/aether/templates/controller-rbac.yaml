@@ -46,10 +46,6 @@ metadata:
   labels:
     {{- include "aether.controller.labels" . | nindent 4 }}
 rules:
-  # Project the MeshConfig into the mounted ConfigMap.
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Leader election (controller-runtime Lease) + events.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -69,6 +65,35 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ include "aether.controller.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.controller.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}
+---
+# MeshConfig is namespaced and the reconciler co-locates its projected ConfigMap in
+# each MeshConfig's own namespace (any namespace), so ConfigMap write must be
+# cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}-meshconfig
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}-meshconfig
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aether.controller.clusterScopedName" . }}-meshconfig
 subjects:
   - kind: ServiceAccount
     name: {{ include "aether.controller.serviceAccountName" . }}

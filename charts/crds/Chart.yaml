@@ -8,7 +8,7 @@ description: |
   docs/proposals/017_virtual-host-l7-routing.md).
 type: application
 # Stamped at package time when built with `--stamp` (see other charts).
-version: "0.3.0-{GIT_COMMIT}"
+version: "0.4.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

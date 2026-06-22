@@ -15,10 +15,10 @@ import (
 type ControllerConfig struct {
 	manager.Config
 
-	// MeshConfigMapName / MeshConfigMapNamespace identify the ConfigMap the
-	// reconciler projects into. Namespace empty = the controller's own namespace.
-	MeshConfigMapName      string
-	MeshConfigMapNamespace string
+	// MeshConfigMapName is the name of the ConfigMap the reconciler projects each
+	// namespace's MeshConfig into. The namespace is the MeshConfig CR's own namespace
+	// (co-located), so there is no namespace setting.
+	MeshConfigMapName string
 
 	// SpireEnabled serves the validating webhook with a SPIRE-issued X.509 SVID
 	// (via the Workload API) instead of the Helm self-signed cert, and injects the

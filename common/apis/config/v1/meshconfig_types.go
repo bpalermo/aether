@@ -33,8 +33,10 @@ func addKnownTypes(s *runtime.Scheme) error {
 	return nil
 }
 
-// MeshConfig is the cluster-scoped singleton custom resource carrying the proxy
-// data-plane observability override. Its `.spec` is the protobuf MeshConfigSpec.
+// MeshConfig is a namespaced custom resource carrying the proxy data-plane
+// observability override: one `default` per namespace, inheriting the control-plane
+// namespace's MeshConfig unless it sets its own. Its `.spec` is the protobuf
+// MeshConfigSpec.
 type MeshConfig struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

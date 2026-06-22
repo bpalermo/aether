@@ -8,7 +8,11 @@ metadata:
     helm.sh/resource-policy: keep
 spec:
   group: config.aether.io
-  scope: Cluster
+  # Namespaced: each namespace has a `default` MeshConfig. A namespace inherits the
+  # control-plane namespace's MeshConfig (field-by-field) unless it sets its own, so
+  # an isolated component (e.g. the edge in aether-ingress) gets a co-located,
+  # namespace-scoped projected ConfigMap. See docs/proposals/015_mesh-config.md.
+  scope: Namespaced
   names:
     kind: MeshConfig
     listKind: MeshConfigList

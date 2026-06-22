@@ -68,8 +68,7 @@ func GetCommand() *cobra.Command {
 
 func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
-	rootCmd.Flags().StringVar(&cfg.MeshConfigMapName, "mesh-config-configmap", cfg.MeshConfigMapName, "Name of the ConfigMap the MeshConfig reconciler projects into")
-	rootCmd.Flags().StringVar(&cfg.MeshConfigMapNamespace, "mesh-config-namespace", cfg.MeshConfigMapNamespace, "Namespace for the projected ConfigMap (empty = the controller's own namespace)")
+	rootCmd.Flags().StringVar(&cfg.MeshConfigMapName, "mesh-config-configmap", cfg.MeshConfigMapName, "Name of the ConfigMap the MeshConfig reconciler projects into (in each MeshConfig's own namespace)")
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Serve the validating webhook with a SPIRE X.509 SVID and inject the SPIRE trust bundle into the webhook caBundle (instead of a static cert)")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
 	rootCmd.Flags().StringVar(&cfg.WebhookConfigName, "webhook-config-name", cfg.WebhookConfigName, "ValidatingWebhookConfiguration to patch with the SPIRE caBundle (SPIRE mode)")
@@ -137,16 +136,15 @@ func runController(ctx context.Context) (retErr error) {
 
 	m := result.Manager
 
-	cmNamespace := cfg.MeshConfigMapNamespace
-	if cmNamespace == "" {
-		cmNamespace = currentNamespace()
-	}
+	// The controller's own namespace holds the canonical (fallback) MeshConfig that
+	// other namespaces inherit from unless they set their own.
+	fallbackNamespace := currentNamespace()
 
 	reconciler := &meshconfig.Reconciler{
-		Client:             m.GetClient(),
-		ConfigMapName:      cfg.MeshConfigMapName,
-		ConfigMapNamespace: cmNamespace,
-		Log:                l,
+		Client:            m.GetClient(),
+		ConfigMapName:     cfg.MeshConfigMapName,
+		FallbackNamespace: fallbackNamespace,
+		Log:               l,
 	}
 	if err = reconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up MeshConfig reconciler: %w", err)
@@ -176,7 +174,8 @@ func runController(ctx context.Context) (retErr error) {
 	}
 
 	l.InfoContext(ctx, "MeshConfig controller configured",
-		"configMap", cmNamespace+"/"+cfg.MeshConfigMapName,
+		"configMapName", cfg.MeshConfigMapName,
+		"fallbackNamespace", fallbackNamespace,
 		"webhookPath", cwebhook.Path,
 	)
 	return m.Start(ctx)
