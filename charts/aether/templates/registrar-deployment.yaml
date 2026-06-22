@@ -72,13 +72,11 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
-          {{- with .Values.registrar.aws.credentialsSecret }}
-          envFrom:
-            - secretRef:
-                name: {{ . }}
-          {{- end }}
           env:
             {{- with .Values.registrar.aws.region }}
+            # AWS_REGION is a plain env (no static keys). For the dynamodb backend,
+            # IRSA supplies credentials via the registrar SA's role-arn annotation
+            # (registrar.aws.roleArn) — the pod-identity webhook injects the rest.
             - name: AWS_REGION
               value: {{ . | quote }}
             {{- end }}

@@ -57,9 +57,6 @@ Release-derived so both sides agree within the single release.
 {{- define "aether.agent.clusterScopedName" -}}
 {{- printf "%s-%s" (include "aether.agent.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
-{{- define "aether.agent.awsSecretName" -}}
-{{- default (printf "%s-aws-credentials" (include "aether.agent.fullname" .)) .Values.agent.awsCredentials.secretName -}}
-{{- end -}}
 {{- define "aether.agent.selectorLabels" -}}
 app.kubernetes.io/name: aether-agent
 app.kubernetes.io/instance: {{ .Release.Name }}

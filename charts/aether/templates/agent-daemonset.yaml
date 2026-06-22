@@ -126,16 +126,6 @@ spec:
             # VictoriaLogs. Refs the env vars defined above ($(VAR) expansion).
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "k8s.node.name=$(NODE_NAME),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "aether.agent.awsSecretName" . }}
-                  key: AWS_ACCESS_KEY_ID
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "aether.agent.awsSecretName" . }}
-                  key: AWS_SECRET_ACCESS_KEY
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
