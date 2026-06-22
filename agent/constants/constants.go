@@ -10,6 +10,13 @@ const (
 	// DefaultHostCNIRegistryDir is the default directory for storing CNI registry data on the host
 	DefaultHostCNIRegistryDir = "/host" + constants.CNIDefaultRegistryPath
 
+	// DefaultEdgeRegistryDir is the edge's pod-local (always-empty) registry dir.
+	// The edge has no host CNI mount, but the shared --mounted-registry-dir flag
+	// defaults to the node hostPath (DefaultHostCNIRegistryDir) via the root
+	// command, so runEdge resolves to this pod-local path unless explicitly
+	// overridden — otherwise the edge would read a path that doesn't exist.
+	DefaultEdgeRegistryDir = constants.CNIDefaultRegistryPath
+
 	// DefaultXdsSocketPath is the default Unix domain socket path for the xDS server
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
 	// DefaultCNISocketPath is the default Unix domain socket path for the CNI server

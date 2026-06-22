@@ -46,7 +46,10 @@ go_library(
 
 go_test(
     name = "cmd_test",
-    srcs = ["config_test.go"],
+    srcs = [
+        "config_test.go",
+        "edge_test.go",
+    ],
     embed = [":cmd"],
     deps = [
         "//agent/constants",
