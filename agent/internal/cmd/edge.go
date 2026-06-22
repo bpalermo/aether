@@ -83,6 +83,8 @@ func runEdge(ctx context.Context) (retErr error) {
 		return fmt.Errorf("edge identity unresolved: set POD_NAME (downward API) or pass --proxy-id/--node-name")
 	}
 
+	cfg.MountedLocalStorageDir = edgeStorageDir(cfg.MountedLocalStorageDir)
+
 	l.InfoContext(ctx, "starting aether edge proxy control plane",
 		"proxy-id", cfg.ProxyServiceNodeID,
 		"debug", cfg.Debug,
@@ -233,6 +235,19 @@ func runEdge(ctx context.Context) (retErr error) {
 
 	l.DebugContext(ctx, "starting edge manager")
 	return m.Start(ctx)
+}
+
+// edgeStorageDir resolves the edge's (always-empty) pod-local registry dir. The
+// shared --mounted-registry-dir flag is registered by BOTH the root and edge
+// commands on one cfg field; the root's hostPath default wins the init ordering,
+// so an un-overridden edge would inherit the node hostPath that doesn't exist in
+// its pod. When the value is that host default, fall back to the pod-local dir;
+// an explicit override is preserved.
+func edgeStorageDir(configured string) string {
+	if configured == constants.DefaultHostCNIRegistryDir {
+		return constants.DefaultEdgeRegistryDir
+	}
+	return configured
 }
 
 // currentPodName returns the edge pod's name from the POD_NAME downward-API env
