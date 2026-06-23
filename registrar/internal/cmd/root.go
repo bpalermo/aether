@@ -7,10 +7,12 @@ import (
 	"log/slog"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/registrar/internal/server"
+	"github.com/bpalermo/aether/registrar/internal/services"
 	"github.com/bpalermo/aether/registry"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
@@ -61,6 +63,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
+	rootCmd.Flags().BoolVar(&cfg.GenerateMeshServices, "generate-mesh-services", false, "Project the mesh catalog into selectorless k8s Services on the mesh port (transparent-capture VIPs, proposal 018 Phase 3a)")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
 
 	// SPIRE on/off is aether system config (inherited from the umbrella globals);
@@ -132,6 +135,22 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	syncer := server.NewSyncer(reg, snapshot, broadcaster, cfg.SyncInterval, l, serverMetrics)
 	if err = m.Add(syncer); err != nil {
 		return fmt.Errorf("failed to add syncer: %w", err)
+	}
+
+	// Transparent-capture VIPs (proposal 018, Phase 3a): the leader registrar
+	// projects the mesh catalog into selectorless k8s Services on the mesh port.
+	// Default off — adds nothing (and no Service-write RBAC) unless enabled.
+	if cfg.GenerateMeshServices {
+		gen := &services.Generator{
+			Client:   m.GetClient(),
+			Snapshot: snapshot,
+			MeshPort: int32(constants.ProxyOutboundPort),
+			Interval: cfg.SyncInterval,
+			Log:      l,
+		}
+		if err = m.Add(gen); err != nil {
+			return fmt.Errorf("failed to add mesh-Service generator: %w", err)
+		}
 	}
 
 	var grpcOpts []grpc.ServerOption

@@ -256,6 +256,11 @@ registrar:
     targetPort: 8443
   # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
   registryBackend: kubernetes
+  # Transparent-capture VIPs (proposal 018, Phase 3a): the leader registrar projects
+  # the mesh catalog into selectorless k8s Services on the mesh port (ClusterIP +
+  # cluster.local name + annotation; no EndpointSlices). Default off; adds Service
+  # CRUD RBAC only when enabled.
+  generateMeshServices: false
   # Region owning this registrar's etcd partition (etcd backend; proposal 006).
   # Keys are origin-first /aether/v1/regions/<region>/clusters/<clusterName>/…;
   # shared by every registrar on the same regional etcd.
