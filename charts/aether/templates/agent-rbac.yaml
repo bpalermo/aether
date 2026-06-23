@@ -18,9 +18,9 @@ rules:
     resources: ["httproutes"]
     verbs: ["list", "get", "watch"]
   {{- end }}
-  {{- if .Values.agent.transparentCapture }}
-  # Transparent capture (proposal 018, Phase 3a): watch the generated mesh Services
-  # for their cluster.local authorities.
+  {{- if or .Values.agent.transparentCapture .Values.agent.meshDns }}
+  # Transparent capture (Phase 3a) / mesh DNS (mesh-global FQDN): watch the generated
+  # mesh Services for their cluster.local authorities + ClusterIPs.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list", "get", "watch"]

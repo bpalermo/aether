@@ -98,6 +98,15 @@ type AgentConfig struct {
 	// with the registrar's --generate-mesh-services and the CNI dst-18081 redirect.
 	// Default off.
 	TransparentCapture bool
+
+	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
+	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
+	// and forwards the rest to MeshDNSUpstream. Pairs with the CNI :53 redirect.
+	// Default off.
+	MeshDNS bool
+	// MeshDNSUpstream is the upstream resolver(s) (host[:port]) the mesh-DNS filter
+	// forwards non-mesh queries to — the cluster kube-dns.
+	MeshDNSUpstream []string
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves when
 	// GatewayAPI is set.
 	GatewayClassName string

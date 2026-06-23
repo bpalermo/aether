@@ -72,6 +72,12 @@ spec:
             {{- if .Values.agent.transparentCapture }}
             - "--transparent-capture"
             {{- end }}
+            {{- if .Values.agent.meshDns }}
+            - "--mesh-dns"
+            {{- range .Values.agent.meshDnsUpstream }}
+            - "--mesh-dns-upstream={{ . }}"
+            {{- end }}
+            {{- end }}
             # Aether system config, inherited from the umbrella global block.
             - "--mesh-domain={{ .Values.meshDomain }}"
             {{- if .Values.otel.enabled }}

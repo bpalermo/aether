@@ -115,6 +115,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.RemoveStartupTaint, "remove-startup-taint", cfg.RemoveStartupTaint, "Remove the aether.io/agent-not-ready node taint once the CNI server is serving (needs nodes patch RBAC)")
 	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", false, "Enable GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2)")
 	rootCmd.Flags().BoolVar(&cfg.TransparentCapture, "transparent-capture", false, "Enable transparent capture: per-pod capture listeners + cap_http route table from the generated mesh Services (proposal 018, Phase 3a)")
+	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
+	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
 }
 
 // registerSharedFlags registers the flags common to the node agent (root) and
@@ -262,6 +264,8 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
+	snapshotCache.SetMeshDNSEnabled(cfg.MeshDNS)
+	snapshotCache.SetMeshDNSUpstream(cfg.MeshDNSUpstream)
 	// Global access-log config, set once before the cache builds any listener.
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
 		Enabled:           cfg.AccessLogsEnabled,
@@ -337,10 +341,11 @@ func runAgent(ctx context.Context) (retErr error) {
 		}
 	}
 
-	// Transparent capture (proposal 018, Phase 3a): watch the generated mesh
-	// Services and project their cluster.local authorities so the cache can build
-	// the cap_http route table. Default off — registers no Service watch unless set.
-	if cfg.TransparentCapture {
+	// Transparent capture (Phase 3a) and/or mesh DNS (mesh-global FQDN) both read the
+	// generated mesh Services: capture wants their cluster.local authorities (cap_http),
+	// mesh DNS wants their ClusterIPs (the DnsTable). One reconciler feeds both; run it
+	// if either feature is on. Default off — no Service watch otherwise.
+	if cfg.TransparentCapture || cfg.MeshDNS {
 		captureReconciler := &capture.Reconciler{
 			Client: m.GetClient(),
 			Sink:   snapshotCache,

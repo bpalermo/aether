@@ -165,12 +165,22 @@ type SnapshotCache struct {
 	// capture listeners + the cap_http route table. Set once before the manager
 	// starts (SetCaptureEnabled); read without locking. Default off.
 	captureEnabled bool
-	// captureMu guards captureAuthorities: a mesh service -> its cluster.local FQDN
-	// (<svc>.<ns>.svc.cluster.local), fed by the agent's capture reconciler from the
-	// generated mesh Services. The cap_http route table maps each in-scope service's
-	// authority to its <svc>.<meshDomain> cluster.
+	// captureMu guards captureAuthorities + meshDNSRecords (both fed by the agent's
+	// mesh-Service reconciler).
+	//   captureAuthorities: mesh service -> its cluster.local FQDN, for cap_http.
+	//   meshDNSRecords:      mesh service -> its mesh-Service ClusterIP, the A-record
+	//     the per-pod dns_filter answers for <svc>.<meshDomain> (the namespace-free,
+	//     globally routable name; the ClusterIP then hits the :18081 capture and is
+	//     routed by Host). Proposal 018 mesh-global FQDN.
 	captureMu          sync.RWMutex
 	captureAuthorities map[string]string
+	meshDNSRecords     map[string]string
+
+	// meshDNSEnabled turns on the per-pod mesh-DNS listener (set once,
+	// SetMeshDNSEnabled). meshDNSUpstream is the upstream resolver(s) the dns_filter
+	// forwards non-mesh queries to (the cluster kube-dns; set once).
+	meshDNSEnabled  bool
+	meshDNSUpstream []string
 
 	version *atomic.Uint64
 }
@@ -189,6 +199,10 @@ type listenerEntry struct {
 	// pod netns; routes CNI-redirected ClusterIP:18081 traffic by cluster.local
 	// authority over the cap_http route table.
 	capture types.Resource
+	// dnsListener is the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
+	// nil unless mesh DNS is enabled. Bound to the DNS capture port in the pod netns;
+	// answers <svc>.<meshDomain> and forwards the rest to the upstream resolver.
+	dnsListener types.Resource
 	// appClusters holds one per-port application cluster (multi-port pods); the
 	// SNI-selected inbound filter chains forward decrypted traffic to these.
 	appClusters []types.Resource
@@ -258,6 +272,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),
 		captureAuthorities: make(map[string]string),
+		meshDNSRecords:     make(map[string]string),
 		depChanged:         make(chan struct{}, 1),
 		version:            atomic.NewUint64(0),
 	}
