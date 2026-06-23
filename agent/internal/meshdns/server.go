@@ -81,24 +81,32 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// ServeDNS answers a mesh A query from the table; everything else (other types,
-// non-mesh names, cluster.local, external) is forwarded to the upstream resolver.
+// ServeDNS answers a known mesh name authoritatively for EVERY query type — A
+// returns the record, anything else (AAAA, etc.) returns NODATA (NOERROR, empty) so
+// the name consistently EXISTS. Forwarding the AAAA would yield NXDOMAIN upstream, and
+// c-ares (curl/Alpine) then concludes the whole name is gone. Unknown names (incl.
+// cluster.local and external) are forwarded to the upstream resolver.
 func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	if len(r.Question) == 1 && r.Question[0].Qtype == dns.TypeA {
-		if ip := s.lookup(r.Question[0].Name); ip != "" {
+	if len(r.Question) == 1 {
+		q := r.Question[0]
+		if ip := s.lookup(q.Name); ip != "" {
 			m := new(dns.Msg)
 			m.SetReply(r)
 			m.Authoritative = true
-			// Echo the client's EDNS0 OPT (UDP size + DO). Strict resolvers (c-ares,
-			// which curl/Alpine use) send EDNS0 and reject an answer that omits the
-			// OPT — getaddrinfo/dig are lenient, c-ares is not.
+			// Echo the client's EDNS0 OPT (UDP size + DO); c-ares rejects an answer
+			// that omits the OPT it asked with (getaddrinfo/dig are lenient).
 			if opt := r.IsEdns0(); opt != nil {
 				m.SetEdns0(opt.UDPSize(), opt.Do())
 			}
-			m.Answer = []dns.RR{&dns.A{
-				Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: answerTTL},
-				A:   net.ParseIP(ip).To4(),
-			}}
+			if q.Qtype == dns.TypeA {
+				if v4 := net.ParseIP(ip).To4(); v4 != nil {
+					m.Answer = []dns.RR{&dns.A{
+						Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: answerTTL},
+						A:   v4,
+					}}
+				}
+			}
+			// Non-A (incl. AAAA): NODATA — empty answer, NOERROR, authoritative.
 			_ = w.WriteMsg(m)
 			return
 		}
