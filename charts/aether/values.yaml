@@ -189,8 +189,14 @@ edge:
   # plain HTTP on httpPort.
   httpPort: 80
   httpsPort: 443
-  # Namespace the edge watches VirtualHost CRs in. Empty = the edge's own namespace.
+  # Namespace the edge watches its route CRs in. Empty = the edge's own namespace.
   routeNamespace: ""
+  # Gateway API mode (proposal 018, Phase 1): consume Gateway + HTTPRoute instead of
+  # the VirtualHost CRD. Requires the Gateway API CRDs installed (standard channel);
+  # the chart renders a GatewayClass `gatewayClassName` with the aether controller.
+  gatewayApi:
+    enabled: false
+    gatewayClassName: aether
   # Downstream (external-facing) TLS. Certs are referenced PER VirtualHost
   # (spec.tls.secretName, a kubernetes.io/tls Secret in the watched namespace),
   # read by the edge agent and served to Envoy over SDS (SNI-selected, hot

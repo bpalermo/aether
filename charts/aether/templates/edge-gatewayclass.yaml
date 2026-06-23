@@ -1,0 +1,12 @@
+{{- if and .Values.edge.enabled .Values.edge.gatewayApi.enabled }}
+# The aether edge's GatewayClass (proposal 018, Phase 1). Operators create Gateways
+# with this gatewayClassName; the edge serves the HTTPRoutes attached to them.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.edge.gatewayApi.gatewayClassName }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+spec:
+  controllerName: gateway.aether.io/edge
+{{- end }}
