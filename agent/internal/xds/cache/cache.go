@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
 
 	commonlog "github.com/bpalermo/aether/common/log"
@@ -203,6 +204,10 @@ type listenerEntry struct {
 	// nil unless mesh DNS is enabled. Bound to the DNS capture port in the pod netns;
 	// answers <svc>.<meshDomain> and forwards the rest to the upstream resolver.
 	dnsListener types.Resource
+	// cniPod is the pod this entry was generated from, retained so the DNS listener
+	// can be regenerated in place when the mesh-DNS records change (the inline
+	// DnsTable is static once built, so a records update needs a listener rebuild).
+	cniPod *cniv1.CNIPod
 	// appClusters holds one per-port application cluster (multi-port pods); the
 	// SNI-selected inbound filter chains forward decrypted traffic to these.
 	appClusters []types.Resource
