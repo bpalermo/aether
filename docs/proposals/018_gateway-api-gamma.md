@@ -3,8 +3,10 @@
 **Status:** Design — 2026-06-22
 **Relates:** proposal 017 (VirtualHost — the north-south CRD this subsumes),
 proposal 003 (edge proxy), proposal 004 (demand-scoped distribution),
-proposal 005 (multi-port), proposal 015 (MeshConfig / controller webhook);
-[[project_edge_proxy_plan]], [[project_demand_scoped]].
+proposal 005 (multi-port), proposal 006 (origin-partitioned registry — the
+cross-cluster plane), proposal 015 (MeshConfig / controller webhook);
+[[project_edge_proxy_plan]], [[project_demand_scoped]],
+[[project_registrar_etcd_vs_ddb]].
 
 ## Summary
 
@@ -150,6 +152,71 @@ dependency set (ODCDS warm-up) — reusing the cold-path machinery.
 - **Phase 3 — conformance hardening.** Standard Service VIP / `*.svc.cluster.local`
   interception, `GRPCRoute`, `ReferenceGrant`, supported-features + Mesh-profile
   conformance reporting.
+
+## Multi-cluster — the registry is the cross-cluster plane
+
+Gateway API and GAMMA are single-cluster specs; the standard multi-cluster answer
+is the **MCS API** (`ServiceExport`/`ServiceImport`, `*.svc.clusterset.local`),
+which normally pairs with **EndpointSlice import** + a **Lighthouse-style CoreDNS**
+that resolves `clusterset.local` by querying a cross-cluster broker. Aether avoids
+both: it already has a cross-cluster endpoint plane that **isn't DNS** — the
+registrar + origin-partitioned per-region etcd (proposal 006). A `backendRef`
+resolves to endpoints in any cluster/region via registry EDS, at **dial time in
+the proxy**, never via DNS.
+
+Design — MCS objects for *conformance*, registry for *wiring*:
+
+- **Registry carries endpoints AND producer routes** (proposal 006 extended),
+  origin-partitioned + replicated. Consumer clusters pull a remote service's
+  producer `HTTPRoute` from the registry (demand-scoped); consumer overrides stay
+  local. No HTTPRoute-object replication, no config-replication controller.
+- **MCS objects are materialized locally from the registry.** An aether MCS
+  controller reconciles `ServiceExport` → registry, and in each cluster materializes
+  a **local** `ServiceImport` + a **local** clusterset VIP (local IPAM). Gateway
+  API/GAMMA accept `backendRef`/`parentRef` → `ServiceImport` (group
+  `multicluster.x-k8s.io`), so multi-cluster routes are expressed in-spec.
+- **DNS stays strictly local.** Each cluster's CoreDNS serves `clusterset.local`
+  from its *own* `ServiceImport` objects → its *own* VIP — standard MCS DNS over
+  local objects, never forwarding/replicating across clusters. The proxy intercepts
+  the VIP and resolves endpoints from the registry. The MCS spec doesn't mandate how
+  endpoints are aggregated behind the VIP; aether uses its registry instead of
+  EndpointSlice import.
+
+This is conformant (Gateway API `ServiceImport` backends; MCS `ServiceExport`/
+`ServiceImport` + local `clusterset.local`; users only ever touch standard objects
+in their own cluster) while the cross-cluster wiring is aether's registry.
+
+### Connectivity modes
+
+Only the endpoint's *dial target* differs; the registry/MCS/DNS design above is
+identical for both.
+
+- **Flat network (default).** Pod IPs are routable across clusters, so a remote
+  endpoint in the registry is just `pod_ip:15008` + SPIFFE ID — identical to a
+  local one. The proxy dials it **directly** over SPIRE mTLS (unchanged code; one
+  identity-preserving hop). No east-west gateway. **Requires:**
+  1. **Non-overlapping, globally-unique pod CIDRs** across all clusters (IPAM
+     discipline; watch CIDR exhaustion as cluster count grows).
+  2. **A routable underlay** that forwards cross-cluster pod-to-pod traffic — flat
+     L3 (VPC peering, BGP, Cilium native routing / cluster-mesh, non-encapsulated;
+     mind MTU on tunneled fabrics). Connectivity is pushed to the network, not a
+     gateway.
+  3. **SPIRE trust across clusters** — one shared trust domain, or SPIRE federation
+     (per-cluster trust domains + bundle exchange) so the dialing proxy already
+     trusts the remote SVID issuer named in the registry endpoint.
+  Trade-off: any pod is L3-reachable cross-cluster (no gateway chokepoint). Defused
+  by zero-trust — every hop is SPIRE mTLS, so a dial without a valid trusted SVID is
+  rejected at inbound `:15008` regardless of L3 reachability; identity, not the
+  network, is the boundary. What you give up is defense-in-depth / a single egress
+  audit point.
+- **East-west gateway (fallback).** No flat-network requirement: the registry
+  endpoint for a remote pod carries the **remote cluster's east-west gateway address
+  + target SPIFFE ID** (the edge generalized), and the proxy dials that gateway,
+  which forwards to the local pod. Adds a component to build/run/scale; one extra
+  hop (identity still preserved via XFCC).
+
+Connectivity mode is a deploy-time choice; conformance is unaffected (it's a
+data-plane detail below the API).
 
 ## Tensions / non-goals / open questions
 
