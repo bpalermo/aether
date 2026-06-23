@@ -71,6 +71,7 @@ go_test(
         "egress_test.go",
         "endpoint_test.go",
         "filterchain_test.go",
+        "gammaroute_test.go",
         "healthgateway_test.go",
         "httpfilter_test.go",
         "ingress_test.go",
