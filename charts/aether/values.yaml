@@ -95,6 +95,11 @@ meshConfig:
 
 # --------------------------------------------------------------------- agent
 agent:
+  # GAMMA east-west L7 routing (proposal 018, Phase 2): the node agent watches
+  # HTTPRoutes parented to a Service and enriches the outbound routes (canary /
+  # header / timeout). Requires the Gateway API CRDs. Default off — a no-op, and
+  # adds the cluster-wide httproutes RBAC only when enabled.
+  gamma: false
   # Image as repository + digest (digest-pinned for immutability). Mirror to a
   # private registry by overriding `repository` alone; the digest is preserved.
   image:

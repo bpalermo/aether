@@ -7,6 +7,7 @@ go_library(
         "cluster.go",
         "dependencies.go",
         "edge.go",
+        "gamma.go",
         "listener.go",
         "metrics.go",
         "secret.go",

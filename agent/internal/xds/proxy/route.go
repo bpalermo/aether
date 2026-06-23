@@ -186,8 +186,10 @@ type GammaHeaderMatch struct {
 	Value string
 }
 
-// GammaBackend is one weighted backend cluster of a route.
+// GammaBackend is one weighted backend of a route: the resolved data-plane Cluster
+// the route forwards to, plus the bare Service name (for the dependency set).
 type GammaBackend struct {
+	Service string
 	Cluster string
 	Weight  uint32
 }

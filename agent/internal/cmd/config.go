@@ -86,6 +86,11 @@ type AgentConfig struct {
 	// GatewayAPI makes the edge consume Gateway API (Gateway + HTTPRoute) instead
 	// of the VirtualHost CRD (proposal 018, Phase 1). Edge subcommand only.
 	GatewayAPI bool
+
+	// Gamma enables GAMMA east-west L7 routing on the node proxy: the agent watches
+	// HTTPRoutes parented to a Service and enriches the outbound routes (proposal
+	// 018, Phase 2). Default off — a no-op until enabled.
+	Gamma bool
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves when
 	// GatewayAPI is set.
 	GatewayClassName string

@@ -63,6 +63,9 @@ spec:
             - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
+            {{- if .Values.agent.gamma }}
+            - "--gamma"
+            {{- end }}
             # Aether system config, inherited from the umbrella global block.
             - "--mesh-domain={{ .Values.meshDomain }}"
             {{- if .Values.otel.enabled }}

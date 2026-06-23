@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/common/constants"
 
 	commonlog "github.com/bpalermo/aether/common/log"
@@ -133,6 +134,12 @@ type SnapshotCache struct {
 	// carries exactly the exposed services; updated by SetStaticDependencies
 	// when the exposed set changes (e.g. an EdgeRoute add/remove).
 	staticDeps map[string]struct{}
+	// serviceRoutes holds the GAMMA east-west L7 rules (HTTPRoute parentRef=Service,
+	// proposal 018 Phase 2), keyed by the parent service. Empty unless --gamma is
+	// enabled. A depended-on service's rule backends are unioned into the
+	// dependency set so their EDS clusters generate; the per-service outbound vhost
+	// is enriched with the rules. Guarded by depMu (dependency state).
+	serviceRoutes map[string][]proxy.GammaRoute
 	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
 	observedTTL time.Duration
 	// depChanged receives a (coalesced) signal when the dependency set
@@ -233,6 +240,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		podDeps:        make(map[string]podDependencies),
 		observedDeps:   make(map[string]time.Time),
 		staticDeps:     make(map[string]struct{}),
+		serviceRoutes:  make(map[string][]proxy.GammaRoute),
 		depChanged:     make(chan struct{}, 1),
 		version:        atomic.NewUint64(0),
 	}

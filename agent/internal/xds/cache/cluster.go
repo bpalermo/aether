@@ -179,6 +179,9 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 
 	deps := c.DependencySet()
+	// GAMMA L7 rules per service (empty unless --gamma), snapshotted once before
+	// the cluster lock so the per-service outbound vhost can be enriched.
+	gammaRoutes := c.serviceRoutesSnapshot()
 	localRegion, localZone := c.nodeLocality()
 
 	// RPC-fill (cold path): a dependency missing from the watch-fed listing —
@@ -314,7 +317,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
 			loadAssignment: defaultCla,
 			endpoints:      defaultEpMap,
-			vhost:          proxy.BuildOutboundClusterVirtualHost(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}),
+			vhost:          proxy.BuildOutboundServiceVirtualHost(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName]),
 			sanNamespaces:  sanNamespaces,
 			service:        serviceName,
 			sni:            strconv.Itoa(int(defaultPort)),
