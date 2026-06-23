@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "capture.go",
         "client.go",
+        "dns.go",
+        "netns.go",
         "netnspin.go",
         "plugin.go",
         "readyprobe.go",
@@ -41,6 +43,7 @@ go_test(
     srcs = [
         "capture_test.go",
         "client_test.go",
+        "dns_test.go",
         "netnspin_test.go",
         "plugin_test.go",
         "readyprobe_test.go",

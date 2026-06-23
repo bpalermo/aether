@@ -3,8 +3,6 @@ package plugin
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
-	"runtime"
 
 	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/google/nftables"
@@ -31,34 +29,7 @@ const captureTableName = "aether_capture"
 // netlink socket nftables opens then lives in the pod netns. A failed restore leaves
 // the thread locked so the Go runtime destroys it rather than reusing a poisoned one.
 func installCaptureRedirect(netnsPath string, logger *zap.Logger) error {
-	target, err := os.Open(netnsPath)
-	if err != nil {
-		return fmt.Errorf("opening netns %s: %w", netnsPath, err)
-	}
-	defer func() { _ = target.Close() }()
-
-	runtime.LockOSThread()
-	origin, err := os.Open(fmt.Sprintf("/proc/self/task/%d/ns/net", unix.Gettid()))
-	if err != nil {
-		runtime.UnlockOSThread()
-		return fmt.Errorf("opening current netns: %w", err)
-	}
-	defer func() { _ = origin.Close() }()
-
-	if err := unix.Setns(int(target.Fd()), unix.CLONE_NEWNET); err != nil {
-		runtime.UnlockOSThread()
-		return fmt.Errorf("entering netns %s: %w", netnsPath, err)
-	}
-
-	progErr := programCaptureRedirect(logger)
-
-	if err := unix.Setns(int(origin.Fd()), unix.CLONE_NEWNET); err != nil {
-		// Thread poisoned (stuck in the pod netns): keep it locked and let the
-		// goroutine's thread be destroyed rather than reused.
-		return fmt.Errorf("restoring host netns: %w", err)
-	}
-	runtime.UnlockOSThread()
-	return progErr
+	return withPodNetns(netnsPath, func() error { return programCaptureRedirect(logger) })
 }
 
 // programCaptureRedirect adds the nat/output REDIRECT rule in the CURRENT netns.

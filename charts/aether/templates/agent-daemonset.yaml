@@ -46,6 +46,9 @@ spec:
             {{- if .Values.agent.transparentCapture }}
             - "--transparent-capture"
             {{- end }}
+            {{- if .Values.agent.meshDns }}
+            - "--mesh-dns"
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
