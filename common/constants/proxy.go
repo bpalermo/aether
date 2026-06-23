@@ -10,6 +10,11 @@ const (
 	// TCP to a mesh ClusterIP:ProxyOutboundPort here; the listener recovers the
 	// original ClusterIP and routes by cluster.local authority. Default off.
 	ProxyCapturePort = 15001
+	// ProxyDNSCapturePort is the UDP port the per-pod mesh-DNS listener binds inside
+	// the pod netns (proposal 018, mesh-global FQDN). The CNI redirects the pod's
+	// outbound DNS (:53) here; Envoy's dns_filter answers <svc>.<meshDomain> with
+	// the sentinel VIP and forwards everything else to the upstream resolver.
+	ProxyDNSCapturePort = 15053
 	// ProxyReadinessPath is the path matched by the non-pass-through
 	// health_check filter on every outbound listener. A 200 proves the listener
 	// is active on worker threads in that netns; a 503 means the answering
