@@ -28,6 +28,58 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 // cap_http route table.
 func (c *SnapshotCache) SetCaptureEnabled(v bool) { c.captureEnabled = v }
 
+// SetMeshDNSEnabled turns the per-pod mesh-DNS listener on (proposal 018, mesh-global
+// FQDN). SetMeshDNSUpstream sets the resolver(s) the dns_filter forwards non-mesh
+// queries to (the cluster kube-dns). Both set once before the manager starts.
+func (c *SnapshotCache) SetMeshDNSEnabled(v bool)       { c.meshDNSEnabled = v }
+func (c *SnapshotCache) SetMeshDNSUpstream(rs []string) { c.meshDNSUpstream = rs }
+
+// SetMeshDNSRecords replaces the mesh service -> ClusterIP map (fed by the mesh-Service
+// reconciler) and signals a rebuild on change so the per-pod DnsTable re-derives.
+func (c *SnapshotCache) SetMeshDNSRecords(records map[string]string) {
+	c.captureMu.Lock()
+	changed := !equalStringMaps(c.meshDNSRecords, records)
+	c.meshDNSRecords = records
+	c.captureMu.Unlock()
+	if changed {
+		c.signalDependencyChange()
+	}
+}
+
+// generateDNSListener builds a pod's mesh-DNS listener, or nil when mesh DNS is off.
+// The DnsTable answers each in-scope service's <svc>.<meshDomain> with its mesh-Service
+// ClusterIP (dep-scoped: a pod resolves only the mesh names it depends on).
+func (c *SnapshotCache) generateDNSListener(cniPod *cniv1.CNIPod) (types.Resource, error) {
+	if !c.meshDNSEnabled {
+		return nil, nil
+	}
+	l, err := proxy.GenerateDNSListener(cniPod, constants.ProxyDNSCapturePort, c.meshDNSVirtualDomains(), c.meshDNSUpstream)
+	if err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// meshDNSVirtualDomains builds the dep-scoped DnsTable entries: <svc>.<meshDomain> ->
+// the service's mesh-Service ClusterIP.
+func (c *SnapshotCache) meshDNSVirtualDomains() []proxy.DNSVirtualDomain {
+	deps := c.DependencySet()
+
+	c.captureMu.RLock()
+	defer c.captureMu.RUnlock()
+	vds := make([]proxy.DNSVirtualDomain, 0, len(c.meshDNSRecords))
+	for svc, clusterIP := range c.meshDNSRecords {
+		if _, ok := deps[svc]; !ok {
+			continue
+		}
+		vds = append(vds, proxy.DNSVirtualDomain{
+			Domain:    proxy.ServiceClusterName(svc, c.meshDomain),
+			Addresses: []string{clusterIP},
+		})
+	}
+	return vds
+}
+
 // SetCaptureAuthorities replaces the mesh service -> cluster.local FQDN map (fed by
 // the agent's capture reconciler from the generated mesh Services) and signals a
 // snapshot rebuild on change so cap_http re-derives.
@@ -55,10 +107,14 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		if _, ok := deps[svc]; !ok {
 			continue
 		}
-		vhosts = append(vhosts, proxy.BuildOutboundClusterVirtualHost(
-			proxy.ServiceClusterName(svc, c.meshDomain),
-			[]string{fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort)},
-		))
+		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
+		// Route both the cluster.local authority and the mesh-global <svc>.<meshDomain>
+		// authority (portless + :meshPort) to the service cluster, so a captured
+		// request reaches it under either name (the mesh-DNS path uses the latter).
+		vhosts = append(vhosts, proxy.BuildOutboundClusterVirtualHost(mesh, []string{
+			fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
+			mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
+		}))
 	}
 	return vhosts
 }

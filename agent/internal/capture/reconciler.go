@@ -20,9 +20,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// AuthoritySink receives the projected mesh service -> cluster.local FQDN map.
+// AuthoritySink receives the projections from the generated mesh Services:
+//   - SetCaptureAuthorities: service -> cluster.local FQDN (cap_http, transparent capture).
+//   - SetMeshDNSRecords:     service -> mesh-Service ClusterIP (the per-pod dns_filter's
+//     A record for <svc>.<meshDomain>, the mesh-global FQDN).
+//
+// Both are emitted every reconcile; the cache uses whichever feature is enabled.
 type AuthoritySink interface {
 	SetCaptureAuthorities(authorities map[string]string)
+	SetMeshDNSRecords(records map[string]string)
 }
 
 // Reconciler watches the generated mesh Services (labeled aether.io/mesh-service) and
@@ -55,6 +61,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 
 	authorities := make(map[string]string, len(list.Items))
+	records := make(map[string]string, len(list.Items))
 	for i := range list.Items {
 		s := &list.Items[i]
 		svc := s.Annotations[constants.AnnotationMeshService]
@@ -62,9 +69,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			svc = s.Name
 		}
 		authorities[svc] = fmt.Sprintf("%s.%s.svc.cluster.local", s.Name, s.Namespace)
+		// The mesh-Service ClusterIP is the A record for <svc>.<meshDomain>. Skip
+		// headless/unallocated Services (no routable VIP to answer with).
+		if ip := s.Spec.ClusterIP; ip != "" && ip != corev1.ClusterIPNone {
+			records[svc] = ip
+		}
 	}
 
 	r.Sink.SetCaptureAuthorities(authorities)
-	r.Log.DebugContext(ctx, "projected capture authorities", "meshServices", len(list.Items))
+	r.Sink.SetMeshDNSRecords(records)
+	r.Log.DebugContext(ctx, "projected mesh-Service authorities + DNS records", "meshServices", len(list.Items), "dnsRecords", len(records))
 	return reconcile.Result{}, nil
 }

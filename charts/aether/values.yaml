@@ -105,6 +105,13 @@ agent:
   # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.
   # Default off — adds the services-read RBAC only when enabled.
   transparentCapture: false
+  # Mesh DNS (proposal 018, mesh-global FQDN): per-pod dns_filter answering
+  # <svc>.<meshDomain> from the generated mesh Services' ClusterIPs (namespace-free,
+  # globally routable), forwarding the rest to meshDnsUpstream. Pairs with the CNI
+  # :53 redirect. Default off. meshDnsUpstream is the cluster kube-dns (env-specific,
+  # e.g. the kube-dns Service ClusterIP); required when meshDns is on.
+  meshDns: false
+  meshDnsUpstream: []
   # Image as repository + digest (digest-pinned for immutability). Mirror to a
   # private registry by overriding `repository` alone; the digest is preserved.
   image:
