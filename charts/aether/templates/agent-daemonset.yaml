@@ -48,7 +48,16 @@ spec:
             {{- end }}
             {{- if .Values.agent.meshDns }}
             - "--mesh-dns"
+            - "--host-ip=$(HOST_IP)"
             {{- end }}
+          {{- if .Values.agent.meshDns }}
+          env:
+            # The node IP written into the netconf as the mesh-DNS DNAT target.
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

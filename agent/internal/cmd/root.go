@@ -280,7 +280,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		if err = m.Add(dnsServer); err != nil {
 			return fmt.Errorf("failed to add mesh-DNS resolver: %w", err)
 		}
-		snapshotCache.SetMeshDNS(dnsServer, hostIP, resolverPort)
+		snapshotCache.SetMeshDNSServer(dnsServer)
 	}
 	// Global access-log config, set once before the cache builds any listener.
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{

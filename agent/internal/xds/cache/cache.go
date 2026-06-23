@@ -172,13 +172,10 @@ type SnapshotCache struct {
 	captureAuthorities map[string]string
 
 	// meshDNS is the agent's in-process DNS resolver (proposal 018, mesh-global FQDN),
-	// or nil when mesh DNS is off. Set once (SetMeshDNS); the cache generates per-pod
-	// Envoy DNS listeners (udp_proxy/tcp_proxy) + the mesh_dns cluster pointing at the
-	// resolver at meshDNSHostIP:meshDNSResolverPort, and feeds it the mesh records.
-	// The Envoy dns_filter is retired (it broke c-ares); Envoy now just relays.
-	meshDNS             *meshdns.Server
-	meshDNSHostIP       string
-	meshDNSResolverPort uint32
+	// or nil when mesh DNS is off. Set once (SetMeshDNSServer); the cache feeds it the
+	// mesh records. The CNI DNATs each pod's :53 straight to the resolver's host
+	// listener — no Envoy DNS listeners or cluster.
+	meshDNS *meshdns.Server
 
 	version *atomic.Uint64
 }
@@ -197,10 +194,6 @@ type listenerEntry struct {
 	// pod netns; routes CNI-redirected ClusterIP:18081 traffic by cluster.local
 	// authority over the cap_http route table.
 	capture types.Resource
-	// dnsListeners are the per-pod UDP+TCP DNS listeners (proposal 018, mesh-global
-	// FQDN): nil unless mesh DNS is enabled. Bound to the DNS capture port in the pod
-	// netns; udp_proxy/tcp_proxy to the mesh_dns cluster (the agent's resolver).
-	dnsListeners []types.Resource
 	// appClusters holds one per-port application cluster (multi-port pods); the
 	// SNI-selected inbound filter chains forward decrypted traffic to these.
 	appClusters []types.Resource

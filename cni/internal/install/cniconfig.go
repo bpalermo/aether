@@ -47,6 +47,7 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig.OTLPEndpoint = cfg.OTLPEndpoint
 	pluginConfig.TransparentCaptureEnabled = cfg.TransparentCaptureEnabled
 	pluginConfig.MeshDNSEnabled = cfg.MeshDNSEnabled
+	pluginConfig.HostIP = cfg.HostIP
 
 	marshalledJSON, err := json.MarshalIndent(pluginConfig, "", "  ")
 	if err != nil {

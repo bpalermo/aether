@@ -12,15 +12,10 @@ const (
 	// In aether's 18xxx range (with ProxyOutboundPort) to avoid colliding with
 	// Istio's 15001 outbound-capture port if both meshes share a node.
 	ProxyCapturePort = 18001
-	// ProxyDNSCapturePort is the port the per-pod Envoy DNS listeners (UDP+TCP) bind
-	// inside the pod netns (proposal 018, mesh-global FQDN). The CNI redirects the
-	// pod's outbound DNS (:53) here; the listeners udp_proxy/tcp_proxy it to the
-	// agent's in-process resolver (the mesh_dns cluster). In aether's 18xxx range to
-	// avoid colliding with Istio's 15053 DNS port.
-	ProxyDNSCapturePort = 18053
 	// ProxyDNSResolverPort is the host port the node agent's in-process mesh-DNS
-	// resolver listens on (UDP+TCP). The per-pod DNS listeners' mesh_dns cluster
-	// targets HOST_IP:ProxyDNSResolverPort.
+	// resolver listens on (UDP+TCP) at HOST_IP (proposal 018, mesh-global FQDN). The
+	// CNI DNATs each pod's outbound :53 straight to HOST_IP:ProxyDNSResolverPort. In
+	// aether's 18xxx range to avoid colliding with Istio's 15053 DNS port.
 	ProxyDNSResolverPort = 18054
 	// ProxyReadinessPath is the path matched by the non-pass-through
 	// health_check filter on every outbound listener. A 200 proves the listener

@@ -5,11 +5,10 @@
 // the registry-fed records and forwards everything else to the upstream resolver
 // (kube-dns), speaking the full protocol correctly.
 //
-// It listens on a single HOST-local address (the agent is host-network) — no setns,
-// no per-pod sockets. The per-pod netns interception is done by the node Envoy: each
-// pod's :53 is CNI-redirected to a per-pod Envoy :18053 udp_proxy/tcp_proxy listener
-// (which Envoy binds with NET_ADMIN, no privilege increase) that transparently relays
-// the datagrams here. Envoy never parses the DNS, so c-ares is unaffected.
+// It listens on a single HOST-local address (the agent is host-network, HOST_IP:18054)
+// — no setns, no per-pod sockets. The CNI DNATs each pod's outbound :53 straight to
+// this resolver; conntrack rewrites the reply's source back to the pod's configured
+// nameserver. No Envoy DNS layer, no privilege change.
 package meshdns
 
 import (
@@ -32,6 +31,7 @@ type Server struct {
 	addr       string
 	log        *slog.Logger
 	client     *dns.Client
+	metrics    *metrics
 
 	mu        sync.RWMutex
 	records   map[string]string // bare service -> A-record IP
@@ -45,6 +45,7 @@ func NewServer(meshDomain, addr string, log *slog.Logger) *Server {
 		addr:       addr,
 		log:        commonlog.Named(log, "mesh-dns"),
 		client:     &dns.Client{Net: "udp"},
+		metrics:    newMetrics(),
 		records:    map[string]string{},
 	}
 }
@@ -108,6 +109,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			}
 			// Non-A (incl. AAAA): NODATA — empty answer, NOERROR, authoritative.
 			_ = w.WriteMsg(m)
+			s.metrics.record(resultAnswered)
 			return
 		}
 	}
@@ -142,10 +144,12 @@ func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		if resp, _, err := s.client.Exchange(r, addr); err == nil && resp != nil {
 			_ = w.WriteMsg(resp)
+			s.metrics.record(resultForwarded)
 			return
 		}
 	}
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeServerFailure)
 	_ = w.WriteMsg(m)
+	s.metrics.record(resultForwardError)
 }

@@ -31,8 +31,11 @@ type InstallerConfig struct {
 	// 3a). Off by default.
 	TransparentCaptureEnabled bool
 	// MeshDNSEnabled writes mesh_dns_enabled into the netconf so the CNI plugin
-	// installs the per-pod :53 redirect (proposal 018, mesh-global FQDN). Off by default.
+	// installs the per-pod :53 DNAT (proposal 018, mesh-global FQDN). Off by default.
 	MeshDNSEnabled bool
+	// HostIP is the node IP (downward-API HOST_IP) written into the netconf as the
+	// mesh-DNS DNAT target (the agent's host-local resolver).
+	HostIP string
 }
 
 // NewInstallerConfig creates a new InstallerConfig with default values.

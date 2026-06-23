@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"net"
 
 	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/google/nftables"
@@ -10,31 +11,36 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// dnsRedirectTableName is the nft table the DNS redirect rules live in (pod netns).
-const dnsRedirectTableName = "aether_dns_capture"
+// dnsNATTableName is the nft table the DNS DNAT rules live in (pod netns).
+const dnsNATTableName = "aether_dns_capture"
 
-// installDNSRedirect programs, inside the pod's network namespace, an nftables REDIRECT
-// of the pod's outbound DNS (UDP+TCP dst-port 53, non-loopback) to the pod-local
-// mesh-DNS listener on ProxyDNSCapturePort (proposal 018, mesh-global FQDN). Envoy's
-// dns_filter answers <svc>.<meshDomain> and forwards the rest to the upstream resolver.
+// installDNSRedirect programs, inside the pod's network namespace, an nftables DNAT of
+// the pod's outbound DNS (UDP+TCP dst-port 53, non-loopback) directly to the node
+// agent's mesh-DNS resolver at hostIP:ProxyDNSResolverPort (proposal 018, mesh-global
+// FQDN). No per-pod Envoy DNS listener is needed: the agent is host-network, so the
+// pod reaches its resolver via the node IP, and conntrack rewrites the reply's source
+// back to the pod's original nameserver.
 //
-// No loop-prevention is needed: the node agent (and the Envoy it supervises) is
-// host-network, so the dns_filter's forward to kube-dns originates in the HOST netns
-// and never traverses this pod-netns redirect. The loopback exclusion leaves any
-// pod-local resolver (127.x) alone. The rule dies with the netns; best-effort.
-func installDNSRedirect(netnsPath string, logger *zap.Logger) error {
-	return withPodNetns(netnsPath, func() error { return programDNSRedirect(logger) })
+// No loop-prevention is needed: the resolver's own forward to kube-dns originates in
+// the HOST netns and never traverses this pod-netns rule. The loopback exclusion
+// leaves a pod-local resolver (127.x) alone. The rule dies with the netns; best-effort.
+func installDNSRedirect(netnsPath, hostIP string, logger *zap.Logger) error {
+	ip := net.ParseIP(hostIP).To4()
+	if ip == nil {
+		return fmt.Errorf("invalid host IP %q for mesh-DNS DNAT", hostIP)
+	}
+	return withPodNetns(netnsPath, func() error { return programDNSDNAT(ip, logger) })
 }
 
-func programDNSRedirect(logger *zap.Logger) error {
-	dnsPort := uint16(commonconstants.ProxyDNSCapturePort)
+func programDNSDNAT(hostIP net.IP, logger *zap.Logger) error {
+	port := uint16(commonconstants.ProxyDNSResolverPort)
 
 	c, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("open nftables netlink: %w", err)
 	}
 
-	table := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: dnsRedirectTableName})
+	table := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: dnsNATTableName})
 	chain := c.AddChain(&nftables.Chain{
 		Name:     "output",
 		Table:    table,
@@ -42,22 +48,20 @@ func programDNSRedirect(logger *zap.Logger) error {
 		Hooknum:  nftables.ChainHookOutput,
 		Priority: nftables.ChainPriorityNATDest,
 	})
-	// DNS is UDP-primary with a TCP fallback (large answers / zone transfers), so
-	// redirect both.
-	c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: dnsRedirectExprs(unix.IPPROTO_UDP, dnsPort)})
-	c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: dnsRedirectExprs(unix.IPPROTO_TCP, dnsPort)})
+	// DNS is UDP-primary with a TCP fallback (large answers), so DNAT both.
+	c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: dnsDNATExprs(unix.IPPROTO_UDP, hostIP, port)})
+	c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: dnsDNATExprs(unix.IPPROTO_TCP, hostIP, port)})
 
 	if err := c.Flush(); err != nil {
-		return fmt.Errorf("apply mesh-DNS redirect (nft flush): %w", err)
+		return fmt.Errorf("apply mesh-DNS DNAT (nft flush): %w", err)
 	}
-	logger.Info("installed mesh-DNS redirect", zap.Uint16("dns_port", dnsPort))
+	logger.Info("installed mesh-DNS DNAT", zap.String("resolver", fmt.Sprintf("%s:%d", hostIP, port)))
 	return nil
 }
 
-// dnsRedirectExprs builds: meta l4proto <proto> · ip daddr & /8 != 127.0.0.0 ·
-// <proto> dport 53 · redirect to redirectPort. The transport dest port is at offset 2
-// for both UDP and TCP.
-func dnsRedirectExprs(proto byte, redirectPort uint16) []expr.Any {
+// dnsDNATExprs builds: meta l4proto <proto> · ip daddr & /8 != 127.0.0.0 · <proto>
+// dport 53 · dnat to hostIP:port. The transport dest port is at offset 2 for UDP+TCP.
+func dnsDNATExprs(proto byte, hostIP net.IP, port uint16) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
@@ -66,7 +70,9 @@ func dnsRedirectExprs(proto byte, redirectPort uint16) []expr.Any {
 		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{127, 0, 0, 0}},
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(53)},
-		&expr.Immediate{Register: 1, Data: beUint16(redirectPort)},
-		&expr.Redir{RegisterProtoMin: 1},
+		// dnat to hostIP (reg1) : port (reg2)
+		&expr.Immediate{Register: 1, Data: hostIP},
+		&expr.Immediate{Register: 2, Data: beUint16(port)},
+		&expr.NAT{Type: expr.NATTypeDestNAT, Family: unix.NFPROTO_IPV4, RegAddrMin: 1, RegProtoMin: 2},
 	}
 }
