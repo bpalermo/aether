@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -35,15 +36,58 @@ func (c *SnapshotCache) SetMeshDNSEnabled(v bool)       { c.meshDNSEnabled = v }
 func (c *SnapshotCache) SetMeshDNSUpstream(rs []string) { c.meshDNSUpstream = rs }
 
 // SetMeshDNSRecords replaces the mesh service -> ClusterIP map (fed by the mesh-Service
-// reconciler) and signals a rebuild on change so the per-pod DnsTable re-derives.
+// reconciler). On change it signals a snapshot rebuild (cap_http) AND rebuilds the
+// per-pod DNS listeners: the dns_filter's inline DnsTable is static once a listener is
+// built, so a records update (incl. the first one, which arrives AFTER the listeners
+// were generated at pod-add) needs a listener regen, or the table stays empty.
 func (c *SnapshotCache) SetMeshDNSRecords(records map[string]string) {
 	c.captureMu.Lock()
 	changed := !equalStringMaps(c.meshDNSRecords, records)
 	c.meshDNSRecords = records
 	c.captureMu.Unlock()
-	if changed {
-		c.signalDependencyChange()
+	if !changed {
+		return
 	}
+	c.signalDependencyChange()
+	if c.meshDNSEnabled {
+		if err := c.rebuildDNSListeners(context.Background()); err != nil {
+			c.log.Error("failed to rebuild mesh-DNS listeners after records change", "error", err)
+		}
+	}
+}
+
+// rebuildDNSListeners regenerates every local pod's mesh-DNS listener from the current
+// records and re-emits the listener snapshot. Listeners are generated outside the
+// listener lock (generateDNSListener reads dep/capture state), then swapped in.
+func (c *SnapshotCache) rebuildDNSListeners(ctx context.Context) error {
+	c.listenerMu.RLock()
+	pods := make([]*cniv1.CNIPod, 0, len(c.listeners))
+	for _, e := range c.listeners {
+		if e.cniPod != nil {
+			pods = append(pods, e.cniPod)
+		}
+	}
+	c.listenerMu.RUnlock()
+
+	rebuilt := make(map[string]types.Resource, len(pods))
+	for _, p := range pods {
+		dnsL, err := c.generateDNSListener(p)
+		if err != nil {
+			return err
+		}
+		rebuilt[p.GetNetworkNamespace()] = dnsL
+	}
+
+	c.listenerMu.Lock()
+	for netns, dnsL := range rebuilt {
+		if e, ok := c.listeners[netns]; ok {
+			e.dnsListener = dnsL
+			c.listeners[netns] = e
+		}
+	}
+	c.listenerMu.Unlock()
+
+	return c.generateListenerSnapshot(ctx)
 }
 
 // generateDNSListener builds a pod's mesh-DNS listener, or nil when mesh DNS is off.
@@ -60,18 +104,17 @@ func (c *SnapshotCache) generateDNSListener(cniPod *cniv1.CNIPod) (types.Resourc
 	return l, nil
 }
 
-// meshDNSVirtualDomains builds the dep-scoped DnsTable entries: <svc>.<meshDomain> ->
-// the service's mesh-Service ClusterIP.
+// meshDNSVirtualDomains builds the DnsTable entries: <svc>.<meshDomain> -> the
+// service's mesh-Service ClusterIP, for the WHOLE mesh catalog (not dep-scoped).
+// Resolution is cheap and harmless; the actual reachability stays demand-scoped at
+// the cluster/EDS/mTLS layer. Answering all names also avoids a bootstrap deadlock —
+// a pod must resolve a name to dial it, but it isn't in the dependency set until first
+// dialed.
 func (c *SnapshotCache) meshDNSVirtualDomains() []proxy.DNSVirtualDomain {
-	deps := c.DependencySet()
-
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
 	vds := make([]proxy.DNSVirtualDomain, 0, len(c.meshDNSRecords))
 	for svc, clusterIP := range c.meshDNSRecords {
-		if _, ok := deps[svc]; !ok {
-			continue
-		}
 		vds = append(vds, proxy.DNSVirtualDomain{
 			Domain:    proxy.ServiceClusterName(svc, c.meshDomain),
 			Addresses: []string{clusterIP},
