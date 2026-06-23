@@ -89,6 +89,12 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			m := new(dns.Msg)
 			m.SetReply(r)
 			m.Authoritative = true
+			// Echo the client's EDNS0 OPT (UDP size + DO). Strict resolvers (c-ares,
+			// which curl/Alpine use) send EDNS0 and reject an answer that omits the
+			// OPT — getaddrinfo/dig are lenient, c-ares is not.
+			if opt := r.IsEdns0(); opt != nil {
+				m.SetEdns0(opt.UDPSize(), opt.Do())
+			}
 			m.Answer = []dns.RR{&dns.A{
 				Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: answerTTL},
 				A:   net.ParseIP(ip).To4(),
