@@ -19,6 +19,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/constants",
+        "//agent/internal/meshdns",
         "//agent/internal/xds/proxy",
         "//agent/storage",
         "//api/aether/cni/v1:cni",

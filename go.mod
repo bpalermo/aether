@@ -215,6 +215,7 @@ require (
 
 require (
 	github.com/google/nftables v0.3.0
+	github.com/miekg/dns v1.1.72
 	go.opentelemetry.io/contrib/bridges/otelslog v0.19.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.20.0
 	go.opentelemetry.io/otel/log v0.20.0 // indirect

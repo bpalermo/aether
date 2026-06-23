@@ -31,6 +31,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/capture"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/gamma"
+	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/node"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
@@ -264,8 +265,13 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
-	snapshotCache.SetMeshDNSEnabled(cfg.MeshDNS)
-	snapshotCache.SetMeshDNSUpstream(cfg.MeshDNSUpstream)
+	if cfg.MeshDNS {
+		// In-process DNS resolver (Istio-style): answers <svc>.<meshDomain>, forwards
+		// the rest to kube-dns. The cache serves it per-pod-netns and feeds it records.
+		dnsServer := meshdns.NewServer(cfg.MeshDomain, l)
+		dnsServer.SetUpstreams(cfg.MeshDNSUpstream)
+		snapshotCache.SetMeshDNSServer(dnsServer)
+	}
 	// Global access-log config, set once before the cache builds any listener.
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
 		Enabled:           cfg.AccessLogsEnabled,
