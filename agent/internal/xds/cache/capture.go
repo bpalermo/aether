@@ -29,12 +29,16 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 // cap_http route table.
 func (c *SnapshotCache) SetCaptureEnabled(v bool) { c.captureEnabled = v }
 
-// SetMeshDNSServer wires the agent's in-process DNS resolver (proposal 018, mesh-global
-// FQDN). When set, the cache opens/closes a per-pod DNS socket in each pod's netns and
-// feeds the server the mesh records. nil = mesh DNS off. This replaces the Envoy
-// dns_filter, which broke c-ares resolvers (curl/Alpine) by mishandling forwarded
-// queries; a real resolver (meshdns) speaks the full protocol.
-func (c *SnapshotCache) SetMeshDNSServer(s *meshdns.Server) { c.meshDNS = s }
+// SetMeshDNS wires the agent's in-process DNS resolver (proposal 018, mesh-global
+// FQDN). When set, the cache generates per-pod Envoy DNS listeners (udp_proxy/
+// tcp_proxy to the mesh_dns cluster at hostIP:resolverPort) and feeds the server the
+// mesh records. nil server = mesh DNS off. Envoy just relays the DNS to the real
+// resolver — the dns_filter is retired (it broke c-ares).
+func (c *SnapshotCache) SetMeshDNS(s *meshdns.Server, hostIP string, resolverPort uint32) {
+	c.meshDNS = s
+	c.meshDNSHostIP = hostIP
+	c.meshDNSResolverPort = resolverPort
+}
 
 // SetMeshDNSRecords feeds the in-process resolver the mesh service -> IP table (from
 // the mesh-Service reconciler). No-op when mesh DNS is off.
@@ -44,21 +48,29 @@ func (c *SnapshotCache) SetMeshDNSRecords(records map[string]string) {
 	}
 }
 
-// addMeshDNS starts serving DNS in the pod's netns; removeMeshDNS stops it. Both are
-// no-ops when mesh DNS is off.
-func (c *SnapshotCache) addMeshDNS(netns string) {
-	if c.meshDNS == nil || netns == "" {
-		return
+// generateDNSListeners builds a pod's UDP+TCP DNS listeners, or nil when mesh DNS is off.
+func (c *SnapshotCache) generateDNSListeners(cniPod *cniv1.CNIPod) ([]types.Resource, error) {
+	if c.meshDNS == nil {
+		return nil, nil
 	}
-	if err := c.meshDNS.AddNetns(netns); err != nil {
-		c.log.Error("failed to serve mesh DNS in pod netns", "netns", netns, "error", err)
+	ls, err := proxy.GenerateDNSListeners(cniPod, constants.ProxyDNSCapturePort)
+	if err != nil {
+		return nil, err
 	}
+	out := make([]types.Resource, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, l)
+	}
+	return out, nil
 }
 
-func (c *SnapshotCache) removeMeshDNS(netns string) {
-	if c.meshDNS != nil && netns != "" {
-		c.meshDNS.RemoveNetns(netns)
+// meshDNSCluster is the static cluster the DNS listeners forward to (the agent's
+// resolver), or nil when mesh DNS is off.
+func (c *SnapshotCache) meshDNSCluster() types.Resource {
+	if c.meshDNS == nil {
+		return nil
 	}
+	return proxy.NewMeshDNSCluster(c.meshDNSHostIP, c.meshDNSResolverPort)
 }
 
 // SetCaptureAuthorities replaces the mesh service -> cluster.local FQDN map (fed by
