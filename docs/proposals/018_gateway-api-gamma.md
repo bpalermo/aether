@@ -149,9 +149,35 @@ dependency set (ODCDS warm-up) — reusing the cold-path machinery.
 - **Phase 2 — GAMMA east-west.** `HTTPRoute` parentRef=Service → node-proxy
   outbound RDS, producer/consumer merge + precedence, weighted/mirror/timeout
   backends. The capability jump.
-- **Phase 3 — conformance hardening.** Standard Service VIP / `*.svc.cluster.local`
-  interception, `GRPCRoute`, `ReferenceGrant`, supported-features + Mesh-profile
-  conformance reporting.
+- **Phase 3 — transparent capture + conformance.** Today's call model is
+  **explicit egress**: the app dials `127.0.0.1:18081` with `Host:
+  <svc>.<meshDomain>` (the proxy binds that loopback listener into the pod netns;
+  no iptables redirect). That is HTTP-only *by construction* — the proxy only ever
+  sees what the app explicitly sends. Conformance (and unmodified apps, and the
+  multi-cluster `ServiceImport` VIP) need **transparent capture** of the Service
+  VIP / `*.svc.cluster.local:port` (and the clusterset VIP), recovering the intended
+  service via **original-dst / SNI** instead of an explicit `Host`.
+  - **Keep EDS metadata under original-dst.** Use original-dst as a *recover +
+    demux* signal (captured VIP → service → the existing **EDS cluster**), NOT an
+    `ORIGINAL_DST` *cluster*. The latter has no endpoint set, so it loses locality,
+    subsets, registry health, and — fatally for zero-trust — the per-endpoint
+    **SPIFFE SAN** for upstream mTLS. The agent already owns the VIP↔service map (it
+    allocates the Service/ServiceImport VIP); the cold path stays ODCDS. Reserve the
+    `ORIGINAL_DST` cluster for genuinely unknown destinations only.
+  - **Transparent capture forces L4+L7.** Capturing the VIP captures *everything*
+    the app sends there (Postgres, Redis, app-TLS, raw TCP), so the proxy must
+    become a general-protocol data plane: protocol-detect
+    (`tls_inspector`+`http_inspector`) → **HCM** for HTTP/2·HTTP/1.1
+    (HTTPRoute/GRPCRoute, full L7) and a **`tcp_proxy`-over-mTLS floor** for
+    everything else (non-HTTP services keep working *and* keep SPIRE mTLS + the EDS
+    SPIFFE SAN, just without L7 rules). Both the outbound capture path **and** the
+    inbound `:15008` (today an HCM) need the inspector-selected `tcp_proxy` chain.
+  - **Phase 3a (floor):** HTTP/gRPC transparent capture + the TCP-over-mTLS
+    passthrough — the minimum that makes capture safe; still HTTP-Mesh-profile
+    conformant. **Phase 3b (opt-in):** `TCPRoute`/`TLSRoute`/`UDPRoute` L4 routing as
+    additional profiles. Throughout, keep the **explicit `localhost:18081` HTTP
+    lane** as an HTTP-only fast path for mesh-aware clients.
+  - Plus `ReferenceGrant`, supported-features + Mesh-profile conformance reporting.
 
 ## Multi-cluster — the registry is the cross-cluster plane
 
@@ -226,12 +252,22 @@ data-plane detail below the API).
   *Supporting* GAMMA routing is easy; *passing* conformance needs the CNI
   capture + demux to honor the standard Service names (Phase 3). Ship support
   first, report supported-features honestly, chase the badge later.
+- **The real conformance cost is a protocol-agnostic data plane, not route types.**
+  aether is HTTP-only today *by construction* (explicit `localhost:18081` egress —
+  the proxy only sees what the app sends). Transparent capture of the Service VIP
+  promotes the proxy to a general **L4+L7** data plane (inspectors → HCM for HTTP,
+  `tcp_proxy`-over-mTLS for the rest), because capturing the VIP captures every
+  protocol the app uses. This is the genuinely new data-plane work the
+  Gateway-API direction pulls in (Phase 3a) — driven by the *interception model*,
+  not the HTTP route-type checklist.
 - **CRD coexistence.** `VirtualHost` stays through Phase 1–2 as a deprecation
   path; the dup-FQDN webhook generalizes to a Gateway/HTTPRoute conflict check.
 - **Policy attachment.** Timeouts/retries/mTLS-policy beyond HTTPRoute may want
   `BackendTrafficPolicy`-style attachment later; out of scope here.
-- **Non-goals:** TCP/UDP routes, Envoy Gateway adoption (Line 2), per-route
-  authz (a SecurityPolicy story), and full GAMMA conformance in Phase 1–2.
+- **Non-goals:** TCP/UDP **L4 routing** (`TCPRoute`/`UDPRoute`/`TLSRoute`, deferred
+  to Phase 3b — note the TCP-over-mTLS *passthrough floor* is NOT a non-goal; Phase
+  3a requires it), Envoy Gateway adoption (Line 2), per-route authz (a
+  SecurityPolicy story), and full GAMMA conformance in Phase 1–2.
 
 ## Verification (per phase)
 
