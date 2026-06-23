@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/capture"
@@ -42,6 +43,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	"github.com/bpalermo/aether/common/config"
+	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
@@ -266,11 +268,19 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
 	if cfg.MeshDNS {
-		// In-process DNS resolver (Istio-style): answers <svc>.<meshDomain>, forwards
-		// the rest to kube-dns. The cache serves it per-pod-netns and feeds it records.
-		dnsServer := meshdns.NewServer(cfg.MeshDomain, l)
+		// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
+		// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The per-pod
+		// Envoy DNS listeners udp_proxy/tcp_proxy to it via the mesh_dns cluster
+		// (HOST_IP:resolverPort) — Envoy does the netns binding (NET_ADMIN), the
+		// resolver runs on the host (no setns, no privilege increase).
+		hostIP := os.Getenv("HOST_IP")
+		resolverPort := uint32(commonconstants.ProxyDNSResolverPort)
+		dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), l)
 		dnsServer.SetUpstreams(cfg.MeshDNSUpstream)
-		snapshotCache.SetMeshDNSServer(dnsServer)
+		if err = m.Add(dnsServer); err != nil {
+			return fmt.Errorf("failed to add mesh-DNS resolver: %w", err)
+		}
+		snapshotCache.SetMeshDNS(dnsServer, hostIP, resolverPort)
 	}
 	// Global access-log config, set once before the cache builds any listener.
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{

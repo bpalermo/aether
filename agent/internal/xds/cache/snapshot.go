@@ -58,6 +58,12 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// clusters carry their endpoints inline, so they need no EDS resources.
 	clusters = append(clusters, c.appClusters()...)
 
+	// The mesh_dns static cluster (the agent's in-process resolver) that the per-pod
+	// DNS listeners udp_proxy/tcp_proxy to (proposal 018, mesh-global FQDN).
+	if mc := c.meshDNSCluster(); mc != nil {
+		clusters = append(clusters, mc)
+	}
+
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
 	for _, s := range c.secrets {

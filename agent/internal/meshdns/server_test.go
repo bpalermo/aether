@@ -8,7 +8,7 @@ import (
 )
 
 func TestLookup(t *testing.T) {
-	s := NewServer("aether.internal", slog.New(slog.DiscardHandler))
+	s := NewServer("aether.internal", "127.0.0.1:18054", slog.New(slog.DiscardHandler))
 	s.SetRecords(map[string]string{"svc-1": "10.111.0.5", "echo": "10.111.0.6"})
 
 	// <svc>.<meshDomain> -> its record; case-insensitive; trailing dot tolerated.

@@ -6,10 +6,8 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/meshdns",
     visibility = ["//agent:__subpackages__"],
     deps = [
-        "//common/constants",
         "//common/log",
         "@com_github_miekg_dns//:dns",
-        "@org_golang_x_sys//unix",
     ],
 )
 
