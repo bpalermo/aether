@@ -100,6 +100,17 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
+	// Transparent capture (proposal 018, Phase 3a): redirect outbound ClusterIP:18081
+	// to the pod-local capture listener. Best-effort — a failure leaves the explicit
+	// fast-lane working, so it must not fail the pod's networking. Uses the runtime
+	// netns path (the rule lives in the kernel netns, not the bind-mount pin).
+	if netConf.TransparentCaptureEnabled {
+		if err := installCaptureRedirect(args.Netns, p.logger); err != nil {
+			p.logger.Warn("failed to install transparent-capture redirect; continuing without capture",
+				zap.String("netns", args.Netns), zap.Error(err))
+		}
+	}
+
 	return p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
 }
 

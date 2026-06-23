@@ -26,6 +26,10 @@ type InstallerConfig struct {
 	// plugin binary pushes traces and metrics to this OTLP gRPC collector.
 	// Empty leaves plugin telemetry disabled.
 	OTLPEndpoint string
+	// TransparentCaptureEnabled writes transparent_capture_enabled into the netconf
+	// so the CNI plugin installs the per-pod capture redirect (proposal 018, Phase
+	// 3a). Off by default.
+	TransparentCaptureEnabled bool
 }
 
 // NewInstallerConfig creates a new InstallerConfig with default values.

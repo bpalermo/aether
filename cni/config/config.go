@@ -61,6 +61,13 @@ type AetherConf struct {
 	// Best-effort: a probe timeout is logged, never fails the CNI operation.
 	ReadinessProbeDisabled bool `json:"readiness_probe_disabled"`
 
+	// TransparentCaptureEnabled installs, inside each pod's netns, an nft REDIRECT
+	// of outbound TCP to a mesh ClusterIP:18081 -> the pod's local capture listener
+	// :15001 (proposal 018, Phase 3a). Off by default; pairs with the agent's
+	// --transparent-capture and the registrar's --generate-mesh-services. The
+	// loopback exclusion keeps the explicit 127.0.0.1:18081 fast-lane working.
+	TransparentCaptureEnabled bool `json:"transparent_capture_enabled"`
+
 	// OTLPEndpoint enables OTel telemetry (traces + metrics) pushed to the
 	// given OTLP gRPC collector (host:port, insecure). The plugin binary is
 	// exec'd by the container runtime, so its environment is the runtime's,
