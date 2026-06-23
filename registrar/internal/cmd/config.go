@@ -40,6 +40,11 @@ type RegistrarConfig struct {
 	// SyncInterval is how often the registrar polls the external registry
 	SyncInterval time.Duration
 
+	// GenerateMeshServices makes the leader registrar project the mesh catalog into
+	// selectorless k8s Services on the mesh port (transparent-capture VIP/name
+	// handles, proposal 018 Phase 3a). Default off.
+	GenerateMeshServices bool
+
 	// GRPCAddress is the address for the registrar gRPC server
 	GRPCAddress string
 

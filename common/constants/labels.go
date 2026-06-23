@@ -12,4 +12,16 @@ const (
 	// it (kubelet --register-with-taints); the agent tolerates it and removes it
 	// once its CNI socket is up, so a pod's CNI ADD can be handled (issue #261).
 	TaintAgentNotReady = aetherLabelPrefix + "/agent-not-ready"
+
+	// LabelMeshService marks a generated, selectorless k8s Service that fronts a
+	// mesh service as a transparent-capture VIP/name handle (proposal 018, Phase
+	// 3a). The registrar owns these — it lists/prunes by this label.
+	LabelMeshService = aetherLabelPrefix + "/mesh-service"
+
+	// AnnotationMeshService / AnnotationMeshPort link a generated Service to the
+	// mesh service + app port it fronts. The agent reads them to map a captured
+	// ClusterIP (original-dst) back to the registry-backed EDS cluster — endpoints
+	// stay in the registry, the Service is a pure name/VIP/identity handle.
+	AnnotationMeshService = aetherLabelPrefix + "/service"
+	AnnotationMeshPort    = aetherLabelPrefix + "/port"
 )
