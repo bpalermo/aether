@@ -161,6 +161,17 @@ type SnapshotCache struct {
 	// injection is skipped.
 	nodeSpiffeID string
 
+	// captureEnabled turns on transparent capture (proposal 018, Phase 3a): per-pod
+	// capture listeners + the cap_http route table. Set once before the manager
+	// starts (SetCaptureEnabled); read without locking. Default off.
+	captureEnabled bool
+	// captureMu guards captureAuthorities: a mesh service -> its cluster.local FQDN
+	// (<svc>.<ns>.svc.cluster.local), fed by the agent's capture reconciler from the
+	// generated mesh Services. The cap_http route table maps each in-scope service's
+	// authority to its <svc>.<meshDomain> cluster.
+	captureMu          sync.RWMutex
+	captureAuthorities map[string]string
+
 	version *atomic.Uint64
 }
 
@@ -173,6 +184,11 @@ type SnapshotCache struct {
 type listenerEntry struct {
 	inbound  types.Resource
 	outbound types.Resource
+	// capture is the per-pod transparent-capture listener (proposal 018, Phase 3a):
+	// nil unless transparent capture is enabled. Bound to the capture port in the
+	// pod netns; routes CNI-redirected ClusterIP:18081 traffic by cluster.local
+	// authority over the cap_http route table.
+	capture types.Resource
 	// appClusters holds one per-port application cluster (multi-port pods); the
 	// SNI-selected inbound filter chains forward decrypted traffic to these.
 	appClusters []types.Resource
@@ -233,16 +249,17 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		// Initialize the resource maps up front so callers never assign to a nil
 		// map. LoadListenersFromStorage assigns directly (no lazy init), which
 		// panics on agent restart when pods already exist in local storage.
-		listeners:      make(map[string]listenerEntry),
-		clusters:       make(map[string]clusterEntry),
-		secrets:        make(map[string]*tlsv3.Secret),
-		localWorkloads: make(map[string]string),
-		podDeps:        make(map[string]podDependencies),
-		observedDeps:   make(map[string]time.Time),
-		staticDeps:     make(map[string]struct{}),
-		serviceRoutes:  make(map[string][]proxy.GammaRoute),
-		depChanged:     make(chan struct{}, 1),
-		version:        atomic.NewUint64(0),
+		listeners:          make(map[string]listenerEntry),
+		clusters:           make(map[string]clusterEntry),
+		secrets:            make(map[string]*tlsv3.Secret),
+		localWorkloads:     make(map[string]string),
+		podDeps:            make(map[string]podDependencies),
+		observedDeps:       make(map[string]time.Time),
+		staticDeps:         make(map[string]struct{}),
+		serviceRoutes:      make(map[string][]proxy.GammaRoute),
+		captureAuthorities: make(map[string]string),
+		depChanged:         make(chan struct{}, 1),
+		version:            atomic.NewUint64(0),
 	}
 }
 

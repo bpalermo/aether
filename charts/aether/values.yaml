@@ -100,6 +100,11 @@ agent:
   # header / timeout). Requires the Gateway API CRDs. Default off — a no-op, and
   # adds the cluster-wide httproutes RBAC only when enabled.
   gamma: false
+  # Transparent capture (proposal 018, Phase 3a): per-pod capture listeners + the
+  # cap_http route table built from the generated mesh Services. Pairs with
+  # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.
+  # Default off — adds the services-read RBAC only when enabled.
+  transparentCapture: false
   # Image as repository + digest (digest-pinned for immutability). Mirror to a
   # private registry by overriding `repository` alone; the digest is preserved.
   image:

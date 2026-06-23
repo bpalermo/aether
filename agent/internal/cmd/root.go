@@ -28,6 +28,7 @@ import (
 	"log/slog"
 
 	"github.com/bpalermo/aether/agent/constants"
+	"github.com/bpalermo/aether/agent/internal/capture"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/gamma"
 	"github.com/bpalermo/aether/agent/internal/node"
@@ -113,6 +114,7 @@ func init() {
 	// startup taint from this node once the CNI server is serving.
 	rootCmd.Flags().BoolVar(&cfg.RemoveStartupTaint, "remove-startup-taint", cfg.RemoveStartupTaint, "Remove the aether.io/agent-not-ready node taint once the CNI server is serving (needs nodes patch RBAC)")
 	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", false, "Enable GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2)")
+	rootCmd.Flags().BoolVar(&cfg.TransparentCapture, "transparent-capture", false, "Enable transparent capture: per-pod capture listeners + cap_http route table from the generated mesh Services (proposal 018, Phase 3a)")
 }
 
 // registerSharedFlags registers the flags common to the node agent (root) and
@@ -259,6 +261,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
+	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
 	// Global access-log config, set once before the cache builds any listener.
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
 		Enabled:           cfg.AccessLogsEnabled,
@@ -331,6 +334,20 @@ func runAgent(ctx context.Context) (retErr error) {
 		}
 		if err = gammaReconciler.SetupWithManager(m); err != nil {
 			return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+		}
+	}
+
+	// Transparent capture (proposal 018, Phase 3a): watch the generated mesh
+	// Services and project their cluster.local authorities so the cache can build
+	// the cap_http route table. Default off — registers no Service watch unless set.
+	if cfg.TransparentCapture {
+		captureReconciler := &capture.Reconciler{
+			Client: m.GetClient(),
+			Sink:   snapshotCache,
+			Log:    l,
+		}
+		if err = captureReconciler.SetupWithManager(m); err != nil {
+			return fmt.Errorf("failed to set up transparent-capture reconciler: %w", err)
 		}
 	}
 

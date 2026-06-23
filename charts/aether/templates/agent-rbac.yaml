@@ -18,6 +18,13 @@ rules:
     resources: ["httproutes"]
     verbs: ["list", "get", "watch"]
   {{- end }}
+  {{- if .Values.agent.transparentCapture }}
+  # Transparent capture (proposal 018, Phase 3a): watch the generated mesh Services
+  # for their cluster.local authorities.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "get", "watch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

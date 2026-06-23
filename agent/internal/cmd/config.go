@@ -91,6 +91,13 @@ type AgentConfig struct {
 	// HTTPRoutes parented to a Service and enriches the outbound routes (proposal
 	// 018, Phase 2). Default off — a no-op until enabled.
 	Gamma bool
+
+	// TransparentCapture enables transparent capture (proposal 018, Phase 3a): the
+	// agent generates per-pod capture listeners + the cap_http route table and
+	// watches the generated mesh Services for their cluster.local authorities. Pairs
+	// with the registrar's --generate-mesh-services and the CNI dst-18081 redirect.
+	// Default off.
+	TransparentCapture bool
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves when
 	// GatewayAPI is set.
 	GatewayClassName string

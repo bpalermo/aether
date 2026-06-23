@@ -86,8 +86,21 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// reference resolves; the catch-all 404 vhost handles unmatched
 		// authorities. No ODCDS.
 		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(c.virtualHostVhosts())}
-	} else if len(vhosts) > 0 {
-		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain)}
+	} else {
+		var routes []types.Resource
+		if len(vhosts) > 0 {
+			routes = append(routes, proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain))
+		}
+		// Transparent capture (proposal 018, Phase 3a): the cap_http table the per-pod
+		// capture listeners reference over RDS. Always emitted when capture is on (it
+		// carries a 404 default) so the listeners' RDS resolves even with no in-scope
+		// cluster.local authorities yet.
+		if c.captureEnabled {
+			routes = append(routes, proxy.BuildCaptureRouteConfiguration(c.captureVhosts()))
+		}
+		if len(routes) > 0 {
+			resources[resourcev3.RouteType] = routes
+		}
 	}
 
 	c.log.DebugContext(ctx, "setting snapshot", "version", v,
