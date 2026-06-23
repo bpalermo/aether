@@ -297,6 +297,12 @@ controller:
     pullPolicy: Always
   # Leader election is on; extra replicas are warm standbys.
   replicaCount: 1
+  # Pod-ndots mutating webhook (proposal 018, mesh-global FQDN): inject dnsConfig
+  # ndots (= the mesh-domain label count) into managed pods so a mesh FQDN
+  # (<svc>.<meshDomain>) resolves absolute-first, before the cluster.local search
+  # list — without it, musl/Alpine clients fail to resolve mesh names. Scoped to
+  # aether.io/managed pods, failurePolicy=Ignore. Default off; pair with mesh DNS.
+  injectPodNdots: false
   webhook:
     # Webhook serving cert source — DECOUPLED from mesh SPIRE (spire.enabled).
     #   false (default): a Helm self-signed cert (genSignedCert, caBundle baked

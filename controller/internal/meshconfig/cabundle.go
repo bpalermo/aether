@@ -21,7 +21,10 @@ type CABundleInjector struct {
 	Client            client.Client
 	Source            *spire.Source
 	WebhookConfigName string
-	Log               *slog.Logger
+	// MutatingWebhookConfigName is the pod-ndots MutatingWebhookConfiguration to
+	// keep in sync too; empty skips it.
+	MutatingWebhookConfigName string
+	Log                       *slog.Logger
 }
 
 // NeedLeaderElection keeps caBundle writes to a single replica.
@@ -63,7 +66,6 @@ func (i *CABundleInjector) inject(ctx context.Context) error {
 	if err := i.Client.Get(ctx, types.NamespacedName{Name: i.WebhookConfigName}, &vwc); err != nil {
 		return fmt.Errorf("get ValidatingWebhookConfiguration %q: %w", i.WebhookConfigName, err)
 	}
-
 	changed := false
 	for idx := range vwc.Webhooks {
 		if !bytes.Equal(vwc.Webhooks[idx].ClientConfig.CABundle, bundle) {
@@ -71,12 +73,34 @@ func (i *CABundleInjector) inject(ctx context.Context) error {
 			changed = true
 		}
 	}
-	if !changed {
+	if changed {
+		if err := i.Client.Update(ctx, &vwc); err != nil {
+			return fmt.Errorf("update validating webhook caBundle: %w", err)
+		}
+		i.Log.InfoContext(ctx, "injected SPIRE trust bundle into webhook caBundle", "webhookConfig", i.WebhookConfigName)
+	}
+
+	// The pod-ndots MutatingWebhookConfiguration shares the same SVID, so keep its
+	// caBundle in sync too.
+	if i.MutatingWebhookConfigName == "" {
 		return nil
 	}
-	if err := i.Client.Update(ctx, &vwc); err != nil {
-		return fmt.Errorf("update webhook caBundle: %w", err)
+	var mwc admissionregistrationv1.MutatingWebhookConfiguration
+	if err := i.Client.Get(ctx, types.NamespacedName{Name: i.MutatingWebhookConfigName}, &mwc); err != nil {
+		return fmt.Errorf("get MutatingWebhookConfiguration %q: %w", i.MutatingWebhookConfigName, err)
 	}
-	i.Log.InfoContext(ctx, "injected SPIRE trust bundle into webhook caBundle", "webhookConfig", i.WebhookConfigName)
+	mChanged := false
+	for idx := range mwc.Webhooks {
+		if !bytes.Equal(mwc.Webhooks[idx].ClientConfig.CABundle, bundle) {
+			mwc.Webhooks[idx].ClientConfig.CABundle = bundle
+			mChanged = true
+		}
+	}
+	if mChanged {
+		if err := i.Client.Update(ctx, &mwc); err != nil {
+			return fmt.Errorf("update mutating webhook caBundle: %w", err)
+		}
+		i.Log.InfoContext(ctx, "injected SPIRE trust bundle into mutating webhook caBundle", "webhookConfig", i.MutatingWebhookConfigName)
+	}
 	return nil
 }

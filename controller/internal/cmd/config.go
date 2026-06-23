@@ -31,6 +31,16 @@ type ControllerConfig struct {
 	// WebhookConfigName is the ValidatingWebhookConfiguration whose caBundle the
 	// controller patches with the SPIRE trust bundle (SPIRE mode only).
 	WebhookConfigName string
+	// MutatingWebhookConfigName is the MutatingWebhookConfiguration (pod ndots
+	// injection) whose caBundle the controller patches with the SPIRE trust bundle
+	// (SPIRE mode only). Empty disables that patch.
+	MutatingWebhookConfigName string
+
+	// PodNDots is the dnsConfig ndots value the pod-mutating webhook injects into
+	// managed pods (= the label count of the mesh domain; 2 for aether.internal), so
+	// mesh FQDNs resolve absolute-first and musl clients stop tripping on the
+	// cluster.local search list.
+	PodNDots string
 }
 
 // DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
@@ -48,5 +58,6 @@ func NewControllerConfig() *ControllerConfig {
 		},
 		MeshConfigMapName:       meshconfig.DefaultMeshConfigMapName,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
+		PodNDots:                "2",
 	}
 }
