@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
 
 	commonlog "github.com/bpalermo/aether/common/log"
@@ -166,22 +166,16 @@ type SnapshotCache struct {
 	// capture listeners + the cap_http route table. Set once before the manager
 	// starts (SetCaptureEnabled); read without locking. Default off.
 	captureEnabled bool
-	// captureMu guards captureAuthorities + meshDNSRecords (both fed by the agent's
-	// mesh-Service reconciler).
-	//   captureAuthorities: mesh service -> its cluster.local FQDN, for cap_http.
-	//   meshDNSRecords:      mesh service -> its mesh-Service ClusterIP, the A-record
-	//     the per-pod dns_filter answers for <svc>.<meshDomain> (the namespace-free,
-	//     globally routable name; the ClusterIP then hits the :18081 capture and is
-	//     routed by Host). Proposal 018 mesh-global FQDN.
+	// captureMu guards captureAuthorities: mesh service -> its cluster.local FQDN,
+	// fed by the mesh-Service reconciler, for the cap_http route table.
 	captureMu          sync.RWMutex
 	captureAuthorities map[string]string
-	meshDNSRecords     map[string]string
 
-	// meshDNSEnabled turns on the per-pod mesh-DNS listener (set once,
-	// SetMeshDNSEnabled). meshDNSUpstream is the upstream resolver(s) the dns_filter
-	// forwards non-mesh queries to (the cluster kube-dns; set once).
-	meshDNSEnabled  bool
-	meshDNSUpstream []string
+	// meshDNS is the agent's in-process DNS resolver (proposal 018, mesh-global FQDN),
+	// or nil when mesh DNS is off. Set once (SetMeshDNSServer); the cache opens/closes
+	// a per-pod DNS socket in each pod's netns and feeds it the mesh records. Replaces
+	// the Envoy dns_filter, which broke c-ares resolvers.
+	meshDNS *meshdns.Server
 
 	version *atomic.Uint64
 }
@@ -200,14 +194,6 @@ type listenerEntry struct {
 	// pod netns; routes CNI-redirected ClusterIP:18081 traffic by cluster.local
 	// authority over the cap_http route table.
 	capture types.Resource
-	// dnsListener is the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
-	// nil unless mesh DNS is enabled. Bound to the DNS capture port in the pod netns;
-	// answers <svc>.<meshDomain> and forwards the rest to the upstream resolver.
-	dnsListener types.Resource
-	// cniPod is the pod this entry was generated from, retained so the DNS listener
-	// can be regenerated in place when the mesh-DNS records change (the inline
-	// DnsTable is static once built, so a records update needs a listener rebuild).
-	cniPod *cniv1.CNIPod
 	// appClusters holds one per-port application cluster (multi-port pods); the
 	// SNI-selected inbound filter chains forward decrypted traffic to these.
 	appClusters []types.Resource
@@ -277,7 +263,6 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),
 		captureAuthorities: make(map[string]string),
-		meshDNSRecords:     make(map[string]string),
 		depChanged:         make(chan struct{}, 1),
 		version:            atomic.NewUint64(0),
 	}

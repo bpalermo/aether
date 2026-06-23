@@ -38,10 +38,6 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	if err != nil {
 		return err
 	}
-	dnsListener, err := c.generateDNSListener(cniPod)
-	if err != nil {
-		return err
-	}
 
 	c.listenerMu.Lock()
 	if c.listeners == nil {
@@ -51,12 +47,13 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		inbound:       inbound,
 		outbound:      outbound,
 		capture:       capture,
-		dnsListener:   dnsListener,
-		cniPod:        cniPod,
 		appClusters:   clustersToResources(appClusters),
 		healthCluster: healthCluster,
 	}
 	c.listenerMu.Unlock()
+
+	// Mesh DNS (proposal 018): serve the agent's resolver in this pod's netns.
+	c.addMeshDNS(netns)
 
 	c.setLocalWorkload(netns, proxy.SpiffeIDFromPod(cniPod, trustDomain), trustDomain)
 
@@ -85,6 +82,7 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 		return nil
 	}
 
+	c.removeMeshDNS(netns)
 	c.removeLocalWorkload(netns)
 
 	// Shrink the node dependency set; clusters only this pod depended on are
@@ -123,9 +121,6 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 		resources = append(resources, entry.inbound, entry.outbound)
 		if entry.capture != nil {
 			resources = append(resources, entry.capture)
-		}
-		if entry.dnsListener != nil {
-			resources = append(resources, entry.dnsListener)
 		}
 		if hc, ok := entry.healthCluster.(*clusterv3.Cluster); ok && hc != nil {
 			probeClusters = append(probeClusters, hc.GetName())
@@ -185,6 +180,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 
 	var errs []error
 	local := make(map[string]string, len(pods))
+	var meshDNSNetns []string
 
 	c.listenerMu.Lock()
 	for _, pod := range pods {
@@ -213,28 +209,26 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			errs = append(errs, captureErr)
 			continue
 		}
-		dnsListener, dnsErr := c.generateDNSListener(pod)
-		if dnsErr != nil {
-			c.log.ErrorContext(ctx, "failed to generate mesh-DNS listener for pod", "error", dnsErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
-			errs = append(errs, dnsErr)
-			continue
-		}
 
 		c.listeners[netns] = listenerEntry{
 			inbound:       inbound,
 			outbound:      outbound,
 			capture:       capture,
-			dnsListener:   dnsListener,
-			cniPod:        pod,
 			appClusters:   clustersToResources(appClusters),
 			healthCluster: healthCluster,
 		}
+		meshDNSNetns = append(meshDNSNetns, netns)
 		local[netns] = proxy.SpiffeIDFromPod(pod, trustDomain)
 		// Contribute to the node dependency set so the scoped registry load
 		// that follows (PreListen) carries these pods' upstreams.
 		c.setPodDependencies(netns, pod)
 	}
 	c.listenerMu.Unlock()
+
+	// Serve mesh DNS in each pod's netns (outside the listener lock — opens sockets).
+	for _, netns := range meshDNSNetns {
+		c.addMeshDNS(netns)
+	}
 
 	// Merge (never replace) into localWorkloads: this load runs concurrently with
 	// the CNI server, and a wholesale replacement would wipe the netns→SPIFFE-ID
