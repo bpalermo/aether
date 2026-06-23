@@ -8,6 +8,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/edge"
+	"github.com/bpalermo/aether/agent/internal/edge/gatewayapi"
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -21,6 +22,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // edgeName is the controller/logging name for the edge proxy control plane.
@@ -56,6 +58,8 @@ func init() {
 	_ = edgeCmd.Flags().MarkDeprecated("edge-route-namespace", "use --route-namespace")
 	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per VirtualHost via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
+	edgeCmd.Flags().BoolVar(&cfg.GatewayAPI, "gateway-api", false, "Consume Gateway API (Gateway + HTTPRoute) instead of the VirtualHost CRD (proposal 018)")
+	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves (with --gateway-api)")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -119,6 +123,11 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	if err := crdv1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("register config.aether.io scheme: %w", err)
+	}
+	if cfg.GatewayAPI {
+		if err := gatewayv1.Install(scheme); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+		}
 	}
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) { o.Scheme = scheme })
@@ -217,15 +226,29 @@ func runEdge(ctx context.Context) (retErr error) {
 	if cfg.EdgeTLS {
 		secretRegistry = secret.NewRegistry(secret.NewKubernetesProvider(m.GetClient(), routeNamespace))
 	}
-	edgeReconciler := &edge.Reconciler{
-		Client:    m.GetClient(),
-		Sink:      snapshotCache,
-		Namespace: routeNamespace,
-		Secrets:   secretRegistry,
-		Log:       l,
-	}
-	if err = edgeReconciler.SetupWithManager(m); err != nil {
-		return fmt.Errorf("failed to set up VirtualHost reconciler: %w", err)
+	if cfg.GatewayAPI {
+		gwReconciler := &gatewayapi.Reconciler{
+			Client:           m.GetClient(),
+			Sink:             snapshotCache,
+			Namespace:        routeNamespace,
+			GatewayClassName: cfg.GatewayClassName,
+			Secrets:          secretRegistry,
+			Log:              l,
+		}
+		if err = gwReconciler.SetupWithManager(m); err != nil {
+			return fmt.Errorf("failed to set up Gateway API reconciler: %w", err)
+		}
+	} else {
+		edgeReconciler := &edge.Reconciler{
+			Client:    m.GetClient(),
+			Sink:      snapshotCache,
+			Namespace: routeNamespace,
+			Secrets:   secretRegistry,
+			Log:       l,
+		}
+		if err = edgeReconciler.SetupWithManager(m); err != nil {
+			return fmt.Errorf("failed to set up VirtualHost reconciler: %w", err)
+		}
 	}
 
 	l.DebugContext(ctx, "waiting for local storage to be ready")

@@ -10,12 +10,23 @@ metadata:
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
 rules:
+  {{- if .Values.edge.gatewayApi.enabled }}
+  # Gateway API mode (proposal 018): read Gateways + HTTPRoutes (and their status)
+  # in the watched namespace.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways/status", "httproutes/status"]
+    verbs: ["get", "update", "patch"]
+  {{- else }}
   - apiGroups: ["config.aether.io"]
     resources: ["virtualhosts"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["config.aether.io"]
     resources: ["virtualhosts/status"]
     verbs: ["get", "update", "patch"]
+  {{- end }}
   {{- if .Values.edge.tls.enabled }}
   # Read the kubernetes.io/tls Secrets VirtualHosts reference (downstream certs,
   # served to Envoy over SDS); watch for hot rotation.

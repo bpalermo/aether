@@ -79,9 +79,16 @@ type AgentConfig struct {
 	// binds (edge subcommand only).
 	EdgeHTTPPort uint32
 
-	// RouteNamespace is the namespace the edge watches VirtualHost CRs in
+	// RouteNamespace is the namespace the edge watches its route CRs in
 	// (edge subcommand only); empty means the edge pod's own namespace.
 	RouteNamespace string
+
+	// GatewayAPI makes the edge consume Gateway API (Gateway + HTTPRoute) instead
+	// of the VirtualHost CRD (proposal 018, Phase 1). Edge subcommand only.
+	GatewayAPI bool
+	// GatewayClassName is the GatewayClass whose Gateways this edge serves when
+	// GatewayAPI is set.
+	GatewayClassName string
 
 	// EdgeTLS enables downstream TLS termination: the edge serves an HTTPS
 	// listener on EdgeHTTPSPort (certs per VirtualHost via SDS) and an HTTP->HTTPS
@@ -103,6 +110,7 @@ func NewAgentConfig() *AgentConfig {
 		ProxyServiceNodeID:      constants.DefaultProxyID,
 		EdgeHTTPPort:            proxy.DefaultEdgeHTTPPort,
 		EdgeHTTPSPort:           proxy.DefaultEdgeHTTPSPort,
+		GatewayClassName:        "aether",
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
