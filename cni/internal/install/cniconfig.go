@@ -45,6 +45,7 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig.CNIVersion = "0.0.1"
 	pluginConfig.AgentCNIPath = constants.DefaultCNISocketPath
 	pluginConfig.OTLPEndpoint = cfg.OTLPEndpoint
+	pluginConfig.TransparentCaptureEnabled = cfg.TransparentCaptureEnabled
 
 	marshalledJSON, err := json.MarshalIndent(pluginConfig, "", "  ")
 	if err != nil {

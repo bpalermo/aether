@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "plugin",
     srcs = [
+        "capture.go",
         "client.go",
         "netnspin.go",
         "plugin.go",
@@ -22,6 +23,8 @@ go_library(
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_containernetworking_cni//pkg/types/100",
+        "@com_github_google_nftables//:nftables",
+        "@com_github_google_nftables//expr",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_trace//:trace",
         "@org_golang_google_grpc//:grpc",
@@ -36,6 +39,7 @@ go_library(
 go_test(
     name = "plugin_test",
     srcs = [
+        "capture_test.go",
         "client_test.go",
         "netnspin_test.go",
         "plugin_test.go",
@@ -45,8 +49,10 @@ go_test(
     deps = [
         "//api/aether/cni/v1:cni",
         "//cni/config",
+        "//common/constants",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
+        "@com_github_google_nftables//expr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_grpc//:grpc",
@@ -55,6 +61,7 @@ go_test(
         "@org_golang_google_grpc//status",
         "@org_golang_google_grpc//test/bufconn",
         "@org_golang_google_protobuf//types/known/wrapperspb",
+        "@org_golang_x_sys//unix",
         "@org_uber_go_zap//:zap",
     ],
 )

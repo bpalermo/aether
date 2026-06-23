@@ -43,6 +43,9 @@ spec:
             # from the agent's runtime OTLP in the MeshConfig CR.
             - "--otlp-endpoint={{ . }}"
             {{- end }}
+            {{- if .Values.agent.transparentCapture }}
+            - "--transparent-capture"
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
