@@ -13,6 +13,7 @@ go_library(
         "//common/manager",
         "//common/spire",
         "//controller/internal/meshconfig",
+        "//controller/internal/podmutate",
         "//controller/internal/virtualhost",
         "//controller/internal/webhook",
         "@com_github_spf13_cobra//:cobra",

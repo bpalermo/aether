@@ -48,10 +48,18 @@ spec:
             {{- if .Values.otel.traceExport }}
             - "--trace-export=true"
             {{- end }}
+            {{- if .Values.controller.injectPodNdots }}
+            # ndots = the mesh-domain label count, so <svc>.<meshDomain> resolves
+            # absolute-first (musl mesh-FQDN fix).
+            - "--pod-ndots={{ len (splitList "." .Values.meshDomain) }}"
+            {{- end }}
             {{- if .Values.controller.webhook.spire }}
             - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--webhook-config-name={{ include "aether.controller.clusterScopedName" . }}"
+            {{- if .Values.controller.injectPodNdots }}
+            - "--mutating-webhook-config-name={{ include "aether.controller.clusterScopedName" . }}-pod-ndots"
+            {{- end }}
             {{- end }}
           ports:
             - name: webhook

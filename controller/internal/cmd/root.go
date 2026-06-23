@@ -25,6 +25,7 @@ import (
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
+	"github.com/bpalermo/aether/controller/internal/podmutate"
 	"github.com/bpalermo/aether/controller/internal/virtualhost"
 	cwebhook "github.com/bpalermo/aether/controller/internal/webhook"
 	"github.com/spf13/cobra"
@@ -72,6 +73,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Serve the validating webhook with a SPIRE X.509 SVID and inject the SPIRE trust bundle into the webhook caBundle (instead of a static cert)")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
 	rootCmd.Flags().StringVar(&cfg.WebhookConfigName, "webhook-config-name", cfg.WebhookConfigName, "ValidatingWebhookConfiguration to patch with the SPIRE caBundle (SPIRE mode)")
+	rootCmd.Flags().StringVar(&cfg.MutatingWebhookConfigName, "mutating-webhook-config-name", cfg.MutatingWebhookConfigName, "MutatingWebhookConfiguration (pod ndots) to patch with the SPIRE caBundle (SPIRE mode); empty disables")
+	rootCmd.Flags().StringVar(&cfg.PodNDots, "pod-ndots", cfg.PodNDots, "dnsConfig ndots the pod-mutating webhook injects into managed pods (the mesh-domain label count; 2 for aether.internal)")
 }
 
 func runController(ctx context.Context) (retErr error) {
@@ -158,15 +161,22 @@ func runController(ctx context.Context) (retErr error) {
 		crdv1.VirtualHostKind: &virtualhost.Validator{Reader: m.GetAPIReader(), Log: l},
 	}).SetupWithManager(m)
 
+	// Pod-ndots mutating webhook (musl mesh-FQDN resolution; opt-in via the chart's
+	// MutatingWebhookConfiguration, scoped to managed pods, failurePolicy=Ignore).
+	// Served on /mutate (mirrors the shared /validate endpoint); inert unless the
+	// apiserver routes pods here.
+	m.GetWebhookServer().Register("/mutate", &admission.Webhook{Handler: podmutate.NewMutator(cfg.PodNDots, l)})
+
 	// In SPIRE mode the webhook presents an SVID, so the apiserver must trust the
 	// SPIRE CA: keep the ValidatingWebhookConfiguration caBundle in sync with the
 	// rotating trust bundle.
 	if cfg.SpireEnabled {
 		injector := &meshconfig.CABundleInjector{
-			Client:            m.GetClient(),
-			Source:            spireSource,
-			WebhookConfigName: cfg.WebhookConfigName,
-			Log:               l,
+			Client:                    m.GetClient(),
+			Source:                    spireSource,
+			WebhookConfigName:         cfg.WebhookConfigName,
+			MutatingWebhookConfigName: cfg.MutatingWebhookConfigName,
+			Log:                       l,
 		}
 		if err = m.Add(injector); err != nil {
 			return fmt.Errorf("failed to add caBundle injector: %w", err)
