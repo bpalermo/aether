@@ -66,6 +66,9 @@ spec:
             {{- if .Values.agent.gamma }}
             - "--gamma"
             {{- end }}
+            {{- if .Values.agent.transparentCapture }}
+            - "--transparent-capture"
+            {{- end }}
             # Aether system config, inherited from the umbrella global block.
             - "--mesh-domain={{ .Values.meshDomain }}"
             {{- if .Values.otel.enabled }}

@@ -4,6 +4,7 @@ go_library(
     name = "cache",
     srcs = [
         "cache.go",
+        "capture.go",
         "cluster.go",
         "dependencies.go",
         "edge.go",
