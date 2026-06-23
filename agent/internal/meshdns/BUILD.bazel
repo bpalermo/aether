@@ -2,12 +2,18 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "meshdns",
-    srcs = ["server.go"],
+    srcs = [
+        "metrics.go",
+        "server.go",
+    ],
     importpath = "github.com/bpalermo/aether/agent/internal/meshdns",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/log",
         "@com_github_miekg_dns//:dns",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_metric//:metric",
     ],
 )
 

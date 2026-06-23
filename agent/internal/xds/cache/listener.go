@@ -38,10 +38,6 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	if err != nil {
 		return err
 	}
-	dnsListeners, err := c.generateDNSListeners(cniPod)
-	if err != nil {
-		return err
-	}
 
 	c.listenerMu.Lock()
 	if c.listeners == nil {
@@ -51,7 +47,6 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		inbound:       inbound,
 		outbound:      outbound,
 		capture:       capture,
-		dnsListeners:  dnsListeners,
 		appClusters:   clustersToResources(appClusters),
 		healthCluster: healthCluster,
 	}
@@ -123,7 +118,6 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 		if entry.capture != nil {
 			resources = append(resources, entry.capture)
 		}
-		resources = append(resources, entry.dnsListeners...)
 		if hc, ok := entry.healthCluster.(*clusterv3.Cluster); ok && hc != nil {
 			probeClusters = append(probeClusters, hc.GetName())
 		}
@@ -210,18 +204,10 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			errs = append(errs, captureErr)
 			continue
 		}
-		dnsListeners, dnsErr := c.generateDNSListeners(pod)
-		if dnsErr != nil {
-			c.log.ErrorContext(ctx, "failed to generate DNS listeners for pod", "error", dnsErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
-			errs = append(errs, dnsErr)
-			continue
-		}
-
 		c.listeners[netns] = listenerEntry{
 			inbound:       inbound,
 			outbound:      outbound,
 			capture:       capture,
-			dnsListeners:  dnsListeners,
 			appClusters:   clustersToResources(appClusters),
 			healthCluster: healthCluster,
 		}

@@ -115,8 +115,8 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// pod-local mesh-DNS listener. Best-effort — a failure leaves the pod's DNS on
 	// the original resolver (mesh names just won't resolve), never breaks networking.
 	if netConf.MeshDNSEnabled {
-		if err := installDNSRedirect(args.Netns, p.logger); err != nil {
-			p.logger.Warn("failed to install mesh-DNS redirect; continuing without mesh DNS",
+		if err := installDNSRedirect(args.Netns, netConf.HostIP, p.logger); err != nil {
+			p.logger.Warn("failed to install mesh-DNS DNAT; continuing without mesh DNS",
 				zap.String("netns", args.Netns), zap.Error(err))
 		}
 	}

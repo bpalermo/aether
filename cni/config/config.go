@@ -68,10 +68,14 @@ type AetherConf struct {
 	// loopback exclusion keeps the explicit 127.0.0.1:18081 fast-lane working.
 	TransparentCaptureEnabled bool `json:"transparent_capture_enabled"`
 
-	// MeshDNSEnabled installs, inside each pod's netns, an nft REDIRECT of outbound
-	// DNS (UDP+TCP :53, non-loopback) -> the pod-local mesh-DNS listener (proposal
-	// 018, mesh-global FQDN). Off by default; pairs with the agent's --mesh-dns.
+	// MeshDNSEnabled installs, inside each pod's netns, an nft DNAT of outbound DNS
+	// (UDP+TCP :53, non-loopback) -> the node agent's resolver at HostIP:18054
+	// (proposal 018, mesh-global FQDN). Off by default; pairs with the agent's
+	// --mesh-dns.
 	MeshDNSEnabled bool `json:"mesh_dns_enabled"`
+	// HostIP is the node IP the mesh-DNS DNAT targets (the agent's host-local
+	// resolver). Written by cni-install from the downward-API HOST_IP.
+	HostIP string `json:"host_ip,omitempty"`
 
 	// OTLPEndpoint enables OTel telemetry (traces + metrics) pushed to the
 	// given OTLP gRPC collector (host:port, insecure). The plugin binary is
