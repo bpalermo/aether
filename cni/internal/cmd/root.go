@@ -38,6 +38,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
 	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint written into the netconf so the CNI plugin pushes traces and metrics (e.g. collector:4317); empty disables plugin telemetry")
 	rootCmd.Flags().BoolVar(&cfg.TransparentCaptureEnabled, "transparent-capture", false, "Write transparent_capture_enabled into the netconf so the CNI plugin installs the per-pod capture redirect (proposal 018, Phase 3a)")
+	rootCmd.Flags().BoolVar(&cfg.MeshDNSEnabled, "mesh-dns", false, "Write mesh_dns_enabled into the netconf so the CNI plugin installs the per-pod :53 redirect (proposal 018, mesh-global FQDN)")
 }
 
 // GetCommand returns the main cobra.Command object for this application

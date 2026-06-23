@@ -68,6 +68,11 @@ type AetherConf struct {
 	// loopback exclusion keeps the explicit 127.0.0.1:18081 fast-lane working.
 	TransparentCaptureEnabled bool `json:"transparent_capture_enabled"`
 
+	// MeshDNSEnabled installs, inside each pod's netns, an nft REDIRECT of outbound
+	// DNS (UDP+TCP :53, non-loopback) -> the pod-local mesh-DNS listener (proposal
+	// 018, mesh-global FQDN). Off by default; pairs with the agent's --mesh-dns.
+	MeshDNSEnabled bool `json:"mesh_dns_enabled"`
+
 	// OTLPEndpoint enables OTel telemetry (traces + metrics) pushed to the
 	// given OTLP gRPC collector (host:port, insecure). The plugin binary is
 	// exec'd by the container runtime, so its environment is the runtime's,

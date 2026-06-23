@@ -30,6 +30,9 @@ type InstallerConfig struct {
 	// so the CNI plugin installs the per-pod capture redirect (proposal 018, Phase
 	// 3a). Off by default.
 	TransparentCaptureEnabled bool
+	// MeshDNSEnabled writes mesh_dns_enabled into the netconf so the CNI plugin
+	// installs the per-pod :53 redirect (proposal 018, mesh-global FQDN). Off by default.
+	MeshDNSEnabled bool
 }
 
 // NewInstallerConfig creates a new InstallerConfig with default values.
