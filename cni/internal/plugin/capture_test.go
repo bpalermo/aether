@@ -15,7 +15,7 @@ import (
 // would silently break the explicit fast-lane or fail to capture.
 func TestCaptureRedirectExprs(t *testing.T) {
 	mesh := uint16(commonconstants.ProxyOutboundPort) // 18081
-	cap := uint16(commonconstants.ProxyCapturePort)   // 15001
+	cap := uint16(commonconstants.ProxyCapturePort)   // 18001
 	exprs := captureRedirectExprs(mesh, cap)
 	require.Len(t, exprs, 9)
 
@@ -37,8 +37,8 @@ func TestCaptureRedirectExprs(t *testing.T) {
 	assert.Equal(t, expr.CmpOpEq, exprs[6].(*expr.Cmp).Op)
 	assert.Equal(t, []byte{0x46, 0xA1}, exprs[6].(*expr.Cmp).Data) // 18081
 
-	// redirect to 15001
+	// redirect to 18001
 	require.IsType(t, &expr.Immediate{}, exprs[7])
-	assert.Equal(t, []byte{0x3A, 0x99}, exprs[7].(*expr.Immediate).Data) // 15001
+	assert.Equal(t, []byte{0x46, 0x51}, exprs[7].(*expr.Immediate).Data) // 18001
 	assert.IsType(t, &expr.Redir{}, exprs[8])
 }
