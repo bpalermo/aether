@@ -161,3 +161,111 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 		},
 	}
 }
+
+// GAMMA east-west L7 routing (proposal 018, Phase 2). A GammaRoute is one resolved
+// HTTPRoute rule: ordered matches forwarding to one or more weighted backend
+// clusters, with an optional timeout. Backends are already resolved to data-plane
+// cluster names (<backend>.<meshDomain>) by the reconciler.
+type GammaRoute struct {
+	Matches  []GammaMatch
+	Backends []GammaBackend
+	Timeout  *durationpb.Duration
+}
+
+// GammaMatch is one HTTPRoute match: a path (prefix OR exact; empty = prefix "/")
+// and zero or more exact header matches (ANDed).
+type GammaMatch struct {
+	Prefix  string
+	Exact   string
+	Headers []GammaHeaderMatch
+}
+
+// GammaHeaderMatch is an exact request-header match.
+type GammaHeaderMatch struct {
+	Name  string
+	Value string
+}
+
+// GammaBackend is one weighted backend of a route: the resolved data-plane Cluster
+// the route forwards to, plus the bare Service name (for the dependency set).
+type GammaBackend struct {
+	Service string
+	Cluster string
+	Weight  uint32
+}
+
+// BuildOutboundServiceVirtualHost builds a service's outbound virtual host enriched
+// with GAMMA rules: each rule's matches become Envoy routes to its weighted backend
+// cluster(s), with the outbound retry policy and an optional timeout. A trailing
+// catch-all routes anything the rules don't match to the service's own cluster
+// (name), so producer rules are additive. With no rules it is the passthrough vhost.
+func BuildOutboundServiceVirtualHost(name string, domains []string, rules []GammaRoute) *routev3.VirtualHost {
+	if len(rules) == 0 {
+		return BuildOutboundClusterVirtualHost(name, domains)
+	}
+	var routes []*routev3.Route
+	for _, rule := range rules {
+		action := gammaRouteAction(name, rule)
+		matches := rule.Matches
+		if len(matches) == 0 {
+			matches = []GammaMatch{{Prefix: "/"}}
+		}
+		for _, m := range matches {
+			routes = append(routes, &routev3.Route{Match: gammaRouteMatch(m), Action: action})
+		}
+	}
+	routes = append(routes, &routev3.Route{
+		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: name},
+			RetryPolicy:      outboundRetryPolicy(),
+		}},
+	})
+	return &routev3.VirtualHost{Name: name, Domains: domains, Routes: routes}
+}
+
+func gammaRouteMatch(m GammaMatch) *routev3.RouteMatch {
+	rm := &routev3.RouteMatch{}
+	switch {
+	case m.Exact != "":
+		rm.PathSpecifier = &routev3.RouteMatch_Path{Path: m.Exact}
+	case m.Prefix != "":
+		rm.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: m.Prefix}
+	default:
+		rm.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
+	}
+	for _, h := range m.Headers {
+		rm.Headers = append(rm.Headers, &routev3.HeaderMatcher{
+			Name: h.Name,
+			HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: h.Value},
+				},
+			},
+		})
+	}
+	return rm
+}
+
+func gammaRouteAction(serviceCluster string, rule GammaRoute) *routev3.Route_Route {
+	ra := &routev3.RouteAction{RetryPolicy: outboundRetryPolicy()}
+	if rule.Timeout != nil {
+		ra.Timeout = rule.Timeout
+	}
+	switch len(rule.Backends) {
+	case 0:
+		ra.ClusterSpecifier = &routev3.RouteAction_Cluster{Cluster: serviceCluster}
+	case 1:
+		ra.ClusterSpecifier = &routev3.RouteAction_Cluster{Cluster: rule.Backends[0].Cluster}
+	default:
+		weighted := &routev3.WeightedCluster{}
+		for _, b := range rule.Backends {
+			weighted.Clusters = append(weighted.Clusters, &routev3.WeightedCluster_ClusterWeight{
+				Name:   b.Cluster,
+				Weight: wrapperspb.UInt32(b.Weight),
+			})
+		}
+		ra.ClusterSpecifier = &routev3.RouteAction_WeightedClusters{WeightedClusters: weighted}
+	}
+	return &routev3.Route_Route{Route: ra}
+}

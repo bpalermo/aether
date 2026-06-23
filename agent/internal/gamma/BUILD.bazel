@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gamma",
+    srcs = ["reconciler.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/gamma",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//agent/internal/xds/proxy",
+        "//common/log",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+        "@io_k8s_sigs_controller_runtime//pkg/reconcile",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+        "@org_golang_google_protobuf//types/known/durationpb",
+    ],
+)
+
+go_test(
+    name = "gamma_test",
+    srcs = ["reconciler_test.go"],
+    embed = [":gamma"],
+    deps = [
+        "//agent/internal/xds/proxy",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+    ],
+)

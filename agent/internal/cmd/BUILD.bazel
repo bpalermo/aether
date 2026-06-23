@@ -16,6 +16,7 @@ go_library(
         "//agent/internal/edge",
         "//agent/internal/edge/gatewayapi",
         "//agent/internal/edge/secret",
+        "//agent/internal/gamma",
         "//agent/internal/node",
         "//agent/internal/proxy/hotrestart",
         "//agent/internal/spire",

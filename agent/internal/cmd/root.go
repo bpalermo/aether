@@ -29,6 +29,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
+	"github.com/bpalermo/aether/agent/internal/gamma"
 	"github.com/bpalermo/aether/agent/internal/node"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
@@ -52,6 +53,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const (
@@ -110,6 +112,7 @@ func init() {
 	// Cold-start gate (node proxy only): remove the aether.io/agent-not-ready
 	// startup taint from this node once the CNI server is serving.
 	rootCmd.Flags().BoolVar(&cfg.RemoveStartupTaint, "remove-startup-taint", cfg.RemoveStartupTaint, "Remove the aether.io/agent-not-ready node taint once the CNI server is serving (needs nodes patch RBAC)")
+	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", false, "Enable GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2)")
 }
 
 // registerSharedFlags registers the flags common to the node agent (root) and
@@ -311,6 +314,24 @@ func runAgent(ctx context.Context) (retErr error) {
 	refresher := xdsServer.NewRegistryRefresher(cfg.ClusterName, cfg.NodeName, snapshotCache, reg, l)
 	if err = m.Add(refresher); err != nil {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
+	}
+
+	// GAMMA east-west L7 routing (proposal 018, Phase 2): watch HTTPRoutes parented
+	// to a Service and enrich the outbound routes. Default off — registers nothing
+	// (and adds no gateway-api watch) unless --gamma is set.
+	if cfg.Gamma {
+		if err = gatewayv1.Install(m.GetScheme()); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+		}
+		gammaReconciler := &gamma.Reconciler{
+			Client:     m.GetClient(),
+			Sink:       snapshotCache,
+			MeshDomain: cfg.MeshDomain,
+			Log:        l,
+		}
+		if err = gammaReconciler.SetupWithManager(m); err != nil {
+			return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+		}
 	}
 
 	l.DebugContext(ctx, "waiting for local storage to be ready")
