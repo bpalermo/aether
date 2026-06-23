@@ -5,6 +5,11 @@ const (
 	// binds inside each pod's network namespace. The CNI plugin probes this
 	// address (from within the netns) to confirm the data plane is serving.
 	ProxyOutboundPort = 18081
+	// ProxyCapturePort is the port the per-pod transparent-capture listener binds
+	// inside the pod netns (proposal 018, Phase 3a). The CNI redirects outbound
+	// TCP to a mesh ClusterIP:ProxyOutboundPort here; the listener recovers the
+	// original ClusterIP and routes by cluster.local authority. Default off.
+	ProxyCapturePort = 15001
 	// ProxyReadinessPath is the path matched by the non-pass-through
 	// health_check filter on every outbound listener. A 200 proves the listener
 	// is active on worker threads in that netns; a 503 means the answering

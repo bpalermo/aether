@@ -4,6 +4,7 @@ go_library(
     name = "proxy",
     srcs = [
         "accesslog.go",
+        "capture.go",
         "cluster.go",
         "edge.go",
         "egress.go",
@@ -46,6 +47,8 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/health_check/v3:health_check",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/on_demand/v3:on_demand",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/listener/http_inspector/v3:http_inspector",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/listener/original_dst/v3:original_dst",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/listener/tls_inspector/v3:tls_inspector",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/set_filter_state/v3:set_filter_state",
@@ -67,6 +70,7 @@ go_test(
     name = "proxy_test",
     srcs = [
         "accesslog_test.go",
+        "capture_test.go",
         "edge_test.go",
         "egress_test.go",
         "endpoint_test.go",
