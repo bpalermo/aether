@@ -4,12 +4,11 @@
 //
 // TCPRoute: weighted backends replace the passthrough TCP floor chain for a service.
 // TLSRoute: per-SNI filter chains (server_names match) route to weighted backends.
-// UDPRoute: control-plane side only — UDP listener + udp_proxy backends. The CNI
-// UDP redirect is not yet wired; see the note in GenerateUDPCaptureListener.
+// UDPRoute: UDP capture listener + udp_proxy backends, with a matching CNI UDP redirect.
 //
 // All three route types are gated behind --l4-routes (proposal 018, Phase 3b).
-// Scheme registration uses gateway-api v1alpha2 (TCPRoute/TLSRoute/UDPRoute are
-// not yet promoted to v1 in gateway-api v1.5.1).
+// TLSRoute graduated to v1 in gateway-api v1.5.1 (and the cluster serves only v1),
+// so it is watched as v1.TLSRoute; TCPRoute/UDPRoute remain v1alpha2 (not promoted).
 package l4route
 
 import (
@@ -22,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
@@ -60,7 +60,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha2.TCPRoute{}).
-		Watches(&gatewayv1alpha2.TLSRoute{}, enqueueAll).
+		Watches(&gatewayv1.TLSRoute{}, enqueueAll).
 		Watches(&gatewayv1alpha2.UDPRoute{}, enqueueAll).
 		Named("l4route").
 		Complete(r)
@@ -74,7 +74,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	if err := r.List(ctx, tcpList); err != nil {
 		return reconcile.Result{}, err
 	}
-	tlsList := &gatewayv1alpha2.TLSRouteList{}
+	tlsList := &gatewayv1.TLSRouteList{}
 	if err := r.List(ctx, tlsList); err != nil {
 		return reconcile.Result{}, err
 	}
@@ -159,7 +159,7 @@ func (r *Reconciler) buildTCPRoute(rule gatewayv1alpha2.TCPRouteRule) proxy.L4Se
 // buildTLSRoute translates a TLSRouteRule + the route's hostname list into an
 // L4ServiceRoute. Hostnames map to filter_chain_match.server_names on the
 // capture listener.
-func (r *Reconciler) buildTLSRoute(rule gatewayv1alpha2.TLSRouteRule, hostnames []string) proxy.L4ServiceRoute {
+func (r *Reconciler) buildTLSRoute(rule gatewayv1.TLSRouteRule, hostnames []string) proxy.L4ServiceRoute {
 	return proxy.L4ServiceRoute{
 		SNIHostnames: hostnames,
 		Backends:     r.buildL4Backends(rule.BackendRefs),

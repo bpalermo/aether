@@ -68,7 +68,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.Gateway{}, resync).
 		Watches(&gatewayv1alpha2.TCPRoute{}, resync).
-		Watches(&gatewayv1alpha2.TLSRoute{}, resync).
+		Watches(&gatewayv1.TLSRoute{}, resync).
 		Named("gatewayapi")
 	if r.Secrets != nil {
 		b = b.Watches(&corev1.Secret{}, resync)
@@ -139,7 +139,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	})
 
 	// --- TLSRoutes ---
-	tlsRouteList := &gatewayv1alpha2.TLSRouteList{}
+	tlsRouteList := &gatewayv1.TLSRouteList{}
 	if err := r.List(ctx, tlsRouteList, client.InNamespace(r.Namespace)); err != nil {
 		return reconcile.Result{}, err
 	}

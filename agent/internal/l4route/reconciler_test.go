@@ -63,7 +63,7 @@ func TestBuildTCPRoute_WeightedBackends(t *testing.T) {
 // TestBuildTLSRoute_WithHostnames verifies TLSRoute SNI propagation.
 func TestBuildTLSRoute_WithHostnames(t *testing.T) {
 	r := &Reconciler{MeshDomain: "aether.internal"}
-	rule := gatewayv1alpha2.TLSRouteRule{
+	rule := gatewayv1.TLSRouteRule{
 		BackendRefs: []gatewayv1.BackendRef{
 			{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-b"}, Weight: ptr(int32(1))},
 		},
