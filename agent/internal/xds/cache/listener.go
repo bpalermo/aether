@@ -38,6 +38,10 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	if err != nil {
 		return err
 	}
+	udpCapture, err := c.generateUDPCaptureListener(cniPod)
+	if err != nil {
+		return err
+	}
 
 	c.listenerMu.Lock()
 	if c.listeners == nil {
@@ -47,6 +51,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		inbound:       inbound,
 		outbound:      outbound,
 		capture:       capture,
+		udpCapture:    udpCapture,
 		cniPod:        cniPod,
 		appClusters:   clustersToResources(appClusters),
 		healthCluster: healthCluster,
@@ -123,6 +128,9 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 		resources = append(resources, entry.inbound, entry.outbound)
 		if entry.capture != nil {
 			resources = append(resources, entry.capture)
+		}
+		if entry.udpCapture != nil {
+			resources = append(resources, entry.udpCapture)
 		}
 		if hc, ok := entry.healthCluster.(*clusterv3.Cluster); ok && hc != nil {
 			probeClusters = append(probeClusters, hc.GetName())
@@ -210,10 +218,17 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			errs = append(errs, captureErr)
 			continue
 		}
+		udpCapture, udpCaptureErr := c.generateUDPCaptureListener(pod)
+		if udpCaptureErr != nil {
+			c.log.ErrorContext(ctx, "failed to generate UDP capture listener for pod", "error", udpCaptureErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
+			errs = append(errs, udpCaptureErr)
+			continue
+		}
 		c.listeners[netns] = listenerEntry{
 			inbound:       inbound,
 			outbound:      outbound,
 			capture:       capture,
+			udpCapture:    udpCapture,
 			cniPod:        pod,
 			appClusters:   clustersToResources(appClusters),
 			healthCluster: healthCluster,

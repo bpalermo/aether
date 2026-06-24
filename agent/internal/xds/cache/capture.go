@@ -12,6 +12,26 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
+// generateUDPCaptureListener builds a pod's per-pod UDP capture listener, or
+// returns nil when capture is disabled or no UDPRoute backends are in scope.
+// The listener is generated from the current udpServiceRoutes snapshot.
+func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.Resource, error) {
+	if !c.captureEnabled {
+		return nil, nil
+	}
+	udpRoutes := c.udpServiceRoutesSnapshot()
+	l, err := proxy.GenerateUDPCaptureListener(
+		cniPod.GetName(),
+		cniPod.GetNetworkNamespace(),
+		constants.ProxyUDPCapturePort,
+		udpRoutes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
 // generateCaptureListener builds a pod's transparent-capture listener, or returns
 // nil when capture is disabled (so the listenerEntry carries no capture resource).
 func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Resource, error) {
@@ -260,6 +280,45 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 		resources = append(resources, cl)
 	}
 	c.clusterMu.RUnlock()
+
+	return resources
+}
+
+// captureUDPClusters returns the UDP floor clusters for services with UDPRoute
+// backends as a resource slice. Each in-scope service that has at least one UDP
+// backend emits a "udp:<svc>.<domain>" EDS cluster — a plain EDS cluster with
+// no transport socket, since UDP traffic is not covered by mesh mTLS.
+//
+// SECURITY NOTE: these clusters forward datagrams in plaintext. This is a known
+// limitation of the UDP floor (proposal 018 Phase 3b).
+func (c *SnapshotCache) captureUDPClusters() []types.Resource {
+	if !c.captureEnabled {
+		return nil
+	}
+
+	udpRoutes := c.udpServiceRoutesSnapshot()
+	if len(udpRoutes) == 0 {
+		return nil
+	}
+
+	// Collect unique service names from the UDP route backends.
+	services := make(map[string]struct{}, len(udpRoutes))
+	for _, backends := range udpRoutes {
+		for _, b := range backends {
+			if b.Service != "" {
+				services[b.Service] = struct{}{}
+			}
+		}
+	}
+
+	resources := make([]types.Resource, 0, len(services))
+	for svc := range services {
+		udpName := proxy.UDPClusterName(svc, c.meshDomain)
+		// EDS service name is the bare service name — shared with the HTTP/TCP
+		// clusters so the same load assignment carries UDP backends.
+		cl := proxy.NewUDPServiceCluster(udpName, svc, svc)
+		resources = append(resources, cl)
+	}
 	return resources
 }
 

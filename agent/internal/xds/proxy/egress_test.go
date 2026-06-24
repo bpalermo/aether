@@ -294,3 +294,56 @@ func TestSubsetSelectors_MultiKey(t *testing.T) {
 		}
 	}
 }
+
+// TestNewUDPServiceCluster verifies the UDP floor cluster shape: plain EDS,
+// no h2 protocol options, no transport socket, no subset routing.
+//
+// The absence of a transport socket is the key invariant — UDP datagrams are
+// forwarded in plaintext (no mesh mTLS). Any regression that injects a
+// transport socket would silently break every UDP route by wrapping datagrams
+// in a TLS session the backend is not expecting.
+func TestNewUDPServiceCluster(t *testing.T) {
+	c := NewUDPServiceCluster("udp:svc-a.aether.internal", "svc-a", "svc-a")
+
+	assert.Equal(t, "udp:svc-a.aether.internal", c.GetName())
+	assert.Equal(t, "svc-a", c.GetAltStatName())
+	assert.Equal(t, "svc-a", c.GetEdsClusterConfig().GetServiceName())
+	assert.Equal(t, clusterv3.Cluster_EDS, c.GetType())
+
+	// No per-downstream pool needed for UDP (no connection-level identity).
+	assert.False(t, c.GetConnectionPoolPerDownstreamConnection())
+
+	// No HTTP/2 protocol options: udp_proxy speaks raw UDP upstream.
+	assert.Empty(t, c.GetTypedExtensionProtocolOptions(), "UDP cluster must not configure h2 upstream protocol")
+
+	// No transport socket: UDP datagrams are plaintext (no mesh mTLS for UDP).
+	assert.Nil(t, c.GetTransportSocket(), "UDP cluster must not have a transport socket")
+	assert.Nil(t, c.GetTransportSocketMatcher(), "UDP cluster must not have a transport socket matcher")
+
+	// No subset routing: not meaningful for UDP.
+	assert.Nil(t, c.GetLbSubsetConfig(), "UDP cluster must not configure subset routing")
+
+	// Outlier detection present for fast failure.
+	od := c.GetOutlierDetection()
+	require.NotNil(t, od)
+	assert.True(t, od.GetSplitExternalLocalOriginErrors())
+	assert.Equal(t, uint32(3), od.GetConsecutiveLocalOriginFailure().GetValue())
+	assert.Equal(t, uint32(50), od.GetMaxEjectionPercent().GetValue())
+
+	// EDS removals honoured immediately (same as TCP/HTTP clusters).
+	assert.True(t, c.GetIgnoreHealthOnHostRemoval())
+}
+
+// TestUDPClusterName verifies the naming scheme and that it does not collide with
+// the TCP or HTTP cluster names for the same service.
+func TestUDPClusterName(t *testing.T) {
+	udp := UDPClusterName("payments", "aether.internal")
+	tcp := TCPClusterName("payments", "aether.internal")
+	http := ServiceClusterName("payments", "aether.internal")
+
+	assert.Equal(t, "udp:payments.aether.internal", udp)
+	assert.Equal(t, "tcp:payments.aether.internal", tcp)
+	assert.Equal(t, "payments.aether.internal", http)
+	assert.NotEqual(t, udp, tcp, "UDP and TCP clusters must have distinct names")
+	assert.NotEqual(t, udp, http, "UDP and HTTP clusters must have distinct names")
+}

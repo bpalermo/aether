@@ -70,6 +70,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	if c.edge {
 		clusters = append(clusters, c.edgeTCPClusters()...)
 	}
+	// UDP floor clusters (proposal 018, Phase 3b): one per service with UDPRoute
+	// backends. These are plain EDS clusters with no transport socket — UDP datagrams
+	// are not protected by mesh mTLS (known limitation). Only emitted when capture is
+	// enabled and there are UDPRoute rules.
+	clusters = append(clusters, c.captureUDPClusters()...)
 
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
