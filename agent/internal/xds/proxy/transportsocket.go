@@ -64,12 +64,13 @@ func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 
 // UpstreamTCPTransportSocket creates a TLS transport socket for TCP-proxy upstream
 // connections (proposal 018, Phase 3a TCP floor). It is identical to
-// UpstreamTransportSocket except that it advertises ALPN "aether-tcp" instead of
-// "h2". The destination inbound listener matches application_protocols:["aether-tcp"]
-// on its TCP floor chain, cleanly demultiplexing TCP from HTTP (which uses "h2").
+// UpstreamTransportSocket except that it advertises NO ALPN (vs HTTP's "h2"). The
+// destination inbound listener's HTTP chains match application_protocols:["h2"], so
+// a no-ALPN mTLS connection falls through to the inbound TCP floor's DEFAULT chain —
+// demultiplexing TCP from HTTP with the standard h2 ALPN instead of a bespoke token.
 // sanURIs and sni semantics are unchanged.
 func UpstreamTCPTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
-	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS(), AetherTCPALPN)
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS(), "")
 }
 
 // EdgeUpstreamTransportSocket is UpstreamTransportSocket for the edge proxy: it
@@ -81,17 +82,22 @@ func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationCont
 	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName))
 }
 
-// upstreamTransportSocket builds an upstream TLS context. An optional alpnOverride
-// replaces the default "h2" ALPN (used by the TCP floor path to signal "aether-tcp"
-// to the destination inbound listener). If no override is supplied, ALPN is "h2".
+// upstreamTransportSocket builds an upstream TLS context. With no alpnOverride the
+// ALPN is "h2" (HTTP/2 mesh transport). An alpnOverride of "" suppresses ALPN
+// entirely — the TCP floor path, so the destination inbound demuxes it as the
+// default (non-h2) chain; any other override value sets that explicit ALPN list.
 func upstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string, sdsSource *corev3.ConfigSource, alpnOverride ...string) *corev3.TransportSocket {
 	alpn := []string{"h2"}
-	if len(alpnOverride) > 0 && alpnOverride[0] != "" {
-		alpn = alpnOverride
+	if len(alpnOverride) > 0 {
+		if alpnOverride[0] == "" {
+			alpn = nil // no ALPN (TCP floor): falls to the inbound default chain
+		} else {
+			alpn = alpnOverride
+		}
 	}
 	common := &transport_sockets_v3.CommonTlsContext{
-		// Clusters speak HTTP/2 upstream by default; the TCP floor overrides with
-		// "aether-tcp" so the destination inbound can demux to the tcp_proxy chain.
+		// Clusters speak HTTP/2 upstream ("h2"); the TCP floor sends no ALPN so the
+		// destination inbound demuxes it to the default tcp_proxy chain (HTTP matches "h2").
 		AlpnProtocols: alpn,
 		TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
 			sdsSecretConfigFrom(tlsCertificateSecretName, sdsSource),

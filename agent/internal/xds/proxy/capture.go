@@ -20,12 +20,6 @@ import (
 // generated mesh-Service names) to the registry-backed service clusters.
 const CaptureHTTPRouteName = "cap_http"
 
-// AetherTCPALPN is the TLS ALPN token the capture/outbound tcp_proxy uses when
-// dialing a destination over mTLS. The destination inbound's filter-chain match
-// on application_protocols: ["aether-tcp"] selects the tcp_proxy floor chain;
-// any other ALPN (e.g. "h2" from the HCM) falls through to the HTTP chains.
-const AetherTCPALPN = "aether-tcp"
-
 const (
 	listenerFilterOriginalDstName   = "envoy.filters.listener.original_dst"
 	listenerFilterHTTPInspectorName = "envoy.filters.listener.http_inspector"

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -34,10 +35,10 @@ func TestNewInboundListener(t *testing.T) {
 	assert.Equal(t, "/var/run/netns/cni-a", sa.GetNetworkNamespaceFilepath())
 	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
 
-	// First chain is the TCP floor (application_protocols: ["aether-tcp"]).
+	// First chain is the TCP floor — the listener's default chain (no match): a
+	// no-ALPN mTLS connection (the source tcp_proxy egress) lands here.
 	tcpFloor := l.GetFilterChains()[0]
-	require.NotNil(t, tcpFloor.GetFilterChainMatch())
-	assert.Equal(t, []string{AetherTCPALPN}, tcpFloor.GetFilterChainMatch().GetApplicationProtocols())
+	assert.Nil(t, tcpFloor.GetFilterChainMatch(), "TCP floor is the default chain (no match)")
 	require.NotNil(t, tcpFloor.GetTransportSocket(), "TCP floor chain must terminate mTLS")
 	require.Len(t, tcpFloor.GetFilters(), 1)
 	assert.Equal(t, "envoy.filters.network.tcp_proxy", tcpFloor.GetFilters()[0].GetName())
@@ -131,17 +132,19 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 	bySNI := map[string]*listenerv3.FilterChain{}
 	var defaultChain *listenerv3.FilterChain
 	for _, fc := range l.GetFilterChains() {
-		// Skip the TCP floor chain (matched on application_protocols only).
-		if fc.GetFilterChainMatch() != nil && len(fc.GetFilterChainMatch().GetApplicationProtocols()) > 0 {
+		m := fc.GetFilterChainMatch()
+		// The TCP floor is the only no-match (default) chain — skip it.
+		if m == nil {
 			continue
 		}
-		if fc.GetFilterChainMatch() == nil || len(fc.GetFilterChainMatch().GetServerNames()) == 0 {
-			defaultChain = fc
+		// Per-port HCM chains match a port SNI; the no-SNI HCM chain matches "h2".
+		if len(m.GetServerNames()) > 0 {
+			bySNI[m.GetServerNames()[0]] = fc
 			continue
 		}
-		bySNI[fc.GetFilterChainMatch().GetServerNames()[0]] = fc
+		defaultChain = fc
 	}
-	require.NotNil(t, defaultChain, "a default (no-SNI) chain must exist for back-compat")
+	require.NotNil(t, defaultChain, "a default (no-SNI, h2) HCM chain must exist for back-compat")
 	require.Contains(t, bySNI, "8080")
 	require.Contains(t, bySNI, "9090")
 
@@ -193,10 +196,9 @@ func TestInboundChainStatsFilter(t *testing.T) {
 	assert.False(t, fields["emit_pod"].GetBoolValue())
 }
 
-// TestInboundTCPFloorFilterChain verifies the ALPN-demuxed TCP floor chain on the
-// inbound :15008 listener (proposal 018, Phase 3a).
-// Expected: chain named "in_tcp_<pod>", matched on application_protocols=["aether-tcp"],
-// a single tcp_proxy network filter routing to the app cluster, and a transport socket.
+// TestInboundTCPFloorFilterChain verifies the TCP floor chain on the inbound :15008
+// listener (proposal 018, Phase 3a) — the DEFAULT chain (no match): a no-ALPN mTLS
+// connection lands here, with a single tcp_proxy network filter to the app cluster.
 func TestInboundTCPFloorFilterChain(t *testing.T) {
 	pod := &cniv1.CNIPod{
 		Name:             "svc-a",
@@ -208,17 +210,15 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 	l, err := NewInboundListener(pod, "aether.internal", false)
 	require.NoError(t, err)
 
-	// Find the TCP floor chain.
+	// Find the TCP floor chain: the default chain (no match), named in_tcp_<pod>.
 	var tcpFloor *listenerv3.FilterChain
 	for _, fc := range l.GetFilterChains() {
-		if fc.GetFilterChainMatch() != nil &&
-			len(fc.GetFilterChainMatch().GetApplicationProtocols()) == 1 &&
-			fc.GetFilterChainMatch().GetApplicationProtocols()[0] == AetherTCPALPN {
+		if fc.GetFilterChainMatch() == nil && strings.HasPrefix(fc.GetName(), "in_tcp_") {
 			tcpFloor = fc
 			break
 		}
 	}
-	require.NotNil(t, tcpFloor, "TCP floor chain with application_protocols=[\"aether-tcp\"] must be present")
+	require.NotNil(t, tcpFloor, "TCP floor chain (default, in_tcp_<pod>) must be present")
 
 	// Chain name.
 	assert.Equal(t, "in_tcp_svc-a", tcpFloor.GetName())
