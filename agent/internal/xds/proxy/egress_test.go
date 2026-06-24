@@ -7,6 +7,7 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -303,12 +304,34 @@ func TestSubsetSelectors_MultiKey(t *testing.T) {
 // transport socket would silently break every UDP route by wrapping datagrams
 // in a TLS session the backend is not expecting.
 func TestNewUDPServiceCluster(t *testing.T) {
-	c := NewUDPServiceCluster("udp:svc-a.aether.internal", "svc-a", "svc-a")
+	// Source LA mirrors a service's bare-name EDS: endpoints on the mesh inbound
+	// :15008 (TCP). UDPLoadAssignment must rewrite them to the app UDP port.
+	src := &endpointv3.ClusterLoadAssignment{
+		ClusterName: "svc-a",
+		Endpoints: []*endpointv3.LocalityLbEndpoints{{
+			LbEndpoints: []*endpointv3.LbEndpoint{{
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{Endpoint: &endpointv3.Endpoint{
+					Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+						Protocol:      corev3.SocketAddress_TCP,
+						Address:       "10.0.0.9",
+						PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 15008},
+					}}},
+				}},
+			}},
+		}},
+	}
+	la := UDPLoadAssignment(src, "udp:svc-a.aether.internal", 9000)
+	c := NewUDPServiceCluster("udp:svc-a.aether.internal", "svc-a", la)
 
 	assert.Equal(t, "udp:svc-a.aether.internal", c.GetName())
 	assert.Equal(t, "svc-a", c.GetAltStatName())
-	assert.Equal(t, "svc-a", c.GetEdsClusterConfig().GetServiceName())
-	assert.Equal(t, clusterv3.Cluster_EDS, c.GetType())
+	assert.Equal(t, clusterv3.Cluster_STATIC, c.GetType())
+	// Inline LA reaches the backend's app UDP port directly (not the mesh inbound).
+	sa := c.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, corev3.SocketAddress_UDP, sa.GetProtocol())
+	assert.Equal(t, uint32(9000), sa.GetPortValue())
+	// The source LA is not mutated (clone).
+	assert.Equal(t, uint32(15008), src.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetPortValue())
 
 	// No per-downstream pool needed for UDP (no connection-level identity).
 	assert.False(t, c.GetConnectionPoolPerDownstreamConnection())

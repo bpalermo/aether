@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/bpalermo/aether/agent/internal/capture"
 	"github.com/bpalermo/aether/agent/internal/meshdns"
@@ -311,12 +312,26 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 		}
 	}
 
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
 	resources := make([]types.Resource, 0, len(services))
 	for svc := range services {
+		entry, ok := c.clusters[svc]
+		if !ok || entry.loadAssignment == nil {
+			// Backend service not in scope yet; skip until its cluster/EDS exists.
+			continue
+		}
+		// entry.sni carries the backend's registered application port. The UDP floor
+		// has no inbound mTLS hop, so udp_proxy must reach that app port directly (not
+		// the mesh inbound :15008 the shared bare-name EDS carries) — build an inline
+		// app-port UDP load assignment from the service's endpoints.
+		port, err := strconv.Atoi(entry.sni)
+		if err != nil || port <= 0 || port > 65535 {
+			continue
+		}
 		udpName := proxy.UDPClusterName(svc, c.meshDomain)
-		// EDS service name is the bare service name — shared with the HTTP/TCP
-		// clusters so the same load assignment carries UDP backends.
-		cl := proxy.NewUDPServiceCluster(udpName, svc, svc)
+		la := proxy.UDPLoadAssignment(entry.loadAssignment, udpName, uint32(port))
+		cl := proxy.NewUDPServiceCluster(udpName, svc, la)
 		resources = append(resources, cl)
 	}
 	return resources
