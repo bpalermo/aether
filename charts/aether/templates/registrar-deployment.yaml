@@ -54,6 +54,9 @@ spec:
             {{- if .Values.registrar.generateMeshServices }}
             - "--generate-mesh-services"
             {{- end }}
+            {{- if .Values.registrar.enableMCS }}
+            - "--enable-mcs"
+            {{- end }}
             - "--spire-enabled={{ .Values.spire.enabled }}"
             {{- if .Values.spire.enabled }}
             {{- with .Values.spire.trustDomain }}

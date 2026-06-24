@@ -11,6 +11,7 @@ import (
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	"github.com/bpalermo/aether/common/spire"
+	"github.com/bpalermo/aether/registrar/internal/mcs"
 	"github.com/bpalermo/aether/registrar/internal/server"
 	"github.com/bpalermo/aether/registrar/internal/services"
 	"github.com/bpalermo/aether/registry"
@@ -18,6 +19,9 @@ import (
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -64,6 +68,7 @@ func init() {
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
 	rootCmd.Flags().BoolVar(&cfg.GenerateMeshServices, "generate-mesh-services", false, "Project the mesh catalog into selectorless k8s Services on the mesh port (transparent-capture VIPs, proposal 018 Phase 3a)")
+	rootCmd.Flags().BoolVar(&cfg.EnableMCS, "enable-mcs", false, "Enable Multi-Cluster Services (MCS-API) phase 1: export ServiceExports to the registry and materialize ServiceImports + clusterset VIPs (proposals 018 + 006; requires the etcd backend)")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
 
 	// SPIRE on/off is aether system config (inherited from the umbrella globals);
@@ -102,7 +107,21 @@ func runRegistrar(ctx context.Context) (retErr error) {
 		}()
 	}
 
-	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version)
+	var bootstrapOpts []func(*ctrl.Options)
+	if cfg.EnableMCS {
+		// MCS phase 1 reconciles typed ServiceExport/ServiceImport objects, so the
+		// manager scheme must carry client-go built-ins + the MCS-API group.
+		scheme := runtime.NewScheme()
+		if err := clientgoscheme.AddToScheme(scheme); err != nil {
+			return fmt.Errorf("register client-go scheme: %w", err)
+		}
+		if err := mcsv1alpha1.AddToScheme(scheme); err != nil {
+			return fmt.Errorf("register MCS-API scheme: %w", err)
+		}
+		bootstrapOpts = append(bootstrapOpts, func(o *ctrl.Options) { o.Scheme = scheme })
+	}
+
+	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, bootstrapOpts...)
 	if err != nil {
 		return err
 	}
@@ -151,6 +170,39 @@ func runRegistrar(ctx context.Context) (retErr error) {
 		if err = m.Add(gen); err != nil {
 			return fmt.Errorf("failed to add mesh-Service generator: %w", err)
 		}
+	}
+
+	// Multi-Cluster Services (MCS-API) phase 1 (proposals 018 + 006): the leader
+	// registrar exports local ServiceExports to the registry and materializes
+	// ServiceImports + clusterset VIPs from the clusterset-wide export view. It
+	// needs a registry backend with a cross-cluster export plane (etcd); other
+	// backends don't implement registry.ServiceExporter, so this is a hard error
+	// rather than a silent no-op (an operator enabling MCS on a non-etcd backend
+	// has misconfigured the deployment).
+	if cfg.EnableMCS {
+		exporter, ok := reg.(registry.ServiceExporter)
+		if !ok {
+			return fmt.Errorf("--enable-mcs requires a registry backend with a cross-cluster export plane (etcd); backend %q does not implement it", cfg.RegistryBackend)
+		}
+		exportCtl := &mcs.ExportController{
+			Client:   m.GetClient(),
+			Exporter: exporter,
+			Log:      l,
+		}
+		if err = exportCtl.SetupWithManager(m); err != nil {
+			return fmt.Errorf("failed to set up MCS ServiceExport controller: %w", err)
+		}
+		importGen := &mcs.ImportGenerator{
+			Client:   m.GetClient(),
+			Exporter: exporter,
+			MeshPort: int32(constants.ProxyOutboundPort),
+			Interval: cfg.SyncInterval,
+			Log:      l,
+		}
+		if err = m.Add(importGen); err != nil {
+			return fmt.Errorf("failed to add MCS ServiceImport generator: %w", err)
+		}
+		l.InfoContext(ctx, "MCS-API phase 1 enabled (ServiceExport->registry, registry->ServiceImport+clusterset VIP)")
 	}
 
 	var grpcOpts []grpc.ServerOption
