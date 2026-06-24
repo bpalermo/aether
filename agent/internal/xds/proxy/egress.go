@@ -299,7 +299,7 @@ func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[strin
 		cluster.TransportSocket = UpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
 		return
 	}
-	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID + ":tcp")
+	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
 
 	cluster.TransportSocketMatcher = matcher
 	cluster.TransportSocketMatches = UpstreamTCPTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs, sni)
