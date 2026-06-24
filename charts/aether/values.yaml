@@ -100,6 +100,11 @@ agent:
   # header / timeout). Requires the Gateway API CRDs. Default off — a no-op, and
   # adds the cluster-wide httproutes RBAC only when enabled.
   gamma: false
+  # L4 route types (proposal 018, Phase 3b): watch TCPRoutes/TLSRoutes/UDPRoutes
+  # parented to a Service and project weighted TCP floor chains + per-SNI TLS chains
+  # onto the capture listener. Requires --transparent-capture. Default off.
+  # NOTE: UDPRoute is control-plane only; the CNI UDP redirect is not yet wired.
+  l4Routes: false
   # Transparent capture (proposal 018, Phase 3a): per-pod capture listeners + the
   # cap_http route table built from the generated mesh Services. Pairs with
   # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.

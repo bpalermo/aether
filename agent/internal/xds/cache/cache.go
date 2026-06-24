@@ -149,6 +149,16 @@ type SnapshotCache struct {
 	// dependency set so their EDS clusters generate; the per-service outbound vhost
 	// is enriched with the rules. Guarded by depMu (dependency state).
 	serviceRoutes map[string][]proxy.GammaRoute
+	// tcpServiceRoutes holds the TCPRoute L4 rules (parentRef=Service, proposal 018
+	// Phase 3b), keyed by the parent service. Empty unless --l4-routes is enabled.
+	// Guarded by depMu (same lock as serviceRoutes: dependency state).
+	tcpServiceRoutes map[string][]proxy.L4ServiceRoute
+	// tlsServiceRoutes holds the TLSRoute L4 rules (SNI-based, parentRef=Service,
+	// proposal 018 Phase 3b). Guarded by depMu.
+	tlsServiceRoutes map[string][]proxy.L4ServiceRoute
+	// udpServiceRoutes holds the UDPRoute backends (parentRef=Service, proposal 018
+	// Phase 3b). Control-plane only until the CNI UDP redirect lands. Guarded by depMu.
+	udpServiceRoutes map[string][]proxy.L4Backend
 	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
 	observedTTL time.Duration
 	// depChanged receives a (coalesced) signal when the dependency set
@@ -281,6 +291,9 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		observedDeps:       make(map[string]time.Time),
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),
+		tcpServiceRoutes:   make(map[string][]proxy.L4ServiceRoute),
+		tlsServiceRoutes:   make(map[string][]proxy.L4ServiceRoute),
+		udpServiceRoutes:   make(map[string][]proxy.L4Backend),
 		captureAuthorities: make(map[string]string),
 		depChanged:         make(chan struct{}, 1),
 		version:            atomic.NewUint64(0),

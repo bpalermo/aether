@@ -19,6 +19,8 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 		return nil, nil
 	}
 	c.captureMu.RLock()
+	tcpRoutes := c.tcpServiceRoutesSnapshot()
+	tlsRoutes := c.tlsServiceRoutesSnapshot()
 	tcpServices := make([]proxy.CaptureTCPService, len(c.captureTCPServices))
 	for i, e := range c.captureTCPServices {
 		tcpServices[i] = proxy.CaptureTCPService{
@@ -27,6 +29,10 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 			// socket so the destination inbound demuxes to the TCP floor chain.
 			ClusterName: proxy.TCPClusterName(e.serviceName, c.meshDomain),
 			ClusterIP:   e.clusterIP,
+			// L4 route rules (Phase 3b): override the passthrough floor chain when
+			// a TCPRoute or TLSRoute is attached to this service.
+			TCPRouteRules: tcpRoutes[e.serviceName],
+			TLSRouteRules: tlsRoutes[e.serviceName],
 		}
 	}
 	c.captureMu.RUnlock()

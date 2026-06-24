@@ -32,6 +32,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/capture"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/gamma"
+	"github.com/bpalermo/aether/agent/internal/l4route"
 	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/node"
 	"github.com/bpalermo/aether/agent/internal/spire"
@@ -58,6 +59,7 @@ import (
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
 const (
@@ -117,6 +119,7 @@ func init() {
 	// startup taint from this node once the CNI server is serving.
 	rootCmd.Flags().BoolVar(&cfg.RemoveStartupTaint, "remove-startup-taint", cfg.RemoveStartupTaint, "Remove the aether.io/agent-not-ready node taint once the CNI server is serving (needs nodes patch RBAC)")
 	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", false, "Enable GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2)")
+	rootCmd.Flags().BoolVar(&cfg.L4Routes, "l4-routes", false, "Enable L4 route types (TCPRoute/TLSRoute/UDPRoute) parented to a Service: weighted TCP floor chains and SNI-routed TLS chains on the capture listener (proposal 018, Phase 3b). NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.")
 	rootCmd.Flags().BoolVar(&cfg.TransparentCapture, "transparent-capture", false, "Enable transparent capture: per-pod capture listeners + cap_http route table from the generated mesh Services (proposal 018, Phase 3a)")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
 	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
@@ -361,6 +364,26 @@ func runAgent(ctx context.Context) (retErr error) {
 		}
 		if err = gammaReconciler.SetupWithManager(m); err != nil {
 			return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+		}
+	}
+
+	// L4 route types (proposal 018, Phase 3b): watch TCPRoutes, TLSRoutes, and
+	// UDPRoutes parented to a Service and project weighted TCP floor chains /
+	// per-SNI TLS chains onto the capture listener. Default off (--l4-routes).
+	// Requires --transparent-capture to be meaningful (routes need capture chains).
+	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
+	if cfg.L4Routes {
+		if err = gatewayv1alpha2.Install(m.GetScheme()); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io v1alpha2 scheme: %w", err)
+		}
+		l4Reconciler := &l4route.Reconciler{
+			Client:     m.GetClient(),
+			Sink:       snapshotCache,
+			MeshDomain: cfg.MeshDomain,
+			Log:        l,
+		}
+		if err = l4Reconciler.SetupWithManager(m); err != nil {
+			return fmt.Errorf("failed to set up L4 route reconciler: %w", err)
 		}
 	}
 
