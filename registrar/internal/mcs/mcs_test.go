@@ -2,6 +2,7 @@ package mcs
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
@@ -78,6 +80,30 @@ func newClient(t *testing.T, objs ...client.Object) client.Client {
 		WithScheme(scheme(t)).
 		WithObjects(objs...).
 		WithStatusSubresource(&mcsv1alpha1.ServiceExport{}, &mcsv1alpha1.ServiceImport{}).
+		Build()
+}
+
+// newIPAllocatingClient mimics the apiserver's ClusterIP allocator: it assigns a
+// deterministic ClusterIP to every ClusterIP Service on Create (the fake client
+// otherwise leaves spec.ClusterIP empty), so the import generator observes a VIP.
+func newIPAllocatingClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	var n int
+	return fake.NewClientBuilder().
+		WithScheme(scheme(t)).
+		WithObjects(objs...).
+		WithStatusSubresource(&mcsv1alpha1.ServiceExport{}, &mcsv1alpha1.ServiceImport{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if svc, ok := obj.(*corev1.Service); ok &&
+					svc.Spec.ClusterIP == "" && svc.Spec.Type == corev1.ServiceTypeClusterIP {
+					n++
+					svc.Spec.ClusterIP = fmt.Sprintf("10.96.0.%d", n)
+					svc.Spec.ClusterIPs = []string{svc.Spec.ClusterIP}
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
 		Build()
 }
 
@@ -163,7 +189,7 @@ func newImportGen(c client.Client, exp *fakeExporter) *ImportGenerator {
 
 func TestImportGenerator_MaterializesImportAndVIP(t *testing.T) {
 	ctx := context.Background()
-	c := newClient(t)
+	c := newIPAllocatingClient(t)
 	exp := newFakeExporter("cluster-1")
 	exp.seeded = []export.ServiceExport{
 		{Service: "svc-1", Namespace: "team-a", Cluster: "cluster-2"},
@@ -171,23 +197,56 @@ func TestImportGenerator_MaterializesImportAndVIP(t *testing.T) {
 	g := newImportGen(c, exp)
 	g.reconcile(ctx)
 
+	// The clusterset VIP Service has a DISTINCT name (<svc>-clusterset) so it
+	// coexists with the same-named per-cluster mesh Service.
+	svc := &corev1.Service{}
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1-clusterset", Namespace: "team-a"}, svc))
+	assert.Equal(t, "true", svc.Labels[constants.LabelClustersetService])
+	assert.Empty(t, svc.Spec.Selector, "selectorless clusterset VIP: endpoints stay in the registry")
+	assert.Equal(t, "svc-1", svc.Annotations[constants.AnnotationMeshService])
+	assert.Equal(t, "svc-1", svc.Annotations[constants.AnnotationClustersetImport])
+	assert.Equal(t, "18081", svc.Annotations[constants.AnnotationMeshPort])
+	require.Len(t, svc.Spec.Ports, 1)
+	assert.Equal(t, int32(18081), svc.Spec.Ports[0].Port)
+	require.NotEmpty(t, svc.Spec.ClusterIP, "the clusterset VIP gets its own ClusterIP")
+
+	// No same-named clusterset Service collides with the mesh Service name.
+	notClusterset := &corev1.Service{}
+	err := c.Get(ctx, types.NamespacedName{Name: "svc-1", Namespace: "team-a"}, notClusterset)
+	assert.True(t, apierrors.IsNotFound(err), "the clusterset VIP does NOT take the mesh Service name")
+
 	si := &mcsv1alpha1.ServiceImport{}
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1", Namespace: "team-a"}, si))
 	assert.Equal(t, "true", si.Labels[constants.LabelManagedServiceImport])
 	assert.Equal(t, mcsv1alpha1.ClusterSetIP, si.Spec.Type)
 	require.Len(t, si.Spec.Ports, 1)
 	assert.Equal(t, int32(18081), si.Spec.Ports[0].Port)
+	require.Len(t, si.Spec.IPs, 1, "the ServiceImport VIP is the clusterset Service ClusterIP")
+	assert.Equal(t, svc.Spec.ClusterIP, si.Spec.IPs[0])
 	require.Len(t, si.Status.Clusters, 1)
 	assert.Equal(t, "cluster-2", si.Status.Clusters[0].Cluster)
+}
+
+func TestImportGenerator_SingleClusterExportGetsVIP(t *testing.T) {
+	ctx := context.Background()
+	c := newIPAllocatingClient(t)
+	// Only a LOCAL export (this cluster) — single-cluster MCS must still produce a
+	// ServiceImport with a real clusterset VIP, distinct from the mesh VIP.
+	exp := newFakeExporter("cluster-1")
+	require.NoError(t, exp.SetExport(ctx, "svc-1", "team-a"))
+	g := newImportGen(c, exp)
+	g.reconcile(ctx)
 
 	svc := &corev1.Service{}
-	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1", Namespace: "team-a"}, svc))
-	assert.Equal(t, "true", svc.Labels[constants.LabelClustersetService])
-	assert.Empty(t, svc.Spec.Selector, "selectorless clusterset VIP: endpoints stay in the registry")
-	assert.Equal(t, "svc-1", svc.Annotations[constants.AnnotationMeshService])
-	assert.Equal(t, "18081", svc.Annotations[constants.AnnotationMeshPort])
-	require.Len(t, svc.Spec.Ports, 1)
-	assert.Equal(t, int32(18081), svc.Spec.Ports[0].Port)
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1-clusterset", Namespace: "team-a"}, svc))
+	require.NotEmpty(t, svc.Spec.ClusterIP)
+
+	si := &mcsv1alpha1.ServiceImport{}
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1", Namespace: "team-a"}, si))
+	require.Len(t, si.Spec.IPs, 1)
+	assert.Equal(t, svc.Spec.ClusterIP, si.Spec.IPs[0], "single-cluster ServiceImport carries the clusterset VIP")
+	require.Len(t, si.Status.Clusters, 1)
+	assert.Equal(t, "cluster-1", si.Status.Clusters[0].Cluster)
 }
 
 func TestImportGenerator_MergesMultiClusterExports(t *testing.T) {
@@ -216,10 +275,11 @@ func TestImportGenerator_PrunesStale(t *testing.T) {
 		Labels: map[string]string{constants.LabelManagedServiceImport: "true"},
 	}}
 	staleSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
-		Name: "gone", Namespace: "team-a",
-		Labels: map[string]string{constants.LabelClustersetService: "true"},
+		Name: "gone-clusterset", Namespace: "team-a",
+		Labels:      map[string]string{constants.LabelClustersetService: "true"},
+		Annotations: map[string]string{constants.AnnotationClustersetImport: "gone"},
 	}}
-	c := newClient(t, staleSI, staleSvc)
+	c := newIPAllocatingClient(t, staleSI, staleSvc)
 	exp := newFakeExporter("cluster-1")
 	exp.seeded = []export.ServiceExport{{Service: "svc-1", Namespace: "team-a", Cluster: "cluster-2"}}
 	g := newImportGen(c, exp)
@@ -227,7 +287,7 @@ func TestImportGenerator_PrunesStale(t *testing.T) {
 
 	err := c.Get(ctx, types.NamespacedName{Name: "gone", Namespace: "team-a"}, &mcsv1alpha1.ServiceImport{})
 	assert.True(t, apierrors.IsNotFound(err), "ServiceImport for a vanished export is pruned")
-	err = c.Get(ctx, types.NamespacedName{Name: "gone", Namespace: "team-a"}, &corev1.Service{})
+	err = c.Get(ctx, types.NamespacedName{Name: "gone-clusterset", Namespace: "team-a"}, &corev1.Service{})
 	assert.True(t, apierrors.IsNotFound(err), "clusterset VIP for a vanished export is pruned")
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1", Namespace: "team-a"}, &mcsv1alpha1.ServiceImport{}))
 }
@@ -238,11 +298,13 @@ func TestImportGenerator_DoesNotClobberUserObjects(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "svc-1", Namespace: "team-a"}, // no managed label
 		Spec:       mcsv1alpha1.ServiceImportSpec{Type: mcsv1alpha1.Headless},
 	}
-	userSvc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc-1", Namespace: "team-a"},
-		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "svc-1"}},
+	// A user's Service occupies the clusterset VIP's DISTINCT name (svc-1-clusterset):
+	// the generator must skip it, not clobber it.
+	userClustersetName := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-1-clusterset", Namespace: "team-a"},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "owned-by-user"}},
 	}
-	c := newClient(t, userSI, userSvc)
+	c := newIPAllocatingClient(t, userSI, userClustersetName)
 	exp := newFakeExporter("cluster-1")
 	exp.seeded = []export.ServiceExport{{Service: "svc-1", Namespace: "team-a", Cluster: "cluster-2"}}
 	g := newImportGen(c, exp)
@@ -253,8 +315,8 @@ func TestImportGenerator_DoesNotClobberUserObjects(t *testing.T) {
 	assert.Equal(t, mcsv1alpha1.Headless, si.Spec.Type, "a user's ServiceImport is left untouched")
 
 	svc := &corev1.Service{}
-	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1", Namespace: "team-a"}, svc))
-	assert.Equal(t, map[string]string{"app": "svc-1"}, svc.Spec.Selector, "a user's Service is left untouched")
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1-clusterset", Namespace: "team-a"}, svc))
+	assert.Equal(t, map[string]string{"app": "owned-by-user"}, svc.Spec.Selector, "a user's Service on the clusterset name is left untouched")
 }
 
 func hasTrueCondition(conds []metav1.Condition, t string) bool {

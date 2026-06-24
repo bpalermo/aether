@@ -8,10 +8,13 @@
 //     import the service. It reconciles ServiceExport status (Valid/Ready).
 //   - ImportGenerator reads the clusterset-wide export view back out of the
 //     registry and materializes, in THIS cluster, a ServiceImport (ClusterSetIP)
-//     plus a LOCAL selectorless clusterset.local Service (the clusterset VIP) —
-//     mirroring the registrar's mesh-Service generator. No EndpointSlice import:
-//     endpoints stay in the registry; the proxy resolves cross-cluster endpoints
-//     via registry EDS at dial time (a later phase — out of scope here).
+//     plus a LOCAL selectorless clusterset VIP Service (a DISTINCT <svc>-clusterset
+//     object with its own ClusterIP, so it coexists with the same-named per-cluster
+//     mesh Service) — mirroring the registrar's mesh-Service generator. The VIP's
+//     ClusterIP is stamped onto the ServiceImport's spec.IPs (the
+//     <svc>.<ns>.svc.clusterset.local address). No EndpointSlice import: endpoints
+//     stay in the registry; the proxy resolves cross-cluster endpoints via registry
+//     EDS at dial time (a later phase — out of scope here).
 //
 // DNS stays STRICTLY LOCAL: each cluster materializes its own clusterset VIP from
 // its own registry view. Both runnables are leader-elected (single writer) and
