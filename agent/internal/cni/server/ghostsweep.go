@@ -38,6 +38,14 @@ import (
 
 const ghostSweepInterval = 60 * time.Second
 
+// sweptProtocols are the registry protocols the ghost sweep reconciles. Both
+// HTTP and TCP services are owned per node, so a missed deregistration of either
+// must be caught.
+var sweptProtocols = []registryv1.Service_Protocol{
+	registryv1.Service_PROTOCOL_HTTP,
+	registryv1.Service_PROTOCOL_TCP,
+}
+
 // netnsExists reports whether a pod's network-namespace path is still present.
 // Overridable in tests (which use synthetic netns paths). A stored pod whose
 // netns is gone is a stale entry from a missed CNI DEL — see sweepGhostEndpoints.
@@ -125,17 +133,28 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// implements (observed 2026-06-11: a registry-backend switch left the
 	// registry empty while every agent no-op'd; only an agent restart healed
 	// it).
-	var all map[string][]*registryv1.ServiceEndpoint
-	var err error
-	if al, ok := s.registry.(registry.AuthoritativeLister); ok {
-		all, err = al.ListAllEndpointsAuthoritative(ctx, registryv1.Service_PROTOCOL_HTTP)
-	} else {
-		all, err = s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
-	}
-	if err != nil {
-		s.log.DebugContext(ctx, "ghost sweep: failed to list registry endpoints", "error", err)
-		retErr = err
-		return
+	// Sweep every protocol so TCP (non-HTTP) endpoints are reconciled too — a
+	// stale TCP ghost is as dangerous as an HTTP one (a HEALTHY ghost in EDS mode
+	// keeps receiving traffic). A service is registered under exactly one
+	// protocol, so merging the per-protocol listings never collides on a name.
+	al, authoritative := s.registry.(registry.AuthoritativeLister)
+	all := make(map[string][]*registryv1.ServiceEndpoint)
+	for _, protocol := range sweptProtocols {
+		var listed map[string][]*registryv1.ServiceEndpoint
+		var err error
+		if authoritative {
+			listed, err = al.ListAllEndpointsAuthoritative(ctx, protocol)
+		} else {
+			listed, err = s.registry.ListAllEndpoints(ctx, protocol)
+		}
+		if err != nil {
+			s.log.DebugContext(ctx, "ghost sweep: failed to list registry endpoints", "protocol", protocol.String(), "error", err)
+			retErr = err
+			return
+		}
+		for svc, eps := range listed {
+			all[svc] = append(all[svc], eps...)
+		}
 	}
 
 	// Serialize against pod lifecycle so an in-flight AddPod (stored after the

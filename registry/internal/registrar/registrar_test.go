@@ -58,7 +58,7 @@ func TestApplyEvent_FullSnapshot_AddsToCache(t *testing.T) {
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
 }
@@ -109,13 +109,13 @@ func TestApplyEvent_EndpointAdded(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
 			r.applyEvent(&registrarv1.WatchEndpointsResponse{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
 }
@@ -173,13 +173,13 @@ func TestApplyEvent_EndpointUpdated(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
 			r.applyEvent(&registrarv1.WatchEndpointsResponse{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
 }
@@ -238,13 +238,13 @@ func TestApplyEvent_EndpointRemoved(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
 			r.applyEvent(&registrarv1.WatchEndpointsResponse{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
 }
@@ -252,17 +252,17 @@ func TestApplyEvent_EndpointRemoved(t *testing.T) {
 func TestRemoveLocked_CleansUpEmptyServiceKey(t *testing.T) {
 	ep := makeEndpoint("10.0.0.1", 8080)
 	r := newTestRegistry()
-	r.cache = map[string][]*registryv1.ServiceEndpoint{
+	r.cache[registryv1.Service_PROTOCOL_HTTP] = map[string][]*registryv1.ServiceEndpoint{
 		"svc-a": {ep},
 	}
 
 	r.mu.Lock()
-	r.removeLocked("svc-a", "10.0.0.1")
+	r.removeLocked(registryv1.Service_PROTOCOL_HTTP, "svc-a", "10.0.0.1")
 	r.mu.Unlock()
 
-	_, exists := r.cache["svc-a"]
+	_, exists := r.cache[registryv1.Service_PROTOCOL_HTTP]["svc-a"]
 	assert.False(t, exists, "service key should be removed from cache when no endpoints remain")
-	assert.Empty(t, r.cache)
+	assert.Empty(t, r.cache[registryv1.Service_PROTOCOL_HTTP])
 }
 
 func TestListAllEndpoints_ReadsFromCache(t *testing.T) {
@@ -299,7 +299,8 @@ func TestListAllEndpoints_ReadsFromCache(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
+			close(r.ready) // cache is populated; serve from it (not RPC)
 			got, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_UNSPECIFIED)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
@@ -339,7 +340,7 @@ func TestListEndpoints_ReadsFromCache(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
 			got, err := r.ListEndpoints(context.Background(), tt.service, registryv1.Service_PROTOCOL_UNSPECIFIED)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
@@ -374,7 +375,7 @@ func TestCache_MultipleServices(t *testing.T) {
 	assert.Equal(t, map[string][]*registryv1.ServiceEndpoint{
 		"svc-a": {ep1, ep3},
 		"svc-b": {ep2},
-	}, r.cache)
+	}, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 
 	// Remove svc-a entirely.
 	r.applyEvent(&registrarv1.WatchEndpointsResponse{
@@ -390,9 +391,9 @@ func TestCache_MultipleServices(t *testing.T) {
 
 	assert.Equal(t, map[string][]*registryv1.ServiceEndpoint{
 		"svc-b": {ep2},
-	}, r.cache)
+	}, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 
-	_, exists := r.cache["svc-a"]
+	_, exists := r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED]["svc-a"]
 	assert.False(t, exists, "svc-a key should be absent after all endpoints removed")
 }
 
@@ -520,6 +521,7 @@ func TestSnapshotCompleteClosesReady(t *testing.T) {
 			{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 				ServiceName: "svc-a",
+				Protocol:    registryv1.Service_PROTOCOL_HTTP,
 				Endpoint:    makeEndpoint("10.0.0.1", 8080),
 				Version:     "7",
 			},
@@ -651,8 +653,12 @@ func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
 func TestSetServiceFilter_PurgesOutOfScopeCache(t *testing.T) {
 	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
 	r.mu.Lock()
-	r.cache["svc-a"] = []*registryv1.ServiceEndpoint{{Ip: "10.0.0.1"}}
-	r.cache["svc-b"] = []*registryv1.ServiceEndpoint{{Ip: "10.0.0.2"}}
+	r.cache[registryv1.Service_PROTOCOL_HTTP] = map[string][]*registryv1.ServiceEndpoint{
+		"svc-a": {{Ip: "10.0.0.1"}},
+	}
+	r.cache[registryv1.Service_PROTOCOL_TCP] = map[string][]*registryv1.ServiceEndpoint{
+		"svc-b": {{Ip: "10.0.0.2"}}, // a TCP service must purge with the filter too
+	}
 	r.mu.Unlock()
 
 	r.SetServiceFilter([]string{"svc-a", "svc-b"})
@@ -660,6 +666,6 @@ func TestSetServiceFilter_PurgesOutOfScopeCache(t *testing.T) {
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	assert.Contains(t, r.cache, "svc-a")
-	assert.NotContains(t, r.cache, "svc-b", "out-of-scope entries must purge with the filter")
+	assert.Contains(t, r.cache[registryv1.Service_PROTOCOL_HTTP], "svc-a")
+	assert.NotContains(t, r.cache[registryv1.Service_PROTOCOL_TCP], "svc-b", "out-of-scope entries must purge with the filter, across protocols")
 }

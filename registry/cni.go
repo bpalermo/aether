@@ -13,10 +13,14 @@ import (
 
 // NewServiceEndpointFromCNIPod creates a ServiceEndpoint from a CNIPod.
 // It extracts the service name from the pod's labels and the port and weight from annotations.
-// The service protocol is always HTTP. Container and Kubernetes metadata are included
-// along with node locality information.
+// The service protocol comes from the endpoint.aether.io/protocol annotation
+// (default HTTP; "tcp" registers a non-HTTP TCP-over-mTLS service). Container
+// and Kubernetes metadata are included along with node locality information.
 func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
-	protocol := registryv1.Service_PROTOCOL_HTTP
+	protocol, err := getProtocolFromAnnotations(cniPod.GetAnnotations())
+	if err != nil {
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
+	}
 
 	serviceName, err := getServiceName(cniPod)
 	if err != nil {
@@ -81,6 +85,23 @@ func getServiceName(cniPod *cniv1.CNIPod) (string, error) {
 		return "", fmt.Errorf("missing service account")
 	}
 	return sa, nil
+}
+
+// getProtocolFromAnnotations maps the endpoint.aether.io/protocol annotation to
+// the service protocol. Unset or "http" yields PROTOCOL_HTTP (default); "tcp"
+// yields PROTOCOL_TCP (a non-HTTP TCP-over-mTLS service, reached through the
+// transparent-capture TCP floor). Any other value is rejected so a typo never
+// silently registers a service under the wrong (or unspecified) protocol.
+func getProtocolFromAnnotations(annotations map[string]string) (registryv1.Service_Protocol, error) {
+	switch annotations[constants.AnnotationEndpointProtocol] {
+	case "", constants.ProtocolHTTP:
+		return registryv1.Service_PROTOCOL_HTTP, nil
+	case constants.ProtocolTCP:
+		return registryv1.Service_PROTOCOL_TCP, nil
+	default:
+		return registryv1.Service_PROTOCOL_UNSPECIFIED, fmt.Errorf("invalid protocol annotation %q (want %q or %q)",
+			annotations[constants.AnnotationEndpointProtocol], constants.ProtocolHTTP, constants.ProtocolTCP)
+	}
 }
 
 // getPortFromAnnotations extracts the endpoint port from pod annotations.

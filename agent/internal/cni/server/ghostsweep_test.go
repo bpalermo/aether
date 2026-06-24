@@ -29,7 +29,13 @@ type sweepRegistry struct {
 	registered   map[string]*registryv1.ServiceEndpoint // service/ip -> endpoint
 }
 
-func (r *sweepRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+func (r *sweepRegistry) ListAllEndpoints(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+	// These tests register HTTP services; the sweep now lists every protocol.
+	// Return the listing only for HTTP so the TCP pass contributes nothing (an
+	// HTTP service must not be double-counted as a TCP one).
+	if protocol != registryv1.Service_PROTOCOL_HTTP {
+		return nil, nil
+	}
 	return r.listing, nil
 }
 
@@ -242,7 +248,11 @@ type authoritativeSweepRegistry struct {
 	authoritative map[string][]*registryv1.ServiceEndpoint
 }
 
-func (r *authoritativeSweepRegistry) ListAllEndpointsAuthoritative(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+func (r *authoritativeSweepRegistry) ListAllEndpointsAuthoritative(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+	// HTTP-only fixtures; the sweep lists every protocol (see sweepRegistry).
+	if protocol != registryv1.Service_PROTOCOL_HTTP {
+		return nil, nil
+	}
 	return r.authoritative, nil
 }
 
