@@ -7,14 +7,12 @@ import (
 	"os"
 
 	"github.com/bpalermo/aether/agent/constants"
-	"github.com/bpalermo/aether/agent/internal/edge"
 	"github.com/bpalermo/aether/agent/internal/edge/gatewayapi"
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
-	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/manager"
 	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/spf13/cobra"
@@ -52,14 +50,10 @@ func init() {
 	// at a pod-local emptyDir so PreListen's load is a no-op.
 	edgeCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", "/var/lib/aether/registry", "Pod-local directory for the edge's (empty) local store")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
-	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "route-namespace", "", "Namespace to watch VirtualHost CRs in (empty = the edge pod's own namespace)")
-	// Deprecated alias kept for one release (the flag predates the EdgeRoute->VirtualHost rename).
-	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "edge-route-namespace", "", "Deprecated alias for --route-namespace")
-	_ = edgeCmd.Flags().MarkDeprecated("edge-route-namespace", "use --route-namespace")
-	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per VirtualHost via SDS) + an HTTP->HTTPS redirect")
+	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "route-namespace", "", "Namespace to watch Gateways/HTTPRoutes in (empty = the edge pod's own namespace)")
+	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per Gateway listener via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
-	edgeCmd.Flags().BoolVar(&cfg.GatewayAPI, "gateway-api", false, "Consume Gateway API (Gateway + HTTPRoute) instead of the VirtualHost CRD (proposal 018)")
-	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves (with --gateway-api)")
+	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -104,9 +98,9 @@ func runEdge(ctx context.Context) (retErr error) {
 		}()
 	}
 
-	// Watch VirtualHost CRs in the edge's own namespace (or an override). Scope the
-	// manager's informer cache to that namespace so the edge needs only namespaced
-	// RBAC, not cluster-wide.
+	// Watch Gateways/HTTPRoutes in the edge's own namespace (or an override). Scope
+	// the manager's informer cache to that namespace so the edge needs only
+	// namespaced RBAC, not cluster-wide.
 	routeNamespace := cfg.RouteNamespace
 	if routeNamespace == "" {
 		routeNamespace = currentNamespace()
@@ -115,19 +109,14 @@ func runEdge(ctx context.Context) (retErr error) {
 		DefaultNamespaces: map[string]ctrlcache.Config{routeNamespace: {}},
 	}
 
-	// Manager scheme = client-go built-ins + the typed VirtualHost CRD so the
-	// reconciler reads typed objects (no unstructured).
+	// Manager scheme = client-go built-ins + the Gateway API types so the
+	// reconciler reads typed Gateways/HTTPRoutes (no unstructured).
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("register client-go scheme: %w", err)
 	}
-	if err := crdv1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register config.aether.io scheme: %w", err)
-	}
-	if cfg.GatewayAPI {
-		if err := gatewayv1.Install(scheme); err != nil {
-			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
-		}
+	if err := gatewayv1.Install(scheme); err != nil {
+		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
 	}
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) { o.Scheme = scheme })
@@ -183,8 +172,8 @@ func runEdge(ctx context.Context) (retErr error) {
 		snapshotCache.SetEdgeTLSMode(cfg.EdgeHTTPSPort)
 	}
 	snapshotCache.SetEdgeIdentity(edgeSpiffeID, identityTrustDomain)
-	// Routes come exclusively from VirtualHost CRs via the reconciler below; the
-	// initial snapshot (PreListen) serves a 404-only edge route table until the
+	// Routes come exclusively from Gateway API HTTPRoutes via the reconciler below;
+	// the initial snapshot (PreListen) serves a 404-only edge route table until the
 	// first reconcile. The edge exposes ONLY explicitly-routed services.
 
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
@@ -219,36 +208,24 @@ func runEdge(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	// Watch VirtualHost CRs and project them into the cache as the edge's virtual
-	// hosts + scoped dependency set. With TLS enabled, also resolve per-host certs
-	// via the SecretProvider registry (kubernetes provider) and watch their Secrets.
+	// Watch Gateways/HTTPRoutes and project them into the cache as the edge's
+	// virtual hosts + scoped dependency set. With TLS enabled, also resolve each
+	// Gateway listener's cert via the SecretProvider registry (kubernetes provider)
+	// and watch their Secrets.
 	var secretRegistry *secret.Registry
 	if cfg.EdgeTLS {
 		secretRegistry = secret.NewRegistry(secret.NewKubernetesProvider(m.GetClient(), routeNamespace))
 	}
-	if cfg.GatewayAPI {
-		gwReconciler := &gatewayapi.Reconciler{
-			Client:           m.GetClient(),
-			Sink:             snapshotCache,
-			Namespace:        routeNamespace,
-			GatewayClassName: cfg.GatewayClassName,
-			Secrets:          secretRegistry,
-			Log:              l,
-		}
-		if err = gwReconciler.SetupWithManager(m); err != nil {
-			return fmt.Errorf("failed to set up Gateway API reconciler: %w", err)
-		}
-	} else {
-		edgeReconciler := &edge.Reconciler{
-			Client:    m.GetClient(),
-			Sink:      snapshotCache,
-			Namespace: routeNamespace,
-			Secrets:   secretRegistry,
-			Log:       l,
-		}
-		if err = edgeReconciler.SetupWithManager(m); err != nil {
-			return fmt.Errorf("failed to set up VirtualHost reconciler: %w", err)
-		}
+	gwReconciler := &gatewayapi.Reconciler{
+		Client:           m.GetClient(),
+		Sink:             snapshotCache,
+		Namespace:        routeNamespace,
+		GatewayClassName: cfg.GatewayClassName,
+		Secrets:          secretRegistry,
+		Log:              l,
+	}
+	if err = gwReconciler.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up Gateway API reconciler: %w", err)
 	}
 
 	l.DebugContext(ctx, "waiting for local storage to be ready")
@@ -280,7 +257,7 @@ func currentPodName() string {
 }
 
 // currentNamespace returns the namespace the edge pod runs in (the default
-// namespace to watch VirtualHosts in). It reads POD_NAMESPACE (set via the
+// namespace to watch Gateways/HTTPRoutes in). It reads POD_NAMESPACE (set via the
 // downward API by the chart) and falls back to the service-account namespace
 // file.
 func currentNamespace() string {

@@ -1,8 +1,8 @@
 // Package gatewayapi contains the edge proxy's Gateway API controller: it watches
 // Gateway API HTTPRoutes attached to a Gateway of the aether GatewayClass and
-// projects them into the same edge data plane the VirtualHost reconciler feeds
-// (proposal 018, Phase 1 — north-south). Routing is direct-to-pod mTLS exactly as
-// with VirtualHost; only the API surface differs.
+// projects them into the edge data plane (proposal 018 — north-south). It is the
+// edge's only routing API (the VirtualHost CRD was retired); routing is
+// direct-to-pod mTLS.
 package gatewayapi
 
 import (

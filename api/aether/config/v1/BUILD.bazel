@@ -13,7 +13,7 @@ proto_library(
     name = "configv1_proto",
     srcs = [
         "mesh_config.proto",
-        "virtual_host.proto",
+        "secret.proto",
     ],
     visibility = ["//visibility:public"],
     deps = ["@protovalidate//proto/protovalidate/buf/validate:validate_proto"],

@@ -1,7 +1,7 @@
 {{- if .Values.edge.enabled }}
 {{- $routeNamespace := default (include "aether.edge.namespace" .) .Values.edge.routeNamespace }}
-# Namespaced: the edge only reads VirtualHosts (and their status) in the namespace
-# it watches. No cluster-wide access — exposure is delegable per namespace.
+# Namespaced: the edge only reads Gateways/HTTPRoutes (and their status) in the
+# namespace it watches. No cluster-wide access — exposure is delegable per namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -10,26 +10,17 @@ metadata:
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
 rules:
-  {{- if .Values.edge.gatewayApi.enabled }}
-  # Gateway API mode (proposal 018): read Gateways + HTTPRoutes (and their status)
-  # in the watched namespace.
+  # Gateway API (proposal 018): read Gateways + HTTPRoutes (and their status) in
+  # the watched namespace.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "httproutes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways/status", "httproutes/status"]
     verbs: ["get", "update", "patch"]
-  {{- else }}
-  - apiGroups: ["config.aether.io"]
-    resources: ["virtualhosts"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["config.aether.io"]
-    resources: ["virtualhosts/status"]
-    verbs: ["get", "update", "patch"]
-  {{- end }}
   {{- if .Values.edge.tls.enabled }}
-  # Read the kubernetes.io/tls Secrets VirtualHosts reference (downstream certs,
-  # served to Envoy over SDS); watch for hot rotation.
+  # Read the kubernetes.io/tls Secrets a Gateway listener references (downstream
+  # certs, served to Envoy over SDS); watch for hot rotation.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]

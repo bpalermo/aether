@@ -1,10 +1,11 @@
-{{- if and .Values.edge.enabled .Values.edge.gatewayApi.enabled }}
-# The aether edge's GatewayClass (proposal 018, Phase 1). Operators create Gateways
-# with this gatewayClassName; the edge serves the HTTPRoutes attached to them.
+{{- if .Values.edge.enabled }}
+# The aether edge's GatewayClass (proposal 018). Operators create Gateways with
+# this gatewayClassName; the edge serves the HTTPRoutes attached to them. Gateway
+# API is the edge's only routing API (the VirtualHost CRD was retired).
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
-  name: {{ .Values.edge.gatewayApi.gatewayClassName }}
+  name: {{ .Values.edge.gatewayClassName }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
 spec:
