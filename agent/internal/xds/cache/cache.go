@@ -23,6 +23,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
 
 	commonlog "github.com/bpalermo/aether/common/log"
@@ -35,6 +36,13 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.uber.org/atomic"
 )
+
+// captureTCPEntry describes a non-HTTP mesh service that needs a per-ClusterIP
+// TCP-proxy floor chain on the capture listener.
+type captureTCPEntry struct {
+	serviceName string // bare service name (for cluster name derivation)
+	clusterIP   string // k8s Service ClusterIP (filter-chain prefix_ranges match)
+}
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy
 // xDS resources for a single node agent. It maintains separate maps of
@@ -166,10 +174,17 @@ type SnapshotCache struct {
 	// capture listeners + the cap_http route table. Set once before the manager
 	// starts (SetCaptureEnabled); read without locking. Default off.
 	captureEnabled bool
-	// captureMu guards captureAuthorities: mesh service -> its cluster.local FQDN,
-	// fed by the mesh-Service reconciler, for the cap_http route table.
+	// captureMu guards captureAuthorities and captureTCPServices.
+	// captureAuthorities: mesh service -> its cluster.local FQDN, fed by the
+	// mesh-Service reconciler, for the cap_http route table.
+	// captureTCPServices: non-HTTP services that need per-ClusterIP TCP floor
+	// chains on the capture listener (proposal 018, Phase 3a TCP floor).
 	captureMu          sync.RWMutex
 	captureAuthorities map[string]string
+	// captureTCPServices is the snapshot of non-HTTP mesh Services, keyed by service
+	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
+	// A nil/empty slice means all captured traffic goes through the HCM chain.
+	captureTCPServices []captureTCPEntry
 
 	// meshDNS is the agent's in-process DNS resolver (proposal 018, mesh-global FQDN),
 	// or nil when mesh DNS is off. Set once (SetMeshDNSServer); the cache feeds it the
@@ -194,6 +209,10 @@ type listenerEntry struct {
 	// pod netns; routes CNI-redirected ClusterIP:18081 traffic by cluster.local
 	// authority over the cap_http route table.
 	capture types.Resource
+	// cniPod is the original CNIPod proto used to build this entry. Stored so
+	// the capture listener can be regenerated in-place when the TCP service set
+	// changes (per-pod capture listeners embed per-ClusterIP TCP floor chains).
+	cniPod *cniv1.CNIPod
 	// appClusters holds one per-port application cluster (multi-port pods); the
 	// SNI-selected inbound filter chains forward decrypted traffic to these.
 	appClusters []types.Resource

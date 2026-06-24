@@ -3,6 +3,7 @@ package cache
 import (
 	"fmt"
 
+	"github.com/bpalermo/aether/agent/internal/capture"
 	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -17,7 +18,20 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	if !c.captureEnabled {
 		return nil, nil
 	}
-	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod)
+	c.captureMu.RLock()
+	tcpServices := make([]proxy.CaptureTCPService, len(c.captureTCPServices))
+	for i, e := range c.captureTCPServices {
+		tcpServices[i] = proxy.CaptureTCPService{
+			// TCP clusters are separate from HTTP clusters: they share the same EDS
+			// resource (same endpoint set) but use ALPN "aether-tcp" on the transport
+			// socket so the destination inbound demuxes to the TCP floor chain.
+			ClusterName: proxy.TCPClusterName(e.serviceName, c.meshDomain),
+			ClusterIP:   e.clusterIP,
+		}
+	}
+	c.captureMu.RUnlock()
+
+	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +70,115 @@ func (c *SnapshotCache) SetCaptureAuthorities(authorities map[string]string) {
 	}
 }
 
+// SetCaptureTCPServices implements capture.AuthoritySink: it replaces the list of
+// non-HTTP mesh services that need per-ClusterIP TCP floor chains on the capture
+// listener. A change rebuilds all per-pod capture listeners (they embed the TCP chains)
+// and regenerates the xDS snapshot so Envoy picks up the new filter chains.
+func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPService) {
+	entries := make([]captureTCPEntry, 0, len(services))
+	for _, s := range services {
+		if s.ServiceName != "" && s.ClusterIP != "" {
+			entries = append(entries, captureTCPEntry{
+				serviceName: s.ServiceName,
+				clusterIP:   s.ClusterIP,
+			})
+		}
+	}
+
+	c.captureMu.Lock()
+	changed := !equalTCPEntries(c.captureTCPServices, entries)
+	c.captureTCPServices = entries
+	c.captureMu.Unlock()
+
+	if !changed {
+		return
+	}
+
+	// Per-pod capture listeners embed TCP floor chains; regenerate all of them.
+	if c.captureEnabled {
+		c.listenerMu.Lock()
+		for netns, entry := range c.listeners {
+			if entry.cniPod == nil {
+				continue
+			}
+			newCapture, err := c.generateCaptureListener(entry.cniPod)
+			if err != nil {
+				c.log.Error("failed to regenerate capture listener on TCP-services change",
+					"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+				continue
+			}
+			entry.capture = newCapture
+			c.listeners[netns] = entry
+		}
+		c.listenerMu.Unlock()
+	}
+
+	// Signal dependency change to trigger cluster snapshot rebuild (TCP clusters
+	// are also rebuilt from captureTCPServices) and a full snapshot push to Envoy.
+	c.signalDependencyChange()
+}
+
+// captureTCPClusters returns the TCP floor clusters for non-HTTP services as a resource
+// slice. These are separate EDS clusters (prefixed "tcp:") that share the same endpoints
+// as the HTTP clusters but use ALPN "aether-tcp" on their transport socket so the
+// destination inbound routes to the TCP floor filter chain. Called from generateSnapshot.
+func (c *SnapshotCache) captureTCPClusters() []types.Resource {
+	if !c.captureEnabled {
+		return nil
+	}
+
+	c.captureMu.RLock()
+	entries := make([]captureTCPEntry, len(c.captureTCPServices))
+	copy(entries, c.captureTCPServices)
+	c.captureMu.RUnlock()
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	c.localMu.RLock()
+	netnsToID := make(map[string]string, len(c.localWorkloads))
+	ids := make([]string, 0, len(c.localWorkloads))
+	for netns, id := range c.localWorkloads {
+		netnsToID[netns] = id
+		ids = append(ids, id)
+	}
+	nodeSpiffeID := c.nodeSpiffeID
+	trustDomain := c.trustDomain
+	c.localMu.RUnlock()
+
+	if nodeSpiffeID == "" {
+		// Node SVID not yet available; skip TCP clusters until it is.
+		return nil
+	}
+
+	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
+
+	// For TCP services, retrieve their SAN namespaces from the cluster map (the HTTP
+	// cluster for the same service is guaranteed to exist if the service is in scope).
+	c.clusterMu.RLock()
+	resources := make([]types.Resource, 0, len(entries))
+	for _, e := range entries {
+		httpEntry, ok := c.clusters[e.serviceName]
+		if !ok {
+			// Service not yet in scope; skip until cluster map has it.
+			continue
+		}
+		sanURIs := make([]string, 0, len(httpEntry.sanNamespaces))
+		for _, ns := range httpEntry.sanNamespaces {
+			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, httpEntry.service))
+		}
+		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
+		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName, c.perDownstreamConnectionPool())
+		// sni = same as HTTP cluster for this service (port routing on destination inbound)
+		proxy.InjectUpstreamTCPMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, httpEntry.sni)
+		resources = append(resources, cl)
+	}
+	c.clusterMu.RUnlock()
+
+	return resources
+}
+
 // captureVhosts builds the cap_http virtual hosts: each in-scope service that has a
 // cluster.local authority routes (both the portless and :meshPort spellings) to its
 // <svc>.<meshDomain> cluster. Scoped to the dependency set so cap_http only references
@@ -92,6 +215,24 @@ func equalStringMaps(a, b map[string]string) bool {
 	}
 	for k, v := range a {
 		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// equalTCPEntries reports whether two captureTCPEntry slices are identical by
+// content (order-independent). Used to gate signalDependencyChange.
+func equalTCPEntries(a, b []captureTCPEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ma := make(map[string]string, len(a))
+	for _, e := range a {
+		ma[e.serviceName] = e.clusterIP
+	}
+	for _, e := range b {
+		if ma[e.serviceName] != e.clusterIP {
 			return false
 		}
 	}

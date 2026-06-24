@@ -15,6 +15,10 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
+// inboundTCPFloorStatPrefix is the stat prefix for the inbound TCP-floor tcp_proxy
+// filter. Per-pod naming follows the same aether.pod tag extraction shape.
+const inboundTCPFloorStatPrefix = "in_tcp"
+
 const (
 	// defaultInboundAddress is the bind address for the per-pod inbound listener
 	// (all interfaces within the pod's network namespace).
@@ -87,25 +91,60 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 	}, nil
 }
 
-// buildInboundFilterChains builds one mTLS filter chain per served port, each
-// matched by SNI = the port number (the source proxy sets SNI to the port it
-// is addressing) and forwarding to that port's app cluster, plus a default
-// (no-SNI) chain targeting the primary port for back-compat and clients that
-// send no SNI. Each port's chain can run its own codec, so ports may differ in
-// protocol. SNI is routing only — identity stays the terminated mTLS SVID.
+// buildInboundFilterChains builds the full set of inbound filter chains:
+//
+//  1. TCP floor chain: matches application_protocols:["aether-tcp"] (set by the
+//     source proxy's tcp_proxy outbound path). Terminates mTLS and routes via
+//     tcp_proxy to the pod's primary app cluster on loopback. This chain is
+//     more specific than the HCM chains (has application_protocols) so Envoy
+//     selects it first for TCP-over-mTLS connections.
+//
+//  2. HCM chains: one per served port (SNI-matched on the port number) plus a
+//     default (no-SNI) chain for back-compat and no-SNI clients. These handle
+//     HTTP/2 (ALPN "h2") and any other ALPN not matched by the floor chain.
+//
+// SNI is port routing only — identity stays the terminated mTLS SVID.
 func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string, emitStatsPod bool) []*listenerv3.FilterChain {
 	defaultPort := AppPortFromPod(cniPod)
 	ports := AppPortsFromPod(cniPod)
 
-	chains := make([]*listenerv3.FilterChain, 0, len(ports)+1)
-	// Default chain (no server_names): primary port. Matches no-SNI clients and
-	// any SNI that doesn't match a port chain.
+	chains := make([]*listenerv3.FilterChain, 0, len(ports)+2)
+
+	// TCP floor chain: ALPN "aether-tcp" → tcp_proxy to primary app loopback port.
+	// Placed first so it is evaluated before the HCM chains when Envoy sorts chains
+	// by specificity (application_protocols is more specific than server_names).
+	chains = append(chains, buildInboundTCPFloorFilterChain(cniPod, defaultPort, tlsCertificateSecretName, validationContextName))
+
+	// Default chain (no server_names): primary port. Matches no-SNI/no-ALPN clients
+	// and any SNI that doesn't match a port chain. Must come before per-port chains
+	// so it is tried after the TCP floor but before named-port chains.
 	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, emitStatsPod))
 	// One chain per served port, SNI-matched on the port number.
 	for _, port := range ports {
 		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, emitStatsPod))
 	}
 	return chains
+}
+
+// buildInboundTCPFloorFilterChain builds the mTLS-terminating TCP floor chain for
+// the inbound listener. It matches ALPN "aether-tcp" (set by the outbound
+// tcp_proxy's UpstreamTCPTransportSocket) and routes all bytes via tcp_proxy to
+// the pod's primary application cluster (app_<pod>_<defaultPort>) on loopback.
+func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
+	appCluster := AppClusterName(cniPod, defaultPort)
+	return &listenerv3.FilterChain{
+		Name: fmt.Sprintf("in_tcp_%s", cniPod.GetName()),
+		FilterChainMatch: &listenerv3.FilterChainMatch{
+			// application_protocols is more specific than server_names in Envoy's
+			// filter-chain match order, so this chain wins over the HCM chains for
+			// any connection that negotiated the "aether-tcp" ALPN.
+			ApplicationProtocols: []string{AetherTCPALPN},
+		},
+		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
+		Filters: []*listenerv3.Filter{
+			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s", inboundTCPFloorStatPrefix, cniPod.GetName()), appCluster),
+		},
+	}
 }
 
 // buildInboundFilterChain builds an mTLS-terminating HTTP filter chain for one
