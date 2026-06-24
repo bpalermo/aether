@@ -14,6 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// tcpTransportSocketFilterStateExtName is the correct Envoy extension name for
+// the transport-socket-specific FilterStateInput, exported here for assertions.
+const tcpTransportSocketFilterStateExtName = "envoy.matching.inputs.transport_socket_filter_state"
+
 // TestLoadClustersFromRegistry_TCPCluster verifies that a PROTOCOL_TCP service
 // produces a "tcp:<svc>.<domain>" floor cluster whose EDS resolves to the
 // service's registry endpoints — the data path the transparent-capture TCP floor
@@ -66,6 +70,18 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	// With a local pod present, the per-source mTLS transport socket is injected
 	// via the matcher (not a single TransportSocket).
 	require.NotNil(t, tcpCluster.GetTransportSocketMatcher(), "tcp floor cluster must carry the per-source mTLS matcher")
+
+	// The transport socket matcher must use the transport-socket-specific
+	// FilterStateInput extension, NOT the generic network filter_state input.
+	// Using "envoy.matching.inputs.filter_state" in a cluster transport_socket_matcher
+	// causes Envoy to silently return nullopt (wrong MatchingData type), so the
+	// exact-match never fires and every upstream connection falls to OnNoMatch,
+	// presenting the node identity instead of the per-source pod cert. For tcp_proxy
+	// upstreams with SAN pinning this causes TLS handshake failures (client cert SAN
+	// mismatch against the service's expected namespace), manifesting as upstream_cx_total=0.
+	inputName := tcpCluster.GetTransportSocketMatcher().GetMatcherTree().GetInput().GetName()
+	assert.Equal(t, tcpTransportSocketFilterStateExtName, inputName,
+		"TCP floor cluster transport_socket_matcher must use envoy.matching.inputs.transport_socket_filter_state")
 
 	// No HTTP cluster/vhost for a TCP-only service.
 	_, hasHTTP := clusters["echo-tcp.aether.internal"]
