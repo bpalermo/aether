@@ -101,6 +101,16 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 	clas := make([]types.Resource, 0, len(c.clusters))
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.clusters))
 	for _, entry := range c.clusters {
+		// TCP services carry no HTTP (h2) cluster or outbound vhost: their data
+		// path is the transparent-capture TCP floor's "tcp:<svc>" cluster (built
+		// in captureTCPClusters), which shares this entry's bare-name EDS load
+		// assignment. Emit only the load assignment so that EDS resolves.
+		if entry.tcp {
+			if entry.loadAssignment != nil {
+				clas = append(clas, entry.loadAssignment)
+			}
+			continue
+		}
 		cluster := entry.cluster
 		if nodeSpiffeID != "" {
 			// Expected server identities for this service: one SPIFFE ID per
@@ -210,8 +220,40 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 	}
 
+	// TCP (non-HTTP) services: their endpoints are the SAME pods reached over a
+	// raw mTLS passthrough through the transparent-capture TCP floor. The floor's
+	// "tcp:<svc>" cluster (built in captureTCPClusters) references the bare-name
+	// EDS this method publishes, so a TCP service needs a cluster entry here too
+	// — holding only the load assignment (no HTTP h2 cluster/vhost). A service is
+	// HTTP or TCP, never both, so the two sets never share a name.
+	tcpServiceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_TCP)
+	if err != nil {
+		return fmt.Errorf("failed to list TCP endpoints from registry: %w", err)
+	}
+	if cat, ok := reg.(registry.ServiceCatalog); ok {
+		for svc := range deps {
+			if _, have := tcpServiceEndpoints[svc]; have {
+				continue
+			}
+			if _, have := serviceEndpoints[svc]; have {
+				continue // already an HTTP dependency
+			}
+			if !cat.HasService(svc) {
+				continue
+			}
+			eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_TCP)
+			if err != nil {
+				c.log.InfoContext(ctx, "cold-path TCP endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
+				continue
+			}
+			if len(eps) > 0 {
+				tcpServiceEndpoints[svc] = eps
+			}
+		}
+	}
+
 	c.log.DebugContext(ctx, "found service endpoints in registry",
-		"count", len(serviceEndpoints), "dependencySet", len(deps))
+		"count", len(serviceEndpoints), "tcpCount", len(tcpServiceEndpoints), "dependencySet", len(deps))
 
 	c.clusterMu.Lock()
 	// Rebuild the cluster set so this method is idempotent and safe to call
@@ -338,6 +380,48 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 				service:        serviceName,
 				sni:            strconv.Itoa(int(port)),
 			}
+		}
+	}
+
+	// TCP service entries: bare-name EDS load assignment + SAN/sni only. The
+	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) references
+	// this EDS resource (by bare name) and pins peer identity from sanNamespaces.
+	for serviceName, endpoints := range tcpServiceEndpoints {
+		if _, inScope := deps[serviceName]; !inScope {
+			continue
+		}
+		if len(endpoints) == 0 {
+			continue
+		}
+		nsSet := make(map[string]struct{})
+		for _, endpoint := range endpoints {
+			if ns := endpoint.GetKubernetesMetadata().GetNamespace(); ns != "" {
+				nsSet[ns] = struct{}{}
+			}
+		}
+		sanNamespaces := make([]string, 0, len(nsSet))
+		for ns := range nsSet {
+			sanNamespaces = append(sanNamespaces, ns)
+		}
+		sort.Strings(sanNamespaces)
+
+		defaultPort := endpoints[0].GetPort()
+		cla := proxy.NewClusterLoadAssignment(serviceName)
+		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
+		for _, endpoint := range endpoints {
+			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone)
+			cla.Endpoints = append(cla.Endpoints, lbEp)
+			epMap[endpoint.GetIp()] = lbEp
+		}
+		proxy.SortLocalityLbEndpoints(cla.Endpoints)
+
+		c.clusters[serviceName] = clusterEntry{
+			loadAssignment: cla,
+			endpoints:      epMap,
+			sanNamespaces:  sanNamespaces,
+			service:        serviceName,
+			sni:            strconv.Itoa(int(defaultPort)),
+			tcp:            true,
 		}
 	}
 

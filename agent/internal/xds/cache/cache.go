@@ -255,6 +255,11 @@ type clusterEntry struct {
 	// mTLS transport socket so the destination inbound demuxes to the right
 	// loopback port (multi-port routing, proposal 005). Empty = default chain.
 	sni string
+	// tcp marks a PROTOCOL_TCP service entry. Such entries hold only the
+	// bare-name EDS load assignment (+ sanNamespaces/sni) for the transparent-
+	// capture TCP floor's "tcp:<svc>" cluster to reference; no HTTP (h2) cluster
+	// or outbound vhost is emitted for them (clustersEndpointsAndVhosts skips it).
+	tcp bool
 	// absentSince is non-zero while the service is missing from the registry
 	// listing. Such entries are retained (with empty endpoints) for
 	// serviceRetentionGrace before being pruned: during pod churn a service

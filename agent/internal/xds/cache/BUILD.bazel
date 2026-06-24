@@ -59,10 +59,12 @@ go_test(
         "outbound_mtls_test.go",
         "races_test.go",
         "snapshot_test.go",
+        "tcp_service_test.go",
         "version_test.go",
     ],
     embed = [":cache"],
     deps = [
+        "//agent/internal/capture",
         "//agent/internal/xds/proxy",
         "//agent/storage",
         "//api/aether/cni/v1:cni",

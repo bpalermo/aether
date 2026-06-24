@@ -14,6 +14,11 @@ import (
 // mockRegistry implements registry.Registry for testing purposes.
 type mockRegistry struct {
 	listAllEndpointsFunc func(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error)
+	// tcpAware lets a test's listAllEndpointsFunc handle PROTOCOL_TCP itself
+	// (returning per-protocol data). When false (default), the wrapper scopes a
+	// protocol-agnostic callback to HTTP so an HTTP service isn't double-counted
+	// as a TCP service.
+	tcpAware bool
 }
 
 var _ registry.Registry = (*mockRegistry)(nil)
@@ -39,7 +44,19 @@ func (m *mockRegistry) ListEndpoints(_ context.Context, _ string, _ registryv1.S
 
 func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	if m.listAllEndpointsFunc != nil {
-		return m.listAllEndpointsFunc(ctx, protocol)
+		eps, err := m.listAllEndpointsFunc(ctx, protocol)
+		if err != nil {
+			return nil, err
+		}
+		// Most tests register HTTP services and their callbacks ignore the
+		// protocol; LoadClustersFromRegistry now also lists PROTOCOL_TCP. Scope
+		// the default (protocol-agnostic) callbacks to HTTP so an HTTP service
+		// isn't also returned as a (TCP-floor) service. A protocol-aware test
+		// returns its own per-protocol data and is not filtered here.
+		if protocol != registryv1.Service_PROTOCOL_HTTP && !m.tcpAware {
+			return map[string][]*registryv1.ServiceEndpoint{}, nil
+		}
+		return eps, nil
 	}
 	return map[string][]*registryv1.ServiceEndpoint{}, nil
 }

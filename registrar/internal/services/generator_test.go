@@ -109,6 +109,36 @@ func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
 		"stale app-protocol annotation must be corrected on reconcile")
 }
 
+// seedProtocol seeds a snapshot with a single service under the given protocol.
+func seedProtocol(svc, ns string, port uint32, protocol registryv1.Service_Protocol) *server.Snapshot {
+	s := server.NewSnapshot()
+	s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
+		svc: {protocol: {{
+			Ip:                 "10.0.0.1",
+			Port:               port,
+			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{Namespace: ns},
+		}}},
+	})
+	return s
+}
+
+// TestGenerator_EmitsTCPMeshService verifies a PROTOCOL_TCP service is projected
+// into a selectorless mesh Service annotated as "tcp" — the signal the agent's
+// capture reconciler reads to emit the per-ClusterIP TCP-proxy floor chain.
+func TestGenerator_EmitsTCPMeshService(t *testing.T) {
+	g, c := newGen(seedProtocol("tcp-svc", "aether-test", 9000, registryv1.Service_PROTOCOL_TCP))
+	g.reconcile(context.Background())
+
+	svc, err := get(t, c, "aether-test", "tcp-svc")
+	require.NoError(t, err)
+	assert.Equal(t, "true", svc.Labels[constants.LabelMeshService])
+	assert.Equal(t, "tcp-svc", svc.Annotations[constants.AnnotationMeshService])
+	assert.Equal(t, "9000", svc.Annotations[constants.AnnotationMeshPort])
+	assert.Equal(t, AppProtocolTCP, svc.Annotations[constants.AnnotationMeshAppProtocol],
+		"PROTOCOL_TCP services must be annotated as tcp")
+	assert.Empty(t, svc.Spec.Selector, "selectorless: endpoints stay in the registry")
+}
+
 func TestGenerator_DoesNotClobberUserService(t *testing.T) {
 	user := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc-1", Namespace: "aether-test"},

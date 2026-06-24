@@ -228,12 +228,21 @@ func TestSyncer_Start_RegistryErrorDoesNotCrash(t *testing.T) {
 // registry error on a periodic (non-initial) sync is handled gracefully, with
 // the snapshot retaining its last known good state.
 func TestSyncer_Start_RegistryErrorOnSubsequentSyncDoesNotCrash(t *testing.T) {
-	callCount := 0
+	// Each sync cycle now lists every protocol (HTTP then TCP). Count cycles by
+	// the HTTP call so the first cycle succeeds (HTTP data + empty TCP) and every
+	// subsequent cycle fails transiently.
+	httpCalls := 0
 
 	reg := &mockRegistry{
-		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-			callCount++
-			if callCount == 1 {
+		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			if protocol == registryv1.Service_PROTOCOL_TCP {
+				if httpCalls <= 1 {
+					return map[string][]*registryv1.ServiceEndpoint{}, nil
+				}
+				return nil, errors.New("transient registry error")
+			}
+			httpCalls++
+			if httpCalls == 1 {
 				return map[string][]*registryv1.ServiceEndpoint{
 					"svc": {{Ip: "10.0.2.1", Port: 8080, Weight: 100}},
 				}, nil

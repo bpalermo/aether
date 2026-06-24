@@ -18,6 +18,15 @@ import (
 // tracerName identifies this instrumentation scope in trace backends.
 const tracerName = "aether/registrar"
 
+// syncedProtocols are the registry protocols the syncer reflects into the
+// snapshot each cycle. HTTP services ride the HCM path; TCP services ride the
+// transparent-capture TCP floor. Each cycle lists every protocol so both flow
+// through the snapshot, the agent watch stream, and name resolution.
+var syncedProtocols = []registryv1.Service_Protocol{
+	registryv1.Service_PROTOCOL_HTTP,
+	registryv1.Service_PROTOCOL_TCP,
+}
+
 // Syncer periodically polls an external registry, computes a diff against the
 // local snapshot, and broadcasts changes to all watching agents. It implements
 // the controller-runtime Runnable interface.
@@ -128,21 +137,24 @@ func (s *Syncer) sync(ctx context.Context) {
 	defer func() { telemetry.EndSpan(span, retErr) }()
 	start := time.Now()
 
-	endpoints, err := s.registry.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
-	if err != nil {
-		s.log.ErrorContext(ctx, "failed to list endpoints from registry", "error", err)
-		s.metrics.syncFailed(ctx, time.Since(start).Seconds())
-		retErr = err
-		return
-	}
-
-	// Build the new state in the format the snapshot expects.
+	// Build the new state in the format the snapshot expects, listing every
+	// protocol so non-HTTP (TCP) services flow through the snapshot, watch
+	// stream, and name resolution alongside HTTP.
 	newState := make(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
-	for svcName, eps := range endpoints {
-		if newState[svcName] == nil {
-			newState[svcName] = make(map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
+	for _, protocol := range syncedProtocols {
+		endpoints, err := s.registry.ListAllEndpoints(ctx, protocol)
+		if err != nil {
+			s.log.ErrorContext(ctx, "failed to list endpoints from registry", "protocol", protocol.String(), "error", err)
+			s.metrics.syncFailed(ctx, time.Since(start).Seconds())
+			retErr = err
+			return
 		}
-		newState[svcName][registryv1.Service_PROTOCOL_HTTP] = eps
+		for svcName, eps := range endpoints {
+			if newState[svcName] == nil {
+				newState[svcName] = make(map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
+			}
+			newState[svcName][protocol] = eps
+		}
 	}
 
 	// Reconcile pending write-behind intents: release the observed ones,

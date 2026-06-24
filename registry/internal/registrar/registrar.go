@@ -59,8 +59,14 @@ type RegistrarRegistry struct {
 	conn   *grpc.ClientConn
 	client registrarv1.RegistrarServiceClient
 
-	mu    sync.RWMutex
-	cache map[string][]*registryv1.ServiceEndpoint // keyed by serviceName
+	mu sync.RWMutex
+	// cache is the watch-fed endpoint store, partitioned by protocol so a
+	// ListAllEndpoints(protocol) returns only that protocol's services (HTTP
+	// services ride the HCM path, TCP services the transparent-capture floor).
+	// A service is registered under exactly one protocol, so the two partitions
+	// never hold the same service name. The watch stream carries the protocol on
+	// every endpoint event.
+	cache map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint
 	// services is the full mesh service-name catalog (every watcher receives
 	// catalog events regardless of filter): the ODCDS cold path answers
 	// existence locally instead of stalling on nonexistent services. Replayed
@@ -116,7 +122,7 @@ func NewRegistrarRegistry(log *slog.Logger, cfg Config) *RegistrarRegistry {
 		log:         commonlog.Named(log, "registrar-registry"),
 		config:      cfg,
 		metrics:     metrics,
-		cache:       make(map[string][]*registryv1.ServiceEndpoint),
+		cache:       make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint),
 		services:    make(map[string]struct{}),
 		notify:      make(chan struct{}, 1),
 		ready:       make(chan struct{}),
@@ -202,7 +208,9 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 		r.mu.Lock()
 		for _, svc := range previous {
 			if _, ok := keep[svc]; !ok {
-				delete(r.cache, svc)
+				for _, byName := range r.cache {
+					delete(byName, svc)
+				}
 			}
 		}
 		r.mu.Unlock()
@@ -319,7 +327,7 @@ func (r *RegistrarRegistry) UnregisterEndpoints(ctx context.Context, serviceName
 // Falls back to the Registrar RPC if the cache is empty.
 func (r *RegistrarRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.mu.RLock()
-	eps, ok := r.cache[service]
+	eps, ok := r.cache[protocol][service]
 	r.mu.RUnlock()
 
 	if ok {
@@ -333,21 +341,24 @@ func (r *RegistrarRegistry) ListEndpoints(ctx context.Context, service string, p
 // ListAllEndpoints returns all endpoints from the local cache.
 // Falls back to the Registrar RPC if the cache is empty.
 func (r *RegistrarRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-	r.mu.RLock()
-	cacheLen := len(r.cache)
-	r.mu.RUnlock()
-
-	if cacheLen > 0 {
+	// Serve from the watch-fed cache once it holds a complete world view (first
+	// SNAPSHOT_COMPLETE). Gating on readiness — not on a non-empty partition —
+	// lets a protocol with no services (e.g. TCP when only HTTP exists) return
+	// the truthful empty set instead of falling back to an RPC.
+	select {
+	case <-r.ready:
 		r.mu.RLock()
-		result := make(map[string][]*registryv1.ServiceEndpoint, len(r.cache))
-		for k, v := range r.cache {
+		byName := r.cache[protocol]
+		result := make(map[string][]*registryv1.ServiceEndpoint, len(byName))
+		for k, v := range byName {
 			result[k] = v
 		}
 		r.mu.RUnlock()
 		return result, nil
+	default:
 	}
 
-	// Fallback to RPC.
+	// Cache not yet ready: fall back to RPC.
 	return r.listAllEndpointsFromServer(ctx, protocol)
 }
 
@@ -494,7 +505,7 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 		// Clear cache before the first FULL_SNAPSHOT event to replace stale data.
 		if event.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT && !snapshotCleared {
 			r.mu.Lock()
-			r.cache = make(map[string][]*registryv1.ServiceEndpoint)
+			r.cache = make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint)
 			r.mu.Unlock()
 			snapshotCleared = true
 		}
@@ -543,18 +554,19 @@ func (r *RegistrarRegistry) applyEvent(event *registrarv1.WatchEndpointsResponse
 	defer r.mu.Unlock()
 
 	svcName := event.GetServiceName()
+	protocol := event.GetProtocol()
 	ep := event.GetEndpoint()
 
 	switch event.GetType() {
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT:
 		// Upsert for full snapshot events.
-		r.upsertLocked(svcName, ep)
+		r.upsertLocked(protocol, svcName, ep)
 
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
-		r.upsertLocked(svcName, ep)
+		r.upsertLocked(protocol, svcName, ep)
 
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
-		r.removeLocked(svcName, ep.GetIp())
+		r.removeLocked(protocol, svcName, ep.GetIp())
 
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE:
 		// Marker only; no cache mutation. The change signal below still fires
@@ -566,26 +578,34 @@ func (r *RegistrarRegistry) applyEvent(event *registrarv1.WatchEndpointsResponse
 	r.signalChange()
 }
 
-// upsertLocked adds or updates an endpoint in the cache. Caller must hold mu.
-func (r *RegistrarRegistry) upsertLocked(svcName string, ep *registryv1.ServiceEndpoint) {
-	eps := r.cache[svcName]
+// upsertLocked adds or updates an endpoint in the protocol's partition of the
+// cache. Caller must hold mu.
+func (r *RegistrarRegistry) upsertLocked(protocol registryv1.Service_Protocol, svcName string, ep *registryv1.ServiceEndpoint) {
+	byName := r.cache[protocol]
+	if byName == nil {
+		byName = make(map[string][]*registryv1.ServiceEndpoint)
+		r.cache[protocol] = byName
+	}
+	eps := byName[svcName]
 	for i, existing := range eps {
 		if existing.GetIp() == ep.GetIp() {
 			eps[i] = ep
 			return
 		}
 	}
-	r.cache[svcName] = append(eps, ep)
+	byName[svcName] = append(eps, ep)
 }
 
-// removeLocked removes an endpoint from the cache by IP. Caller must hold mu.
-func (r *RegistrarRegistry) removeLocked(svcName string, ip string) {
-	eps := r.cache[svcName]
+// removeLocked removes an endpoint by IP from the protocol's partition of the
+// cache. Caller must hold mu.
+func (r *RegistrarRegistry) removeLocked(protocol registryv1.Service_Protocol, svcName string, ip string) {
+	byName := r.cache[protocol]
+	eps := byName[svcName]
 	for i, existing := range eps {
 		if existing.GetIp() == ip {
-			r.cache[svcName] = append(eps[:i], eps[i+1:]...)
-			if len(r.cache[svcName]) == 0 {
-				delete(r.cache, svcName)
+			byName[svcName] = append(eps[:i], eps[i+1:]...)
+			if len(byName[svcName]) == 0 {
+				delete(byName, svcName)
 			}
 			return
 		}

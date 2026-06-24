@@ -19,6 +19,10 @@ message Service {
   enum Protocol {
     PROTOCOL_UNSPECIFIED = 0;
     PROTOCOL_HTTP = 1;
+    // PROTOCOL_TCP marks a non-HTTP (raw TCP-over-mTLS) mesh service. Its
+    // endpoints are reached through the transparent-capture TCP floor as a raw
+    // mTLS passthrough (proposal 018, Phase 3a), not the HTTP HCM path.
+    PROTOCOL_TCP = 2;
   }
 
   Protocol protocol = 2 [(buf.validate.field).enum.defined_only = true];

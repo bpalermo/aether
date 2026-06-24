@@ -141,10 +141,14 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 	ips := req.GetIps()
 	if s.writeBehind != nil {
 		for _, ip := range ips {
-			// UnregisterEndpointRequest carries no protocol; the registrar is
-			// HTTP-only end-to-end today (the sync loop lists PROTOCOL_HTTP),
-			// and the key must match the register side's for supersede.
-			s.writeBehind.EnqueueUnregister(req.GetServiceName(), registryv1.Service_PROTOCOL_HTTP, ip)
+			// UnregisterEndpointRequest carries no protocol, but a service is
+			// registered under exactly one (HTTP or TCP). Supersede the pending
+			// register on every synced protocol so a TCP endpoint's removal isn't
+			// defeated by a still-pending TCP register keyed under a protocol the
+			// HTTP-only key would miss. The external delete is protocol-agnostic.
+			for _, protocol := range syncedProtocols {
+				s.writeBehind.EnqueueUnregister(req.GetServiceName(), protocol, ip)
+			}
 		}
 	} else if len(ips) == 1 {
 		if err := s.registry.UnregisterEndpoint(ctx, req.GetServiceName(), ips[0]); err != nil {

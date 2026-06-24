@@ -50,6 +50,20 @@ const (
 	HealthCheckModeActive = "active"
 	HealthCheckModeEDS    = "eds"
 
+	// AnnotationEndpointProtocol is the pod annotation selecting the mesh
+	// service's wire protocol (a registration fact: what the pod serves). Unset
+	// or "http" (default) registers the workload as a PROTOCOL_HTTP service
+	// reached via the HCM path; "tcp" registers it as a PROTOCOL_TCP service
+	// reached as a raw mTLS passthrough through the transparent-capture TCP
+	// floor (proposal 018, Phase 3a). Distinct from aether.io/app-protocol
+	// (AnnotationMeshAppProtocol), which the registrar STAMPS on the generated
+	// mesh Service for the agent's capture reconciler to read.
+	AnnotationEndpointProtocol = annotationAetherEndpointPrefix + "protocol"
+	// ProtocolHTTP / ProtocolTCP are the accepted AnnotationEndpointProtocol
+	// values.
+	ProtocolHTTP = "http"
+	ProtocolTCP  = "tcp"
+
 	// AnnotationAetherEndpointMetadataPrefix is the prefix for endpoint metadata annotations
 	AnnotationAetherEndpointMetadataPrefix = "metadata." + annotationAetherEndpointPrefix
 

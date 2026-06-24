@@ -57,24 +57,44 @@ type desiredService struct {
 	service     string
 	namespace   string
 	port        uint32
-	appProtocol string // "http" for all current registry services (PROTOCOL_HTTP)
+	appProtocol string // "http" (PROTOCOL_HTTP) or "tcp" (PROTOCOL_TCP)
+}
+
+// protocolAppProtocol maps a registry service protocol to the AnnotationMeshAppProtocol
+// value the generator stamps on the mesh Service (the agent's capture reconciler reads
+// it to decide HCM vs. TCP-floor chain emission).
+var protocolAppProtocol = map[registryv1.Service_Protocol]string{
+	registryv1.Service_PROTOCOL_HTTP: AppProtocolHTTP,
+	registryv1.Service_PROTOCOL_TCP:  AppProtocolTCP,
 }
 
 // reconcile makes the managed Services equal the snapshot catalog: create missing,
 // update drifted, prune stale (only Services this generator owns, by label).
 func (g *Generator) reconcile(ctx context.Context) {
 	desired := map[client.ObjectKey]desiredService{}
-	for svc, eps := range g.Snapshot.GetAll(registryv1.Service_PROTOCOL_HTTP) {
-		ep := firstNamespaced(eps)
-		if ep == nil {
-			continue
-		}
-		ns := ep.GetKubernetesMetadata().GetNamespace()
-		desired[client.ObjectKey{Namespace: ns, Name: svc}] = desiredService{
-			service:     svc,
-			namespace:   ns,
-			port:        ep.GetPort(),
-			appProtocol: AppProtocolHTTP,
+	// A service is registered under exactly one protocol (the registry key is
+	// name+protocol; the pod annotation picks it). Iterate every protocol so an
+	// HTTP service gets an "http" mesh Service and a TCP service a "tcp" one.
+	// Iteration is ordered (HTTP before TCP) so the no-clobber convergence is
+	// deterministic if a name ever appeared under both.
+	for _, protocol := range []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP} {
+		appProto := protocolAppProtocol[protocol]
+		for svc, eps := range g.Snapshot.GetAll(protocol) {
+			ep := firstNamespaced(eps)
+			if ep == nil {
+				continue
+			}
+			ns := ep.GetKubernetesMetadata().GetNamespace()
+			key := client.ObjectKey{Namespace: ns, Name: svc}
+			if _, exists := desired[key]; exists {
+				continue // already claimed by an earlier protocol; one Service per name
+			}
+			desired[key] = desiredService{
+				service:     svc,
+				namespace:   ns,
+				port:        ep.GetPort(),
+				appProtocol: appProto,
+			}
 		}
 	}
 
