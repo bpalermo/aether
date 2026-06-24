@@ -12,6 +12,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -307,21 +308,20 @@ func NewTCPServiceCluster(name, edsServiceName, altStatName string, perDownstrea
 // forwarded to backends via this cluster travel without encryption or mutual
 // authentication. This is a known limitation; see proposal 018 Phase 3b.
 //
-// The cluster uses EDS (bare service name) to discover backends, outlier
-// detection for fast failure, and no subset routing (not meaningful for UDP).
-func NewUDPServiceCluster(name, edsServiceName, altStatName string) *clusterv3.Cluster {
+// The cluster is STATIC with an inline load assignment rather than EDS: the UDP
+// floor has no inbound mTLS hop, so udp_proxy must reach the backend's application
+// UDP port directly — not the mesh inbound :15008 that the shared bare-name EDS
+// carries. Callers pass a load assignment from UDPLoadAssignment (app-port endpoints).
+func NewUDPServiceCluster(name, altStatName string, loadAssignment *endpointv3.ClusterLoadAssignment) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name:                          name,
 		AltStatName:                   altStatName,
 		ConnectTimeout:                durationpb.New(2 * time.Second),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
-			Type: clusterv3.Cluster_EDS,
+			Type: clusterv3.Cluster_STATIC,
 		},
-		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
-			EdsConfig:   config.XDSConfigSourceADS(),
-			ServiceName: edsServiceName,
-		},
+		LoadAssignment: loadAssignment,
 		// No TypedExtensionProtocolOptions: udp_proxy speaks raw UDP upstream.
 		// No LbSubsetConfig: subset routing is not meaningful for UDP.
 		// No TransportSocket: UDP is plaintext — see security note above.
@@ -337,6 +337,30 @@ func NewUDPServiceCluster(name, edsServiceName, altStatName string) *clusterv3.C
 		},
 		IgnoreHealthOnHostRemoval: true,
 	}
+}
+
+// UDPLoadAssignment derives an inline UDP load assignment from a service's existing
+// (TCP-inbound, :15008) load assignment: it clones it and rewrites every endpoint to
+// the backend's application UDP port and UDP protocol. The UDP floor has no inbound
+// mTLS proxy, so udp_proxy reaches the application port directly. Returns nil if src
+// is nil.
+func UDPLoadAssignment(src *endpointv3.ClusterLoadAssignment, clusterName string, port uint32) *endpointv3.ClusterLoadAssignment {
+	if src == nil {
+		return nil
+	}
+	la, _ := proto.Clone(src).(*endpointv3.ClusterLoadAssignment)
+	la.ClusterName = clusterName
+	for _, lle := range la.GetEndpoints() {
+		for _, lb := range lle.GetLbEndpoints() {
+			sa := lb.GetEndpoint().GetAddress().GetSocketAddress()
+			if sa == nil {
+				continue
+			}
+			sa.Protocol = corev3.SocketAddress_UDP
+			sa.PortSpecifier = &corev3.SocketAddress_PortValue{PortValue: port}
+		}
+	}
+	return la
 }
 
 // InjectUpstreamTCPMTLS is InjectUpstreamMTLS for TCP floor clusters: it injects
