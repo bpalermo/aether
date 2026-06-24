@@ -42,18 +42,24 @@ func (c *SnapshotCache) SetTLSServiceRoutes(routes map[string][]proxy.L4ServiceR
 }
 
 // SetUDPServiceRoutes replaces the UDPRoute-derived per-service UDP routes
-// (proposal 018, Phase 3b). The cache does not generate a UDP capture listener
-// yet — UDP redirect requires a CNI follow-up; this stores the routes for when
-// it lands. On change, signals a snapshot rebuild to ensure the dependency set
-// includes UDP backend services.
+// (proposal 018, Phase 3b). On change, regenerates all per-pod UDP capture
+// listeners (each pod gets one UDP listener covering all services' UDP routes)
+// and triggers a full snapshot rebuild so Envoy picks up the new listeners and
+// their backend UDP clusters.
 func (c *SnapshotCache) SetUDPServiceRoutes(routes map[string][]proxy.L4Backend) {
 	c.depMu.Lock()
 	changed := !equalUDPRoutes(c.udpServiceRoutes, routes)
 	c.udpServiceRoutes = routes
 	c.depMu.Unlock()
-	if changed {
-		c.signalDependencyChange()
+	if !changed {
+		return
 	}
+	// Regenerate per-pod UDP capture listeners: the udp_proxy target cluster set
+	// changes when UDPRoute rules arrive or change.
+	if c.captureEnabled {
+		c.regenerateAllUDPCaptureListeners()
+	}
+	c.signalDependencyChange()
 }
 
 // tcpServiceRoutesSnapshot returns a shallow copy of the TCPRoute rules for
@@ -112,6 +118,27 @@ func (c *SnapshotCache) l4RouteBackendsLocked(service string, set map[string]str
 			set[b.Service] = struct{}{}
 		}
 	}
+}
+
+// regenerateAllUDPCaptureListeners rebuilds every per-pod UDP capture listener
+// in place. Called when UDPRoute rules change: the udp_proxy target cluster
+// is derived from the route map, so a change requires regenerating all listeners.
+func (c *SnapshotCache) regenerateAllUDPCaptureListeners() {
+	c.listenerMu.Lock()
+	for netns, entry := range c.listeners {
+		if entry.cniPod == nil {
+			continue
+		}
+		newUDP, err := c.generateUDPCaptureListener(entry.cniPod)
+		if err != nil {
+			c.log.Error("failed to regenerate UDP capture listener on UDPRoute change",
+				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			continue
+		}
+		entry.udpCapture = newUDP
+		c.listeners[netns] = entry
+	}
+	c.listenerMu.Unlock()
 }
 
 // regenerateAllCaptureListeners rebuilds every per-pod capture listener in place.

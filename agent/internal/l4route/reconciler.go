@@ -167,13 +167,36 @@ func (r *Reconciler) buildTLSRoute(rule gatewayv1alpha2.TLSRouteRule, hostnames 
 }
 
 // buildUDPBackends translates a UDPRouteRule into a flat backend list.
+// UDP backends resolve to "udp:<svc>.<domain>" clusters (plain EDS, no mTLS)
+// rather than the TCP "tcp:<svc>.<domain>" clusters used by TCPRoute/TLSRoute.
 func (r *Reconciler) buildUDPBackends(rule gatewayv1alpha2.UDPRouteRule) []proxy.L4Backend {
-	return r.buildL4Backends(rule.BackendRefs)
+	return r.buildUDPL4Backends(rule.BackendRefs)
 }
 
 // buildL4Backends converts a BackendRef slice into L4Backends with resolved
 // TCP cluster names. Refs with a non-core group or non-Service kind are skipped.
 func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef) []proxy.L4Backend {
+	return r.buildBackendsWithCluster(refs, func(name string) string {
+		// TCP clusters share the same EDS endpoints as HTTP clusters but use
+		// ALPN "aether-tcp" (see TCPClusterName). The capture TCP floor chains
+		// already reference "tcp:<svc>.<domain>" clusters.
+		return proxy.TCPClusterName(name, r.MeshDomain)
+	})
+}
+
+// buildUDPL4Backends converts a BackendRef slice into L4Backends with resolved
+// UDP cluster names ("udp:<svc>.<domain>"). These clusters are plain EDS without
+// a transport socket — UDP traffic is not covered by mesh mTLS.
+func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1alpha2.BackendRef) []proxy.L4Backend {
+	return r.buildBackendsWithCluster(refs, func(name string) string {
+		return proxy.UDPClusterName(name, r.MeshDomain)
+	})
+}
+
+// buildBackendsWithCluster converts a BackendRef slice into L4Backends, resolving
+// the cluster name via clusterNameFn. Refs with a non-core group or non-Service
+// kind are skipped.
+func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef, clusterNameFn func(name string) string) []proxy.L4Backend {
 	backends := make([]proxy.L4Backend, 0, len(refs))
 	for _, b := range refs {
 		if b.Group != nil && string(*b.Group) != "" {
@@ -192,10 +215,7 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef) []proxy.
 		}
 		backends = append(backends, proxy.L4Backend{
 			Service: name,
-			// TCP clusters share the same EDS endpoints as HTTP clusters but use
-			// ALPN "aether-tcp" (see TCPClusterName). The capture TCP floor chains
-			// already reference "tcp:<svc>.<domain>" clusters.
-			Cluster: proxy.TCPClusterName(name, r.MeshDomain),
+			Cluster: clusterNameFn(name),
 			Weight:  weight,
 		})
 	}

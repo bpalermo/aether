@@ -44,6 +44,15 @@ func TCPClusterName(serviceName, meshDomain string) string {
 	return "tcp:" + ServiceClusterName(serviceName, meshDomain)
 }
 
+// UDPClusterName returns the data-plane name of a service's UDP-floor cluster:
+// "udp:<service>.<meshDomain>". This cluster carries the same backend endpoints
+// as the HTTP cluster but is a plain EDS cluster with no transport socket (UDP
+// datagrams are not wrapped in mTLS — mesh mTLS is a TCP/TLS construct and
+// DTLS is not supported). The udp_proxy capture listener references this cluster.
+func UDPClusterName(serviceName, meshDomain string) string {
+	return "udp:" + ServiceClusterName(serviceName, meshDomain)
+}
+
 // ServiceFromClusterName maps a data-plane cluster name (a mesh authority,
 // <service>.<meshDomain>) back to the bare service name. ok is false when the
 // name is not under the mesh domain or the remainder is not a single DNS
@@ -286,6 +295,47 @@ func NewTCPServiceCluster(name, edsServiceName, altStatName string, perDownstrea
 		},
 		CloseConnectionsOnHostHealthFailure: true,
 		IgnoreHealthOnHostRemoval:           true,
+	}
+}
+
+// NewUDPServiceCluster builds a plain EDS cluster for a UDPRoute's backend
+// (proposal 018, Phase 3b). It is intentionally transport-socket-free — UDP
+// datagrams are not wrapped in mTLS (mTLS is a TCP/TLS construct; DTLS is not
+// implemented in this mesh). Traffic forwarded via this cluster is PLAINTEXT.
+//
+// SECURITY NOTE: mesh mTLS does NOT cover the UDP floor. All datagrams
+// forwarded to backends via this cluster travel without encryption or mutual
+// authentication. This is a known limitation; see proposal 018 Phase 3b.
+//
+// The cluster uses EDS (bare service name) to discover backends, outlier
+// detection for fast failure, and no subset routing (not meaningful for UDP).
+func NewUDPServiceCluster(name, edsServiceName, altStatName string) *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:                          name,
+		AltStatName:                   altStatName,
+		ConnectTimeout:                durationpb.New(2 * time.Second),
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_EDS,
+		},
+		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			EdsConfig:   config.XDSConfigSourceADS(),
+			ServiceName: edsServiceName,
+		},
+		// No TypedExtensionProtocolOptions: udp_proxy speaks raw UDP upstream.
+		// No LbSubsetConfig: subset routing is not meaningful for UDP.
+		// No TransportSocket: UDP is plaintext — see security note above.
+		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
+			HealthyPanicThreshold: &typev3.Percent{Value: 0},
+		},
+		OutlierDetection: &clusterv3.OutlierDetection{
+			SplitExternalLocalOriginErrors: true,
+			ConsecutiveLocalOriginFailure:  wrapperspb.UInt32(3),
+			BaseEjectionTime:               durationpb.New(30 * time.Second),
+			MaxEjectionPercent:             wrapperspb.UInt32(50),
+			Interval:                       durationpb.New(10 * time.Second),
+		},
+		IgnoreHealthOnHostRemoval: true,
 	}
 }
 

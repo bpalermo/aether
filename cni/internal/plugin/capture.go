@@ -32,10 +32,24 @@ func installCaptureRedirect(netnsPath string, logger *zap.Logger) error {
 	return withPodNetns(netnsPath, func() error { return programCaptureRedirect(logger) })
 }
 
-// programCaptureRedirect adds the nat/output REDIRECT rule in the CURRENT netns.
+// programCaptureRedirect adds the nat/output REDIRECT rules in the CURRENT netns:
+// one for outbound TCP and one for outbound UDP, both destined for the mesh
+// port (ProxyOutboundPort). TCP redirects to ProxyCapturePort (the capture
+// listener); UDP redirects to ProxyUDPCapturePort (the UDP capture listener,
+// proposal 018 Phase 3b). Both rules share the loopback exclusion so the
+// pod-local explicit fast-lane (127.x:meshPort) is never intercepted.
+//
+// NOTE: the UDP redirect only takes effect when --l4-routes is enabled (the
+// agent only generates the UDP capture listener when UDPRoute backends exist).
+// The nft rule itself is always installed when capture is on — the absence of a
+// bound UDP socket on ProxyUDPCapturePort means redirected packets are silently
+// dropped until the agent creates the listener, which is correct behaviour
+// (UDPRoute without --l4-routes = no listener = datagrams discarded rather than
+// sent to an unexpected destination).
 func programCaptureRedirect(logger *zap.Logger) error {
 	meshPort := uint16(commonconstants.ProxyOutboundPort)
-	capturePort := uint16(commonconstants.ProxyCapturePort)
+	tcpCapturePort := uint16(commonconstants.ProxyCapturePort)
+	udpCapturePort := uint16(commonconstants.ProxyUDPCapturePort)
 
 	c, err := nftables.New()
 	if err != nil {
@@ -50,35 +64,53 @@ func programCaptureRedirect(logger *zap.Logger) error {
 		Hooknum:  nftables.ChainHookOutput,
 		Priority: nftables.ChainPriorityNATDest,
 	})
+	// TCP: outbound TCP to ClusterIP:meshPort → capturePort (Phase 3a).
 	c.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
-		Exprs: captureRedirectExprs(meshPort, capturePort),
+		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, meshPort, tcpCapturePort),
+	})
+	// UDP: outbound UDP to ClusterIP:meshPort → udpCapturePort (Phase 3b).
+	// Datagrams arriving at ProxyUDPCapturePort are handled by the udp_proxy
+	// capture listener generated for each pod when UDPRoute backends are present.
+	// No mesh mTLS — UDP is forwarded in plaintext (known limitation; no DTLS).
+	c.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: chain,
+		Exprs: captureRedirectExprs(unix.IPPROTO_UDP, meshPort, udpCapturePort),
 	})
 
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("apply capture redirect (nft flush): %w", err)
 	}
 	logger.Info("installed transparent-capture redirect",
-		zap.Uint16("mesh_port", meshPort), zap.Uint16("capture_port", capturePort))
+		zap.Uint16("mesh_port", meshPort),
+		zap.Uint16("tcp_capture_port", tcpCapturePort),
+		zap.Uint16("udp_capture_port", udpCapturePort))
 	return nil
 }
 
 // captureRedirectExprs builds the rule:
 //
-//	meta l4proto tcp
-//	ip daddr & 255.0.0.0 != 127.0.0.0      (skip the loopback fast-lane)
-//	tcp dport <meshPort>
+//	meta l4proto <proto>                         (tcp or udp)
+//	ip daddr & 255.0.0.0 != 127.0.0.0           (skip the loopback fast-lane)
+//	<proto> dport <meshPort>                     (transport dport, offset 2)
 //	redirect to :<capturePort>
-func captureRedirectExprs(meshPort, capturePort uint16) []expr.Any {
+//
+// The transport dest port is at the same offset (2, len 2) for both TCP and UDP,
+// so the same expression shape applies to both protocols — matching the approach
+// used in dns.go for the mesh-DNS DNAT. The proto byte controls which L4 traffic
+// is matched (unix.IPPROTO_TCP or unix.IPPROTO_UDP).
+func captureRedirectExprs(proto byte, meshPort, capturePort uint16) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
 		// ip daddr (IPv4 dest = offset 16, len 4), masked to /8, != 127.0.0.0
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: []byte{0xff, 0x00, 0x00, 0x00}, Xor: []byte{0x00, 0x00, 0x00, 0x00}},
 		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{127, 0, 0, 0}},
-		// tcp dport == meshPort (transport dest = offset 2, len 2, big-endian)
+		// <proto> dport == meshPort (transport dest = offset 2, len 2, big-endian;
+		// this offset is identical for TCP and UDP headers).
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(meshPort)},
 		// redirect to capturePort

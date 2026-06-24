@@ -14,11 +14,14 @@ package proxy
 // TCP clusters. No TLS termination — the mTLS between proxies stays intact; the
 // SNI is the app's TLS SNI on the raw captured stream.
 //
-// UDPRoute (parentRef=Service): the control-plane side is implemented here
-// (per-pod UDP listener + udp_proxy with weighted clusters). The CNI UDP redirect
-// is NOT yet wired: the nftables rule in cni/internal/plugin/capture.go only
-// redirects TCP. See the note in GenerateUDPCaptureListener. Plan to add the UDP
-// redirect in a follow-up CNI change.
+// UDPRoute (parentRef=Service): per-pod UDP capture listener + udp_proxy. The
+// CNI installs an nftables REDIRECT rule for outbound UDP to a mesh ClusterIP
+// (in cni/internal/plugin/capture.go, programCaptureRedirect). Backends use
+// "udp:<svc>.<domain>" EDS clusters (plain, no mTLS — see NewUDPServiceCluster).
+//
+// SECURITY NOTE: mesh mTLS does NOT cover the UDP floor. Datagrams are forwarded
+// to backends in plaintext. This is a known limitation of the UDP floor (proposal
+// 018 Phase 3b); DTLS is not implemented.
 
 import (
 	"fmt"
@@ -167,18 +170,14 @@ func CaptureUDPListenerName(podName string) string {
 // routing (proposal 018, Phase 3b). It binds to captureUDPPort inside the pod
 // netns and routes via udp_proxy to the service's backends.
 //
-// IMPORTANT — PARTIAL IMPLEMENTATION: the CNI redirect for UDP is NOT yet wired.
-// cni/internal/plugin/capture.go only installs an nftables rule for TCP
-// (meta l4proto tcp). To activate UDP capture, a follow-up CNI change must add:
+// The CNI installs a matching nftables REDIRECT rule (programCaptureRedirect in
+// cni/internal/plugin/capture.go) that steers outbound UDP destined for a mesh
+// ClusterIP:meshPort into this listener when --l4-routes is enabled.
 //
-//	meta l4proto udp
-//	ip daddr & 255.0.0.0 != 127.0.0.0
-//	udp dport <meshPort>
-//	redirect to :<captureUDPPort>
-//
-// Until that lands, this listener will be generated in the snapshot but will
-// receive no traffic (no iptables/nftables rule redirects UDP to it). It is safe
-// to include: the listener binds a UDP socket that receives nothing.
+// SECURITY NOTE: datagrams forwarded via this listener are NOT protected by
+// mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not implemented. Backend
+// clusters are plain EDS with no transport socket. This is a known limitation
+// of the UDP floor (proposal 018 Phase 3b).
 //
 // Returns nil if udpRoutes is empty (no listener generated until there are routes).
 func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, udpRoutes map[string][]L4Backend) (*listenerv3.Listener, error) {

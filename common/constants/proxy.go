@@ -12,6 +12,17 @@ const (
 	// In aether's 18xxx range (with ProxyOutboundPort) to avoid colliding with
 	// Istio's 15001 outbound-capture port if both meshes share a node.
 	ProxyCapturePort = 18001
+	// ProxyUDPCapturePort is the port the per-pod UDP capture listener binds
+	// inside the pod netns (proposal 018, Phase 3b UDPRoute). The CNI REDIRECTs
+	// outbound UDP to a mesh ClusterIP:ProxyOutboundPort here; the udp_proxy
+	// filter routes to the UDPRoute backends. Default off (gated behind
+	// --l4-routes). In aether's 18xxx range alongside ProxyCapturePort (TCP).
+	//
+	// SECURITY NOTE: UDP datagrams routed via this listener are NOT protected
+	// by mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not implemented in this
+	// mesh. UDP traffic is forwarded in plaintext to the backend pods. This is a
+	// known limitation of the UDP floor — see proposal 018 Phase 3b.
+	ProxyUDPCapturePort = 18002
 	// ProxyDNSResolverPort is the host port the node agent's in-process mesh-DNS
 	// resolver listens on (UDP+TCP) at HOST_IP (proposal 018, mesh-global FQDN). The
 	// CNI DNATs each pod's outbound :53 straight to HOST_IP:ProxyDNSResolverPort. In
