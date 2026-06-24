@@ -103,14 +103,15 @@ agent:
   # Transparent capture (proposal 018, Phase 3a): per-pod capture listeners + the
   # cap_http route table built from the generated mesh Services. Pairs with
   # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.
-  # Default off — adds the services-read RBAC only when enabled.
-  transparentCapture: false
-  # Mesh DNS (proposal 018, mesh-global FQDN): per-pod dns_filter answering
-  # <svc>.<meshDomain> from the generated mesh Services' ClusterIPs (namespace-free,
-  # globally routable), forwarding the rest to meshDnsUpstream. Pairs with the CNI
-  # :53 redirect. Default off. meshDnsUpstream is the cluster kube-dns (env-specific,
-  # e.g. the kube-dns Service ClusterIP); required when meshDns is on.
-  meshDns: false
+  # Default ON (validated hitless under churn); adds the services-read RBAC.
+  transparentCapture: true
+  # Mesh DNS (proposal 018, mesh-global FQDN): the node agent runs an in-process
+  # resolver answering <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
+  # (namespace-free, globally routable) and forwarding the rest to meshDnsUpstream;
+  # the CNI DNATs each pod's :53 straight to it. Default ON. meshDnsUpstream defaults
+  # to the agent's own resolv.conf (kube-dns via ClusterFirstWithHostNet) when empty,
+  # so no per-cluster config is needed; set it only to override.
+  meshDns: true
   meshDnsUpstream: []
   # Image as repository + digest (digest-pinned for immutability). Mirror to a
   # private registry by overriding `repository` alone; the digest is preserved.
@@ -270,9 +271,9 @@ registrar:
   registryBackend: kubernetes
   # Transparent-capture VIPs (proposal 018, Phase 3a): the leader registrar projects
   # the mesh catalog into selectorless k8s Services on the mesh port (ClusterIP +
-  # cluster.local name + annotation; no EndpointSlices). Default off; adds Service
-  # CRUD RBAC only when enabled.
-  generateMeshServices: false
+  # cluster.local name + annotation; no EndpointSlices). Default ON — the VIPs +
+  # mesh-DNS records that capture and meshDns depend on; adds Service CRUD RBAC.
+  generateMeshServices: true
   # Region owning this registrar's etcd partition (etcd backend; proposal 006).
   # Keys are origin-first /aether/v1/regions/<region>/clusters/<clusterName>/…;
   # shared by every registrar on the same regional etcd.
@@ -301,8 +302,8 @@ controller:
   # ndots (= the mesh-domain label count) into managed pods so a mesh FQDN
   # (<svc>.<meshDomain>) resolves absolute-first, before the cluster.local search
   # list — without it, musl/Alpine clients fail to resolve mesh names. Scoped to
-  # aether.io/managed pods, failurePolicy=Ignore. Default off; pair with mesh DNS.
-  injectPodNdots: false
+  # aether.io/managed pods, failurePolicy=Ignore. Default ON; pairs with mesh DNS.
+  injectPodNdots: true
   webhook:
     # Webhook serving cert source — DECOUPLED from mesh SPIRE (spire.enabled).
     #   false (default): a Helm self-signed cert (genSignedCert, caBundle baked

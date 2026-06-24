@@ -4,6 +4,7 @@ go_library(
     name = "meshdns",
     srcs = [
         "metrics.go",
+        "resolvconf.go",
         "server.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/meshdns",
@@ -19,7 +20,13 @@ go_library(
 
 go_test(
     name = "meshdns_test",
-    srcs = ["server_test.go"],
+    srcs = [
+        "resolvconf_test.go",
+        "server_test.go",
+    ],
     embed = [":meshdns"],
-    deps = ["@com_github_stretchr_testify//assert"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

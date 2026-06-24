@@ -93,10 +93,10 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		}
 		// Transparent capture (proposal 018, Phase 3a): the cap_http table the per-pod
 		// capture listeners reference over RDS. Always emitted when capture is on (it
-		// carries a 404 default) so the listeners' RDS resolves even with no in-scope
-		// cluster.local authorities yet.
+		// carries the on-demand catch-all) so the listeners' RDS resolves even with no
+		// in-scope authorities yet, and cold/off-node services recover via ODCDS.
 		if c.captureEnabled {
-			routes = append(routes, proxy.BuildCaptureRouteConfiguration(c.captureVhosts()))
+			routes = append(routes, proxy.BuildCaptureRouteConfiguration(c.captureVhosts(), c.meshDomain))
 		}
 		if len(routes) > 0 {
 			resources[resourcev3.RouteType] = routes
