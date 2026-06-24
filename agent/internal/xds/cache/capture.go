@@ -176,8 +176,13 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		}
 		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
 		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName, c.perDownstreamConnectionPool())
-		// sni = same as HTTP cluster for this service (port routing on destination inbound)
-		proxy.InjectUpstreamTCPMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, httpEntry.sni)
+		// NO SNI for the TCP floor: the egress floor connection must NOT carry the
+		// destination port as SNI, or the peer's inbound per-port HCM chain
+		// (server_names:[port]) would win over the inbound TCP floor's default chain
+		// (server_names > application_protocols > default) — the connection lands on
+		// the HCM, which can't parse the raw TCP stream and 503s. An empty SNI lets it
+		// fall through to the inbound default floor chain (tcp_proxy to the app).
+		proxy.InjectUpstreamTCPMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, "")
 		resources = append(resources, cl)
 	}
 	c.clusterMu.RUnlock()
