@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -19,10 +20,31 @@ import (
 // generated mesh-Service names) to the registry-backed service clusters.
 const CaptureHTTPRouteName = "cap_http"
 
+// AetherTCPALPN is the TLS ALPN token the capture/outbound tcp_proxy uses when
+// dialing a destination over mTLS. The destination inbound's filter-chain match
+// on application_protocols: ["aether-tcp"] selects the tcp_proxy floor chain;
+// any other ALPN (e.g. "h2" from the HCM) falls through to the HTTP chains.
+const AetherTCPALPN = "aether-tcp"
+
 const (
 	listenerFilterOriginalDstName   = "envoy.filters.listener.original_dst"
 	listenerFilterHTTPInspectorName = "envoy.filters.listener.http_inspector"
 )
+
+// CaptureTCPService describes a non-HTTP mesh service that requires a
+// per-ClusterIP TCP-proxy floor chain on the transparent-capture listener.
+// When the capture listener sees outbound traffic whose original-dst ClusterIP
+// matches one of these services, it routes via tcp_proxy over per-source mTLS
+// to the service's EDS cluster — preserving SPIFFE SAN validation and
+// registry health without demux through the HCM.
+type CaptureTCPService struct {
+	// ClusterName is the EDS cluster the tcp_proxy forwards to
+	// (<service>.<meshDomain>, same as the HTTP route target).
+	ClusterName string
+	// ClusterIP is the k8s Service ClusterIP matched by the filter chain's
+	// prefix_ranges (/32 host match).
+	ClusterIP string
+}
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
 func CaptureListenerName(cniPod *cniv1.CNIPod) string {
@@ -34,15 +56,33 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // traffic the CNI redirects from a mesh ClusterIP:meshPort, recovers the original
 // destination, and routes by cluster.local authority (the request Host) to the
 // service's registry-backed EDS cluster — the same SPIRE-mTLS egress path the
-// explicit :18081 listener serves. HTTP only for now; the TCP-over-mTLS floor is a
-// follow-up. Default off (no listener is generated unless transparent capture is on).
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool) (*listenerv3.Listener, error) {
+// explicit :18081 listener serves.
+//
+// TCP floor (Phase 3a): for non-HTTP services (tcpServices), per-ClusterIP filter
+// chains route via tcp_proxy over per-source mTLS to the service's EDS cluster,
+// preserving SPIFFE SAN validation and registry health. The HCM chain handles all
+// HTTP services; the TCP chains are more specific (destination-IP match) and only
+// exist for non-HTTP ClusterIPs so there is no precedence conflict.
+//
+// Default off (no listener is generated unless transparent capture is on).
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
 	if cniPod.GetNetworkNamespace() == "" {
 		return nil, fmt.Errorf("network namespace is required")
 	}
+
+	// Build filter chains: per-ClusterIP TCP floor chains first (more specific),
+	// then the global HCM chain as the catch-all for HTTP/gRPC traffic.
+	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)+1)
+	for _, svc := range tcpServices {
+		tc := buildCaptureTCPFloorFilterChain(svc)
+		if tc != nil {
+			chains = append(chains, tc)
+		}
+	}
+	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod))
 
 	return &listenerv3.Listener{
 		Name: CaptureListenerName(cniPod),
@@ -61,24 +101,63 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 			},
 		},
 		// original_dst recovers the pre-REDIRECT ClusterIP:meshPort (SO_ORIGINAL_DST);
-		// http_inspector lets the AUTO codec detect HTTP/1 vs HTTP/2 on the captured
-		// stream. use_original_dst keeps the recovered destination on the connection.
+		// http_inspector detects HTTP/1 vs HTTP/2; tls_inspector detects TLS on the
+		// captured stream for future downstreams that speak TLS at the app layer.
+		// use_original_dst keeps the recovered destination on the connection.
 		ListenerFilters:               buildCaptureListenerFilters(),
 		UseOriginalDst:                wrapperspb.Bool(true),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		StatPrefix:                    fmt.Sprintf("capture_%s", cniPod.GetName()),
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
-		FilterChains: []*listenerv3.FilterChain{
-			buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod),
-		},
+		FilterChains:                  chains,
 	}, nil
 }
 
-// buildCaptureListenerFilters: recover the original destination, then sniff HTTP.
+// buildCaptureListenerFilters: recover the original destination, then sniff HTTP and TLS.
+// original_dst must run first (recovers SO_ORIGINAL_DST before any inspection);
+// http_inspector and tls_inspector detect the application protocol on the captured stream.
 func buildCaptureListenerFilters() []*listenerv3.ListenerFilter {
 	return []*listenerv3.ListenerFilter{
 		listenerFilter(listenerFilterOriginalDstName, &original_dstv3.OriginalDst{}),
 		listenerFilter(listenerFilterHTTPInspectorName, &http_inspectorv3.HttpInspector{}),
+		tlsInspector(),
+	}
+}
+
+// buildCaptureTCPFloorFilterChain builds a per-ClusterIP TCP floor filter chain for
+// one non-HTTP mesh service. It matches the service's ClusterIP as the original
+// destination (/32 prefix_ranges) and routes via tcp_proxy over the per-source mTLS
+// upstream transport socket to the service's EDS cluster. Returns nil for invalid
+// ClusterIPs (headless or unset) so callers can skip them.
+//
+// ALPN: the outbound tcp_proxy dials with ALPN "aether-tcp" (via
+// UpstreamTCPTransportSocket). The destination inbound listener matches
+// application_protocols:["aether-tcp"] on its TCP floor chain, so mTLS-demux is
+// clean: h2 → HCM chains; aether-tcp → TCP floor chains.
+//
+// Filter-chain precedence: destination-IP is more specific than application-protocol
+// in Envoy's match order, BUT this chain only exists for NON-HTTP ClusterIPs, so the
+// global HCM catch-all chain never has a precedence conflict with these chains.
+func buildCaptureTCPFloorFilterChain(svc CaptureTCPService) *listenerv3.FilterChain {
+	if svc.ClusterIP == "" || svc.ClusterName == "" {
+		return nil
+	}
+	if net.ParseIP(svc.ClusterIP) == nil {
+		return nil
+	}
+	return &listenerv3.FilterChain{
+		Name: fmt.Sprintf("cap_tcp_%s", svc.ClusterName),
+		FilterChainMatch: &listenerv3.FilterChainMatch{
+			// Match only the exact ClusterIP so this chain intercepts only TCP
+			// traffic destined for this specific non-HTTP service VIP.
+			PrefixRanges: []*corev3.CidrRange{
+				{AddressPrefix: svc.ClusterIP, PrefixLen: wrapperspb.UInt32(32)},
+			},
+		},
+		Filters: []*listenerv3.Filter{
+			buildNetworkNamespaceFilterState(),
+			buildTCPProxyNetworkFilter(fmt.Sprintf("cap_tcp_%s", svc.ClusterName), svc.ClusterName),
+		},
 	}
 }
 

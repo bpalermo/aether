@@ -10,6 +10,7 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,8 +34,16 @@ func TestNewInboundListener(t *testing.T) {
 	assert.Equal(t, "/var/run/netns/cni-a", sa.GetNetworkNamespaceFilepath())
 	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
 
-	// mTLS terminating filter chain presenting the pod's own SVID as the server cert.
-	fc := l.GetFilterChains()[0]
+	// First chain is the TCP floor (application_protocols: ["aether-tcp"]).
+	tcpFloor := l.GetFilterChains()[0]
+	require.NotNil(t, tcpFloor.GetFilterChainMatch())
+	assert.Equal(t, []string{AetherTCPALPN}, tcpFloor.GetFilterChainMatch().GetApplicationProtocols())
+	require.NotNil(t, tcpFloor.GetTransportSocket(), "TCP floor chain must terminate mTLS")
+	require.Len(t, tcpFloor.GetFilters(), 1)
+	assert.Equal(t, "envoy.filters.network.tcp_proxy", tcpFloor.GetFilters()[0].GetName())
+
+	// Second chain is the default HCM chain (no match criteria = catch-all for h2).
+	fc := l.GetFilterChains()[1]
 	require.NotNil(t, fc.GetTransportSocket(), "inbound listener must terminate mTLS")
 
 	hcm := decodeHCM(t, l)
@@ -77,11 +86,24 @@ func TestNewInboundListener_Errors(t *testing.T) {
 	require.Error(t, err)
 }
 
+// decodeHCM finds and decodes the first HCM filter chain on the listener.
+// With the TCP floor chain now first, the default HCM chain is at index 1.
 func decodeHCM(t *testing.T, l *listenerv3.Listener) *http_connection_managerv3.HttpConnectionManager {
 	t.Helper()
-	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
-	return hcm
+	for _, fc := range l.GetFilterChains() {
+		if fc.GetFilterChainMatch() != nil && len(fc.GetFilterChainMatch().GetApplicationProtocols()) > 0 {
+			// Skip the TCP floor chain (matched on application_protocols).
+			continue
+		}
+		for _, f := range fc.GetFilters() {
+			hcm := &http_connection_managerv3.HttpConnectionManager{}
+			if err := f.GetTypedConfig().UnmarshalTo(hcm); err == nil {
+				return hcm
+			}
+		}
+	}
+	t.Fatal("no HCM filter found in listener filter chains")
+	return nil
 }
 
 func decodeHealthCheck(t *testing.T, f *http_connection_managerv3.HttpFilter) *healthcheckv3.HealthCheck {
@@ -109,6 +131,10 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 	bySNI := map[string]*listenerv3.FilterChain{}
 	var defaultChain *listenerv3.FilterChain
 	for _, fc := range l.GetFilterChains() {
+		// Skip the TCP floor chain (matched on application_protocols only).
+		if fc.GetFilterChainMatch() != nil && len(fc.GetFilterChainMatch().GetApplicationProtocols()) > 0 {
+			continue
+		}
 		if fc.GetFilterChainMatch() == nil || len(fc.GetFilterChainMatch().GetServerNames()) == 0 {
 			defaultChain = fc
 			continue
@@ -145,8 +171,10 @@ func TestInboundChainStatsFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, l.GetFilterChains())
 
+	// FilterChains()[0] is the TCP floor chain (application_protocols=["aether-tcp"]).
+	// The default HCM chain (catch-all for h2/mTLS traffic) is at index 1.
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	require.NoError(t, l.GetFilterChains()[1].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 
 	filters := hcm.GetHttpFilters()
 	require.Len(t, filters, 4, "expected liveness + readiness + stats + router")
@@ -163,4 +191,47 @@ func TestInboundChainStatsFilter(t *testing.T) {
 	// unless emit_pod is set (off by default here).
 	assert.Equal(t, "checkout-abc", fields["destination_pod"].GetStringValue())
 	assert.False(t, fields["emit_pod"].GetBoolValue())
+}
+
+// TestInboundTCPFloorFilterChain verifies the ALPN-demuxed TCP floor chain on the
+// inbound :15008 listener (proposal 018, Phase 3a).
+// Expected: chain named "in_tcp_<pod>", matched on application_protocols=["aether-tcp"],
+// a single tcp_proxy network filter routing to the app cluster, and a transport socket.
+func TestInboundTCPFloorFilterChain(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "svc-a",
+		Namespace:        "default",
+		ServiceAccount:   "svc-a",
+		NetworkNamespace: "/var/run/netns/cni-tcp",
+		Ips:              []string{"10.0.0.5"},
+	}
+	l, err := NewInboundListener(pod, "aether.internal", false)
+	require.NoError(t, err)
+
+	// Find the TCP floor chain.
+	var tcpFloor *listenerv3.FilterChain
+	for _, fc := range l.GetFilterChains() {
+		if fc.GetFilterChainMatch() != nil &&
+			len(fc.GetFilterChainMatch().GetApplicationProtocols()) == 1 &&
+			fc.GetFilterChainMatch().GetApplicationProtocols()[0] == AetherTCPALPN {
+			tcpFloor = fc
+			break
+		}
+	}
+	require.NotNil(t, tcpFloor, "TCP floor chain with application_protocols=[\"aether-tcp\"] must be present")
+
+	// Chain name.
+	assert.Equal(t, "in_tcp_svc-a", tcpFloor.GetName())
+
+	// Must terminate mTLS (transport socket present).
+	require.NotNil(t, tcpFloor.GetTransportSocket(), "TCP floor chain must terminate mTLS")
+	assert.Equal(t, "envoy.transport_sockets.tls", tcpFloor.GetTransportSocket().GetName())
+
+	// Single tcp_proxy network filter routing to the pod's app cluster.
+	require.Len(t, tcpFloor.GetFilters(), 1)
+	assert.Equal(t, "envoy.filters.network.tcp_proxy", tcpFloor.GetFilters()[0].GetName())
+
+	tcp := &tcp_proxyv3.TcpProxy{}
+	require.NoError(t, tcpFloor.GetFilters()[0].GetTypedConfig().UnmarshalTo(tcp))
+	assert.Equal(t, "app_svc-a_8080", tcp.GetCluster(), "tcp_proxy must forward to the pod's primary app cluster")
 }

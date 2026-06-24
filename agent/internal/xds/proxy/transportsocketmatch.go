@@ -103,6 +103,36 @@ func UpstreamTransportSocketMatcher(netnsToSpiffeID map[string]string) *matcherv
 	}
 }
 
+// UpstreamTCPTransportSocketMatches is UpstreamTransportSocketMatches for TCP floor
+// clusters: each match uses UpstreamTCPTransportSocket (ALPN "aether-tcp") instead
+// of UpstreamTransportSocket ("h2"). Match names are suffixed with ":tcp" to keep
+// them distinct from the HTTP matches when both cluster types coexist in the snapshot.
+func UpstreamTCPTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string, sni string) []*clusterv3.Cluster_TransportSocketMatch {
+	unique := make([]string, 0, len(spiffeIDs))
+	seen := make(map[string]struct{}, len(spiffeIDs))
+	for _, id := range spiffeIDs {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	sort.Strings(unique)
+
+	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
+	for _, id := range unique {
+		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
+			Name:            id + ":tcp",
+			Match:           &structpb.Struct{},
+			TransportSocket: UpstreamTCPTransportSocket(id, validationContextName, sanURIs, sni),
+		})
+	}
+	return matches
+}
+
 // transportSocketNameOnMatch builds an OnMatch that selects the named transport
 // socket from the cluster's transport_socket_matches.
 func transportSocketNameOnMatch(socketName string) *matcherv3.Matcher_OnMatch {

@@ -35,6 +35,15 @@ func PortClusterName(serviceName, meshDomain string, port uint32) string {
 	return fmt.Sprintf("%s:%d", ServiceClusterName(serviceName, meshDomain), port)
 }
 
+// TCPClusterName returns the data-plane name of a service's TCP-floor cluster:
+// "tcp:<service>.<meshDomain>". This cluster is identical to the HTTP cluster
+// (<service>.<meshDomain>) except it uses ALPN "aether-tcp" on its upstream
+// transport socket so the destination inbound demuxes to the TCP floor chain.
+// The capture TCP floor filter chains reference this cluster by this name.
+func TCPClusterName(serviceName, meshDomain string) string {
+	return "tcp:" + ServiceClusterName(serviceName, meshDomain)
+}
+
 // ServiceFromClusterName maps a data-plane cluster name (a mesh authority,
 // <service>.<meshDomain>) back to the bare service name. ok is false when the
 // name is not under the mesh domain or the remainder is not a single DNS
@@ -239,6 +248,61 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 		// picking it before the app dies). Honor EDS removals immediately.
 		IgnoreHealthOnHostRemoval: true,
 	}
+}
+
+// NewTCPServiceCluster builds an EDS service cluster for a non-HTTP service's TCP
+// floor path (proposal 018, Phase 3a). It is identical to NewServiceCluster except:
+//   - It omits TypedExtensionProtocolOptions (no HTTP/2 upstream protocol — the
+//     tcp_proxy sends raw bytes after mTLS termination, so h2 negotiation is wrong).
+//   - The cluster's transport socket (injected at snapshot time by InjectUpstreamTCPMTLS)
+//     uses ALPN "aether-tcp" instead of "h2", so the destination inbound's tls_inspector
+//     routes to the TCP floor filter chain, not the HCM.
+//   - subset_selectors and retry circuit-breakers are omitted — TCP proxy doesn't use
+//     subset routing or the HTTP retry mechanism.
+func NewTCPServiceCluster(name, edsServiceName, altStatName string, perDownstreamConnectionPool bool) *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:                                  name,
+		AltStatName:                           altStatName,
+		ConnectTimeout:                        durationpb.New(2 * time.Second),
+		PerConnectionBufferLimitBytes:         wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		ConnectionPoolPerDownstreamConnection: perDownstreamConnectionPool,
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_EDS,
+		},
+		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			EdsConfig:   config.XDSConfigSourceADS(),
+			ServiceName: edsServiceName,
+		},
+		// No TypedExtensionProtocolOptions: tcp_proxy does not speak h2 upstream.
+		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
+			HealthyPanicThreshold: &typev3.Percent{Value: 0},
+		},
+		OutlierDetection: &clusterv3.OutlierDetection{
+			SplitExternalLocalOriginErrors: true,
+			ConsecutiveLocalOriginFailure:  wrapperspb.UInt32(3),
+			BaseEjectionTime:               durationpb.New(30 * time.Second),
+			MaxEjectionPercent:             wrapperspb.UInt32(50),
+			Interval:                       durationpb.New(10 * time.Second),
+		},
+		CloseConnectionsOnHostHealthFailure: true,
+		IgnoreHealthOnHostRemoval:           true,
+	}
+}
+
+// InjectUpstreamTCPMTLS is InjectUpstreamMTLS for TCP floor clusters: it injects
+// a per-source transport socket that uses ALPN "aether-tcp" (UpstreamTCPTransportSocket)
+// instead of "h2", so the destination inbound filter-chain match on
+// application_protocols:["aether-tcp"] routes to the TCP floor tcp_proxy chain.
+func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni string) {
+	matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
+	if matcher == nil {
+		cluster.TransportSocket = UpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
+		return
+	}
+	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID + ":tcp")
+
+	cluster.TransportSocketMatcher = matcher
+	cluster.TransportSocketMatches = UpstreamTCPTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs, sni)
 }
 
 // InjectUpstreamMTLS sets the per-source mTLS transport socket on a service cluster:

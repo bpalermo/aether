@@ -58,6 +58,12 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// clusters carry their endpoints inline, so they need no EDS resources.
 	clusters = append(clusters, c.appClusters()...)
 
+	// TCP floor clusters (proposal 018, Phase 3a): one per non-HTTP service in the
+	// capture TCP set. These are separate EDS clusters using ALPN "aether-tcp" that
+	// share endpoints with the corresponding HTTP clusters. Only emitted when capture
+	// is enabled and there are non-HTTP services.
+	clusters = append(clusters, c.captureTCPClusters()...)
+
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
 	for _, s := range c.secrets {

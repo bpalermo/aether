@@ -69,6 +69,46 @@ func TestGenerator_PrunesStale(t *testing.T) {
 	require.NoError(t, err, "current mesh service still has its VIP")
 }
 
+// TestGenerator_AnnotatesHTTPAppProtocol verifies that the generator writes the
+// AnnotationMeshAppProtocol annotation on created mesh Services and updates it if the
+// protocol changes. HTTP is the only protocol emitted by the current registry (all
+// services use PROTOCOL_HTTP), so this test verifies that annotation is always "http".
+func TestGenerator_AnnotatesHTTPAppProtocol(t *testing.T) {
+	g, c := newGen(seed("svc-1", "aether-test", 8080))
+	g.reconcile(context.Background())
+
+	svc, err := get(t, c, "aether-test", "svc-1")
+	require.NoError(t, err)
+	assert.Equal(t, AppProtocolHTTP, svc.Annotations[constants.AnnotationMeshAppProtocol],
+		"PROTOCOL_HTTP services must be annotated as http")
+}
+
+// TestGenerator_UpdatesStaleAppProtocol verifies that if an existing mesh Service
+// has a stale/wrong AnnotationMeshAppProtocol, the generator corrects it on the next
+// reconcile.
+func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
+	// Pre-existing managed Service with the wrong app-protocol annotation.
+	existing := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc-1", Namespace: "aether-test",
+			Labels: map[string]string{constants.LabelMeshService: "true"},
+			Annotations: map[string]string{
+				constants.AnnotationMeshService:     "svc-1",
+				constants.AnnotationMeshPort:        "8080",
+				constants.AnnotationMeshAppProtocol: "tcp", // stale, should be corrected to "http"
+			},
+		},
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 18081}}},
+	}
+	g, c := newGen(seed("svc-1", "aether-test", 8080), existing)
+	g.reconcile(context.Background())
+
+	svc, err := get(t, c, "aether-test", "svc-1")
+	require.NoError(t, err)
+	assert.Equal(t, AppProtocolHTTP, svc.Annotations[constants.AnnotationMeshAppProtocol],
+		"stale app-protocol annotation must be corrected on reconcile")
+}
+
 func TestGenerator_DoesNotClobberUserService(t *testing.T) {
 	user := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc-1", Namespace: "aether-test"},

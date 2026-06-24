@@ -37,4 +37,11 @@ const (
 	// owns these — it lists/prunes ServiceImports by this label, never touching
 	// a ServiceImport an operator or another controller authored.
 	LabelManagedServiceImport = aetherLabelPrefix + "/managed-service-import"
+
+	// AnnotationMeshAppProtocol records the application-layer protocol for a
+	// generated mesh Service (proposal 018, Phase 3a TCP floor). Values: "http"
+	// (default), "grpc", "tcp". The capture reconciler reads it to decide whether
+	// to emit a per-ClusterIP TCP-proxy filter chain (non-HTTP services) or leave
+	// the global HCM chain to handle traffic to that VIP (HTTP/gRPC services).
+	AnnotationMeshAppProtocol = aetherLabelPrefix + "/app-protocol"
 )
