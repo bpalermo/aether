@@ -81,6 +81,9 @@ spec:
             {{- if .Values.agent.gamma }}
             - "--gamma"
             {{- end }}
+            {{- if .Values.agent.l4Routes }}
+            - "--l4-routes"
+            {{- end }}
             {{- if .Values.agent.transparentCapture }}
             - "--transparent-capture"
             {{- end }}

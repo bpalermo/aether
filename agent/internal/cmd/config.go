@@ -88,6 +88,13 @@ type AgentConfig struct {
 	// 018, Phase 2). Default off — a no-op until enabled.
 	Gamma bool
 
+	// L4Routes enables L4 route types (TCPRoute/TLSRoute/UDPRoute parentRef=Service,
+	// proposal 018, Phase 3b): the agent watches these route types and projects
+	// weighted TCP floor chains and SNI-routed TLS chains onto the capture listener.
+	// Requires --transparent-capture to be meaningful. Default off.
+	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
+	L4Routes bool
+
 	// TransparentCapture enables transparent capture (proposal 018, Phase 3a): the
 	// agent generates per-pod capture listeners + the cap_http route table and
 	// watches the generated mesh Services for their cluster.local authorities. Pairs

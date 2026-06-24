@@ -9,6 +9,7 @@ go_library(
         "dependencies.go",
         "edge.go",
         "gamma.go",
+        "l4route.go",
         "listener.go",
         "metrics.go",
         "secret.go",

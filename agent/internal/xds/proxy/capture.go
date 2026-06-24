@@ -44,6 +44,15 @@ type CaptureTCPService struct {
 	// ClusterIP is the k8s Service ClusterIP matched by the filter chain's
 	// prefix_ranges (/32 host match).
 	ClusterIP string
+	// TCPRouteRules are the L4ServiceRoutes from a TCPRoute parentRef=Service
+	// (proposal 018, Phase 3b). When non-empty, the passthrough floor chain is
+	// replaced with a weighted_clusters tcp_proxy routing to these backends.
+	// Empty = passthrough (Phase 3a behaviour).
+	TCPRouteRules []L4ServiceRoute
+	// TLSRouteRules are the L4ServiceRoutes from a TLSRoute parentRef=Service.
+	// When non-empty, per-SNI filter chains (server_names match) are inserted
+	// BEFORE the per-ClusterIP TCP floor chain on the capture listener.
+	TLSRouteRules []L4ServiceRoute
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -73,11 +82,23 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 		return nil, fmt.Errorf("network namespace is required")
 	}
 
-	// Build filter chains: per-ClusterIP TCP floor chains first (more specific),
-	// then the global HCM chain as the catch-all for HTTP/gRPC traffic.
-	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)+1)
+	// Build filter chains. Order matters for Envoy's filter-chain matching:
+	//   1. TLS SNI chains (TLSRoute, proposal 018 Phase 3b): server_names + prefix_ranges.
+	//      The tls_inspector reads SNI before chain selection; more specific than
+	//      destination-IP-only chains.
+	//   2. Per-ClusterIP TCP floor chains (TCPRoute or passthrough, Phase 3a/3b):
+	//      destination-IP match only (prefix_ranges=/32).
+	//   3. Global HCM catch-all: no match criteria (catches all HTTP/gRPC traffic).
+	//
+	// TLS SNI chains are inserted first so Envoy evaluates server_names+IP before
+	// the destination-IP-only TCP floor chain (more specific wins).
+	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)*2+1)
 	for _, svc := range tcpServices {
-		tc := buildCaptureTCPFloorFilterChain(svc)
+		// TLSRoute SNI chains (if any) go before the TCP floor chain.
+		tlsChains := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules)
+		chains = append(chains, tlsChains...)
+		// TCP floor chain: passthrough or TCPRoute-weighted.
+		tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules)
 		if tc != nil {
 			chains = append(chains, tc)
 		}

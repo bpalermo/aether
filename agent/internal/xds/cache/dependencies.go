@@ -155,13 +155,21 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	}
 	// GAMMA (proposal 018 Phase 2): a depended-on service's L7 rule backends must
 	// also be resolvable, so union them in (their EDS clusters then generate).
-	if len(c.serviceRoutes) > 0 {
+	// L4 routes (proposal 018 Phase 3b): same principle for TCP/TLS/UDP backends.
+	hasL7 := len(c.serviceRoutes) > 0
+	hasL4 := len(c.tcpServiceRoutes) > 0 || len(c.tlsServiceRoutes) > 0 || len(c.udpServiceRoutes) > 0
+	if hasL7 || hasL4 {
 		base := make([]string, 0, len(set))
 		for svc := range set {
 			base = append(base, svc)
 		}
 		for _, svc := range base {
-			c.routeBackendsLocked(svc, set)
+			if hasL7 {
+				c.routeBackendsLocked(svc, set)
+			}
+			if hasL4 {
+				c.l4RouteBackendsLocked(svc, set)
+			}
 		}
 	}
 	return set
