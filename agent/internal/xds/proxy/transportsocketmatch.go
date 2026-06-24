@@ -105,8 +105,13 @@ func UpstreamTransportSocketMatcher(netnsToSpiffeID map[string]string) *matcherv
 
 // UpstreamTCPTransportSocketMatches is UpstreamTransportSocketMatches for TCP floor
 // clusters: each match uses UpstreamTCPTransportSocket (ALPN "aether-tcp") instead
-// of UpstreamTransportSocket ("h2"). Match names are suffixed with ":tcp" to keep
-// them distinct from the HTTP matches when both cluster types coexist in the snapshot.
+// of UpstreamTransportSocket ("h2"). Match names are the bare SPIFFE ID — identical
+// to the HTTP matches — because the shared UpstreamTransportSocketMatcher selects by
+// the source pod's SPIFFE ID, and transport_socket_matches are scoped per cluster
+// (the HTTP <svc> and TCP tcp:<svc> clusters are distinct, so the names never
+// collide). A ":tcp" suffix would never be selected (the matcher emits the bare ID),
+// leaving the floor connection on the default socket with no "aether-tcp" ALPN, so
+// the inbound floor chain wouldn't match and the mTLS connection would reset.
 func UpstreamTCPTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string, sni string) []*clusterv3.Cluster_TransportSocketMatch {
 	unique := make([]string, 0, len(spiffeIDs))
 	seen := make(map[string]struct{}, len(spiffeIDs))
@@ -125,7 +130,7 @@ func UpstreamTCPTransportSocketMatches(spiffeIDs []string, validationContextName
 	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
 	for _, id := range unique {
 		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
-			Name:            id + ":tcp",
+			Name:            id,
 			Match:           &structpb.Struct{},
 			TransportSocket: UpstreamTCPTransportSocket(id, validationContextName, sanURIs, sni),
 		})
