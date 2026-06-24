@@ -91,17 +91,16 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 	}, nil
 }
 
-// buildInboundFilterChains builds the full set of inbound filter chains:
+// buildInboundFilterChains builds the full set of inbound filter chains, demuxed by
+// Envoy's match precedence (server_names > application_protocols > default):
 //
-//  1. TCP floor chain: matches application_protocols:["aether-tcp"] (set by the
-//     source proxy's tcp_proxy outbound path). Terminates mTLS and routes via
-//     tcp_proxy to the pod's primary app cluster on loopback. This chain is
-//     more specific than the HCM chains (has application_protocols) so Envoy
-//     selects it first for TCP-over-mTLS connections.
+//  1. HCM chains: one per served port (SNI-matched on the port number) plus a
+//     no-SNI chain matching application_protocols:["h2"] — the mesh HTTP/2 transport.
 //
-//  2. HCM chains: one per served port (SNI-matched on the port number) plus a
-//     default (no-SNI) chain for back-compat and no-SNI clients. These handle
-//     HTTP/2 (ALPN "h2") and any other ALPN not matched by the floor chain.
+//  2. TCP floor chain: the DEFAULT (no match). The source proxy's tcp_proxy egress
+//     sends NO ALPN, so it matches no HCM chain (no "h2", no port SNI) and lands
+//     here, terminating mTLS and routing via tcp_proxy to the pod's app on loopback.
+//     Demux is the standard "h2" ALPN for HTTP vs no-ALPN for TCP — no bespoke token.
 //
 // SNI is port routing only — identity stays the terminated mTLS SVID.
 func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string, emitStatsPod bool) []*listenerv3.FilterChain {
@@ -127,20 +126,17 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 }
 
 // buildInboundTCPFloorFilterChain builds the mTLS-terminating TCP floor chain for
-// the inbound listener. It matches ALPN "aether-tcp" (set by the outbound
-// tcp_proxy's UpstreamTCPTransportSocket) and routes all bytes via tcp_proxy to
-// the pod's primary application cluster (app_<pod>_<defaultPort>) on loopback.
+// the inbound listener. It is the listener's DEFAULT chain (no match criteria): a
+// no-ALPN mTLS connection — the source proxy's tcp_proxy floor egress, which sends
+// no ALPN — matches nothing more specific (HTTP chains require "h2" or a port SNI)
+// and lands here, terminating mTLS and routing all bytes via tcp_proxy to the pod's
+// primary application cluster (app_<pod>_<defaultPort>) on loopback.
 func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
 	appCluster := AppClusterName(cniPod, defaultPort)
 	return &listenerv3.FilterChain{
-		Name: fmt.Sprintf("in_tcp_%s", cniPod.GetName()),
-		FilterChainMatch: &listenerv3.FilterChainMatch{
-			// application_protocols is more specific than server_names in Envoy's
-			// filter-chain match order, so this chain wins over the HCM chains for
-			// any connection that negotiated the "aether-tcp" ALPN.
-			ApplicationProtocols: []string{AetherTCPALPN},
-		},
-		TransportSocket: DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
+		Name:             fmt.Sprintf("in_tcp_%s", cniPod.GetName()),
+		FilterChainMatch: nil, // default chain: no ALPN / no SNI → the TCP floor
+		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
 		Filters: []*listenerv3.Filter{
 			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s", inboundTCPFloorStatPrefix, cniPod.GetName()), appCluster),
 		},
@@ -175,7 +171,11 @@ func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16,
 	}
 
 	name := fmt.Sprintf("in_%s", cniPod.GetName())
-	var match *listenerv3.FilterChainMatch
+	// The no-SNI HCM chain matches application_protocols:["h2"] (the mesh's HTTP/2
+	// transport) so a no-ALPN mTLS connection — the TCP floor — falls through to the
+	// floor's default chain instead. Per-port chains match the port SNI (more
+	// specific than application_protocols, so they win for HTTP regardless of ALPN).
+	match := &listenerv3.FilterChainMatch{ApplicationProtocols: []string{"h2"}}
 	if sni != "" {
 		name = fmt.Sprintf("in_%s_%s", cniPod.GetName(), sni)
 		match = &listenerv3.FilterChainMatch{ServerNames: []string{sni}}
