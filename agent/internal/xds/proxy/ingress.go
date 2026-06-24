@@ -109,14 +109,12 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 
 	chains := make([]*listenerv3.FilterChain, 0, len(ports)+2)
 
-	// TCP floor chain: ALPN "aether-tcp" → tcp_proxy to primary app loopback port.
-	// Placed first so it is evaluated before the HCM chains when Envoy sorts chains
-	// by specificity (application_protocols is more specific than server_names).
+	// TCP floor chain: the DEFAULT (no match) → tcp_proxy to the primary app loopback
+	// port. A no-ALPN mTLS connection (the source tcp_proxy egress) lands here.
 	chains = append(chains, buildInboundTCPFloorFilterChain(cniPod, defaultPort, tlsCertificateSecretName, validationContextName))
 
-	// Default chain (no server_names): primary port. Matches no-SNI/no-ALPN clients
-	// and any SNI that doesn't match a port chain. Must come before per-port chains
-	// so it is tried after the TCP floor but before named-port chains.
+	// No-SNI HCM chain: matches application_protocols ["h2"] (the mesh HTTP/2
+	// transport) on the primary port. Per-port SNI chains follow.
 	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, emitStatsPod))
 	// One chain per served port, SNI-matched on the port number.
 	for _, port := range ports {
