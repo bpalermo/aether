@@ -79,13 +79,9 @@ type AgentConfig struct {
 	// binds (edge subcommand only).
 	EdgeHTTPPort uint32
 
-	// RouteNamespace is the namespace the edge watches its route CRs in
+	// RouteNamespace is the namespace the edge watches its Gateways/HTTPRoutes in
 	// (edge subcommand only); empty means the edge pod's own namespace.
 	RouteNamespace string
-
-	// GatewayAPI makes the edge consume Gateway API (Gateway + HTTPRoute) instead
-	// of the VirtualHost CRD (proposal 018, Phase 1). Edge subcommand only.
-	GatewayAPI bool
 
 	// Gamma enables GAMMA east-west L7 routing on the node proxy: the agent watches
 	// HTTPRoutes parented to a Service and enriches the outbound routes (proposal
@@ -107,13 +103,12 @@ type AgentConfig struct {
 	// MeshDNSUpstream is the upstream resolver(s) (host[:port]) the mesh-DNS filter
 	// forwards non-mesh queries to — the cluster kube-dns.
 	MeshDNSUpstream []string
-	// GatewayClassName is the GatewayClass whose Gateways this edge serves when
-	// GatewayAPI is set.
+	// GatewayClassName is the GatewayClass whose Gateways this edge serves.
 	GatewayClassName string
 
 	// EdgeTLS enables downstream TLS termination: the edge serves an HTTPS
-	// listener on EdgeHTTPSPort (certs per VirtualHost via SDS) and an HTTP->HTTPS
-	// redirect on the plain port (edge subcommand only).
+	// listener on EdgeHTTPSPort (certs per Gateway listener via SDS) and an
+	// HTTP->HTTPS redirect on the plain port (edge subcommand only).
 	EdgeTLS bool
 	// EdgeHTTPSPort is the port the edge TLS listener binds when EdgeTLS is set.
 	EdgeHTTPSPort uint32

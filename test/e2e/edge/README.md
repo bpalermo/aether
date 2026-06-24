@@ -31,12 +31,12 @@ render only when `edge.enabled=true`.
 
 ## 2. Expose a service
 
-Apply `edgeroute.yaml` (host-based). The edge exposes a service ONLY at the
-external hostnames its EdgeRoute lists:
+Apply `httproute.yaml` (a Gateway + HTTPRoute, proposal 018). The edge exposes a
+service ONLY at the external hostnames its HTTPRoutes list:
 
 ```bash
-kubectl apply -f test/e2e/edge/edgeroute.yaml
-kubectl get edgeroutes -n aether-edge
+kubectl apply -f test/e2e/edge/httproute.yaml
+kubectl get gateways,httproutes -n aether-ingress
 ```
 
 ## 3. Drive traffic
@@ -45,7 +45,7 @@ kubectl get edgeroutes -n aether-edge
 # External entrypoint (LoadBalancer IP or NodePort).
 EDGE=$(kubectl get svc -n aether-edge aether-edge -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
-# Host-routed (matches EdgeRoute.spec.hosts):
+# Host-routed (matches HTTPRoute.spec.hostnames):
 curl -sS -H 'Host: api.example.com' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'   # 200
 
 # The internal mesh FQDN is NOT routable from the edge -> 404:
@@ -69,10 +69,11 @@ With `edge.tls.enabled`, use `https://` and the cert's SNI.
 - **Hitless rollout.** `kubectl rollout restart deploy/aether-edge -n aether-edge`
   under a load generator → no failed requests (Service + `/aether/readyz` readiness
   gate).
-- **Live route changes.** `kubectl apply`/`delete` an EdgeRoute → the route
+- **Live route changes.** `kubectl apply`/`delete` an HTTPRoute → the route
   appears/disappears within a reconcile, no edge redeploy.
 
 ## Rollback
 
-`helm upgrade aether ... --set edge.enabled=false` removes all edge resources;
-the EdgeRoute CRD (in the `crds` chart, `resource-policy: keep`) is left in place.
+`helm upgrade aether ... --set edge.enabled=false` removes all edge resources.
+The Gateway API CRDs are installed out-of-band (standard channel); aether does not
+own them.

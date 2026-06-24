@@ -12,9 +12,10 @@ rules:
   - apiGroups: ["config.aether.io"]
     resources: ["meshconfigs/status"]
     verbs: ["get", "update", "patch"]
-  # List VirtualHosts cluster-wide for the duplicate-FQDN validating webhook.
-  - apiGroups: ["config.aether.io"]
-    resources: ["virtualhosts"]
+  # List HTTPRoutes cluster-wide for the hostname-conflict validating webhook
+  # (proposal 018).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
     verbs: ["get", "list", "watch"]
   {{- if .Values.controller.webhook.spire }}
   # Inject the SPIRE trust bundle into the webhook's caBundle (by name).

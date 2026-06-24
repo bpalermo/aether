@@ -23,11 +23,11 @@ func req(kind string) admission.Request {
 
 func TestDispatchByKind(t *testing.T) {
 	h := NewHandler(slog.New(slog.DiscardHandler), map[string]admission.Handler{
-		"MeshConfig":  stub{admission.Denied("mc")},
-		"VirtualHost": stub{admission.Denied("vh")},
+		"MeshConfig": stub{admission.Denied("mc")},
+		"HTTPRoute":  stub{admission.Denied("hr")},
 	})
 	assert.Equal(t, "mc", h.Handle(context.Background(), req("MeshConfig")).Result.Message)
-	assert.Equal(t, "vh", h.Handle(context.Background(), req("VirtualHost")).Result.Message)
+	assert.Equal(t, "hr", h.Handle(context.Background(), req("HTTPRoute")).Result.Message)
 }
 
 // TestUnknownKindAdmitted verifies an unrouted Kind is admitted (fail-open) — it

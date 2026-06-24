@@ -24,9 +24,9 @@ import (
 	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
+	"github.com/bpalermo/aether/controller/internal/gatewayapi"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
 	"github.com/bpalermo/aether/controller/internal/podmutate"
-	"github.com/bpalermo/aether/controller/internal/virtualhost"
 	cwebhook "github.com/bpalermo/aether/controller/internal/webhook"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const name = "aether-controller"
@@ -102,6 +103,11 @@ func runController(ctx context.Context) (retErr error) {
 	if err := crdv1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("register MeshConfig scheme: %w", err)
 	}
+	// Gateway API types: the HTTPRoute validating webhook lists HTTPRoutes for the
+	// hostname-conflict check (proposal 018).
+	if err := gatewayv1.Install(scheme); err != nil {
+		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+	}
 
 	// When SPIRE is enabled, serve the validating webhook with a SPIRE X.509 SVID
 	// (one-way TLS; the apiserver verifies against the SPIRE bundle injected as the
@@ -153,12 +159,12 @@ func runController(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to set up MeshConfig reconciler: %w", err)
 	}
 
-	// All CRD validation is served on one /validate endpoint, dispatched by Kind.
-	// The VirtualHost validator uses the API reader for a cluster-wide
-	// duplicate-FQDN list (uncached, correct regardless of the manager cache scope).
+	// All validation is served on one /validate endpoint, dispatched by Kind. The
+	// HTTPRoute validator uses the API reader for a cluster-wide hostname-conflict
+	// list (uncached, correct regardless of the manager cache scope).
 	cwebhook.NewHandler(l, map[string]admission.Handler{
-		crdv1.MeshConfigKind:  &meshconfig.Validator{Log: l},
-		crdv1.VirtualHostKind: &virtualhost.Validator{Reader: m.GetAPIReader(), Log: l},
+		crdv1.MeshConfigKind:     &meshconfig.Validator{Log: l},
+		gatewayapi.HTTPRouteKind: &gatewayapi.Validator{Reader: m.GetAPIReader(), Log: l},
 	}).SetupWithManager(m)
 
 	// Pod-ndots mutating webhook (musl mesh-FQDN resolution; opt-in via the chart's

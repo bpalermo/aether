@@ -71,9 +71,8 @@ spec:
             {{- with .Values.edge.routeNamespace }}
             - "--route-namespace={{ . }}"
             {{- end }}
-            {{- if .Values.edge.gatewayApi.enabled }}
-            - "--gateway-api"
-            - "--gateway-class={{ .Values.edge.gatewayApi.gatewayClassName }}"
+            {{- if ne .Values.edge.gatewayClassName "aether" }}
+            - "--gateway-class={{ .Values.edge.gatewayClassName }}"
             {{- end }}
             {{- if .Values.edge.tls.enabled }}
             - "--edge-tls"
