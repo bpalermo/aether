@@ -12,9 +12,35 @@ import (
 )
 
 const (
-	// filterStateInputName is the matcher input extension that reads a filter
-	// state object.
-	filterStateInputName = "envoy.matching.inputs.filter_state"
+	// filterStateInputName is the transport-socket-specific matcher input that
+	// reads a filter state object from TransportSocketOptions.
+	//
+	// This is envoy.matching.inputs.transport_socket_filter_state
+	// (envoy/extensions/matching/common_inputs/transport_socket/v3/FilterStateInput),
+	// NOT the generic "envoy.matching.inputs.filter_state"
+	// (envoy/extensions/matching/common_inputs/network/v3/FilterStateInput).
+	//
+	// The distinction is critical:
+	//   - The generic input (filter_state) reads from StreamInfo::filterState()
+	//     on the connection. It is registered for network/HTTP matcher contexts
+	//     (filter chain matching, route matching, etc.).
+	//   - The transport-socket-specific input (transport_socket_filter_state)
+	//     reads from TransportSocketOptions::downstreamSharedFilterStateObjects(),
+	//     which are the filter state objects propagated from the downstream
+	//     connection via SharedWithUpstream. It is registered for the
+	//     transport_socket_matcher context on a cluster.
+	//
+	// Using the generic name in a cluster transport_socket_matcher causes the
+	// input factory to be resolved for the wrong matcher data type
+	// (TransportSocketMatchingData instead of NetworkMatchingData). The factory
+	// returns nullopt (no value), the exact-match never fires, and evaluation
+	// falls to OnNoMatch — selecting the node identity for every upstream
+	// connection regardless of source pod. Per-source cert selection is silently
+	// broken. For tcp_proxy upstream connections the wrong socket can also cause
+	// TLS handshake failures (wrong client cert vs SAN-pinned peer expectation),
+	// manifesting as upstream_cx_total staying 0 because connections open but
+	// immediately reset before the pool records them.
+	filterStateInputName = "envoy.matching.inputs.transport_socket_filter_state"
 	// transportSocketNameActionName is the matcher action extension that selects
 	// a named transport socket.
 	transportSocketNameActionName = "envoy.matching.action.transport_socket.name"

@@ -43,8 +43,18 @@ func TestUpstreamTransportSocketMatcher(t *testing.T) {
 	tree := matcher.GetMatcherTree()
 	require.NotNil(t, tree)
 
-	// Input reads the aether network namespace filter state.
-	assert.Equal(t, filterStateInputName, tree.GetInput().GetName())
+	// Input must use the transport-socket-specific FilterStateInput extension
+	// (envoy.matching.inputs.transport_socket_filter_state), NOT the generic
+	// network/HTTP filter_state input. The transport-socket variant reads from
+	// TransportSocketOptions::downstreamSharedFilterStateObjects() — the objects
+	// propagated from the downstream connection via SharedWithUpstream. The
+	// generic variant reads from StreamInfo::filterState() directly and is
+	// registered for network/HTTP matcher contexts, not transport-socket
+	// contexts; using it in a cluster transport_socket_matcher causes the input
+	// to return nullopt silently, the exact-match never fires, and all
+	// connections fall to OnNoMatch (node identity, never per-source cert).
+	assert.Equal(t, filterStateInputName, tree.GetInput().GetName(),
+		"must be envoy.matching.inputs.transport_socket_filter_state, not the generic filter_state")
 	var input tsinputsv3.FilterStateInput
 	require.NoError(t, proto.Unmarshal(tree.GetInput().GetTypedConfig().GetValue(), &input))
 	assert.Equal(t, networkNamespaceFilterStateKey, input.GetKey())
@@ -60,6 +70,24 @@ func TestUpstreamTransportSocketMatcher(t *testing.T) {
 	var nameAction tsinputsv3.TransportSocketNameAction
 	require.NoError(t, proto.Unmarshal(action.GetTypedConfig().GetValue(), &nameAction))
 	assert.Equal(t, idA, nameAction.GetName())
+}
+
+// TestUpstreamTransportSocketMatcherExtensionName is a regression test for the
+// transport-socket-specific FilterStateInput extension name. Using the wrong
+// extension name ("envoy.matching.inputs.filter_state", the generic network/HTTP
+// input) in a cluster transport_socket_matcher causes Envoy to silently return
+// nullopt from the input (wrong data type for TransportSocketMatchingData), so
+// the exact-match never fires and every upstream connection falls to OnNoMatch.
+// This results in all egress presenting the node identity rather than the
+// originating pod's, and for TCP floor clusters causes TLS handshake failures
+// (client cert SAN mismatch), manifesting as upstream_cx_total = 0.
+func TestUpstreamTransportSocketMatcherExtensionName(t *testing.T) {
+	matcher := UpstreamTransportSocketMatcher(map[string]string{"/var/run/netns/cni-a": "spiffe://aether.internal/ns/ns/sa/sa"})
+	name := matcher.GetMatcherTree().GetInput().GetName()
+	assert.Equal(t, "envoy.matching.inputs.transport_socket_filter_state", name,
+		"must be the transport-socket-scoped FilterStateInput, not the generic network filter_state input")
+	assert.NotEqual(t, "envoy.matching.inputs.filter_state", name,
+		"the generic filter_state input silently returns nullopt in a transport_socket_matcher context")
 }
 
 // TestUpstreamTransportSocketMatchesDeterministic verifies the matches are

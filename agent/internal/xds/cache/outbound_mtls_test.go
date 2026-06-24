@@ -50,6 +50,17 @@ func TestServiceClusterMTLSInjected(t *testing.T) {
 	echo, ok := clusters["echo.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
 	require.NotNil(t, echo.GetTransportSocketMatcher(), "service cluster must carry the per-source mTLS matcher")
+
+	// The matcher input must be the transport-socket-specific FilterStateInput
+	// (envoy.matching.inputs.transport_socket_filter_state), NOT the generic
+	// "envoy.matching.inputs.filter_state". Using the wrong extension name causes
+	// Envoy to silently return nullopt in the transport_socket_matcher context,
+	// so the exact-match never fires and all connections fall to OnNoMatch
+	// (always node identity, never per-source cert).
+	inputName := echo.GetTransportSocketMatcher().GetMatcherTree().GetInput().GetName()
+	assert.Equal(t, "envoy.matching.inputs.transport_socket_filter_state", inputName,
+		"transport_socket_matcher input must be the transport-socket-scoped FilterStateInput")
+
 	names := map[string]bool{}
 	for _, m := range echo.GetTransportSocketMatches() {
 		names[m.GetName()] = true
