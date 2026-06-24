@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//agent/internal/edge/secret",
         "//agent/internal/xds/cache",
+        "//agent/internal/xds/proxy",
         "//api/aether/config/v1:config",
         "//common/log",
         "@io_k8s_api//core/v1:core",
@@ -17,6 +18,7 @@ go_library(
         "@io_k8s_sigs_controller_runtime//pkg/handler",
         "@io_k8s_sigs_controller_runtime//pkg/reconcile",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
+        "@io_k8s_sigs_gateway_api//apis/v1alpha2",
     ],
 )
 
@@ -26,8 +28,11 @@ go_test(
     embed = [":gatewayapi"],
     deps = [
         "//agent/internal/xds/cache",
+        "//agent/internal/xds/proxy",
         "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
+        "@io_k8s_sigs_gateway_api//apis/v1alpha2",
     ],
 )

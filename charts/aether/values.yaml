@@ -233,6 +233,11 @@ edge:
     port: 80
     httpsPort: 443
     annotations: {}
+    # extraPorts declares additional TCP ports on the edge Service so the LoadBalancer
+    # exposes them. Each entry becomes a spec.ports item. Use this to expose the ports
+    # bound by Gateway TCP/TLS listeners (TCPRoute/TLSRoute parented to the edge Gateway).
+    # Example: [{name: postgres, port: 5432, protocol: TCP}]
+    extraPorts: []
   resources:
     requests:
       cpu: 200m

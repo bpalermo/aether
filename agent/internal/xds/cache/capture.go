@@ -25,8 +25,8 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	for i, e := range c.captureTCPServices {
 		tcpServices[i] = proxy.CaptureTCPService{
 			// TCP clusters are separate from HTTP clusters: they share the same EDS
-			// resource (same endpoint set) but use ALPN "aether-tcp" on the transport
-			// socket so the destination inbound demuxes to the TCP floor chain.
+			// resource (same endpoint set) but use no ALPN on the transport socket so
+			// the destination inbound demuxes to the TCP floor DEFAULT chain.
 			ClusterName: proxy.TCPClusterName(e.serviceName, c.meshDomain),
 			ClusterIP:   e.clusterIP,
 			// L4 route rules (Phase 3b): override the passthrough floor chain when
@@ -126,8 +126,8 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 
 // captureTCPClusters returns the TCP floor clusters for non-HTTP services as a resource
 // slice. These are separate EDS clusters (prefixed "tcp:") that share the same endpoints
-// as the HTTP clusters but use ALPN "aether-tcp" on their transport socket so the
-// destination inbound routes to the TCP floor filter chain. Called from generateSnapshot.
+// as the HTTP clusters but use NO ALPN on their transport socket so the destination
+// inbound routes to the TCP floor DEFAULT chain. Called from generateSnapshot.
 func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 	if !c.captureEnabled {
 		return nil
@@ -187,6 +187,79 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 	}
 	c.clusterMu.RUnlock()
 
+	return resources
+}
+
+// edgeTCPClusters returns TCP floor clusters for services referenced by the edge's
+// L4 routes (TCPRoute/TLSRoute parented to a Gateway). Called from generateSnapshot
+// when in edge mode; parallel to captureTCPClusters but for the edge identity
+// (EdgeUpstreamTCPTransportSocket fetches SDS from spire_agent, not ADS).
+//
+// The edge has one identity so no per-source matcher is needed: the cluster gets
+// a single transport socket presenting the edge SVID with no ALPN and no SNI,
+// so the destination inbound demuxes to the TCP floor DEFAULT chain.
+func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
+	c.edgeMu.RLock()
+	tcpRoutes := append([]proxy.EdgeL4TCPRoute(nil), c.edgeTCPRoutes...)
+	tlsRoutes := append([]proxy.EdgeL4TLSRoute(nil), c.edgeTLSRoutes...)
+	c.edgeMu.RUnlock()
+
+	// Collect the distinct service names referenced by edge L4 routes.
+	seen := make(map[string]struct{})
+	var services []string
+	for _, r := range tcpRoutes {
+		for _, b := range r.Backends {
+			if b.Service != "" && b.Cluster != "" {
+				if _, ok := seen[b.Service]; !ok {
+					seen[b.Service] = struct{}{}
+					services = append(services, b.Service)
+				}
+			}
+		}
+	}
+	for _, r := range tlsRoutes {
+		for _, rule := range r.Rules {
+			for _, b := range rule.Backends {
+				if b.Service != "" && b.Cluster != "" {
+					if _, ok := seen[b.Service]; !ok {
+						seen[b.Service] = struct{}{}
+						services = append(services, b.Service)
+					}
+				}
+			}
+		}
+	}
+	if len(services) == 0 {
+		return nil
+	}
+
+	c.localMu.RLock()
+	nodeSpiffeID := c.nodeSpiffeID
+	trustDomain := c.trustDomain
+	c.localMu.RUnlock()
+	if nodeSpiffeID == "" {
+		return nil
+	}
+	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
+
+	c.clusterMu.RLock()
+	resources := make([]types.Resource, 0, len(services))
+	for _, svc := range services {
+		entry, ok := c.clusters[svc]
+		if !ok {
+			continue // not yet in scope; will appear when registry delivers endpoints
+		}
+		sanURIs := make([]string, 0, len(entry.sanNamespaces))
+		for _, ns := range entry.sanNamespaces {
+			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, entry.service))
+		}
+		tcpName := proxy.TCPClusterName(svc, c.meshDomain)
+		cl := proxy.NewTCPServiceCluster(tcpName, svc, svc, false /* edge = single identity, no per-downstream pool */)
+		// Edge variant: fetch SVID/bundle from spire_agent (not ADS), no ALPN, no SNI (TCP floor).
+		cl.TransportSocket = proxy.EdgeUpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
+		resources = append(resources, cl)
+	}
+	c.clusterMu.RUnlock()
 	return resources
 }
 

@@ -64,6 +64,13 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// is enabled and there are non-HTTP services.
 	clusters = append(clusters, c.captureTCPClusters()...)
 
+	// Edge L4 TCP clusters (proposal 018, Phase 3b north-south): one per service
+	// referenced by an edge TCPRoute or TLSRoute. Like capture TCP clusters but use
+	// the edge SPIRE identity and fetch SDS from spire_agent directly.
+	if c.edge {
+		clusters = append(clusters, c.edgeTCPClusters()...)
+	}
+
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
 	for _, s := range c.secrets {

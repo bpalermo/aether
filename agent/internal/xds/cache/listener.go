@@ -95,18 +95,23 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 // Thread-safe.
 func (c *SnapshotCache) Listeners() []types.Resource {
 	// Edge mode: public-facing listener(s) (no per-pod inbound/outbound
-	// listeners, no health gateway — the edge runs no local workloads). With TLS
-	// enabled it serves a TLS-terminating listener on the https port (certs
-	// SNI-selected from SDS) plus an HTTP->HTTPS redirect on the plain port;
-	// otherwise a single plain-HTTP listener.
+	// listeners, no health gateway — the edge runs no local workloads). The edge
+	// serves:
+	//   - HTTP listener (plain or TLS-terminating) from HTTPRoutes
+	//   - TCP listener(s) for each Gateway TCP port from TCPRoutes
+	//   - TLS passthrough listener(s) for each Gateway TLS port from TLSRoutes
 	if c.edge {
+		var resources []types.Resource
 		if c.edgeTLSEnabled {
-			return []types.Resource{
+			resources = append(resources,
 				proxy.BuildEdgeListener(c.edgeHTTPSPort, c.edgeTLSSecretNames()),
 				proxy.BuildEdgeRedirectListener(c.edgeHTTPPort),
-			}
+			)
+		} else {
+			resources = append(resources, proxy.BuildEdgeListener(c.edgeHTTPPort, nil))
 		}
-		return []types.Resource{proxy.BuildEdgeListener(c.edgeHTTPPort, nil)}
+		resources = append(resources, c.edgeTCPListeners()...)
+		return resources
 	}
 
 	c.listenerMu.RLock()

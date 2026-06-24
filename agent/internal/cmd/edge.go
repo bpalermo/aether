@@ -21,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
 // edgeName is the controller/logging name for the edge proxy control plane.
@@ -117,6 +118,10 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	if err := gatewayv1.Install(scheme); err != nil {
 		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+	}
+	// TCPRoute/TLSRoute live in v1alpha2 (not yet promoted to v1 in gateway-api v1.5.1).
+	if err := gatewayv1alpha2.Install(scheme); err != nil {
+		return fmt.Errorf("register gateway.networking.k8s.io/v1alpha2 scheme: %w", err)
 	}
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) { o.Scheme = scheme })
@@ -221,6 +226,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		Sink:             snapshotCache,
 		Namespace:        routeNamespace,
 		GatewayClassName: cfg.GatewayClassName,
+		MeshDomain:       cfg.MeshDomain,
 		Secrets:          secretRegistry,
 		Log:              l,
 	}
