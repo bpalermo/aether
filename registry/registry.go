@@ -7,7 +7,13 @@ import (
 	"context"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/registry/export"
 )
+
+// ServiceExport is one cluster's declaration that a mesh service is consumable
+// across the clusterset (Kubernetes MCS-API). Re-exported from registry/export
+// (a leaf package shared with the backends to avoid an import cycle).
+type ServiceExport = export.ServiceExport
 
 // Registry manages service endpoint registration, deregistration, and discovery.
 // It maintains a list of service endpoints and supports querying by service name and protocol.
@@ -80,6 +86,29 @@ type ServiceCatalog interface {
 // implementation re-asserts the filter on every reconnect.
 type WatchScoper interface {
 	SetServiceFilter(services []string)
+}
+
+// ServiceExporter is an optional capability for cross-cluster Registry
+// implementations (the etcd backend, proposal 006): it records, alongside the
+// origin-partitioned endpoints, that a cluster has EXPORTED a mesh service to
+// the clusterset (Kubernetes MCS-API ServiceExport). Marks live under the
+// instance's own authoritative partition (writes) but List ranges every origin
+// (reads), so each cluster sees the union of exports clusterset-wide and can
+// materialize a local ServiceImport + clusterset VIP for any of them.
+//
+// Backends without a cross-cluster plane (kubernetes, dynamodb) do not implement
+// it; the registrar's MCS controllers no-op when it is absent.
+type ServiceExporter interface {
+	// SetExport records, under THIS instance's own partition, that the local
+	// cluster exports the named mesh service from the given namespace. Idempotent.
+	SetExport(ctx context.Context, service, namespace string) error
+	// UnsetExport removes the local cluster's export mark for the named service.
+	// Idempotent (removing a nonexistent mark is not an error).
+	UnsetExport(ctx context.Context, service string) error
+	// ListExports returns every export mark across all origins (clusters) — the
+	// clusterset-wide export view. The same service may appear once per exporting
+	// cluster.
+	ListExports(ctx context.Context) ([]ServiceExport, error)
 }
 
 // AuthoritativeLister is an optional capability for Registry implementations

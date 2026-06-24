@@ -24,6 +24,7 @@ import (
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/registry/export"
 )
 
 const (
@@ -380,6 +381,89 @@ func (r *EtcdRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 
 	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
 	return endpointsByService, nil
+}
+
+// exportsMarker delimits the export-mark segment within a key, after the origin
+// (region/cluster) prefix: <ownPrefix>/exports/<service> = <namespace>.
+const exportsMarker = "/exports/"
+
+// exportKey builds the key for one of THIS instance's own export marks.
+func (r *EtcdRegistry) exportKey(service string) string {
+	return r.ownPrefix + exportsMarker + service
+}
+
+// SetExport records that the local cluster exports the named mesh service from
+// the given namespace (Kubernetes MCS-API ServiceExport). The mark lives under
+// THIS instance's own authoritative partition; the namespace is the value so a
+// remote importer can materialize the ServiceImport into the right namespace.
+// Satisfies registry.ServiceExporter.
+func (r *EtcdRegistry) SetExport(ctx context.Context, service, namespace string) error {
+	key := r.exportKey(service)
+	if _, err := r.client.Put(ctx, key, namespace); err != nil {
+		r.log.ErrorContext(ctx, "failed to set service export", "error", err, "service", service, "key", key)
+		return fmt.Errorf("failed to set export for service %s: %w", service, err)
+	}
+	r.log.InfoContext(ctx, "service export set", "service", service, "namespace", namespace)
+	return nil
+}
+
+// UnsetExport removes the local cluster's export mark for the named service.
+// Idempotent. Satisfies registry.ServiceExporter.
+func (r *EtcdRegistry) UnsetExport(ctx context.Context, service string) error {
+	key := r.exportKey(service)
+	if _, err := r.client.Delete(ctx, key); err != nil {
+		r.log.ErrorContext(ctx, "failed to unset service export", "error", err, "service", service, "key", key)
+		return fmt.Errorf("failed to unset export for service %s: %w", service, err)
+	}
+	r.log.InfoContext(ctx, "service export unset", "service", service)
+	return nil
+}
+
+// ListExports returns every export mark across all origins (clusters) — the
+// clusterset-wide export view. It ranges the whole root and parses each key's
+// origin cluster and service. Satisfies registry.ServiceExporter.
+func (r *EtcdRegistry) ListExports(ctx context.Context) ([]export.ServiceExport, error) {
+	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to list service exports", "error", err)
+		return nil, fmt.Errorf("failed to list service exports: %w", err)
+	}
+
+	exports := make([]export.ServiceExport, 0)
+	for _, kv := range resp.Kvs {
+		key := string(kv.Key)
+		i := strings.Index(key, exportsMarker)
+		if i < 0 {
+			continue
+		}
+		service := key[i+len(exportsMarker):]
+		if service == "" || strings.Contains(service, "/") {
+			continue
+		}
+		exports = append(exports, export.ServiceExport{
+			Service:   service,
+			Namespace: string(kv.Value),
+			Cluster:   extractCluster(key),
+		})
+	}
+
+	r.log.DebugContext(ctx, "listed service exports", "count", len(exports))
+	return exports, nil
+}
+
+// extractCluster pulls the origin cluster name from a full key path. Keys are
+// <root>/<region>/clusters/<cluster>/… (proposal 006 origin-first layout).
+func extractCluster(key string) string {
+	const marker = "/clusters/"
+	i := strings.Index(key, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := key[i+len(marker):]
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		return rest[:j]
+	}
+	return rest
 }
 
 // Close closes the etcd client connection.

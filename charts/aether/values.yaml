@@ -274,6 +274,16 @@ registrar:
   # cluster.local name + annotation; no EndpointSlices). Default ON — the VIPs +
   # mesh-DNS records that capture and meshDns depend on; adds Service CRUD RBAC.
   generateMeshServices: true
+  # Multi-Cluster Services (MCS-API) phase 1 (`--enable-mcs`; proposals 018 + 006):
+  # the leader registrar exports local ServiceExports to the registry and
+  # materializes a ServiceImport (ClusterSetIP) + a local clusterset.local VIP
+  # Service for every service exported anywhere in the clusterset. Requires the
+  # etcd backend (the cross-cluster plane); no-ops/errors for kubernetes/dynamodb.
+  # Default OFF — adds ServiceExport/ServiceImport RBAC only when enabled. The MCS
+  # ServiceExport/ServiceImport CRDs must be installed separately (the upstream
+  # sigs.k8s.io/mcs-api CRDs). DNS stays strictly local; the cross-cluster data
+  # path (remote endpoint resolution) is a later phase.
+  enableMCS: false
   # Region owning this registrar's etcd partition (etcd backend; proposal 006).
   # Keys are origin-first /aether/v1/regions/<region>/clusters/<clusterName>/…;
   # shared by every registrar on the same regional etcd.

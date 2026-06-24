@@ -1,0 +1,283 @@
+package mcs
+
+import (
+	"context"
+	"log/slog"
+	"sort"
+	"strconv"
+	"time"
+
+	"github.com/bpalermo/aether/common/constants"
+	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/registry"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+)
+
+// ImportGenerator reconciles the registry's clusterset-wide export view into, in
+// THIS cluster: a ServiceImport (type ClusterSetIP) per exported service, and a
+// LOCAL selectorless clusterset.local Service (the ClusterSet VIP) — mirroring
+// the registrar's mesh-Service generator. No EndpointSlice import: endpoints stay
+// in the registry, and the proxy resolves cross-cluster endpoints via registry
+// EDS at dial time (a later phase). Each clusterset Service is annotated with the
+// mesh service + mesh port so the agent maps the captured ClusterIP back to the
+// registry-backed EDS cluster, exactly like a per-cluster mesh VIP.
+//
+// It is a leader-elected manager Runnable: only the leader writes. It reads the
+// export view on a ticker (the etcd registry's view changes when any cluster's
+// ExportController writes a mark).
+type ImportGenerator struct {
+	client.Client
+	// Exporter is the registry's cross-cluster export capability. Required.
+	Exporter registry.ServiceExporter
+	// MeshPort is the clusterset VIP Service port (the mesh capture port).
+	MeshPort int32
+	Interval time.Duration
+	Log      *slog.Logger
+}
+
+// NeedLeaderElection makes the generator run only on the elected leader.
+func (g *ImportGenerator) NeedLeaderElection() bool { return true }
+
+// Start runs the reconcile loop until the context is cancelled.
+func (g *ImportGenerator) Start(ctx context.Context) error {
+	g.Log = commonlog.Named(g.Log, "mcs-import-generator")
+	ticker := time.NewTicker(g.Interval)
+	defer ticker.Stop()
+	g.reconcile(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			g.reconcile(ctx)
+		}
+	}
+}
+
+// desiredImport is one materialized clusterset service: a ServiceImport + a
+// selectorless clusterset VIP Service, keyed by (namespace, service).
+type desiredImport struct {
+	service   string
+	namespace string
+	clusters  []string
+}
+
+// reconcile makes the managed ServiceImports + clusterset Services equal the
+// registry's clusterset-wide export view: create missing, update drifted, prune
+// stale (only objects this generator owns, by label).
+func (g *ImportGenerator) reconcile(ctx context.Context) {
+	exports, err := g.Exporter.ListExports(ctx)
+	if err != nil {
+		g.Log.ErrorContext(ctx, "list registry exports failed", "error", err)
+		return
+	}
+
+	desired := map[client.ObjectKey]*desiredImport{}
+	for _, e := range exports {
+		if e.Service == "" || e.Namespace == "" {
+			continue
+		}
+		key := client.ObjectKey{Namespace: e.Namespace, Name: e.Service}
+		d := desired[key]
+		if d == nil {
+			d = &desiredImport{service: e.Service, namespace: e.Namespace}
+			desired[key] = d
+		}
+		if e.Cluster != "" {
+			d.clusters = append(d.clusters, e.Cluster)
+		}
+	}
+	for _, d := range desired {
+		sort.Strings(d.clusters)
+		d.clusters = dedupe(d.clusters)
+	}
+
+	g.pruneServiceImports(ctx, desired)
+	g.pruneClustersetServices(ctx, desired)
+	for _, d := range desired {
+		g.applyServiceImport(ctx, d)
+		g.applyClustersetService(ctx, d)
+	}
+}
+
+// pruneServiceImports deletes managed ServiceImports whose service no longer has
+// any export in the clusterset.
+func (g *ImportGenerator) pruneServiceImports(ctx context.Context, desired map[client.ObjectKey]*desiredImport) {
+	var managed mcsv1alpha1.ServiceImportList
+	if err := g.List(ctx, &managed, client.MatchingLabels{constants.LabelManagedServiceImport: "true"}); err != nil {
+		g.Log.ErrorContext(ctx, "list managed ServiceImports failed", "error", err)
+		return
+	}
+	for i := range managed.Items {
+		s := &managed.Items[i]
+		key := client.ObjectKeyFromObject(s)
+		if _, ok := desired[key]; ok {
+			continue
+		}
+		if err := g.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
+			g.Log.ErrorContext(ctx, "prune ServiceImport failed", "import", key.String(), "error", err)
+		} else {
+			g.Log.InfoContext(ctx, "pruned ServiceImport (export gone clusterset-wide)", "import", key.String())
+		}
+	}
+}
+
+// pruneClustersetServices deletes managed clusterset VIP Services with no export.
+func (g *ImportGenerator) pruneClustersetServices(ctx context.Context, desired map[client.ObjectKey]*desiredImport) {
+	var managed corev1.ServiceList
+	if err := g.List(ctx, &managed, client.MatchingLabels{constants.LabelClustersetService: "true"}); err != nil {
+		g.Log.ErrorContext(ctx, "list managed clusterset Services failed", "error", err)
+		return
+	}
+	for i := range managed.Items {
+		s := &managed.Items[i]
+		key := client.ObjectKeyFromObject(s)
+		if _, ok := desired[key]; ok {
+			continue
+		}
+		if err := g.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
+			g.Log.ErrorContext(ctx, "prune clusterset Service failed", "service", key.String(), "error", err)
+		} else {
+			g.Log.InfoContext(ctx, "pruned clusterset Service (export gone clusterset-wide)", "service", key.String())
+		}
+	}
+}
+
+// applyServiceImport creates or updates the ServiceImport (ClusterSetIP) for one
+// exported service. It never touches a ServiceImport it does not own.
+func (g *ImportGenerator) applyServiceImport(ctx context.Context, d *desiredImport) {
+	key := client.ObjectKey{Namespace: d.namespace, Name: d.service}
+	clusters := make([]mcsv1alpha1.ClusterStatus, 0, len(d.clusters))
+	for _, c := range d.clusters {
+		clusters = append(clusters, mcsv1alpha1.ClusterStatus{Cluster: c})
+	}
+
+	existing := &mcsv1alpha1.ServiceImport{}
+	if err := g.Get(ctx, key, existing); err == nil {
+		if existing.Labels[constants.LabelManagedServiceImport] != "true" {
+			g.Log.WarnContext(ctx, "a non-aether ServiceImport owns this name; skipping", "import", key.String())
+			return
+		}
+		existing.Spec.Type = mcsv1alpha1.ClusterSetIP
+		existing.Spec.Ports = g.importPorts()
+		if err := g.Update(ctx, existing); err != nil {
+			g.Log.ErrorContext(ctx, "update ServiceImport failed", "import", key.String(), "error", err)
+			return
+		}
+		g.setImportClusters(ctx, existing, clusters)
+		return
+	} else if !apierrors.IsNotFound(err) {
+		g.Log.ErrorContext(ctx, "get ServiceImport failed", "import", key.String(), "error", err)
+		return
+	}
+
+	si := &mcsv1alpha1.ServiceImport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      d.service,
+			Namespace: d.namespace,
+			Labels:    map[string]string{constants.LabelManagedServiceImport: "true"},
+		},
+		Spec: mcsv1alpha1.ServiceImportSpec{
+			Type:  mcsv1alpha1.ClusterSetIP,
+			Ports: g.importPorts(),
+		},
+	}
+	if err := g.Create(ctx, si); err != nil && !apierrors.IsAlreadyExists(err) {
+		g.Log.ErrorContext(ctx, "create ServiceImport failed", "import", key.String(), "error", err)
+		return
+	}
+	g.Log.InfoContext(ctx, "created ServiceImport (ClusterSetIP)", "import", key.String(), "clusters", d.clusters)
+	g.setImportClusters(ctx, si, clusters)
+}
+
+// setImportClusters records the exporting clusters on the ServiceImport status.
+// Best-effort: a write failure is logged, not surfaced.
+func (g *ImportGenerator) setImportClusters(ctx context.Context, si *mcsv1alpha1.ServiceImport, clusters []mcsv1alpha1.ClusterStatus) {
+	si.Status.Clusters = clusters
+	if err := g.Status().Update(ctx, si); err != nil {
+		g.Log.WarnContext(ctx, "update ServiceImport status failed", "import", client.ObjectKeyFromObject(si).String(), "error", err)
+	}
+}
+
+// importPorts is the ServiceImport's advertised port set: the mesh capture port.
+// Phase 1 advertises the single mesh port; per-app-port import is a later phase
+// (the registry already carries per-port endpoints, proposal 005).
+func (g *ImportGenerator) importPorts() []mcsv1alpha1.ServicePort {
+	return []mcsv1alpha1.ServicePort{{
+		Name:     "mesh",
+		Protocol: corev1.ProtocolTCP,
+		Port:     g.MeshPort,
+	}}
+}
+
+// applyClustersetService creates or updates the selectorless clusterset VIP
+// Service for one exported service. Mirrors the mesh-Service generator: a pure
+// ClusterIP + name handle, endpoints stay in the registry. It never touches a
+// Service it does not own.
+func (g *ImportGenerator) applyClustersetService(ctx context.Context, d *desiredImport) {
+	key := client.ObjectKey{Namespace: d.namespace, Name: d.service}
+
+	existing := &corev1.Service{}
+	if err := g.Get(ctx, key, existing); err == nil {
+		if existing.Labels[constants.LabelClustersetService] != "true" {
+			g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping clusterset VIP", "service", key.String())
+			return
+		}
+		return // converged (selectorless VIP is static)
+	} else if !apierrors.IsNotFound(err) {
+		g.Log.ErrorContext(ctx, "get clusterset Service failed", "service", key.String(), "error", err)
+		return
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      d.service,
+			Namespace: d.namespace,
+			Labels: map[string]string{
+				constants.LabelClustersetService: "true",
+				constants.LabelMeshService:       "true",
+			},
+			Annotations: map[string]string{
+				constants.AnnotationMeshService: d.service,
+				constants.AnnotationMeshPort:    strconv.Itoa(int(g.MeshPort)),
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeClusterIP,
+			// Selectorless ClusterSet VIP: a cluster.local name + VIP handle.
+			// Endpoints stay in the aether registry; the agent maps this ClusterIP
+			// to the registry-backed EDS cluster, which resolves cross-cluster
+			// endpoints at dial time.
+			Ports: []corev1.ServicePort{{
+				Name:       "mesh",
+				Port:       g.MeshPort,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt32(g.MeshPort),
+			}},
+		},
+	}
+	if err := g.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
+		g.Log.ErrorContext(ctx, "create clusterset Service failed", "service", key.String(), "error", err)
+		return
+	}
+	g.Log.InfoContext(ctx, "created clusterset Service (ClusterSet VIP)", "service", key.String())
+}
+
+// dedupe returns xs with consecutive duplicates removed; xs must be sorted.
+func dedupe(xs []string) []string {
+	if len(xs) < 2 {
+		return xs
+	}
+	out := xs[:1]
+	for _, x := range xs[1:] {
+		if x != out[len(out)-1] {
+			out = append(out, x)
+		}
+	}
+	return out
+}
