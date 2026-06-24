@@ -10,6 +10,7 @@ import (
 	setFilterStatev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	set_filter_state_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -96,6 +97,18 @@ func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, ro
 // buildHTTPConnectionManagerFilter creates a network filter wrapping an HTTP connection manager.
 func buildHTTPConnectionManagerFilter(config *http_connection_managerv3.HttpConnectionManager) *listenerv3.Filter {
 	return networkFilter("envoy.http_connection_manager", config)
+}
+
+// buildTCPProxyNetworkFilter builds an envoy.filters.network.tcp_proxy network
+// filter that routes all TCP traffic to the named upstream cluster. statPrefix is
+// used for Envoy stats (tcp.<statPrefix>.*). The upstream transport socket is NOT
+// set here — it is injected at snapshot time via InjectUpstreamMTLS (same path as
+// the HCM egress clusters), so per-source mTLS and SPIFFE SAN pinning apply.
+func buildTCPProxyNetworkFilter(statPrefix, clusterName string) *listenerv3.Filter {
+	return networkFilter("envoy.filters.network.tcp_proxy", &tcp_proxyv3.TcpProxy{
+		StatPrefix:       statPrefix,
+		ClusterSpecifier: &tcp_proxyv3.TcpProxy_Cluster{Cluster: clusterName},
+	})
 }
 
 // networkFilter creates a network filter with the given name and configuration.

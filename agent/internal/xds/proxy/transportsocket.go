@@ -62,6 +62,16 @@ func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS())
 }
 
+// UpstreamTCPTransportSocket creates a TLS transport socket for TCP-proxy upstream
+// connections (proposal 018, Phase 3a TCP floor). It is identical to
+// UpstreamTransportSocket except that it advertises ALPN "aether-tcp" instead of
+// "h2". The destination inbound listener matches application_protocols:["aether-tcp"]
+// on its TCP floor chain, cleanly demultiplexing TCP from HTTP (which uses "h2").
+// sanURIs and sni semantics are unchanged.
+func UpstreamTCPTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS(), AetherTCPALPN)
+}
+
 // EdgeUpstreamTransportSocket is UpstreamTransportSocket for the edge proxy: it
 // fetches the (single) edge SVID and trust bundle over the SPIRE Agent's native
 // SDS API (the static spire_agent cluster) instead of the agent's ADS stream.
@@ -71,11 +81,18 @@ func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationCont
 	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName))
 }
 
-func upstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string, sdsSource *corev3.ConfigSource) *corev3.TransportSocket {
+// upstreamTransportSocket builds an upstream TLS context. An optional alpnOverride
+// replaces the default "h2" ALPN (used by the TCP floor path to signal "aether-tcp"
+// to the destination inbound listener). If no override is supplied, ALPN is "h2".
+func upstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string, sdsSource *corev3.ConfigSource, alpnOverride ...string) *corev3.TransportSocket {
+	alpn := []string{"h2"}
+	if len(alpnOverride) > 0 && alpnOverride[0] != "" {
+		alpn = alpnOverride
+	}
 	common := &transport_sockets_v3.CommonTlsContext{
-		// Clusters speak HTTP/2 upstream; advertise it so the mTLS handshake
-		// negotiates h2 (matches the inbound listener's codec).
-		AlpnProtocols: []string{"h2"},
+		// Clusters speak HTTP/2 upstream by default; the TCP floor overrides with
+		// "aether-tcp" so the destination inbound can demux to the tcp_proxy chain.
+		AlpnProtocols: alpn,
 		TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
 			sdsSecretConfigFrom(tlsCertificateSecretName, sdsSource),
 		},

@@ -24,4 +24,24 @@ const (
 	// stay in the registry, the Service is a pure name/VIP/identity handle.
 	AnnotationMeshService = aetherLabelPrefix + "/service"
 	AnnotationMeshPort    = aetherLabelPrefix + "/port"
+
+	// LabelClustersetService marks a generated, selectorless clusterset.local
+	// Service that fronts a cross-cluster mesh service as a ClusterSet VIP
+	// (Kubernetes MCS-API, proposals 018 + 006). The registrar owns these — it
+	// lists/prunes by this label, separately from the per-cluster mesh VIPs
+	// (LabelMeshService) so the two projections never clobber each other.
+	LabelClustersetService = aetherLabelPrefix + "/clusterset-service"
+
+	// LabelManagedServiceImport marks a ServiceImport materialized by the
+	// registrar from the registry's clusterset-wide export view. The registrar
+	// owns these — it lists/prunes ServiceImports by this label, never touching
+	// a ServiceImport an operator or another controller authored.
+	LabelManagedServiceImport = aetherLabelPrefix + "/managed-service-import"
+
+	// AnnotationMeshAppProtocol records the application-layer protocol for a
+	// generated mesh Service (proposal 018, Phase 3a TCP floor). Values: "http"
+	// (default), "grpc", "tcp". The capture reconciler reads it to decide whether
+	// to emit a per-ClusterIP TCP-proxy filter chain (non-HTTP services) or leave
+	// the global HCM chain to handle traffic to that VIP (HTTP/gRPC services).
+	AnnotationMeshAppProtocol = aetherLabelPrefix + "/app-protocol"
 )

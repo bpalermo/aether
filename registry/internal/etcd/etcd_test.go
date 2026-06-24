@@ -509,3 +509,49 @@ func TestEtcdRegistry_ListEndpointsCrossOrigin(t *testing.T) {
 	require.Len(t, eps, 1)
 	assert.Equal(t, "cluster-b", eps[0].GetClusterName())
 }
+
+// TestEtcdRegistry_ServiceExportsCrossOrigin verifies the MCS export plane: each
+// cluster writes its own export mark under its own partition, ListExports returns
+// the clusterset-wide union (origin cluster parsed from the key), and an unset
+// touches only the unsetting cluster's mark.
+func TestEtcdRegistry_ServiceExportsCrossOrigin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+	prefix := keyPrefix(t)
+	regA := crossOriginRegistry(ctx, t, prefix, "us-east", "cluster-a")
+	regB := crossOriginRegistry(ctx, t, prefix, "us-west", "cluster-b")
+
+	// The SAME service is exported from both clusters; each mark lives under its
+	// own origin partition.
+	require.NoError(t, regA.SetExport(ctx, "svc", "team-a"))
+	require.NoError(t, regB.SetExport(ctx, "svc", "team-a"))
+	require.NoError(t, regB.SetExport(ctx, "other", "team-b"))
+
+	// ListExports ranges every origin and returns the union (from either reader).
+	exports, err := regA.ListExports(ctx)
+	require.NoError(t, err)
+	require.Len(t, exports, 3)
+
+	byCluster := map[string][]string{}
+	for _, e := range exports {
+		byCluster[e.Cluster] = append(byCluster[e.Cluster], e.Service)
+		assert.NotEmpty(t, e.Namespace, "namespace round-trips through the mark value")
+	}
+	assert.ElementsMatch(t, []string{"svc"}, byCluster["cluster-a"])
+	assert.ElementsMatch(t, []string{"svc", "other"}, byCluster["cluster-b"])
+
+	// Each cluster unsets ONLY its own mark: A's unset leaves B's svc export intact.
+	require.NoError(t, regA.UnsetExport(ctx, "svc"))
+	exports, err = regB.ListExports(ctx)
+	require.NoError(t, err)
+	remaining := map[string]string{}
+	for _, e := range exports {
+		remaining[e.Cluster+"/"+e.Service] = e.Namespace
+	}
+	assert.NotContains(t, remaining, "cluster-a/svc")
+	assert.Contains(t, remaining, "cluster-b/svc")
+	assert.Contains(t, remaining, "cluster-b/other")
+}

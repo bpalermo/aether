@@ -221,6 +221,7 @@ require (
 	go.opentelemetry.io/otel/log v0.20.0 // indirect
 	go.opentelemetry.io/otel/sdk/log v0.20.0
 	sigs.k8s.io/gateway-api v1.5.1
+	sigs.k8s.io/mcs-api v0.5.0
 )
 
 // https://github.com/lyft/protoc-gen-star/pull/132

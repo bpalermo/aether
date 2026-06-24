@@ -11,12 +11,30 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list", "get", "watch"]
-  {{- if .Values.registrar.generateMeshServices }}
-  # Transparent-capture VIPs (proposal 018, Phase 3a): the leader registrar
-  # creates/prunes selectorless mesh Services across namespaces.
+  {{- if or .Values.registrar.generateMeshServices .Values.registrar.enableMCS }}
+  # Selectorless VIP Services across namespaces: the transparent-capture VIPs
+  # (proposal 018, Phase 3a, generateMeshServices) and/or the clusterset.local
+  # VIPs the MCS ServiceImport generator materializes (enableMCS).
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list", "get", "watch", "create", "update", "patch", "delete"]
+  {{- end }}
+  {{- if .Values.registrar.enableMCS }}
+  # Multi-Cluster Services (MCS-API) phase 1 (proposals 018 + 006): the leader
+  # registrar watches ServiceExports (and stamps their status) and materializes
+  # ServiceImports + their status from the registry's clusterset-wide export view.
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceexports"]
+    verbs: ["list", "get", "watch"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceexports/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceimports"]
+    verbs: ["list", "get", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceimports/status"]
+    verbs: ["get", "update", "patch"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

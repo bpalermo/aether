@@ -45,6 +45,15 @@ type RegistrarConfig struct {
 	// handles, proposal 018 Phase 3a). Default off.
 	GenerateMeshServices bool
 
+	// EnableMCS turns on Kubernetes Multi-Cluster Services (MCS-API) phase 1
+	// (proposals 018 + 006): the leader registrar watches ServiceExport objects
+	// and records exports in the origin-partitioned registry, and materializes a
+	// ServiceImport (ClusterSetIP) + a local clusterset VIP Service for every
+	// service exported anywhere in the clusterset. Requires a registry backend
+	// with a cross-cluster plane (etcd); no-ops for kubernetes/dynamodb. Default
+	// off — adds nothing (and no ServiceExport/ServiceImport RBAC) unless enabled.
+	EnableMCS bool
+
 	// GRPCAddress is the address for the registrar gRPC server
 	GRPCAddress string
 

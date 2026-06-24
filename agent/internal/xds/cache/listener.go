@@ -47,6 +47,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		inbound:       inbound,
 		outbound:      outbound,
 		capture:       capture,
+		cniPod:        cniPod,
 		appClusters:   clustersToResources(appClusters),
 		healthCluster: healthCluster,
 	}
@@ -208,6 +209,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			inbound:       inbound,
 			outbound:      outbound,
 			capture:       capture,
+			cniPod:        pod,
 			appClusters:   clustersToResources(appClusters),
 			healthCluster: healthCluster,
 		}

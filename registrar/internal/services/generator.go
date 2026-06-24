@@ -54,9 +54,10 @@ func (g *Generator) Start(ctx context.Context) error {
 }
 
 type desiredService struct {
-	service   string
-	namespace string
-	port      uint32
+	service     string
+	namespace   string
+	port        uint32
+	appProtocol string // "http" for all current registry services (PROTOCOL_HTTP)
 }
 
 // reconcile makes the managed Services equal the snapshot catalog: create missing,
@@ -69,7 +70,12 @@ func (g *Generator) reconcile(ctx context.Context) {
 			continue
 		}
 		ns := ep.GetKubernetesMetadata().GetNamespace()
-		desired[client.ObjectKey{Namespace: ns, Name: svc}] = desiredService{service: svc, namespace: ns, port: ep.GetPort()}
+		desired[client.ObjectKey{Namespace: ns, Name: svc}] = desiredService{
+			service:     svc,
+			namespace:   ns,
+			port:        ep.GetPort(),
+			appProtocol: AppProtocolHTTP,
+		}
 	}
 
 	var managed corev1.ServiceList
@@ -94,12 +100,23 @@ func (g *Generator) reconcile(ctx context.Context) {
 	}
 }
 
+// AppProtocolHTTP / AppProtocolTCP are the AnnotationMeshAppProtocol values the
+// generator writes (and the agent reads to decide TCP-floor chain emission).
+const (
+	AppProtocolHTTP = "http"
+	AppProtocolTCP  = "tcp"
+)
+
 // apply creates or updates the VIP Service for one mesh service. It NEVER touches a
 // Service it doesn't own — a name collision with a user's Service is logged, not
 // clobbered.
 func (g *Generator) apply(ctx context.Context, d desiredService) {
 	key := client.ObjectKey{Namespace: d.namespace, Name: d.service}
 	port := strconv.Itoa(int(d.port))
+	appProto := d.appProtocol
+	if appProto == "" {
+		appProto = AppProtocolHTTP
+	}
 
 	existing := &corev1.Service{}
 	if err := g.Get(ctx, key, existing); err == nil {
@@ -107,11 +124,13 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 			g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping mesh VIP", "service", key.String())
 			return
 		}
-		if existing.Annotations[constants.AnnotationMeshPort] == port {
+		if existing.Annotations[constants.AnnotationMeshPort] == port &&
+			existing.Annotations[constants.AnnotationMeshAppProtocol] == appProto {
 			return // converged
 		}
 		existing.Annotations[constants.AnnotationMeshService] = d.service
 		existing.Annotations[constants.AnnotationMeshPort] = port
+		existing.Annotations[constants.AnnotationMeshAppProtocol] = appProto
 		if err := g.Update(ctx, existing); err != nil {
 			g.Log.ErrorContext(ctx, "update mesh Service failed", "service", key.String(), "error", err)
 		}
@@ -127,8 +146,9 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 			Namespace: d.namespace,
 			Labels:    map[string]string{constants.LabelMeshService: "true"},
 			Annotations: map[string]string{
-				constants.AnnotationMeshService: d.service,
-				constants.AnnotationMeshPort:    port,
+				constants.AnnotationMeshService:     d.service,
+				constants.AnnotationMeshPort:        port,
+				constants.AnnotationMeshAppProtocol: appProto,
 			},
 		},
 		Spec: corev1.ServiceSpec{

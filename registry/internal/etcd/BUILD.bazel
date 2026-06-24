@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//api/aether/registry/v1:registry",
         "//common/log",
+        "//registry/export",
         "@io_etcd_go_etcd_client_v3//:client",
         "@org_golang_google_protobuf//proto",
     ],
