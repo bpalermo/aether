@@ -269,14 +269,21 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
 	if cfg.MeshDNS {
 		// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
-		// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The per-pod
-		// Envoy DNS listeners udp_proxy/tcp_proxy to it via the mesh_dns cluster
-		// (HOST_IP:resolverPort) — Envoy does the netns binding (NET_ADMIN), the
-		// resolver runs on the host (no setns, no privilege increase).
+		// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The CNI DNATs
+		// each pod's :53 straight to it at HOST_IP:resolverPort (no Envoy DNS layer,
+		// no setns, no privilege increase).
 		hostIP := os.Getenv("HOST_IP")
 		resolverPort := uint32(commonconstants.ProxyDNSResolverPort)
 		dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), l)
-		dnsServer.SetUpstreams(cfg.MeshDNSUpstream)
+		// Default the forward upstream to the agent's own resolv.conf (kube-dns, via
+		// ClusterFirstWithHostNet) when --mesh-dns-upstream is unset, so mesh DNS is
+		// safe to enable by default without per-cluster configuration.
+		upstreams := cfg.MeshDNSUpstream
+		if len(upstreams) == 0 {
+			upstreams = meshdns.NameserversFromResolvConf("/etc/resolv.conf")
+			l.Info("mesh-DNS upstream defaulted from /etc/resolv.conf", "upstreams", upstreams)
+		}
+		dnsServer.SetUpstreams(upstreams)
 		if err = m.Add(dnsServer); err != nil {
 			return fmt.Errorf("failed to add mesh-DNS resolver: %w", err)
 		}

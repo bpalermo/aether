@@ -114,26 +114,16 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitSt
 
 // BuildCaptureRouteConfiguration builds the transparent-capture route table: the
 // given cluster.local authority -> service-cluster virtual hosts (built by the agent
-// from the generated mesh Services), plus a default 404 for unknown authorities.
-func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.RouteConfiguration {
+// from the generated mesh Services, scoped to the node dependency set), plus the
+// same on-demand catch-all the outbound listener uses. A captured request for a mesh
+// authority (<svc>.<meshDomain>) with no scoped vhost — a cold or off-node service —
+// then resolves via ODCDS (proposal 004 cold path) instead of a dead 404; anything
+// outside the mesh domain still 404s. This makes capture symmetric with outbound:
+// without it, a service whose pods all leave this node drops from the dependency set
+// and its scoped vhost vanishes, leaving it stuck 404 until something re-reconciles.
+func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name:         CaptureHTTPRouteName,
-		VirtualHosts: append(vhosts, captureNotFoundVirtualHost()),
-	}
-}
-
-// captureNotFoundVirtualHost 404s any captured authority with no generated Service.
-func captureNotFoundVirtualHost() *routev3.VirtualHost {
-	return &routev3.VirtualHost{
-		Name:    "capture_not_found",
-		Domains: []string{"*"},
-		Routes: []*routev3.Route{
-			{
-				Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-				Action: &routev3.Route_DirectResponse{
-					DirectResponse: &routev3.DirectResponseAction{Status: 404},
-				},
-			},
-		},
+		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain)),
 	}
 }

@@ -47,15 +47,27 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 		ServiceClusterName("svc-1", "aether.internal"),
 		[]string{"svc-1.aether-test.svc.cluster.local", "svc-1.aether-test.svc.cluster.local:18081"},
 	)
-	rc := BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vh})
+	rc := BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vh}, "aether.internal")
 	assert.Equal(t, CaptureHTTPRouteName, rc.GetName())
-	require.Len(t, rc.GetVirtualHosts(), 2, "the service vhost + the 404 default")
+	require.Len(t, rc.GetVirtualHosts(), 2, "the service vhost + the on-demand catch-all")
 
 	got := rc.GetVirtualHosts()[0]
 	assert.Contains(t, got.GetDomains(), "svc-1.aether-test.svc.cluster.local:18081")
 	assert.Equal(t, "svc-1.aether.internal", got.GetRoutes()[0].GetRoute().GetCluster())
 
-	def := rc.GetVirtualHosts()[1]
-	assert.Equal(t, []string{"*"}, def.GetDomains())
-	assert.Equal(t, uint32(404), def.GetRoutes()[0].GetDirectResponse().GetStatus())
+	// The catch-all recovers cold/off-node mesh services via ODCDS (ClusterHeader
+	// on :authority) and 404s only non-mesh authorities — symmetric with outbound.
+	catchAll := rc.GetVirtualHosts()[1]
+	assert.Equal(t, []string{"*"}, catchAll.GetDomains())
+	var hasOnDemand, has404 bool
+	for _, r := range catchAll.GetRoutes() {
+		if r.GetRoute().GetClusterHeader() == ":authority" {
+			hasOnDemand = true
+		}
+		if r.GetDirectResponse().GetStatus() == 404 {
+			has404 = true
+		}
+	}
+	assert.True(t, hasOnDemand, "catch-all routes mesh authorities to ODCDS via :authority")
+	assert.True(t, has404, "catch-all 404s non-mesh authorities")
 }
