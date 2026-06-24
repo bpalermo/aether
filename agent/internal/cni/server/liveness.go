@@ -7,6 +7,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/types"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
 	"go.opentelemetry.io/otel"
@@ -95,12 +96,21 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 			continue
 		}
 
-		healthy, known, err := s.healthClient.appHealth(ctx, proxy.HealthProbeClusterName(pod))
-		if err != nil {
-			// The gateway itself is unreachable (proxy down / restarting): no
-			// probe this tick can succeed, abort instead of logging per pod.
-			s.log.DebugContext(ctx, "liveness: health gateway unreachable", "error", err)
-			return
+		// TCP floor services are reached as a raw mTLS passthrough, so the HTTP
+		// delegated app-health probe is inapplicable — treat them as healthy instead
+		// of leaving them perpetually UNHEALTHY (which, with the floor cluster's
+		// HealthyPanicThreshold of 0, gives it no host to dial). A protocol-aware
+		// TCP-connect liveness is a follow-up.
+		healthy, known := true, true
+		if pod.GetAnnotations()[constants.AnnotationEndpointProtocol] != constants.ProtocolTCP {
+			var err error
+			healthy, known, err = s.healthClient.appHealth(ctx, proxy.HealthProbeClusterName(pod))
+			if err != nil {
+				// The gateway itself is unreachable (proxy down / restarting): no
+				// probe this tick can succeed, abort instead of logging per pod.
+				s.log.DebugContext(ctx, "liveness: health gateway unreachable", "error", err)
+				return
+			}
 		}
 		if !known {
 			continue // pod's gateway filter not yet programmed / propagated
