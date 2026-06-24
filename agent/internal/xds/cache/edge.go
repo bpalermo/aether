@@ -8,6 +8,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
 // VirtualHost is the cache's projection of a VirtualHost CR (without the
@@ -72,41 +73,21 @@ func (c *SnapshotCache) edgeTLSSecretNames() []string {
 }
 
 // SetVirtualHosts replaces the edge's exposed virtual hosts. It scopes the
-// dependency set to the union of every route's backend service (so the registrar
-// watch and clusters follow the exposed set) and rebuilds the snapshot's route
-// table — including when only the hostnames or matches changed (the service set,
-// and therefore the dependency set, didn't).
+// dependency set to the union of every route's backend service (plus L4 route
+// backends) and rebuilds the snapshot's route table — including when only the
+// hostnames or matches changed (the service set, and therefore the dependency set,
+// didn't).
 func (c *SnapshotCache) SetVirtualHosts(vhosts []VirtualHost) {
 	c.edgeMu.Lock()
 	changed := !equalVirtualHosts(c.virtualHosts, vhosts)
 	c.virtualHosts = vhosts
 	c.edgeMu.Unlock()
 
-	// Dependency set = the distinct backend services of every ROUTABLE virtual
-	// host (those with at least one external host). A vhost without hosts exposes
-	// nothing — it must not pull its services into scope. Signals a reload when
-	// the set changed.
-	seen := make(map[string]struct{})
-	services := make([]string, 0, len(vhosts))
-	for _, v := range vhosts {
-		if len(v.Hosts) == 0 {
-			continue
-		}
-		for _, r := range v.Routes {
-			if r.Service == "" {
-				continue
-			}
-			if _, ok := seen[r.Service]; ok {
-				continue
-			}
-			seen[r.Service] = struct{}{}
-			services = append(services, r.Service)
-		}
-	}
-	c.SetStaticDependencies(services)
+	// Rebuild the full static dependency set (HTTP vhosts + any L4 routes).
+	c.rebuildEdgeDependencies()
 
 	// A host/match-only change leaves the dependency set untouched, so signal a
-	// rebuild directly; the send is coalesced, so the SetStaticDependencies
+	// rebuild directly; the send is coalesced, so the rebuildEdgeDependencies
 	// signal (if any) is not duplicated.
 	if changed {
 		c.signalDependencyChange()
@@ -181,6 +162,120 @@ func (c *SnapshotCache) edgeClusterNameLocked(service string, port uint32) strin
 	return portName
 }
 
+// SetEdgeTCPRoutes replaces the edge's TCP listener routes (one per Gateway TCP
+// listener port). On change it updates the dependency set and signals a rebuild
+// so the new tcp_proxy listeners appear in the snapshot.
+func (c *SnapshotCache) SetEdgeTCPRoutes(routes []proxy.EdgeL4TCPRoute) {
+	c.edgeMu.Lock()
+	changed := !equalEdgeTCPRoutes(c.edgeTCPRoutes, routes)
+	c.edgeTCPRoutes = routes
+	c.edgeMu.Unlock()
+
+	if !changed {
+		return
+	}
+
+	// Extend the static dependency set with the backends' services so their EDS
+	// clusters generate. We re-derive the full set here (HTTP + L4) rather than
+	// patching to keep the logic idempotent.
+	c.rebuildEdgeDependencies()
+	c.signalDependencyChange()
+}
+
+// SetEdgeTLSRoutes replaces the edge's TLS passthrough listener routes (one per
+// Gateway TLS listener port). On change it updates the dependency set and signals
+// a rebuild.
+func (c *SnapshotCache) SetEdgeTLSRoutes(routes []proxy.EdgeL4TLSRoute) {
+	c.edgeMu.Lock()
+	changed := !equalEdgeTLSRoutes(c.edgeTLSRoutes, routes)
+	c.edgeTLSRoutes = routes
+	c.edgeMu.Unlock()
+
+	if !changed {
+		return
+	}
+
+	c.rebuildEdgeDependencies()
+	c.signalDependencyChange()
+}
+
+// rebuildEdgeDependencies recomputes the static dependency set from the union of
+// all edge route backends (HTTP virtual-hosts + TCP routes + TLS routes) and calls
+// SetStaticDependencies. Called whenever any edge route set changes.
+func (c *SnapshotCache) rebuildEdgeDependencies() {
+	c.edgeMu.RLock()
+	vhosts := slices.Clone(c.virtualHosts)
+	tcpRoutes := append([]proxy.EdgeL4TCPRoute(nil), c.edgeTCPRoutes...)
+	tlsRoutes := append([]proxy.EdgeL4TLSRoute(nil), c.edgeTLSRoutes...)
+	c.edgeMu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var services []string
+
+	for _, v := range vhosts {
+		if len(v.Hosts) == 0 {
+			continue
+		}
+		for _, r := range v.Routes {
+			if r.Service == "" {
+				continue
+			}
+			if _, ok := seen[r.Service]; !ok {
+				seen[r.Service] = struct{}{}
+				services = append(services, r.Service)
+			}
+		}
+	}
+	for _, r := range tcpRoutes {
+		for _, b := range r.Backends {
+			if b.Service == "" {
+				continue
+			}
+			if _, ok := seen[b.Service]; !ok {
+				seen[b.Service] = struct{}{}
+				services = append(services, b.Service)
+			}
+		}
+	}
+	for _, r := range tlsRoutes {
+		for _, rule := range r.Rules {
+			for _, b := range rule.Backends {
+				if b.Service == "" {
+					continue
+				}
+				if _, ok := seen[b.Service]; !ok {
+					seen[b.Service] = struct{}{}
+					services = append(services, b.Service)
+				}
+			}
+		}
+	}
+	c.SetStaticDependencies(services)
+}
+
+// edgeTCPListeners returns the edge's L4 listeners (TCP + TLS passthrough) derived
+// from the current EdgeL4TCPRoute and EdgeL4TLSRoute sets. Called from Listeners()
+// in edge mode.
+func (c *SnapshotCache) edgeTCPListeners() []types.Resource {
+	c.edgeMu.RLock()
+	tcpRoutes := append([]proxy.EdgeL4TCPRoute(nil), c.edgeTCPRoutes...)
+	tlsRoutes := append([]proxy.EdgeL4TLSRoute(nil), c.edgeTLSRoutes...)
+	c.edgeMu.RUnlock()
+
+	var out []types.Resource
+	for _, r := range tcpRoutes {
+		if ln := proxy.BuildEdgeTCPListener(r.Port, r.Backends); ln != nil {
+			out = append(out, ln)
+		}
+	}
+	for _, r := range tlsRoutes {
+		if ln := proxy.BuildEdgeTLSPassthroughListener(r.Port, r.Rules); ln != nil {
+			out = append(out, ln)
+		}
+	}
+	return out
+}
+
 // equalVirtualHosts reports whether two virtual-host slices are identical (order
 // and contents), so a no-op SetVirtualHosts call skips a snapshot rebuild.
 func equalVirtualHosts(a, b []VirtualHost) bool {
@@ -192,6 +287,54 @@ func equalVirtualHosts(a, b []VirtualHost) bool {
 			!slices.Equal(a[i].Hosts, b[i].Hosts) ||
 			!slices.Equal(a[i].Routes, b[i].Routes) {
 			return false
+		}
+	}
+	return true
+}
+
+// equalEdgeTCPRoutes reports whether two EdgeL4TCPRoute slices are identical.
+func equalEdgeTCPRoutes(a, b []proxy.EdgeL4TCPRoute) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Port != b[i].Port || len(a[i].Backends) != len(b[i].Backends) {
+			return false
+		}
+		for j := range a[i].Backends {
+			if a[i].Backends[j] != b[i].Backends[j] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// equalEdgeTLSRoutes reports whether two EdgeL4TLSRoute slices are identical.
+func equalEdgeTLSRoutes(a, b []proxy.EdgeL4TLSRoute) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Port != b[i].Port {
+			return false
+		}
+		if len(a[i].Rules) != len(b[i].Rules) {
+			return false
+		}
+		for j := range a[i].Rules {
+			ra, rb := a[i].Rules[j], b[i].Rules[j]
+			if !slices.Equal(ra.SNIHostnames, rb.SNIHostnames) {
+				return false
+			}
+			if len(ra.Backends) != len(rb.Backends) {
+				return false
+			}
+			for k := range ra.Backends {
+				if ra.Backends[k] != rb.Backends[k] {
+					return false
+				}
+			}
 		}
 	}
 	return true

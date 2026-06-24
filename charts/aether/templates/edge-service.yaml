@@ -25,4 +25,10 @@ spec:
       targetPort: https
       protocol: TCP
     {{- end }}
+    {{- range .Values.edge.service.extraPorts }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .port }}
+      protocol: {{ default "TCP" .protocol }}
+    {{- end }}
 {{- end }}

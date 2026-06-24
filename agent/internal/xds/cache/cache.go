@@ -104,11 +104,17 @@ type SnapshotCache struct {
 	// edgeHTTPSPort is the port the edge TLS listener binds when edgeTLSEnabled.
 	edgeHTTPSPort uint32
 
-	// edgeMu guards virtualHosts: the external-host -> mesh-service routing the
-	// edge serves (derived from VirtualHost CRs). The edge route config is built
-	// from them, and their backend-service set scopes the dependency set.
+	// edgeMu guards virtualHosts, edgeTCPRoutes, and edgeTLSRoutes: the routing
+	// the edge serves. The HTTP route config and L4 listeners are built from them,
+	// and their backend-service set scopes the dependency set.
 	edgeMu       sync.RWMutex
 	virtualHosts []VirtualHost
+	// edgeTCPRoutes holds the edge's TCP listener routes (one per Gateway TCP
+	// listener port, derived from TCPRoutes parented to a Gateway of our class).
+	edgeTCPRoutes []proxy.EdgeL4TCPRoute
+	// edgeTLSRoutes holds the edge's TLS passthrough listener routes (one per
+	// Gateway TLS listener port, derived from TLSRoutes parented to a Gateway).
+	edgeTLSRoutes []proxy.EdgeL4TLSRoute
 
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace

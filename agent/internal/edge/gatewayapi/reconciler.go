@@ -1,8 +1,8 @@
 // Package gatewayapi contains the edge proxy's Gateway API controller: it watches
-// Gateway API HTTPRoutes attached to a Gateway of the aether GatewayClass and
-// projects them into the edge data plane (proposal 018 — north-south). It is the
-// edge's only routing API (the VirtualHost CRD was retired); routing is
-// direct-to-pod mTLS.
+// Gateway API HTTPRoutes, TCPRoutes, and TLSRoutes attached to a Gateway of the
+// aether GatewayClass and projects them into the edge data plane (proposal 018 —
+// north-south). It is the edge's only routing API (the VirtualHost CRD was retired);
+// routing is direct-to-pod mTLS.
 package gatewayapi
 
 import (
@@ -13,6 +13,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	commonlog "github.com/bpalermo/aether/common/log"
 	corev1 "k8s.io/api/core/v1"
@@ -22,34 +23,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
-// RouteSink receives the projected virtual hosts and TLS certs (the snapshot cache).
+// RouteSink receives the projected virtual hosts, TLS certs, and L4 routes
+// (the snapshot cache).
 type RouteSink interface {
 	SetVirtualHosts(vhosts []cache.VirtualHost)
 	SetEdgeTLSSecrets(ctx context.Context, certs map[string]cache.EdgeTLSCert) error
+	SetEdgeTCPRoutes(routes []proxy.EdgeL4TCPRoute)
+	SetEdgeTLSRoutes(routes []proxy.EdgeL4TLSRoute)
 }
 
-// Reconciler watches Gateway API HTTPRoutes (and the Gateways/Secrets they depend
-// on) in a namespace and projects, on any change, the complete virtual-host set
-// into the cache. Level-based: each reconcile re-lists, so adds/updates/deletes
-// converge without delta tracking — the same model as the VirtualHost reconciler.
+// Reconciler watches Gateway API HTTPRoutes, TCPRoutes, and TLSRoutes (and the
+// Gateways/Secrets they depend on) in a namespace and projects, on any change,
+// the complete virtual-host and L4 route sets into the cache. Level-based: each
+// reconcile re-lists, so adds/updates/deletes converge without delta tracking —
+// the same model as the VirtualHost reconciler.
 type Reconciler struct {
 	client.Client
 
-	// Sink receives the projected virtual hosts/certs (the snapshot cache).
+	// Sink receives the projected virtual hosts/certs and L4 routes (the snapshot cache).
 	Sink RouteSink
-	// Namespace is the namespace Gateways/HTTPRoutes (and their TLS Secrets) live in.
+	// Namespace is the namespace Gateways/HTTPRoutes/TCPRoutes/TLSRoutes live in.
 	Namespace string
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves.
 	GatewayClassName string
 	// Secrets resolves Gateway listener TLS cert material; nil disables TLS.
 	Secrets *secret.Registry
-	Log     *slog.Logger
+	// MeshDomain is the mesh DNS domain used to build TCP cluster names.
+	MeshDomain string
+	Log        *slog.Logger
 }
 
-// SetupWithManager registers the reconciler to watch HTTPRoutes, Gateways and (when
-// TLS is enabled) Secrets — any change re-projects the whole set.
+// SetupWithManager registers the reconciler to watch HTTPRoutes, TCPRoutes,
+// TLSRoutes, Gateways and (when TLS is enabled) Secrets — any change
+// re-projects the whole set.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Log = commonlog.Named(r.Log, "gatewayapi")
 	resync := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
@@ -58,6 +67,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.Gateway{}, resync).
+		Watches(&gatewayv1alpha2.TCPRoute{}, resync).
+		Watches(&gatewayv1alpha2.TLSRoute{}, resync).
 		Named("gatewayapi")
 	if r.Secrets != nil {
 		b = b.Watches(&corev1.Secret{}, resync)
@@ -65,29 +76,30 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return b.Complete(r)
 }
 
-// Reconcile re-lists our Gateways and the HTTPRoutes attached to them, resolves
-// each Gateway listener's TLS cert, and replaces the cache's virtual-host set.
+// Reconcile re-lists our Gateways and the HTTPRoutes, TCPRoutes, and TLSRoutes
+// attached to them, resolves each Gateway listener's TLS cert, and replaces the
+// cache's virtual-host and L4 route sets.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	// Our Gateways (those of our GatewayClass) and, per listener hostname, the SDS
 	// cert name to present. listenerCerts also accumulates the cert bytes to push.
-	gateways, hostCerts, certs, err := r.resolveGateways(ctx)
+	gateways, gatewayListeners, hostCerts, certs, err := r.resolveGateways(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
 
-	routes := &gatewayv1.HTTPRouteList{}
-	if err := r.List(ctx, routes, client.InNamespace(r.Namespace)); err != nil {
+	// --- HTTPRoutes ---
+	httpRoutes := &gatewayv1.HTTPRouteList{}
+	if err := r.List(ctx, httpRoutes, client.InNamespace(r.Namespace)); err != nil {
 		return reconcile.Result{}, err
 	}
 	// Deterministic order so keep-first host-dedup in the cache is stable.
-	slices.SortFunc(routes.Items, func(a, b gatewayv1.HTTPRoute) int {
+	slices.SortFunc(httpRoutes.Items, func(a, b gatewayv1.HTTPRoute) int {
 		return strings.Compare(a.Name, b.Name)
 	})
-
-	vhosts := make([]cache.VirtualHost, 0, len(routes.Items))
-	for i := range routes.Items {
-		hr := &routes.Items[i]
-		if !attachedToOurGateway(hr, gateways) {
+	vhosts := make([]cache.VirtualHost, 0, len(httpRoutes.Items))
+	for i := range httpRoutes.Items {
+		hr := &httpRoutes.Items[i]
+		if !attachedToOurGateway(hr.Spec.ParentRefs, gateways) {
 			continue
 		}
 		vh := r.buildVirtualHost(hr, hostCerts)
@@ -97,25 +109,110 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		vhosts = append(vhosts, vh)
 	}
 
+	// --- TCPRoutes ---
+	tcpRouteList := &gatewayv1alpha2.TCPRouteList{}
+	if err := r.List(ctx, tcpRouteList, client.InNamespace(r.Namespace)); err != nil {
+		return reconcile.Result{}, err
+	}
+	tcpByPort := make(map[uint32][]proxy.L4Backend)
+	for i := range tcpRouteList.Items {
+		tr := &tcpRouteList.Items[i]
+		ports := gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TCPProtocolType, gatewayListeners)
+		for _, port := range ports {
+			for _, rule := range tr.Spec.Rules {
+				tcpByPort[port] = append(tcpByPort[port], r.buildL4Backends(rule.BackendRefs)...)
+			}
+		}
+	}
+	tcpRoutes := make([]proxy.EdgeL4TCPRoute, 0, len(tcpByPort))
+	for port, backends := range tcpByPort {
+		tcpRoutes = append(tcpRoutes, proxy.EdgeL4TCPRoute{Port: port, Backends: backends})
+	}
+	slices.SortFunc(tcpRoutes, func(a, b proxy.EdgeL4TCPRoute) int {
+		if a.Port < b.Port {
+			return -1
+		}
+		if a.Port > b.Port {
+			return 1
+		}
+		return 0
+	})
+
+	// --- TLSRoutes ---
+	tlsRouteList := &gatewayv1alpha2.TLSRouteList{}
+	if err := r.List(ctx, tlsRouteList, client.InNamespace(r.Namespace)); err != nil {
+		return reconcile.Result{}, err
+	}
+	tlsByPort := make(map[uint32][]proxy.L4ServiceRoute)
+	for i := range tlsRouteList.Items {
+		tr := &tlsRouteList.Items[i]
+		ports := gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TLSProtocolType, gatewayListeners)
+		hostnames := make([]string, 0, len(tr.Spec.Hostnames))
+		for _, h := range tr.Spec.Hostnames {
+			hostnames = append(hostnames, string(h))
+		}
+		for _, port := range ports {
+			for _, rule := range tr.Spec.Rules {
+				tlsByPort[port] = append(tlsByPort[port], proxy.L4ServiceRoute{
+					SNIHostnames: hostnames,
+					Backends:     r.buildL4Backends(rule.BackendRefs),
+				})
+			}
+		}
+	}
+	tlsRoutes := make([]proxy.EdgeL4TLSRoute, 0, len(tlsByPort))
+	for port, rules := range tlsByPort {
+		tlsRoutes = append(tlsRoutes, proxy.EdgeL4TLSRoute{Port: port, Rules: rules})
+	}
+	slices.SortFunc(tlsRoutes, func(a, b proxy.EdgeL4TLSRoute) int {
+		if a.Port < b.Port {
+			return -1
+		}
+		if a.Port > b.Port {
+			return 1
+		}
+		return 0
+	})
+
 	if r.Secrets != nil {
 		if err := r.Sink.SetEdgeTLSSecrets(ctx, certs); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
 	r.Sink.SetVirtualHosts(vhosts)
-	r.Log.DebugContext(ctx, "projected gateway-api routes", "httpRoutes", len(routes.Items), "virtualHosts", len(vhosts), "tlsCerts", len(certs))
+	r.Sink.SetEdgeTCPRoutes(tcpRoutes)
+	r.Sink.SetEdgeTLSRoutes(tlsRoutes)
+	r.Log.DebugContext(ctx, "projected gateway-api routes",
+		"httpRoutes", len(httpRoutes.Items),
+		"tcpRoutes", len(tcpRouteList.Items),
+		"tlsRoutes", len(tlsRouteList.Items),
+		"virtualHosts", len(vhosts),
+		"tcpListeners", len(tcpRoutes),
+		"tlsListeners", len(tlsRoutes),
+		"tlsCerts", len(certs),
+	)
 	return reconcile.Result{}, nil
 }
 
+// gatewayListenerKey identifies a listener within a gateway by name+protocol+port.
+// Used to scope TCPRoute/TLSRoute parentRef port matching.
+type gatewayListenerKey struct {
+	Gateway  string
+	Port     uint32
+	Protocol gatewayv1.ProtocolType
+}
+
 // resolveGateways lists the Gateways of our GatewayClass and resolves each TLS
-// listener's cert. It returns the set of our Gateway names, a hostname→SDS-name map
-// for cert selection, and the SDS-name→bytes map to push.
-func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, map[string]string, map[string]cache.EdgeTLSCert, error) {
+// listener's cert. It returns the set of our Gateway names, a set of listener
+// keys (for TCPRoute/TLSRoute port matching), a hostname→SDS-name map for HTTP
+// cert selection, and the SDS-name→bytes map to push.
+func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, error) {
 	list := &gatewayv1.GatewayList{}
 	if err := r.List(ctx, list, client.InNamespace(r.Namespace)); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	gateways := map[string]struct{}{}
+	listenerKeys := map[gatewayListenerKey]struct{}{}
 	hostCerts := map[string]string{} // listener hostname ("" = catch-all) -> SDS name
 	certs := map[string]cache.EdgeTLSCert{}
 	for i := range list.Items {
@@ -124,6 +221,13 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, 
 			continue
 		}
 		gateways[gw.Name] = struct{}{}
+		for _, ln := range gw.Spec.Listeners {
+			listenerKeys[gatewayListenerKey{
+				Gateway:  gw.Name,
+				Port:     uint32(ln.Port),
+				Protocol: ln.Protocol,
+			}] = struct{}{}
+		}
 		if r.Secrets == nil {
 			continue
 		}
@@ -156,7 +260,7 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, 
 			}
 		}
 	}
-	return gateways, hostCerts, certs, nil
+	return gateways, listenerKeys, hostCerts, certs, nil
 }
 
 // buildVirtualHost maps one HTTPRoute to an edge VirtualHost: its hostnames become
@@ -202,10 +306,10 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 	return vh
 }
 
-// attachedToOurGateway reports whether the HTTPRoute has a parentRef to one of our
-// Gateways (same namespace; Gateway kind/group).
-func attachedToOurGateway(hr *gatewayv1.HTTPRoute, gateways map[string]struct{}) bool {
-	for _, p := range hr.Spec.ParentRefs {
+// attachedToOurGateway reports whether the given parentRefs include a reference
+// to one of our Gateways (same namespace; Gateway kind/group).
+func attachedToOurGateway(parentRefs []gatewayv1.ParentReference, gateways map[string]struct{}) bool {
+	for _, p := range parentRefs {
 		if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
 			continue
 		}
@@ -217,6 +321,82 @@ func attachedToOurGateway(hr *gatewayv1.HTTPRoute, gateways map[string]struct{})
 		}
 	}
 	return false
+}
+
+// gatewayParentPorts returns the distinct ports of our Gateway listeners that
+// match the given protocol and are referenced by the given parentRefs. Used to
+// scope TCPRoute/TLSRoute attachments to the exact Gateway listener ports.
+func gatewayParentPorts(
+	parentRefs []gatewayv1alpha2.ParentReference,
+	gateways map[string]struct{},
+	protocol gatewayv1.ProtocolType,
+	listenerKeys map[gatewayListenerKey]struct{},
+) []uint32 {
+	seen := map[uint32]struct{}{}
+	var ports []uint32
+	for _, p := range parentRefs {
+		if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
+			continue
+		}
+		if p.Kind != nil && string(*p.Kind) != "Gateway" {
+			continue
+		}
+		gwName := string(p.Name)
+		if _, ok := gateways[gwName]; !ok {
+			continue
+		}
+		// If a sectionName (listener name) is specified, match only that listener;
+		// otherwise match all listeners of the given protocol on this gateway.
+		if p.Port != nil {
+			port := uint32(*p.Port)
+			key := gatewayListenerKey{Gateway: gwName, Port: port, Protocol: protocol}
+			if _, ok := listenerKeys[key]; ok {
+				if _, dup := seen[port]; !dup {
+					seen[port] = struct{}{}
+					ports = append(ports, port)
+				}
+			}
+			continue
+		}
+		// No port specified: include all matching-protocol listeners on this gateway.
+		for k := range listenerKeys {
+			if k.Gateway == gwName && k.Protocol == protocol {
+				if _, dup := seen[k.Port]; !dup {
+					seen[k.Port] = struct{}{}
+					ports = append(ports, k.Port)
+				}
+			}
+		}
+	}
+	return ports
+}
+
+// buildL4Backends converts a BackendRef slice into L4Backends with resolved TCP
+// cluster names. Refs with a non-core group or non-Service kind are skipped.
+func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef) []proxy.L4Backend {
+	backends := make([]proxy.L4Backend, 0, len(refs))
+	for _, b := range refs {
+		if b.Group != nil && string(*b.Group) != "" {
+			continue
+		}
+		if b.Kind != nil && string(*b.Kind) != "Service" {
+			continue
+		}
+		name := string(b.Name)
+		if name == "" {
+			continue
+		}
+		weight := uint32(1)
+		if b.Weight != nil {
+			weight = uint32(*b.Weight)
+		}
+		backends = append(backends, proxy.L4Backend{
+			Service: name,
+			Cluster: proxy.TCPClusterName(name, r.MeshDomain),
+			Weight:  weight,
+		})
+	}
+	return backends
 }
 
 func firstBackendService(refs []gatewayv1.HTTPBackendRef) string {

@@ -82,6 +82,17 @@ func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationCont
 	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName))
 }
 
+// EdgeUpstreamTCPTransportSocket is EdgeUpstreamTransportSocket for TCP floor
+// clusters: it advertises NO ALPN (like the east-west UpstreamTCPTransportSocket)
+// and NO SNI so the destination inbound demuxes to the TCP floor's DEFAULT chain,
+// while still fetching the edge SVID and trust bundle directly from the SPIRE Agent
+// (not the agent's ADS stream). #304 removed the bespoke "aether-tcp" ALPN; #306
+// established that the SNI must be empty for the floor — a non-empty SNI would
+// hit the destination's per-port HCM chain instead of the floor default.
+func EdgeUpstreamTCPTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string) *corev3.TransportSocket {
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, "" /* no SNI */, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName), "" /* no ALPN */)
+}
+
 // upstreamTransportSocket builds an upstream TLS context. With no alpnOverride the
 // ALPN is "h2" (HTTP/2 mesh transport). An alpnOverride of "" suppresses ALPN
 // entirely — the TCP floor path, so the destination inbound demuxes it as the
