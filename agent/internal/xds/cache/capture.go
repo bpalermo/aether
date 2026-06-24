@@ -62,6 +62,10 @@ func (c *SnapshotCache) SetCaptureAuthorities(authorities map[string]string) {
 // clusters the scoped snapshot carries; unknown authorities hit the 404 default.
 func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	deps := c.DependencySet()
+	// GAMMA (HTTPRoute/GRPCRoute) rules enrich the captured path too — capture is the
+	// default client path (mesh-DNS), so the same L7 vocabulary the outbound listener
+	// applies must apply here; no rules = passthrough to the service cluster.
+	gammaRoutes := c.serviceRoutesSnapshot()
 
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
@@ -74,10 +78,10 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		// Route both the cluster.local authority and the mesh-global <svc>.<meshDomain>
 		// authority (portless + :meshPort) to the service cluster, so a captured
 		// request reaches it under either name (the mesh-DNS path uses the latter).
-		vhosts = append(vhosts, proxy.BuildOutboundClusterVirtualHost(mesh, []string{
+		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, []string{
 			fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
 			mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
-		}))
+		}, gammaRoutes[svc]))
 	}
 	return vhosts
 }
