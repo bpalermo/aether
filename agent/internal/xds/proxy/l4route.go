@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -208,7 +209,11 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 		return nil, nil
 	}
 
-	udpFilter := networkFilter("envoy.filters.udp_listener.udp_proxy", &udp_proxyv3.UdpProxyConfig{
+	// udp_proxy is a UDP *listener filter*, not a network filter in a filter chain.
+	// A connection-less UDP listener must carry NO filter_chains — Envoy rejects it
+	// with "N filter chain(s) specified for connection-less UDP listener" — so the
+	// proxy config goes in listener_filters instead.
+	udpProxyConfig := config.TypedConfig(&udp_proxyv3.UdpProxyConfig{
 		StatPrefix: fmt.Sprintf("capture_udp_%s", podName),
 		RouteSpecifier: &udp_proxyv3.UdpProxyConfig_Cluster{
 			Cluster: primaryCluster,
@@ -231,11 +236,10 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 		},
 		StatPrefix:       fmt.Sprintf("capture_udp_%s", podName),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
-		ListenerFilters:  []*listenerv3.ListenerFilter{},
-		FilterChains: []*listenerv3.FilterChain{
+		ListenerFilters: []*listenerv3.ListenerFilter{
 			{
-				Name:    fmt.Sprintf("capture_udp_%s", podName),
-				Filters: []*listenerv3.Filter{udpFilter},
+				Name:       "envoy.filters.udp_listener.udp_proxy",
+				ConfigType: &listenerv3.ListenerFilter_TypedConfig{TypedConfig: udpProxyConfig},
 			},
 		},
 	}, nil

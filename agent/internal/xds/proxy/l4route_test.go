@@ -204,8 +204,11 @@ func TestGenerateUDPCaptureListener_WithRoutes(t *testing.T) {
 	require.NotNil(t, sa)
 	assert.Equal(t, corev3.SocketAddress_UDP, sa.Protocol)
 	assert.Equal(t, uint32(18082), sa.GetPortValue())
-	require.Len(t, l.FilterChains, 1)
-	assert.Equal(t, "envoy.filters.udp_listener.udp_proxy", l.FilterChains[0].Filters[0].Name)
+	// A connection-less UDP listener carries NO filter chains; udp_proxy is a
+	// listener filter (Envoy rejects filter_chains on a UDP listener).
+	assert.Empty(t, l.FilterChains, "UDP listener must have no filter chains")
+	require.Len(t, l.ListenerFilters, 1)
+	assert.Equal(t, "envoy.filters.udp_listener.udp_proxy", l.ListenerFilters[0].Name)
 }
 
 // TestL4RulesToWeightedClusters_DefaultWeight verifies weight=0 becomes 1.
