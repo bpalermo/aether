@@ -12,6 +12,7 @@ go_library(
         "@io_k8s_sigs_controller_runtime//pkg/client",
         "@io_k8s_sigs_controller_runtime//pkg/handler",
         "@io_k8s_sigs_controller_runtime//pkg/reconcile",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1alpha2",
     ],
 )
