@@ -13,9 +13,9 @@ rules:
     # patch: remove the aether.io/agent-not-ready startup taint once CNI is serving.
     verbs: ["list", "get", "watch", "patch"]
   {{- if .Values.agent.gamma }}
-  # GAMMA east-west (proposal 018): watch HTTPRoutes parented to Services cluster-wide.
+  # GAMMA east-west (proposal 018): watch HTTP/GRPCRoutes parented to Services cluster-wide.
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes"]
+    resources: ["httproutes", "grpcroutes"]
     verbs: ["list", "get", "watch"]
   {{- end }}
   {{- if or .Values.agent.transparentCapture .Values.agent.meshDns }}

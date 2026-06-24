@@ -19,7 +19,7 @@ func TestServiceParents(t *testing.T) {
 			{Name: "no-kind"}, // no kind → ignored
 		},
 	}}}
-	assert.Equal(t, []string{"svc-1"}, serviceParents(hr))
+	assert.Equal(t, []string{"svc-1"}, serviceParents(hr.Spec.ParentRefs))
 }
 
 // TestBuildGammaRoute: matches → GammaMatch, weighted backendRefs → GammaBackend
@@ -50,4 +50,27 @@ func TestBuildGammaRoute(t *testing.T) {
 
 	require.NotNil(t, gr.Timeout)
 	assert.Equal(t, int64(5), gr.Timeout.GetSeconds())
+}
+
+// TestBuildGammaRouteFromGRPC: gRPC method match -> path, weighted backendRefs.
+func TestBuildGammaRouteFromGRPC(t *testing.T) {
+	r := &Reconciler{MeshDomain: "aether.internal"}
+	w := ptr(int32(7))
+	rule := gatewayv1.GRPCRouteRule{
+		Matches: []gatewayv1.GRPCRouteMatch{
+			{Method: &gatewayv1.GRPCMethodMatch{Service: ptr("foo.Bar"), Method: ptr("Baz")}},
+			{Method: &gatewayv1.GRPCMethodMatch{Service: ptr("foo.Bar")}},
+		},
+		BackendRefs: []gatewayv1.GRPCBackendRef{
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}, Weight: w}},
+		},
+	}
+	gr := r.buildGammaRouteFromGRPC(rule)
+	require.Len(t, gr.Matches, 2)
+	assert.Equal(t, "/foo.Bar/Baz", gr.Matches[0].Exact, "service+method -> exact path")
+	assert.Equal(t, "/foo.Bar/", gr.Matches[1].Prefix, "service-only -> prefix path")
+	require.Len(t, gr.Backends, 1)
+	assert.Equal(t, "svc-2", gr.Backends[0].Service)
+	assert.Equal(t, "svc-2.aether.internal", gr.Backends[0].Cluster)
+	assert.Equal(t, uint32(7), gr.Backends[0].Weight)
 }
