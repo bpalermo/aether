@@ -279,3 +279,54 @@ data-plane detail below the API).
   namespace overrides only that client; a `/admin` match routes elsewhere; a
   per-route timeout takes effect — all over the existing SPIRE mTLS, with the
   routes pushed only to proxies whose dependency set includes the service.
+
+## As-built status (2026-06-24)
+
+Tracking what has actually shipped vs the design above. Validated end-to-end on the
+talos-main cluster unless noted.
+
+**Shipped + e2e-green:**
+- **Gateway API dependency** upgraded to `sigs.k8s.io/gateway-api` v1.5.1 (#272).
+- **Phase 1 — edge HTTPRoute** (#270): `edge.gatewayApi.enabled`; Gateway+HTTPRoute
+  (parentRef=Gateway) → the edge data plane; GatewayClass `gateway.aether.io/edge`;
+  listener TLS via SDS. HTTPRoute `backendRef` requires a `port` (use the service
+  default, 8080).
+- **Phase 2 — GAMMA east-west** (#271): `agent.gamma`; HTTPRoute (parentRef=Service)
+  → per-service outbound vhost enrichment (matches→routes, weighted backendRefs,
+  timeout, additive default). Producer routes; the dependency set unions a route's
+  backends.
+- **GRPCRoute** (#289): the GAMMA reconciler also watches GRPCRoutes; a gRPC method
+  match (`/<service>/<method>`) maps into the same route vocabulary; weighted
+  backends + header matches identical to HTTPRoute.
+- **GAMMA on the capture path** (#290): GAMMA was outbound-only; once transparent
+  capture + mesh-DNS became the default client path, captured requests bypassed the
+  rules. `captureVhosts` now builds the gamma-enriched vhost, so HTTP/gRPC route
+  rules apply on the captured path too.
+- **Mesh-global FQDN** (proposal-018 sub-thread, #277→#288): clients dial the
+  namespace-free `<svc>.<meshDomain>`. Final design is an **in-agent miekg/dns
+  resolver** (not the Envoy `dns_filter`, which broke c-ares) reached by a CNI
+  **DNAT** of each pod's `:53` straight to `HOST_IP:18054` (no Envoy DNS layer); a
+  pod-ndots mutating webhook injects `ndots` so musl/Alpine clients resolve the mesh
+  FQDN absolute-first; the resolver answers mesh names authoritatively for all types
+  (A→record, else NODATA) and forwards the rest to kube-dns (auto-discovered from the
+  agent's resolv.conf).
+- **Phase 3a — HTTP transparent capture** (#273→#276): selectorless mesh-Service VIPs
+  on :18081, the `cap_http` route table, and the CNI dst-18081 REDIRECT. Hardened
+  with an **on-demand catch-all** (#288) so a cold/off-node service recovers via
+  ODCDS instead of a stuck 404.
+- **Defaults flipped ON** (#288): `generateMeshServices`, `transparentCapture`,
+  `meshDns`, `injectPodNdots` (gamma stays opt-in). Validated hitless over a 6h churn
+  soak (7 agent/proxy rolls + 29 service rolls, prober 100%, mesh 5xx 0).
+
+**In progress / not yet shipped:**
+- **Phase 3a TCP-over-mTLS floor**: protocol-detect (`tls_inspector`+`http_inspector`)
+  → HCM for HTTP/gRPC, `tcp_proxy`-over-mTLS for everything else, on both the capture
+  path and inbound `:15008`. Needs `appProtocol` metadata + capture broader than the
+  :18081 mesh port to be exercised.
+- **Phase 3b**: `TCPRoute`/`TLSRoute`/`UDPRoute` L4 routing (layers on the floor).
+- **VirtualHost CRD retirement**: edge migrates fully to HTTPRoute; the dup-FQDN
+  webhook generalizes to a Gateway/HTTPRoute hostname-conflict check.
+- **Multi-cluster MCS**: `ServiceExport`/`ServiceImport` + `clusterset.local`
+  materialized from the registry; cross-cluster data path is a later phase.
+- **Conformance**: `ReferenceGrant` and supported-features/Mesh-profile reporting
+  (see `docs/conformance/gateway-api-features.md`).
