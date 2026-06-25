@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -31,6 +32,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(s))
 	require.NoError(t, gatewayv1.Install(s))
+	require.NoError(t, gatewayv1beta1.Install(s))
 	return s
 }
 
@@ -111,22 +113,72 @@ func TestBackendsResolve_Shapes(t *testing.T) {
 	svcKind := gatewayv1.Kind("Service")
 	otherKind := gatewayv1.Kind("Foo")
 
-	ok, _, _ := r.backendsResolve(context.Background(), "ns", []gatewayv1.BackendObjectReference{
+	ok, _, _ := r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
 		{Name: "svc-1", Kind: &svcKind},
-	})
+	}, nil)
 	assert.True(t, ok, "valid Service-kind ref resolves")
 
-	ok, reason, _ := r.backendsResolve(context.Background(), "ns", []gatewayv1.BackendObjectReference{
+	ok, reason, _ := r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
 		{Name: "x", Kind: &otherKind},
-	})
+	}, nil)
 	assert.False(t, ok)
 	assert.Equal(t, string(gatewayv1.RouteReasonInvalidKind), reason)
 
-	ok, reason, _ = r.backendsResolve(context.Background(), "ns", []gatewayv1.BackendObjectReference{
+	ok, reason, _ = r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
 		{Name: ""},
-	})
+	}, nil)
 	assert.False(t, ok)
 	assert.Equal(t, string(gatewayv1.RouteReasonBackendNotFound), reason)
+
+	// Cross-namespace ref with no ReferenceGrant → RefNotPermitted.
+	otherNs := gatewayv1.Namespace("other")
+	ok, reason, _ = r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
+		{Name: "svc-1", Kind: &svcKind, Namespace: &otherNs},
+	}, nil)
+	assert.False(t, ok)
+	assert.Equal(t, string(gatewayv1.RouteReasonRefNotPermitted), reason)
+
+	// Cross-namespace ref WITH a matching grant → resolved.
+	grants := []gatewayv1beta1.ReferenceGrant{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "ns"}},
+			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
+		},
+	}}
+	ok, _, _ = r.backendsResolve(context.Background(), "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{
+		{Name: "svc-1", Kind: &svcKind, Namespace: &otherNs},
+	}, grants)
+	assert.True(t, ok, "granted cross-namespace ref resolves")
+}
+
+// TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend: an ungranted
+// cross-namespace backendRef is dropped from the built route; a same-namespace one
+// (and a granted cross-ns one) stays.
+func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	otherNs := gatewayv1.Namespace("other")
+	rule := gatewayv1.HTTPRouteRule{
+		BackendRefs: []gatewayv1.HTTPBackendRef{
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "local"}}},
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "remote", Namespace: &otherNs}}},
+		},
+	}
+	// No grants: the cross-ns "remote" backend is dropped.
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+	require.Len(t, gr.Backends, 1)
+	assert.Equal(t, "local", gr.Backends[0].Service)
+
+	// With a matching grant: both backends are kept.
+	grants := []gatewayv1beta1.ReferenceGrant{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "ns"}},
+			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service", Name: ptr(gatewayv1.ObjectName("remote"))}},
+		},
+	}}
+	gr = r.buildGammaRoute(rule, "ns", "HTTPRoute", grants)
+	require.Len(t, gr.Backends, 2)
 }
 
 func TestServiceParents(t *testing.T) {
@@ -155,7 +207,7 @@ func TestBuildGammaRoute(t *testing.T) {
 		},
 		Timeouts: &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration("5s"))},
 	}
-	gr := r.buildGammaRoute(rule)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 
 	require.Len(t, gr.Matches, 1)
 	assert.Equal(t, "/admin", gr.Matches[0].Exact)
@@ -183,7 +235,7 @@ func TestBuildGammaRouteFromGRPC(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}, Weight: w}},
 		},
 	}
-	gr := r.buildGammaRouteFromGRPC(rule)
+	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil)
 	require.Len(t, gr.Matches, 2)
 	assert.Equal(t, "/foo.Bar/Baz", gr.Matches[0].Exact, "service+method -> exact path")
 	assert.Equal(t, "/foo.Bar/", gr.Matches[1].Prefix, "service-only -> prefix path")
@@ -233,7 +285,7 @@ func TestBuildGammaRouteFromGRPC_RegularExpression(t *testing.T) {
 					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc"}}},
 				},
 			}
-			gr := r.buildGammaRouteFromGRPC(rule)
+			gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil)
 			require.Len(t, gr.Matches, 1)
 			assert.Equal(t, tc.wantRegex, gr.Matches[0].Regex, "Regex field")
 			assert.Empty(t, gr.Matches[0].Exact, "Exact must be empty for regex match")
@@ -261,7 +313,7 @@ func TestBuildGammaRoute_RequestHeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	require.Len(t, gr.HeaderMutation.SetRequest, 1)
@@ -291,7 +343,7 @@ func TestBuildGammaRoute_ResponseHeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	assert.Empty(t, gr.HeaderMutation.SetRequest, "no request headers")
@@ -314,7 +366,7 @@ func TestBuildGammaRoute_UnknownFilterSkipped(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 	assert.Nil(t, gr.HeaderMutation, "redirect filter type must not produce a HeaderMutation")
 }
 
@@ -378,7 +430,7 @@ func TestBuildGammaRoute_RequestRedirect(t *testing.T) {
 					{Type: gatewayv1.HTTPRouteFilterRequestRedirect, RequestRedirect: &f},
 				},
 			}
-			gr := r.buildGammaRoute(rule)
+			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 			require.NotNil(t, gr.Redirect, "RequestRedirect filter must produce GammaRoute.Redirect")
 			assert.Nil(t, gr.URLRewrite, "RequestRedirect must not produce URLRewrite")
 			assert.Equal(t, tc.wantScheme, gr.Redirect.Scheme)
@@ -441,7 +493,7 @@ func TestBuildGammaRoute_URLRewrite(t *testing.T) {
 					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 				},
 			}
-			gr := r.buildGammaRoute(rule)
+			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 			require.NotNil(t, gr.URLRewrite, "URLRewrite filter must produce GammaRoute.URLRewrite")
 			assert.Nil(t, gr.Redirect, "URLRewrite must not produce Redirect")
 			assert.Equal(t, tc.wantHost, gr.URLRewrite.Hostname)
@@ -460,7 +512,7 @@ func TestBuildGammaRoute_NilRedirectWhenNoFilter(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 	assert.Nil(t, gr.Redirect, "no filter must produce nil Redirect")
 	assert.Nil(t, gr.URLRewrite, "no filter must produce nil URLRewrite")
 }
@@ -488,7 +540,7 @@ func TestBuildGammaRouteFromGRPC_HeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}}},
 		},
 	}
-	gr := r.buildGammaRouteFromGRPC(rule)
+	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	require.Len(t, gr.HeaderMutation.SetRequest, 1)

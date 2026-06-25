@@ -33,6 +33,14 @@ rules:
     resources: ["tcproutes/status", "tlsroutes/status", "udproutes/status"]
     verbs: ["get", "update", "patch"]
   {{- end }}
+  {{- if or .Values.agent.gamma .Values.agent.l4Routes }}
+  # ReferenceGrant (v1beta1): admit cross-namespace backendRefs on GAMMA/L4 routes.
+  # Read-only; a grant's presence gates whether a cross-ns backend is served +
+  # surfaced as ResolvedRefs (RefNotPermitted otherwise). Cluster-wide.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["referencegrants"]
+    verbs: ["list", "get", "watch"]
+  {{- end }}
   {{- if or .Values.agent.transparentCapture .Values.agent.meshDns .Values.agent.gamma .Values.agent.l4Routes }}
   # Transparent capture (Phase 3a) / mesh DNS (mesh-global FQDN): watch the generated
   # mesh Services for their cluster.local authorities + ClusterIPs. GAMMA + l4route also

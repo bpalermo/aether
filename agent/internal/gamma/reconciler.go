@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
+	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // RouteSink receives the projected per-service GAMMA rules (the snapshot cache).
@@ -55,6 +57,10 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.GRPCRoute{}, enqueueAll).
+		// ReferenceGrant (v1beta1, the served storage version): a change to any grant
+		// can flip a cross-namespace backendRef between permitted and RefNotPermitted,
+		// so re-project + re-status on every grant change. Cluster-wide cache (post-#323).
+		Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll).
 		Named("gamma").
 		Complete(r)
 }
@@ -70,13 +76,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	if err := r.List(ctx, grpcList); err != nil {
 		return reconcile.Result{}, err
 	}
+	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
+	grantList := &gatewayv1beta1.ReferenceGrantList{}
+	if err := r.List(ctx, grantList); err != nil {
+		return reconcile.Result{}, err
+	}
+	grants := grantList.Items
 
 	routes := map[string][]proxy.GammaRoute{}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
 		for _, svc := range serviceParents(hr.Spec.ParentRefs) {
 			for _, rule := range hr.Spec.Rules {
-				routes[svc] = append(routes[svc], r.buildGammaRoute(rule))
+				routes[svc] = append(routes[svc], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants))
 			}
 		}
 	}
@@ -84,7 +96,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		gr := &grpcList.Items[i]
 		for _, svc := range serviceParents(gr.Spec.ParentRefs) {
 			for _, rule := range gr.Spec.Rules {
-				routes[svc] = append(routes[svc], r.buildGammaRouteFromGRPC(rule))
+				routes[svc] = append(routes[svc], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants))
 			}
 		}
 	}
@@ -99,14 +111,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// projected); the next reconcile retries.
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, hr.Namespace, httpBackendRefs(hr.Spec.Rules))
+		resolved, reason, msg := r.backendsResolve(ctx, hr.Namespace, "HTTPRoute", httpBackendRefs(hr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, hr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write HTTPRoute status", "route", hr.Name, "namespace", hr.Namespace, "error", err.Error())
 		}
 	}
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, gr.Namespace, grpcBackendRefs(gr.Spec.Rules))
+		resolved, reason, msg := r.backendsResolve(ctx, gr.Namespace, "GRPCRoute", grpcBackendRefs(gr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, gr, gr.Generation, &gr.Status.RouteStatus, gr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write GRPCRoute status", "route", gr.Name, "namespace", gr.Namespace, "error", err.Error())
 		}
@@ -168,8 +180,10 @@ func (r *Reconciler) writeRouteStatus(
 // ref with a non-empty name is resolved here; a genuinely-absent backend surfaces at
 // runtime as no endpoints / 503, not a static ResolvedRefs failure. A k8s Service Get
 // would be a false negative (the registry, not a k8s Service, backs the route). Only
-// the ref *shape* is validated.
-func (r *Reconciler) backendsResolve(_ context.Context, _ string, refs []gatewayv1.BackendObjectReference) (bool, string, string) {
+// the ref *shape* — and, for cross-namespace refs, ReferenceGrant permission — is
+// validated. routeKind is the referring route's kind (HTTPRoute/GRPCRoute), used to
+// match a grant's spec.from.kind.
+func (r *Reconciler) backendsResolve(_ context.Context, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
 	for _, ref := range refs {
 		if (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
 			return false, string(gatewayv1.RouteReasonInvalidKind), fmt.Sprintf("backendRef %q is not a core Service", ref.Name)
@@ -177,8 +191,33 @@ func (r *Reconciler) backendsResolve(_ context.Context, _ string, refs []gateway
 		if string(ref.Name) == "" {
 			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
 		}
+		if ns := derefBackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
+			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, string(ref.Name)) {
+			return false, string(gatewayv1.RouteReasonRefNotPermitted),
+				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, ns)
+		}
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
+}
+
+// derefBackendNamespace returns the backendRef namespace ("" when unset).
+func derefBackendNamespace(ns *gatewayv1.Namespace) string {
+	if ns == nil {
+		return ""
+	}
+	return string(*ns)
+}
+
+// backendPermitted reports whether a backendRef is allowed onto the data plane: a
+// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant.
+// Non-permitted cross-namespace backends are dropped from the built route (the rest of
+// the route still applies), mirroring the RefNotPermitted status.
+func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
+	ns := derefBackendNamespace(backendNamespace)
+	if !referencegrant.CrossNamespace(ns, routeNamespace) {
+		return true
+	}
+	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
 }
 
 func httpBackendRefs(rules []gatewayv1.HTTPRouteRule) []gatewayv1.BackendObjectReference {
@@ -217,7 +256,7 @@ func serviceParents(refs []gatewayv1.ParentReference) []string {
 	return svcs
 }
 
-func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule) proxy.GammaRoute {
+func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.GammaRoute {
 	gr := proxy.GammaRoute{}
 	if rule.Timeouts != nil && rule.Timeouts.Request != nil {
 		// HTTPRoute timeouts are GEP-2257 duration strings (a subset of Go's).
@@ -233,6 +272,11 @@ func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule) proxy.GammaRo
 			continue
 		}
 		name := string(b.Name)
+		// Drop ungranted cross-namespace backends (RefNotPermitted): they are removed
+		// from the data plane, but the rest of the route still applies.
+		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
+			continue
+		}
 		weight := uint32(1)
 		if b.Weight != nil {
 			weight = uint32(*b.Weight)
@@ -430,7 +474,7 @@ func buildGRPCHeaderMutation(filters []gatewayv1.GRPCRouteFilter) *proxy.GammaHe
 // method match becomes a path match (service+method = exact /svc/method; service-only
 // = prefix /svc/), and gRPC header matches map to request-header matches. GRPCRoute
 // has no per-rule timeout. The backends are identical (weighted Service refs).
-func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule) proxy.GammaRoute {
+func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.GammaRoute {
 	gr := proxy.GammaRoute{}
 	for _, b := range rule.BackendRefs {
 		if b.Group != nil && string(*b.Group) != "" {
@@ -440,6 +484,9 @@ func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule) proxy
 			continue
 		}
 		name := string(b.Name)
+		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
+			continue
+		}
 		weight := uint32(1)
 		if b.Weight != nil {
 			weight = uint32(*b.Weight)

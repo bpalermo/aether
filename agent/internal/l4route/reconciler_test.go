@@ -6,8 +6,10 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -35,7 +37,7 @@ func TestBuildTCPRoute_SingleBackend(t *testing.T) {
 			},
 		},
 	}
-	route := r.buildTCPRoute(rule)
+	route := r.buildTCPRoute(rule, "ns", "TCPRoute", nil)
 	assert.Empty(t, route.SNIHostnames, "TCPRoute must not set SNI hostnames")
 	require.Len(t, route.Backends, 1)
 	assert.Equal(t, "svc-a", route.Backends[0].Service)
@@ -52,7 +54,7 @@ func TestBuildTCPRoute_WeightedBackends(t *testing.T) {
 			{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-v2"}, Weight: ptr(int32(10))},
 		},
 	}
-	route := r.buildTCPRoute(rule)
+	route := r.buildTCPRoute(rule, "ns", "TCPRoute", nil)
 	require.Len(t, route.Backends, 2)
 	assert.Equal(t, "tcp:svc-v1.mesh", route.Backends[0].Cluster)
 	assert.Equal(t, uint32(90), route.Backends[0].Weight)
@@ -69,7 +71,7 @@ func TestBuildTLSRoute_WithHostnames(t *testing.T) {
 		},
 	}
 	hostnames := []string{"a.example.com", "b.example.com"}
-	route := r.buildTLSRoute(rule, hostnames)
+	route := r.buildTLSRoute(rule, hostnames, "ns", "TLSRoute", nil)
 	assert.Equal(t, hostnames, route.SNIHostnames)
 	require.Len(t, route.Backends, 1)
 	assert.Equal(t, proxy.TCPClusterName("svc-b", "aether.internal"), route.Backends[0].Cluster)
@@ -83,7 +85,7 @@ func TestBuildUDPBackends(t *testing.T) {
 			{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-c"}, Weight: ptr(int32(5))},
 		},
 	}
-	backends := r.buildUDPBackends(rule)
+	backends := r.buildUDPBackends(rule, "ns", "UDPRoute", nil)
 	require.Len(t, backends, 1)
 	assert.Equal(t, "svc-c", backends[0].Service)
 	assert.Equal(t, uint32(5), backends[0].Weight)
@@ -102,7 +104,7 @@ func TestBuildL4Backends_ForeignGroupSkipped(t *testing.T) {
 		}},
 		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "keep-me"}},
 	}
-	backends := r.buildL4Backends(refs)
+	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 1)
 	assert.Equal(t, "keep-me", backends[0].Service)
 }
@@ -113,7 +115,34 @@ func TestBuildL4Backends_DefaultWeight(t *testing.T) {
 	refs := []gatewayv1.BackendRef{
 		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-d"}},
 	}
-	backends := r.buildL4Backends(refs)
+	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 1)
 	assert.Equal(t, uint32(1), backends[0].Weight, "nil weight should default to 1")
+}
+
+// TestBuildL4Backends_DropsUngrantedCrossNamespace verifies that an ungranted
+// cross-namespace backendRef is dropped (RefNotPermitted), while a matching grant
+// keeps it.
+func TestBuildL4Backends_DropsUngrantedCrossNamespace(t *testing.T) {
+	r := &Reconciler{MeshDomain: "aether.internal"}
+	otherNs := gatewayv1.Namespace("other")
+	refs := []gatewayv1.BackendRef{
+		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "local"}},
+		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "remote", Namespace: &otherNs}},
+	}
+	// No grants: cross-ns "remote" dropped.
+	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
+	require.Len(t, backends, 1)
+	assert.Equal(t, "local", backends[0].Service)
+
+	// Matching grant: both kept.
+	grants := []gatewayv1beta1.ReferenceGrant{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "TCPRoute", Namespace: "ns"}},
+			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
+		},
+	}}
+	backends = r.buildL4Backends(refs, "ns", "TCPRoute", grants)
+	require.Len(t, backends, 2)
 }

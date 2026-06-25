@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 type statusFakeSink struct{}
@@ -38,6 +39,7 @@ func statusScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, clientgoscheme.AddToScheme(s))
 	require.NoError(t, gatewayv1.Install(s))
 	require.NoError(t, gatewayv1alpha2.Install(s))
+	require.NoError(t, gatewayv1beta1.Install(s))
 	return s
 }
 
@@ -116,6 +118,73 @@ func TestReconcile_GatewayAndRouteStatus(t *testing.T) {
 	rres := meta.FindStatusCondition(gotHR.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionResolvedRefs))
 	require.NotNil(t, rres)
 	assert.Equal(t, metav1.ConditionTrue, rres.Status)
+}
+
+// TestReconcile_CrossNamespaceBackend_RefNotPermitted: an HTTPRoute in ns A whose
+// backendRef targets a Service in ns B with NO ReferenceGrant gets ResolvedRefs=
+// False/RefNotPermitted; adding a matching grant flips it to True.
+func TestReconcile_CrossNamespaceBackend_RefNotPermitted(t *testing.T) {
+	gc := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "aether", Generation: 1},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: gatewaystatus.EdgeControllerName},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "ns-a", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "aether",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	nsB := gatewayv1.Namespace("ns-b")
+	hr := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: "ns-a", Generation: 1},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{
+				{Kind: ptr(gatewayv1.Kind("Gateway")), Name: "edge"},
+			}},
+			Hostnames: []gatewayv1.Hostname{"api.example.com"},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{
+					BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-b", Namespace: &nsB, Port: ptr(gatewayv1.PortNumber(8080))},
+				}}},
+			}},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gc, gw, hr).
+		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns-a", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	gotHR := &gatewayv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "ns-a", Name: "r1"}, gotHR))
+	require.Len(t, gotHR.Status.Parents, 1)
+	rres := meta.FindStatusCondition(gotHR.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionResolvedRefs))
+	require.NotNil(t, rres)
+	assert.Equal(t, metav1.ConditionFalse, rres.Status, "ungranted cross-ns backend → ResolvedRefs False")
+	assert.Equal(t, string(gatewayv1.RouteReasonRefNotPermitted), rres.Reason)
+
+	// Add a matching ReferenceGrant in ns-b → ResolvedRefs flips to True.
+	grant := &gatewayv1beta1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "ns-b"},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "ns-a"}},
+			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
+		},
+	}
+	require.NoError(t, c.Create(context.Background(), grant))
+
+	_, err = r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "ns-a", Name: "r1"}, gotHR))
+	rres = meta.FindStatusCondition(gotHR.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionResolvedRefs))
+	require.NotNil(t, rres)
+	assert.Equal(t, metav1.ConditionTrue, rres.Status, "granted cross-ns backend → ResolvedRefs True")
 }
 
 // TestReconcile_GatewayInNonEdgeNamespace: a Gateway of our class living in a
@@ -213,7 +282,9 @@ func TestReconcile_GatewayClassSupportedFeatures(t *testing.T) {
 	assert.Contains(t, names, "HTTPRoute")
 	assert.Contains(t, names, "GRPCRoute")
 	assert.Contains(t, names, "HTTPRouteRequestTimeout")
+	// ReferenceGrant is now implemented (cross-namespace backendRef admission +
+	// status) and therefore advertised so the suite runs those tests.
+	assert.Contains(t, names, "ReferenceGrant")
 	// Unsupported features must NOT be advertised (so their suites skip).
 	assert.NotContains(t, names, "HTTPRouteRequestMirror")
-	assert.NotContains(t, names, "ReferenceGrant")
 }

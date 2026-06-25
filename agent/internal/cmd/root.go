@@ -60,6 +60,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 const (
@@ -356,6 +357,10 @@ func runAgent(ctx context.Context) (retErr error) {
 		if err = gatewayv1.Install(m.GetScheme()); err != nil {
 			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
 		}
+		// ReferenceGrant (v1beta1) gates cross-namespace backendRefs on GAMMA routes.
+		if err = gatewayv1beta1.Install(m.GetScheme()); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+		}
 		gammaReconciler := &gamma.Reconciler{
 			Client:     m.GetClient(),
 			Sink:       snapshotCache,
@@ -375,6 +380,13 @@ func runAgent(ctx context.Context) (retErr error) {
 	if cfg.L4Routes {
 		if err = gatewayv1alpha2.Install(m.GetScheme()); err != nil {
 			return fmt.Errorf("register gateway.networking.k8s.io v1alpha2 scheme: %w", err)
+		}
+		// v1 (TLSRoute) + v1beta1 (ReferenceGrant) types the l4 reconciler reads.
+		if err = gatewayv1.Install(m.GetScheme()); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+		}
+		if err = gatewayv1beta1.Install(m.GetScheme()); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
 		}
 		l4Reconciler := &l4route.Reconciler{
 			Client:     m.GetClient(),

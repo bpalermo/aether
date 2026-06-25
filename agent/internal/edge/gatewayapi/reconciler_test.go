@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -47,7 +48,7 @@ func TestBuildVirtualHost(t *testing.T) {
 		{Matches: pathMatch(gatewayv1.PathMatchExact, "/exact"), BackendRefs: backend("svc-2", 8080)},
 		{BackendRefs: backend("svc-1", 0)}, // no match → default "/"
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 
 	assert.Equal(t, []string{"api.example.com"}, vh.Hosts)
 	assert.Equal(t, []cache.Route{
@@ -64,10 +65,10 @@ func TestBuildVirtualHost_TLS(t *testing.T) {
 	r := &Reconciler{}
 	hostCerts := map[string]string{"*.example.com": "kubernetes/wild", "": "kubernetes/default"}
 
-	wild := r.buildVirtualHost(httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts)
+	wild := r.buildVirtualHost(httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts, nil)
 	assert.Equal(t, "kubernetes/wild", wild.TLSSecret, "wildcard listener covers the host")
 
-	other := r.buildVirtualHost(httpRoute([]string{"foo.other.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts)
+	other := r.buildVirtualHost(httpRoute([]string{"foo.other.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts, nil)
 	assert.Equal(t, "kubernetes/default", other.TLSSecret, "falls back to the catch-all listener")
 }
 
@@ -93,8 +94,24 @@ func TestAttachedToOurGateway_ExplicitNamespace(t *testing.T) {
 }
 
 func TestFirstBackendService(t *testing.T) {
-	assert.Equal(t, "echo", firstBackendService(backend("echo", 0)))
-	assert.Empty(t, firstBackendService(nil))
+	assert.Equal(t, "echo", firstBackendService(backend("echo", 0), "ns", nil))
+	assert.Empty(t, firstBackendService(nil, "ns", nil))
+
+	// A cross-namespace backendRef without a grant is skipped (RefNotPermitted).
+	otherNs := gatewayv1.Namespace("other")
+	crossRefs := []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{
+		BackendObjectReference: gatewayv1.BackendObjectReference{Name: "echo", Namespace: &otherNs},
+	}}}
+	assert.Empty(t, firstBackendService(crossRefs, "ns", nil), "ungranted cross-ns backend dropped")
+
+	grants := []gatewayv1beta1.ReferenceGrant{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "ns"}},
+			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
+		},
+	}}
+	assert.Equal(t, "echo", firstBackendService(crossRefs, "ns", grants), "granted cross-ns backend kept")
 }
 
 // --- L4 edge helpers ---
@@ -125,7 +142,7 @@ func TestBuildL4Backends(t *testing.T) {
 		tcpBackendRef("pg", 1),
 		tcpBackendRef("cache", 2),
 	}
-	backends := r.buildL4Backends(refs)
+	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 2)
 	assert.Equal(t, "pg", backends[0].Service)
 	assert.Equal(t, proxy.TCPClusterName("pg", "aether.internal"), backends[0].Cluster)
@@ -143,7 +160,7 @@ func TestBuildL4Backends_ForeignGroupSkipped(t *testing.T) {
 		}},
 		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "keep"}},
 	}
-	backends := r.buildL4Backends(refs)
+	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 1)
 	assert.Equal(t, "keep", backends[0].Service)
 }
@@ -242,7 +259,7 @@ func TestBuildVirtualHost_RequestHeaderModifier(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 
 	require.Len(t, vh.Routes, 1)
 	m := vh.Routes[0].HeaderMutation
@@ -275,7 +292,7 @@ func TestBuildVirtualHost_ResponseHeaderModifier(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 
 	require.Len(t, vh.Routes, 1)
 	m := vh.Routes[0].HeaderMutation
@@ -302,7 +319,7 @@ func TestBuildVirtualHost_UnknownFilterSkipped(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	assert.Nil(t, vh.Routes[0].HeaderMutation, "unknown/nil-body filter must not produce a header mutation")
 	assert.Nil(t, vh.Routes[0].Redirect, "nil-body redirect filter must produce nil Redirect")
@@ -328,7 +345,7 @@ func TestBuildVirtualHost_RequestRedirect(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 	require.Len(t, vh.Routes, 1, "redirect rule with no backend must still produce a route")
 	rt := vh.Routes[0]
 	assert.Equal(t, "/old", rt.Prefix)
@@ -362,7 +379,7 @@ func TestBuildVirtualHost_URLRewrite(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	rt := vh.Routes[0]
 	assert.Equal(t, "/api", rt.Prefix)
@@ -396,7 +413,7 @@ func TestBuildVirtualHost_URLRewrite_ReplaceFullPath(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	require.NotNil(t, vh.Routes[0].URLRewrite)
 	assert.Equal(t, "ReplaceFullPath", vh.Routes[0].URLRewrite.PathType)
@@ -413,7 +430,7 @@ func TestBuildVirtualHost_NoMutationWhenNoFilters(t *testing.T) {
 			BackendRefs: backend("svc-1", 0),
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil)
+	vh := r.buildVirtualHost(hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	assert.Nil(t, vh.Routes[0].HeaderMutation)
 }

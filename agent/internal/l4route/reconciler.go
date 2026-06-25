@@ -17,6 +17,7 @@ import (
 	"log/slog"
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
+	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonlog "github.com/bpalermo/aether/common/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // L4RouteSink receives the projected L4 service routes and UDP routes from this
@@ -65,6 +67,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&gatewayv1alpha2.TCPRoute{}).
 		Watches(&gatewayv1.TLSRoute{}, enqueueAll).
 		Watches(&gatewayv1alpha2.UDPRoute{}, enqueueAll).
+		// ReferenceGrant (v1beta1): a grant change can flip a cross-namespace backendRef
+		// between permitted and RefNotPermitted, so re-project + re-status on any change.
+		Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll).
 		Named("l4route").
 		Complete(r)
 }
@@ -85,13 +90,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	if err := r.List(ctx, udpList); err != nil {
 		return reconcile.Result{}, err
 	}
+	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
+	grantList := &gatewayv1beta1.ReferenceGrantList{}
+	if err := r.List(ctx, grantList); err != nil {
+		return reconcile.Result{}, err
+	}
+	grants := grantList.Items
 
 	tcpRoutes := map[string][]proxy.L4ServiceRoute{}
 	for i := range tcpList.Items {
 		tr := &tcpList.Items[i]
 		for _, svc := range serviceParents(tr.Spec.ParentRefs) {
 			for _, rule := range tr.Spec.Rules {
-				tcpRoutes[svc] = append(tcpRoutes[svc], r.buildTCPRoute(rule))
+				tcpRoutes[svc] = append(tcpRoutes[svc], r.buildTCPRoute(rule, tr.Namespace, "TCPRoute", grants))
 			}
 		}
 	}
@@ -105,7 +116,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 				hostnames = append(hostnames, string(h))
 			}
 			for _, rule := range tr.Spec.Rules {
-				tlsRoutes[svc] = append(tlsRoutes[svc], r.buildTLSRoute(rule, hostnames))
+				tlsRoutes[svc] = append(tlsRoutes[svc], r.buildTLSRoute(rule, hostnames, tr.Namespace, "TLSRoute", grants))
 			}
 		}
 	}
@@ -115,7 +126,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		ur := &udpList.Items[i]
 		for _, svc := range serviceParents(ur.Spec.ParentRefs) {
 			for _, rule := range ur.Spec.Rules {
-				udpRoutes[svc] = append(udpRoutes[svc], r.buildUDPBackends(rule)...)
+				udpRoutes[svc] = append(udpRoutes[svc], r.buildUDPBackends(rule, ur.Namespace, "UDPRoute", grants)...)
 			}
 		}
 	}
@@ -139,21 +150,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// reconcile retries.
 	for i := range tcpList.Items {
 		tr := &tcpList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, tcpBackendRefs(tr.Spec.Rules))
+		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, "TCPRoute", tcpBackendRefs(tr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write TCPRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
 	}
 	for i := range tlsList.Items {
 		tr := &tlsList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, tlsBackendRefs(tr.Spec.Rules))
+		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, "TLSRoute", tlsBackendRefs(tr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write TLSRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
 	}
 	for i := range udpList.Items {
 		ur := &udpList.Items[i]
-		resolved, reason, msg := r.backendsResolve(ctx, ur.Namespace, udpBackendRefs(ur.Spec.Rules))
+		resolved, reason, msg := r.backendsResolve(ctx, ur.Namespace, "UDPRoute", udpBackendRefs(ur.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, ur, ur.Generation, &ur.Status.RouteStatus, ur.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write UDPRoute status", "route", ur.Name, "namespace", ur.Namespace, "error", err.Error())
 		}
@@ -217,8 +228,9 @@ func (r *Reconciler) writeRouteStatus(
 // ref with a non-empty name is resolved here; a genuinely-absent backend surfaces at
 // runtime as no endpoints / 503, not a static ResolvedRefs failure. A k8s Service Get
 // would be a false negative (the registry, not a k8s Service, backs the route). Only
-// the ref *shape* is validated.
-func (r *Reconciler) backendsResolve(_ context.Context, _ string, refs []gatewayv1.BackendObjectReference) (bool, string, string) {
+// the ref *shape* — and, for cross-namespace refs, ReferenceGrant permission — is
+// validated. routeKind is the referring route's kind (TCPRoute/TLSRoute/UDPRoute).
+func (r *Reconciler) backendsResolve(_ context.Context, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
 	for _, ref := range refs {
 		if (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
 			return false, string(gatewayv1.RouteReasonInvalidKind), fmt.Sprintf("backendRef %q is not a core Service", ref.Name)
@@ -226,8 +238,32 @@ func (r *Reconciler) backendsResolve(_ context.Context, _ string, refs []gateway
 		if string(ref.Name) == "" {
 			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
 		}
+		if ns := derefBackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
+			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, string(ref.Name)) {
+			return false, string(gatewayv1.RouteReasonRefNotPermitted),
+				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, ns)
+		}
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
+}
+
+// derefBackendNamespace returns the backendRef namespace ("" when unset).
+func derefBackendNamespace(ns *gatewayv1.Namespace) string {
+	if ns == nil {
+		return ""
+	}
+	return string(*ns)
+}
+
+// backendPermitted reports whether a backendRef is allowed onto the data plane: a
+// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant.
+// Non-permitted cross-namespace backends are dropped from the built route.
+func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
+	ns := derefBackendNamespace(backendNamespace)
+	if !referencegrant.CrossNamespace(ns, routeNamespace) {
+		return true
+	}
+	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
 }
 
 func tcpBackendRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.BackendObjectReference {
@@ -278,33 +314,33 @@ func serviceParents(refs []gatewayv1alpha2.ParentReference) []string {
 
 // buildTCPRoute translates a TCPRouteRule into an L4ServiceRoute (no SNI match).
 // Backends without a valid Service name (foreign group/kind) are skipped.
-func (r *Reconciler) buildTCPRoute(rule gatewayv1alpha2.TCPRouteRule) proxy.L4ServiceRoute {
+func (r *Reconciler) buildTCPRoute(rule gatewayv1alpha2.TCPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.L4ServiceRoute {
 	return proxy.L4ServiceRoute{
-		Backends: r.buildL4Backends(rule.BackendRefs),
+		Backends: r.buildL4Backends(rule.BackendRefs, routeNamespace, routeKind, grants),
 	}
 }
 
 // buildTLSRoute translates a TLSRouteRule + the route's hostname list into an
 // L4ServiceRoute. Hostnames map to filter_chain_match.server_names on the
 // capture listener.
-func (r *Reconciler) buildTLSRoute(rule gatewayv1.TLSRouteRule, hostnames []string) proxy.L4ServiceRoute {
+func (r *Reconciler) buildTLSRoute(rule gatewayv1.TLSRouteRule, hostnames []string, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.L4ServiceRoute {
 	return proxy.L4ServiceRoute{
 		SNIHostnames: hostnames,
-		Backends:     r.buildL4Backends(rule.BackendRefs),
+		Backends:     r.buildL4Backends(rule.BackendRefs, routeNamespace, routeKind, grants),
 	}
 }
 
 // buildUDPBackends translates a UDPRouteRule into a flat backend list.
 // UDP backends resolve to "udp:<svc>.<domain>" clusters (plain EDS, no mTLS)
 // rather than the TCP "tcp:<svc>.<domain>" clusters used by TCPRoute/TLSRoute.
-func (r *Reconciler) buildUDPBackends(rule gatewayv1alpha2.UDPRouteRule) []proxy.L4Backend {
-	return r.buildUDPL4Backends(rule.BackendRefs)
+func (r *Reconciler) buildUDPBackends(rule gatewayv1alpha2.UDPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
+	return r.buildUDPL4Backends(rule.BackendRefs, routeNamespace, routeKind, grants)
 }
 
 // buildL4Backends converts a BackendRef slice into L4Backends with resolved
 // TCP cluster names. Refs with a non-core group or non-Service kind are skipped.
-func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef) []proxy.L4Backend {
-	return r.buildBackendsWithCluster(refs, func(name string) string {
+func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
+	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(name string) string {
 		// TCP clusters share the same EDS endpoints as HTTP clusters but use
 		// ALPN "aether-tcp" (see TCPClusterName). The capture TCP floor chains
 		// already reference "tcp:<svc>.<domain>" clusters.
@@ -315,16 +351,17 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef) []proxy.
 // buildUDPL4Backends converts a BackendRef slice into L4Backends with resolved
 // UDP cluster names ("udp:<svc>.<domain>"). These clusters are plain EDS without
 // a transport socket — UDP traffic is not covered by mesh mTLS.
-func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1alpha2.BackendRef) []proxy.L4Backend {
-	return r.buildBackendsWithCluster(refs, func(name string) string {
+func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
+	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(name string) string {
 		return proxy.UDPClusterName(name, r.MeshDomain)
 	})
 }
 
 // buildBackendsWithCluster converts a BackendRef slice into L4Backends, resolving
 // the cluster name via clusterNameFn. Refs with a non-core group or non-Service
-// kind are skipped.
-func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef, clusterNameFn func(name string) string) []proxy.L4Backend {
+// kind are skipped, as are ungranted cross-namespace refs (RefNotPermitted: dropped
+// from the data plane, mirroring the route's ResolvedRefs status).
+func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, clusterNameFn func(name string) string) []proxy.L4Backend {
 	backends := make([]proxy.L4Backend, 0, len(refs))
 	for _, b := range refs {
 		if b.Group != nil && string(*b.Group) != "" {
@@ -335,6 +372,9 @@ func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef,
 		}
 		name := string(b.Name)
 		if name == "" {
+			continue
+		}
+		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
 			continue
 		}
 		weight := uint32(1)

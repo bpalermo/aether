@@ -44,7 +44,7 @@ e2e-validated on talos (aether 0.41.0).
 | GAMMA Mesh profile (parentRef=Service) | Supported | producer routes; consumer (per-namespace) overrides Planned |
 | GAMMA rules on the transparent-capture path | Supported | applies to clients dialing `<svc>.<meshDomain>` (the default path) |
 | East-west L4 on the transparent-capture path | Supported | TCPRoute/TLSRoute/UDPRoute (parentRef=Service) project onto the capture floor; gated behind `--l4-routes` |
-| `ReferenceGrant` (cross-namespace backendRefs) | N/A → Planned | aether's data-plane cluster name is namespace-free (`<svc>.<meshDomain>`), so cross-namespace backend references are not part of the routing model today; grant enforcement is a conformance-only follow-up |
+| `ReferenceGrant` (cross-namespace backendRefs) | Supported (admission + status; namespace-blind resolution pending 020 Part 1) | A cross-namespace backendRef (namespace set and != the route's) is admitted only when a `ReferenceGrant` in the backend's namespace has a `from` matching `{group: gateway.networking.k8s.io, kind: <route kind>, namespace: <route ns>}` and a `to` matching `{group: "", kind: Service}` (optionally `name`). Without a grant the route's `ResolvedRefs` is `False`/`RefNotPermitted` and the backend is DROPPED from the data plane (rest of the route still applies). Enforced on edge HTTPRoute/TCPRoute/TLSRoute and east-west GAMMA HTTPRoute/GRPCRoute + L4 TCPRoute/TLSRoute/UDPRoute. CAVEAT: aether's data-plane cluster name is still namespace-free (`<svc>.<meshDomain>`), so a *granted* cross-ns ref resolves by name exactly as today; proper per-namespace resolution lands with proposal 020 Part 1 |
 | MCS `ServiceExport`/`ServiceImport`, `clusterset.local` | Planned | registry-backed (proposal 006), DNS strictly local |
 
 ## Transport / security
@@ -67,10 +67,12 @@ The GatewayClass also publishes a machine-readable `status.supportedFeatures` li
 the suite skips (rather than fails) the features aether does not implement. The
 advertised set is: `Gateway`, `GatewayPort8080`, `HTTPRoute`, `GRPCRoute`,
 `HTTPRouteMethodMatching`, `HTTPRouteRequestTimeout`,
-`HTTPRouteResponseHeaderModification`. Path/header/method match, weighted backends,
-and the `RequestHeaderModifier` filter are part of HTTPRoute *core* and carry no
-separate feature flag. Redirect/rewrite/mirror and `ReferenceGrant` are deliberately
-omitted (not implemented).
+`HTTPRouteResponseHeaderModification`, `ReferenceGrant`. Path/header/method match,
+weighted backends, and the `RequestHeaderModifier` filter are part of HTTPRoute *core*
+and carry no separate feature flag. Redirect/rewrite/mirror are deliberately omitted
+(not implemented). `ReferenceGrant` is advertised now that cross-namespace backendRef
+admission + status enforcement is implemented (resolution stays namespace-blind until
+proposal 020 Part 1).
 
 ### Data-plane / addressing gap
 
