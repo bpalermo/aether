@@ -203,3 +203,101 @@ func TestBuildVirtualHost_ParentRefsRefactored(t *testing.T) {
 	hr.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: "edge-gw"}}
 	assert.True(t, attachedToOurGateway(hr.Spec.ParentRefs, ours))
 }
+
+// TestBuildVirtualHost_RequestHeaderModifier: set/add/remove request header filters
+// on an edge HTTPRoute rule are projected into cache.Route.HeaderMutation.
+func TestBuildVirtualHost_RequestHeaderModifier(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/api"),
+			BackendRefs: backend("svc-1", 0),
+			Filters: []gatewayv1.HTTPRouteFilter{
+				{
+					Type: gatewayv1.HTTPRouteFilterRequestHeaderModifier,
+					RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+						Set:    []gatewayv1.HTTPHeader{{Name: "x-env", Value: "prod"}},
+						Add:    []gatewayv1.HTTPHeader{{Name: "x-trace", Value: "1"}},
+						Remove: []string{"x-debug"},
+					},
+				},
+			},
+		},
+	})
+	vh := r.buildVirtualHost(hr, nil)
+
+	require.Len(t, vh.Routes, 1)
+	m := vh.Routes[0].HeaderMutation
+	require.NotNil(t, m)
+	require.Len(t, m.SetRequest, 1)
+	assert.Equal(t, proxy.GammaHeaderKV{Name: "x-env", Value: "prod"}, m.SetRequest[0])
+	require.Len(t, m.AddRequest, 1)
+	assert.Equal(t, proxy.GammaHeaderKV{Name: "x-trace", Value: "1"}, m.AddRequest[0])
+	require.Len(t, m.RemoveRequest, 1)
+	assert.Equal(t, "x-debug", m.RemoveRequest[0])
+	assert.Empty(t, m.SetResponse, "no response modifiers in this rule")
+}
+
+// TestBuildVirtualHost_ResponseHeaderModifier: response header modifier filter is
+// projected into cache.Route.HeaderMutation.SetResponse / RemoveResponse.
+func TestBuildVirtualHost_ResponseHeaderModifier(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchExact, "/health"),
+			BackendRefs: backend("svc-1", 0),
+			Filters: []gatewayv1.HTTPRouteFilter{
+				{
+					Type: gatewayv1.HTTPRouteFilterResponseHeaderModifier,
+					ResponseHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+						Set:    []gatewayv1.HTTPHeader{{Name: "x-served-by", Value: "aether"}},
+						Remove: []string{"x-internal"},
+					},
+				},
+			},
+		},
+	})
+	vh := r.buildVirtualHost(hr, nil)
+
+	require.Len(t, vh.Routes, 1)
+	m := vh.Routes[0].HeaderMutation
+	require.NotNil(t, m)
+	assert.Empty(t, m.SetRequest, "no request modifiers")
+	require.Len(t, m.SetResponse, 1)
+	assert.Equal(t, proxy.GammaHeaderKV{Name: "x-served-by", Value: "aether"}, m.SetResponse[0])
+	require.Len(t, m.RemoveResponse, 1)
+	assert.Equal(t, "x-internal", m.RemoveResponse[0])
+}
+
+// TestBuildVirtualHost_UnknownFilterSkipped: non-modifier filters produce a nil
+// HeaderMutation (redirect/rewrite are future items, must not panic).
+func TestBuildVirtualHost_UnknownFilterSkipped(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/"),
+			BackendRefs: backend("svc-1", 0),
+			Filters: []gatewayv1.HTTPRouteFilter{
+				{Type: gatewayv1.HTTPRouteFilterRequestRedirect},
+			},
+		},
+	})
+	vh := r.buildVirtualHost(hr, nil)
+	require.Len(t, vh.Routes, 1)
+	assert.Nil(t, vh.Routes[0].HeaderMutation, "unknown filter must not produce a mutation")
+}
+
+// TestBuildVirtualHost_NoMutationWhenNoFilters: a route with no filters has a nil
+// HeaderMutation (regression guard against allocating empty structs).
+func TestBuildVirtualHost_NoMutationWhenNoFilters(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/"),
+			BackendRefs: backend("svc-1", 0),
+		},
+	})
+	vh := r.buildVirtualHost(hr, nil)
+	require.Len(t, vh.Routes, 1)
+	assert.Nil(t, vh.Routes[0].HeaderMutation)
+}

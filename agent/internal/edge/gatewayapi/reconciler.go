@@ -297,12 +297,13 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 		if p := firstBackendPort(rule.BackendRefs); p != 0 {
 			port = p
 		}
+		mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
 		if len(rule.Matches) == 0 {
-			vh.Routes = append(vh.Routes, cache.Route{Prefix: "/", Service: backend, Port: port})
+			vh.Routes = append(vh.Routes, cache.Route{Prefix: "/", Service: backend, Port: port, HeaderMutation: mutation})
 			continue
 		}
 		for _, m := range rule.Matches {
-			route := cache.Route{Service: backend, Port: port}
+			route := cache.Route{Service: backend, Port: port, HeaderMutation: mutation}
 			if m.Path != nil && m.Path.Value != nil {
 				switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
 				case gatewayv1.PathMatchExact:
@@ -463,4 +464,47 @@ func ptrType(p *gatewayv1.PathMatchType, def gatewayv1.PathMatchType) gatewayv1.
 		return def
 	}
 	return *p
+}
+
+// buildEdgeHTTPHeaderMutation merges all RequestHeaderModifier and
+// ResponseHeaderModifier filters in an edge HTTPRoute rule's filter list into a
+// single GammaHeaderMutation. Unknown filter types (redirect, rewrite, mirror)
+// are silently skipped. Returns nil when no modifier filter is present.
+func buildEdgeHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaHeaderMutation {
+	var m *proxy.GammaHeaderMutation
+	ensure := func() {
+		if m == nil {
+			m = &proxy.GammaHeaderMutation{}
+		}
+	}
+	for _, f := range filters {
+		switch f.Type {
+		case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+			if f.RequestHeaderModifier == nil {
+				continue
+			}
+			ensure()
+			for _, h := range f.RequestHeaderModifier.Set {
+				m.SetRequest = append(m.SetRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			for _, h := range f.RequestHeaderModifier.Add {
+				m.AddRequest = append(m.AddRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			m.RemoveRequest = append(m.RemoveRequest, f.RequestHeaderModifier.Remove...)
+		case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
+			if f.ResponseHeaderModifier == nil {
+				continue
+			}
+			ensure()
+			for _, h := range f.ResponseHeaderModifier.Set {
+				m.SetResponse = append(m.SetResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			for _, h := range f.ResponseHeaderModifier.Add {
+				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
+			// Redirect, rewrite, mirror, extension: future items, silently skipped.
+		}
+	}
+	return m
 }

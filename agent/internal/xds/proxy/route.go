@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	previoushostsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
@@ -164,19 +165,27 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 
 // GAMMA east-west L7 routing (proposal 018, Phase 2). A GammaRoute is one resolved
 // HTTPRoute rule: ordered matches forwarding to one or more weighted backend
-// clusters, with an optional timeout. Backends are already resolved to data-plane
-// cluster names (<backend>.<meshDomain>) by the reconciler.
+// clusters, with an optional timeout and header mutations.
+// Backends are already resolved to data-plane cluster names (<backend>.<meshDomain>)
+// by the reconciler.
 type GammaRoute struct {
-	Matches  []GammaMatch
-	Backends []GammaBackend
-	Timeout  *durationpb.Duration
+	Matches        []GammaMatch
+	Backends       []GammaBackend
+	Timeout        *durationpb.Duration
+	HeaderMutation *GammaHeaderMutation
 }
 
-// GammaMatch is one HTTPRoute match: a path (prefix OR exact; empty = prefix "/")
-// and zero or more exact header matches (ANDed).
+// GammaMatch is one HTTPRoute match: a path (prefix OR exact OR regex; empty =
+// prefix "/") and zero or more exact header matches (ANDed). Exactly one of
+// Prefix, Exact, or Regex should be set; Exact takes precedence over Prefix, and
+// Regex is only used when neither Prefix nor Exact is set.
 type GammaMatch struct {
-	Prefix  string
-	Exact   string
+	Prefix string
+	Exact  string
+	// Regex is an RE2 safe_regex path match, used for gRPC RegularExpression method
+	// matches: the reconciler builds a /<serviceRegex>/<methodRegex> pattern and
+	// stores it here. Empty means no regex path match.
+	Regex   string
 	Headers []GammaHeaderMatch
 }
 
@@ -194,11 +203,37 @@ type GammaBackend struct {
 	Weight  uint32
 }
 
+// GammaHeaderMutation describes the header modifications carried by one
+// RequestHeaderModifier or ResponseHeaderModifier filter on a route rule.
+// Multiple filters merge (later set/add entries win for set, remove is additive).
+type GammaHeaderMutation struct {
+	// SetRequest are key/value pairs to set (overwrite) on the request.
+	SetRequest []GammaHeaderKV
+	// AddRequest are key/value pairs to append to the request.
+	AddRequest []GammaHeaderKV
+	// RemoveRequest are header names to strip from the request.
+	RemoveRequest []string
+	// SetResponse are key/value pairs to set (overwrite) on the response.
+	SetResponse []GammaHeaderKV
+	// AddResponse are key/value pairs to append to the response.
+	AddResponse []GammaHeaderKV
+	// RemoveResponse are header names to strip from the response.
+	RemoveResponse []string
+}
+
+// GammaHeaderKV is one header name+value pair for a header mutation action.
+type GammaHeaderKV struct {
+	Name  string
+	Value string
+}
+
 // BuildOutboundServiceVirtualHost builds a service's outbound virtual host enriched
 // with GAMMA rules: each rule's matches become Envoy routes to its weighted backend
-// cluster(s), with the outbound retry policy and an optional timeout. A trailing
-// catch-all routes anything the rules don't match to the service's own cluster
-// (name), so producer rules are additive. With no rules it is the passthrough vhost.
+// cluster(s), with the outbound retry policy, an optional timeout, and optional
+// header mutations (RequestHeaderModifier / ResponseHeaderModifier filters). A
+// trailing catch-all routes anything the rules don't match to the service's own
+// cluster (name), so producer rules are additive. With no rules it is the passthrough
+// vhost.
 func BuildOutboundServiceVirtualHost(name string, domains []string, rules []GammaRoute) *routev3.VirtualHost {
 	if len(rules) == 0 {
 		return BuildOutboundClusterVirtualHost(name, domains)
@@ -210,8 +245,17 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 		if len(matches) == 0 {
 			matches = []GammaMatch{{Prefix: "/"}}
 		}
+		reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(rule.HeaderMutation)
 		for _, m := range matches {
-			routes = append(routes, &routev3.Route{Match: gammaRouteMatch(m), Action: action})
+			r := &routev3.Route{
+				Match:                   gammaRouteMatch(m),
+				Action:                  action,
+				RequestHeadersToAdd:     reqAdd,
+				RequestHeadersToRemove:  reqRemove,
+				ResponseHeadersToAdd:    respAdd,
+				ResponseHeadersToRemove: respRemove,
+			}
+			routes = append(routes, r)
 		}
 	}
 	routes = append(routes, &routev3.Route{
@@ -224,11 +268,56 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 	return &routev3.VirtualHost{Name: name, Domains: domains, Routes: routes}
 }
 
+// headerMutationFields converts a GammaHeaderMutation into the four Envoy route-level
+// header mutation slices. Returns nil slices when mutation is nil or empty (no
+// allocations for the common no-filter case).
+func headerMutationFields(m *GammaHeaderMutation) (
+	reqAdd []*corev3.HeaderValueOption,
+	respAdd []*corev3.HeaderValueOption,
+	reqRemove []string,
+	respRemove []string,
+) {
+	if m == nil {
+		return
+	}
+	for _, kv := range m.SetRequest {
+		reqAdd = append(reqAdd, &corev3.HeaderValueOption{
+			Header:       &corev3.HeaderValue{Key: kv.Name, Value: kv.Value},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		})
+	}
+	for _, kv := range m.AddRequest {
+		reqAdd = append(reqAdd, &corev3.HeaderValueOption{
+			Header:       &corev3.HeaderValue{Key: kv.Name, Value: kv.Value},
+			AppendAction: corev3.HeaderValueOption_APPEND_IF_EXISTS_OR_ADD,
+		})
+	}
+	reqRemove = append(reqRemove, m.RemoveRequest...)
+	for _, kv := range m.SetResponse {
+		respAdd = append(respAdd, &corev3.HeaderValueOption{
+			Header:       &corev3.HeaderValue{Key: kv.Name, Value: kv.Value},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		})
+	}
+	for _, kv := range m.AddResponse {
+		respAdd = append(respAdd, &corev3.HeaderValueOption{
+			Header:       &corev3.HeaderValue{Key: kv.Name, Value: kv.Value},
+			AppendAction: corev3.HeaderValueOption_APPEND_IF_EXISTS_OR_ADD,
+		})
+	}
+	respRemove = append(respRemove, m.RemoveResponse...)
+	return
+}
+
 func gammaRouteMatch(m GammaMatch) *routev3.RouteMatch {
 	rm := &routev3.RouteMatch{}
 	switch {
 	case m.Exact != "":
 		rm.PathSpecifier = &routev3.RouteMatch_Path{Path: m.Exact}
+	case m.Regex != "":
+		rm.PathSpecifier = &routev3.RouteMatch_SafeRegex{
+			SafeRegex: &matcherv3.RegexMatcher{Regex: m.Regex},
+		}
 	case m.Prefix != "":
 		rm.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: m.Prefix}
 	default:

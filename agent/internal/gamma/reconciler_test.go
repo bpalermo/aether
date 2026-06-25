@@ -192,3 +192,159 @@ func TestBuildGammaRouteFromGRPC(t *testing.T) {
 	assert.Equal(t, "svc-2.aether.internal", gr.Backends[0].Cluster)
 	assert.Equal(t, uint32(7), gr.Backends[0].Weight)
 }
+
+// TestBuildGammaRouteFromGRPC_RegularExpression: GRPCMethodMatchRegularExpression
+// type produces a safe_regex path in GammaMatch.Regex.
+func TestBuildGammaRouteFromGRPC_RegularExpression(t *testing.T) {
+	r := &Reconciler{MeshDomain: "aether.internal"}
+	regexType := gatewayv1.GRPCMethodMatchRegularExpression
+
+	tests := []struct {
+		name      string
+		match     gatewayv1.GRPCMethodMatch
+		wantRegex string
+	}{
+		{
+			name:      "service+method regex",
+			match:     gatewayv1.GRPCMethodMatch{Type: &regexType, Service: ptr("foo\\..*"), Method: ptr("Get.*")},
+			wantRegex: "/foo\\..*/Get.*",
+		},
+		{
+			name:      "service-only regex",
+			match:     gatewayv1.GRPCMethodMatch{Type: &regexType, Service: ptr("my\\.svc")},
+			wantRegex: "/my\\.svc/[^/]+",
+		},
+		{
+			name:      "method-only regex",
+			match:     gatewayv1.GRPCMethodMatch{Type: &regexType, Method: ptr("Watch.*")},
+			wantRegex: "/[^/]+/Watch.*",
+		},
+		{
+			name:      "both unset regex",
+			match:     gatewayv1.GRPCMethodMatch{Type: &regexType},
+			wantRegex: "/[^/]+/[^/]+",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := gatewayv1.GRPCRouteRule{
+				Matches: []gatewayv1.GRPCRouteMatch{{Method: &tc.match}},
+				BackendRefs: []gatewayv1.GRPCBackendRef{
+					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc"}}},
+				},
+			}
+			gr := r.buildGammaRouteFromGRPC(rule)
+			require.Len(t, gr.Matches, 1)
+			assert.Equal(t, tc.wantRegex, gr.Matches[0].Regex, "Regex field")
+			assert.Empty(t, gr.Matches[0].Exact, "Exact must be empty for regex match")
+			assert.Empty(t, gr.Matches[0].Prefix, "Prefix must be empty for regex match")
+		})
+	}
+}
+
+// TestBuildGammaRoute_RequestHeaderModifier: set/add/remove request header
+// filters on an HTTPRoute rule are projected into the GammaHeaderMutation.
+func TestBuildGammaRoute_RequestHeaderModifier(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	rule := gatewayv1.HTTPRouteRule{
+		Filters: []gatewayv1.HTTPRouteFilter{
+			{
+				Type: gatewayv1.HTTPRouteFilterRequestHeaderModifier,
+				RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+					Set:    []gatewayv1.HTTPHeader{{Name: "x-env", Value: "prod"}},
+					Add:    []gatewayv1.HTTPHeader{{Name: "x-trace", Value: "1"}},
+					Remove: []string{"x-debug"},
+				},
+			},
+		},
+		BackendRefs: []gatewayv1.HTTPBackendRef{
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
+		},
+	}
+	gr := r.buildGammaRoute(rule)
+
+	require.NotNil(t, gr.HeaderMutation)
+	require.Len(t, gr.HeaderMutation.SetRequest, 1)
+	assert.Equal(t, proxy.GammaHeaderKV{Name: "x-env", Value: "prod"}, gr.HeaderMutation.SetRequest[0])
+	require.Len(t, gr.HeaderMutation.AddRequest, 1)
+	assert.Equal(t, proxy.GammaHeaderKV{Name: "x-trace", Value: "1"}, gr.HeaderMutation.AddRequest[0])
+	require.Len(t, gr.HeaderMutation.RemoveRequest, 1)
+	assert.Equal(t, "x-debug", gr.HeaderMutation.RemoveRequest[0])
+	assert.Empty(t, gr.HeaderMutation.SetResponse)
+}
+
+// TestBuildGammaRoute_ResponseHeaderModifier: set/add/remove response header
+// filters on an HTTPRoute rule are projected into the GammaHeaderMutation.
+func TestBuildGammaRoute_ResponseHeaderModifier(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	rule := gatewayv1.HTTPRouteRule{
+		Filters: []gatewayv1.HTTPRouteFilter{
+			{
+				Type: gatewayv1.HTTPRouteFilterResponseHeaderModifier,
+				ResponseHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+					Set:    []gatewayv1.HTTPHeader{{Name: "x-served-by", Value: "aether"}},
+					Remove: []string{"x-internal"},
+				},
+			},
+		},
+		BackendRefs: []gatewayv1.HTTPBackendRef{
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
+		},
+	}
+	gr := r.buildGammaRoute(rule)
+
+	require.NotNil(t, gr.HeaderMutation)
+	assert.Empty(t, gr.HeaderMutation.SetRequest, "no request headers")
+	require.Len(t, gr.HeaderMutation.SetResponse, 1)
+	assert.Equal(t, proxy.GammaHeaderKV{Name: "x-served-by", Value: "aether"}, gr.HeaderMutation.SetResponse[0])
+	require.Len(t, gr.HeaderMutation.RemoveResponse, 1)
+	assert.Equal(t, "x-internal", gr.HeaderMutation.RemoveResponse[0])
+}
+
+// TestBuildGammaRoute_UnknownFilterSkipped: non-modifier filters (e.g. redirect)
+// are silently ignored; HeaderMutation is nil when only unknown filters are present.
+func TestBuildGammaRoute_UnknownFilterSkipped(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	rule := gatewayv1.HTTPRouteRule{
+		Filters: []gatewayv1.HTTPRouteFilter{
+			{Type: gatewayv1.HTTPRouteFilterRequestRedirect},
+		},
+		BackendRefs: []gatewayv1.HTTPBackendRef{
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
+		},
+	}
+	gr := r.buildGammaRoute(rule)
+	assert.Nil(t, gr.HeaderMutation, "unknown filter type must not produce a mutation")
+}
+
+// TestBuildGammaRouteFromGRPC_HeaderModifier: GRPCRoute request/response header
+// modifier filters are projected into GammaHeaderMutation.
+func TestBuildGammaRouteFromGRPC_HeaderModifier(t *testing.T) {
+	r := &Reconciler{MeshDomain: "aether.internal"}
+	rule := gatewayv1.GRPCRouteRule{
+		Filters: []gatewayv1.GRPCRouteFilter{
+			{
+				Type: gatewayv1.GRPCRouteFilterRequestHeaderModifier,
+				RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+					Set: []gatewayv1.HTTPHeader{{Name: "x-grpc-env", Value: "prod"}},
+				},
+			},
+			{
+				Type: gatewayv1.GRPCRouteFilterResponseHeaderModifier,
+				ResponseHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+					Remove: []string{"x-grpc-debug"},
+				},
+			},
+		},
+		BackendRefs: []gatewayv1.GRPCBackendRef{
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}}},
+		},
+	}
+	gr := r.buildGammaRouteFromGRPC(rule)
+
+	require.NotNil(t, gr.HeaderMutation)
+	require.Len(t, gr.HeaderMutation.SetRequest, 1)
+	assert.Equal(t, proxy.GammaHeaderKV{Name: "x-grpc-env", Value: "prod"}, gr.HeaderMutation.SetRequest[0])
+	require.Len(t, gr.HeaderMutation.RemoveResponse, 1)
+	assert.Equal(t, "x-grpc-debug", gr.HeaderMutation.RemoveResponse[0])
+}

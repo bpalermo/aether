@@ -257,7 +257,97 @@ func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule) proxy.GammaRo
 		}
 		gr.Matches = append(gr.Matches, gm)
 	}
+	gr.HeaderMutation = buildHTTPHeaderMutation(rule.Filters)
 	return gr
+}
+
+// buildHTTPHeaderMutation merges all RequestHeaderModifier and
+// ResponseHeaderModifier filters in an HTTPRoute rule's filter list into a single
+// GammaHeaderMutation. Unknown filter types are silently skipped so future
+// filter types (redirect, rewrite, mirror) can be added without breaking this
+// path. Returns nil when no modifier filter is present.
+func buildHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaHeaderMutation {
+	var m *proxy.GammaHeaderMutation
+	ensure := func() {
+		if m == nil {
+			m = &proxy.GammaHeaderMutation{}
+		}
+	}
+	for _, f := range filters {
+		switch f.Type {
+		case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+			if f.RequestHeaderModifier == nil {
+				continue
+			}
+			ensure()
+			for _, h := range f.RequestHeaderModifier.Set {
+				m.SetRequest = append(m.SetRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			for _, h := range f.RequestHeaderModifier.Add {
+				m.AddRequest = append(m.AddRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			m.RemoveRequest = append(m.RemoveRequest, f.RequestHeaderModifier.Remove...)
+		case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
+			if f.ResponseHeaderModifier == nil {
+				continue
+			}
+			ensure()
+			for _, h := range f.ResponseHeaderModifier.Set {
+				m.SetResponse = append(m.SetResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			for _, h := range f.ResponseHeaderModifier.Add {
+				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
+			// Redirect, rewrite, mirror, and extension filter types are not handled
+			// here — they are future items and are silently skipped.
+		}
+	}
+	return m
+}
+
+// buildGRPCHeaderMutation merges all RequestHeaderModifier and
+// ResponseHeaderModifier filters in a GRPCRoute rule's filter list into a single
+// GammaHeaderMutation. The filter shape is identical to the HTTP variant
+// (HTTPHeaderFilter is shared); unknown types are silently skipped.
+// Returns nil when no modifier filter is present.
+func buildGRPCHeaderMutation(filters []gatewayv1.GRPCRouteFilter) *proxy.GammaHeaderMutation {
+	var m *proxy.GammaHeaderMutation
+	ensure := func() {
+		if m == nil {
+			m = &proxy.GammaHeaderMutation{}
+		}
+	}
+	for _, f := range filters {
+		switch f.Type {
+		case gatewayv1.GRPCRouteFilterRequestHeaderModifier:
+			if f.RequestHeaderModifier == nil {
+				continue
+			}
+			ensure()
+			for _, h := range f.RequestHeaderModifier.Set {
+				m.SetRequest = append(m.SetRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			for _, h := range f.RequestHeaderModifier.Add {
+				m.AddRequest = append(m.AddRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			m.RemoveRequest = append(m.RemoveRequest, f.RequestHeaderModifier.Remove...)
+		case gatewayv1.GRPCRouteFilterResponseHeaderModifier:
+			if f.ResponseHeaderModifier == nil {
+				continue
+			}
+			ensure()
+			for _, h := range f.ResponseHeaderModifier.Set {
+				m.SetResponse = append(m.SetResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			for _, h := range f.ResponseHeaderModifier.Add {
+				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+			}
+			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
+			// Mirror and extension filter types are future items; skip silently.
+		}
+	}
+	return m
 }
 
 // buildGammaRouteFromGRPC translates a GRPCRouteRule into the same GammaRoute
@@ -295,13 +385,31 @@ func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule) proxy
 			if m.Method.Method != nil {
 				method = *m.Method.Method
 			}
-			// Only the Exact method-match type maps to a literal path (the
-			// GammaMatch vocabulary has no regex). svc+method = exact, svc = prefix.
-			exactType := m.Method.Type == nil || *m.Method.Type == gatewayv1.GRPCMethodMatchExact
-			if exactType && svc != "" && method != "" {
-				gm.Exact = fmt.Sprintf("/%s/%s", svc, method)
-			} else if exactType && svc != "" {
-				gm.Prefix = fmt.Sprintf("/%s/", svc)
+			matchType := gatewayv1.GRPCMethodMatchExact
+			if m.Method.Type != nil {
+				matchType = *m.Method.Type
+			}
+			switch matchType {
+			case gatewayv1.GRPCMethodMatchExact:
+				// svc+method = exact /svc/method; svc-only = prefix /svc/.
+				if svc != "" && method != "" {
+					gm.Exact = fmt.Sprintf("/%s/%s", svc, method)
+				} else if svc != "" {
+					gm.Prefix = fmt.Sprintf("/%s/", svc)
+				}
+			case gatewayv1.GRPCMethodMatchRegularExpression:
+				// Build a /<serviceRegex>/<methodRegex> safe_regex path. When a
+				// component is unset, use ".*" to match any value in that segment,
+				// mirroring the Exact service-only → prefix semantics.
+				svcPart := svc
+				if svcPart == "" {
+					svcPart = "[^/]+"
+				}
+				methodPart := method
+				if methodPart == "" {
+					methodPart = "[^/]+"
+				}
+				gm.Regex = fmt.Sprintf("/%s/%s", svcPart, methodPart)
 			}
 		}
 		for _, h := range m.Headers {
@@ -309,5 +417,6 @@ func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule) proxy
 		}
 		gr.Matches = append(gr.Matches, gm)
 	}
+	gr.HeaderMutation = buildGRPCHeaderMutation(rule.Filters)
 	return gr
 }

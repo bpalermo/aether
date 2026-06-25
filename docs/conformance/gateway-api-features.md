@@ -31,8 +31,10 @@ e2e-validated on talos (aether 0.41.0).
 | Weighted backends (canary/split) | Supported | `WeightedClusters` |
 | Request timeout | Supported | HTTPRoute `timeouts.request` |
 | Request mirroring | Planned | |
-| Request/response header & redirect filters | Planned | |
-| RegularExpression matches | Partial | gRPC method RegularExpression type is not translated (Exact only) |
+| Request redirect / URL rewrite filters | Planned | |
+| `RequestHeaderModifier` filter | Supported | `set` → `OVERWRITE_IF_EXISTS_OR_ADD`; `add` → `APPEND_IF_EXISTS_OR_ADD`; `remove` → `request_headers_to_remove`; applied at route level on HTTPRoute (edge + GAMMA) and GRPCRoute |
+| `ResponseHeaderModifier` filter | Supported | same shape on `response_headers_to_add` / `response_headers_to_remove`; applied at route level on HTTPRoute (edge + GAMMA) and GRPCRoute |
+| RegularExpression matches | Supported | gRPC method `RegularExpression` type → Envoy `safe_regex` path (`/<serviceRegex>/<methodRegex>`); unset component uses `[^/]+` |
 
 ## Mesh & multi-cluster
 
