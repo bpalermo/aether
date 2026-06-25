@@ -7,6 +7,7 @@ package gatewayapi
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -91,6 +92,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
+		// GatewayClass: a spec change must re-publish status (observedGeneration
+		// bump). We reconcile any GatewayClass bearing our controllerName.
+		Watches(&gatewayv1.GatewayClass{}, resync).
 		Watches(&gatewayv1.Gateway{}, resync).
 		Watches(&gatewayv1alpha2.TCPRoute{}, resync).
 		Watches(&gatewayv1.TLSRoute{}, resync).
@@ -110,7 +114,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	// Our Gateways (those of our GatewayClass) and, per listener hostname, the SDS
 	// cert name to present. listenerCerts also accumulates the cert bytes to push.
-	gateways, ourGateways, gatewayListeners, hostCerts, certs, err := r.resolveGateways(ctx)
+	gateways, ourGateways, gatewayListeners, hostCerts, certs, tlsResults, err := r.resolveGateways(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -250,8 +254,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// not fatal — the data plane is already projected and the next reconcile
 	// retries. The GatewayClass, Gateways, and routes we own all get conditions.
 	r.writeGatewayClassStatus(ctx)
-	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners)
-	r.writeRouteStatuses(ctx, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, grants)
+	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, tlsResults)
+	r.writeRouteStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, grants)
 	return reconcile.Result{}, nil
 }
 
@@ -273,6 +277,25 @@ type gatewayListenerKey struct {
 	Protocol gatewayv1.ProtocolType
 }
 
+// listenerStatusKey identifies a listener within a Gateway by namespaced Gateway
+// name + listener (section) name. Used to carry per-listener TLS-resolution
+// results from resolveGateways into status writing (the InvalidCertificateRef
+// gate).
+type listenerStatusKey struct {
+	Gateway gatewayKey
+	Name    gatewayv1.SectionName
+}
+
+// listenerTLSResult records whether a TLS listener's certificateRefs resolved.
+// hasTLS is true for any HTTPS/TLS listener that declares a tls block; resolved
+// is true only when every (supported) certificateRef resolved to usable material.
+// message carries the first failure for the listener condition.
+type listenerTLSResult struct {
+	hasTLS   bool
+	resolved bool
+	message  string
+}
+
 // resolveGateways lists the Gateways of our GatewayClass CLUSTER-WIDE and resolves
 // each TLS listener's cert. It returns the set of our Gateways (by namespaced
 // name), the Gateway objects themselves (for status), a set of listener keys (for
@@ -281,16 +304,17 @@ type gatewayListenerKey struct {
 // GatewayClassName: every Gateway whose gatewayClassName is the class this edge
 // serves (whose controllerName is gateway.aether.io/edge) is ours, regardless of
 // namespace.
-func (r *Reconciler) resolveGateways(ctx context.Context) (map[gatewayKey]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, error) {
+func (r *Reconciler) resolveGateways(ctx context.Context) (map[gatewayKey]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, map[listenerStatusKey]listenerTLSResult, error) {
 	list := &gatewayv1.GatewayList{}
 	if err := r.List(ctx, list); err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	gateways := map[gatewayKey]struct{}{}
 	var ourGateways []gatewayv1.Gateway
 	listenerKeys := map[gatewayListenerKey]struct{}{}
 	hostCerts := map[string]string{} // listener hostname ("" = catch-all) -> SDS name
 	certs := map[string]cache.EdgeTLSCert{}
+	tlsResults := map[listenerStatusKey]listenerTLSResult{}
 	for i := range list.Items {
 		gw := &list.Items[i]
 		if string(gw.Spec.GatewayClassName) != r.GatewayClassName {
@@ -306,39 +330,72 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[gatewayKey]struct
 				Protocol: ln.Protocol,
 			}] = struct{}{}
 		}
-		if r.Secrets == nil {
-			continue
-		}
 		for _, ln := range gw.Spec.Listeners {
 			if ln.TLS == nil {
 				continue
 			}
-			host := ""
-			if ln.Hostname != nil {
-				host = string(*ln.Hostname)
-			}
-			for _, ref := range ln.TLS.CertificateRefs {
-				if ref.Kind != nil && string(*ref.Kind) != "Secret" {
-					continue
-				}
-				name := string(ref.Name)
-				sdsName, sErr := r.Secrets.SDSName(configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, name)
-				if sErr != nil {
-					r.Log.WarnContext(ctx, "gateway listener TLS provider unavailable", "gateway", gw.Name, "secret", name, "error", sErr.Error())
-					continue
-				}
-				cert, cErr := r.Secrets.Resolve(ctx, configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, name)
-				if cErr != nil {
-					r.Log.WarnContext(ctx, "gateway listener TLS cert unresolved", "gateway", gw.Name, "secret", name, "error", cErr.Error())
-					continue
-				}
-				certs[sdsName] = cache.EdgeTLSCert{Cert: cert.Cert, Key: cert.Key}
-				hostCerts[host] = sdsName
-				break // one cert per listener
-			}
+			lk := listenerStatusKey{Gateway: gk, Name: ln.Name}
+			res := r.resolveListenerTLS(ctx, gw, ln, hostCerts, certs)
+			tlsResults[lk] = res
 		}
 	}
-	return gateways, ourGateways, listenerKeys, hostCerts, certs, nil
+	return gateways, ourGateways, listenerKeys, hostCerts, certs, tlsResults, nil
+}
+
+// resolveListenerTLS resolves a single TLS listener's certificateRefs, recording
+// each resolved cert into certs/hostCerts and returning whether the listener's TLS
+// configuration is valid. A listener is INVALID (resolved=false) when any
+// certificateRef has an unsupported group/kind, names a missing Secret, or holds
+// malformed cert material — driving the ResolvedRefs=False/InvalidCertificateRef
+// listener condition. With no Secrets provider configured, TLS cannot be resolved,
+// so a TLS listener is reported invalid.
+func (r *Reconciler) resolveListenerTLS(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	ln gatewayv1.Listener,
+	hostCerts map[string]string,
+	certs map[string]cache.EdgeTLSCert,
+) listenerTLSResult {
+	if len(ln.TLS.CertificateRefs) == 0 {
+		return listenerTLSResult{hasTLS: true, resolved: false, message: "TLS listener has no certificateRefs"}
+	}
+	if r.Secrets == nil {
+		return listenerTLSResult{hasTLS: true, resolved: false, message: "no TLS secret provider configured"}
+	}
+	host := ""
+	if ln.Hostname != nil {
+		host = string(*ln.Hostname)
+	}
+	var firstResolved string
+	for _, ref := range ln.TLS.CertificateRefs {
+		// Only core ("") group Secret kind is supported; any other group/kind is an
+		// invalid certificateRef.
+		if ref.Group != nil && string(*ref.Group) != "" {
+			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q has unsupported group %q", ref.Name, *ref.Group)}
+		}
+		if ref.Kind != nil && string(*ref.Kind) != "Secret" {
+			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q has unsupported kind %q", ref.Name, *ref.Kind)}
+		}
+		name := string(ref.Name)
+		sdsName, sErr := r.Secrets.SDSName(configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, name)
+		if sErr != nil {
+			r.Log.WarnContext(ctx, "gateway listener TLS provider unavailable", "gateway", gw.Name, "secret", name, "error", sErr.Error())
+			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q provider unavailable", name)}
+		}
+		cert, cErr := r.Secrets.Resolve(ctx, configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, name)
+		if cErr != nil {
+			r.Log.WarnContext(ctx, "gateway listener TLS cert unresolved", "gateway", gw.Name, "secret", name, "error", cErr.Error())
+			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q did not resolve: %v", name, cErr)}
+		}
+		certs[sdsName] = cache.EdgeTLSCert{Cert: cert.Cert, Key: cert.Key}
+		if firstResolved == "" {
+			firstResolved = sdsName
+		}
+	}
+	if firstResolved != "" {
+		hostCerts[host] = firstResolved
+	}
+	return listenerTLSResult{hasTLS: true, resolved: true}
 }
 
 // buildVirtualHost maps one HTTPRoute to an edge VirtualHost: its hostnames become
