@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "gatewayapi",
     srcs = [
+        "attachment.go",
         "features.go",
         "reconciler.go",
         "status.go",
@@ -21,6 +22,7 @@ go_library(
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/labels",
         "@io_k8s_apimachinery//pkg/types",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
         "@io_k8s_sigs_controller_runtime//pkg/client",
@@ -36,6 +38,7 @@ go_library(
 go_test(
     name = "gatewayapi_test",
     srcs = [
+        "edge_cases_test.go",
         "reconciler_test.go",
         "status_test.go",
     ],
