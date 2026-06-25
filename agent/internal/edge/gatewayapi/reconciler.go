@@ -280,8 +280,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			// for edge cases like a reconcile that loses the Phase 2 allocations).
 		}
 	} else {
-		// Phase 1 / disabled: clear any stale Phase 2 state.
+		// Phase 1 / disabled: clear any stale Phase 2 state, and garbage-collect any
+		// per-Gateway Services left over from a previous Phase 2 run. The Phase 2
+		// reconcile path is skipped here, so without this the Services orphan and
+		// keep holding their LoadBalancer IP (e.g. the pinned edge address), which
+		// blocks the shared Service from reclaiming it on a downgrade.
 		r.Sink.SetEdgeGateways(nil)
+		if r.EdgeServiceName != "" {
+			if err := r.gcStaleGatewayServices(ctx, map[string]struct{}{}); err != nil {
+				r.Log.WarnContext(ctx, "GC of stale per-Gateway Services failed", "error", err.Error())
+			}
+		}
 	}
 	r.Sink.SetVirtualHosts(vhosts)
 	r.Sink.SetEdgeTCPRoutes(tcpRoutes)

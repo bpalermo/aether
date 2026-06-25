@@ -81,6 +81,9 @@ spec:
             {{- if not .Values.edge.perGatewayAddressing }}
             - "--edge-per-gateway-addressing=false"
             {{- end }}
+            {{- if ne (int .Values.edge.readinessPort) 15021 }}
+            - "--edge-readiness-port={{ .Values.edge.readinessPort }}"
+            {{- end }}
             {{- if .Values.edge.tls.enabled }}
             - "--edge-tls"
             {{- if ne (int .Values.edge.httpsPort) 443 }}
@@ -197,18 +200,18 @@ spec:
               containerPort: {{ .Values.edge.httpsPort }}
               protocol: TCP
             {{- end }}
+            - name: readiness
+              containerPort: {{ .Values.edge.readinessPort }}
+              protocol: TCP
           readinessProbe:
-            # Envoy's /aether/readyz health_check filter rides the main route
-            # listener: 200 while serving, 503 while draining. With TLS that is the
-            # HTTPS listener (the :80 listener only redirects); else plain HTTP.
+            # /aether/readyz (drain-aware: 200 serving, 503 draining) is served by a
+            # DEDICATED always-bound plain-HTTP readiness listener, independent of the
+            # public listeners — so the probe survives proposal 021 Phase 2, where the
+            # public listeners move to per-Gateway internal ports and nothing binds
+            # the HTTPS port (probing it there fails and wedges the rollout).
             httpGet:
               path: /aether/readyz
-              {{- if .Values.edge.tls.enabled }}
-              port: https
-              scheme: HTTPS
-              {{- else }}
-              port: http
-              {{- end }}
+              port: readiness
             initialDelaySeconds: 2
             periodSeconds: 2
             failureThreshold: 3

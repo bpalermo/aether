@@ -213,6 +213,12 @@ edge:
   # plain HTTP on httpPort.
   httpPort: 80
   httpsPort: 443
+  # Port the dedicated, always-bound readiness listener binds (the kubelet
+  # readiness probe target, plain HTTP). It is independent of the public HTTP/HTTPS
+  # listeners so the probe survives proposal 021 Phase 2, where those listeners move
+  # to per-Gateway internal ports and nothing binds the HTTPS port. Internal only —
+  # never exposed via a Service.
+  readinessPort: 15021
   # Namespace the edge watches its Gateways/HTTPRoutes in. Empty = the edge's own
   # namespace.
   routeNamespace: ""

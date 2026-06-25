@@ -7,9 +7,30 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stripReadiness asserts the dedicated always-bound readiness listener is present
+// (on the default readiness port) and returns the remaining PUBLIC edge listeners,
+// so the public-listener assertions below are unaffected by it.
+func stripReadiness(t *testing.T, ls []types.Resource) []*listenerv3.Listener {
+	t.Helper()
+	var public []*listenerv3.Listener
+	foundReadiness := false
+	for _, r := range ls {
+		l := r.(*listenerv3.Listener)
+		if l.GetName() == proxy.EdgeReadinessListenerName {
+			foundReadiness = true
+			assert.Equal(t, uint32(proxy.DefaultEdgeReadinessPort), l.GetAddress().GetSocketAddress().GetPortValue())
+			continue
+		}
+		public = append(public, l)
+	}
+	require.True(t, foundReadiness, "the dedicated readiness listener must always be present")
+	return public
+}
 
 // TestEdgeTLSModeListeners verifies that with TLS enabled AND the per-Gateway
 // HTTP redirect opt-in set, the cache serves a TLS listener on the https port
@@ -27,11 +48,10 @@ func TestEdgeTLSModeListeners(t *testing.T) {
 		"kubernetes/api-tls": {Cert: []byte("CERT"), Key: []byte("KEY")},
 	}))
 
-	ls := c.Listeners()
+	ls := stripReadiness(t, c.Listeners())
 	require.Len(t, ls, 2)
 	names := map[string]*listenerv3.Listener{}
-	for _, r := range ls {
-		l := r.(*listenerv3.Listener)
+	for _, l := range ls {
 		names[l.GetName()] = l
 	}
 	tls := names[proxy.EdgeHTTPSListenerName]
@@ -72,10 +92,9 @@ func TestEdgeModeListeners(t *testing.T) {
 	c := newTestCache("edge-1")
 	c.SetEdgeMode(8080)
 
-	listeners := c.Listeners()
+	listeners := stripReadiness(t, c.Listeners())
 	require.Len(t, listeners, 1)
-	l, ok := listeners[0].(*listenerv3.Listener)
-	require.True(t, ok)
+	l := listeners[0]
 	assert.Equal(t, proxy.EdgeListenerName, l.GetName())
 	assert.Equal(t, uint32(8080), l.GetAddress().GetSocketAddress().GetPortValue())
 }
@@ -197,9 +216,9 @@ func TestEdgeHTTPRedirectOptIn(t *testing.T) {
 		c.SetEdgeMode(80)
 		// No SetEdgeHTTPRedirect call → default off.
 
-		ls := c.Listeners()
+		ls := stripReadiness(t, c.Listeners())
 		require.Len(t, ls, 1)
-		l := ls[0].(*listenerv3.Listener)
+		l := ls[0]
 		assert.Equal(t, proxy.EdgeListenerName, l.GetName(), "HTTP listener serves routes, not a redirect")
 		assert.Equal(t, uint32(80), l.GetAddress().GetSocketAddress().GetPortValue())
 	})
@@ -210,10 +229,9 @@ func TestEdgeHTTPRedirectOptIn(t *testing.T) {
 		c.SetEdgeTLSMode(443)
 		c.SetEdgeHTTPRedirect(true)
 
-		ls := c.Listeners()
+		ls := stripReadiness(t, c.Listeners())
 		names := map[string]*listenerv3.Listener{}
-		for _, r := range ls {
-			l := r.(*listenerv3.Listener)
+		for _, l := range ls {
 			names[l.GetName()] = l
 		}
 		// The HTTPS routing listener must be present (distinct name from the :80 listener).
@@ -232,13 +250,12 @@ func TestEdgeHTTPRedirectOptIn(t *testing.T) {
 		c.SetEdgeTLSMode(443)
 		// TLS enabled but redirect annotation not set → HTTP listener still serves routes.
 
-		ls := c.Listeners()
+		ls := stripReadiness(t, c.Listeners())
 		require.Len(t, ls, 2, "HTTPS listener + HTTP routing listener")
 		// The two listeners MUST have DISTINCT names (edge_https on 443, edge_http on
 		// 80) — a shared name collides in the snapshot/LDS and drops :443 (regression).
 		byName := map[string]uint32{}
-		for _, r := range ls {
-			l := r.(*listenerv3.Listener)
+		for _, l := range ls {
 			byName[l.GetName()] = l.GetAddress().GetSocketAddress().GetPortValue()
 			assert.NotEqual(t, proxy.EdgeRedirectListenerName, l.GetName(), "redirect listener must NOT be present without opt-in")
 		}
@@ -291,10 +308,9 @@ func TestPerGatewayListenerNamesAllDistinct(t *testing.T) {
 	}
 	c.SetEdgeGateways(gateways)
 
-	ls := c.Listeners()
+	ls := stripReadiness(t, c.Listeners())
 	names := map[string]bool{}
-	for _, r := range ls {
-		l := r.(*listenerv3.Listener)
+	for _, l := range ls {
 		name := l.GetName()
 		assert.False(t, names[name], "listener name %q must be unique (duplicate = LDS drop, regression for #332)", name)
 		names[name] = true
@@ -322,11 +338,44 @@ func TestPerGatewayListenerFallbackToPhase1(t *testing.T) {
 	})
 	c.SetEdgeGateways(nil) // reset to Phase 1
 
-	ls := c.Listeners()
+	ls := stripReadiness(t, c.Listeners())
 	require.Len(t, ls, 1)
-	l := ls[0].(*listenerv3.Listener)
+	l := ls[0]
 	assert.Equal(t, proxy.EdgeListenerName, l.GetName(), "Phase 1 fallback: listener must be the shared edge_http")
 	assert.Equal(t, uint32(80), l.GetAddress().GetSocketAddress().GetPortValue())
+}
+
+// TestEdgeReadinessListenerAlwaysPresent is the regression guard for the Phase 2
+// readiness wedge: the dedicated readiness listener (edge_readiness on the
+// readiness port) MUST be emitted in BOTH Phase 1 (shared listeners) and Phase 2
+// (per-Gateway listeners on internal ports, where nothing binds :443), so the
+// kubelet readiness probe always has a stable target.
+func TestEdgeReadinessListenerAlwaysPresent(t *testing.T) {
+	readiness := func(ls []types.Resource) *listenerv3.Listener {
+		for _, r := range ls {
+			if l := r.(*listenerv3.Listener); l.GetName() == proxy.EdgeReadinessListenerName {
+				return l
+			}
+		}
+		return nil
+	}
+
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+	c.SetEdgeTLSMode(443)
+
+	// Phase 1 (shared listeners).
+	rl := readiness(c.Listeners())
+	require.NotNil(t, rl, "readiness listener must be present in Phase 1")
+	assert.Equal(t, uint32(proxy.DefaultEdgeReadinessPort), rl.GetAddress().GetSocketAddress().GetPortValue())
+
+	// Phase 2 (per-Gateway listeners on internal ports — nothing binds :443).
+	c.SetEdgeGateways([]EdgeGatewayEntry{
+		{Namespace: "aether-ingress", Name: "edge", Listeners: []EdgeGatewayListenerEntry{{ExternalPort: 443, InternalPort: 18100}}},
+	})
+	rl2 := readiness(c.Listeners())
+	require.NotNil(t, rl2, "readiness listener must ALSO be present in Phase 2 (the probe target when :443 is unbound)")
+	assert.Equal(t, uint32(proxy.DefaultEdgeReadinessPort), rl2.GetAddress().GetSocketAddress().GetPortValue())
 }
 
 // TestPerGatewayRouteConfigIsolation verifies that each Gateway gets its own route
@@ -401,9 +450,9 @@ func TestPerGatewayCertWired(t *testing.T) {
 		},
 	})
 
-	ls := c.Listeners()
+	ls := stripReadiness(t, c.Listeners())
 	require.Len(t, ls, 1)
-	l := ls[0].(*listenerv3.Listener)
+	l := ls[0]
 	assert.Equal(t, "edge_gw_ns-tls_secure-gw_18110", l.GetName())
 	// TLS transport socket must be wired (not nil).
 	require.NotNil(t, l.GetFilterChains()[0].GetTransportSocket(), "per-Gateway HTTPS listener must terminate TLS")

@@ -98,6 +98,10 @@ type SnapshotCache struct {
 	edge bool
 	// edgeHTTPPort is the port the edge plain-HTTP / redirect listener binds.
 	edgeHTTPPort uint32
+	// edgeReadinessPort is the port the dedicated always-bound readiness listener
+	// binds (the kubelet probe target). Defaults to proxy.DefaultEdgeReadinessPort
+	// when unset, so the readiness listener is always emitted regardless of phase.
+	edgeReadinessPort uint32
 	// edgeTLSEnabled serves a TLS-terminating listener on edgeHTTPSPort (certs
 	// per VirtualHost via SDS). Set once before the manager starts via SetEdgeTLSMode.
 	edgeTLSEnabled bool
@@ -381,6 +385,13 @@ func (c *SnapshotCache) SetEmitStatsPod(enabled bool) {
 func (c *SnapshotCache) SetEdgeMode(httpPort uint32) {
 	c.edge = true
 	c.edgeHTTPPort = httpPort
+}
+
+// SetEdgeReadinessPort sets the port the dedicated always-bound readiness listener
+// binds (the kubelet probe target). Must be called before the manager starts. A
+// zero value leaves the default (proxy.DefaultEdgeReadinessPort) in effect.
+func (c *SnapshotCache) SetEdgeReadinessPort(port uint32) {
+	c.edgeReadinessPort = port
 }
 
 // SetEdgeTLSMode enables downstream TLS termination: the edge serves a TLS

@@ -37,6 +37,13 @@ const (
 	// when TLS is enabled.
 	EdgeRedirectListenerName = "edge_redirect"
 
+	// EdgeReadinessListenerName is a dedicated, always-bound plain-HTTP listener
+	// serving only the drain-aware /aether/readyz endpoint. It is independent of
+	// any Gateway listener so the edge readiness probe has a stable target even
+	// under proposal 021 Phase 2 (where the public listeners move to per-Gateway
+	// internal ports and nothing binds the HTTPS port).
+	EdgeReadinessListenerName = "edge_readiness"
+
 	// DefaultEdgeHTTPPort is the port the edge plain-HTTP / redirect listener
 	// binds for external (north-south) traffic. Privileged (the edge is an ingress
 	// gateway); the pod is granted NET_BIND_SERVICE, so it binds unprivileged.
@@ -45,6 +52,11 @@ const (
 	// DefaultEdgeHTTPSPort is the port the edge TLS-terminating listener binds
 	// when downstream TLS is enabled.
 	DefaultEdgeHTTPSPort = 443
+
+	// DefaultEdgeReadinessPort is the (unprivileged, internal) port the dedicated
+	// readiness listener binds. The kubelet readiness probe targets it over plain
+	// HTTP; it is never exposed via a Service.
+	DefaultEdgeReadinessPort = 15021
 
 	// defaultEdgeAddress binds the edge listener on all interfaces (it fronts
 	// external traffic, unlike the node proxy's loopback-only outbound listener).
@@ -318,6 +330,47 @@ func BuildEdgeRedirectListener(port uint32) *listenerv3.Listener {
 		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
 	}
 	return edgeListener(EdgeRedirectListenerName, port, filterChain)
+}
+
+// BuildEdgeReadinessListener builds the dedicated, always-bound plain-HTTP
+// readiness listener. It carries the drain-aware readiness health_check filter
+// (answers /aether/readyz with 200/503 from the server's drain state) ahead of a
+// catch-all that 404s every other path — this listener exists ONLY to give the
+// kubelet readiness probe a stable target that does not depend on which public
+// listeners are bound (the public listeners move to per-Gateway internal ports
+// under proposal 021 Phase 2, so probing :443 there fails).
+func BuildEdgeReadinessListener(port uint32) *listenerv3.Listener {
+	hcm := buildHTTPConnectionManager(EdgeReadinessListenerName, ReporterSource, "", "", buildEdgeReadinessRouteConfig())
+	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+	filterChain := &listenerv3.FilterChain{
+		Name:    EdgeReadinessListenerName,
+		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+	}
+	return edgeListener(EdgeReadinessListenerName, port, filterChain)
+}
+
+// buildEdgeReadinessRouteConfig is the inline route table for the readiness
+// listener: a single catch-all that direct-responds 404. The readiness
+// health_check filter intercepts /aether/readyz before the router, so this only
+// covers stray non-readyz requests.
+func buildEdgeReadinessRouteConfig() *routev3.RouteConfiguration {
+	return &routev3.RouteConfiguration{
+		Name: EdgeReadinessListenerName,
+		VirtualHosts: []*routev3.VirtualHost{
+			{
+				Name:    EdgeReadinessListenerName,
+				Domains: []string{"*"},
+				Routes: []*routev3.Route{
+					{
+						Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+						Action: &routev3.Route_DirectResponse{
+							DirectResponse: &routev3.DirectResponseAction{Status: 404},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // edgeListener wraps a filter chain in a 0.0.0.0:<port> INBOUND listener.
