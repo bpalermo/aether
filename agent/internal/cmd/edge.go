@@ -223,6 +223,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	gwReconciler := &gatewayapi.Reconciler{
 		Client:           m.GetClient(),
+		APIReader:        m.GetAPIReader(),
 		Sink:             snapshotCache,
 		Namespace:        routeNamespace,
 		GatewayClassName: cfg.GatewayClassName,

@@ -80,7 +80,7 @@ func TestReconcile_GatewayAndRouteStatus(t *testing.T) {
 		WithObjects(gc, gw, hr, svc).
 		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
 		Build()
-	r := &Reconciler{Client: c, Sink: statusFakeSink{}, Namespace: "ns", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
+	r := &Reconciler{Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)

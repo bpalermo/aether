@@ -77,10 +77,11 @@ func TestReconcile_WritesAcceptedResolved(t *testing.T) {
 	assert.Equal(t, string(gatewayv1.RouteReasonResolvedRefs), res.Reason)
 }
 
-// An HTTPRoute whose backend Service does not exist gets ResolvedRefs=False with
-// reason BackendNotFound (Accepted still True — the route attached).
-func TestReconcile_BackendNotFound(t *testing.T) {
-	hr := httpRoute("r1", "ns", "svc-1", "missing-svc")
+// aether resolves backends by NAME via the registry, so a valid Service-kind
+// backendRef gets ResolvedRefs=True even without a matching k8s Service object
+// (a genuinely-absent backend surfaces at runtime as no endpoints / 503).
+func TestReconcile_BackendRefsResolvedByName(t *testing.T) {
+	hr := httpRoute("r1", "ns", "svc-1", "no-k8s-svc")
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
 		WithObjects(hr).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
@@ -95,11 +96,37 @@ func TestReconcile_BackendNotFound(t *testing.T) {
 	require.Len(t, got.Status.Parents, 1)
 	res := meta.FindStatusCondition(got.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionResolvedRefs))
 	require.NotNil(t, res)
-	assert.Equal(t, metav1.ConditionFalse, res.Status)
-	assert.Equal(t, string(gatewayv1.RouteReasonBackendNotFound), res.Reason)
+	assert.Equal(t, metav1.ConditionTrue, res.Status)
+	assert.Equal(t, string(gatewayv1.RouteReasonResolvedRefs), res.Reason)
 	acc := meta.FindStatusCondition(got.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionAccepted))
 	require.NotNil(t, acc)
 	assert.Equal(t, metav1.ConditionTrue, acc.Status)
+}
+
+// backendsResolve validates the backendRef shape (aether resolves by name via the
+// registry): a valid core Service-kind ref is resolved; a non-Service ref is
+// InvalidKind; an empty name is BackendNotFound.
+func TestBackendsResolve_Shapes(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	svcKind := gatewayv1.Kind("Service")
+	otherKind := gatewayv1.Kind("Foo")
+
+	ok, _, _ := r.backendsResolve(context.Background(), "ns", []gatewayv1.BackendObjectReference{
+		{Name: "svc-1", Kind: &svcKind},
+	})
+	assert.True(t, ok, "valid Service-kind ref resolves")
+
+	ok, reason, _ := r.backendsResolve(context.Background(), "ns", []gatewayv1.BackendObjectReference{
+		{Name: "x", Kind: &otherKind},
+	})
+	assert.False(t, ok)
+	assert.Equal(t, string(gatewayv1.RouteReasonInvalidKind), reason)
+
+	ok, reason, _ = r.backendsResolve(context.Background(), "ns", []gatewayv1.BackendObjectReference{
+		{Name: ""},
+	})
+	assert.False(t, ok)
+	assert.Equal(t, string(gatewayv1.RouteReasonBackendNotFound), reason)
 }
 
 func TestServiceParents(t *testing.T) {

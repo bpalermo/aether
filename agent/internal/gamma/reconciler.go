@@ -15,10 +15,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"google.golang.org/protobuf/types/known/durationpb"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -166,28 +163,19 @@ func (r *Reconciler) writeRouteStatus(
 	return r.Status().Update(ctx, obj)
 }
 
-// backendsResolve reports whether every Service backendRef of the route resolves
-// to an existing Service in the route's namespace. A missing Service yields
-// ResolvedRefs=False / BackendNotFound. Cross-namespace refs (namespace set) are
-// resolved in their target namespace.
-func (r *Reconciler) backendsResolve(ctx context.Context, routeNamespace string, refs []gatewayv1.BackendObjectReference) (bool, string, string) {
+// backendsResolve reports whether every backendRef is resolvable. aether resolves
+// backends by NAME via the registry (namespace-free), so a valid core Service-kind
+// ref with a non-empty name is resolved here; a genuinely-absent backend surfaces at
+// runtime as no endpoints / 503, not a static ResolvedRefs failure. A k8s Service Get
+// would be a false negative (the registry, not a k8s Service, backs the route). Only
+// the ref *shape* is validated.
+func (r *Reconciler) backendsResolve(_ context.Context, _ string, refs []gatewayv1.BackendObjectReference) (bool, string, string) {
 	for _, ref := range refs {
-		if ref.Group != nil && string(*ref.Group) != "" {
-			continue
+		if (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
+			return false, string(gatewayv1.RouteReasonInvalidKind), fmt.Sprintf("backendRef %q is not a core Service", ref.Name)
 		}
-		if ref.Kind != nil && string(*ref.Kind) != "Service" {
-			continue
-		}
-		ns := routeNamespace
-		if ref.Namespace != nil {
-			ns = string(*ref.Namespace)
-		}
-		svc := &corev1.Service{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: string(ref.Name)}, svc); err != nil {
-			if apierrors.IsNotFound(err) {
-				return false, string(gatewayv1.RouteReasonBackendNotFound), fmt.Sprintf("backend Service %s/%s not found", ns, ref.Name)
-			}
-			return false, string(gatewayv1.RouteReasonBackendNotFound), fmt.Sprintf("error resolving backend Service %s/%s: %v", ns, ref.Name, err)
+		if string(ref.Name) == "" {
+			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
 		}
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"

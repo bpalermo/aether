@@ -43,6 +43,12 @@ type RouteSink interface {
 type Reconciler struct {
 	client.Client
 
+	// APIReader is an uncached reader (mgr.GetAPIReader) used to fetch the
+	// cluster-scoped GatewayClass for status: the edge's cache is namespace-scoped
+	// (DefaultNamespaces), so a cached Get on the cluster-scoped GatewayClass misses
+	// and returns NotFound, leaving its Accepted status stuck at the CRD default.
+	APIReader client.Reader
+
 	// Sink receives the projected virtual hosts/certs and L4 routes (the snapshot cache).
 	Sink RouteSink
 	// Namespace is the namespace Gateways/HTTPRoutes/TCPRoutes/TLSRoutes live in.
