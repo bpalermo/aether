@@ -19,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
@@ -99,16 +98,21 @@ func runEdge(ctx context.Context) (retErr error) {
 		}()
 	}
 
-	// Watch Gateways/HTTPRoutes in the edge's own namespace (or an override). Scope
-	// the manager's informer cache to that namespace so the edge needs only
-	// namespaced RBAC, not cluster-wide.
+	// Watch Gateway API objects CLUSTER-WIDE. The edge reconciles every Gateway of
+	// our GatewayClass wherever it lives (namespace-agnostic): the conformance suite
+	// creates its Gateways/Routes in its own namespaces, so a namespace-scoped cache
+	// would never see them and they would never reach Accepted/Programmed. Leaving
+	// CacheOptions nil makes the manager cache every watched kind across all
+	// namespaces; the ClusterRoles grant the matching cluster-wide list/watch.
+	//
+	// routeNamespace is still resolved (the edge's own namespace) and used as the
+	// default namespace for the Secret provider's TLS cert lookups — Gateway TLS
+	// secrets are expected alongside the edge by default.
 	routeNamespace := cfg.RouteNamespace
 	if routeNamespace == "" {
 		routeNamespace = currentNamespace()
 	}
-	cfg.CacheOptions = &ctrlcache.Options{
-		DefaultNamespaces: map[string]ctrlcache.Config{routeNamespace: {}},
-	}
+	cfg.CacheOptions = nil
 
 	// Manager scheme = client-go built-ins + the Gateway API types so the
 	// reconciler reads typed Gateways/HTTPRoutes (no unstructured).

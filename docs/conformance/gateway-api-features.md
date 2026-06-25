@@ -58,4 +58,25 @@ e2e-validated on talos (aether 0.41.0).
 ## Status reporting
 
 GatewayClass/Gateway/Route status-condition reporting (Accepted/Programmed/ResolvedRefs)
-and a machine-readable supported-features report are a Planned conformance follow-up.
+is **Supported**: the edge controller is namespace-agnostic — it reconciles every
+Gateway of its GatewayClass in ANY namespace and publishes the Gateway/Route status
+conditions and per-listener `attachedRoutes`, which is what the upstream conformance
+suite's `NamespacesMustBeReady` gate requires before any test runs.
+
+The GatewayClass also publishes a machine-readable `status.supportedFeatures` list so
+the suite skips (rather than fails) the features aether does not implement. The
+advertised set is: `Gateway`, `GatewayPort8080`, `HTTPRoute`, `GRPCRoute`,
+`HTTPRouteMethodMatching`, `HTTPRouteRequestTimeout`,
+`HTTPRouteResponseHeaderModification`. Path/header/method match, weighted backends,
+and the `RequestHeaderModifier` filter are part of HTTPRoute *core* and carry no
+separate feature flag. Redirect/rewrite/mirror and `ReferenceGrant` are deliberately
+omitted (not implemented).
+
+### Data-plane / addressing gap
+
+The status/reconcile unlock is namespace-agnostic, but the edge data plane is still a
+single Deployment on a single LoadBalancer address. A Gateway in another namespace is
+reconciled and reaches `Accepted`/`Programmed`, and its routes are served through that
+one shared edge address — there is no per-Gateway address allocation. Tests that assert
+each Gateway has its OWN distinct address are not yet satisfied; multi-Gateway
+addressing is the next item.

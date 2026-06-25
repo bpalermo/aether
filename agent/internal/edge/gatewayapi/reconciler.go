@@ -36,22 +36,26 @@ type RouteSink interface {
 }
 
 // Reconciler watches Gateway API HTTPRoutes, TCPRoutes, and TLSRoutes (and the
-// Gateways/Secrets they depend on) in a namespace and projects, on any change,
-// the complete virtual-host and L4 route sets into the cache. Level-based: each
+// Gateways/Secrets they depend on) CLUSTER-WIDE and projects, on any change, the
+// complete virtual-host and L4 route sets into the cache. Level-based: each
 // reconcile re-lists, so adds/updates/deletes converge without delta tracking —
-// the same model as the VirtualHost reconciler.
+// the same model as the VirtualHost reconciler. It is namespace-agnostic: a
+// Gateway of our class in any namespace is reconciled and gets status, which is
+// what the upstream conformance suite (running in its own namespaces) requires.
 type Reconciler struct {
 	client.Client
 
 	// APIReader is an uncached reader (mgr.GetAPIReader) used to fetch the
-	// cluster-scoped GatewayClass for status: the edge's cache is namespace-scoped
-	// (DefaultNamespaces), so a cached Get on the cluster-scoped GatewayClass misses
-	// and returns NotFound, leaving its Accepted status stuck at the CRD default.
+	// cluster-scoped GatewayClass for status (a cached Get on a cluster-scoped
+	// resource can miss before its informer has synced and return NotFound).
 	APIReader client.Reader
 
 	// Sink receives the projected virtual hosts/certs and L4 routes (the snapshot cache).
 	Sink RouteSink
-	// Namespace is the namespace Gateways/HTTPRoutes/TCPRoutes/TLSRoutes live in.
+	// Namespace is the edge's own namespace. It is used only as the default
+	// namespace for the TLS Secret provider's cert lookups; Gateways/Routes are
+	// listed and reconciled CLUSTER-WIDE (namespace-agnostic), so this field no
+	// longer scopes the route/Gateway lists.
 	Namespace string
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves.
 	GatewayClassName string
@@ -93,19 +97,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return reconcile.Result{}, err
 	}
 
-	// --- HTTPRoutes ---
+	// --- HTTPRoutes (cluster-wide) ---
 	httpRoutes := &gatewayv1.HTTPRouteList{}
-	if err := r.List(ctx, httpRoutes, client.InNamespace(r.Namespace)); err != nil {
+	if err := r.List(ctx, httpRoutes); err != nil {
 		return reconcile.Result{}, err
 	}
-	// Deterministic order so keep-first host-dedup in the cache is stable.
+	// Deterministic order so keep-first host-dedup in the cache is stable. Sort by
+	// namespace+name now that routes may span namespaces.
 	slices.SortFunc(httpRoutes.Items, func(a, b gatewayv1.HTTPRoute) int {
+		if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
 		return strings.Compare(a.Name, b.Name)
 	})
 	vhosts := make([]cache.VirtualHost, 0, len(httpRoutes.Items))
 	for i := range httpRoutes.Items {
 		hr := &httpRoutes.Items[i]
-		if !attachedToOurGateway(hr.Spec.ParentRefs, gateways) {
+		if !attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways) {
 			continue
 		}
 		vh := r.buildVirtualHost(hr, hostCerts)
@@ -115,15 +123,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		vhosts = append(vhosts, vh)
 	}
 
-	// --- TCPRoutes ---
+	// --- TCPRoutes (cluster-wide) ---
 	tcpRouteList := &gatewayv1alpha2.TCPRouteList{}
-	if err := r.List(ctx, tcpRouteList, client.InNamespace(r.Namespace)); err != nil {
+	if err := r.List(ctx, tcpRouteList); err != nil {
 		return reconcile.Result{}, err
 	}
 	tcpByPort := make(map[uint32][]proxy.L4Backend)
 	for i := range tcpRouteList.Items {
 		tr := &tcpRouteList.Items[i]
-		ports := gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TCPProtocolType, gatewayListeners)
+		ports := gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, gatewayListeners)
 		for _, port := range ports {
 			for _, rule := range tr.Spec.Rules {
 				tcpByPort[port] = append(tcpByPort[port], r.buildL4Backends(rule.BackendRefs)...)
@@ -144,15 +152,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return 0
 	})
 
-	// --- TLSRoutes ---
+	// --- TLSRoutes (cluster-wide) ---
 	tlsRouteList := &gatewayv1.TLSRouteList{}
-	if err := r.List(ctx, tlsRouteList, client.InNamespace(r.Namespace)); err != nil {
+	if err := r.List(ctx, tlsRouteList); err != nil {
 		return reconcile.Result{}, err
 	}
 	tlsByPort := make(map[uint32][]proxy.L4ServiceRoute)
 	for i := range tlsRouteList.Items {
 		tr := &tlsRouteList.Items[i]
-		ports := gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TLSProtocolType, gatewayListeners)
+		ports := gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, gatewayListeners)
 		hostnames := make([]string, 0, len(tr.Spec.Hostnames))
 		for _, h := range tr.Spec.Hostnames {
 			hostnames = append(hostnames, string(h))
@@ -207,25 +215,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	return reconcile.Result{}, nil
 }
 
-// gatewayListenerKey identifies a listener within a gateway by name+protocol+port.
-// Used to scope TCPRoute/TLSRoute parentRef port matching.
+// gatewayKey identifies a Gateway by namespace+name. Since the edge now
+// reconciles cluster-wide, Gateway names alone are no longer unique (two
+// namespaces may each have a Gateway "edge"), so route attachment must match on
+// the full namespaced name.
+type gatewayKey struct {
+	Namespace string
+	Name      string
+}
+
+// gatewayListenerKey identifies a listener within a gateway by
+// namespace+name+protocol+port. Used to scope TCPRoute/TLSRoute parentRef port
+// matching.
 type gatewayListenerKey struct {
-	Gateway  string
+	Gateway  gatewayKey
 	Port     uint32
 	Protocol gatewayv1.ProtocolType
 }
 
-// resolveGateways lists the Gateways of our GatewayClass and resolves each TLS
-// listener's cert. It returns the set of our Gateway names, the Gateway objects
-// themselves (for status), a set of listener keys (for TCPRoute/TLSRoute port
-// matching), a hostname→SDS-name map for HTTP cert selection, and the
-// SDS-name→bytes map to push.
-func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, error) {
+// resolveGateways lists the Gateways of our GatewayClass CLUSTER-WIDE and resolves
+// each TLS listener's cert. It returns the set of our Gateways (by namespaced
+// name), the Gateway objects themselves (for status), a set of listener keys (for
+// TCPRoute/TLSRoute port matching), a hostname→SDS-name map for HTTP cert
+// selection, and the SDS-name→bytes map to push. Selection is by
+// GatewayClassName: every Gateway whose gatewayClassName is the class this edge
+// serves (whose controllerName is gateway.aether.io/edge) is ours, regardless of
+// namespace.
+func (r *Reconciler) resolveGateways(ctx context.Context) (map[gatewayKey]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, error) {
 	list := &gatewayv1.GatewayList{}
-	if err := r.List(ctx, list, client.InNamespace(r.Namespace)); err != nil {
+	if err := r.List(ctx, list); err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
-	gateways := map[string]struct{}{}
+	gateways := map[gatewayKey]struct{}{}
 	var ourGateways []gatewayv1.Gateway
 	listenerKeys := map[gatewayListenerKey]struct{}{}
 	hostCerts := map[string]string{} // listener hostname ("" = catch-all) -> SDS name
@@ -235,11 +256,12 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, 
 		if string(gw.Spec.GatewayClassName) != r.GatewayClassName {
 			continue
 		}
-		gateways[gw.Name] = struct{}{}
+		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
+		gateways[gk] = struct{}{}
 		ourGateways = append(ourGateways, *gw)
 		for _, ln := range gw.Spec.Listeners {
 			listenerKeys[gatewayListenerKey{
-				Gateway:  gw.Name,
+				Gateway:  gk,
 				Port:     uint32(ln.Port),
 				Protocol: ln.Protocol,
 			}] = struct{}{}
@@ -343,29 +365,53 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 	return vh
 }
 
-// attachedToOurGateway reports whether the given parentRefs include a reference
-// to one of our Gateways (same namespace; Gateway kind/group).
-func attachedToOurGateway(parentRefs []gatewayv1.ParentReference, gateways map[string]struct{}) bool {
+// attachedToOurGateway reports whether the given parentRefs (belonging to a route
+// in routeNamespace) include a reference to one of our Gateways. A parentRef's
+// namespace defaults to the route's own namespace when unset (per the Gateway API
+// spec), so cross-namespace attachment is matched correctly.
+func attachedToOurGateway(parentRefs []gatewayv1.ParentReference, routeNamespace string, gateways map[gatewayKey]struct{}) bool {
 	for _, p := range parentRefs {
-		if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
+		if !parentRefIsGateway(p) {
 			continue
 		}
-		if p.Kind != nil && string(*p.Kind) != "Gateway" {
-			continue
-		}
-		if _, ok := gateways[string(p.Name)]; ok {
+		key := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
+		if _, ok := gateways[key]; ok {
 			return true
 		}
 	}
 	return false
 }
 
+// parentRefIsGateway reports whether a parentRef targets a Gateway (the default
+// group/kind, or explicitly the Gateway API Gateway kind).
+func parentRefIsGateway(p gatewayv1.ParentReference) bool {
+	if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
+		return false
+	}
+	if p.Kind != nil && string(*p.Kind) != "Gateway" {
+		return false
+	}
+	return true
+}
+
+// parentRefNamespace resolves a parentRef namespace, defaulting to the referring
+// route's namespace when the ref leaves it unset (Gateway API local-default rule).
+func parentRefNamespace(ns *gatewayv1.Namespace, routeNamespace string) string {
+	if ns != nil && *ns != "" {
+		return string(*ns)
+	}
+	return routeNamespace
+}
+
 // gatewayParentPorts returns the distinct ports of our Gateway listeners that
-// match the given protocol and are referenced by the given parentRefs. Used to
-// scope TCPRoute/TLSRoute attachments to the exact Gateway listener ports.
+// match the given protocol and are referenced by the given parentRefs (belonging
+// to a route in routeNamespace). Used to scope TCPRoute/TLSRoute attachments to
+// the exact Gateway listener ports. A parentRef namespace defaults to the route's
+// own namespace when unset.
 func gatewayParentPorts(
 	parentRefs []gatewayv1alpha2.ParentReference,
-	gateways map[string]struct{},
+	routeNamespace string,
+	gateways map[gatewayKey]struct{},
 	protocol gatewayv1.ProtocolType,
 	listenerKeys map[gatewayListenerKey]struct{},
 ) []uint32 {
@@ -378,15 +424,15 @@ func gatewayParentPorts(
 		if p.Kind != nil && string(*p.Kind) != "Gateway" {
 			continue
 		}
-		gwName := string(p.Name)
-		if _, ok := gateways[gwName]; !ok {
+		gk := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
+		if _, ok := gateways[gk]; !ok {
 			continue
 		}
 		// If a sectionName (listener name) is specified, match only that listener;
 		// otherwise match all listeners of the given protocol on this gateway.
 		if p.Port != nil {
 			port := uint32(*p.Port)
-			key := gatewayListenerKey{Gateway: gwName, Port: port, Protocol: protocol}
+			key := gatewayListenerKey{Gateway: gk, Port: port, Protocol: protocol}
 			if _, ok := listenerKeys[key]; ok {
 				if _, dup := seen[port]; !dup {
 					seen[port] = struct{}{}
@@ -397,7 +443,7 @@ func gatewayParentPorts(
 		}
 		// No port specified: include all matching-protocol listeners on this gateway.
 		for k := range listenerKeys {
-			if k.Gateway == gwName && k.Protocol == protocol {
+			if k.Gateway == gk && k.Protocol == protocol {
 				if _, dup := seen[k.Port]; !dup {
 					seen[k.Port] = struct{}{}
 					ports = append(ports, k.Port)
