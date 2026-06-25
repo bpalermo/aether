@@ -24,7 +24,7 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 	l, err := proxy.GenerateUDPCaptureListener(
 		cniPod.GetName(),
 		cniPod.GetNetworkNamespace(),
-		constants.ProxyUDPCapturePort,
+		constants.ProxyCapturePort,
 		udpRoutes,
 	)
 	if err != nil {

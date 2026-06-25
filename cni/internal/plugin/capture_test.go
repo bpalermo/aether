@@ -44,12 +44,14 @@ func TestCaptureRedirectExprs_TCP(t *testing.T) {
 }
 
 // TestCaptureRedirectExprs_UDP verifies the nft rule for UDP: udp + non-loopback
-// daddr + dport meshPort -> redirect to udpCapturePort. The transport header dport
-// is at the same offset (2) for UDP as for TCP, so the expression shape is identical
-// except for the l4proto byte and the redirect target port.
+// daddr + dport meshPort -> redirect to ProxyCapturePort (same port as TCP).
+// The transport header dport is at the same offset (2) for UDP as for TCP, so
+// the expression shape is identical except for the l4proto byte. Both TCP and
+// UDP redirect to the same port number (18001) — the kernel differentiates them
+// at the socket layer by protocol, so the listeners do not collide.
 func TestCaptureRedirectExprs_UDP(t *testing.T) {
-	mesh := uint16(commonconstants.ProxyOutboundPort)  // 18081
-	cap := uint16(commonconstants.ProxyUDPCapturePort) // 18002
+	mesh := uint16(commonconstants.ProxyOutboundPort) // 18081
+	cap := uint16(commonconstants.ProxyCapturePort)   // 18001 (shared with TCP)
 	exprs := captureRedirectExprs(unix.IPPROTO_UDP, mesh, cap)
 	require.Len(t, exprs, 9)
 
@@ -71,8 +73,8 @@ func TestCaptureRedirectExprs_UDP(t *testing.T) {
 	assert.Equal(t, expr.CmpOpEq, exprs[6].(*expr.Cmp).Op)
 	assert.Equal(t, []byte{0x46, 0xA1}, exprs[6].(*expr.Cmp).Data) // 18081
 
-	// redirect to 18002
+	// redirect to 18001 (ProxyCapturePort, shared with TCP listener)
 	require.IsType(t, &expr.Immediate{}, exprs[7])
-	assert.Equal(t, []byte{0x46, 0x52}, exprs[7].(*expr.Immediate).Data) // 18002
+	assert.Equal(t, []byte{0x46, 0x51}, exprs[7].(*expr.Immediate).Data) // 18001
 	assert.IsType(t, &expr.Redir{}, exprs[8])
 }

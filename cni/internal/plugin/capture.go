@@ -34,22 +34,22 @@ func installCaptureRedirect(netnsPath string, logger *zap.Logger) error {
 
 // programCaptureRedirect adds the nat/output REDIRECT rules in the CURRENT netns:
 // one for outbound TCP and one for outbound UDP, both destined for the mesh
-// port (ProxyOutboundPort). TCP redirects to ProxyCapturePort (the capture
-// listener); UDP redirects to ProxyUDPCapturePort (the UDP capture listener,
-// proposal 018 Phase 3b). Both rules share the loopback exclusion so the
+// port (ProxyOutboundPort). Both protocols redirect to ProxyCapturePort — the
+// TCP and UDP listeners bind the SAME port number on independent sockets (TCP
+// and UDP are separate socket families; the kernel routes by (protocol, port),
+// so there is no collision). Both rules share the loopback exclusion so the
 // pod-local explicit fast-lane (127.x:meshPort) is never intercepted.
 //
 // NOTE: the UDP redirect only takes effect when --l4-routes is enabled (the
 // agent only generates the UDP capture listener when UDPRoute backends exist).
 // The nft rule itself is always installed when capture is on — the absence of a
-// bound UDP socket on ProxyUDPCapturePort means redirected packets are silently
+// bound UDP socket on ProxyCapturePort means redirected packets are silently
 // dropped until the agent creates the listener, which is correct behaviour
 // (UDPRoute without --l4-routes = no listener = datagrams discarded rather than
 // sent to an unexpected destination).
 func programCaptureRedirect(logger *zap.Logger) error {
 	meshPort := uint16(commonconstants.ProxyOutboundPort)
-	tcpCapturePort := uint16(commonconstants.ProxyCapturePort)
-	udpCapturePort := uint16(commonconstants.ProxyUDPCapturePort)
+	capturePort := uint16(commonconstants.ProxyCapturePort)
 
 	c, err := nftables.New()
 	if err != nil {
@@ -68,16 +68,17 @@ func programCaptureRedirect(logger *zap.Logger) error {
 	c.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
-		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, meshPort, tcpCapturePort),
+		Exprs: captureRedirectExprs(unix.IPPROTO_TCP, meshPort, capturePort),
 	})
-	// UDP: outbound UDP to ClusterIP:meshPort → udpCapturePort (Phase 3b).
-	// Datagrams arriving at ProxyUDPCapturePort are handled by the udp_proxy
+	// UDP: outbound UDP to ClusterIP:meshPort → capturePort (Phase 3b).
+	// Datagrams arriving at ProxyCapturePort:UDP are handled by the udp_proxy
 	// capture listener generated for each pod when UDPRoute backends are present.
+	// The TCP and UDP listeners coexist on :18001 via independent protocol sockets.
 	// No mesh mTLS — UDP is forwarded in plaintext (known limitation; no DTLS).
 	c.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
-		Exprs: captureRedirectExprs(unix.IPPROTO_UDP, meshPort, udpCapturePort),
+		Exprs: captureRedirectExprs(unix.IPPROTO_UDP, meshPort, capturePort),
 	})
 
 	if err := c.Flush(); err != nil {
@@ -85,8 +86,7 @@ func programCaptureRedirect(logger *zap.Logger) error {
 	}
 	logger.Info("installed transparent-capture redirect",
 		zap.Uint16("mesh_port", meshPort),
-		zap.Uint16("tcp_capture_port", tcpCapturePort),
-		zap.Uint16("udp_capture_port", udpCapturePort))
+		zap.Uint16("capture_port", capturePort))
 	return nil
 }
 
