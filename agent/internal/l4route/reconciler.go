@@ -13,10 +13,16 @@ package l4route
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
+	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonlog "github.com/bpalermo/aether/common/log"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -129,7 +135,139 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		"tlsServices", len(tlsRoutes),
 		"udpServices", len(udpRoutes),
 	)
+
+	// Publish Gateway API status: Accepted + ResolvedRefs RouteParentStatus for
+	// every Service parentRef of each route we own (mesh controller). Failures are
+	// logged, not fatal — the data plane is already projected and the next
+	// reconcile retries.
+	for i := range tcpList.Items {
+		tr := &tcpList.Items[i]
+		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, tcpBackendRefs(tr.Spec.Rules))
+		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
+			r.Log.WarnContext(ctx, "failed to write TCPRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
+		}
+	}
+	for i := range tlsList.Items {
+		tr := &tlsList.Items[i]
+		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, tlsBackendRefs(tr.Spec.Rules))
+		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
+			r.Log.WarnContext(ctx, "failed to write TLSRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
+		}
+	}
+	for i := range udpList.Items {
+		ur := &udpList.Items[i]
+		resolved, reason, msg := r.backendsResolve(ctx, ur.Namespace, udpBackendRefs(ur.Spec.Rules))
+		if err := r.writeRouteStatus(ctx, ur, ur.Generation, &ur.Status.RouteStatus, ur.Spec.ParentRefs, resolved, reason, msg); err != nil {
+			r.Log.WarnContext(ctx, "failed to write UDPRoute status", "route", ur.Name, "namespace", ur.Namespace, "error", err.Error())
+		}
+	}
 	return reconcile.Result{}, nil
+}
+
+// writeRouteStatus upserts our (mesh controller) RouteParentStatus for each
+// Service parentRef of the route, setting Accepted=True and ResolvedRefs per the
+// backend check, preserving entries owned by other controllers and only issuing
+// a status update when something changed.
+func (r *Reconciler) writeRouteStatus(
+	ctx context.Context,
+	obj client.Object,
+	generation int64,
+	status *gatewayv1.RouteStatus,
+	parentRefs []gatewayv1.ParentReference,
+	backendsResolved bool,
+	resolvedReason, resolvedMsg string,
+) error {
+	parents := status.Parents
+	changed := false
+	for _, p := range parentRefs {
+		if p.Group != nil && string(*p.Group) != "" {
+			continue
+		}
+		if p.Kind == nil || string(*p.Kind) != "Service" {
+			continue
+		}
+		resolvedStatus := metav1.ConditionTrue
+		if !backendsResolved {
+			resolvedStatus = metav1.ConditionFalse
+		}
+		conds := []gatewaystatus.Condition{
+			{
+				Type:    string(gatewayv1.RouteConditionAccepted),
+				Status:  metav1.ConditionTrue,
+				Reason:  string(gatewayv1.RouteReasonAccepted),
+				Message: "Route accepted by the aether mesh",
+			},
+			{
+				Type:    string(gatewayv1.RouteConditionResolvedRefs),
+				Status:  resolvedStatus,
+				Reason:  resolvedReason,
+				Message: resolvedMsg,
+			},
+		}
+		var upd bool
+		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, conds...)
+		changed = changed || upd
+	}
+	if !changed {
+		return nil
+	}
+	status.Parents = parents
+	return r.Status().Update(ctx, obj)
+}
+
+// backendsResolve reports whether every Service backendRef resolves to an
+// existing Service. A missing Service yields ResolvedRefs=False / BackendNotFound.
+func (r *Reconciler) backendsResolve(ctx context.Context, routeNamespace string, refs []gatewayv1.BackendObjectReference) (bool, string, string) {
+	for _, ref := range refs {
+		if ref.Group != nil && string(*ref.Group) != "" {
+			continue
+		}
+		if ref.Kind != nil && string(*ref.Kind) != "Service" {
+			continue
+		}
+		ns := routeNamespace
+		if ref.Namespace != nil {
+			ns = string(*ref.Namespace)
+		}
+		svc := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: string(ref.Name)}, svc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, string(gatewayv1.RouteReasonBackendNotFound), fmt.Sprintf("backend Service %s/%s not found", ns, ref.Name)
+			}
+			return false, string(gatewayv1.RouteReasonBackendNotFound), fmt.Sprintf("error resolving backend Service %s/%s: %v", ns, ref.Name, err)
+		}
+	}
+	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
+}
+
+func tcpBackendRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for _, rule := range rules {
+		for _, b := range rule.BackendRefs {
+			refs = append(refs, b.BackendObjectReference)
+		}
+	}
+	return refs
+}
+
+func tlsBackendRefs(rules []gatewayv1.TLSRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for _, rule := range rules {
+		for _, b := range rule.BackendRefs {
+			refs = append(refs, b.BackendObjectReference)
+		}
+	}
+	return refs
+}
+
+func udpBackendRefs(rules []gatewayv1alpha2.UDPRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for _, rule := range rules {
+		for _, b := range rule.BackendRefs {
+			refs = append(refs, b.BackendObjectReference)
+		}
+	}
+	return refs
 }
 
 // serviceParents returns the names of the Services these parentRefs attach to

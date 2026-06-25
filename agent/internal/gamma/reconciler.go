@@ -11,9 +11,14 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"google.golang.org/protobuf/types/known/durationpb"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -90,7 +95,122 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	r.Sink.SetServiceRoutes(routes)
 	r.Log.DebugContext(ctx, "projected gamma service routes",
 		"httpRoutes", len(httpList.Items), "grpcRoutes", len(grpcList.Items), "services", len(routes))
+
+	// Publish Gateway API status: for every Service-parented route we own, write an
+	// Accepted + ResolvedRefs RouteParentStatus per Service parentRef. Status write
+	// failures are logged but don't fail the reconcile (the data plane is already
+	// projected); the next reconcile retries.
+	for i := range httpList.Items {
+		hr := &httpList.Items[i]
+		resolved, reason, msg := r.backendsResolve(ctx, hr.Namespace, httpBackendRefs(hr.Spec.Rules))
+		if err := r.writeRouteStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, hr.Spec.ParentRefs, resolved, reason, msg); err != nil {
+			r.Log.WarnContext(ctx, "failed to write HTTPRoute status", "route", hr.Name, "namespace", hr.Namespace, "error", err.Error())
+		}
+	}
+	for i := range grpcList.Items {
+		gr := &grpcList.Items[i]
+		resolved, reason, msg := r.backendsResolve(ctx, gr.Namespace, grpcBackendRefs(gr.Spec.Rules))
+		if err := r.writeRouteStatus(ctx, gr, gr.Generation, &gr.Status.RouteStatus, gr.Spec.ParentRefs, resolved, reason, msg); err != nil {
+			r.Log.WarnContext(ctx, "failed to write GRPCRoute status", "route", gr.Name, "namespace", gr.Namespace, "error", err.Error())
+		}
+	}
 	return reconcile.Result{}, nil
+}
+
+// writeRouteStatus upserts our (mesh controller) RouteParentStatus for each
+// Service parentRef of the route, setting Accepted=True (we processed it) and
+// ResolvedRefs per the backend check. It preserves status entries owned by other
+// controllers and only issues a status update when something changed.
+func (r *Reconciler) writeRouteStatus(
+	ctx context.Context,
+	obj client.Object,
+	generation int64,
+	status *gatewayv1.RouteStatus,
+	parentRefs []gatewayv1.ParentReference,
+	backendsResolved bool,
+	resolvedReason, resolvedMsg string,
+) error {
+	parents := status.Parents
+	changed := false
+	for _, p := range parentRefs {
+		if p.Group != nil && string(*p.Group) != "" {
+			continue
+		}
+		if p.Kind == nil || string(*p.Kind) != "Service" {
+			continue
+		}
+		conds := []gatewaystatus.Condition{{
+			Type:    string(gatewayv1.RouteConditionAccepted),
+			Status:  metav1.ConditionTrue,
+			Reason:  string(gatewayv1.RouteReasonAccepted),
+			Message: "Route accepted by the aether mesh",
+		}}
+		resolvedStatus := metav1.ConditionTrue
+		if !backendsResolved {
+			resolvedStatus = metav1.ConditionFalse
+		}
+		conds = append(conds, gatewaystatus.Condition{
+			Type:    string(gatewayv1.RouteConditionResolvedRefs),
+			Status:  resolvedStatus,
+			Reason:  resolvedReason,
+			Message: resolvedMsg,
+		})
+		var upd bool
+		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, conds...)
+		changed = changed || upd
+	}
+	if !changed {
+		return nil
+	}
+	status.Parents = parents
+	return r.Status().Update(ctx, obj)
+}
+
+// backendsResolve reports whether every Service backendRef of the route resolves
+// to an existing Service in the route's namespace. A missing Service yields
+// ResolvedRefs=False / BackendNotFound. Cross-namespace refs (namespace set) are
+// resolved in their target namespace.
+func (r *Reconciler) backendsResolve(ctx context.Context, routeNamespace string, refs []gatewayv1.BackendObjectReference) (bool, string, string) {
+	for _, ref := range refs {
+		if ref.Group != nil && string(*ref.Group) != "" {
+			continue
+		}
+		if ref.Kind != nil && string(*ref.Kind) != "Service" {
+			continue
+		}
+		ns := routeNamespace
+		if ref.Namespace != nil {
+			ns = string(*ref.Namespace)
+		}
+		svc := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: string(ref.Name)}, svc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, string(gatewayv1.RouteReasonBackendNotFound), fmt.Sprintf("backend Service %s/%s not found", ns, ref.Name)
+			}
+			return false, string(gatewayv1.RouteReasonBackendNotFound), fmt.Sprintf("error resolving backend Service %s/%s: %v", ns, ref.Name, err)
+		}
+	}
+	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
+}
+
+func httpBackendRefs(rules []gatewayv1.HTTPRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for _, rule := range rules {
+		for _, b := range rule.BackendRefs {
+			refs = append(refs, b.BackendObjectReference)
+		}
+	}
+	return refs
+}
+
+func grpcBackendRefs(rules []gatewayv1.GRPCRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for _, rule := range rules {
+		for _, b := range rule.BackendRefs {
+			refs = append(refs, b.BackendObjectReference)
+		}
+	}
+	return refs
 }
 
 // serviceParents returns the names of the Services these parentRefs attach to

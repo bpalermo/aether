@@ -17,6 +17,10 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes", "grpcroutes"]
     verbs: ["list", "get", "watch"]
+  # Write Gateway API status (Accepted/ResolvedRefs RouteParentStatus, mesh controller).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes/status", "grpcroutes/status"]
+    verbs: ["get", "update", "patch"]
   {{- end }}
   {{- if .Values.agent.l4Routes }}
   # L4 route types (proposal 018, Phase 3b): watch TCPRoutes/TLSRoutes/UDPRoutes
@@ -24,10 +28,15 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["tcproutes", "tlsroutes", "udproutes"]
     verbs: ["list", "get", "watch"]
+  # Write Gateway API status (Accepted/ResolvedRefs RouteParentStatus, mesh controller).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["tcproutes/status", "tlsroutes/status", "udproutes/status"]
+    verbs: ["get", "update", "patch"]
   {{- end }}
-  {{- if or .Values.agent.transparentCapture .Values.agent.meshDns }}
+  {{- if or .Values.agent.transparentCapture .Values.agent.meshDns .Values.agent.gamma .Values.agent.l4Routes }}
   # Transparent capture (Phase 3a) / mesh DNS (mesh-global FQDN): watch the generated
-  # mesh Services for their cluster.local authorities + ClusterIPs.
+  # mesh Services for their cluster.local authorities + ClusterIPs. GAMMA + l4route also
+  # read Services to resolve backendRefs for the ResolvedRefs status condition.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list", "get", "watch"]
