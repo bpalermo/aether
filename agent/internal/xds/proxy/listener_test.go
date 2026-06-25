@@ -75,6 +75,25 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 	}
 }
 
+// TestNewAppHealthProbeCluster_CheckerType verifies the active health checker is a
+// raw TCP connect for TCP-floor services and an HTTP GET otherwise (proposal 018
+// Phase 3b TCP liveness).
+func TestNewAppHealthProbeCluster_CheckerType(t *testing.T) {
+	httpC := NewAppHealthProbeCluster("health_p", "/var/run/netns/x", 8080, "/-/-/ready", false)
+	require.Len(t, httpC.GetHealthChecks(), 1)
+	require.NotNil(t, httpC.GetHealthChecks()[0].GetHttpHealthCheck(), "HTTP service: HTTP health check")
+	assert.Nil(t, httpC.GetHealthChecks()[0].GetTcpHealthCheck())
+	assert.Equal(t, "/-/-/ready", httpC.GetHealthChecks()[0].GetHttpHealthCheck().GetPath())
+
+	tcpC := NewAppHealthProbeCluster("health_p", "/var/run/netns/x", 9000, "/-/-/ready", true)
+	require.Len(t, tcpC.GetHealthChecks(), 1)
+	require.NotNil(t, tcpC.GetHealthChecks()[0].GetTcpHealthCheck(), "TCP service: connect-only TCP health check")
+	assert.Nil(t, tcpC.GetHealthChecks()[0].GetHttpHealthCheck())
+	// Connect-only: no send/receive payloads.
+	assert.Empty(t, tcpC.GetHealthChecks()[0].GetTcpHealthCheck().GetSend())
+	assert.Empty(t, tcpC.GetHealthChecks()[0].GetTcpHealthCheck().GetReceive())
+}
+
 func TestGenerateOutboundHTTPListener(t *testing.T) {
 	tests := []struct {
 		name                     string
