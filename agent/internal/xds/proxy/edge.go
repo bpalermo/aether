@@ -247,13 +247,16 @@ func buildEdgeRedirectRouteConfig() *routev3.RouteConfiguration {
 // BuildEdgeRoute builds one Envoy route for the edge: a path match forwarding to
 // the named cluster with the outbound retry policy. Exactly one of prefix/exact
 // is non-empty (exact takes precedence if both are set). Prefix "/" matches all.
-func BuildEdgeRoute(prefix, exact, cluster string) *routev3.Route {
+// mutation applies RequestHeaderModifier / ResponseHeaderModifier at the route
+// level; nil mutation = no header mutations.
+func BuildEdgeRoute(prefix, exact, cluster string, mutation *GammaHeaderMutation) *routev3.Route {
 	match := &routev3.RouteMatch{}
 	if exact != "" {
 		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
 	} else {
 		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
 	}
+	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(mutation)
 	return &routev3.Route{
 		Match: match,
 		Action: &routev3.Route_Route{
@@ -262,6 +265,10 @@ func BuildEdgeRoute(prefix, exact, cluster string) *routev3.Route {
 				RetryPolicy:      outboundRetryPolicy(),
 			},
 		},
+		RequestHeadersToAdd:     reqAdd,
+		RequestHeadersToRemove:  reqRemove,
+		ResponseHeadersToAdd:    respAdd,
+		ResponseHeadersToRemove: respRemove,
 	}
 }
 

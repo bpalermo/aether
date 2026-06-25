@@ -27,11 +27,14 @@ type VirtualHost struct {
 
 // Route is one path-match -> backend rule within a VirtualHost. Exactly one of
 // Prefix/Exact is set; Port 0 means the service's default port.
+// HeaderMutation carries the merged request/response header modifier filters for
+// this rule (nil = no header mutations).
 type Route struct {
-	Prefix  string
-	Exact   string
-	Service string
-	Port    uint32
+	Prefix         string
+	Exact          string
+	Service        string
+	Port           uint32
+	HeaderMutation *proxy.GammaHeaderMutation
 }
 
 // EdgeTLSCert is raw certificate material for an edge downstream TLS secret,
@@ -132,7 +135,7 @@ func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 				continue
 			}
 			cluster := c.edgeClusterNameLocked(r.Service, r.Port)
-			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster))
+			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation))
 		}
 		if len(routes) == 0 {
 			continue
@@ -276,6 +279,54 @@ func (c *SnapshotCache) edgeTCPListeners() []types.Resource {
 	return out
 }
 
+// equalRoutes reports whether two Route slices are content-equal. Route carries
+// a *GammaHeaderMutation pointer, so we cannot rely on slices.Equal (pointer
+// identity) — we need a deep comparison.
+func equalRoutes(a, b []Route) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		ra, rb := a[i], b[i]
+		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port {
+			return false
+		}
+		if !equalHeaderMutation(ra.HeaderMutation, rb.HeaderMutation) {
+			return false
+		}
+	}
+	return true
+}
+
+// equalHeaderMutation reports content equality for two *GammaHeaderMutation
+// values. Both nil = equal; one nil = not equal; otherwise fields are compared.
+func equalHeaderMutation(a, b *proxy.GammaHeaderMutation) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return slices.Equal(a.RemoveRequest, b.RemoveRequest) &&
+		slices.Equal(a.RemoveResponse, b.RemoveResponse) &&
+		equalHeaderKVs(a.SetRequest, b.SetRequest) &&
+		equalHeaderKVs(a.AddRequest, b.AddRequest) &&
+		equalHeaderKVs(a.SetResponse, b.SetResponse) &&
+		equalHeaderKVs(a.AddResponse, b.AddResponse)
+}
+
+func equalHeaderKVs(a, b []proxy.GammaHeaderKV) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // equalVirtualHosts reports whether two virtual-host slices are identical (order
 // and contents), so a no-op SetVirtualHosts call skips a snapshot rebuild.
 func equalVirtualHosts(a, b []VirtualHost) bool {
@@ -285,7 +336,7 @@ func equalVirtualHosts(a, b []VirtualHost) bool {
 	for i := range a {
 		if a[i].TLSSecret != b[i].TLSSecret ||
 			!slices.Equal(a[i].Hosts, b[i].Hosts) ||
-			!slices.Equal(a[i].Routes, b[i].Routes) {
+			!equalRoutes(a[i].Routes, b[i].Routes) {
 			return false
 		}
 	}
