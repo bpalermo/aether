@@ -16,15 +16,23 @@ import (
 // (sigs.k8s.io/gateway-api/pkg/features).
 //
 //   - Gateway / GatewayPort8080 — north-south Gateways on the standard test port.
+//
 //   - HTTPRoute / GRPCRoute — both route types (edge HTTPRoute, GAMMA HTTPRoute+GRPCRoute).
+//
 //   - HTTPRouteMethodMatching — gRPC method match → path; HTTP method match.
+//
 //   - HTTPRouteResponseHeaderModification — ResponseHeaderModifier filter (route level).
+//
 //   - HTTPRouteRequestTimeout — HTTPRoute timeouts.request.
+//
+//   - ReferenceGrant — cross-namespace backendRef admission + status enforcement
+//     (ungranted cross-ns refs report ResolvedRefs=False/RefNotPermitted and are
+//     dropped). Resolution stays namespace-blind today (proposal 020 Part 1).
 //
 // Path match (Exact/PathPrefix), header match (Exact), weighted backends, and the
 // RequestHeaderModifier filter are part of HTTPRoute *core* conformance and carry
-// no separate feature flag. Redirect/rewrite/mirror and ReferenceGrant are
-// deliberately omitted (not implemented) so their suites skip.
+// no separate feature flag. Redirect/rewrite/mirror are deliberately omitted (not
+// implemented) so their suites skip.
 var aetherSupportedFeaturesList = []features.FeatureName{
 	features.SupportGateway,
 	features.SupportGatewayPort8080,
@@ -33,6 +41,7 @@ var aetherSupportedFeaturesList = []features.FeatureName{
 	features.SupportHTTPRouteMethodMatching,
 	features.SupportHTTPRouteRequestTimeout,
 	features.SupportHTTPRouteResponseHeaderModification,
+	features.SupportReferenceGrant,
 }
 
 // aetherSupportedFeatures returns the supportedFeatures to publish on the

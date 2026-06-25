@@ -29,6 +29,12 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gatewayclasses/status"]
     verbs: ["get", "update", "patch"]
+  # ReferenceGrant (v1beta1): admit cross-namespace backendRefs. Read-only; the
+  # presence/absence of a grant gates whether a cross-ns backend is served +
+  # surfaced as ResolvedRefs (RefNotPermitted otherwise).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["referencegrants"]
+    verbs: ["get", "list", "watch"]
   # Resolve backendRef Services cluster-wide for the ResolvedRefs condition.
   - apiGroups: [""]
     resources: ["services"]

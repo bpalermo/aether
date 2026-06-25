@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
+	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
@@ -24,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // RouteSink receives the projected virtual hosts, TLS certs, and L4 routes
@@ -79,6 +81,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&gatewayv1.Gateway{}, resync).
 		Watches(&gatewayv1alpha2.TCPRoute{}, resync).
 		Watches(&gatewayv1.TLSRoute{}, resync).
+		// ReferenceGrant (v1beta1): a grant change can flip a cross-namespace
+		// backendRef between permitted and RefNotPermitted, so re-project everything.
+		Watches(&gatewayv1beta1.ReferenceGrant{}, resync).
 		Named("gatewayapi")
 	if r.Secrets != nil {
 		b = b.Watches(&corev1.Secret{}, resync)
@@ -96,6 +101,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+
+	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs (drop +
+	// RefNotPermitted). The edge cache is cluster-wide (post-#323).
+	grantList := &gatewayv1beta1.ReferenceGrantList{}
+	if err := r.List(ctx, grantList); err != nil {
+		return reconcile.Result{}, err
+	}
+	grants := grantList.Items
 
 	// --- HTTPRoutes (cluster-wide) ---
 	httpRoutes := &gatewayv1.HTTPRouteList{}
@@ -116,7 +129,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if !attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways) {
 			continue
 		}
-		vh := r.buildVirtualHost(hr, hostCerts)
+		vh := r.buildVirtualHost(hr, hostCerts, grants)
 		if len(vh.Hosts) == 0 || len(vh.Routes) == 0 {
 			continue
 		}
@@ -134,7 +147,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		ports := gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, gatewayListeners)
 		for _, port := range ports {
 			for _, rule := range tr.Spec.Rules {
-				tcpByPort[port] = append(tcpByPort[port], r.buildL4Backends(rule.BackendRefs)...)
+				tcpByPort[port] = append(tcpByPort[port], r.buildL4Backends(rule.BackendRefs, tr.Namespace, "TCPRoute", grants)...)
 			}
 		}
 	}
@@ -169,7 +182,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			for _, rule := range tr.Spec.Rules {
 				tlsByPort[port] = append(tlsByPort[port], proxy.L4ServiceRoute{
 					SNIHostnames: hostnames,
-					Backends:     r.buildL4Backends(rule.BackendRefs),
+					Backends:     r.buildL4Backends(rule.BackendRefs, tr.Namespace, "TLSRoute", grants),
 				})
 			}
 		}
@@ -211,7 +224,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// retries. The GatewayClass, Gateways, and routes we own all get conditions.
 	r.writeGatewayClassStatus(ctx)
 	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners)
-	r.writeRouteStatuses(ctx, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners)
+	r.writeRouteStatuses(ctx, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, grants)
 	return reconcile.Result{}, nil
 }
 
@@ -308,7 +321,7 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[gatewayKey]struct
 //
 // Rules with a RequestRedirect filter emit a redirect route (no backend required).
 // Rules with a URLRewrite filter apply host/path rewriting on the forwarding route.
-func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[string]string) cache.VirtualHost {
+func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[string]string, grants []gatewayv1beta1.ReferenceGrant) cache.VirtualHost {
 	vh := cache.VirtualHost{}
 	for _, h := range hr.Spec.Hostnames {
 		vh.Hosts = append(vh.Hosts, string(h))
@@ -317,13 +330,13 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 		redirect := buildHTTPRedirect(rule.Filters)
 		urlRewrite := buildHTTPURLRewrite(rule.Filters)
 
-		backend := firstBackendService(rule.BackendRefs)
+		backend := firstBackendService(rule.BackendRefs, hr.Namespace, grants)
 		// A rule must have either a backend or a redirect to produce a route.
 		if backend == "" && redirect == nil {
 			continue
 		}
 		var port uint32
-		if p := firstBackendPort(rule.BackendRefs); p != 0 {
+		if p := firstBackendPort(rule.BackendRefs, hr.Namespace, grants); p != 0 {
 			port = p
 		}
 		mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
@@ -455,8 +468,10 @@ func gatewayParentPorts(
 }
 
 // buildL4Backends converts a BackendRef slice into L4Backends with resolved TCP
-// cluster names. Refs with a non-core group or non-Service kind are skipped.
-func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef) []proxy.L4Backend {
+// cluster names. Refs with a non-core group or non-Service kind are skipped, as are
+// ungranted cross-namespace refs (RefNotPermitted: dropped from the data plane).
+// routeKind is the referring route's kind (TCPRoute/TLSRoute).
+func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
 	backends := make([]proxy.L4Backend, 0, len(refs))
 	for _, b := range refs {
 		if b.Group != nil && string(*b.Group) != "" {
@@ -467,6 +482,9 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef) []proxy.L4Back
 		}
 		name := string(b.Name)
 		if name == "" {
+			continue
+		}
+		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
 			continue
 		}
 		weight := uint32(1)
@@ -482,7 +500,12 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef) []proxy.L4Back
 	return backends
 }
 
-func firstBackendService(refs []gatewayv1.HTTPBackendRef) string {
+// firstBackendService returns the name of the first core-Service backendRef that is
+// admissible: a same-namespace ref, or a cross-namespace ref permitted by a
+// ReferenceGrant. Ungranted cross-namespace refs are skipped (RefNotPermitted →
+// dropped from the data plane), so a rule whose only backend is ungranted yields no
+// backend (and, with no redirect, no route).
+func firstBackendService(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) string {
 	for _, b := range refs {
 		if b.Group != nil && string(*b.Group) != "" {
 			continue // only core Services in Phase 1
@@ -490,18 +513,53 @@ func firstBackendService(refs []gatewayv1.HTTPBackendRef) string {
 		if b.Kind != nil && string(*b.Kind) != "Service" {
 			continue
 		}
+		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
+			continue
+		}
 		return string(b.Name)
 	}
 	return ""
 }
 
-func firstBackendPort(refs []gatewayv1.HTTPBackendRef) uint32 {
+// firstBackendPort returns the port of the first admissible (same-namespace or
+// granted cross-namespace) backendRef, so the port matches the backend
+// firstBackendService selects.
+func firstBackendPort(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) uint32 {
 	for _, b := range refs {
+		if b.Group != nil && string(*b.Group) != "" {
+			continue
+		}
+		if b.Kind != nil && string(*b.Kind) != "Service" {
+			continue
+		}
+		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
+			continue
+		}
 		if b.Port != nil {
 			return uint32(*b.Port)
 		}
 	}
 	return 0
+}
+
+// derefBackendNamespace returns the backendRef namespace ("" when unset).
+func derefBackendNamespace(ns *gatewayv1.Namespace) string {
+	if ns == nil {
+		return ""
+	}
+	return string(*ns)
+}
+
+// backendPermitted reports whether a backendRef is allowed onto the data plane: a
+// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant
+// in the backend's namespace whose from matches the route and whose to allows the
+// Service. routeKind is the referring route's kind (HTTPRoute/TCPRoute/TLSRoute).
+func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
+	ns := derefBackendNamespace(backendNamespace)
+	if !referencegrant.CrossNamespace(ns, routeNamespace) {
+		return true
+	}
+	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
 }
 
 // certForHosts picks the SDS cert for a vhost: an exact hostname listener match

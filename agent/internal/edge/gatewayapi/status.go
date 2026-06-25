@@ -5,12 +5,14 @@ import (
 	"fmt"
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
+	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // writeGatewayClassStatus sets Accepted=True and the supportedFeatures list on the
@@ -269,23 +271,24 @@ func (r *Reconciler) writeRouteStatuses(
 	tlsRoutes []gatewayv1.TLSRoute,
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
+	grants []gatewayv1beta1.ReferenceGrant,
 ) {
 	for i := range httpRoutes {
 		hr := &httpRoutes[i]
 		accepted := attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways)
-		resolved, reason, msg := r.backendsResolveHTTP(ctx, hr.Namespace, hr.Spec.Rules)
+		resolved, reason, msg := r.backendsResolveHTTP(ctx, hr.Namespace, hr.Spec.Rules, grants)
 		r.writeRouteParentStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, ourGatewayParentRefs(hr.Spec.ParentRefs, hr.Namespace, gateways), accepted, resolved, reason, msg, "HTTPRoute")
 	}
 	for i := range tcpRoutes {
 		tr := &tcpRoutes[i]
 		accepted := len(gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, listenerKeys)) > 0
-		resolved, reason, msg := r.backendsResolveL4(ctx, tr.Namespace, l4BackendObjectRefs(tr.Spec.Rules))
+		resolved, reason, msg := r.backendsResolveL4(ctx, tr.Namespace, "TCPRoute", l4BackendObjectRefs(tr.Spec.Rules), grants)
 		r.writeRouteParentStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, ourGatewayParentRefs(tr.Spec.ParentRefs, tr.Namespace, gateways), accepted, resolved, reason, msg, "TCPRoute")
 	}
 	for i := range tlsRoutes {
 		tr := &tlsRoutes[i]
 		accepted := len(gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, listenerKeys)) > 0
-		resolved, reason, msg := r.backendsResolveTLS(ctx, tr.Namespace, tr.Spec.Rules)
+		resolved, reason, msg := r.backendsResolveTLS(ctx, tr.Namespace, tr.Spec.Rules, grants)
 		r.writeRouteParentStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, ourGatewayParentRefs(tr.Spec.ParentRefs, tr.Namespace, gateways), accepted, resolved, reason, msg, "TLSRoute")
 	}
 }
@@ -367,24 +370,24 @@ func (r *Reconciler) writeRouteParentStatus(
 	}
 }
 
-func (r *Reconciler) backendsResolveHTTP(ctx context.Context, ns string, rules []gatewayv1.HTTPRouteRule) (bool, string, string) {
+func (r *Reconciler) backendsResolveHTTP(ctx context.Context, ns string, rules []gatewayv1.HTTPRouteRule, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
 	var refs []gatewayv1.BackendObjectReference
 	for _, rule := range rules {
 		for _, b := range rule.BackendRefs {
 			refs = append(refs, b.BackendObjectReference)
 		}
 	}
-	return r.backendsResolveL4(ctx, ns, refs)
+	return r.backendsResolveL4(ctx, ns, "HTTPRoute", refs, grants)
 }
 
-func (r *Reconciler) backendsResolveTLS(ctx context.Context, ns string, rules []gatewayv1.TLSRouteRule) (bool, string, string) {
+func (r *Reconciler) backendsResolveTLS(ctx context.Context, ns string, rules []gatewayv1.TLSRouteRule, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
 	var refs []gatewayv1.BackendObjectReference
 	for _, rule := range rules {
 		for _, b := range rule.BackendRefs {
 			refs = append(refs, b.BackendObjectReference)
 		}
 	}
-	return r.backendsResolveL4(ctx, ns, refs)
+	return r.backendsResolveL4(ctx, ns, "TLSRoute", refs, grants)
 }
 
 func l4BackendObjectRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.BackendObjectReference {
@@ -404,13 +407,18 @@ func l4BackendObjectRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.Backe
 // A valid core Service-kind ref with a non-empty name is therefore resolved here; a
 // genuinely-absent backend surfaces at runtime as no endpoints / 503, not a static
 // ResolvedRefs failure. Only the ref *shape* is validated.
-func (r *Reconciler) backendsResolveL4(_ context.Context, _ string, refs []gatewayv1.BackendObjectReference) (bool, string, string) {
+func (r *Reconciler) backendsResolveL4(_ context.Context, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
 	for _, ref := range refs {
 		if (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
 			return false, string(gatewayv1.RouteReasonInvalidKind), fmt.Sprintf("backendRef %q is not a core Service", ref.Name)
 		}
 		if string(ref.Name) == "" {
 			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
+		}
+		if ns := derefBackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
+			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, string(ref.Name)) {
+			return false, string(gatewayv1.RouteReasonRefNotPermitted),
+				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, ns)
 		}
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
