@@ -244,12 +244,14 @@ func buildEdgeRedirectRouteConfig() *routev3.RouteConfiguration {
 	}
 }
 
-// BuildEdgeRoute builds one Envoy route for the edge: a path match forwarding to
-// the named cluster with the outbound retry policy. Exactly one of prefix/exact
+// BuildEdgeRoute builds one Envoy route for the edge. Exactly one of prefix/exact
 // is non-empty (exact takes precedence if both are set). Prefix "/" matches all.
-// mutation applies RequestHeaderModifier / ResponseHeaderModifier at the route
-// level; nil mutation = no header mutations.
-func BuildEdgeRoute(prefix, exact, cluster string, mutation *GammaHeaderMutation) *routev3.Route {
+// mutation applies RequestHeaderModifier / ResponseHeaderModifier at the route level.
+//
+// When redirect is non-nil the route emits a Route_Redirect (no cluster). When
+// urlRewrite is non-nil the route rewrite fields are applied before forwarding to
+// cluster. Both nil → plain forwarding route.
+func BuildEdgeRoute(prefix, exact, cluster string, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
 	match := &routev3.RouteMatch{}
 	if exact != "" {
 		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
@@ -257,19 +259,24 @@ func BuildEdgeRoute(prefix, exact, cluster string, mutation *GammaHeaderMutation
 		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
 	}
 	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(mutation)
-	return &routev3.Route{
-		Match: match,
-		Action: &routev3.Route_Route{
-			Route: &routev3.RouteAction{
-				ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: cluster},
-				RetryPolicy:      outboundRetryPolicy(),
-			},
-		},
+	r := &routev3.Route{
+		Match:                   match,
 		RequestHeadersToAdd:     reqAdd,
 		RequestHeadersToRemove:  reqRemove,
 		ResponseHeadersToAdd:    respAdd,
 		ResponseHeadersToRemove: respRemove,
 	}
+	if redirect != nil {
+		r.Action = gammaRedirectAction(redirect)
+	} else {
+		ra := &routev3.RouteAction{
+			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: cluster},
+			RetryPolicy:      outboundRetryPolicy(),
+		}
+		applyURLRewrite(ra, urlRewrite)
+		r.Action = &routev3.Route_Route{Route: ra}
+	}
+	return r
 }
 
 // BuildEdgeVirtualHost builds one edge virtual host: the given external domains

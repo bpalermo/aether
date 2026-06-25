@@ -119,6 +119,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/tcp_proxy/v3:tcp_proxy",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/matching/common_inputs/transport_socket/v3:transport_socket",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
+        "@com_github_envoyproxy_go_control_plane_envoy//type/matcher/v3:matcher",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_protobuf//proto",

@@ -165,7 +165,7 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 
 // GAMMA east-west L7 routing (proposal 018, Phase 2). A GammaRoute is one resolved
 // HTTPRoute rule: ordered matches forwarding to one or more weighted backend
-// clusters, with an optional timeout and header mutations.
+// clusters, with an optional timeout, header mutations, redirect, and URL rewrite.
 // Backends are already resolved to data-plane cluster names (<backend>.<meshDomain>)
 // by the reconciler.
 type GammaRoute struct {
@@ -173,6 +173,42 @@ type GammaRoute struct {
 	Backends       []GammaBackend
 	Timeout        *durationpb.Duration
 	HeaderMutation *GammaHeaderMutation
+	// Redirect, when non-nil, makes this route return a redirect response instead
+	// of forwarding to a backend. Coexists with Matches; takes precedence over
+	// Backends per the Gateway API spec.
+	Redirect *GammaRedirect
+	// URLRewrite, when non-nil, rewrites the request URL (host and/or path) before
+	// forwarding. Applied on top of the normal RouteAction (Backends still used).
+	URLRewrite *GammaURLRewrite
+}
+
+// GammaRedirect describes a RequestRedirect filter: it replaces the route action
+// with an Envoy RedirectAction instead of forwarding to a backend cluster.
+type GammaRedirect struct {
+	// Scheme is the target scheme ("http" or "https"). Empty = unchanged.
+	Scheme string
+	// Hostname is the target hostname. Empty = unchanged.
+	Hostname string
+	// Port is the target port (0 = unchanged).
+	Port uint32
+	// StatusCode is the HTTP redirect code (301 or 302; default 301).
+	StatusCode int
+	// PathType selects how to rewrite the path (empty = no path rewrite).
+	// "ReplaceFullPath" → Envoy PathRedirect; "ReplacePrefixMatch" → PrefixRewrite.
+	PathType  string
+	PathValue string
+}
+
+// GammaURLRewrite describes a URLRewrite filter: rewrites the request host
+// and/or path before forwarding to the backend. Applied within the RouteAction.
+type GammaURLRewrite struct {
+	// Hostname is the Host header to rewrite to. Empty = unchanged.
+	Hostname string
+	// PathType selects how to rewrite the path (empty = no path rewrite).
+	// "ReplaceFullPath" → Envoy RegexRewrite (.*) → value.
+	// "ReplacePrefixMatch" → Envoy PrefixRewrite.
+	PathType  string
+	PathValue string
 }
 
 // GammaMatch is one HTTPRoute match: a path (prefix OR exact OR regex; empty =
@@ -234,13 +270,16 @@ type GammaHeaderKV struct {
 // trailing catch-all routes anything the rules don't match to the service's own
 // cluster (name), so producer rules are additive. With no rules it is the passthrough
 // vhost.
+//
+// Rules with a Redirect field produce a redirect route (Route_Redirect) with no
+// backend cluster. Rules with a URLRewrite field apply host/path rewriting on the
+// RouteAction before forwarding to the backend.
 func BuildOutboundServiceVirtualHost(name string, domains []string, rules []GammaRoute) *routev3.VirtualHost {
 	if len(rules) == 0 {
 		return BuildOutboundClusterVirtualHost(name, domains)
 	}
 	var routes []*routev3.Route
 	for _, rule := range rules {
-		action := gammaRouteAction(name, rule)
 		matches := rule.Matches
 		if len(matches) == 0 {
 			matches = []GammaMatch{{Prefix: "/"}}
@@ -249,11 +288,15 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 		for _, m := range matches {
 			r := &routev3.Route{
 				Match:                   gammaRouteMatch(m),
-				Action:                  action,
 				RequestHeadersToAdd:     reqAdd,
 				RequestHeadersToRemove:  reqRemove,
 				ResponseHeadersToAdd:    respAdd,
 				ResponseHeadersToRemove: respRemove,
+			}
+			if rule.Redirect != nil {
+				r.Action = gammaRedirectAction(rule.Redirect)
+			} else {
+				r.Action = gammaRouteAction(name, rule)
 			}
 			routes = append(routes, r)
 		}
@@ -356,5 +399,56 @@ func gammaRouteAction(serviceCluster string, rule GammaRoute) *routev3.Route_Rou
 		}
 		ra.ClusterSpecifier = &routev3.RouteAction_WeightedClusters{WeightedClusters: weighted}
 	}
+	applyURLRewrite(ra, rule.URLRewrite)
 	return &routev3.Route_Route{Route: ra}
+}
+
+// gammaRedirectAction converts a GammaRedirect into an Envoy Route_Redirect action.
+// The returned action replaces the RouteAction entirely — no backend cluster is used.
+func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
+	a := &routev3.RedirectAction{}
+	if rd.Scheme != "" {
+		a.SchemeRewriteSpecifier = &routev3.RedirectAction_SchemeRedirect{SchemeRedirect: rd.Scheme}
+	}
+	if rd.Hostname != "" {
+		a.HostRedirect = rd.Hostname
+	}
+	if rd.Port != 0 {
+		a.PortRedirect = rd.Port
+	}
+	switch rd.StatusCode {
+	case 302:
+		a.ResponseCode = routev3.RedirectAction_FOUND
+	default:
+		// 301 is the Gateway API default; also covers 0 (unset).
+		a.ResponseCode = routev3.RedirectAction_MOVED_PERMANENTLY
+	}
+	switch rd.PathType {
+	case "ReplaceFullPath":
+		a.PathRewriteSpecifier = &routev3.RedirectAction_PathRedirect{PathRedirect: rd.PathValue}
+	case "ReplacePrefixMatch":
+		a.PathRewriteSpecifier = &routev3.RedirectAction_PrefixRewrite{PrefixRewrite: rd.PathValue}
+	}
+	return &routev3.Route_Redirect{Redirect: a}
+}
+
+// applyURLRewrite writes URLRewrite fields onto an existing RouteAction.
+// hostname → HostRewriteLiteral; ReplacePrefixMatch → PrefixRewrite;
+// ReplaceFullPath → RegexRewrite matching .* → the new path.
+func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite) {
+	if rw == nil {
+		return
+	}
+	if rw.Hostname != "" {
+		ra.HostRewriteSpecifier = &routev3.RouteAction_HostRewriteLiteral{HostRewriteLiteral: rw.Hostname}
+	}
+	switch rw.PathType {
+	case "ReplacePrefixMatch":
+		ra.PrefixRewrite = rw.PathValue
+	case "ReplaceFullPath":
+		ra.RegexRewrite = &matcherv3.RegexMatchAndSubstitute{
+			Pattern:      &matcherv3.RegexMatcher{Regex: ".*"},
+			Substitution: rw.PathValue,
+		}
+	}
 }

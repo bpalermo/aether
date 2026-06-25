@@ -258,14 +258,15 @@ func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule) proxy.GammaRo
 		gr.Matches = append(gr.Matches, gm)
 	}
 	gr.HeaderMutation = buildHTTPHeaderMutation(rule.Filters)
+	gr.Redirect = buildHTTPRedirect(rule.Filters)
+	gr.URLRewrite = buildHTTPURLRewrite(rule.Filters)
 	return gr
 }
 
 // buildHTTPHeaderMutation merges all RequestHeaderModifier and
 // ResponseHeaderModifier filters in an HTTPRoute rule's filter list into a single
-// GammaHeaderMutation. Unknown filter types are silently skipped so future
-// filter types (redirect, rewrite, mirror) can be added without breaking this
-// path. Returns nil when no modifier filter is present.
+// GammaHeaderMutation. Unknown filter types (redirect, rewrite, mirror) are silently
+// skipped. Returns nil when no modifier filter is present.
 func buildHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaHeaderMutation {
 	var m *proxy.GammaHeaderMutation
 	ensure := func() {
@@ -299,11 +300,85 @@ func buildHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaHe
 				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
 			}
 			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
-			// Redirect, rewrite, mirror, and extension filter types are not handled
-			// here — they are future items and are silently skipped.
+			// Redirect, rewrite, mirror: handled by dedicated builders below; skip here.
 		}
 	}
 	return m
+}
+
+// buildHTTPRedirect extracts the first RequestRedirect filter from an HTTPRoute
+// rule's filter list and converts it to a GammaRedirect. Returns nil when no
+// redirect filter is present. A rule with a RequestRedirect filter yields a redirect
+// route (no backend cluster) per the Gateway API spec.
+func buildHTTPRedirect(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaRedirect {
+	for _, f := range filters {
+		if f.Type != gatewayv1.HTTPRouteFilterRequestRedirect || f.RequestRedirect == nil {
+			continue
+		}
+		rd := f.RequestRedirect
+		r := &proxy.GammaRedirect{}
+		if rd.Scheme != nil {
+			r.Scheme = *rd.Scheme
+		}
+		if rd.Hostname != nil {
+			r.Hostname = string(*rd.Hostname)
+		}
+		if rd.Port != nil {
+			r.Port = uint32(*rd.Port)
+		}
+		if rd.StatusCode != nil {
+			r.StatusCode = *rd.StatusCode
+		}
+		if rd.Path != nil {
+			switch rd.Path.Type {
+			case gatewayv1.FullPathHTTPPathModifier:
+				if rd.Path.ReplaceFullPath != nil {
+					r.PathType = "ReplaceFullPath"
+					r.PathValue = *rd.Path.ReplaceFullPath
+				}
+			case gatewayv1.PrefixMatchHTTPPathModifier:
+				if rd.Path.ReplacePrefixMatch != nil {
+					r.PathType = "ReplacePrefixMatch"
+					r.PathValue = *rd.Path.ReplacePrefixMatch
+				}
+			}
+		}
+		return r
+	}
+	return nil
+}
+
+// buildHTTPURLRewrite extracts the first URLRewrite filter from an HTTPRoute
+// rule's filter list and converts it to a GammaURLRewrite. Returns nil when no
+// URLRewrite filter is present. URLRewrite is applied on the RouteAction (the
+// request still proxies to the backend).
+func buildHTTPURLRewrite(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaURLRewrite {
+	for _, f := range filters {
+		if f.Type != gatewayv1.HTTPRouteFilterURLRewrite || f.URLRewrite == nil {
+			continue
+		}
+		rw := f.URLRewrite
+		r := &proxy.GammaURLRewrite{}
+		if rw.Hostname != nil {
+			r.Hostname = string(*rw.Hostname)
+		}
+		if rw.Path != nil {
+			switch rw.Path.Type {
+			case gatewayv1.FullPathHTTPPathModifier:
+				if rw.Path.ReplaceFullPath != nil {
+					r.PathType = "ReplaceFullPath"
+					r.PathValue = *rw.Path.ReplaceFullPath
+				}
+			case gatewayv1.PrefixMatchHTTPPathModifier:
+				if rw.Path.ReplacePrefixMatch != nil {
+					r.PathType = "ReplacePrefixMatch"
+					r.PathValue = *rw.Path.ReplacePrefixMatch
+				}
+			}
+		}
+		return r
+	}
+	return nil
 }
 
 // buildGRPCHeaderMutation merges all RequestHeaderModifier and
