@@ -42,6 +42,11 @@ type RouteSink interface {
 	// on every reconcile based on whether any Gateway in the current set carries
 	// the gateway.aether.io/http-redirect: "true" annotation.
 	SetEdgeHTTPRedirect(enabled bool)
+	// SetEdgeGateways replaces the per-Gateway routing set (proposal 021 Phase 2).
+	// When non-empty, the snapshot emits per-Gateway listeners and route configs
+	// (one per Gateway, bound on allocated internal ports) instead of the shared
+	// Phase 1 listeners. When empty, falls back to Phase 1 behavior.
+	SetEdgeGateways(gateways []cache.EdgeGatewayEntry)
 }
 
 // Reconciler watches Gateway API HTTPRoutes, TCPRoutes, and TLSRoutes (and the
@@ -71,7 +76,8 @@ type Reconciler struct {
 	// EdgeServiceName is the name of the edge's own LoadBalancer Service (in
 	// Namespace). Its status.loadBalancer.ingress address is published as every
 	// class-aether Gateway's status.addresses (proposal 021 Phase 1 — the shared
-	// edge address). Empty disables address publication.
+	// edge address), and is used as the base name for per-Gateway Services in Phase 2.
+	// Empty disables address publication.
 	EdgeServiceName string
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves.
 	GatewayClassName string
@@ -79,7 +85,12 @@ type Reconciler struct {
 	Secrets *secret.Registry
 	// MeshDomain is the mesh DNS domain used to build TCP cluster names.
 	MeshDomain string
-	Log        *slog.Logger
+	// PerGatewayAddressing enables proposal 021 Phase 2: a per-Gateway LoadBalancer
+	// Service + internal-port demux so each Gateway gets its own external IP. When
+	// false (or when EdgeServiceName is empty), the reconciler falls back to Phase 1
+	// (single shared edge LB IP for all Gateways).
+	PerGatewayAddressing bool
+	Log                  *slog.Logger
 }
 
 // SetupWithManager registers the reconciler to watch HTTPRoutes, TCPRoutes,
@@ -101,6 +112,10 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// ReferenceGrant (v1beta1): a grant change can flip a cross-namespace
 		// backendRef between permitted and RefNotPermitted, so re-project everything.
 		Watches(&gatewayv1beta1.ReferenceGrant{}, resync).
+		// Watch Services in the edge namespace: when MetalLB assigns a LoadBalancer
+		// IP to a per-Gateway Service, the Service status changes and we must
+		// re-publish status.addresses on the corresponding Gateway.
+		Watches(&corev1.Service{}, resync).
 		Named("gatewayapi")
 	if r.Secrets != nil {
 		b = b.Watches(&corev1.Secret{}, resync)
@@ -218,16 +233,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return 0
 	})
 
-	// Determine whether ANY of our Gateways opts into HTTP→HTTPS redirect via the
-	// gateway.aether.io/http-redirect: "true" annotation. This replaces the global
-	// edgeTLSEnabled-based redirect (which redirected ALL HTTP traffic whenever TLS
-	// was enabled on the process). With this per-Gateway opt-in, a plain HTTP Gateway
-	// listener serves its routes by default; only annotated Gateways redirect.
+	// Determine per-Gateway HTTP redirect opt-in (gateway.aether.io/http-redirect).
+	// In Phase 1 this is a single bool; in Phase 2 it is tracked per Gateway key.
 	httpRedirect := false
+	gatewayHTTPRedirect := make(map[gatewayKey]bool, len(ourGateways))
 	for i := range ourGateways {
 		if ourGateways[i].Annotations[constants.AnnotationGatewayHTTPRedirect] == "true" {
 			httpRedirect = true
-			break
+			gk := gatewayKey{Namespace: ourGateways[i].Namespace, Name: ourGateways[i].Name}
+			gatewayHTTPRedirect[gk] = true
 		}
 	}
 	r.Sink.SetEdgeHTTPRedirect(httpRedirect)
@@ -236,6 +250,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if err := r.Sink.SetEdgeTLSSecrets(ctx, certs); err != nil {
 			return reconcile.Result{}, err
 		}
+	}
+
+	// Phase 2: per-Gateway LoadBalancer Services + per-Gateway listeners.
+	// When PerGatewayAddressing is enabled and EdgeServiceName is set, we manage
+	// per-Gateway Services and emit per-Gateway listeners. Otherwise fall back to
+	// Phase 1 (shared SetVirtualHosts path).
+	var perGWAssignedIPs map[gatewayKey]string
+	if r.PerGatewayAddressing && r.EdgeServiceName != "" && len(ourGateways) > 0 {
+		allocations, allocErr := allocateGatewayListenerPorts(ourGateways, hostCerts)
+		if allocErr != nil {
+			r.Log.WarnContext(ctx, "per-Gateway port allocation failed, falling back to Phase 1",
+				"error", allocErr.Error())
+			// Fall through to Phase 1 path.
+			r.Sink.SetEdgeGateways(nil)
+		} else {
+			ips, svcErr := r.reconcileGatewayServices(ctx, ourGateways, allocations)
+			if svcErr != nil {
+				r.Log.WarnContext(ctx, "per-Gateway Service reconcile error", "error", svcErr.Error())
+			}
+			perGWAssignedIPs = ips
+			entries := buildEdgeGatewayEntries(ourGateways, vhosts, allocations, gatewayHTTPRedirect)
+			r.Sink.SetEdgeGateways(entries)
+			r.Log.DebugContext(ctx, "projected per-Gateway entries",
+				"gateways", len(entries))
+			// In Phase 2 we still call SetVirtualHosts with the full vhosts so
+			// the Phase 1 fallback route table is up-to-date (no-op at snapshot
+			// time when per-Gateway mode is active, but keeps state consistent
+			// for edge cases like a reconcile that loses the Phase 2 allocations).
+		}
+	} else {
+		// Phase 1 / disabled: clear any stale Phase 2 state.
+		r.Sink.SetEdgeGateways(nil)
 	}
 	r.Sink.SetVirtualHosts(vhosts)
 	r.Sink.SetEdgeTCPRoutes(tcpRoutes)
@@ -248,13 +294,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		"tcpListeners", len(tcpRoutes),
 		"tlsListeners", len(tlsRoutes),
 		"tlsCerts", len(certs),
+		"perGatewayAddressing", r.PerGatewayAddressing,
 	)
 
 	// Publish Gateway API status (the conformance on-ramp). Failures are logged,
 	// not fatal — the data plane is already projected and the next reconcile
 	// retries. The GatewayClass, Gateways, and routes we own all get conditions.
 	r.writeGatewayClassStatus(ctx)
-	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, tlsResults)
+	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, tlsResults, perGWAssignedIPs)
 	r.writeRouteStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, grants)
 	return reconcile.Result{}, nil
 }

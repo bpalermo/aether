@@ -30,9 +30,10 @@ func (statusFakeSink) SetVirtualHosts([]cache.VirtualHost) {}
 func (statusFakeSink) SetEdgeTLSSecrets(context.Context, map[string]cache.EdgeTLSCert) error {
 	return nil
 }
-func (statusFakeSink) SetEdgeTCPRoutes([]proxy.EdgeL4TCPRoute) {}
-func (statusFakeSink) SetEdgeTLSRoutes([]proxy.EdgeL4TLSRoute) {}
-func (statusFakeSink) SetEdgeHTTPRedirect(bool)                {}
+func (statusFakeSink) SetEdgeTCPRoutes([]proxy.EdgeL4TCPRoute)  {}
+func (statusFakeSink) SetEdgeTLSRoutes([]proxy.EdgeL4TLSRoute)  {}
+func (statusFakeSink) SetEdgeHTTPRedirect(bool)                 {}
+func (statusFakeSink) SetEdgeGateways([]cache.EdgeGatewayEntry) {}
 
 func statusScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()

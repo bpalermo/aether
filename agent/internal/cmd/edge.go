@@ -56,6 +56,7 @@ func init() {
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
 	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves")
 	edgeCmd.Flags().StringVar(&cfg.EdgeServiceName, "edge-service-name", "", "Name of the edge's own LoadBalancer Service (in the edge namespace); its assigned LB address is published as every class-aether Gateway's status.addresses. Empty disables address publication")
+	edgeCmd.Flags().BoolVar(&cfg.EdgePerGatewayAddressing, "edge-per-gateway-addressing", true, "Enable proposal 021 Phase 2: create a per-Gateway LoadBalancer Service + internal-port demux so each Gateway gets its own external IP (default: true). Set false to fall back to Phase 1 (shared IP)")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -233,15 +234,16 @@ func runEdge(ctx context.Context) (retErr error) {
 		secretRegistry = secret.NewRegistry(secret.NewKubernetesProvider(m.GetClient(), routeNamespace))
 	}
 	gwReconciler := &gatewayapi.Reconciler{
-		Client:           m.GetClient(),
-		APIReader:        m.GetAPIReader(),
-		Sink:             snapshotCache,
-		Namespace:        routeNamespace,
-		EdgeServiceName:  cfg.EdgeServiceName,
-		GatewayClassName: cfg.GatewayClassName,
-		MeshDomain:       cfg.MeshDomain,
-		Secrets:          secretRegistry,
-		Log:              l,
+		Client:               m.GetClient(),
+		APIReader:            m.GetAPIReader(),
+		Sink:                 snapshotCache,
+		Namespace:            routeNamespace,
+		EdgeServiceName:      cfg.EdgeServiceName,
+		GatewayClassName:     cfg.GatewayClassName,
+		MeshDomain:           cfg.MeshDomain,
+		Secrets:              secretRegistry,
+		PerGatewayAddressing: cfg.EdgePerGatewayAddressing,
+		Log:                  l,
 	}
 	if err = gwReconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up Gateway API reconciler: %w", err)

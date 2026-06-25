@@ -111,9 +111,9 @@ type SnapshotCache struct {
 	edgeHTTPRedirectMu sync.RWMutex
 	edgeHTTPRedirect   bool
 
-	// edgeMu guards virtualHosts, edgeTCPRoutes, and edgeTLSRoutes: the routing
-	// the edge serves. The HTTP route config and L4 listeners are built from them,
-	// and their backend-service set scopes the dependency set.
+	// edgeMu guards virtualHosts, edgeTCPRoutes, edgeTLSRoutes, and edgeGateways:
+	// the routing the edge serves. The HTTP route config and L4 listeners are built
+	// from them, and their backend-service set scopes the dependency set.
 	edgeMu       sync.RWMutex
 	virtualHosts []VirtualHost
 	// edgeTCPRoutes holds the edge's TCP listener routes (one per Gateway TCP
@@ -122,6 +122,12 @@ type SnapshotCache struct {
 	// edgeTLSRoutes holds the edge's TLS passthrough listener routes (one per
 	// Gateway TLS listener port, derived from TLSRoutes parented to a Gateway).
 	edgeTLSRoutes []proxy.EdgeL4TLSRoute
+	// edgeGateways is the per-Gateway routing set for proposal 021 Phase 2
+	// (per-Gateway addressing). When non-nil, the edge emits per-Gateway listeners
+	// (bound on internal ports) and per-Gateway route tables instead of the shared
+	// edge_http/edge_https listeners. When nil/empty, the cache falls back to the
+	// Phase 1 shared-listener behavior (edgeHTTPPort, edgeTLSEnabled, etc.).
+	edgeGateways []EdgeGatewayEntry
 
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace

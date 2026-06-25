@@ -39,6 +39,12 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # Per-Gateway LoadBalancer Services (proposal 021 Phase 2): the edge controller
+  # creates/updates/deletes one LoadBalancer Service per Gateway in its own
+  # namespace so MetalLB assigns each Gateway its own external IP.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "update", "patch", "delete"]
   {{- if .Values.edge.tls.enabled }}
   # Read the kubernetes.io/tls Secrets a Gateway listener references (downstream
   # certs, served to Envoy over SDS); watch for hot rotation.

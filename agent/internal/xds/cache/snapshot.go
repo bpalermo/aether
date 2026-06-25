@@ -98,12 +98,17 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		resourcev3.ExtensionConfigType: {subsetExt},
 	}
 	if c.edge {
-		// The edge route table maps external hosts (from VirtualHosts) to the
-		// service clusters via ordered path matches — NOT the FQDN cluster vhosts
-		// the node proxy uses. Always emitted (even empty) so the listener's RDS
-		// reference resolves; the catch-all 404 vhost handles unmatched
-		// authorities. No ODCDS.
-		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(c.virtualHostVhosts())}
+		if c.hasPerGatewayAddressing() {
+			// Proposal 021 Phase 2: one route config per Gateway (edge_rt_<ns>_<gwname>),
+			// serving only that Gateway's attached virtual hosts. Each listener's RDS
+			// reference is isolated — no cross-Gateway route leakage.
+			resources[resourcev3.RouteType] = c.edgeGatewayRouteConfigs()
+		} else {
+			// Phase 1 / fallback: single shared edge_http route config.
+			// Always emitted (even empty) so the listener's RDS reference resolves;
+			// the catch-all 404 vhost handles unmatched authorities. No ODCDS.
+			resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(c.virtualHostVhosts())}
+		}
 	} else {
 		var routes []types.Resource
 		if len(vhosts) > 0 {

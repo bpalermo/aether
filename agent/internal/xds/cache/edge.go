@@ -11,6 +11,36 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
+// EdgeGatewayListenerEntry describes one listener port within a per-Gateway entry.
+// ExternalPort is the Gateway listener's declared port (e.g. 80 or 443).
+// InternalPort is the container port allocated by the port allocator that the
+// per-Gateway LoadBalancer Service maps ExternalPort → InternalPort.
+type EdgeGatewayListenerEntry struct {
+	// ExternalPort is the Gateway listener's declared external port (e.g. 80, 443).
+	ExternalPort uint32
+	// InternalPort is the unique container port allocated for this (Gateway, listener).
+	InternalPort uint32
+	// TLSSecretNames are the SDS cert names for downstream TLS (empty = plain HTTP).
+	TLSSecretNames []string
+	// HTTPRedirect when true means this listener emits an HTTP→HTTPS 301 redirect
+	// instead of serving routes directly.
+	HTTPRedirect bool
+}
+
+// EdgeGatewayEntry is the cache's per-Gateway routing data for proposal 021 Phase 2.
+// Each entry maps to one per-Gateway LoadBalancer Service and a set of per-listener
+// Envoy listeners bound on InternalPorts.
+type EdgeGatewayEntry struct {
+	// Namespace is the Gateway's Kubernetes namespace.
+	Namespace string
+	// Name is the Gateway's name.
+	Name string
+	// Listeners is the per-listener port allocations and TLS config.
+	Listeners []EdgeGatewayListenerEntry
+	// VirtualHosts are the HTTPRoute virtual hosts attached to this Gateway.
+	VirtualHosts []VirtualHost
+}
+
 // VirtualHost is the cache's projection of a VirtualHost CR (without the
 // Kubernetes types): a set of external hosts carrying an ordered list of
 // path-matched routes to mesh services, optionally served under a downstream
@@ -77,6 +107,121 @@ func (c *SnapshotCache) edgeTLSSecretNames() []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// SetEdgeGateways replaces the per-Gateway routing set (proposal 021 Phase 2). When
+// non-empty the snapshot generates per-Gateway listeners (bound on InternalPorts) and
+// per-Gateway route tables instead of the shared edge_http/edge_https listeners.
+// When empty, the cache falls back to Phase 1 (shared-listener) behavior.
+// Thread-safe; triggers a dependency rebuild and snapshot push on change.
+func (c *SnapshotCache) SetEdgeGateways(gateways []EdgeGatewayEntry) {
+	c.edgeMu.Lock()
+	changed := !equalEdgeGateways(c.edgeGateways, gateways)
+	c.edgeGateways = gateways
+	c.edgeMu.Unlock()
+
+	c.rebuildEdgeDependencies()
+	if changed {
+		c.signalDependencyChange()
+	}
+}
+
+// edgeGatewayListeners generates per-Gateway Envoy listeners from edgeGateways.
+// Each Gateway gets one listener per listener entry, bound on InternalPort.
+// All names are UNIQUE (edge_gw_<ns>_<gwname>_<internalPort>) — no two listeners
+// can share a name regardless of how many Gateways are configured (regression guard
+// for #332 where shared name "edge_http" dropped the :443 listener).
+func (c *SnapshotCache) edgeGatewayListeners() []types.Resource {
+	c.edgeMu.RLock()
+	gws := slices.Clone(c.edgeGateways)
+	c.edgeMu.RUnlock()
+
+	var out []types.Resource
+	for _, gw := range gws {
+		for _, ln := range gw.Listeners {
+			if len(ln.TLSSecretNames) > 0 {
+				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames))
+			} else {
+				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect))
+			}
+		}
+	}
+	return out
+}
+
+// edgeGatewayRouteConfigs generates per-Gateway RDS route configurations from
+// edgeGateways. Each Gateway gets one route config with its attached VirtualHosts
+// plus a catch-all 404. The route config name (edge_rt_<ns>_<gwname>) is unique
+// per Gateway and matches the RDS reference in edgeGatewayListeners.
+func (c *SnapshotCache) edgeGatewayRouteConfigs() []types.Resource {
+	c.edgeMu.RLock()
+	gws := slices.Clone(c.edgeGateways)
+	c.edgeMu.RUnlock()
+
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
+
+	var out []types.Resource
+	for _, gw := range gws {
+		vhosts := c.gatewayVhostsLocked(gw.VirtualHosts)
+		rc := proxy.BuildEdgeGatewayRouteConfiguration(gw.Namespace, gw.Name, vhosts)
+		out = append(out, rc)
+	}
+	return out
+}
+
+// gatewayVhostsLocked builds Envoy virtual hosts for one Gateway's VirtualHost
+// slice. It is identical to virtualHostVhosts but scoped to one Gateway's vhosts.
+// Caller must hold clusterMu.
+func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost) []*routev3.VirtualHost {
+	used := make(map[string]struct{})
+	out := make([]*routev3.VirtualHost, 0, len(vhosts))
+	for _, v := range vhosts {
+		domains := make([]string, 0, len(v.Hosts))
+		for _, h := range v.Hosts {
+			if h == "" {
+				continue
+			}
+			if _, ok := used[h]; ok {
+				continue
+			}
+			used[h] = struct{}{}
+			domains = append(domains, h)
+		}
+		if len(domains) == 0 {
+			continue
+		}
+		routes := make([]*routev3.Route, 0, len(v.Routes))
+		for _, r := range v.Routes {
+			if r.Redirect == nil && r.Service == "" {
+				continue
+			}
+			cluster := ""
+			if r.Service != "" {
+				cluster = c.edgeClusterNameLocked(r.Service, r.Port)
+			}
+			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
+		}
+		if len(routes) == 0 {
+			continue
+		}
+		out = append(out, proxy.BuildEdgeVirtualHost(domains[0], domains, routes))
+	}
+	return out
+}
+
+// hasPerGatewayAddressing reports whether per-Gateway addressing (Phase 2) is
+// active. Phase 2 is active when there is at least one EdgeGatewayEntry with at
+// least one listener configured.
+func (c *SnapshotCache) hasPerGatewayAddressing() bool {
+	c.edgeMu.RLock()
+	defer c.edgeMu.RUnlock()
+	for _, gw := range c.edgeGateways {
+		if len(gw.Listeners) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // SetVirtualHosts replaces the edge's exposed virtual hosts. It scopes the
@@ -210,11 +355,13 @@ func (c *SnapshotCache) SetEdgeTLSRoutes(routes []proxy.EdgeL4TLSRoute) {
 }
 
 // rebuildEdgeDependencies recomputes the static dependency set from the union of
-// all edge route backends (HTTP virtual-hosts + TCP routes + TLS routes) and calls
-// SetStaticDependencies. Called whenever any edge route set changes.
+// all edge route backends (HTTP virtual-hosts + per-Gateway virtual-hosts + TCP
+// routes + TLS routes) and calls SetStaticDependencies. Called whenever any edge
+// route set changes.
 func (c *SnapshotCache) rebuildEdgeDependencies() {
 	c.edgeMu.RLock()
 	vhosts := slices.Clone(c.virtualHosts)
+	gws := slices.Clone(c.edgeGateways)
 	tcpRoutes := append([]proxy.EdgeL4TCPRoute(nil), c.edgeTCPRoutes...)
 	tlsRoutes := append([]proxy.EdgeL4TLSRoute(nil), c.edgeTLSRoutes...)
 	c.edgeMu.RUnlock()
@@ -222,9 +369,9 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 	seen := make(map[string]struct{})
 	var services []string
 
-	for _, v := range vhosts {
+	addVhost := func(v VirtualHost) {
 		if len(v.Hosts) == 0 {
-			continue
+			return
 		}
 		for _, r := range v.Routes {
 			if r.Service == "" {
@@ -234,6 +381,16 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 				seen[r.Service] = struct{}{}
 				services = append(services, r.Service)
 			}
+		}
+	}
+
+	for _, v := range vhosts {
+		addVhost(v)
+	}
+	// Per-Gateway vhosts (Phase 2).
+	for _, gw := range gws {
+		for _, v := range gw.VirtualHosts {
+			addVhost(v)
 		}
 	}
 	for _, r := range tcpRoutes {
@@ -421,6 +578,42 @@ func equalEdgeTLSRoutes(a, b []proxy.EdgeL4TLSRoute) bool {
 					return false
 				}
 			}
+		}
+	}
+	return true
+}
+
+// equalEdgeGateways reports whether two EdgeGatewayEntry slices are identical.
+func equalEdgeGateways(a, b []EdgeGatewayEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Namespace != b[i].Namespace || a[i].Name != b[i].Name {
+			return false
+		}
+		if !equalEdgeGatewayListeners(a[i].Listeners, b[i].Listeners) {
+			return false
+		}
+		if !equalVirtualHosts(a[i].VirtualHosts, b[i].VirtualHosts) {
+			return false
+		}
+	}
+	return true
+}
+
+// equalEdgeGatewayListeners reports whether two EdgeGatewayListenerEntry slices
+// are identical (port allocations + TLS config).
+func equalEdgeGatewayListeners(a, b []EdgeGatewayListenerEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ExternalPort != b[i].ExternalPort ||
+			a[i].InternalPort != b[i].InternalPort ||
+			a[i].HTTPRedirect != b[i].HTTPRedirect ||
+			!slices.Equal(a[i].TLSSecretNames, b[i].TLSSecretNames) {
+			return false
 		}
 	}
 	return true

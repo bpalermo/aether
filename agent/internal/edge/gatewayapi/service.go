@@ -1,0 +1,398 @@
+package gatewayapi
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/bpalermo/aether/agent/internal/edge/portalloc"
+	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+)
+
+const (
+	// LabelEdgeGateway is the label applied to per-Gateway LoadBalancer Services for
+	// GC (value = "<namespace>.<name>"). The edge reconciler lists Services with this
+	// label to find stale per-Gateway Services and delete them when their Gateway is
+	// gone.
+	LabelEdgeGateway = "aether.io/edge-gateway"
+
+	// AnnotationMetalLBLoadBalancerIPs is the MetalLB annotation that pins a
+	// LoadBalancer Service to a specific IP from the MetalLB pool.
+	AnnotationMetalLBLoadBalancerIPs = "metallb.universe.tf/loadBalancerIPs"
+)
+
+// edgeSelectorLabels are the pod-selector labels for edge pods — the same set the
+// edge Deployment's pod template carries. Per-Gateway LoadBalancer Services select
+// these pods so traffic reaches any edge replica.
+var edgeSelectorLabels = map[string]string{
+	"app.kubernetes.io/name":      "aether-edge",
+	"app.kubernetes.io/component": "edge",
+}
+
+// gatewayServiceName returns the name of the per-Gateway LoadBalancer Service.
+// Scheme: <edgeFullName>-gw-<ns>-<gwname>, truncated to 63 chars (DNS label).
+func gatewayServiceName(edgeServiceName, namespace, gatewayName string) string {
+	s := fmt.Sprintf("%s-gw-%s-%s", edgeServiceName, namespace, gatewayName)
+	if len(s) > 63 {
+		// Truncate to 63 chars; unlikely in practice for normal names.
+		s = s[:63]
+	}
+	return s
+}
+
+// gatewayLabelValue returns the label value for a per-Gateway Service.
+// Format: "<namespace>.<name>" — uniquely identifies a Gateway.
+func gatewayLabelValue(namespace, name string) string {
+	return namespace + "." + name
+}
+
+// gatewayListenerAllocations holds the port allocation result for one Gateway's
+// listeners: the list of (externalPort → internalPort, TLS, redirect) entries.
+type gatewayListenerAllocation struct {
+	externalPort  uint32
+	internalPort  uint32
+	tlsSecretName string // first resolved TLS cert SDS name (empty = plain HTTP)
+	httpRedirect  bool
+	listenerName  string // Gateway listener section name (for the port allocator key)
+}
+
+// allocateGatewayListenerPorts runs the port allocator for all listeners across
+// all Gateways in one batch, returning the allocation map.
+func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, hostCerts map[string]string) (map[gatewayKey][]gatewayListenerAllocation, error) {
+	// Build allocator keys from all (Gateway, listener) pairs.
+	var keys []portalloc.Key
+	for _, gw := range gws {
+		for _, ln := range gw.Spec.Listeners {
+			keys = append(keys, portalloc.Key{
+				Namespace:    gw.Namespace,
+				GatewayName:  gw.Name,
+				ListenerName: string(ln.Name),
+			})
+		}
+	}
+	ports, err := portalloc.AssignAll(keys)
+	if err != nil {
+		return nil, fmt.Errorf("per-Gateway port allocation: %w", err)
+	}
+
+	result := make(map[gatewayKey][]gatewayListenerAllocation, len(gws))
+	for _, gw := range gws {
+		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
+		var allocs []gatewayListenerAllocation
+		for _, ln := range gw.Spec.Listeners {
+			key := portalloc.Key{
+				Namespace:    gw.Namespace,
+				GatewayName:  gw.Name,
+				ListenerName: string(ln.Name),
+			}
+			internalPort := ports[key]
+			// Determine TLS cert for this listener (from already-resolved hostCerts).
+			tlsSecret := ""
+			if ln.TLS != nil && ln.Hostname != nil {
+				h := string(*ln.Hostname)
+				if c, ok := hostCerts[h]; ok {
+					tlsSecret = c
+				} else if c, ok = hostCerts[""]; ok {
+					tlsSecret = c
+				}
+			} else if ln.TLS != nil {
+				tlsSecret = hostCerts[""]
+			}
+			httpRedirect := false
+			// HTTP→HTTPS redirect: determined per-Gateway from the annotation (passed
+			// in from the reconciler); here we track whether this listener is the HTTP
+			// port on a redirect-enabled Gateway. Since we receive the per-Gateway flag,
+			// we set it on HTTP listeners when the Gateway opted in.
+			allocs = append(allocs, gatewayListenerAllocation{
+				externalPort:  uint32(ln.Port),
+				internalPort:  internalPort,
+				tlsSecretName: tlsSecret,
+				httpRedirect:  httpRedirect,
+				listenerName:  string(ln.Name),
+			})
+		}
+		result[gk] = allocs
+	}
+	return result, nil
+}
+
+// reconcileGatewayServices creates/updates the per-Gateway LoadBalancer Service
+// for each class-aether Gateway, and garbage-collects stale per-Gateway Services
+// whose Gateway no longer exists. Returns a map from gatewayKey → the Service's
+// assigned IP (from status.loadBalancer.ingress), used for status.addresses.
+//
+// The production Gateway (whichever has spec.addresses set, or the one matching
+// the existing shared edge Service) pins its IP via the MetalLB annotation. All
+// other Gateways get auto-assigned IPs from the MetalLB pool.
+func (r *Reconciler) reconcileGatewayServices(
+	ctx context.Context,
+	ourGateways []gatewayv1.Gateway,
+	allocations map[gatewayKey][]gatewayListenerAllocation,
+) (map[gatewayKey]string, error) {
+	assignedIPs := make(map[gatewayKey]string, len(ourGateways))
+	currentGWKeys := make(map[string]struct{}, len(ourGateways))
+
+	for _, gw := range ourGateways {
+		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
+		allocs := allocations[gk]
+		svcName := gatewayServiceName(r.EdgeServiceName, gw.Namespace, gw.Name)
+		currentGWKeys[svcName] = struct{}{}
+
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      svcName,
+				Namespace: r.Namespace,
+			},
+		}
+		// Determine the pinned IP (MetalLB annotation) if spec.addresses is set.
+		pinnedIP := ""
+		for _, addr := range gw.Spec.Addresses {
+			if addr.Type != nil && *addr.Type == gatewayv1.IPAddressType && addr.Value != "" {
+				pinnedIP = addr.Value
+				break
+			}
+		}
+
+		// Build the desired port list from the allocation.
+		ports := make([]corev1.ServicePort, 0, len(allocs))
+		for _, a := range allocs {
+			portName := fmt.Sprintf("port-%d", a.externalPort)
+			ports = append(ports, corev1.ServicePort{
+				Name:       portName,
+				Port:       int32(a.externalPort),
+				TargetPort: intstr.FromInt32(int32(a.internalPort)),
+				Protocol:   corev1.ProtocolTCP,
+			})
+		}
+		if len(ports) == 0 {
+			// No listeners — skip creating a Service for this Gateway.
+			continue
+		}
+
+		// CreateOrUpdate the per-Gateway Service.
+		err := r.createOrUpdateGatewayService(ctx, svc, gw.Namespace, gw.Name, ports, pinnedIP)
+		if err != nil {
+			r.Log.WarnContext(ctx, "failed to reconcile per-Gateway Service",
+				"gateway", gw.Namespace+"/"+gw.Name, "service", svcName, "error", err.Error())
+			continue
+		}
+
+		// Read the (possibly just-created) Service's assigned LB IP.
+		ip := r.readServiceLBIP(ctx, svcName)
+		if ip != "" {
+			assignedIPs[gk] = ip
+		}
+	}
+
+	// GC: delete per-Gateway Services whose Gateway no longer exists. List all
+	// Services in the edge namespace with the LabelEdgeGateway label.
+	if err := r.gcStaleGatewayServices(ctx, currentGWKeys); err != nil {
+		r.Log.WarnContext(ctx, "per-Gateway Service GC error", "error", err.Error())
+	}
+
+	return assignedIPs, nil
+}
+
+// createOrUpdateGatewayService creates or updates one per-Gateway LoadBalancer
+// Service. It applies the gateway selector labels, the per-Gateway label for GC,
+// the MetalLB IP annotation (if pinnedIP is set), and the port mapping.
+func (r *Reconciler) createOrUpdateGatewayService(
+	ctx context.Context,
+	svc *corev1.Service,
+	gwNamespace, gwName string,
+	ports []corev1.ServicePort,
+	pinnedIP string,
+) error {
+	// Fetch the existing Service first (CreateOrUpdate pattern via Get + Create/Update).
+	existing := &corev1.Service{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: svc.Name}, existing)
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("get per-Gateway Service %s: %w", svc.Name, err)
+	}
+
+	labels := map[string]string{
+		LabelEdgeGateway: gatewayLabelValue(gwNamespace, gwName),
+	}
+	annotations := map[string]string{}
+	if pinnedIP != "" {
+		annotations[AnnotationMetalLBLoadBalancerIPs] = pinnedIP
+	}
+
+	if errors.IsNotFound(err) {
+		// Create the Service.
+		svc.Labels = labels
+		svc.Annotations = annotations
+		svc.Spec = corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeLoadBalancer,
+			Selector: edgeSelectorLabels,
+			Ports:    ports,
+		}
+		if err := r.Create(ctx, svc); err != nil {
+			return fmt.Errorf("create per-Gateway Service %s: %w", svc.Name, err)
+		}
+		r.Log.InfoContext(ctx, "created per-Gateway LoadBalancer Service",
+			"gateway", gwNamespace+"/"+gwName, "service", svc.Name, "pinnedIP", pinnedIP)
+		return nil
+	}
+
+	// Update the Service: merge labels/annotations and reconcile ports.
+	updated := existing.DeepCopy()
+	if updated.Labels == nil {
+		updated.Labels = map[string]string{}
+	}
+	for k, v := range labels {
+		updated.Labels[k] = v
+	}
+	if updated.Annotations == nil {
+		updated.Annotations = map[string]string{}
+	}
+	// Set or clear the pinned-IP annotation.
+	if pinnedIP != "" {
+		updated.Annotations[AnnotationMetalLBLoadBalancerIPs] = pinnedIP
+	} else {
+		delete(updated.Annotations, AnnotationMetalLBLoadBalancerIPs)
+	}
+	updated.Spec.Type = corev1.ServiceTypeLoadBalancer
+	updated.Spec.Selector = edgeSelectorLabels
+	updated.Spec.Ports = ports
+
+	if err := r.Update(ctx, updated); err != nil {
+		return fmt.Errorf("update per-Gateway Service %s: %w", svc.Name, err)
+	}
+	return nil
+}
+
+// readServiceLBIP returns the first LoadBalancer ingress IP (or hostname) of the
+// named Service in r.Namespace. Returns "" when the Service hasn't been assigned
+// an address yet (MetalLB is still allocating).
+func (r *Reconciler) readServiceLBIP(ctx context.Context, svcName string) string {
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: svcName}, svc); err != nil {
+		return ""
+	}
+	for _, ing := range svc.Status.LoadBalancer.Ingress {
+		if ing.IP != "" {
+			return ing.IP
+		}
+		if ing.Hostname != "" {
+			return ing.Hostname
+		}
+	}
+	return ""
+}
+
+// gcStaleGatewayServices deletes per-Gateway LoadBalancer Services in r.Namespace
+// that have the LabelEdgeGateway label but are NOT in currentSvcNames (i.e. their
+// Gateway has been deleted or is no longer of our class).
+func (r *Reconciler) gcStaleGatewayServices(ctx context.Context, currentSvcNames map[string]struct{}) error {
+	svcList := &corev1.ServiceList{}
+	// client.HasLabels matches any Service that has the label key, regardless of value.
+	if err := r.List(ctx, svcList,
+		client.InNamespace(r.Namespace),
+		client.HasLabels{LabelEdgeGateway},
+	); err != nil {
+		return fmt.Errorf("list per-Gateway Services for GC: %w", err)
+	}
+	for i := range svcList.Items {
+		s := &svcList.Items[i]
+		if _, current := currentSvcNames[s.Name]; current {
+			continue
+		}
+		if err := r.Delete(ctx, s); err != nil && !errors.IsNotFound(err) {
+			r.Log.WarnContext(ctx, "failed to delete stale per-Gateway Service",
+				"service", s.Name, "error", err.Error())
+		} else {
+			r.Log.InfoContext(ctx, "deleted stale per-Gateway Service", "service", s.Name)
+		}
+	}
+	return nil
+}
+
+// buildEdgeGatewayEntries constructs the []cache.EdgeGatewayEntry that the
+// snapshot cache needs to emit per-Gateway listeners and route configs.
+// It takes the already-projected virtualHosts (the result of the existing
+// HTTP-route projection loop), filters them per-Gateway by hostname intersection,
+// and pairs them with listener port allocations.
+//
+// In Phase 2 each Gateway gets the virtual hosts whose TLSSecret matches the
+// Gateway's listener cert (or all HTTP vhosts for an HTTP Gateway). This is a
+// simplified assignment: each VirtualHost is placed on the Gateway whose
+// listener covers its hosts (by the existing hostCerts resolution). VirtualHosts
+// with no TLSSecret go to HTTP Gateways; those with a TLSSecret go to HTTPS Gateways.
+func buildEdgeGatewayEntries(
+	ourGateways []gatewayv1.Gateway,
+	allVhosts []cache.VirtualHost,
+	allocations map[gatewayKey][]gatewayListenerAllocation,
+	gatewayHTTPRedirect map[gatewayKey]bool,
+) []cache.EdgeGatewayEntry {
+	entries := make([]cache.EdgeGatewayEntry, 0, len(ourGateways))
+
+	for _, gw := range ourGateways {
+		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
+		allocs := allocations[gk]
+		if len(allocs) == 0 {
+			continue
+		}
+
+		// Build the EdgeGatewayListenerEntry slice from allocations.
+		redirect := gatewayHTTPRedirect[gk]
+		lns := make([]cache.EdgeGatewayListenerEntry, 0, len(allocs))
+
+		// Determine which TLS certs are used by this Gateway's listeners.
+		tlsSecretSet := map[string]struct{}{}
+		for _, a := range allocs {
+			if a.tlsSecretName != "" {
+				tlsSecretSet[a.tlsSecretName] = struct{}{}
+			}
+		}
+
+		for _, a := range allocs {
+			var tlsNames []string
+			if a.tlsSecretName != "" {
+				tlsNames = []string{a.tlsSecretName}
+			}
+			isHTTPRedirect := redirect && len(tlsNames) == 0
+			lns = append(lns, cache.EdgeGatewayListenerEntry{
+				ExternalPort:   a.externalPort,
+				InternalPort:   a.internalPort,
+				TLSSecretNames: tlsNames,
+				HTTPRedirect:   isHTTPRedirect,
+			})
+		}
+
+		// Assign vhosts to this Gateway: those whose TLSSecret matches one of this
+		// Gateway's TLS certs (for HTTPS Gateways), or those with no TLSSecret (for
+		// HTTP Gateways, or HTTPS Gateways also serve plain-HTTP routes on their
+		// HTTP listener).
+		var gwVhosts []cache.VirtualHost
+		for _, vh := range allVhosts {
+			if vh.TLSSecret == "" {
+				// Plain HTTP vhost: attach to all Gateways (the listener serving HTTP
+				// for this Gateway will route it). In a multi-Gateway setup this means
+				// every Gateway's HTTP listener has access to all plain-HTTP vhosts.
+				// The per-Gateway route config + per-listener port demux ensures
+				// isolation at the network level.
+				gwVhosts = append(gwVhosts, vh)
+			} else {
+				// TLS vhost: attach only to the Gateway whose listener resolved this cert.
+				if _, ok := tlsSecretSet[vh.TLSSecret]; ok {
+					gwVhosts = append(gwVhosts, vh)
+				}
+			}
+		}
+
+		entries = append(entries, cache.EdgeGatewayEntry{
+			Namespace:    gw.Namespace,
+			Name:         gw.Name,
+			Listeners:    lns,
+			VirtualHosts: gwVhosts,
+		})
+	}
+	return entries
+}
