@@ -270,7 +270,8 @@ func TestBuildVirtualHost_ResponseHeaderModifier(t *testing.T) {
 }
 
 // TestBuildVirtualHost_UnknownFilterSkipped: non-modifier filters produce a nil
-// HeaderMutation (redirect/rewrite are future items, must not panic).
+// HeaderMutation. A bare RequestRedirect filter (no nil RequestRedirect field)
+// with no backendRef still yields no route (nil filter body → skipped).
 func TestBuildVirtualHost_UnknownFilterSkipped(t *testing.T) {
 	r := &Reconciler{}
 	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
@@ -278,13 +279,110 @@ func TestBuildVirtualHost_UnknownFilterSkipped(t *testing.T) {
 			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/"),
 			BackendRefs: backend("svc-1", 0),
 			Filters: []gatewayv1.HTTPRouteFilter{
+				// nil RequestRedirect body → buildHTTPRedirect returns nil → treated as header modifier skip
 				{Type: gatewayv1.HTTPRouteFilterRequestRedirect},
 			},
 		},
 	})
 	vh := r.buildVirtualHost(hr, nil)
 	require.Len(t, vh.Routes, 1)
-	assert.Nil(t, vh.Routes[0].HeaderMutation, "unknown filter must not produce a mutation")
+	assert.Nil(t, vh.Routes[0].HeaderMutation, "unknown/nil-body filter must not produce a header mutation")
+	assert.Nil(t, vh.Routes[0].Redirect, "nil-body redirect filter must produce nil Redirect")
+}
+
+// TestBuildVirtualHost_RequestRedirect: a RequestRedirect filter on an edge
+// HTTPRoute rule is projected into cache.Route.Redirect and no backend is needed.
+func TestBuildVirtualHost_RequestRedirect(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: pathMatch(gatewayv1.PathMatchPathPrefix, "/old"),
+			// No backendRefs — redirect filter provides the action.
+			Filters: []gatewayv1.HTTPRouteFilter{
+				{
+					Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+					RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
+						Scheme:     ptr("https"),
+						Hostname:   ptr(gatewayv1.PreciseHostname("new.example.com")),
+						StatusCode: ptr(301),
+					},
+				},
+			},
+		},
+	})
+	vh := r.buildVirtualHost(hr, nil)
+	require.Len(t, vh.Routes, 1, "redirect rule with no backend must still produce a route")
+	rt := vh.Routes[0]
+	assert.Equal(t, "/old", rt.Prefix)
+	assert.Empty(t, rt.Service, "redirect route must have no backend service")
+	require.NotNil(t, rt.Redirect)
+	assert.Equal(t, "https", rt.Redirect.Scheme)
+	assert.Equal(t, "new.example.com", rt.Redirect.Hostname)
+	assert.Equal(t, 301, rt.Redirect.StatusCode)
+	assert.Nil(t, rt.URLRewrite, "redirect rule must not set URLRewrite")
+}
+
+// TestBuildVirtualHost_URLRewrite: a URLRewrite filter on an edge HTTPRoute rule is
+// projected into cache.Route.URLRewrite while the backend is still used.
+func TestBuildVirtualHost_URLRewrite(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/api"),
+			BackendRefs: backend("svc-1", 8080),
+			Filters: []gatewayv1.HTTPRouteFilter{
+				{
+					Type: gatewayv1.HTTPRouteFilterURLRewrite,
+					URLRewrite: &gatewayv1.HTTPURLRewriteFilter{
+						Hostname: ptr(gatewayv1.PreciseHostname("backend.internal")),
+						Path: &gatewayv1.HTTPPathModifier{
+							Type:               gatewayv1.PrefixMatchHTTPPathModifier,
+							ReplacePrefixMatch: ptr("/v2"),
+						},
+					},
+				},
+			},
+		},
+	})
+	vh := r.buildVirtualHost(hr, nil)
+	require.Len(t, vh.Routes, 1)
+	rt := vh.Routes[0]
+	assert.Equal(t, "/api", rt.Prefix)
+	assert.Equal(t, "svc-1", rt.Service)
+	assert.Equal(t, uint32(8080), rt.Port)
+	require.NotNil(t, rt.URLRewrite)
+	assert.Equal(t, "backend.internal", rt.URLRewrite.Hostname)
+	assert.Equal(t, "ReplacePrefixMatch", rt.URLRewrite.PathType)
+	assert.Equal(t, "/v2", rt.URLRewrite.PathValue)
+	assert.Nil(t, rt.Redirect, "URLRewrite rule must not set Redirect")
+}
+
+// TestBuildVirtualHost_URLRewrite_ReplaceFullPath: URLRewrite with ReplaceFullPath
+// is projected into PathType="ReplaceFullPath".
+func TestBuildVirtualHost_URLRewrite_ReplaceFullPath(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/"),
+			BackendRefs: backend("svc-1", 0),
+			Filters: []gatewayv1.HTTPRouteFilter{
+				{
+					Type: gatewayv1.HTTPRouteFilterURLRewrite,
+					URLRewrite: &gatewayv1.HTTPURLRewriteFilter{
+						Path: &gatewayv1.HTTPPathModifier{
+							Type:            gatewayv1.FullPathHTTPPathModifier,
+							ReplaceFullPath: ptr("/fixed"),
+						},
+					},
+				},
+			},
+		},
+	})
+	vh := r.buildVirtualHost(hr, nil)
+	require.Len(t, vh.Routes, 1)
+	require.NotNil(t, vh.Routes[0].URLRewrite)
+	assert.Equal(t, "ReplaceFullPath", vh.Routes[0].URLRewrite.PathType)
+	assert.Equal(t, "/fixed", vh.Routes[0].URLRewrite.PathValue)
 }
 
 // TestBuildVirtualHost_NoMutationWhenNoFilters: a route with no filters has a nil

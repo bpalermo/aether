@@ -29,12 +29,16 @@ type VirtualHost struct {
 // Prefix/Exact is set; Port 0 means the service's default port.
 // HeaderMutation carries the merged request/response header modifier filters for
 // this rule (nil = no header mutations).
+// When Redirect is non-nil the route returns a redirect response (no backend).
+// When URLRewrite is non-nil the route rewrites the request URL before forwarding.
 type Route struct {
 	Prefix         string
 	Exact          string
 	Service        string
 	Port           uint32
 	HeaderMutation *proxy.GammaHeaderMutation
+	Redirect       *proxy.GammaRedirect
+	URLRewrite     *proxy.GammaURLRewrite
 }
 
 // EdgeTLSCert is raw certificate material for an edge downstream TLS secret,
@@ -131,11 +135,14 @@ func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 		}
 		routes := make([]*routev3.Route, 0, len(v.Routes))
 		for _, r := range v.Routes {
-			if r.Service == "" {
+			if r.Redirect == nil && r.Service == "" {
 				continue
 			}
-			cluster := c.edgeClusterNameLocked(r.Service, r.Port)
-			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation))
+			cluster := ""
+			if r.Service != "" {
+				cluster = c.edgeClusterNameLocked(r.Service, r.Port)
+			}
+			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
 		}
 		if len(routes) == 0 {
 			continue
@@ -280,8 +287,8 @@ func (c *SnapshotCache) edgeTCPListeners() []types.Resource {
 }
 
 // equalRoutes reports whether two Route slices are content-equal. Route carries
-// a *GammaHeaderMutation pointer, so we cannot rely on slices.Equal (pointer
-// identity) — we need a deep comparison.
+// pointer fields (*GammaHeaderMutation, *GammaRedirect, *GammaURLRewrite), so we
+// cannot rely on slices.Equal (pointer identity) — we need a deep comparison.
 func equalRoutes(a, b []Route) bool {
 	if len(a) != len(b) {
 		return false
@@ -294,8 +301,36 @@ func equalRoutes(a, b []Route) bool {
 		if !equalHeaderMutation(ra.HeaderMutation, rb.HeaderMutation) {
 			return false
 		}
+		if !equalRouteRedirect(ra.Redirect, rb.Redirect) {
+			return false
+		}
+		if !equalRouteURLRewrite(ra.URLRewrite, rb.URLRewrite) {
+			return false
+		}
 	}
 	return true
+}
+
+// equalRouteRedirect reports content equality for two *proxy.GammaRedirect values.
+func equalRouteRedirect(a, b *proxy.GammaRedirect) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// equalRouteURLRewrite reports content equality for two *proxy.GammaURLRewrite values.
+func equalRouteURLRewrite(a, b *proxy.GammaURLRewrite) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 // equalHeaderMutation reports content equality for two *GammaHeaderMutation

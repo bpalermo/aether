@@ -283,14 +283,21 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, 
 // the vhost domains, each rule's path match + first backendRef becomes a Route, and
 // the matching Gateway listener cert (by hostname, falling back to a catch-all
 // listener) sets the downstream TLS.
+//
+// Rules with a RequestRedirect filter emit a redirect route (no backend required).
+// Rules with a URLRewrite filter apply host/path rewriting on the forwarding route.
 func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[string]string) cache.VirtualHost {
 	vh := cache.VirtualHost{}
 	for _, h := range hr.Spec.Hostnames {
 		vh.Hosts = append(vh.Hosts, string(h))
 	}
 	for _, rule := range hr.Spec.Rules {
+		redirect := buildHTTPRedirect(rule.Filters)
+		urlRewrite := buildHTTPURLRewrite(rule.Filters)
+
 		backend := firstBackendService(rule.BackendRefs)
-		if backend == "" {
+		// A rule must have either a backend or a redirect to produce a route.
+		if backend == "" && redirect == nil {
 			continue
 		}
 		var port uint32
@@ -299,11 +306,24 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 		}
 		mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
 		if len(rule.Matches) == 0 {
-			vh.Routes = append(vh.Routes, cache.Route{Prefix: "/", Service: backend, Port: port, HeaderMutation: mutation})
+			vh.Routes = append(vh.Routes, cache.Route{
+				Prefix:         "/",
+				Service:        backend,
+				Port:           port,
+				HeaderMutation: mutation,
+				Redirect:       redirect,
+				URLRewrite:     urlRewrite,
+			})
 			continue
 		}
 		for _, m := range rule.Matches {
-			route := cache.Route{Service: backend, Port: port, HeaderMutation: mutation}
+			route := cache.Route{
+				Service:        backend,
+				Port:           port,
+				HeaderMutation: mutation,
+				Redirect:       redirect,
+				URLRewrite:     urlRewrite,
+			}
 			if m.Path != nil && m.Path.Value != nil {
 				switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
 				case gatewayv1.PathMatchExact:
@@ -466,6 +486,77 @@ func ptrType(p *gatewayv1.PathMatchType, def gatewayv1.PathMatchType) gatewayv1.
 	return *p
 }
 
+// buildHTTPRedirect extracts the first RequestRedirect filter and converts it to a
+// GammaRedirect. Returns nil when no redirect filter is present.
+func buildHTTPRedirect(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaRedirect {
+	for _, f := range filters {
+		if f.Type != gatewayv1.HTTPRouteFilterRequestRedirect || f.RequestRedirect == nil {
+			continue
+		}
+		rd := f.RequestRedirect
+		r := &proxy.GammaRedirect{}
+		if rd.Scheme != nil {
+			r.Scheme = *rd.Scheme
+		}
+		if rd.Hostname != nil {
+			r.Hostname = string(*rd.Hostname)
+		}
+		if rd.Port != nil {
+			r.Port = uint32(*rd.Port)
+		}
+		if rd.StatusCode != nil {
+			r.StatusCode = *rd.StatusCode
+		}
+		if rd.Path != nil {
+			switch rd.Path.Type {
+			case gatewayv1.FullPathHTTPPathModifier:
+				if rd.Path.ReplaceFullPath != nil {
+					r.PathType = "ReplaceFullPath"
+					r.PathValue = *rd.Path.ReplaceFullPath
+				}
+			case gatewayv1.PrefixMatchHTTPPathModifier:
+				if rd.Path.ReplacePrefixMatch != nil {
+					r.PathType = "ReplacePrefixMatch"
+					r.PathValue = *rd.Path.ReplacePrefixMatch
+				}
+			}
+		}
+		return r
+	}
+	return nil
+}
+
+// buildHTTPURLRewrite extracts the first URLRewrite filter and converts it to a
+// GammaURLRewrite. Returns nil when no URLRewrite filter is present.
+func buildHTTPURLRewrite(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaURLRewrite {
+	for _, f := range filters {
+		if f.Type != gatewayv1.HTTPRouteFilterURLRewrite || f.URLRewrite == nil {
+			continue
+		}
+		rw := f.URLRewrite
+		r := &proxy.GammaURLRewrite{}
+		if rw.Hostname != nil {
+			r.Hostname = string(*rw.Hostname)
+		}
+		if rw.Path != nil {
+			switch rw.Path.Type {
+			case gatewayv1.FullPathHTTPPathModifier:
+				if rw.Path.ReplaceFullPath != nil {
+					r.PathType = "ReplaceFullPath"
+					r.PathValue = *rw.Path.ReplaceFullPath
+				}
+			case gatewayv1.PrefixMatchHTTPPathModifier:
+				if rw.Path.ReplacePrefixMatch != nil {
+					r.PathType = "ReplacePrefixMatch"
+					r.PathValue = *rw.Path.ReplacePrefixMatch
+				}
+			}
+		}
+		return r
+	}
+	return nil
+}
+
 // buildEdgeHTTPHeaderMutation merges all RequestHeaderModifier and
 // ResponseHeaderModifier filters in an edge HTTPRoute rule's filter list into a
 // single GammaHeaderMutation. Unknown filter types (redirect, rewrite, mirror)
@@ -503,7 +594,7 @@ func buildEdgeHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.Gam
 				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
 			}
 			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
-			// Redirect, rewrite, mirror, extension: future items, silently skipped.
+			// Redirect, rewrite, mirror: handled by dedicated builders above; skip here.
 		}
 	}
 	return m

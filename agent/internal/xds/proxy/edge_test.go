@@ -257,6 +257,62 @@ func TestBuildEdgeTLSPassthroughListener_EmptyRules(t *testing.T) {
 	}))
 }
 
+// TestBuildEdgeRoute_Redirect: BuildEdgeRoute with a non-nil GammaRedirect emits a
+// Route_Redirect action (no cluster) with the correct fields.
+func TestBuildEdgeRoute_Redirect(t *testing.T) {
+	rd := &GammaRedirect{
+		Scheme:     "https",
+		Hostname:   "new.example.com",
+		Port:       8443,
+		StatusCode: 301,
+		PathType:   "ReplaceFullPath",
+		PathValue:  "/new-path",
+	}
+	r := BuildEdgeRoute("/old", "", "", nil, rd, nil)
+
+	require.NotNil(t, r, "BuildEdgeRoute must return a route")
+	assert.Nil(t, r.GetRoute(), "redirect route must not have a RouteAction")
+	rdr := r.GetRedirect()
+	require.NotNil(t, rdr, "redirect route must have a RedirectAction")
+	assert.Equal(t, routev3.RedirectAction_MOVED_PERMANENTLY, rdr.GetResponseCode())
+	assert.Equal(t, "https", rdr.GetSchemeRedirect())
+	assert.Equal(t, "new.example.com", rdr.GetHostRedirect())
+	assert.Equal(t, uint32(8443), rdr.GetPortRedirect())
+	assert.Equal(t, "/new-path", rdr.GetPathRedirect())
+}
+
+// TestBuildEdgeRoute_URLRewrite: BuildEdgeRoute with a non-nil GammaURLRewrite sets
+// the rewrite fields on the RouteAction (cluster is still used).
+func TestBuildEdgeRoute_URLRewrite(t *testing.T) {
+	rw := &GammaURLRewrite{
+		Hostname:  "backend.internal",
+		PathType:  "ReplacePrefixMatch",
+		PathValue: "/v2",
+	}
+	r := BuildEdgeRoute("/api", "", "svc-1.aether.internal", nil, nil, rw)
+
+	require.NotNil(t, r)
+	ra := r.GetRoute()
+	require.NotNil(t, ra, "URLRewrite route must have a RouteAction")
+	assert.Nil(t, r.GetRedirect(), "URLRewrite route must not be a redirect")
+	assert.Equal(t, "svc-1.aether.internal", ra.GetCluster())
+	assert.Equal(t, "backend.internal", ra.GetHostRewriteLiteral())
+	assert.Equal(t, "/v2", ra.GetPrefixRewrite())
+}
+
+// TestBuildEdgeRoute_URLRewrite_FullPath: ReplaceFullPath URLRewrite uses RegexRewrite.
+func TestBuildEdgeRoute_URLRewrite_FullPath(t *testing.T) {
+	rw := &GammaURLRewrite{PathType: "ReplaceFullPath", PathValue: "/fixed"}
+	r := BuildEdgeRoute("/", "", "svc-1.aether.internal", nil, nil, rw)
+
+	ra := r.GetRoute()
+	require.NotNil(t, ra)
+	rr := ra.GetRegexRewrite()
+	require.NotNil(t, rr, "ReplaceFullPath must produce a RegexRewrite")
+	assert.Equal(t, ".*", rr.GetPattern().GetRegex())
+	assert.Equal(t, "/fixed", rr.GetSubstitution())
+}
+
 // TestEdgeUpstreamTCPTransportSocket verifies the edge TCP transport socket uses
 // NO ALPN (not "h2" or "aether-tcp") and NO SNI so the destination inbound falls
 // to the TCP floor DEFAULT chain, while SDS is fetched from spire_agent (not ADS).

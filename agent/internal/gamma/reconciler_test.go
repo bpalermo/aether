@@ -302,7 +302,8 @@ func TestBuildGammaRoute_ResponseHeaderModifier(t *testing.T) {
 }
 
 // TestBuildGammaRoute_UnknownFilterSkipped: non-modifier filters (e.g. redirect)
-// are silently ignored; HeaderMutation is nil when only unknown filters are present.
+// are silently ignored by buildHTTPHeaderMutation; HeaderMutation is nil when only
+// redirect/rewrite filters are present.
 func TestBuildGammaRoute_UnknownFilterSkipped(t *testing.T) {
 	r := &Reconciler{MeshDomain: "mesh"}
 	rule := gatewayv1.HTTPRouteRule{
@@ -314,7 +315,154 @@ func TestBuildGammaRoute_UnknownFilterSkipped(t *testing.T) {
 		},
 	}
 	gr := r.buildGammaRoute(rule)
-	assert.Nil(t, gr.HeaderMutation, "unknown filter type must not produce a mutation")
+	assert.Nil(t, gr.HeaderMutation, "redirect filter type must not produce a HeaderMutation")
+}
+
+// TestBuildGammaRoute_RequestRedirect: a RequestRedirect filter on an HTTPRoute rule
+// is projected into GammaRoute.Redirect with all fields mapped correctly.
+func TestBuildGammaRoute_RequestRedirect(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	tests := []struct {
+		name       string
+		filter     gatewayv1.HTTPRequestRedirectFilter
+		wantScheme string
+		wantHost   string
+		wantPort   uint32
+		wantStatus int
+		wantPType  string
+		wantPValue string
+	}{
+		{
+			name: "scheme+host+port+301",
+			filter: gatewayv1.HTTPRequestRedirectFilter{
+				Scheme:     ptr("https"),
+				Hostname:   ptr(gatewayv1.PreciseHostname("new.example.com")),
+				Port:       ptr(gatewayv1.PortNumber(8443)),
+				StatusCode: ptr(301),
+			},
+			wantScheme: "https",
+			wantHost:   "new.example.com",
+			wantPort:   8443,
+			wantStatus: 301,
+		},
+		{
+			name: "302 ReplaceFullPath",
+			filter: gatewayv1.HTTPRequestRedirectFilter{
+				StatusCode: ptr(302),
+				Path: &gatewayv1.HTTPPathModifier{
+					Type:            gatewayv1.FullPathHTTPPathModifier,
+					ReplaceFullPath: ptr("/new-path"),
+				},
+			},
+			wantStatus: 302,
+			wantPType:  "ReplaceFullPath",
+			wantPValue: "/new-path",
+		},
+		{
+			name: "ReplacePrefixMatch",
+			filter: gatewayv1.HTTPRequestRedirectFilter{
+				Path: &gatewayv1.HTTPPathModifier{
+					Type:               gatewayv1.PrefixMatchHTTPPathModifier,
+					ReplacePrefixMatch: ptr("/api/v2"),
+				},
+			},
+			wantPType:  "ReplacePrefixMatch",
+			wantPValue: "/api/v2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.filter
+			rule := gatewayv1.HTTPRouteRule{
+				Filters: []gatewayv1.HTTPRouteFilter{
+					{Type: gatewayv1.HTTPRouteFilterRequestRedirect, RequestRedirect: &f},
+				},
+			}
+			gr := r.buildGammaRoute(rule)
+			require.NotNil(t, gr.Redirect, "RequestRedirect filter must produce GammaRoute.Redirect")
+			assert.Nil(t, gr.URLRewrite, "RequestRedirect must not produce URLRewrite")
+			assert.Equal(t, tc.wantScheme, gr.Redirect.Scheme)
+			assert.Equal(t, tc.wantHost, gr.Redirect.Hostname)
+			assert.Equal(t, tc.wantPort, gr.Redirect.Port)
+			assert.Equal(t, tc.wantStatus, gr.Redirect.StatusCode)
+			assert.Equal(t, tc.wantPType, gr.Redirect.PathType)
+			assert.Equal(t, tc.wantPValue, gr.Redirect.PathValue)
+		})
+	}
+}
+
+// TestBuildGammaRoute_URLRewrite: a URLRewrite filter on an HTTPRoute rule is
+// projected into GammaRoute.URLRewrite with all fields mapped correctly.
+func TestBuildGammaRoute_URLRewrite(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	tests := []struct {
+		name       string
+		filter     gatewayv1.HTTPURLRewriteFilter
+		wantHost   string
+		wantPType  string
+		wantPValue string
+	}{
+		{
+			name:     "hostname rewrite",
+			filter:   gatewayv1.HTTPURLRewriteFilter{Hostname: ptr(gatewayv1.PreciseHostname("backend.internal"))},
+			wantHost: "backend.internal",
+		},
+		{
+			name: "ReplaceFullPath",
+			filter: gatewayv1.HTTPURLRewriteFilter{
+				Path: &gatewayv1.HTTPPathModifier{
+					Type:            gatewayv1.FullPathHTTPPathModifier,
+					ReplaceFullPath: ptr("/fixed"),
+				},
+			},
+			wantPType:  "ReplaceFullPath",
+			wantPValue: "/fixed",
+		},
+		{
+			name: "ReplacePrefixMatch",
+			filter: gatewayv1.HTTPURLRewriteFilter{
+				Path: &gatewayv1.HTTPPathModifier{
+					Type:               gatewayv1.PrefixMatchHTTPPathModifier,
+					ReplacePrefixMatch: ptr("/api/v2"),
+				},
+			},
+			wantPType:  "ReplacePrefixMatch",
+			wantPValue: "/api/v2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.filter
+			rule := gatewayv1.HTTPRouteRule{
+				Filters: []gatewayv1.HTTPRouteFilter{
+					{Type: gatewayv1.HTTPRouteFilterURLRewrite, URLRewrite: &f},
+				},
+				BackendRefs: []gatewayv1.HTTPBackendRef{
+					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
+				},
+			}
+			gr := r.buildGammaRoute(rule)
+			require.NotNil(t, gr.URLRewrite, "URLRewrite filter must produce GammaRoute.URLRewrite")
+			assert.Nil(t, gr.Redirect, "URLRewrite must not produce Redirect")
+			assert.Equal(t, tc.wantHost, gr.URLRewrite.Hostname)
+			assert.Equal(t, tc.wantPType, gr.URLRewrite.PathType)
+			assert.Equal(t, tc.wantPValue, gr.URLRewrite.PathValue)
+		})
+	}
+}
+
+// TestBuildGammaRoute_NilRedirectWhenNoFilter: no redirect/rewrite filter means
+// GammaRoute.Redirect and URLRewrite are nil (regression guard).
+func TestBuildGammaRoute_NilRedirectWhenNoFilter(t *testing.T) {
+	r := &Reconciler{MeshDomain: "mesh"}
+	rule := gatewayv1.HTTPRouteRule{
+		BackendRefs: []gatewayv1.HTTPBackendRef{
+			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
+		},
+	}
+	gr := r.buildGammaRoute(rule)
+	assert.Nil(t, gr.Redirect, "no filter must produce nil Redirect")
+	assert.Nil(t, gr.URLRewrite, "no filter must produce nil URLRewrite")
 }
 
 // TestBuildGammaRouteFromGRPC_HeaderModifier: GRPCRoute request/response header

@@ -70,6 +70,12 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 	if !equalGammaHeaderMutation(a.HeaderMutation, b.HeaderMutation) {
 		return false
 	}
+	if !equalGammaRedirect(a.Redirect, b.Redirect) {
+		return false
+	}
+	if !equalGammaURLRewrite(a.URLRewrite, b.URLRewrite) {
+		return false
+	}
 	for i := range a.Matches {
 		ma, mb := a.Matches[i], b.Matches[i]
 		if ma.Prefix != mb.Prefix || ma.Exact != mb.Exact || ma.Regex != mb.Regex || len(ma.Headers) != len(mb.Headers) {
@@ -87,6 +93,28 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 		}
 	}
 	return true
+}
+
+// equalGammaRedirect reports content equality for two *GammaRedirect values.
+func equalGammaRedirect(a, b *proxy.GammaRedirect) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// equalGammaURLRewrite reports content equality for two *GammaURLRewrite values.
+func equalGammaURLRewrite(a, b *proxy.GammaURLRewrite) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 // equalGammaHeaderMutation compares two *GammaHeaderMutation values for content
