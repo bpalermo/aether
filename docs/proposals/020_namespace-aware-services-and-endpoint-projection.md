@@ -66,14 +66,34 @@ demand-scoping, and CNI registration. Slices remain a projection.
 
 - **Opt-in, default OFF** (per-service annotation, e.g. `aether.io/expose-endpoints:
   "true"`) — preserves zero-trust by default.
-- aether **projects** the registry's *local* endpoints into `EndpointSlice`s owned by
-  the generated mesh Service (read-only output; the registrar/agent writes them from the
-  registry). The CNI + registry remain the source of truth.
+
+**The registry is the single source of truth — the Service is selectorless, and the
+slices are a projection, NOT a selector.** This is the crux. aether membership is
+*identity-based* (the CNI registers a pod by `aether.io/managed=true` + its
+ServiceAccount → the service key `<ns>/<svc>`); a Kubernetes Service `selector` is
+*label-based*. Those are two different definitions of "which pods are endpoints," and if
+both exist they **drift**: a pod that matches the selector but isn't registered yet, or a
+registered pod missing the selector label, lands in one set and not the other — so
+non-mesh consumers (kube-proxy → slices) and mesh consumers (capture → registry EDS) would
+see **different endpoint sets** for the same Service. Avoid that split-brain by having
+**one** source:
+
+- aether **projects** the registry's *local* endpoints into `EndpointSlice`s owned by the
+  generated (selectorless) mesh Service — a read-only output the registrar/agent writes
+  from the registry. There is nothing to "align," because the slices *are* the registry's
+  local view by construction.
+- **Project mesh health into the slice conditions.** The slice `Ready`/`Terminating`
+  conditions carry the registry's health (CNI liveness + the two-phase drain), so a pod
+  the mesh is draining stops receiving non-mesh traffic too. This is *more* correct than a
+  raw selector, which only sees k8s readiness and would keep steering non-mesh traffic at
+  a draining pod.
+
 - **Coexistence on one ClusterIP** — no collision, because the capture redirect only
   exists in *meshed* pod netns:
   - mesh pod → CNI capture-redirect → proxy → registry EDS (mTLS, cross-cluster,
     demand-scoped);
   - non-mesh pod / kube-proxy → projected `EndpointSlice` → local pod.
+
 - **Caveats (why opt-in, not a blanket must):**
   - **Local endpoints only.** Cross-cluster non-mesh reachability is bounded by the
     proposal 019 connectivity mode (waypoint / flat network); projection covers
@@ -82,6 +102,18 @@ demand-scoping, and CNI registration. Slices remain a projection.
     `127.0.0.1` (inbound proxy forwards) won't accept a direct connection.
   - It is a **deliberate mTLS/identity bypass** for that path (the non-mesh client skips
     the inbound `:15008` handshake). Per-service opt-in, never default.
+
+**Discouraged alternative — a generated selector.** If standard-k8s ergonomics (letting
+the EndpointSlice controller build the slices, `kubectl get endpoints`, third-party
+controllers) are wanted, a selector is acceptable *only if aether generates it from the
+exact same membership* — never user-authored. The registrar/injecting webhook stamps a
+per-service label mirroring the registration (e.g. `aether.io/service: <svc>`) on
+registered pods, and the mesh Service selector is `{aether.io/managed: "true",
+aether.io/service: "<svc>"}`, so the two align *because the same membership produces
+both*. The trade-offs vs the projection: it adds a per-service label that must stay in
+sync (a new drift surface), and it hands local-endpoint health back to k8s readiness,
+losing the mesh's drain/liveness signal on that path. **A user-authored selector that is
+"supposed to match" the registry is the trap — don't allow it.**
 
 ### Part 3 — Service-from-ServiceAccount decoupling (deferred)
 
