@@ -155,6 +155,130 @@ func TestEdgeL4ListenerNames(t *testing.T) {
 	assert.Equal(t, "edge_tls_8443", EdgeTLSListenerName(8443))
 }
 
+// TestEdgeGatewayListenerNaming verifies per-Gateway listener and route names are
+// unique across (Gateway, port) pairs — regression guard for #332 where all edge
+// listeners shared "edge_http" causing the :443 listener to be silently dropped.
+func TestEdgeGatewayListenerNaming(t *testing.T) {
+	cases := []struct {
+		ns, gw     string
+		port       uint32
+		wantSuffix string
+	}{
+		{"aether-ingress", "edge", 18100, "edge_gw_aether-ingress_edge_18100"},
+		{"aether-ingress", "edge", 18101, "edge_gw_aether-ingress_edge_18101"},
+		{"conformance", "same-ns", 18200, "edge_gw_conformance_same-ns_18200"},
+	}
+	names := map[string]bool{}
+	for _, tc := range cases {
+		n := EdgeGatewayListenerName(tc.ns, tc.gw, tc.port)
+		assert.Equal(t, tc.wantSuffix, n)
+		assert.False(t, names[n], "listener name %q must be unique across cases", n)
+		names[n] = true
+	}
+}
+
+// TestEdgeGatewayListenerNamesAllDistinct verifies that for a typical set of
+// Gateways and listeners (as seen in conformance), ALL listener names are distinct
+// — this is the core guarantee of proposal 021 Phase 2 (no LDS collision).
+func TestEdgeGatewayListenerNamesAllDistinct(t *testing.T) {
+	type gwListener struct {
+		ns, gw, listenerSection string
+	}
+	pairs := []gwListener{
+		{"aether-ingress", "edge", "http"},
+		{"aether-ingress", "edge", "https"},
+		{"gateway-conformance-infra", "same-namespace", "http"},
+		{"gateway-conformance-infra", "backend-namespaces", "http"},
+		{"gateway-conformance-app-backend", "my-gateway", "http"},
+	}
+	// Assign unique internal ports (simulating the allocator).
+	names := map[string]bool{}
+	for i, p := range pairs {
+		internalPort := uint32(18100 + i)
+		n := EdgeGatewayListenerName(p.ns, p.gw, internalPort)
+		assert.False(t, names[n], "collision: listener name %q already used", n)
+		names[n] = true
+	}
+	assert.Len(t, names, len(pairs))
+}
+
+// TestEdgeGatewayRouteNameUnique verifies per-Gateway route config names are unique.
+func TestEdgeGatewayRouteNameUnique(t *testing.T) {
+	n1 := EdgeGatewayRouteName("ns-a", "gw1")
+	n2 := EdgeGatewayRouteName("ns-b", "gw1")
+	n3 := EdgeGatewayRouteName("ns-a", "gw2")
+	assert.NotEqual(t, n1, n2)
+	assert.NotEqual(t, n1, n3)
+	assert.NotEqual(t, n2, n3)
+	assert.Equal(t, "edge_rt_ns-a_gw1", n1)
+}
+
+// TestBuildEdgeGatewayHTTPListener verifies the per-Gateway plain-HTTP listener:
+// unique name, bound on the internal port, RDS to the per-Gateway route config.
+func TestBuildEdgeGatewayHTTPListener(t *testing.T) {
+	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18150, false)
+	assert.Equal(t, "edge_gw_ns-a_my-gw_18150", l.GetName())
+	assert.Equal(t, uint32(18150), l.GetAddress().GetSocketAddress().GetPortValue())
+	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
+	require.Len(t, l.GetFilterChains(), 1)
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	// Must reference the per-Gateway route config (not the shared "edge_http").
+	assert.Equal(t, "edge_rt_ns-a_my-gw", hcm.GetRds().GetRouteConfigName())
+	// Plain HTTP: no transport socket.
+	assert.Nil(t, l.GetFilterChains()[0].GetTransportSocket())
+}
+
+// TestBuildEdgeGatewayHTTPListener_Redirect verifies the per-Gateway HTTP→HTTPS
+// redirect listener uses an inline route config (no RDS) with the per-Gateway name.
+func TestBuildEdgeGatewayHTTPListener_Redirect(t *testing.T) {
+	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18151, true)
+	assert.Equal(t, "edge_gw_ns-a_my-gw_18151", l.GetName())
+	assert.Equal(t, uint32(18151), l.GetAddress().GetSocketAddress().GetPortValue())
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	// Redirect: uses inline route config (no RDS reference).
+	assert.Nil(t, hcm.GetRds(), "redirect must use inline route config, not RDS")
+	rc := hcm.GetRouteConfig()
+	require.NotNil(t, rc)
+	red := rc.GetVirtualHosts()[0].GetRoutes()[0].GetRedirect()
+	require.NotNil(t, red)
+	assert.True(t, red.GetHttpsRedirect())
+}
+
+// TestBuildEdgeGatewayHTTPSListener verifies the per-Gateway HTTPS listener
+// terminates TLS, uses the per-Gateway route config, and has the unique name.
+func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
+	l := BuildEdgeGatewayHTTPSListener("ns-b", "secure-gw", 18160, []string{"kubernetes/my-cert"})
+	assert.Equal(t, "edge_gw_ns-b_secure-gw_18160", l.GetName())
+	assert.Equal(t, uint32(18160), l.GetAddress().GetSocketAddress().GetPortValue())
+
+	require.Len(t, l.GetFilterChains(), 1)
+	fc := l.GetFilterChains()[0]
+	// TLS transport socket must be set.
+	require.NotNil(t, fc.GetTransportSocket())
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, fc.GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	// Routes via per-Gateway RDS route config.
+	assert.Equal(t, "edge_rt_ns-b_secure-gw", hcm.GetRds().GetRouteConfigName())
+}
+
+// TestBuildEdgeGatewayRouteConfiguration verifies per-Gateway route config:
+// correct name, provided vhosts, catch-all 404.
+func TestBuildEdgeGatewayRouteConfiguration(t *testing.T) {
+	vh := BuildEdgeVirtualHost("api.example.com", []string{"api.example.com"}, []*routev3.Route{})
+	rc := BuildEdgeGatewayRouteConfiguration("ns-a", "gw1", []*routev3.VirtualHost{vh})
+
+	assert.Equal(t, "edge_rt_ns-a_gw1", rc.GetName())
+	require.Len(t, rc.GetVirtualHosts(), 2)
+	assert.Equal(t, "api.example.com", rc.GetVirtualHosts()[0].GetName())
+	last := rc.GetVirtualHosts()[len(rc.GetVirtualHosts())-1]
+	assert.Equal(t, []string{"*"}, last.GetDomains())
+	assert.Equal(t, uint32(404), last.GetRoutes()[0].GetDirectResponse().GetStatus())
+}
+
 // TestBuildEdgeTCPListener_SingleBackend verifies the TCP listener: INBOUND on 0.0.0.0,
 // one filter chain with a tcp_proxy (single-cluster form), no TLS transport socket.
 func TestBuildEdgeTCPListener_SingleBackend(t *testing.T) {

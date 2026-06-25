@@ -234,6 +234,12 @@ edge:
     # The Secret must be in the edge namespace (or tlsSecretNamespace if set).
     tlsSecretName: ""
     tlsSecretNamespace: ""
+  # Per-Gateway addressing (proposal 021 Phase 2): when enabled (the default),
+  # the edge controller creates one LoadBalancer Service per class-aether Gateway,
+  # MetalLB assigns each its own IP from the pool, and the edge proxy binds a
+  # distinct internal port per (Gateway, listener). Set to false to fall back to
+  # Phase 1 (single shared edge LB IP for all Gateways, no per-Gateway Services).
+  perGatewayAddressing: true
   # Downstream (external-facing) TLS. Certs are referenced per Gateway listener
   # (spec.listeners[].tls.certificateRefs, a kubernetes.io/tls Secret in the
   # watched namespace), read by the edge agent and served to Envoy over SDS

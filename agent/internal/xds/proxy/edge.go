@@ -51,6 +51,121 @@ const (
 	defaultEdgeAddress = "0.0.0.0"
 )
 
+// EdgeGatewayListenerName returns the UNIQUE name for a per-Gateway edge listener.
+// Naming scheme: edge_gw_<ns>_<gwname>_<port> — distinct per (Gateway, port).
+// This guarantees no LDS collision across Gateways (regression guard for #332,
+// where all listeners shared "edge_http" and the :443 listener was silently dropped).
+func EdgeGatewayListenerName(namespace, gatewayName string, internalPort uint32) string {
+	return fmt.Sprintf("edge_gw_%s_%s_%d", namespace, gatewayName, internalPort)
+}
+
+// EdgeGatewayRouteName returns the RDS route configuration name for a per-Gateway
+// edge listener. Scheme: edge_rt_<ns>_<gwname>. Each Gateway gets an isolated
+// route table so route leakage between Gateways is impossible.
+func EdgeGatewayRouteName(namespace, gatewayName string) string {
+	return fmt.Sprintf("edge_rt_%s_%s", namespace, gatewayName)
+}
+
+// EdgeGatewayListener is the inputs for building one per-Gateway edge listener
+// (proposal 021 Phase 2). The listener binds on InternalPort (the container/pod
+// port the per-Gateway LoadBalancer Service's targetPort points at) and serves
+// only the routes for this Gateway.
+type EdgeGatewayListener struct {
+	// Namespace is the Gateway's namespace.
+	Namespace string
+	// GatewayName is the Gateway's name.
+	GatewayName string
+	// InternalPort is the container port this listener binds. It is uniquely
+	// allocated per (Gateway, listener section) by the port allocator.
+	InternalPort uint32
+	// TLSSecretNames are the SDS cert names to present for downstream TLS on this
+	// listener (empty = plain HTTP). Cert bytes are already in the snapshot Secrets.
+	TLSSecretNames []string
+	// HTTPRedirect when true emits an HTTP→HTTPS 301 redirect (replaces the route
+	// listener for this Gateway's HTTP port).
+	HTTPRedirect bool
+}
+
+// BuildEdgeGatewayHTTPListener builds a per-Gateway plain-HTTP or HTTP→HTTPS
+// redirect listener. Listener name and RDS route config name are unique per
+// Gateway (proposal 021 Phase 2). When httpRedirect is true, the listener emits
+// a 301 redirect to HTTPS (no RDS reference); otherwise it serves routes via RDS.
+func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort uint32, httpRedirect bool) *listenerv3.Listener {
+	name := EdgeGatewayListenerName(namespace, gatewayName, internalPort)
+	if httpRedirect {
+		// Redirect listener: inline route config (no RDS), no separate route config
+		// resource needed. Re-uses the redirect route logic but names the HCM and
+		// vhost after the Gateway to keep stats distinct.
+		hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", buildEdgeRedirectRouteConfig())
+		hcm.GetRouteConfig().Name = name // unique inline config name avoids any residual collision
+		filterChain := &listenerv3.FilterChain{
+			Name:    name,
+			Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+		}
+		return edgeListener(name, internalPort, filterChain)
+	}
+	// Plain HTTP routing listener: RDS-driven, per-Gateway route config.
+	routeName := EdgeGatewayRouteName(namespace, gatewayName)
+	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
+	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
+		Rds: &http_connection_managerv3.Rds{
+			RouteConfigName: routeName,
+			ConfigSource:    config.XDSConfigSourceADS(),
+		},
+	}
+	filterChain := &listenerv3.FilterChain{
+		Name:    name,
+		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+	}
+	return edgeListener(name, internalPort, filterChain)
+}
+
+// BuildEdgeGatewayHTTPSListener builds a per-Gateway TLS-terminating HTTPS listener.
+// It terminates downstream TLS using the named SDS cert(s) and routes via the
+// per-Gateway RDS route config. The listener name is unique per (Gateway, port).
+func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort uint32, tlsSecretNames []string) *listenerv3.Listener {
+	name := EdgeGatewayListenerName(namespace, gatewayName, internalPort)
+	routeName := EdgeGatewayRouteName(namespace, gatewayName)
+	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
+	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
+		Rds: &http_connection_managerv3.Rds{
+			RouteConfigName: routeName,
+			ConfigSource:    config.XDSConfigSourceADS(),
+		},
+	}
+	filterChain := &listenerv3.FilterChain{
+		Name:    name,
+		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+	}
+	if len(tlsSecretNames) > 0 {
+		filterChain.TransportSocket = edgeDownstreamTLSFromSDS(tlsSecretNames)
+	}
+	return edgeListener(name, internalPort, filterChain)
+}
+
+// BuildEdgeGatewayRouteConfiguration builds the per-Gateway route table from the
+// given virtual hosts. It has a catch-all 404 (no ODCDS — the edge serves only
+// explicitly routed services). The route config name is unique per Gateway.
+func BuildEdgeGatewayRouteConfiguration(namespace, gatewayName string, vhosts []*routev3.VirtualHost) *routev3.RouteConfiguration {
+	all := append([]*routev3.VirtualHost{}, vhosts...)
+	all = append(all, &routev3.VirtualHost{
+		Name:    "edge_not_found",
+		Domains: []string{"*"},
+		Routes: []*routev3.Route{
+			{
+				Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+				Action: &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{Status: 404}},
+			},
+		},
+	})
+	return &routev3.RouteConfiguration{
+		Name:         EdgeGatewayRouteName(namespace, gatewayName),
+		VirtualHosts: all,
+	}
+}
+
 // EdgeTCPListenerName returns the name of an edge TCP listener for a given port.
 // TCPRoute listeners are named edge_tcp_<port> so each Gateway TCP listener
 // gets its own Envoy listener and stats prefix.

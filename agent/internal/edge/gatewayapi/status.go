@@ -61,9 +61,12 @@ func (r *Reconciler) writeGatewayClassStatus(ctx context.Context) {
 
 // writeGatewayStatuses sets, for each of our Gateways, top-level Accepted=True +
 // Programmed=True, a per-listener status (supportedKinds, attachedRoutes,
-// Programmed/Accepted/ResolvedRefs=True), and status.addresses (proposal 021
-// Phase 1: the shared edge LB IP). attachedRoutes is computed from the routes the
-// reconciler already listed.
+// Programmed/Accepted/ResolvedRefs=True), and status.addresses.
+//
+// When perGWAssignedIPs is non-nil (proposal 021 Phase 2), each Gateway gets its
+// own per-Gateway LB IP from that map. Otherwise (Phase 1), every Gateway gets the
+// shared edge LB IP from EdgeServiceName. attachedRoutes is computed from the
+// routes the reconciler already listed.
 func (r *Reconciler) writeGatewayStatuses(
 	ctx context.Context,
 	ourGateways []gatewayv1.Gateway,
@@ -73,13 +76,14 @@ func (r *Reconciler) writeGatewayStatuses(
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
 	tlsResults map[listenerStatusKey]listenerTLSResult,
+	perGWAssignedIPs map[gatewayKey]string,
 ) {
-	// Proposal 021 Phase 1: resolve the shared edge LoadBalancer address once and
-	// publish it on every class-aether Gateway. Resolved at runtime (robust to
-	// MetalLB assignment): if the LB hasn't been assigned an address yet, addrs is
-	// empty and we leave status.addresses untouched this reconcile — the Service
-	// watch re-triggers us once MetalLB assigns it.
-	addrs := r.resolveGatewayAddresses(ctx)
+	// Proposal 021 Phase 1 fallback: resolve the shared edge LoadBalancer address
+	// once and publish it on every class-aether Gateway when Phase 2 is not active.
+	var sharedAddrs []gatewayv1.GatewayStatusAddress
+	if len(perGWAssignedIPs) == 0 {
+		sharedAddrs = r.resolveGatewayAddresses(ctx)
+	}
 	for i := range ourGateways {
 		gw := &ourGateways[i]
 		desired := *gw.DeepCopy()
@@ -182,11 +186,22 @@ func (r *Reconciler) writeGatewayStatuses(
 		listenersChanged := !listenerStatusesEqual(gw.Status.Listeners, listeners)
 		desired.Status.Listeners = listeners
 
-		// Only publish addresses once the LB IP is resolved; never overwrite a
-		// previously-published address with an empty list (which would regress the
-		// Gateway to "no address"). The address write participates in the same
-		// no-op-skip change detection as the conditions so we don't hot-loop.
+		// Publish status.addresses: Phase 2 uses the per-Gateway LB IP; Phase 1
+		// uses the shared edge LB IP. Never overwrite a previously-published address
+		// with an empty list — leave the old address in place and wait for the next
+		// reconcile once MetalLB assigns an IP.
 		addrsChanged := false
+		var addrs []gatewayv1.GatewayStatusAddress
+		if ip, ok := perGWAssignedIPs[gk]; ok && ip != "" {
+			// Phase 2: per-Gateway IP from the per-Gateway LoadBalancer Service.
+			addrs = []gatewayv1.GatewayStatusAddress{{
+				Type:  ptr(gatewayv1.IPAddressType),
+				Value: ip,
+			}}
+		} else {
+			// Phase 1: shared edge LB IP.
+			addrs = sharedAddrs
+		}
 		if len(addrs) > 0 {
 			addrsChanged = !gatewayAddressesEqual(gw.Status.Addresses, addrs)
 			desired.Status.Addresses = addrs

@@ -126,6 +126,12 @@ type AgentConfig struct {
 	EdgeTLS bool
 	// EdgeHTTPSPort is the port the edge TLS listener binds when EdgeTLS is set.
 	EdgeHTTPSPort uint32
+
+	// EdgePerGatewayAddressing enables proposal 021 Phase 2: a per-Gateway
+	// LoadBalancer Service + internal-port demux so each class-aether Gateway
+	// gets its own external IP. When false, falls back to Phase 1 (single shared
+	// edge LB IP for all Gateways). Default: true (edge subcommand only).
+	EdgePerGatewayAddressing bool
 }
 
 // NewAgentConfig creates a new AgentConfig with default values.
@@ -136,18 +142,19 @@ func NewAgentConfig() *AgentConfig {
 			MetricsEnabled:         true,
 			MetricsBindAddress:     ":8080",
 		},
-		MeshConfigPath:          DefaultMeshConfigPath,
-		ProxyServiceNodeID:      constants.DefaultProxyID,
-		EdgeHTTPPort:            proxy.DefaultEdgeHTTPPort,
-		EdgeHTTPSPort:           proxy.DefaultEdgeHTTPSPort,
-		GatewayClassName:        "aether",
-		CNIServerConfig:         cniServer.NewCNIServerConfig(),
-		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
-		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
-		MeshDomain:              commonconstants.DefaultMeshDomain,
-		SpireEnabled:            true,
-		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
-		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
-		RemoveStartupTaint:      true,
+		MeshConfigPath:           DefaultMeshConfigPath,
+		ProxyServiceNodeID:       constants.DefaultProxyID,
+		EdgeHTTPPort:             proxy.DefaultEdgeHTTPPort,
+		EdgeHTTPSPort:            proxy.DefaultEdgeHTTPSPort,
+		EdgePerGatewayAddressing: true,
+		GatewayClassName:         "aether",
+		CNIServerConfig:          cniServer.NewCNIServerConfig(),
+		MountedLocalStorageDir:   constants.DefaultHostCNIRegistryDir,
+		RegistrarAddress:         "aether-registrar.aether-system.svc:443",
+		MeshDomain:               commonconstants.DefaultMeshDomain,
+		SpireEnabled:             true,
+		SpireAdminSocketPath:     constants.DefaultSpireAdminSocketPath,
+		SpireWorkloadSocketPath:  constants.DefaultSpireWorkloadSocketPath,
+		RemoveStartupTaint:       true,
 	}
 }

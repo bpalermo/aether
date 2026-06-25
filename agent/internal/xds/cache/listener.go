@@ -106,25 +106,36 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	//   - TCP listener(s) for each Gateway TCP port from TCPRoutes
 	//   - TLS passthrough listener(s) for each Gateway TLS port from TLSRoutes
 	if c.edge {
-		c.edgeHTTPRedirectMu.RLock()
-		httpRedirect := c.edgeHTTPRedirect
-		c.edgeHTTPRedirectMu.RUnlock()
-
 		var resources []types.Resource
-		if c.edgeTLSEnabled {
-			// TLS listener on httpsPort, under a name DISTINCT from the :80 listener so
-			// the two never collide in the snapshot/LDS (a shared name dropped :443).
-			resources = append(resources,
-				proxy.BuildEdgeListener(proxy.EdgeHTTPSListenerName, c.edgeHTTPSPort, c.edgeTLSSecretNames()),
-			)
-		}
-		if httpRedirect {
-			// At least one Gateway opted into HTTP→HTTPS redirect: emit the redirect
-			// listener on the plain HTTP port (replaces a routing listener for that port).
-			resources = append(resources, proxy.BuildEdgeRedirectListener(c.edgeHTTPPort))
+
+		if c.hasPerGatewayAddressing() {
+			// Proposal 021 Phase 2: per-Gateway listeners, each with a unique name
+			// (edge_gw_<ns>_<gwname>_<internalPort>). No shared edge_http/edge_https
+			// listeners — every Gateway gets its own listener bound on its allocated
+			// internal port. L4 (TCP/TLS passthrough) listeners are still shared.
+			resources = append(resources, c.edgeGatewayListeners()...)
 		} else {
-			// Default: the HTTP-port listener serves its attached HTTPRoutes directly.
-			resources = append(resources, proxy.BuildEdgeListener(proxy.EdgeListenerName, c.edgeHTTPPort, nil))
+			// Phase 1 / fallback: shared edge_http / edge_https / edge_redirect
+			// listeners on the configured global ports.
+			c.edgeHTTPRedirectMu.RLock()
+			httpRedirect := c.edgeHTTPRedirect
+			c.edgeHTTPRedirectMu.RUnlock()
+
+			if c.edgeTLSEnabled {
+				// TLS listener on httpsPort, under a name DISTINCT from the :80 listener so
+				// the two never collide in the snapshot/LDS (a shared name dropped :443).
+				resources = append(resources,
+					proxy.BuildEdgeListener(proxy.EdgeHTTPSListenerName, c.edgeHTTPSPort, c.edgeTLSSecretNames()),
+				)
+			}
+			if httpRedirect {
+				// At least one Gateway opted into HTTP→HTTPS redirect: emit the redirect
+				// listener on the plain HTTP port (replaces a routing listener for that port).
+				resources = append(resources, proxy.BuildEdgeRedirectListener(c.edgeHTTPPort))
+			} else {
+				// Default: the HTTP-port listener serves its attached HTTPRoutes directly.
+				resources = append(resources, proxy.BuildEdgeListener(proxy.EdgeListenerName, c.edgeHTTPPort, nil))
+			}
 		}
 		resources = append(resources, c.edgeTCPListeners()...)
 		return resources

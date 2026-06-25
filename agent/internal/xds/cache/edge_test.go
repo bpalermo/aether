@@ -6,6 +6,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -245,4 +246,165 @@ func TestEdgeHTTPRedirectOptIn(t *testing.T) {
 		assert.Equal(t, uint32(443), byName[proxy.EdgeHTTPSListenerName], "HTTPS listener named edge_https on 443")
 		assert.Equal(t, uint32(80), byName[proxy.EdgeListenerName], "plain HTTP routing listener named edge_http on 80")
 	})
+}
+
+// TestPerGatewayListenerNamesAllDistinct is a regression guard for #332: every
+// per-Gateway listener must have a UNIQUE name. When all listeners shared
+// "edge_http", LDS silently dropped the :443 listener, taking down the HTTPS side.
+func TestPerGatewayListenerNamesAllDistinct(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80) // enable edge mode
+
+	// Simulate 3 Gateways each with HTTP + HTTPS listeners (6 listeners total).
+	gateways := []EdgeGatewayEntry{
+		{
+			Namespace: "aether-ingress",
+			Name:      "edge",
+			Listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 80, InternalPort: 18100, HTTPRedirect: false},
+				{ExternalPort: 443, InternalPort: 18101, TLSSecretNames: []string{"kubernetes/prod-tls"}},
+			},
+			VirtualHosts: []VirtualHost{
+				{Hosts: []string{"api.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-1"}}},
+			},
+		},
+		{
+			Namespace: "conformance",
+			Name:      "same-namespace",
+			Listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 80, InternalPort: 18200, HTTPRedirect: false},
+			},
+			VirtualHosts: []VirtualHost{
+				{Hosts: []string{"conformance.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-2"}}},
+			},
+		},
+		{
+			Namespace: "conformance",
+			Name:      "backend-namespaces",
+			Listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 80, InternalPort: 18300, HTTPRedirect: false},
+			},
+			VirtualHosts: []VirtualHost{
+				{Hosts: []string{"backend.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-3"}}},
+			},
+		},
+	}
+	c.SetEdgeGateways(gateways)
+
+	ls := c.Listeners()
+	names := map[string]bool{}
+	for _, r := range ls {
+		l := r.(*listenerv3.Listener)
+		name := l.GetName()
+		assert.False(t, names[name], "listener name %q must be unique (duplicate = LDS drop, regression for #332)", name)
+		names[name] = true
+	}
+
+	// Must have exactly one listener per (Gateway, listener) pair.
+	assert.Len(t, names, 4, "3 HTTP + 1 HTTPS = 4 distinct listeners")
+}
+
+// TestPerGatewayListenerFallbackToPhase1 verifies that when SetEdgeGateways(nil)
+// is called, the cache falls back to the shared Phase 1 listener (edge_http).
+func TestPerGatewayListenerFallbackToPhase1(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+
+	// Start with Phase 2 gateways, then reset to nil.
+	c.SetEdgeGateways([]EdgeGatewayEntry{
+		{
+			Namespace: "aether-ingress",
+			Name:      "edge",
+			Listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 80, InternalPort: 18100},
+			},
+		},
+	})
+	c.SetEdgeGateways(nil) // reset to Phase 1
+
+	ls := c.Listeners()
+	require.Len(t, ls, 1)
+	l := ls[0].(*listenerv3.Listener)
+	assert.Equal(t, proxy.EdgeListenerName, l.GetName(), "Phase 1 fallback: listener must be the shared edge_http")
+	assert.Equal(t, uint32(80), l.GetAddress().GetSocketAddress().GetPortValue())
+}
+
+// TestPerGatewayRouteConfigIsolation verifies that each Gateway gets its own route
+// config with its own virtual hosts (no cross-Gateway leakage).
+func TestPerGatewayRouteConfigIsolation(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+	c.SetEdgeGateways([]EdgeGatewayEntry{
+		{
+			Namespace: "ns-a",
+			Name:      "gw-a",
+			Listeners: []EdgeGatewayListenerEntry{{ExternalPort: 80, InternalPort: 18100}},
+			VirtualHosts: []VirtualHost{
+				{Hosts: []string{"alpha.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-alpha"}}},
+			},
+		},
+		{
+			Namespace: "ns-b",
+			Name:      "gw-b",
+			Listeners: []EdgeGatewayListenerEntry{{ExternalPort: 80, InternalPort: 18200}},
+			VirtualHosts: []VirtualHost{
+				{Hosts: []string{"beta.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-beta"}}},
+			},
+		},
+	})
+
+	rcs := c.edgeGatewayRouteConfigs()
+	require.Len(t, rcs, 2)
+
+	rcNames := map[string]bool{}
+	for _, r := range rcs {
+		rc, ok := r.(*routev3.RouteConfiguration)
+		require.True(t, ok)
+		rcNames[rc.GetName()] = true
+		// Each route config must only reference its own domains.
+		if rc.GetName() == "edge_rt_ns-a_gw-a" {
+			var domains []string
+			for _, vh := range rc.GetVirtualHosts() {
+				domains = append(domains, vh.GetDomains()...)
+			}
+			assert.Contains(t, domains, "alpha.example.com")
+			assert.NotContains(t, domains, "beta.example.com")
+		} else if rc.GetName() == "edge_rt_ns-b_gw-b" {
+			var domains []string
+			for _, vh := range rc.GetVirtualHosts() {
+				domains = append(domains, vh.GetDomains()...)
+			}
+			assert.Contains(t, domains, "beta.example.com")
+			assert.NotContains(t, domains, "alpha.example.com")
+		}
+	}
+	assert.Contains(t, rcNames, "edge_rt_ns-a_gw-a")
+	assert.Contains(t, rcNames, "edge_rt_ns-b_gw-b")
+}
+
+// TestPerGatewayCertWired verifies that an HTTPS per-Gateway listener references
+// the TLS secret names that were passed in the EdgeGatewayListenerEntry, and
+// that the listener has a transport socket (TLS termination), not plaintext.
+func TestPerGatewayCertWired(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+	c.SetEdgeGateways([]EdgeGatewayEntry{
+		{
+			Namespace: "ns-tls",
+			Name:      "secure-gw",
+			Listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 443, InternalPort: 18110, TLSSecretNames: []string{"kubernetes/my-cert"}},
+			},
+			VirtualHosts: []VirtualHost{
+				{Hosts: []string{"secure.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-secure"}}},
+			},
+		},
+	})
+
+	ls := c.Listeners()
+	require.Len(t, ls, 1)
+	l := ls[0].(*listenerv3.Listener)
+	assert.Equal(t, "edge_gw_ns-tls_secure-gw_18110", l.GetName())
+	// TLS transport socket must be wired (not nil).
+	require.NotNil(t, l.GetFilterChains()[0].GetTransportSocket(), "per-Gateway HTTPS listener must terminate TLS")
 }
