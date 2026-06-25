@@ -99,10 +99,17 @@ type SnapshotCache struct {
 	// edgeHTTPPort is the port the edge plain-HTTP / redirect listener binds.
 	edgeHTTPPort uint32
 	// edgeTLSEnabled serves a TLS-terminating listener on edgeHTTPSPort (certs
-	// per VirtualHost via SDS) plus an HTTP->HTTPS redirect on edgeHTTPPort.
+	// per VirtualHost via SDS). Set once before the manager starts via SetEdgeTLSMode.
 	edgeTLSEnabled bool
 	// edgeHTTPSPort is the port the edge TLS listener binds when edgeTLSEnabled.
 	edgeHTTPSPort uint32
+	// edgeHTTPRedirect gates the HTTP→HTTPS redirect listener. When true, the
+	// HTTP-port listener 301-redirects all traffic to https instead of serving
+	// routes. This is set dynamically by the reconciler based on a per-Gateway
+	// annotation (gateway.aether.io/http-redirect), so any Gateway can opt in.
+	// Guarded by edgeHTTPRedirectMu to allow live updates from the reconciler.
+	edgeHTTPRedirectMu sync.RWMutex
+	edgeHTTPRedirect   bool
 
 	// edgeMu guards virtualHosts, edgeTCPRoutes, and edgeTLSRoutes: the routing
 	// the edge serves. The HTTP route config and L4 listeners are built from them,
@@ -371,11 +378,27 @@ func (c *SnapshotCache) SetEdgeMode(httpPort uint32) {
 }
 
 // SetEdgeTLSMode enables downstream TLS termination: the edge serves a TLS
-// listener on httpsPort (certs per VirtualHost via SDS) and an HTTP->HTTPS
-// redirect on the plain port. Must be called before the manager starts.
+// listener on httpsPort (certs per VirtualHost via SDS). Must be called before
+// the manager starts. The HTTP→HTTPS redirect is separately controlled per-Gateway
+// via SetEdgeHTTPRedirect (driven by the gateway.aether.io/http-redirect annotation).
 func (c *SnapshotCache) SetEdgeTLSMode(httpsPort uint32) {
 	c.edgeTLSEnabled = true
 	c.edgeHTTPSPort = httpsPort
+}
+
+// SetEdgeHTTPRedirect controls whether the edge's plain-HTTP port listener emits
+// a 301 HTTP→HTTPS redirect (true) or serves routes directly (false, the default).
+// Called by the Gateway API reconciler on every reconcile based on whether any
+// Gateway in the current aether GatewayClass set carries the
+// gateway.aether.io/http-redirect: "true" annotation. Safe for concurrent use.
+func (c *SnapshotCache) SetEdgeHTTPRedirect(enabled bool) {
+	c.edgeHTTPRedirectMu.Lock()
+	changed := c.edgeHTTPRedirect != enabled
+	c.edgeHTTPRedirect = enabled
+	c.edgeHTTPRedirectMu.Unlock()
+	if changed {
+		c.signalDependencyChange()
+	}
 }
 
 // SetEdgeIdentity records the edge proxy's single SVID name and trust domain so

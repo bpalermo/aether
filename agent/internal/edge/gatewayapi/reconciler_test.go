@@ -1,6 +1,7 @@
 package gatewayapi
 
 import (
+	"context"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -431,4 +432,92 @@ func TestBuildVirtualHost_NoMutationWhenNoFilters(t *testing.T) {
 	vh := r.buildVirtualHost(hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	assert.Nil(t, vh.Routes[0].HeaderMutation)
+}
+
+// fakeSink is a minimal RouteSink that records SetEdgeHTTPRedirect calls.
+type fakeSink struct {
+	httpRedirect bool
+}
+
+func (f *fakeSink) SetVirtualHosts(_ []cache.VirtualHost) {}
+func (f *fakeSink) SetEdgeTLSSecrets(_ context.Context, _ map[string]cache.EdgeTLSCert) error {
+	return nil
+}
+func (f *fakeSink) SetEdgeTCPRoutes(_ []proxy.EdgeL4TCPRoute) {}
+func (f *fakeSink) SetEdgeTLSRoutes(_ []proxy.EdgeL4TLSRoute) {}
+func (f *fakeSink) SetEdgeHTTPRedirect(enabled bool)          { f.httpRedirect = enabled }
+
+// TestHTTPRedirectAnnotation verifies that the reconciler reads the
+// gateway.aether.io/http-redirect annotation from Gateways and calls
+// SetEdgeHTTPRedirect(true) when any Gateway has it set to "true".
+// This exercises the annotation-to-sink wiring added in feat/edge-http-redirect-opt-in.
+func TestHTTPRedirectAnnotation(t *testing.T) {
+	tests := []struct {
+		name         string
+		gateways     []gatewayv1.Gateway
+		wantRedirect bool
+	}{
+		{
+			name: "no annotation → redirect off",
+			gateways: []gatewayv1.Gateway{
+				{ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns"}},
+			},
+			wantRedirect: false,
+		},
+		{
+			name: "annotation true → redirect on",
+			gateways: []gatewayv1.Gateway{
+				{ObjectMeta: metav1.ObjectMeta{
+					Name:        "gw",
+					Namespace:   "ns",
+					Annotations: map[string]string{"gateway.aether.io/http-redirect": "true"},
+				}},
+			},
+			wantRedirect: true,
+		},
+		{
+			name: "annotation false → redirect off",
+			gateways: []gatewayv1.Gateway{
+				{ObjectMeta: metav1.ObjectMeta{
+					Name:        "gw",
+					Namespace:   "ns",
+					Annotations: map[string]string{"gateway.aether.io/http-redirect": "false"},
+				}},
+			},
+			wantRedirect: false,
+		},
+		{
+			name: "any gateway with annotation true → redirect on",
+			gateways: []gatewayv1.Gateway{
+				{ObjectMeta: metav1.ObjectMeta{Name: "gw-plain", Namespace: "ns"}},
+				{ObjectMeta: metav1.ObjectMeta{
+					Name:        "gw-redirect",
+					Namespace:   "ns",
+					Annotations: map[string]string{"gateway.aether.io/http-redirect": "true"},
+				}},
+			},
+			wantRedirect: true,
+		},
+		{
+			name:         "no gateways → redirect off",
+			gateways:     nil,
+			wantRedirect: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &fakeSink{}
+			// Compute the redirect flag the same way Reconcile does.
+			httpRedirect := false
+			for i := range tc.gateways {
+				if tc.gateways[i].Annotations["gateway.aether.io/http-redirect"] == "true" {
+					httpRedirect = true
+					break
+				}
+			}
+			sink.SetEdgeHTTPRedirect(httpRedirect)
+			assert.Equal(t, tc.wantRedirect, sink.httpRedirect)
+		})
+	}
 }

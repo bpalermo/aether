@@ -10,13 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEdgeTLSModeListeners verifies that with TLS enabled the cache serves a TLS
-// listener on the https port (referencing the vhost's SDS cert) plus an
-// HTTP->HTTPS redirect on the plain port; the certs ride the SecretType channel.
+// TestEdgeTLSModeListeners verifies that with TLS enabled AND the per-Gateway
+// HTTP redirect opt-in set, the cache serves a TLS listener on the https port
+// (referencing the vhost's SDS cert) plus an HTTP->HTTPS redirect on the plain
+// port; the certs ride the SecretType channel.
 func TestEdgeTLSModeListeners(t *testing.T) {
 	c := newTestCache("edge-1")
 	c.SetEdgeMode(80)
 	c.SetEdgeTLSMode(443)
+	c.SetEdgeHTTPRedirect(true) // opt-in: this Gateway redirects HTTP→HTTPS
 	c.SetVirtualHosts([]VirtualHost{
 		{Hosts: []string{"api.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-1"}}, TLSSecret: "kubernetes/api-tls"},
 	})
@@ -183,4 +185,67 @@ func TestPerDownstreamConnectionPool(t *testing.T) {
 	edge := newTestCache("edge-1")
 	edge.SetEdgeMode(8080)
 	assert.False(t, edge.perDownstreamConnectionPool(), "edge multiplexes on its single identity")
+}
+
+// TestEdgeHTTPRedirectOptIn verifies that without the opt-in the HTTP listener
+// serves routes directly (no redirect listener), and with the opt-in it emits
+// the redirect listener and NO plain HTTP routing listener.
+func TestEdgeHTTPRedirectOptIn(t *testing.T) {
+	t.Run("no redirect by default", func(t *testing.T) {
+		c := newTestCache("edge-1")
+		c.SetEdgeMode(80)
+		// No SetEdgeHTTPRedirect call → default off.
+
+		ls := c.Listeners()
+		require.Len(t, ls, 1)
+		l := ls[0].(*listenerv3.Listener)
+		assert.Equal(t, proxy.EdgeListenerName, l.GetName(), "HTTP listener serves routes, not a redirect")
+		assert.Equal(t, uint32(80), l.GetAddress().GetSocketAddress().GetPortValue())
+	})
+
+	t.Run("redirect when opt-in annotation set", func(t *testing.T) {
+		c := newTestCache("edge-1")
+		c.SetEdgeMode(80)
+		c.SetEdgeTLSMode(443)
+		c.SetEdgeHTTPRedirect(true)
+
+		ls := c.Listeners()
+		names := map[string]*listenerv3.Listener{}
+		for _, r := range ls {
+			l := r.(*listenerv3.Listener)
+			names[l.GetName()] = l
+		}
+		// The HTTPS routing listener must be present.
+		require.NotNil(t, names[proxy.EdgeListenerName], "HTTPS routing listener must be present")
+		assert.Equal(t, uint32(443), names[proxy.EdgeListenerName].GetAddress().GetSocketAddress().GetPortValue())
+		// The redirect listener replaces the plain HTTP routing listener.
+		require.NotNil(t, names[proxy.EdgeRedirectListenerName], "redirect listener must be present when opt-in is set")
+		assert.Equal(t, uint32(80), names[proxy.EdgeRedirectListenerName].GetAddress().GetSocketAddress().GetPortValue())
+		// There must be no second plain HTTP routing listener (would conflict with the redirect on port 80).
+		assert.Len(t, ls, 2, "exactly TLS listener + redirect listener, no duplicate HTTP listener")
+	})
+
+	t.Run("TLS mode without redirect opt-in serves HTTP directly", func(t *testing.T) {
+		c := newTestCache("edge-1")
+		c.SetEdgeMode(80)
+		c.SetEdgeTLSMode(443)
+		// TLS enabled but redirect annotation not set → HTTP listener still serves routes.
+
+		ls := c.Listeners()
+		require.Len(t, ls, 2, "HTTPS listener + HTTP routing listener")
+		// Both listeners are named edge_http (one TLS on 443, one plain on 80).
+		ports := []uint32{}
+		for _, r := range ls {
+			l := r.(*listenerv3.Listener)
+			assert.Equal(t, proxy.EdgeListenerName, l.GetName(), "all HTTP-type listeners are named edge_http")
+			ports = append(ports, l.GetAddress().GetSocketAddress().GetPortValue())
+		}
+		assert.Contains(t, ports, uint32(443), "TLS listener on 443 must be present")
+		assert.Contains(t, ports, uint32(80), "plain HTTP routing listener on 80 must be present")
+		// No redirect listener.
+		for _, r := range ls {
+			l := r.(*listenerv3.Listener)
+			assert.NotEqual(t, proxy.EdgeRedirectListenerName, l.GetName(), "redirect listener must NOT be present without opt-in")
+		}
+	})
 }

@@ -16,6 +16,7 @@ go_library(
         "//agent/internal/xds/cache",
         "//agent/internal/xds/proxy",
         "//api/aether/config/v1:config",
+        "//common/constants",
         "//common/log",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",

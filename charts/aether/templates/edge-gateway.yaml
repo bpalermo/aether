@@ -1,0 +1,43 @@
+{{- if and .Values.edge.enabled .Values.edge.gateway.create }}
+# The edge proxy's own Gateway resource (proposal 018 / proposal 003 as-built).
+# Operators can disable this (edge.gateway.create=false) and manage their own
+# Gateway; they MUST add gateway.aether.io/http-redirect: "true" to any Gateway
+# whose HTTP listener should 301-redirect to HTTPS instead of serving routes
+# directly. When edge.tls.enabled is true this chart-created Gateway sets that
+# annotation automatically so the production edge keeps redirecting.
+#
+# The HTTP listener is always created (port edge.httpPort). When edge.tls.enabled
+# is true a HTTPS listener is added (port edge.httpsPort) referencing a TLS Secret
+# (edge.gateway.tlsSecretName / edge.gateway.tlsSecretNamespace) via certificateRefs.
+# The Secret must exist before the edge agent can serve TLS.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  namespace: {{ include "aether.edge.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+  {{- if .Values.edge.tls.enabled }}
+  annotations:
+    # HTTP→HTTPS redirect: the HTTP-port listener 301-redirects all traffic to
+    # https. Remove this annotation (or set edge.tls.enabled=false) to serve
+    # routes on the HTTP listener directly (conformance / plain-HTTP use-cases).
+    gateway.aether.io/http-redirect: "true"
+  {{- end }}
+spec:
+  gatewayClassName: {{ .Values.edge.gatewayClassName }}
+  listeners:
+    - name: http
+      port: {{ .Values.edge.httpPort }}
+      protocol: HTTP
+    {{- if .Values.edge.tls.enabled }}
+    - name: https
+      port: {{ .Values.edge.httpsPort }}
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ required "edge.gateway.tlsSecretName is required when edge.tls.enabled=true and edge.gateway.create=true" .Values.edge.gateway.tlsSecretName | quote }}
+            namespace: {{ default (include "aether.edge.namespace" .) .Values.edge.gateway.tlsSecretNamespace | quote }}
+    {{- end }}
+{{- end }}
