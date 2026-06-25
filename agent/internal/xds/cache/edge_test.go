@@ -33,7 +33,7 @@ func TestEdgeTLSModeListeners(t *testing.T) {
 		l := r.(*listenerv3.Listener)
 		names[l.GetName()] = l
 	}
-	tls := names[proxy.EdgeListenerName]
+	tls := names[proxy.EdgeHTTPSListenerName]
 	redirect := names[proxy.EdgeRedirectListenerName]
 	require.NotNil(t, tls)
 	require.NotNil(t, redirect)
@@ -215,9 +215,9 @@ func TestEdgeHTTPRedirectOptIn(t *testing.T) {
 			l := r.(*listenerv3.Listener)
 			names[l.GetName()] = l
 		}
-		// The HTTPS routing listener must be present.
-		require.NotNil(t, names[proxy.EdgeListenerName], "HTTPS routing listener must be present")
-		assert.Equal(t, uint32(443), names[proxy.EdgeListenerName].GetAddress().GetSocketAddress().GetPortValue())
+		// The HTTPS routing listener must be present (distinct name from the :80 listener).
+		require.NotNil(t, names[proxy.EdgeHTTPSListenerName], "HTTPS routing listener must be present")
+		assert.Equal(t, uint32(443), names[proxy.EdgeHTTPSListenerName].GetAddress().GetSocketAddress().GetPortValue())
 		// The redirect listener replaces the plain HTTP routing listener.
 		require.NotNil(t, names[proxy.EdgeRedirectListenerName], "redirect listener must be present when opt-in is set")
 		assert.Equal(t, uint32(80), names[proxy.EdgeRedirectListenerName].GetAddress().GetSocketAddress().GetPortValue())
@@ -233,19 +233,16 @@ func TestEdgeHTTPRedirectOptIn(t *testing.T) {
 
 		ls := c.Listeners()
 		require.Len(t, ls, 2, "HTTPS listener + HTTP routing listener")
-		// Both listeners are named edge_http (one TLS on 443, one plain on 80).
-		ports := []uint32{}
+		// The two listeners MUST have DISTINCT names (edge_https on 443, edge_http on
+		// 80) — a shared name collides in the snapshot/LDS and drops :443 (regression).
+		byName := map[string]uint32{}
 		for _, r := range ls {
 			l := r.(*listenerv3.Listener)
-			assert.Equal(t, proxy.EdgeListenerName, l.GetName(), "all HTTP-type listeners are named edge_http")
-			ports = append(ports, l.GetAddress().GetSocketAddress().GetPortValue())
-		}
-		assert.Contains(t, ports, uint32(443), "TLS listener on 443 must be present")
-		assert.Contains(t, ports, uint32(80), "plain HTTP routing listener on 80 must be present")
-		// No redirect listener.
-		for _, r := range ls {
-			l := r.(*listenerv3.Listener)
+			byName[l.GetName()] = l.GetAddress().GetSocketAddress().GetPortValue()
 			assert.NotEqual(t, proxy.EdgeRedirectListenerName, l.GetName(), "redirect listener must NOT be present without opt-in")
 		}
+		assert.Len(t, byName, 2, "the two listeners must have distinct names (no collision)")
+		assert.Equal(t, uint32(443), byName[proxy.EdgeHTTPSListenerName], "HTTPS listener named edge_https on 443")
+		assert.Equal(t, uint32(80), byName[proxy.EdgeListenerName], "plain HTTP routing listener named edge_http on 80")
 	})
 }
