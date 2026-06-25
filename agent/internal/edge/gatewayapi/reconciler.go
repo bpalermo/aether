@@ -16,6 +16,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	constants "github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,6 +36,11 @@ type RouteSink interface {
 	SetEdgeTLSSecrets(ctx context.Context, certs map[string]cache.EdgeTLSCert) error
 	SetEdgeTCPRoutes(routes []proxy.EdgeL4TCPRoute)
 	SetEdgeTLSRoutes(routes []proxy.EdgeL4TLSRoute)
+	// SetEdgeHTTPRedirect controls whether the HTTP-port listener 301-redirects
+	// to https (true) or serves routes directly (false). The reconciler sets this
+	// on every reconcile based on whether any Gateway in the current set carries
+	// the gateway.aether.io/http-redirect: "true" annotation.
+	SetEdgeHTTPRedirect(enabled bool)
 }
 
 // Reconciler watches Gateway API HTTPRoutes, TCPRoutes, and TLSRoutes (and the
@@ -207,6 +213,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		return 0
 	})
+
+	// Determine whether ANY of our Gateways opts into HTTP→HTTPS redirect via the
+	// gateway.aether.io/http-redirect: "true" annotation. This replaces the global
+	// edgeTLSEnabled-based redirect (which redirected ALL HTTP traffic whenever TLS
+	// was enabled on the process). With this per-Gateway opt-in, a plain HTTP Gateway
+	// listener serves its routes by default; only annotated Gateways redirect.
+	httpRedirect := false
+	for i := range ourGateways {
+		if ourGateways[i].Annotations[constants.AnnotationGatewayHTTPRedirect] == "true" {
+			httpRedirect = true
+			break
+		}
+	}
+	r.Sink.SetEdgeHTTPRedirect(httpRedirect)
 
 	if r.Secrets != nil {
 		if err := r.Sink.SetEdgeTLSSecrets(ctx, certs); err != nil {

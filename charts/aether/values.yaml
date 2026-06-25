@@ -221,6 +221,19 @@ edge:
   # CRDs installed (standard channel); the chart renders this GatewayClass bound to
   # the aether edge controller (gateway.aether.io/edge).
   gatewayClassName: aether
+  # gateway controls the chart-managed Gateway resource for this edge deployment.
+  # By default the chart creates one Gateway of the aether GatewayClass with HTTP
+  # (and optionally HTTPS) listeners. Set create=false to manage your own Gateway
+  # (you MUST add gateway.aether.io/http-redirect: "true" to that Gateway if you
+  # want HTTP→HTTPS redirect). When tls.enabled=true the chart automatically adds
+  # the http-redirect annotation to the generated Gateway.
+  gateway:
+    create: true
+    # tlsSecretName / tlsSecretNamespace: the kubernetes.io/tls Secret holding the
+    # downstream TLS cert. REQUIRED when tls.enabled=true and gateway.create=true.
+    # The Secret must be in the edge namespace (or tlsSecretNamespace if set).
+    tlsSecretName: ""
+    tlsSecretNamespace: ""
   # Downstream (external-facing) TLS. Certs are referenced per Gateway listener
   # (spec.listeners[].tls.certificateRefs, a kubernetes.io/tls Secret in the
   # watched namespace), read by the edge agent and served to Envoy over SDS

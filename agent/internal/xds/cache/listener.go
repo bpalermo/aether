@@ -106,13 +106,23 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	//   - TCP listener(s) for each Gateway TCP port from TCPRoutes
 	//   - TLS passthrough listener(s) for each Gateway TLS port from TLSRoutes
 	if c.edge {
+		c.edgeHTTPRedirectMu.RLock()
+		httpRedirect := c.edgeHTTPRedirect
+		c.edgeHTTPRedirectMu.RUnlock()
+
 		var resources []types.Resource
 		if c.edgeTLSEnabled {
+			// TLS listener on httpsPort; HTTP behaviour depends on per-Gateway opt-in.
 			resources = append(resources,
 				proxy.BuildEdgeListener(c.edgeHTTPSPort, c.edgeTLSSecretNames()),
-				proxy.BuildEdgeRedirectListener(c.edgeHTTPPort),
 			)
+		}
+		if httpRedirect {
+			// At least one Gateway opted into HTTP→HTTPS redirect: emit the redirect
+			// listener on the plain HTTP port (replaces a routing listener for that port).
+			resources = append(resources, proxy.BuildEdgeRedirectListener(c.edgeHTTPPort))
 		} else {
+			// Default: the HTTP-port listener serves its attached HTTPRoutes directly.
 			resources = append(resources, proxy.BuildEdgeListener(c.edgeHTTPPort, nil))
 		}
 		resources = append(resources, c.edgeTCPListeners()...)

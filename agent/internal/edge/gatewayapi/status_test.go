@@ -32,6 +32,7 @@ func (statusFakeSink) SetEdgeTLSSecrets(context.Context, map[string]cache.EdgeTL
 }
 func (statusFakeSink) SetEdgeTCPRoutes([]proxy.EdgeL4TCPRoute) {}
 func (statusFakeSink) SetEdgeTLSRoutes([]proxy.EdgeL4TLSRoute) {}
+func (statusFakeSink) SetEdgeHTTPRedirect(bool)                {}
 
 func statusScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()

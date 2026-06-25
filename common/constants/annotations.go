@@ -67,6 +67,17 @@ const (
 	// AnnotationAetherEndpointMetadataPrefix is the prefix for endpoint metadata annotations
 	AnnotationAetherEndpointMetadataPrefix = "metadata." + annotationAetherEndpointPrefix
 
+	// AnnotationGatewayHTTPRedirect is a Gateway annotation that opts a plain-HTTP
+	// listener into HTTP→HTTPS redirect behaviour. When set to "true" on a Gateway
+	// of the aether GatewayClass, the edge emits a 301-redirect listener on the
+	// Gateway's HTTP port instead of serving routes directly.
+	//
+	// Default absent / "false" → the HTTP listener serves its attached HTTPRoutes
+	// (no redirect). Operators MUST set this annotation on any Gateway whose HTTP
+	// listener should redirect to HTTPS (e.g. the production api.palermo.dev edge
+	// Gateway). The aether chart sets it automatically when edge.tls.enabled is true.
+	AnnotationGatewayHTTPRedirect = "gateway.aether.io/http-redirect"
+
 	// Kubernetes topology annotations
 	// AnnotationKubernetesNodeTopologyRegion is the Kubernetes node label for the region
 	AnnotationKubernetesNodeTopologyRegion = "topology.kubernetes.io/region"
