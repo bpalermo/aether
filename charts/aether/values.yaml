@@ -234,6 +234,27 @@ edge:
     # The Secret must be in the edge namespace (or tlsSecretNamespace if set).
     tlsSecretName: ""
     tlsSecretNamespace: ""
+    # address pins the Gateway's spec.addresses. Under proposal 021 Phase 2
+    # (perGatewayAddressing) the edge controller requests this IP from MetalLB for
+    # the Gateway's own LoadBalancer Service, so the edge keeps a stable address
+    # (e.g. the IP api.palermo.dev resolves to). Empty = MetalLB auto-assigns from
+    # the pool.
+    address: ""
+    # hostname constrains the chart-managed Gateway's listeners (e.g.
+    # "*.palermo.dev"). Empty = listeners accept any host.
+    hostname: ""
+    # httpRoutes declares HTTPRoutes managed by this chart, each parented to the
+    # chart-managed edge Gateway above. This is the supported, declarative
+    # replacement for hand-applying HTTPRoute manifests (DEPRECATED). Each entry:
+    #   - name: api
+    #     hostnames: ["api.palermo.dev"]
+    #     rules:
+    #       - backendRefs:
+    #           - name: my-backend
+    #             port: 8080
+    # `rules` is a standard Gateway API HTTPRoute rules list (matches, backendRefs,
+    # filters), passed through verbatim.
+    httpRoutes: []
   # Per-Gateway addressing (proposal 021 Phase 2): when enabled (the default),
   # the edge controller creates one LoadBalancer Service per class-aether Gateway,
   # MetalLB assigns each its own IP from the pool, and the edge proxy binds a

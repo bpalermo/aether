@@ -7,6 +7,13 @@ System config:
 
 Components: agent (+ Envoy proxy), registrar, controller.
 CRD: install //charts/crds first (the MeshConfig CRD).
+{{- if .Values.edge.enabled }}
+
+Edge (ingress): the chart manages the edge Gateway{{ if .Values.edge.gateway.create }} (created){{ end }} and
+its HTTPRoutes declaratively. Declare routes under edge.gateway.httpRoutes and pin
+the address via edge.gateway.address — hand-applying edge Gateway/HTTPRoute
+manifests is DEPRECATED; let the chart own them so upgrades stay consistent.
+{{- end }}
 
 The proxy data plane inherits the system config above; override its access-log /
 tracing / metrics policy at runtime by editing the MeshConfig CR:
