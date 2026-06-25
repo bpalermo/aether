@@ -6,6 +6,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/referencegrant"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -54,9 +55,10 @@ func (r *Reconciler) writeGatewayClassStatus(ctx context.Context) {
 }
 
 // writeGatewayStatuses sets, for each of our Gateways, top-level Accepted=True +
-// Programmed=True and a per-listener status (supportedKinds, attachedRoutes,
-// Programmed/Accepted/ResolvedRefs=True). attachedRoutes is computed from the
-// routes the reconciler already listed.
+// Programmed=True, a per-listener status (supportedKinds, attachedRoutes,
+// Programmed/Accepted/ResolvedRefs=True), and status.addresses (proposal 021
+// Phase 1: the shared edge LB IP). attachedRoutes is computed from the routes the
+// reconciler already listed.
 func (r *Reconciler) writeGatewayStatuses(
 	ctx context.Context,
 	ourGateways []gatewayv1.Gateway,
@@ -66,6 +68,12 @@ func (r *Reconciler) writeGatewayStatuses(
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
 ) {
+	// Proposal 021 Phase 1: resolve the shared edge LoadBalancer address once and
+	// publish it on every class-aether Gateway. Resolved at runtime (robust to
+	// MetalLB assignment): if the LB hasn't been assigned an address yet, addrs is
+	// empty and we leave status.addresses untouched this reconcile — the Service
+	// watch re-triggers us once MetalLB assigns it.
+	addrs := r.resolveGatewayAddresses(ctx)
 	for i := range ourGateways {
 		gw := &ourGateways[i]
 		desired := *gw.DeepCopy()
@@ -119,13 +127,85 @@ func (r *Reconciler) writeGatewayStatuses(
 
 		listenersChanged := !listenerStatusesEqual(gw.Status.Listeners, listeners)
 		desired.Status.Listeners = listeners
-		if !topChanged && !listenersChanged {
+
+		// Only publish addresses once the LB IP is resolved; never overwrite a
+		// previously-published address with an empty list (which would regress the
+		// Gateway to "no address"). The address write participates in the same
+		// no-op-skip change detection as the conditions so we don't hot-loop.
+		addrsChanged := false
+		if len(addrs) > 0 {
+			addrsChanged = !gatewayAddressesEqual(gw.Status.Addresses, addrs)
+			desired.Status.Addresses = addrs
+		}
+
+		if !topChanged && !listenersChanged && !addrsChanged {
 			continue
 		}
 		if err := r.Status().Update(ctx, &desired); err != nil {
 			r.Log.WarnContext(ctx, "failed to write Gateway status", "gateway", gw.Name, "error", err.Error())
 		}
 	}
+}
+
+// resolveGatewayAddresses returns the edge's shared LoadBalancer address as a
+// single Gateway status address (proposal 021 Phase 1). It Gets the edge's own
+// LoadBalancer Service (EdgeServiceName in Namespace) and reads
+// status.loadBalancer.ingress[0].ip, falling back to .hostname when the ingress
+// is hostname-based. It returns nil (skip publication) when EdgeServiceName is
+// unset, the Service is missing, or no LB address has been assigned yet — the
+// Service watch re-triggers reconciliation once MetalLB assigns one.
+func (r *Reconciler) resolveGatewayAddresses(ctx context.Context) []gatewayv1.GatewayStatusAddress {
+	if r.EdgeServiceName == "" {
+		return nil
+	}
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: r.EdgeServiceName}, svc); err != nil {
+		if !apierrors.IsNotFound(err) {
+			r.Log.WarnContext(ctx, "failed to get edge Service for Gateway addresses",
+				"service", r.EdgeServiceName, "namespace", r.Namespace, "error", err.Error())
+		}
+		return nil
+	}
+	for _, ing := range svc.Status.LoadBalancer.Ingress {
+		if ing.IP != "" {
+			return []gatewayv1.GatewayStatusAddress{{
+				Type:  ptr(gatewayv1.IPAddressType),
+				Value: ing.IP,
+			}}
+		}
+		if ing.Hostname != "" {
+			return []gatewayv1.GatewayStatusAddress{{
+				Type:  ptr(gatewayv1.HostnameAddressType),
+				Value: ing.Hostname,
+			}}
+		}
+	}
+	return nil
+}
+
+// ptr returns a pointer to v (for optional Gateway API fields).
+func ptr[T any](v T) *T { return &v }
+
+// gatewayAddressesEqual reports whether two Gateway status address slices are
+// equivalent (same type+value in order) — the no-op-skip guard for the address
+// write.
+func gatewayAddressesEqual(a, b []gatewayv1.GatewayStatusAddress) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		at, bt := "", ""
+		if a[i].Type != nil {
+			at = string(*a[i].Type)
+		}
+		if b[i].Type != nil {
+			bt = string(*b[i].Type)
+		}
+		if at != bt || a[i].Value != b[i].Value {
+			return false
+		}
+	}
+	return true
 }
 
 // attachedRoutesForListener counts the routes (with Accepted=True) attached to a

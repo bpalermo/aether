@@ -63,6 +63,14 @@ Gateway of its GatewayClass in ANY namespace and publishes the Gateway/Route sta
 conditions and per-listener `attachedRoutes`, which is what the upstream conformance
 suite's `NamespacesMustBeReady` gate requires before any test runs.
 
+Every class-`aether` Gateway also gets `status.addresses` (one `IPAddress` entry =
+the shared edge LoadBalancer IP), so the suite's "wait for at least one IP address in
+status" setup step passes and the GATEWAY-HTTP *traffic* tests run (proposal 021 Phase
+1). The address is resolved at runtime from the edge's own LoadBalancer Service status
+(robust to MetalLB assignment): until the LB IP is assigned the address is omitted
+rather than written empty. All class-`aether` Gateways currently share the one edge
+address; distinct per-Gateway addresses are proposal 021 Phase 2.
+
 The GatewayClass also publishes a machine-readable `status.supportedFeatures` list so
 the suite skips (rather than fails) the features aether does not implement. The
 advertised set is: `Gateway`, `GatewayPort8080`, `HTTPRoute`, `GRPCRoute`,
@@ -76,9 +84,10 @@ proposal 020 Part 1).
 
 ### Data-plane / addressing gap
 
-The status/reconcile unlock is namespace-agnostic, but the edge data plane is still a
-single Deployment on a single LoadBalancer address. A Gateway in another namespace is
-reconciled and reaches `Accepted`/`Programmed`, and its routes are served through that
-one shared edge address — there is no per-Gateway address allocation. Tests that assert
-each Gateway has its OWN distinct address are not yet satisfied; multi-Gateway
-addressing is the next item.
+The edge data plane is still a single Deployment on a single LoadBalancer address.
+Every class-`aether` Gateway now publishes that shared address in `status.addresses`
+(proposal 021 Phase 1), which unblocks the address-dependent GATEWAY-HTTP traffic
+tests; routes are served through the one shared address (demuxed by listener
+hostname/port). Tests that assert each Gateway has its OWN *distinct* address are not
+yet satisfied — distinct per-Gateway addressing (per-Gateway LoadBalancer Service +
+internal-port demux) is proposal 021 Phase 2.
