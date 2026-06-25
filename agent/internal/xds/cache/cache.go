@@ -227,9 +227,10 @@ type listenerEntry struct {
 	capture types.Resource
 	// udpCapture is the per-pod UDP capture listener (proposal 018, Phase 3b):
 	// nil unless capture is enabled AND there are UDPRoute backends for this pod's
-	// upstream services. Bound to ProxyUDPCapturePort inside the pod netns; the
-	// CNI installs a UDP REDIRECT rule that steers outbound UDP to a mesh ClusterIP
-	// into this listener. No mTLS — UDP datagrams are forwarded in plaintext.
+	// upstream services. Bound to ProxyCapturePort (UDP socket, same port as the
+	// TCP capture listener) inside the pod netns; the CNI installs a UDP REDIRECT
+	// rule that steers outbound UDP to a mesh ClusterIP into this listener.
+	// No mTLS — UDP datagrams are forwarded in plaintext.
 	udpCapture types.Resource
 	// cniPod is the original CNIPod proto used to build this entry. Stored so
 	// the capture listener can be regenerated in-place when the TCP service set
