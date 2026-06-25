@@ -55,6 +55,7 @@ func init() {
 	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per Gateway listener via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
 	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves")
+	edgeCmd.Flags().StringVar(&cfg.EdgeServiceName, "edge-service-name", "", "Name of the edge's own LoadBalancer Service (in the edge namespace); its assigned LB address is published as every class-aether Gateway's status.addresses. Empty disables address publication")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -236,6 +237,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		APIReader:        m.GetAPIReader(),
 		Sink:             snapshotCache,
 		Namespace:        routeNamespace,
+		EdgeServiceName:  cfg.EdgeServiceName,
 		GatewayClassName: cfg.GatewayClassName,
 		MeshDomain:       cfg.MeshDomain,
 		Secrets:          secretRegistry,

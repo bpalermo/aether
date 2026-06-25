@@ -113,6 +113,13 @@ type AgentConfig struct {
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves.
 	GatewayClassName string
 
+	// EdgeServiceName is the name of the edge's own LoadBalancer Service (in the
+	// edge's namespace). The edge resolves its assigned LB address from that
+	// Service's status and publishes it as every class-aether Gateway's
+	// status.addresses (proposal 021 Phase 1, shared edge address). Empty disables
+	// address publication (edge subcommand only).
+	EdgeServiceName string
+
 	// EdgeTLS enables downstream TLS termination: the edge serves an HTTPS
 	// listener on EdgeHTTPSPort (certs per Gateway listener via SDS) and an
 	// HTTP->HTTPS redirect on the plain port (edge subcommand only).

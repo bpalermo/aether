@@ -74,6 +74,10 @@ spec:
             {{- if ne .Values.edge.gatewayClassName "aether" }}
             - "--gateway-class={{ .Values.edge.gatewayClassName }}"
             {{- end }}
+            # Publish this edge's shared LoadBalancer address as every class-aether
+            # Gateway's status.addresses (proposal 021 Phase 1). The edge Gets this
+            # Service in its own namespace and reads status.loadBalancer.ingress.
+            - "--edge-service-name={{ include "aether.edge.fullname" . }}"
             {{- if .Values.edge.tls.enabled }}
             - "--edge-tls"
             {{- if ne (int .Values.edge.httpsPort) 443 }}

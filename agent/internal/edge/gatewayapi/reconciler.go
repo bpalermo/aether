@@ -54,11 +54,18 @@ type Reconciler struct {
 
 	// Sink receives the projected virtual hosts/certs and L4 routes (the snapshot cache).
 	Sink RouteSink
-	// Namespace is the edge's own namespace. It is used only as the default
-	// namespace for the TLS Secret provider's cert lookups; Gateways/Routes are
-	// listed and reconciled CLUSTER-WIDE (namespace-agnostic), so this field no
-	// longer scopes the route/Gateway lists.
+	// Namespace is the edge's own namespace. It is used as the default namespace
+	// for the TLS Secret provider's cert lookups and as the namespace of the edge
+	// LoadBalancer Service (EdgeServiceName) from which the published Gateway
+	// status.addresses is resolved; Gateways/Routes are listed and reconciled
+	// CLUSTER-WIDE (namespace-agnostic), so this field does not scope the
+	// route/Gateway lists.
 	Namespace string
+	// EdgeServiceName is the name of the edge's own LoadBalancer Service (in
+	// Namespace). Its status.loadBalancer.ingress address is published as every
+	// class-aether Gateway's status.addresses (proposal 021 Phase 1 — the shared
+	// edge address). Empty disables address publication.
+	EdgeServiceName string
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves.
 	GatewayClassName string
 	// Secrets resolves Gateway listener TLS cert material; nil disables TLS.

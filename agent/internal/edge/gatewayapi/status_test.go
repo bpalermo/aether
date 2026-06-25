@@ -253,6 +253,97 @@ func TestReconcile_GatewayInNonEdgeNamespace(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, racc.Status)
 }
 
+// TestReconcile_GatewayStatusAddresses: a reconciled class-aether Gateway (in any
+// namespace) gets status.addresses = the edge LoadBalancer Service's assigned IP
+// (proposal 021 Phase 1, shared edge address), resolved at runtime from the edge
+// Service's status.loadBalancer.ingress.
+func TestReconcile_GatewayStatusAddresses(t *testing.T) {
+	gc := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "aether", Generation: 1},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: gatewaystatus.EdgeControllerName},
+	}
+	// Gateway in a foreign namespace — it still shares the one edge address.
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "conformance-gw", Namespace: "gateway-conformance-infra", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "aether",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	// The edge's own LoadBalancer Service, with MetalLB having assigned an IP.
+	edgeSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "aether-edge", Namespace: "aether-ingress"},
+		Spec:       corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer},
+		Status: corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{
+			Ingress: []corev1.LoadBalancerIngress{{IP: "192.168.100.101"}},
+		}},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gc, gw, edgeSvc).
+		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}).
+		Build()
+	r := &Reconciler{
+		Client: c, APIReader: c, Sink: statusFakeSink{},
+		Namespace: "aether-ingress", EdgeServiceName: "aether-edge",
+		GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default(),
+	}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	gotGW := &gatewayv1.Gateway{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "gateway-conformance-infra", Name: "conformance-gw"}, gotGW))
+	require.Len(t, gotGW.Status.Addresses, 1)
+	require.NotNil(t, gotGW.Status.Addresses[0].Type)
+	assert.Equal(t, gatewayv1.IPAddressType, *gotGW.Status.Addresses[0].Type)
+	assert.Equal(t, "192.168.100.101", gotGW.Status.Addresses[0].Value)
+}
+
+// TestReconcile_GatewayStatusAddresses_NoLBIP: when the edge LoadBalancer Service
+// has no assigned ingress address yet (MetalLB pending), no status.addresses is
+// written — the Gateway is left address-less rather than getting an empty/garbage
+// address. (The Service watch re-triggers reconciliation once the IP lands.)
+func TestReconcile_GatewayStatusAddresses_NoLBIP(t *testing.T) {
+	gc := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "aether", Generation: 1},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: gatewaystatus.EdgeControllerName},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "aether-ingress", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "aether",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	// Edge Service exists but MetalLB hasn't assigned an IP (empty Ingress).
+	edgeSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "aether-edge", Namespace: "aether-ingress"},
+		Spec:       corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gc, gw, edgeSvc).
+		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}).
+		Build()
+	r := &Reconciler{
+		Client: c, APIReader: c, Sink: statusFakeSink{},
+		Namespace: "aether-ingress", EdgeServiceName: "aether-edge",
+		GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default(),
+	}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	gotGW := &gatewayv1.Gateway{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "aether-ingress", Name: "edge"}, gotGW))
+	// Conditions are still published; addresses are not (LB IP unset).
+	prog := meta.FindStatusCondition(gotGW.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
+	require.NotNil(t, prog)
+	assert.Equal(t, metav1.ConditionTrue, prog.Status)
+	assert.Empty(t, gotGW.Status.Addresses, "no LB IP assigned → no status.addresses")
+}
+
 // TestReconcile_GatewayClassSupportedFeatures: the GatewayClass status carries the
 // advertised supportedFeatures, sorted ascending and including HTTPRoute/GRPCRoute,
 // and omitting features aether does not implement.
