@@ -112,16 +112,20 @@ func MergeConditions(
 	result = make([]metav1.Condition, len(current))
 	copy(result, current)
 	for _, c := range conditions {
-		before := meta.FindStatusCondition(result, c.Type)
-		meta.SetStatusCondition(&result, metav1.Condition{
+		// meta.SetStatusCondition mutates the matching element in place and returns
+		// whether anything changed; use that return directly. The previous
+		// before/after comparison captured `before` as a pointer INTO result, which
+		// SetStatusCondition then mutates in place — so before and after aliased the
+		// same (already-updated) element and a transition on a PRE-EXISTING condition
+		// (e.g. a GatewayClass that ships a default Accepted=Unknown/Pending
+		// condition) was misdetected as no-change, and the status was never written.
+		if meta.SetStatusCondition(&result, metav1.Condition{
 			Type:               c.Type,
 			Status:             c.Status,
 			Reason:             c.Reason,
 			Message:            c.Message,
 			ObservedGeneration: observedGeneration,
-		})
-		after := meta.FindStatusCondition(result, c.Type)
-		if before == nil || !conditionSemanticEqual(*before, *after) {
+		}) {
 			changed = true
 		}
 	}

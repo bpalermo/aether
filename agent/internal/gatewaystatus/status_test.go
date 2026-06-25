@@ -83,3 +83,38 @@ func TestMergeConditions(t *testing.T) {
 	})
 	assert.False(t, changed2)
 }
+
+// TestMergeConditions_TransitionOnPreExisting is the GatewayClass regression: a
+// CRD ships a default Accepted=Unknown/Pending condition, and the controller must
+// flip it to True. The previous before/after pointer comparison aliased the same
+// (already-mutated) element, so the transition was misdetected as no-change and the
+// status was never written. The merge MUST report changed for a status flip.
+func TestMergeConditions_TransitionOnPreExisting(t *testing.T) {
+	current := []metav1.Condition{{
+		Type:    string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Status:  metav1.ConditionUnknown,
+		Reason:  "Pending",
+		Message: "Waiting for controller",
+	}}
+	result, changed := MergeConditions(current, 2, Condition{
+		Type:    string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Status:  metav1.ConditionTrue,
+		Reason:  string(gatewayv1.GatewayClassReasonAccepted),
+		Message: "GatewayClass accepted by the aether edge controller",
+	})
+	require.True(t, changed, "Unknown/Pending -> True must report changed")
+	acc := meta.FindStatusCondition(result, string(gatewayv1.GatewayClassConditionStatusAccepted))
+	require.NotNil(t, acc)
+	assert.Equal(t, metav1.ConditionTrue, acc.Status)
+	assert.Equal(t, string(gatewayv1.GatewayClassReasonAccepted), acc.Reason)
+	assert.Equal(t, int64(2), acc.ObservedGeneration)
+
+	// A reason-only change on a pre-existing condition is also a real change.
+	_, changed2 := MergeConditions(result, 2, Condition{
+		Type:    string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Status:  metav1.ConditionTrue,
+		Reason:  "Reconciled",
+		Message: "GatewayClass accepted by the aether edge controller",
+	})
+	assert.True(t, changed2, "reason change on a pre-existing condition must report changed")
+}
