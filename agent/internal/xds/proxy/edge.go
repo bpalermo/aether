@@ -23,9 +23,15 @@ const (
 	// under it.
 	EdgeHTTPRouteName = "edge_http"
 
-	// EdgeListenerName is the name of the edge proxy's public-facing listener
-	// (plain HTTP, or HTTPS-terminating when TLS is enabled).
+	// EdgeListenerName is the name of the edge proxy's plain-HTTP public listener.
 	EdgeListenerName = "edge_http"
+
+	// EdgeHTTPSListenerName is the name of the edge proxy's TLS-terminating public
+	// listener. It MUST differ from EdgeListenerName: when TLS is enabled and no
+	// Gateway opts into HTTP→HTTPS redirect, both the HTTPS (:443) and the plain-HTTP
+	// (:80) routing listeners are emitted; a shared name collides in the snapshot/LDS
+	// and one clobbers the other (regression that dropped the :443 listener).
+	EdgeHTTPSListenerName = "edge_https"
 
 	// EdgeRedirectListenerName is the :80 listener that 301-redirects to https
 	// when TLS is enabled.
@@ -165,25 +171,26 @@ func BuildEdgeTLSPassthroughListener(port uint32, rules []L4ServiceRoute) *liste
 // When tlsSecretNames is non-empty the filter chain terminates downstream TLS,
 // presenting one of those SDS-served certs selected by SNI; otherwise the edge
 // serves plain HTTP. Either way the upstream (edge -> pod) hop stays mTLS.
-func BuildEdgeListener(port uint32, tlsSecretNames []string) *listenerv3.Listener {
-	hcm := buildHTTPConnectionManager(EdgeListenerName, ReporterSource, "", "", nil)
+func BuildEdgeListener(name string, port uint32, tlsSecretNames []string) *listenerv3.Listener {
+	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
+			// Both the HTTP and HTTPS listeners serve the same edge route table.
 			RouteConfigName: EdgeHTTPRouteName,
 			ConfigSource:    config.XDSConfigSourceADS(),
 		},
 	}
 
 	filterChain := &listenerv3.FilterChain{
-		Name:    EdgeListenerName,
+		Name:    name,
 		Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
 	}
 	if len(tlsSecretNames) > 0 {
 		filterChain.TransportSocket = edgeDownstreamTLSFromSDS(tlsSecretNames)
 	}
 
-	return edgeListener(EdgeListenerName, port, filterChain)
+	return edgeListener(name, port, filterChain)
 }
 
 // BuildEdgeRedirectListener builds the :80 listener that 301-redirects every

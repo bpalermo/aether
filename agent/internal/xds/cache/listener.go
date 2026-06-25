@@ -112,9 +112,10 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 
 		var resources []types.Resource
 		if c.edgeTLSEnabled {
-			// TLS listener on httpsPort; HTTP behaviour depends on per-Gateway opt-in.
+			// TLS listener on httpsPort, under a name DISTINCT from the :80 listener so
+			// the two never collide in the snapshot/LDS (a shared name dropped :443).
 			resources = append(resources,
-				proxy.BuildEdgeListener(c.edgeHTTPSPort, c.edgeTLSSecretNames()),
+				proxy.BuildEdgeListener(proxy.EdgeHTTPSListenerName, c.edgeHTTPSPort, c.edgeTLSSecretNames()),
 			)
 		}
 		if httpRedirect {
@@ -123,7 +124,7 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 			resources = append(resources, proxy.BuildEdgeRedirectListener(c.edgeHTTPPort))
 		} else {
 			// Default: the HTTP-port listener serves its attached HTTPRoutes directly.
-			resources = append(resources, proxy.BuildEdgeListener(c.edgeHTTPPort, nil))
+			resources = append(resources, proxy.BuildEdgeListener(proxy.EdgeListenerName, c.edgeHTTPPort, nil))
 		}
 		resources = append(resources, c.edgeTCPListeners()...)
 		return resources

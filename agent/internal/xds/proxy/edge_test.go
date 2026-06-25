@@ -54,7 +54,7 @@ func TestNewServiceCluster_EdgePoolingOff(t *testing.T) {
 // interfaces at the configured port, RDS-driven, with the readiness filter
 // ahead of the router.
 func TestBuildEdgeListener(t *testing.T) {
-	l := BuildEdgeListener(8080, nil)
+	l := BuildEdgeListener(EdgeListenerName, 8080, nil)
 
 	assert.Equal(t, EdgeListenerName, l.GetName())
 	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
@@ -80,7 +80,7 @@ func TestBuildEdgeListener(t *testing.T) {
 // gets a TLS transport socket serving the named SDS certs (SNI-selected), does
 // NOT require a client certificate, and sets the TLS floor + ALPN.
 func TestBuildEdgeListenerTLS(t *testing.T) {
-	l := BuildEdgeListener(8443, []string{"kubernetes/api-tls", "kubernetes/foo-tls"})
+	l := BuildEdgeListener(EdgeHTTPSListenerName, 8443, []string{"kubernetes/api-tls", "kubernetes/foo-tls"})
 
 	ts := l.GetFilterChains()[0].GetTransportSocket()
 	require.NotNil(t, ts, "TLS filter chain has a transport socket")
@@ -128,7 +128,7 @@ func TestBuildEdgeRedirectListener(t *testing.T) {
 // TestBuildEdgeListenerNoTLS verifies the plain-HTTP edge listener has no
 // transport socket.
 func TestBuildEdgeListenerNoTLS(t *testing.T) {
-	l := BuildEdgeListener(8080, nil)
+	l := BuildEdgeListener(EdgeListenerName, 8080, nil)
 	assert.Nil(t, l.GetFilterChains()[0].GetTransportSocket())
 }
 
