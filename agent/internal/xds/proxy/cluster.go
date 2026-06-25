@@ -211,10 +211,11 @@ func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
 // separate cluster, not on app_<pod>: an active HC removes failing/pending hosts
 // from load balancing, which would gate (break) the real delivery path through
 // app_<pod> at startup and whenever the probe fails.
-func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string) *clusterv3.Cluster {
-	// The active health check probes the app readiness path over HTTP/1.1
-	// (delegated liveness); h2 app ports are still liveness-probed on the
-	// primary port, so the probe cluster stays HTTP/1.1.
+func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string, tcp bool) *clusterv3.Cluster {
+	// The active health check probes the app's readiness (delegated liveness):
+	// HTTP/1.1 GET <healthPath> for HTTP/gRPC services, or a raw TCP connect for
+	// non-HTTP (TCP floor) services, which have no HTTP readiness surface. h2 app
+	// ports are still liveness-probed on the primary port, so HTTP probes stay HTTP/1.1.
 	c := NewAppCluster(name, netns, port, false)
 	// MUST stay per-pod (clear the inherited collapse): the health_check
 	// filter answers per-pod readiness by reading THIS cluster's
@@ -222,30 +223,38 @@ func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string
 	// outage). A shared alt_stat_name would merge every pod's membership into
 	// one gauge and one unhealthy pod would fail every pod's readiness.
 	c.AltStatName = ""
-	c.HealthChecks = []*corev3.HealthCheck{
-		{
-			Timeout:            durationpb.New(1 * time.Second),
-			Interval:           durationpb.New(5 * time.Second),
-			HealthyThreshold:   wrapperspb.UInt32(1),
-			UnhealthyThreshold: wrapperspb.UInt32(2),
-			// This cluster never carries routed traffic (see above), so without
-			// these Envoy applies its no-traffic HC cadence (default 60s) to every
-			// check after the immediate first one — measured as a 30-62s
-			// endpoint-promotion delay per new pod (e2e 2026-06-11): the first
-			// probe races app startup, loses, and the retry waits out the
-			// no-traffic interval. The healthy variant likewise delayed *demotion*
-			// of a dying app by up to 60s. Probing localhost is cheap; keep the
-			// configured cadence regardless of traffic.
-			NoTrafficInterval:        durationpb.New(5 * time.Second),
-			NoTrafficHealthyInterval: durationpb.New(5 * time.Second),
-			HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
-				HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
-					Host:            appHealthCheckHost,
-					Path:            healthPath,
-					CodecClientType: typev3.CodecClientType_HTTP1,
-				},
-			},
-		},
+	hc := &corev3.HealthCheck{
+		Timeout:            durationpb.New(1 * time.Second),
+		Interval:           durationpb.New(5 * time.Second),
+		HealthyThreshold:   wrapperspb.UInt32(1),
+		UnhealthyThreshold: wrapperspb.UInt32(2),
+		// This cluster never carries routed traffic (see above), so without
+		// these Envoy applies its no-traffic HC cadence (default 60s) to every
+		// check after the immediate first one — measured as a 30-62s
+		// endpoint-promotion delay per new pod (e2e 2026-06-11): the first
+		// probe races app startup, loses, and the retry waits out the
+		// no-traffic interval. The healthy variant likewise delayed *demotion*
+		// of a dying app by up to 60s. Probing localhost is cheap; keep the
+		// configured cadence regardless of traffic.
+		NoTrafficInterval:        durationpb.New(5 * time.Second),
+		NoTrafficHealthyInterval: durationpb.New(5 * time.Second),
 	}
+	if tcp {
+		// Connect-only (empty send/receive): a successful TCP connect to the app
+		// port = healthy. This replaces the inapplicable HTTP probe for TCP-floor
+		// services so they get real liveness instead of being assumed healthy.
+		hc.HealthChecker = &corev3.HealthCheck_TcpHealthCheck_{
+			TcpHealthCheck: &corev3.HealthCheck_TcpHealthCheck{},
+		}
+	} else {
+		hc.HealthChecker = &corev3.HealthCheck_HttpHealthCheck_{
+			HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
+				Host:            appHealthCheckHost,
+				Path:            healthPath,
+				CodecClientType: typev3.CodecClientType_HTTP1,
+			},
+		}
+	}
+	c.HealthChecks = []*corev3.HealthCheck{hc}
 	return c
 }

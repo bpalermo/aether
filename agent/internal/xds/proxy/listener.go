@@ -66,7 +66,10 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 	// liveness) on the primary port; keeping the HC off app_<pod> avoids gating
 	// the delivery path. Liveness stays pod-level (primary port), not per-port.
 	primary := AppPortFromPod(cniPod)
-	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, primary, AppHealthPathFromPod(cniPod))
+	// TCP-floor (non-HTTP) services have no HTTP readiness surface: the probe is a
+	// raw TCP connect to the app port instead of an HTTP GET.
+	isTCP := cniPod.GetAnnotations()[constants.AnnotationEndpointProtocol] == constants.ProtocolTCP
+	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, primary, AppHealthPathFromPod(cniPod), isTCP)
 
 	return inbound, outbound, appClusters, healthCluster, nil
 }
