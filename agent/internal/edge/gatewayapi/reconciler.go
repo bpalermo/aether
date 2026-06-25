@@ -82,7 +82,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	// Our Gateways (those of our GatewayClass) and, per listener hostname, the SDS
 	// cert name to present. listenerCerts also accumulates the cert bytes to push.
-	gateways, gatewayListeners, hostCerts, certs, err := r.resolveGateways(ctx)
+	gateways, ourGateways, gatewayListeners, hostCerts, certs, err := r.resolveGateways(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -191,6 +191,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		"tlsListeners", len(tlsRoutes),
 		"tlsCerts", len(certs),
 	)
+
+	// Publish Gateway API status (the conformance on-ramp). Failures are logged,
+	// not fatal — the data plane is already projected and the next reconcile
+	// retries. The GatewayClass, Gateways, and routes we own all get conditions.
+	r.writeGatewayClassStatus(ctx)
+	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners)
+	r.writeRouteStatuses(ctx, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners)
 	return reconcile.Result{}, nil
 }
 
@@ -203,15 +210,17 @@ type gatewayListenerKey struct {
 }
 
 // resolveGateways lists the Gateways of our GatewayClass and resolves each TLS
-// listener's cert. It returns the set of our Gateway names, a set of listener
-// keys (for TCPRoute/TLSRoute port matching), a hostname→SDS-name map for HTTP
-// cert selection, and the SDS-name→bytes map to push.
-func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, error) {
+// listener's cert. It returns the set of our Gateway names, the Gateway objects
+// themselves (for status), a set of listener keys (for TCPRoute/TLSRoute port
+// matching), a hostname→SDS-name map for HTTP cert selection, and the
+// SDS-name→bytes map to push.
+func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, error) {
 	list := &gatewayv1.GatewayList{}
 	if err := r.List(ctx, list, client.InNamespace(r.Namespace)); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	gateways := map[string]struct{}{}
+	var ourGateways []gatewayv1.Gateway
 	listenerKeys := map[gatewayListenerKey]struct{}{}
 	hostCerts := map[string]string{} // listener hostname ("" = catch-all) -> SDS name
 	certs := map[string]cache.EdgeTLSCert{}
@@ -221,6 +230,7 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, 
 			continue
 		}
 		gateways[gw.Name] = struct{}{}
+		ourGateways = append(ourGateways, *gw)
 		for _, ln := range gw.Spec.Listeners {
 			listenerKeys[gatewayListenerKey{
 				Gateway:  gw.Name,
@@ -260,7 +270,7 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[string]struct{}, 
 			}
 		}
 	}
-	return gateways, listenerKeys, hostCerts, certs, nil
+	return gateways, ourGateways, listenerKeys, hostCerts, certs, nil
 }
 
 // buildVirtualHost maps one HTTPRoute to an edge VirtualHost: its hostnames become
