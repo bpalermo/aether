@@ -111,6 +111,9 @@ func (r *Reconciler) writeGatewayStatuses(
 				if res, ok := tlsResults[listenerStatusKey{Gateway: gk, Name: ln.Name}]; ok && res.hasTLS && !res.resolved {
 					resolvedStatus = metav1.ConditionFalse
 					resolvedReason = string(gatewayv1.ListenerReasonInvalidCertificateRef)
+					if res.reason != "" {
+						resolvedReason = res.reason
+					}
 					resolvedMsg = res.message
 					programmed = false
 				}

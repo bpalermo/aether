@@ -48,6 +48,22 @@ func TestKubernetesProviderResolve(t *testing.T) {
 	assert.Equal(t, "7", got.Version)
 }
 
+func TestKubernetesProviderResolveNamespacedRef(t *testing.T) {
+	// A "<ns>/<name>" ref reads from that namespace, NOT the provider's default —
+	// so a Gateway certificateRef resolves from the Gateway's own namespace, not
+	// the edge's. (Regression: the edge read all certs from its own namespace.)
+	cl := newFakeClient(tlsSecret("other-ns", "their-tls", "OTHERCERT", "OTHERKEY"))
+	p := NewKubernetesProvider(cl, "edge") // default namespace is "edge"
+
+	got, err := p.Resolve(context.Background(), "other-ns/their-tls")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("OTHERCERT"), got.Cert)
+
+	// A bare name still resolves in the default namespace (no Secret there → error).
+	_, err = p.Resolve(context.Background(), "their-tls")
+	require.Error(t, err, "bare name looks in the default namespace, not other-ns")
+}
+
 func TestKubernetesProviderResolveErrors(t *testing.T) {
 	opaque := &corev1.Secret{Type: corev1.SecretTypeOpaque, Data: map[string][]byte{"x": []byte("y")}}
 	opaque.Name, opaque.Namespace = "opaque", "edge"
