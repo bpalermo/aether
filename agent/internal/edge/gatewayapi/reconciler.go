@@ -129,18 +129,19 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	// Our Gateways (those of our GatewayClass) and, per listener hostname, the SDS
 	// cert name to present. listenerCerts also accumulates the cert bytes to push.
-	gateways, ourGateways, gatewayListeners, hostCerts, certs, tlsResults, err := r.resolveGateways(ctx)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-
-	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs (drop +
-	// RefNotPermitted). The edge cache is cluster-wide (post-#323).
+	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs and listener
+	// certificateRefs (drop + RefNotPermitted). The edge cache is cluster-wide
+	// (post-#323). Listed first so resolveGateways can enforce them on cert refs.
 	grantList := &gatewayv1beta1.ReferenceGrantList{}
 	if err := r.List(ctx, grantList); err != nil {
 		return reconcile.Result{}, err
 	}
 	grants := grantList.Items
+
+	gateways, ourGateways, gatewayListeners, hostCerts, certs, tlsResults, err := r.resolveGateways(ctx, grants)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
 
 	// --- HTTPRoutes (cluster-wide) ---
 	httpRoutes := &gatewayv1.HTTPRouteList{}
@@ -350,6 +351,10 @@ type listenerTLSResult struct {
 	hasTLS   bool
 	resolved bool
 	message  string
+	// reason overrides the default ResolvedRefs=False reason
+	// (InvalidCertificateRef) when set — e.g. RefNotPermitted for an ungranted
+	// cross-namespace certificateRef.
+	reason string
 }
 
 // resolveGateways lists the Gateways of our GatewayClass CLUSTER-WIDE and resolves
@@ -360,7 +365,7 @@ type listenerTLSResult struct {
 // GatewayClassName: every Gateway whose gatewayClassName is the class this edge
 // serves (whose controllerName is gateway.aether.io/edge) is ours, regardless of
 // namespace.
-func (r *Reconciler) resolveGateways(ctx context.Context) (map[gatewayKey]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, map[listenerStatusKey]listenerTLSResult, error) {
+func (r *Reconciler) resolveGateways(ctx context.Context, grants []gatewayv1beta1.ReferenceGrant) (map[gatewayKey]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, map[listenerStatusKey]listenerTLSResult, error) {
 	list := &gatewayv1.GatewayList{}
 	if err := r.List(ctx, list); err != nil {
 		return nil, nil, nil, nil, nil, nil, err
@@ -391,7 +396,7 @@ func (r *Reconciler) resolveGateways(ctx context.Context) (map[gatewayKey]struct
 				continue
 			}
 			lk := listenerStatusKey{Gateway: gk, Name: ln.Name}
-			res := r.resolveListenerTLS(ctx, gw, ln, hostCerts, certs)
+			res := r.resolveListenerTLS(ctx, gw, ln, hostCerts, certs, grants)
 			tlsResults[lk] = res
 		}
 	}
@@ -411,6 +416,7 @@ func (r *Reconciler) resolveListenerTLS(
 	ln gatewayv1.Listener,
 	hostCerts map[string]string,
 	certs map[string]cache.EdgeTLSCert,
+	grants []gatewayv1beta1.ReferenceGrant,
 ) listenerTLSResult {
 	if len(ln.TLS.CertificateRefs) == 0 {
 		return listenerTLSResult{hasTLS: true, resolved: false, message: "TLS listener has no certificateRefs"}
@@ -433,14 +439,27 @@ func (r *Reconciler) resolveListenerTLS(
 			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q has unsupported kind %q", ref.Name, *ref.Kind)}
 		}
 		name := string(ref.Name)
-		sdsName, sErr := r.Secrets.SDSName(configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, name)
+		// The Secret lives in certificateRef.namespace, defaulting to the GATEWAY's
+		// own namespace — NOT the edge's namespace. A cross-namespace ref (namespace
+		// set and != the Gateway's) is permitted only by a ReferenceGrant in the
+		// Secret's namespace; otherwise it is RefNotPermitted (and not resolved).
+		certNS := gw.Namespace
+		if ref.Namespace != nil && string(*ref.Namespace) != "" {
+			certNS = string(*ref.Namespace)
+		}
+		if referencegrant.CrossNamespace(certNS, gw.Namespace) &&
+			!referencegrant.PermitsSecret(grants, gw.Namespace, certNS, name) {
+			return listenerTLSResult{hasTLS: true, resolved: false, reason: string(gatewayv1.ListenerReasonRefNotPermitted), message: fmt.Sprintf("certificateRef %s/%s is not permitted by any ReferenceGrant", certNS, name)}
+		}
+		secretRef := certNS + "/" + name
+		sdsName, sErr := r.Secrets.SDSName(configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, secretRef)
 		if sErr != nil {
-			r.Log.WarnContext(ctx, "gateway listener TLS provider unavailable", "gateway", gw.Name, "secret", name, "error", sErr.Error())
+			r.Log.WarnContext(ctx, "gateway listener TLS provider unavailable", "gateway", gw.Name, "secret", secretRef, "error", sErr.Error())
 			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q provider unavailable", name)}
 		}
-		cert, cErr := r.Secrets.Resolve(ctx, configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, name)
+		cert, cErr := r.Secrets.Resolve(ctx, configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, secretRef)
 		if cErr != nil {
-			r.Log.WarnContext(ctx, "gateway listener TLS cert unresolved", "gateway", gw.Name, "secret", name, "error", cErr.Error())
+			r.Log.WarnContext(ctx, "gateway listener TLS cert unresolved", "gateway", gw.Name, "secret", secretRef, "error", cErr.Error())
 			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q did not resolve: %v", name, cErr)}
 		}
 		certs[sdsName] = cache.EdgeTLSCert{Cert: cert.Cert, Key: cert.Key}

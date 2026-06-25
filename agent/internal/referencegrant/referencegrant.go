@@ -52,6 +52,50 @@ func PermitsBackend(
 	return false
 }
 
+// PermitsSecret reports whether the grants permit a cross-namespace reference from
+// a Gateway in fromNamespace to a core Secret named toName in toNamespace (the
+// Gateway listener certificateRef case). A grant matches when it lives in
+// toNamespace, has a spec.from entry matching {gateway.networking.k8s.io, Gateway,
+// fromNamespace}, and a spec.to entry for the core Secret {group: "", kind: Secret}
+// whose name is empty (all Secrets) or equal to toName.
+//
+// Callers must only invoke this for genuinely cross-namespace refs; same-namespace
+// refs are always permitted and need no grant (see CrossNamespace).
+func PermitsSecret(
+	grants []gatewayv1beta1.ReferenceGrant,
+	fromNamespace string,
+	toNamespace, toName string,
+) bool {
+	for i := range grants {
+		g := &grants[i]
+		if g.Namespace != toNamespace {
+			continue
+		}
+		if !fromMatches(g.Spec.From, "gateway.networking.k8s.io", "Gateway", fromNamespace) {
+			continue
+		}
+		if toMatchesSecret(g.Spec.To, toName) {
+			return true
+		}
+	}
+	return false
+}
+
+// toMatchesSecret reports whether any spec.to entry allows the core Secret named
+// toName. A to-entry with no Name matches every Secret; a named entry matches only
+// that Secret.
+func toMatchesSecret(to []gatewayv1.ReferenceGrantTo, toName string) bool {
+	for _, t := range to {
+		if string(t.Group) != "" || string(t.Kind) != "Secret" {
+			continue
+		}
+		if t.Name == nil || string(*t.Name) == "" || string(*t.Name) == toName {
+			return true
+		}
+	}
+	return false
+}
+
 // fromMatches reports whether any spec.from entry trusts {group, kind, namespace}.
 func fromMatches(from []gatewayv1.ReferenceGrantFrom, group, kind, namespace string) bool {
 	for _, f := range from {

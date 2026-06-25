@@ -55,6 +55,59 @@ func TestCrossNamespace(t *testing.T) {
 	}
 }
 
+func TestPermitsSecret(t *testing.T) {
+	// from a Gateway in ns-a to a Secret "cert" in ns-b.
+	cases := []struct {
+		name   string
+		grants []gatewayv1beta1.ReferenceGrant
+		want   bool
+	}{
+		{"no grants", nil, false},
+		{
+			"matching grant (Gateway->Secret, named)",
+			[]gatewayv1beta1.ReferenceGrant{grant("ns-b",
+				[]gatewayv1.ReferenceGrantFrom{from("gateway.networking.k8s.io", "Gateway", "ns-a")},
+				[]gatewayv1.ReferenceGrantTo{to("", "Secret", strp("cert"))})},
+			true,
+		},
+		{
+			"matching grant (all Secrets)",
+			[]gatewayv1beta1.ReferenceGrant{grant("ns-b",
+				[]gatewayv1.ReferenceGrantFrom{from("gateway.networking.k8s.io", "Gateway", "ns-a")},
+				[]gatewayv1.ReferenceGrantTo{to("", "Secret", nil)})},
+			true,
+		},
+		{
+			"wrong from kind (Service, not Gateway)",
+			[]gatewayv1beta1.ReferenceGrant{grant("ns-b",
+				[]gatewayv1.ReferenceGrantFrom{from("gateway.networking.k8s.io", "HTTPRoute", "ns-a")},
+				[]gatewayv1.ReferenceGrantTo{to("", "Secret", nil)})},
+			false,
+		},
+		{
+			"wrong to kind (Service, not Secret)",
+			[]gatewayv1beta1.ReferenceGrant{grant("ns-b",
+				[]gatewayv1.ReferenceGrantFrom{from("gateway.networking.k8s.io", "Gateway", "ns-a")},
+				[]gatewayv1.ReferenceGrantTo{to("", "Service", nil)})},
+			false,
+		},
+		{
+			"grant in the wrong namespace",
+			[]gatewayv1beta1.ReferenceGrant{grant("ns-a",
+				[]gatewayv1.ReferenceGrantFrom{from("gateway.networking.k8s.io", "Gateway", "ns-a")},
+				[]gatewayv1.ReferenceGrantTo{to("", "Secret", nil)})},
+			false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := PermitsSecret(c.grants, "ns-a", "ns-b", "cert"); got != c.want {
+				t.Fatalf("PermitsSecret=%v want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestPermitsBackend(t *testing.T) {
 	const grp = gatewayv1.GroupName // gateway.networking.k8s.io
 
