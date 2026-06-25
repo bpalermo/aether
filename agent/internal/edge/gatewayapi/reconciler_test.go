@@ -72,12 +72,24 @@ func TestBuildVirtualHost_TLS(t *testing.T) {
 }
 
 // TestAttachedToOurGateway: only routes with a parentRef to one of our Gateways
-// project.
+// project. parentRef namespace defaults to the route's namespace.
 func TestAttachedToOurGateway(t *testing.T) {
-	ours := map[string]struct{}{"edge-gw": {}}
-	assert.True(t, attachedToOurGateway(httpRoute(nil, nil, "edge-gw").Spec.ParentRefs, ours))
-	assert.False(t, attachedToOurGateway(httpRoute(nil, nil, "other-gw").Spec.ParentRefs, ours))
-	assert.False(t, attachedToOurGateway(httpRoute(nil, nil).Spec.ParentRefs, ours), "no parentRef")
+	ours := map[gatewayKey]struct{}{{Namespace: "ns", Name: "edge-gw"}: {}}
+	assert.True(t, attachedToOurGateway(httpRoute(nil, nil, "edge-gw").Spec.ParentRefs, "ns", ours))
+	assert.False(t, attachedToOurGateway(httpRoute(nil, nil, "other-gw").Spec.ParentRefs, "ns", ours))
+	assert.False(t, attachedToOurGateway(httpRoute(nil, nil).Spec.ParentRefs, "ns", ours), "no parentRef")
+	// Same gateway name in a DIFFERENT namespace must not match.
+	assert.False(t, attachedToOurGateway(httpRoute(nil, nil, "edge-gw").Spec.ParentRefs, "other-ns", ours), "name match in wrong namespace")
+}
+
+// TestAttachedToOurGateway_ExplicitNamespace: a parentRef with an explicit
+// namespace matches the Gateway in that namespace regardless of the route's.
+func TestAttachedToOurGateway_ExplicitNamespace(t *testing.T) {
+	ours := map[gatewayKey]struct{}{{Namespace: "gw-ns", Name: "edge-gw"}: {}}
+	ns := gatewayv1.Namespace("gw-ns")
+	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "route-ns"}}
+	hr.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: "edge-gw", Namespace: &ns}}
+	assert.True(t, attachedToOurGateway(hr.Spec.ParentRefs, "route-ns", ours))
 }
 
 func TestFirstBackendService(t *testing.T) {
@@ -139,45 +151,51 @@ func TestBuildL4Backends_ForeignGroupSkipped(t *testing.T) {
 // TestAttachedToOurGateway_L4 verifies the refactored attachedToOurGateway accepts
 // a []ParentReference slice directly (used by TCPRoute/TLSRoute path).
 func TestAttachedToOurGateway_L4(t *testing.T) {
-	ours := map[string]struct{}{"edge-gw": {}}
+	ours := map[gatewayKey]struct{}{{Namespace: "ns", Name: "edge-gw"}: {}}
 	refs := []gatewayv1.ParentReference{
 		{Name: "edge-gw"},
 	}
-	assert.True(t, attachedToOurGateway(refs, ours))
-	assert.False(t, attachedToOurGateway([]gatewayv1.ParentReference{{Name: "other"}}, ours))
+	assert.True(t, attachedToOurGateway(refs, "ns", ours))
+	assert.False(t, attachedToOurGateway([]gatewayv1.ParentReference{{Name: "other"}}, "ns", ours))
 }
 
 // TestGatewayParentPorts_WithPort verifies port-scoped parentRefs are matched
 // against the listener key set.
 func TestGatewayParentPorts_WithPort(t *testing.T) {
-	gateways := map[string]struct{}{"edge-gw": {}}
+	gk := gatewayKey{Namespace: "ns", Name: "edge-gw"}
+	gateways := map[gatewayKey]struct{}{gk: {}}
 	keys := map[gatewayListenerKey]struct{}{
-		{Gateway: "edge-gw", Port: 5432, Protocol: gatewayv1.TCPProtocolType}: {},
-		{Gateway: "edge-gw", Port: 8443, Protocol: gatewayv1.TLSProtocolType}: {},
+		{Gateway: gk, Port: 5432, Protocol: gatewayv1.TCPProtocolType}: {},
+		{Gateway: gk, Port: 8443, Protocol: gatewayv1.TLSProtocolType}: {},
 	}
 
 	tcpRefs := []gatewayv1alpha2.ParentReference{gatewayParentRef("edge-gw", 5432)}
-	ports := gatewayParentPorts(tcpRefs, gateways, gatewayv1.TCPProtocolType, keys)
+	ports := gatewayParentPorts(tcpRefs, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Equal(t, []uint32{5432}, ports)
 
 	// Wrong protocol: TLS ref not matched as TCP.
 	wrongProto := []gatewayv1alpha2.ParentReference{gatewayParentRef("edge-gw", 8443)}
-	tcpPorts := gatewayParentPorts(wrongProto, gateways, gatewayv1.TCPProtocolType, keys)
+	tcpPorts := gatewayParentPorts(wrongProto, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Empty(t, tcpPorts)
+
+	// Right name+port but wrong route namespace (no explicit ref ns): no match.
+	wrongNs := gatewayParentPorts(tcpRefs, "other-ns", gateways, gatewayv1.TCPProtocolType, keys)
+	assert.Empty(t, wrongNs)
 }
 
 // TestGatewayParentPorts_NoPort verifies that a parentRef with no port matches
 // all listeners of the given protocol on the gateway.
 func TestGatewayParentPorts_NoPort(t *testing.T) {
-	gateways := map[string]struct{}{"edge-gw": {}}
+	gk := gatewayKey{Namespace: "ns", Name: "edge-gw"}
+	gateways := map[gatewayKey]struct{}{gk: {}}
 	keys := map[gatewayListenerKey]struct{}{
-		{Gateway: "edge-gw", Port: 5432, Protocol: gatewayv1.TCPProtocolType}: {},
-		{Gateway: "edge-gw", Port: 5433, Protocol: gatewayv1.TCPProtocolType}: {},
-		{Gateway: "edge-gw", Port: 8443, Protocol: gatewayv1.TLSProtocolType}: {},
+		{Gateway: gk, Port: 5432, Protocol: gatewayv1.TCPProtocolType}: {},
+		{Gateway: gk, Port: 5433, Protocol: gatewayv1.TCPProtocolType}: {},
+		{Gateway: gk, Port: 8443, Protocol: gatewayv1.TLSProtocolType}: {},
 	}
 	// No port: should match all TCP listeners.
 	refs := []gatewayv1alpha2.ParentReference{gatewayParentRef("edge-gw", 0)}
-	ports := gatewayParentPorts(refs, gateways, gatewayv1.TCPProtocolType, keys)
+	ports := gatewayParentPorts(refs, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Len(t, ports, 2)
 	for _, p := range ports {
 		assert.True(t, p == 5432 || p == 5433)
@@ -186,22 +204,22 @@ func TestGatewayParentPorts_NoPort(t *testing.T) {
 
 // TestGatewayParentPorts_UnknownGateway verifies refs to unknown gateways are ignored.
 func TestGatewayParentPorts_UnknownGateway(t *testing.T) {
-	gateways := map[string]struct{}{"edge-gw": {}}
+	gateways := map[gatewayKey]struct{}{{Namespace: "ns", Name: "edge-gw"}: {}}
 	keys := map[gatewayListenerKey]struct{}{
-		{Gateway: "other-gw", Port: 5432, Protocol: gatewayv1.TCPProtocolType}: {},
+		{Gateway: gatewayKey{Namespace: "ns", Name: "other-gw"}, Port: 5432, Protocol: gatewayv1.TCPProtocolType}: {},
 	}
 	refs := []gatewayv1alpha2.ParentReference{gatewayParentRef("other-gw", 5432)}
-	ports := gatewayParentPorts(refs, gateways, gatewayv1.TCPProtocolType, keys)
+	ports := gatewayParentPorts(refs, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Empty(t, ports)
 }
 
 // TestBuildVirtualHost_ParentRefsRefactored verifies the refactored
 // attachedToOurGateway still works for HTTPRoutes.
 func TestBuildVirtualHost_ParentRefsRefactored(t *testing.T) {
-	ours := map[string]struct{}{"edge-gw": {}}
-	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "r"}}
+	ours := map[gatewayKey]struct{}{{Namespace: "ns", Name: "edge-gw"}: {}}
+	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"}}
 	hr.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: "edge-gw"}}
-	assert.True(t, attachedToOurGateway(hr.Spec.ParentRefs, ours))
+	assert.True(t, attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, ours))
 }
 
 // TestBuildVirtualHost_RequestHeaderModifier: set/add/remove request header filters

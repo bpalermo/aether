@@ -1,17 +1,19 @@
 {{- if .Values.edge.enabled }}
-{{- $routeNamespace := default (include "aether.edge.namespace" .) .Values.edge.routeNamespace }}
-# Namespaced: the edge only reads Gateways/HTTPRoutes (and their status) in the
-# namespace it watches. No cluster-wide access — exposure is delegable per namespace.
+# Cluster-scoped: the edge is now namespace-agnostic. It reconciles every Gateway
+# of its GatewayClass wherever it lives and publishes status (Accepted/Programmed/
+# ResolvedRefs) on those Gateways and their Routes — the upstream conformance suite
+# creates its objects in its OWN namespaces, so a namespace-scoped Role would never
+# see them. The cluster-wide list/watch + status here is what unblocks the
+# north-south profile. GatewayClass is itself a cluster resource.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: {{ include "aether.edge.fullname" . }}
-  namespace: {{ $routeNamespace }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
 rules:
   # Gateway API (proposal 018): read Gateways + HTTPRoutes + TCPRoutes + TLSRoutes
-  # (and their status) in the watched namespace. TCPRoute/TLSRoute live in
+  # (and write their status) CLUSTER-WIDE. TCPRoute/TLSRoute live in
   # gateway.networking.k8s.io/v1alpha2 but share the same apiGroup label in RBAC.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "httproutes", "tcproutes", "tlsroutes"]
@@ -19,8 +21,15 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways/status", "httproutes/status", "tcproutes/status", "tlsroutes/status"]
     verbs: ["get", "update", "patch"]
-  # Resolve backendRef Services in the watched namespace for the ResolvedRefs
-  # condition on routes.
+  # GatewayClass (cluster resource): read it and set its Accepted status +
+  # supportedFeatures (conformance).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status"]
+    verbs: ["get", "update", "patch"]
+  # Resolve backendRef Services cluster-wide for the ResolvedRefs condition.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
@@ -33,47 +42,15 @@ rules:
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ include "aether.edge.fullname" . }}
-  namespace: {{ $routeNamespace }}
-  labels:
-    {{- include "aether.edge.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "aether.edge.fullname" . }}
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "aether.edge.serviceAccountName" . }}
-    namespace: {{ include "aether.edge.namespace" . }}
----
-# Cluster-scoped: GatewayClass is a cluster resource, so the edge needs a
-# ClusterRole to read it and set its Accepted status condition (conformance).
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ include "aether.edge.fullname" . }}-gatewayclass
-  labels:
-    {{- include "aether.edge.labels" . | nindent 4 }}
-rules:
-  - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gatewayclasses"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gatewayclasses/status"]
-    verbs: ["get", "update", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "aether.edge.fullname" . }}-gatewayclass
+  name: {{ include "aether.edge.fullname" . }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "aether.edge.fullname" . }}-gatewayclass
+  name: {{ include "aether.edge.fullname" . }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "aether.edge.serviceAccountName" . }}

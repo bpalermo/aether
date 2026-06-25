@@ -13,13 +13,15 @@ import (
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
-// writeGatewayClassStatus sets Accepted=True on the GatewayClass whose
-// controllerName is the edge controller and whose name is the one we serve. It
-// is a no-op for any other class (we MUST only touch classes we control).
+// writeGatewayClassStatus sets Accepted=True and the supportedFeatures list on the
+// GatewayClass whose controllerName is the edge controller and whose name is the
+// one we serve. It is a no-op for any other class (we MUST only touch classes we
+// control). supportedFeatures is what the upstream conformance suite reads to
+// decide which test suites to run vs skip.
 func (r *Reconciler) writeGatewayClassStatus(ctx context.Context) {
 	gc := &gatewayv1.GatewayClass{}
-	// Uncached read: GatewayClass is cluster-scoped and the manager cache is
-	// namespace-scoped, so r.Get (cached) would miss and return NotFound.
+	// Uncached read: GatewayClass is cluster-scoped and a cached Get can race the
+	// informer sync and return NotFound on the first reconcile.
 	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: r.GatewayClassName}, gc); err != nil {
 		if !apierrors.IsNotFound(err) {
 			r.Log.WarnContext(ctx, "failed to get GatewayClass for status", "gatewayClass", r.GatewayClassName, "error", err.Error())
@@ -29,16 +31,21 @@ func (r *Reconciler) writeGatewayClassStatus(ctx context.Context) {
 	if gc.Spec.ControllerName != gatewaystatus.EdgeControllerName {
 		return
 	}
-	conds, changed := gatewaystatus.MergeConditions(gc.Status.Conditions, gc.Generation, gatewaystatus.Condition{
+	conds, condChanged := gatewaystatus.MergeConditions(gc.Status.Conditions, gc.Generation, gatewaystatus.Condition{
 		Type:    string(gatewayv1.GatewayClassConditionStatusAccepted),
 		Status:  metav1.ConditionTrue,
 		Reason:  string(gatewayv1.GatewayClassReasonAccepted),
 		Message: "GatewayClass accepted by the aether edge controller",
 	})
-	if !changed {
+
+	features := aetherSupportedFeatures()
+	featChanged := !supportedFeaturesEqual(gc.Status.SupportedFeatures, features)
+
+	if !condChanged && !featChanged {
 		return
 	}
 	gc.Status.Conditions = conds
+	gc.Status.SupportedFeatures = features
 	if err := r.Status().Update(ctx, gc); err != nil {
 		r.Log.WarnContext(ctx, "failed to write GatewayClass status", "gatewayClass", gc.Name, "error", err.Error())
 	}
@@ -54,7 +61,7 @@ func (r *Reconciler) writeGatewayStatuses(
 	httpRoutes []gatewayv1.HTTPRoute,
 	tcpRoutes []gatewayv1alpha2.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
-	gateways map[string]struct{},
+	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
 ) {
 	for i := range ourGateways {
@@ -79,7 +86,7 @@ func (r *Reconciler) writeGatewayStatuses(
 
 		listeners := make([]gatewayv1.ListenerStatus, 0, len(gw.Spec.Listeners))
 		for _, ln := range gw.Spec.Listeners {
-			attached := r.attachedRoutesForListener(gw.Name, ln, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys)
+			attached := r.attachedRoutesForListener(gw.Namespace, gw.Name, ln, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys)
 			lc, _ := gatewaystatus.MergeConditions(existingListenerConditions(gw.Status.Listeners, ln.Name), gw.Generation,
 				gatewaystatus.Condition{
 					Type:    string(gatewayv1.ListenerConditionAccepted),
@@ -124,12 +131,12 @@ func (r *Reconciler) writeGatewayStatuses(
 // gateway; TCP/TLS listeners accept TCP/TLSRoutes whose parentRef resolves to
 // that listener's port (via gatewayParentPorts).
 func (r *Reconciler) attachedRoutesForListener(
-	gwName string,
+	gwNamespace, gwName string,
 	ln gatewayv1.Listener,
 	httpRoutes []gatewayv1.HTTPRoute,
 	tcpRoutes []gatewayv1alpha2.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
-	gateways map[string]struct{},
+	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
 ) int32 {
 	var count int32
@@ -137,14 +144,14 @@ func (r *Reconciler) attachedRoutesForListener(
 	case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
 		for i := range httpRoutes {
 			hr := &httpRoutes[i]
-			if httpRouteAttachesToListener(hr.Spec.ParentRefs, gwName, ln) {
+			if httpRouteAttachesToListener(hr.Spec.ParentRefs, hr.Namespace, gwNamespace, gwName, ln) {
 				count++
 			}
 		}
 	case gatewayv1.TCPProtocolType:
 		for i := range tcpRoutes {
 			tr := &tcpRoutes[i]
-			ports := gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TCPProtocolType, listenerKeys)
+			ports := gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, listenerKeys)
 			if containsPort(ports, uint32(ln.Port)) {
 				count++
 			}
@@ -152,7 +159,7 @@ func (r *Reconciler) attachedRoutesForListener(
 	case gatewayv1.TLSProtocolType:
 		for i := range tlsRoutes {
 			tr := &tlsRoutes[i]
-			ports := gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TLSProtocolType, listenerKeys)
+			ports := gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, listenerKeys)
 			if containsPort(ports, uint32(ln.Port)) {
 				count++
 			}
@@ -161,10 +168,11 @@ func (r *Reconciler) attachedRoutesForListener(
 	return count
 }
 
-// httpRouteAttachesToListener reports whether an HTTPRoute's parentRefs attach to
-// the given gateway listener. A parentRef with no sectionName/port attaches to
-// every HTTP/HTTPS listener; a sectionName or port narrows it to that listener.
-func httpRouteAttachesToListener(parentRefs []gatewayv1.ParentReference, gwName string, ln gatewayv1.Listener) bool {
+// httpRouteAttachesToListener reports whether an HTTPRoute (in routeNamespace)
+// attaches to the given gateway listener. A parentRef with no sectionName/port
+// attaches to every HTTP/HTTPS listener; a sectionName or port narrows it to that
+// listener. The parentRef namespace defaults to the route's namespace.
+func httpRouteAttachesToListener(parentRefs []gatewayv1.ParentReference, routeNamespace, gwNamespace, gwName string, ln gatewayv1.Listener) bool {
 	for _, p := range parentRefs {
 		if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
 			continue
@@ -172,7 +180,7 @@ func httpRouteAttachesToListener(parentRefs []gatewayv1.ParentReference, gwName 
 		if p.Kind != nil && string(*p.Kind) != "Gateway" {
 			continue
 		}
-		if string(p.Name) != gwName {
+		if string(p.Name) != gwName || parentRefNamespace(p.Namespace, routeNamespace) != gwNamespace {
 			continue
 		}
 		if p.SectionName != nil && *p.SectionName != ln.Name {
@@ -259,32 +267,33 @@ func (r *Reconciler) writeRouteStatuses(
 	httpRoutes []gatewayv1.HTTPRoute,
 	tcpRoutes []gatewayv1alpha2.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
-	gateways map[string]struct{},
+	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
 ) {
 	for i := range httpRoutes {
 		hr := &httpRoutes[i]
-		accepted := attachedToOurGateway(hr.Spec.ParentRefs, gateways)
+		accepted := attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways)
 		resolved, reason, msg := r.backendsResolveHTTP(ctx, hr.Namespace, hr.Spec.Rules)
-		r.writeRouteParentStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, ourGatewayParentRefs(hr.Spec.ParentRefs, gateways), accepted, resolved, reason, msg, "HTTPRoute")
+		r.writeRouteParentStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, ourGatewayParentRefs(hr.Spec.ParentRefs, hr.Namespace, gateways), accepted, resolved, reason, msg, "HTTPRoute")
 	}
 	for i := range tcpRoutes {
 		tr := &tcpRoutes[i]
-		accepted := len(gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TCPProtocolType, listenerKeys)) > 0
+		accepted := len(gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, listenerKeys)) > 0
 		resolved, reason, msg := r.backendsResolveL4(ctx, tr.Namespace, l4BackendObjectRefs(tr.Spec.Rules))
-		r.writeRouteParentStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, ourGatewayParentRefs(tr.Spec.ParentRefs, gateways), accepted, resolved, reason, msg, "TCPRoute")
+		r.writeRouteParentStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, ourGatewayParentRefs(tr.Spec.ParentRefs, tr.Namespace, gateways), accepted, resolved, reason, msg, "TCPRoute")
 	}
 	for i := range tlsRoutes {
 		tr := &tlsRoutes[i]
-		accepted := len(gatewayParentPorts(tr.Spec.ParentRefs, gateways, gatewayv1.TLSProtocolType, listenerKeys)) > 0
+		accepted := len(gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, listenerKeys)) > 0
 		resolved, reason, msg := r.backendsResolveTLS(ctx, tr.Namespace, tr.Spec.Rules)
-		r.writeRouteParentStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, ourGatewayParentRefs(tr.Spec.ParentRefs, gateways), accepted, resolved, reason, msg, "TLSRoute")
+		r.writeRouteParentStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, ourGatewayParentRefs(tr.Spec.ParentRefs, tr.Namespace, gateways), accepted, resolved, reason, msg, "TLSRoute")
 	}
 }
 
-// ourGatewayParentRefs returns the parentRefs of a route that point at one of our
-// Gateways — the only entries we own status for.
-func ourGatewayParentRefs(parentRefs []gatewayv1.ParentReference, gateways map[string]struct{}) []gatewayv1.ParentReference {
+// ourGatewayParentRefs returns the parentRefs of a route (in routeNamespace) that
+// point at one of our Gateways — the only entries we own status for. The parentRef
+// namespace defaults to the route's namespace.
+func ourGatewayParentRefs(parentRefs []gatewayv1.ParentReference, routeNamespace string, gateways map[gatewayKey]struct{}) []gatewayv1.ParentReference {
 	var out []gatewayv1.ParentReference
 	for _, p := range parentRefs {
 		if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
@@ -293,7 +302,8 @@ func ourGatewayParentRefs(parentRefs []gatewayv1.ParentReference, gateways map[s
 		if p.Kind != nil && string(*p.Kind) != "Gateway" {
 			continue
 		}
-		if _, ok := gateways[string(p.Name)]; !ok {
+		key := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
+		if _, ok := gateways[key]; !ok {
 			continue
 		}
 		out = append(out, p)
