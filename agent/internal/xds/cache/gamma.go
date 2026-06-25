@@ -67,9 +67,12 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 	if timeoutNanos(a) != timeoutNanos(b) {
 		return false
 	}
+	if !equalGammaHeaderMutation(a.HeaderMutation, b.HeaderMutation) {
+		return false
+	}
 	for i := range a.Matches {
 		ma, mb := a.Matches[i], b.Matches[i]
-		if ma.Prefix != mb.Prefix || ma.Exact != mb.Exact || len(ma.Headers) != len(mb.Headers) {
+		if ma.Prefix != mb.Prefix || ma.Exact != mb.Exact || ma.Regex != mb.Regex || len(ma.Headers) != len(mb.Headers) {
 			return false
 		}
 		for j := range ma.Headers {
@@ -80,6 +83,54 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 	}
 	for i := range a.Backends {
 		if a.Backends[i] != b.Backends[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// equalGammaHeaderMutation compares two *GammaHeaderMutation values for content
+// equality. Used by the gamma route equality check to avoid constant snapshot
+// rebuilds when the reconciler allocates new (but equivalent) mutation structs.
+func equalGammaHeaderMutation(a, b *proxy.GammaHeaderMutation) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if len(a.SetRequest) != len(b.SetRequest) || len(a.AddRequest) != len(b.AddRequest) ||
+		len(a.RemoveRequest) != len(b.RemoveRequest) || len(a.SetResponse) != len(b.SetResponse) ||
+		len(a.AddResponse) != len(b.AddResponse) || len(a.RemoveResponse) != len(b.RemoveResponse) {
+		return false
+	}
+	for i := range a.SetRequest {
+		if a.SetRequest[i] != b.SetRequest[i] {
+			return false
+		}
+	}
+	for i := range a.AddRequest {
+		if a.AddRequest[i] != b.AddRequest[i] {
+			return false
+		}
+	}
+	for i := range a.RemoveRequest {
+		if a.RemoveRequest[i] != b.RemoveRequest[i] {
+			return false
+		}
+	}
+	for i := range a.SetResponse {
+		if a.SetResponse[i] != b.SetResponse[i] {
+			return false
+		}
+	}
+	for i := range a.AddResponse {
+		if a.AddResponse[i] != b.AddResponse[i] {
+			return false
+		}
+	}
+	for i := range a.RemoveResponse {
+		if a.RemoveResponse[i] != b.RemoveResponse[i] {
 			return false
 		}
 	}
