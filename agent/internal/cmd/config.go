@@ -127,6 +127,11 @@ type AgentConfig struct {
 	// EdgeHTTPSPort is the port the edge TLS listener binds when EdgeTLS is set.
 	EdgeHTTPSPort uint32
 
+	// EdgeReadinessPort is the port the dedicated always-bound readiness listener
+	// binds; the kubelet readiness probe targets it over plain HTTP. Independent of
+	// the public listeners so the probe survives proposal 021 Phase 2 (edge only).
+	EdgeReadinessPort uint32
+
 	// EdgePerGatewayAddressing enables proposal 021 Phase 2: a per-Gateway
 	// LoadBalancer Service + internal-port demux so each class-aether Gateway
 	// gets its own external IP. When false, falls back to Phase 1 (single shared
@@ -146,6 +151,7 @@ func NewAgentConfig() *AgentConfig {
 		ProxyServiceNodeID:       constants.DefaultProxyID,
 		EdgeHTTPPort:             proxy.DefaultEdgeHTTPPort,
 		EdgeHTTPSPort:            proxy.DefaultEdgeHTTPSPort,
+		EdgeReadinessPort:        proxy.DefaultEdgeReadinessPort,
 		EdgePerGatewayAddressing: true,
 		GatewayClassName:         "aether",
 		CNIServerConfig:          cniServer.NewCNIServerConfig(),

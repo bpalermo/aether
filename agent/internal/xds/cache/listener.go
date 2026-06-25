@@ -108,6 +108,16 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	if c.edge {
 		var resources []types.Resource
 
+		// Always emit the dedicated readiness listener so the kubelet probe has a
+		// stable target independent of which public listeners are bound. Under
+		// Phase 2 the public listeners move to per-Gateway internal ports and
+		// nothing binds the HTTPS port — probing it there fails and wedges the roll.
+		readinessPort := c.edgeReadinessPort
+		if readinessPort == 0 {
+			readinessPort = proxy.DefaultEdgeReadinessPort
+		}
+		resources = append(resources, proxy.BuildEdgeReadinessListener(readinessPort))
+
 		if c.hasPerGatewayAddressing() {
 			// Proposal 021 Phase 2: per-Gateway listeners, each with a unique name
 			// (edge_gw_<ns>_<gwname>_<internalPort>). No shared edge_http/edge_https

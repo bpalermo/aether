@@ -54,6 +54,7 @@ func init() {
 	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "route-namespace", "", "Namespace to watch Gateways/HTTPRoutes in (empty = the edge pod's own namespace)")
 	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per Gateway listener via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
+	edgeCmd.Flags().Uint32Var(&cfg.EdgeReadinessPort, "edge-readiness-port", cfg.EdgeReadinessPort, "Port the dedicated always-bound readiness listener binds; the readiness probe targets it (independent of the public listeners)")
 	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves")
 	edgeCmd.Flags().StringVar(&cfg.EdgeServiceName, "edge-service-name", "", "Name of the edge's own LoadBalancer Service (in the edge namespace); its assigned LB address is published as every class-aether Gateway's status.addresses. Empty disables address publication")
 	edgeCmd.Flags().BoolVar(&cfg.EdgePerGatewayAddressing, "edge-per-gateway-addressing", true, "Enable proposal 021 Phase 2: create a per-Gateway LoadBalancer Service + internal-port demux so each Gateway gets its own external IP (default: true). Set false to fall back to Phase 1 (shared IP)")
@@ -185,6 +186,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetEdgeMode(cfg.EdgeHTTPPort)
+	snapshotCache.SetEdgeReadinessPort(cfg.EdgeReadinessPort)
 	if cfg.EdgeTLS {
 		snapshotCache.SetEdgeTLSMode(cfg.EdgeHTTPSPort)
 	}
