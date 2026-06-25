@@ -1,0 +1,27 @@
+{{- if and .Values.edge.enabled .Values.edge.gateway.create }}
+{{- /*
+Chart-managed HTTPRoutes for the edge, each parented to the chart-managed edge
+Gateway. This is the supported, declarative replacement for hand-applying
+HTTPRoute manifests against the edge (DEPRECATED). Declare routes under
+edge.gateway.httpRoutes; the parentRef is wired to the edge Gateway automatically.
+*/ -}}
+{{- range .Values.edge.gateway.httpRoutes }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ required "edge.gateway.httpRoutes[].name is required" .name }}
+  namespace: {{ include "aether.edge.namespace" $ }}
+  labels:
+    {{- include "aether.edge.labels" $ | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ include "aether.edge.fullname" $ }}
+  {{- with .hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- toYaml (required "edge.gateway.httpRoutes[].rules is required" .rules) | nindent 4 }}
+{{- end }}
+{{- end }}

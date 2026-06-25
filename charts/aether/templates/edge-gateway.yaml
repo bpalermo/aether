@@ -26,14 +26,27 @@ metadata:
   {{- end }}
 spec:
   gatewayClassName: {{ .Values.edge.gatewayClassName }}
+  {{- with .Values.edge.gateway.address }}
+  # Pin the Gateway's address. Under perGatewayAddressing the edge controller
+  # requests this IP from MetalLB for the Gateway's own LoadBalancer Service.
+  addresses:
+    - type: IPAddress
+      value: {{ . | quote }}
+  {{- end }}
   listeners:
     - name: http
       port: {{ .Values.edge.httpPort }}
       protocol: HTTP
+      {{- with .Values.edge.gateway.hostname }}
+      hostname: {{ . | quote }}
+      {{- end }}
     {{- if .Values.edge.tls.enabled }}
     - name: https
       port: {{ .Values.edge.httpsPort }}
       protocol: HTTPS
+      {{- with .Values.edge.gateway.hostname }}
+      hostname: {{ . | quote }}
+      {{- end }}
       tls:
         mode: Terminate
         certificateRefs:
