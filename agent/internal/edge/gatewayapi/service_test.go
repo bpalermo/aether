@@ -147,10 +147,11 @@ func TestAllocateGatewayListenerPorts_MultiListenerSamePort(t *testing.T) {
 	assert.NotEqual(t, byPort[80].internalPort, byPort[443].internalPort, "distinct internal ports per external port")
 }
 
-// TestBuildEdgeGatewayEntries_HTTPVhostsAttachedToAllGateways verifies that
-// plain-HTTP vhosts (no TLSSecret) are assigned to ALL Gateways, while TLS vhosts
-// are only assigned to the Gateway whose listener cert matches.
-func TestBuildEdgeGatewayEntries_HTTPVhostsAttachedToAllGateways(t *testing.T) {
+// TestBuildEdgeGatewayEntries_AssignByAttachment verifies vhosts are assigned to a
+// Gateway's route table by ATTACHMENT (vh.Gateways = the route's parentRefs), not by
+// cert tag — a route lands on exactly the Gateways it attaches to; a vhost with no
+// recorded Gateways attaches to all (fallback).
+func TestBuildEdgeGatewayEntries_AssignByAttachment(t *testing.T) {
 	gws := []gatewayv1.Gateway{
 		{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "gw-http"},
@@ -170,8 +171,13 @@ func TestBuildEdgeGatewayEntries_HTTPVhostsAttachedToAllGateways(t *testing.T) {
 		},
 	}
 	allVhosts := []cache.VirtualHost{
-		{Hosts: []string{"plain.example.com"}, Routes: []cache.Route{{Prefix: "/", Service: "svc-1"}}},
-		{Hosts: []string{"secure.example.com"}, TLSSecret: "kubernetes/my-cert", Routes: []cache.Route{{Prefix: "/", Service: "svc-2"}}},
+		// Attached to the HTTP Gateway only.
+		{Hosts: []string{"plain.example.com"}, Gateways: []string{"ns-a/gw-http"}, Routes: []cache.Route{{Prefix: "/", Service: "svc-1"}}},
+		// Attached to the HTTPS Gateway only (and TLS-tagged — but assignment is by
+		// attachment, NOT the cert tag).
+		{Hosts: []string{"secure.example.com"}, Gateways: []string{"ns-b/gw-https"}, TLSSecret: "kubernetes/my-cert", Routes: []cache.Route{{Prefix: "/", Service: "svc-2"}}},
+		// No recorded Gateways → attaches to ALL (fallback).
+		{Hosts: []string{"shared.example.com"}, Routes: []cache.Route{{Prefix: "/", Service: "svc-3"}}},
 	}
 	allocs := map[gatewayKey][]gatewayListenerAllocation{
 		{Namespace: "ns-a", Name: "gw-http"}: {
@@ -189,25 +195,28 @@ func TestBuildEdgeGatewayEntries_HTTPVhostsAttachedToAllGateways(t *testing.T) {
 	for _, e := range entries {
 		byName[e.Namespace+"/"+e.Name] = e
 	}
-
-	httpGW := byName["ns-a/gw-http"]
-	httpsGW := byName["ns-b/gw-https"]
-
-	// HTTP Gateway gets the plain-HTTP vhost only.
-	require.Len(t, httpGW.VirtualHosts, 1)
-	assert.Equal(t, []string{"plain.example.com"}, httpGW.VirtualHosts[0].Hosts)
-
-	// HTTPS Gateway gets both: the TLS vhost (cert match) and the plain-HTTP vhost
-	// (HTTP vhosts attach to all Gateways for their HTTP listeners).
-	require.Len(t, httpsGW.VirtualHosts, 2)
-	vhostHosts := map[string]bool{}
-	for _, vh := range httpsGW.VirtualHosts {
-		for _, h := range vh.Hosts {
-			vhostHosts[h] = true
+	hostsOf := func(e cache.EdgeGatewayEntry) map[string]bool {
+		m := map[string]bool{}
+		for _, vh := range e.VirtualHosts {
+			for _, h := range vh.Hosts {
+				m[h] = true
+			}
 		}
+		return m
 	}
-	assert.True(t, vhostHosts["secure.example.com"])
-	assert.True(t, vhostHosts["plain.example.com"])
+
+	// HTTP Gateway: its own attached route + the unscoped (fallback) one; NOT the
+	// HTTPS-attached route (even though it is plain assignment-wise).
+	httpHosts := hostsOf(byName["ns-a/gw-http"])
+	assert.True(t, httpHosts["plain.example.com"], "attached route on its Gateway")
+	assert.True(t, httpHosts["shared.example.com"], "unscoped vhost attaches to all")
+	assert.False(t, httpHosts["secure.example.com"], "a route attached elsewhere must NOT land here")
+
+	// HTTPS Gateway: its own attached route + the unscoped one; NOT the HTTP route.
+	httpsHosts := hostsOf(byName["ns-b/gw-https"])
+	assert.True(t, httpsHosts["secure.example.com"])
+	assert.True(t, httpsHosts["shared.example.com"])
+	assert.False(t, httpsHosts["plain.example.com"])
 }
 
 // TestGatewayServiceShape verifies the shape of the per-Gateway LoadBalancer

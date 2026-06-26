@@ -54,6 +54,11 @@ type VirtualHost struct {
 	// virtual host's hosts (empty = no cert). Cert bytes are supplied separately
 	// via SetEdgeTLSSecrets.
 	TLSSecret string
+	// Gateways are the "<ns>/<name>" keys of the Gateways this route attaches to
+	// (its parentRefs). Under proposal 021 Phase 2 it scopes which per-Gateway route
+	// tables get this vhost — assignment is by ATTACHMENT, not by cert. Empty means
+	// unscoped (Phase 1 shared listener, or attach-to-all fallback).
+	Gateways []string
 }
 
 // Route is one path-match -> backend rule within a VirtualHost. Exactly one of
