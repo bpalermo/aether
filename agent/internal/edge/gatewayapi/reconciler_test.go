@@ -627,8 +627,11 @@ func TestHTTPRouteGatewaySortOrder(t *testing.T) {
 }
 
 // fakeSink is a minimal RouteSink that records SetEdgeHTTPRedirect calls.
+// hasRegistryService, when non-nil, is consulted by HasRegistryService so tests
+// can inject mesh/registry service names without a real registry.
 type fakeSink struct {
-	httpRedirect bool
+	httpRedirect       bool
+	hasRegistryService func(name string) bool
 }
 
 func (f *fakeSink) SetVirtualHosts(_ []cache.VirtualHost) {}
@@ -639,6 +642,12 @@ func (f *fakeSink) SetEdgeTCPRoutes(_ []proxy.EdgeL4TCPRoute)  {}
 func (f *fakeSink) SetEdgeTLSRoutes(_ []proxy.EdgeL4TLSRoute)  {}
 func (f *fakeSink) SetEdgeHTTPRedirect(enabled bool)           { f.httpRedirect = enabled }
 func (f *fakeSink) SetEdgeGateways(_ []cache.EdgeGatewayEntry) {}
+func (f *fakeSink) HasRegistryService(name string) bool {
+	if f.hasRegistryService != nil {
+		return f.hasRegistryService(name)
+	}
+	return false
+}
 
 // TestHTTPRedirectAnnotation verifies that the reconciler reads the
 // gateway.aether.io/http-redirect annotation from Gateways and calls
@@ -1213,7 +1222,7 @@ func TestBuildHTTPRouteBackends_HeadlessDialPort(t *testing.T) {
 func TestBuildHTTPRouteBackends_NonExistentService_Dropped(t *testing.T) {
 	// Client has no Services registered — "ghost-svc" does not exist.
 	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
-	r := &Reconciler{Client: c}
+	r := &Reconciler{Client: c, Sink: &fakeSink{}}
 
 	got := r.buildHTTPRouteBackends(
 		context.Background(),
@@ -1222,6 +1231,92 @@ func TestBuildHTTPRouteBackends_NonExistentService_Dropped(t *testing.T) {
 		nil,
 	)
 	assert.Empty(t, got, "nonexistent Service must be dropped from the admitted backend set")
+}
+
+// --- Registry-aware backend existence (mesh/registry service regression) ---
+
+// TestBuildHTTPRouteBackends_RegistryService_Admitted is the regression guard for
+// #367: a backend that IS a registry/mesh service (HasRegistryService=true) but has
+// NO corresponding k8s Service in the route namespace must be ADMITTED (not dropped).
+// This is the api.palermo.dev 200→500 regression: mesh backends are namespace-blind
+// and only exist in the registry, not as k8s Services in the edge namespace.
+func TestBuildHTTPRouteBackends_RegistryService_Admitted(t *testing.T) {
+	// Client has no Services — "echo" does not exist as a k8s Service.
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
+	// Sink reports "echo" as a registry/mesh service.
+	sink := &fakeSink{hasRegistryService: func(name string) bool { return name == "echo" }}
+	r := &Reconciler{Client: c, Sink: sink}
+
+	got := r.buildHTTPRouteBackends(
+		context.Background(),
+		backend("echo", 8080),
+		"aether-ingress",
+		nil,
+	)
+	require.Len(t, got, 1, "registry/mesh backend must be admitted even without a k8s Service")
+	assert.Equal(t, "echo", got[0].Service)
+}
+
+// TestBuildVirtualHost_RegistryBackend_NoDirectResponse500 verifies the end-to-end
+// regression guard: a rule whose backend is a registry/mesh service must NOT produce
+// a DirectResponseStatus=500 route (it must produce a normal forwarding route).
+func TestBuildVirtualHost_RegistryBackend_NoDirectResponse500(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
+	sink := &fakeSink{hasRegistryService: func(name string) bool { return name == "echo" }}
+	r := &Reconciler{Client: c, Sink: sink}
+
+	hr := httpRoute([]string{"api.palermo.dev"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/"),
+			BackendRefs: backend("echo", 8080),
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1, "registry backend must produce exactly one forwarding route")
+	rt := vh.Routes[0]
+	assert.Equal(t, uint32(0), rt.DirectResponseStatus,
+		"registry/mesh backend must NOT produce DirectResponseStatus=500")
+	assert.Equal(t, "echo", rt.Service, "forwarding route must carry the backend service name")
+}
+
+// TestBuildHTTPRouteBackends_K8sService_RegistryMiss_Admitted verifies that a
+// backend that IS a k8s Service (exists in the API server) but is NOT a registry
+// service (e.g. a cleartext edge backend to a real k8s service outside the mesh)
+// is admitted normally.
+func TestBuildHTTPRouteBackends_K8sService_RegistryMiss_Admitted(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(svcWith("real-svc", "ns", "10.0.0.1", 8080, intstr.FromInt(8080))).
+		Build()
+	// Sink reports NO registry services (real-svc is a pure k8s service).
+	r := &Reconciler{Client: c, Sink: &fakeSink{}}
+
+	got := r.buildHTTPRouteBackends(
+		context.Background(),
+		backend("real-svc", 8080),
+		"ns",
+		nil,
+	)
+	require.Len(t, got, 1, "k8s Service (non-registry) must be admitted")
+	assert.Equal(t, "real-svc", got[0].Service)
+}
+
+// TestBuildHTTPRouteBackends_NeitherRegistryNorK8s_Dropped verifies that a backend
+// that is NEITHER a registry service nor a real k8s Service is dropped (BackendNotFound
+// → 500 direct_response). This is the conformance HTTPRouteInvalidNonExistentBackendRef
+// case that #367 was intended to handle.
+func TestBuildHTTPRouteBackends_NeitherRegistryNorK8s_Dropped(t *testing.T) {
+	// Client has no Services; sink has no registry services.
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
+	r := &Reconciler{Client: c, Sink: &fakeSink{}}
+
+	got := r.buildHTTPRouteBackends(
+		context.Background(),
+		backend("nonexistent", 8080),
+		"ns",
+		nil,
+	)
+	assert.Empty(t, got, "backend that is neither registry nor k8s Service must be dropped → 500")
 }
 
 // TestBuildVirtualHost_NonExistentBackend_DirectResponse500 verifies the end-to-end

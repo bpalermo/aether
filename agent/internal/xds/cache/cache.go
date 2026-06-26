@@ -25,6 +25,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
+	"github.com/bpalermo/aether/registry"
 
 	commonlog "github.com/bpalermo/aether/common/log"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -226,6 +227,11 @@ type SnapshotCache struct {
 	meshDNS *meshdns.Server
 
 	version *atomic.Uint64
+
+	// regMu guards reg, the service registry used to resolve mesh service
+	// existence for the edge backend-existence check (HasRegistryService).
+	regMu sync.RWMutex
+	reg   registry.Registry
 }
 
 // listenerEntry holds the inbound and outbound Envoy listeners for a single pod,
@@ -428,6 +434,35 @@ func (c *SnapshotCache) SetEdgeIdentity(spiffeID, trustDomain string) {
 	c.nodeSpiffeID = spiffeID
 	c.trustDomain = trustDomain
 	c.localMu.Unlock()
+}
+
+// SetRegistry stores the service registry for use in HasRegistryService.
+// Called once from NewAgentXdsServer before the manager starts; safe for
+// concurrent use after that point (registry is only read, never replaced).
+func (c *SnapshotCache) SetRegistry(reg registry.Registry) {
+	c.regMu.Lock()
+	c.reg = reg
+	c.regMu.Unlock()
+}
+
+// HasRegistryService reports whether the named service is currently known to
+// the mesh registry. It delegates to the registry's ServiceCatalog.HasService
+// when available; returns false if the registry does not implement ServiceCatalog
+// or no registry has been set (safe default = treat as not a registry service).
+// Used by the edge reconciler's backend-existence check to distinguish mesh
+// services (namespace-blind, registry-resolved) from k8s Services.
+func (c *SnapshotCache) HasRegistryService(name string) bool {
+	c.regMu.RLock()
+	reg := c.reg
+	c.regMu.RUnlock()
+	if reg == nil {
+		return false
+	}
+	cat, ok := reg.(registry.ServiceCatalog)
+	if !ok {
+		return false
+	}
+	return cat.HasService(name)
 }
 
 // perDownstreamConnectionPool reports whether service clusters should key

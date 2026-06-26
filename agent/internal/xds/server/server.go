@@ -58,6 +58,10 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 		combined = append(combined, callbacks)
 	}
 
+	// Store the registry in the cache so the edge reconciler can query mesh
+	// service existence via HasRegistryService (registry-aware backend check).
+	snapshotCache.SetRegistry(registry)
+
 	aXdsServer := &AgentXdsServer{
 		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, combined, log),
 		log:         commonlog.Named(log, "agent-xds"),
