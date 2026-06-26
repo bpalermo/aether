@@ -444,6 +444,75 @@ func buildEdgeRedirectRouteConfig() *routev3.RouteConfiguration {
 	}
 }
 
+// WeightedRouteBackend is one entry in a weighted_clusters route action. Cluster
+// is the resolved Envoy cluster name; Weight is the Gateway API backendRef weight
+// (default 1; 0 = receives no traffic but is a valid backend per spec).
+type WeightedRouteBackend struct {
+	Cluster string
+	Weight  uint32
+}
+
+// BuildEdgeRouteWeighted builds one Envoy route for the edge with a
+// weighted_clusters action when there are multiple backends, or a plain
+// single-cluster action when there is exactly one (keeping the common path clean).
+//
+// Gateway API weight semantics:
+//   - total_weight = sum of all entry weights; each entry's share = weight/total.
+//   - Weight 0 = the backend receives no traffic (remains valid per spec).
+//   - If all backends have weight 0 (total_weight = 0), Envoy treats this as
+//     "no healthy backend" and returns 500 — this is the expected behavior per
+//     the Gateway API spec for that edge case; we do not special-case it.
+//
+// redirect is applied ahead of backend resolution (no backends needed for a
+// redirect). urlRewrite is applied on forwarding routes only.
+func BuildEdgeRouteWeighted(prefix, exact string, backends []WeightedRouteBackend, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
+	if redirect != nil || len(backends) <= 1 {
+		// Redirect path or single backend: delegate to the plain builder.
+		cluster := ""
+		if len(backends) == 1 {
+			cluster = backends[0].Cluster
+		}
+		return BuildEdgeRoute(prefix, exact, cluster, mutation, redirect, urlRewrite)
+	}
+	// Multiple backends: weighted_clusters action.
+	match := &routev3.RouteMatch{}
+	if exact != "" {
+		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
+	} else {
+		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
+	}
+	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(mutation)
+
+	var totalWeight uint32
+	clusters := make([]*routev3.WeightedCluster_ClusterWeight, 0, len(backends))
+	for _, b := range backends {
+		totalWeight += b.Weight
+		clusters = append(clusters, &routev3.WeightedCluster_ClusterWeight{
+			Name:   b.Cluster,
+			Weight: wrapperspb.UInt32(b.Weight),
+		})
+	}
+	wc := &routev3.WeightedCluster{
+		Clusters:    clusters,
+		TotalWeight: wrapperspb.UInt32(totalWeight),
+	}
+
+	ra := &routev3.RouteAction{
+		ClusterSpecifier: &routev3.RouteAction_WeightedClusters{WeightedClusters: wc},
+		RetryPolicy:      outboundRetryPolicy(),
+	}
+	applyURLRewrite(ra, urlRewrite)
+
+	return &routev3.Route{
+		Match:                   match,
+		RequestHeadersToAdd:     reqAdd,
+		RequestHeadersToRemove:  reqRemove,
+		ResponseHeadersToAdd:    respAdd,
+		ResponseHeadersToRemove: respRemove,
+		Action:                  &routev3.Route_Route{Route: ra},
+	}
+}
+
 // BuildEdgeRoute builds one Envoy route for the edge. Exactly one of prefix/exact
 // is non-empty (exact takes precedence if both are set). Prefix "/" matches all.
 // mutation applies RequestHeaderModifier / ResponseHeaderModifier at the route level.

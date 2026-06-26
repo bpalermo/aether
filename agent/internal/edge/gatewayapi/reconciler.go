@@ -504,12 +504,17 @@ func (r *Reconciler) resolveListenerTLS(
 }
 
 // buildVirtualHost maps one HTTPRoute to an edge VirtualHost: its hostnames become
-// the vhost domains, each rule's path match + first backendRef becomes a Route, and
-// the matching Gateway listener cert (by hostname, falling back to a catch-all
-// listener) sets the downstream TLS.
+// the vhost domains, each rule's path match + backendRefs becomes a Route (with
+// weighted backends when there are multiple), and the matching Gateway listener
+// cert (by hostname, falling back to a catch-all listener) sets the downstream TLS.
 //
 // Rules with a RequestRedirect filter emit a redirect route (no backend required).
 // Rules with a URLRewrite filter apply host/path rewriting on the forwarding route.
+//
+// Gateway API weight semantics: backendRef.weight defaults to 1 when nil. A rule
+// where ALL backends are invalid/ungranted is skipped (no route). A rule where all
+// valid backends have weight 0 is a valid route that produces no traffic (spec
+// allows it; Envoy returns 500 for that case — acceptable).
 func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[string]string, grants []gatewayv1beta1.ReferenceGrant) cache.VirtualHost {
 	vh := cache.VirtualHost{}
 	for _, h := range hr.Spec.Hostnames {
@@ -519,59 +524,105 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 		redirect := buildHTTPRedirect(rule.Filters)
 		urlRewrite := buildHTTPURLRewrite(rule.Filters)
 
-		backend := firstBackendService(rule.BackendRefs, hr.Namespace, grants)
-		// A rule must have either a backend or a redirect to produce a route.
-		if backend == "" && redirect == nil {
+		// Collect ALL admissible backends in this rule with their weights.
+		// backendRef.weight nil → default 1 (per Gateway API spec).
+		backends := buildHTTPRouteBackends(rule.BackendRefs, hr.Namespace, grants)
+
+		// A rule must have either at least one backend or a redirect to produce a route.
+		if len(backends) == 0 && redirect == nil {
 			continue
 		}
-		var port uint32
-		if p := firstBackendPort(rule.BackendRefs, hr.Namespace, grants); p != 0 {
-			port = p
-		}
-		// Resolve the namespace of the first admissible backendRef for the cleartext
-		// cluster FQDN. Same-namespace refs default to the route's own namespace;
-		// cross-namespace refs use their explicit namespace (already validated by
-		// backendPermitted / firstBackendService above).
-		backendNS := firstBackendNamespace(rule.BackendRefs, hr.Namespace, grants)
+
 		mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
-		if len(rule.Matches) == 0 {
+
+		// For backward-compat we also populate the legacy Service/Port/BackendNamespace
+		// from the first backend so that code paths that read those fields still work.
+		var legacySvc, legacyNS string
+		var legacyPort uint32
+		if len(backends) > 0 {
+			legacySvc = backends[0].Service
+			legacyPort = backends[0].Port
+			legacyNS = backends[0].BackendNamespace
+		}
+
+		appendRoute := func(prefix, exact string) {
 			vh.Routes = append(vh.Routes, cache.Route{
-				Prefix:           "/",
-				Service:          backend,
-				Port:             port,
-				BackendNamespace: backendNS,
+				Prefix:           prefix,
+				Exact:            exact,
+				Service:          legacySvc,
+				Port:             legacyPort,
+				BackendNamespace: legacyNS,
+				Backends:         backends,
 				HeaderMutation:   mutation,
 				Redirect:         redirect,
 				URLRewrite:       urlRewrite,
 			})
+		}
+
+		if len(rule.Matches) == 0 {
+			appendRoute("/", "")
 			continue
 		}
 		for _, m := range rule.Matches {
-			route := cache.Route{
-				Service:          backend,
-				Port:             port,
-				BackendNamespace: backendNS,
-				HeaderMutation:   mutation,
-				Redirect:         redirect,
-				URLRewrite:       urlRewrite,
-			}
+			prefix, exact := "/", ""
 			if m.Path != nil && m.Path.Value != nil {
 				switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
 				case gatewayv1.PathMatchExact:
-					route.Exact = *m.Path.Value
+					exact = *m.Path.Value
+					prefix = ""
 				default: // PathPrefix (and unimplemented types) → prefix
-					route.Prefix = *m.Path.Value
+					prefix = *m.Path.Value
 				}
-			} else {
-				route.Prefix = "/"
 			}
-			vh.Routes = append(vh.Routes, route)
+			appendRoute(prefix, exact)
 		}
 	}
 	if cert := certForHosts(vh.Hosts, hostCerts); cert != "" {
 		vh.TLSSecret = cert
 	}
 	return vh
+}
+
+// buildHTTPRouteBackends converts the HTTPRoute rule's backendRefs into a list of
+// RouteBackend values, applying Gateway API admission rules: non-core group/kind
+// refs are skipped; ungranted cross-namespace refs are skipped (RefNotPermitted).
+// Weight nil → default 1 per spec. Returns an empty slice when no backend is admissible.
+func buildHTTPRouteBackends(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) []cache.RouteBackend {
+	out := make([]cache.RouteBackend, 0, len(refs))
+	for _, b := range refs {
+		if b.Group != nil && string(*b.Group) != "" {
+			continue // only core Services
+		}
+		if b.Kind != nil && string(*b.Kind) != "Service" {
+			continue
+		}
+		name := string(b.Name)
+		if name == "" {
+			continue
+		}
+		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", name, grants) {
+			continue
+		}
+		ns := routeNamespace
+		if b.Namespace != nil && string(*b.Namespace) != "" {
+			ns = string(*b.Namespace)
+		}
+		var port uint32
+		if b.Port != nil {
+			port = uint32(*b.Port)
+		}
+		weight := uint32(1) // default per Gateway API spec
+		if b.Weight != nil {
+			weight = uint32(*b.Weight)
+		}
+		out = append(out, cache.RouteBackend{
+			Service:          name,
+			BackendNamespace: ns,
+			Port:             port,
+			Weight:           weight,
+		})
+	}
+	return out
 }
 
 // attachedToOurGateway reports whether the given parentRefs (belonging to a route
