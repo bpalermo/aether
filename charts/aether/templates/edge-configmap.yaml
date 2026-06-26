@@ -8,11 +8,15 @@ metadata:
     {{- include "aether.edge.labels" . | nindent 4 }}
 data:
   envoy.yaml: |
+    {{- if .Values.edge.admin.enabled }}
+    # Envoy admin, bound to pod-local loopback only (never a Service/port). Off by
+    # default; enable for diagnostics (config_dump/stats) via `kubectl port-forward`.
     admin:
       address:
         socket_address:
           address: 127.0.0.1
-          port_value: 9901
+          port_value: {{ .Values.edge.admin.port }}
+    {{- end }}
 
 {{- if .Values.proxy.jsonLogs }}
     application_log_config:

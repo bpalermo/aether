@@ -209,61 +209,55 @@ func (r *Reconciler) createOrUpdateGatewayService(
 	ports []corev1.ServicePort,
 	pinnedIP string,
 ) error {
-	// Fetch the existing Service first (CreateOrUpdate pattern via Get + Create/Update).
+	// apply stamps the desired labels/annotations/spec onto a Service object.
+	apply := func(s *corev1.Service) {
+		if s.Labels == nil {
+			s.Labels = map[string]string{}
+		}
+		s.Labels[LabelEdgeGateway] = gatewayLabelValue(gwNamespace, gwName)
+		if s.Annotations == nil {
+			s.Annotations = map[string]string{}
+		}
+		if pinnedIP != "" {
+			s.Annotations[AnnotationMetalLBLoadBalancerIPs] = pinnedIP
+		} else {
+			delete(s.Annotations, AnnotationMetalLBLoadBalancerIPs)
+		}
+		s.Spec.Type = corev1.ServiceTypeLoadBalancer
+		s.Spec.Selector = edgeSelectorLabels
+		s.Spec.Ports = ports
+	}
+
+	key := types.NamespacedName{Namespace: r.Namespace, Name: svc.Name}
 	existing := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: svc.Name}, existing)
+	err := r.Get(ctx, key, existing)
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("get per-Gateway Service %s: %w", svc.Name, err)
 	}
 
-	labels := map[string]string{
-		LabelEdgeGateway: gatewayLabelValue(gwNamespace, gwName),
-	}
-	annotations := map[string]string{}
-	if pinnedIP != "" {
-		annotations[AnnotationMetalLBLoadBalancerIPs] = pinnedIP
-	}
-
 	if errors.IsNotFound(err) {
-		// Create the Service.
-		svc.Labels = labels
-		svc.Annotations = annotations
-		svc.Spec = corev1.ServiceSpec{
-			Type:     corev1.ServiceTypeLoadBalancer,
-			Selector: edgeSelectorLabels,
-			Ports:    ports,
+		apply(svc)
+		if cerr := r.Create(ctx, svc); cerr != nil {
+			// Idempotency: a concurrent reconcile (stale cache) may have created it
+			// between our Get and Create — re-fetch and fall through to the update
+			// path instead of surfacing an AlreadyExists error (reconcile churn).
+			if !errors.IsAlreadyExists(cerr) {
+				return fmt.Errorf("create per-Gateway Service %s: %w", svc.Name, cerr)
+			}
+			if gerr := r.Get(ctx, key, existing); gerr != nil {
+				return fmt.Errorf("get per-Gateway Service %s after create race: %w", svc.Name, gerr)
+			}
+		} else {
+			r.Log.InfoContext(ctx, "created per-Gateway LoadBalancer Service",
+				"gateway", gwNamespace+"/"+gwName, "service", svc.Name, "pinnedIP", pinnedIP)
+			return nil
 		}
-		if err := r.Create(ctx, svc); err != nil {
-			return fmt.Errorf("create per-Gateway Service %s: %w", svc.Name, err)
-		}
-		r.Log.InfoContext(ctx, "created per-Gateway LoadBalancer Service",
-			"gateway", gwNamespace+"/"+gwName, "service", svc.Name, "pinnedIP", pinnedIP)
-		return nil
 	}
 
-	// Update the Service: merge labels/annotations and reconcile ports.
 	updated := existing.DeepCopy()
-	if updated.Labels == nil {
-		updated.Labels = map[string]string{}
-	}
-	for k, v := range labels {
-		updated.Labels[k] = v
-	}
-	if updated.Annotations == nil {
-		updated.Annotations = map[string]string{}
-	}
-	// Set or clear the pinned-IP annotation.
-	if pinnedIP != "" {
-		updated.Annotations[AnnotationMetalLBLoadBalancerIPs] = pinnedIP
-	} else {
-		delete(updated.Annotations, AnnotationMetalLBLoadBalancerIPs)
-	}
-	updated.Spec.Type = corev1.ServiceTypeLoadBalancer
-	updated.Spec.Selector = edgeSelectorLabels
-	updated.Spec.Ports = ports
-
-	if err := r.Update(ctx, updated); err != nil {
-		return fmt.Errorf("update per-Gateway Service %s: %w", svc.Name, err)
+	apply(updated)
+	if uerr := r.Update(ctx, updated); uerr != nil {
+		return fmt.Errorf("update per-Gateway Service %s: %w", svc.Name, uerr)
 	}
 	return nil
 }
