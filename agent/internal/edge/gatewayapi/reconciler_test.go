@@ -748,25 +748,35 @@ func makeGateway(ns, name string, hostnames ...string) gatewayv1.Gateway {
 }
 
 // TestBuildGatewayListenerHostnames verifies the listener-hostname map is built
-// correctly: one entry per Gateway key, with deduplication of repeated hostnames.
+// correctly: one gateway-level entry per Gateway (union, deduped) plus one
+// per-section entry per listener.
 func TestBuildGatewayListenerHostnames(t *testing.T) {
+	// makeGateway names listeners "l", "ll", ... (strings.Repeat("l", i+1)).
 	gws := []gatewayv1.Gateway{
 		makeGateway("ns", "gw-a", "*.example.com", "other.example.com"),
 		makeGateway("ns", "gw-b", ""), // no hostname = catch-all
 	}
 	m := buildGatewayListenerHostnames(gws)
-	require.Len(t, m, 2)
+	// Gateway-level entries.
 	assert.ElementsMatch(t, []string{"*.example.com", "other.example.com"}, m["ns/gw-a"])
 	assert.Equal(t, []string{""}, m["ns/gw-b"])
+	// Per-section entries (section names from makeGateway: "l" for first, "ll" for second).
+	assert.Equal(t, []string{"*.example.com"}, m["ns/gw-a/l"])
+	assert.Equal(t, []string{"other.example.com"}, m["ns/gw-a/ll"])
+	assert.Equal(t, []string{""}, m["ns/gw-b/l"])
 }
 
 // TestBuildGatewayListenerHostnames_DedupListenerHostnames verifies that a Gateway
 // with two listeners sharing the same hostname (e.g. two ports) yields only one
-// hostname entry.
+// hostname entry in the gateway-level key (deduplication), while per-section keys
+// each carry their own entry.
 func TestBuildGatewayListenerHostnames_DedupListenerHostnames(t *testing.T) {
 	gw := makeGateway("ns", "gw", "*.example.com", "*.example.com")
 	m := buildGatewayListenerHostnames([]gatewayv1.Gateway{gw})
-	assert.Equal(t, []string{"*.example.com"}, m["ns/gw"], "duplicate listener hostname is deduped")
+	assert.Equal(t, []string{"*.example.com"}, m["ns/gw"], "duplicate listener hostname is deduped at gateway level")
+	// Per-section keys are distinct listeners even if they share the same hostname.
+	assert.Equal(t, []string{"*.example.com"}, m["ns/gw/l"])
+	assert.Equal(t, []string{"*.example.com"}, m["ns/gw/ll"])
 }
 
 // TestHostnameIntersect covers the pairwise intersection cases.
@@ -1437,4 +1447,90 @@ func TestBuildVirtualHost_TimeoutRequest_MultiMatch(t *testing.T) {
 		require.NotNil(t, rt.Timeout, "route %d must have Timeout set", i)
 		assert.Equal(t, int64(2), rt.Timeout.GetSeconds(), "route %d timeout must be 2s", i)
 	}
+}
+
+// --- FIX 2: sectionName-scoped hostname lookup (HTTPRouteListenerHostnameMatching) ---
+
+// TestAttachedHostnameLookupKeys_SectionName verifies that a parentRef with a
+// sectionName produces a per-section lookup key ("ns/gw/section") while a
+// parentRef without sectionName produces a gateway-level key ("ns/gw").
+func TestAttachedHostnameLookupKeys_SectionName(t *testing.T) {
+	ours := map[gatewayKey]struct{}{{Namespace: "ns", Name: "gw"}: {}}
+
+	// With sectionName → "ns/gw/listener-1".
+	sn := gatewayv1.SectionName("listener-1")
+	parentRefsWithSection := []gatewayv1.ParentReference{{Name: "gw", SectionName: &sn}}
+	keys := attachedHostnameLookupKeys(parentRefsWithSection, "ns", ours)
+	require.Len(t, keys, 1)
+	assert.Equal(t, "ns/gw/listener-1", keys[0])
+
+	// Without sectionName → gateway-level "ns/gw".
+	parentRefsNoSection := []gatewayv1.ParentReference{{Name: "gw"}}
+	keys2 := attachedHostnameLookupKeys(parentRefsNoSection, "ns", ours)
+	require.Len(t, keys2, 1)
+	assert.Equal(t, "ns/gw", keys2[0])
+}
+
+// TestEffectiveHostnames_SectionNameScoped is the HTTPRouteListenerHostnameMatching
+// conformance regression guard: a no-hostname route attached to a specific listener
+// section must inherit only THAT listener's hostname, not the whole Gateway's union.
+// Without this fix, backend-v1 (attached to listener-1 "bar.com") would also inherit
+// "foo.bar.com", "*.bar.com", "*.foo.com" from the other listeners.
+func TestEffectiveHostnames_SectionNameScoped(t *testing.T) {
+	// Gateway with 4 listeners (same port, different hostnames — the conformance setup).
+	gw := gatewayv1.Gateway{}
+	gw.Namespace = "ns"
+	gw.Name = "gw"
+	for _, pair := range []struct{ name, host string }{
+		{"listener-1", "bar.com"},
+		{"listener-2", "foo.bar.com"},
+		{"listener-3", "*.bar.com"},
+		{"listener-4", "*.foo.com"},
+	} {
+		ln := gatewayv1.Listener{Name: gatewayv1.SectionName(pair.name), Port: 80, Protocol: gatewayv1.HTTPProtocolType}
+		hn := gatewayv1.Hostname(pair.host)
+		ln.Hostname = &hn
+		gw.Spec.Listeners = append(gw.Spec.Listeners, ln)
+	}
+	m := buildGatewayListenerHostnames([]gatewayv1.Gateway{gw})
+
+	// Route attached to listener-1 (sectionName) with no route hostnames →
+	// effective hostname must be ONLY "bar.com", not the whole Gateway union.
+	got := effectiveHostnames(nil, []string{"ns/gw/listener-1"}, m)
+	assert.Equal(t, []string{"bar.com"}, got,
+		"no-hostname route on listener-1 must inherit only bar.com")
+
+	// Listener-3 "*.bar.com" with no route hostnames → inherits "*.bar.com".
+	got3 := effectiveHostnames(nil, []string{"ns/gw/listener-3"}, m)
+	assert.Equal(t, []string{"*.bar.com"}, got3,
+		"no-hostname route on listener-3 must inherit *.bar.com")
+
+	// Route on both listener-3 and listener-4 (backend-v3 in the conformance test):
+	// inherits both "*.bar.com" and "*.foo.com".
+	got34 := effectiveHostnames(nil, []string{"ns/gw/listener-3", "ns/gw/listener-4"}, m)
+	assert.ElementsMatch(t, []string{"*.bar.com", "*.foo.com"}, got34,
+		"no-hostname route on listener-3+4 must inherit both wildcard hostnames")
+}
+
+// TestEffectiveHostnames_NoIntersectingHostsDiscarded is the regression guard for
+// the HTTPRouteHostnameIntersection "no intersecting hosts" sub-test: a route
+// whose declared hostnames don't match any listener hostname should return an
+// empty effective-hostname set (caller discards it, preventing leak to catch-all).
+func TestEffectiveHostnames_NoIntersectingHostsDiscarded(t *testing.T) {
+	// Gateway with listeners bar.com, *.wildcard.io, *.anotherwildcard.io.
+	gw := gatewayv1.Gateway{}
+	gw.Namespace = "ns"
+	gw.Name = "gw"
+	for _, h := range []string{"bar.com", "*.wildcard.io", "*.anotherwildcard.io"} {
+		ln := gatewayv1.Listener{Name: gatewayv1.SectionName(h), Port: 80, Protocol: gatewayv1.HTTPProtocolType}
+		hn := gatewayv1.Hostname(h)
+		ln.Hostname = &hn
+		gw.Spec.Listeners = append(gw.Spec.Listeners, ln)
+	}
+	m := buildGatewayListenerHostnames([]gatewayv1.Gateway{gw})
+
+	// Route hostnames "specific.but.wrong.com" and "wildcard.io" don't match any listener.
+	got := effectiveHostnames([]string{"specific.but.wrong.com", "wildcard.io"}, []string{"ns/gw"}, m)
+	assert.Empty(t, got,
+		"route with no-intersecting hostnames must produce empty effective set (not catch-all)")
 }

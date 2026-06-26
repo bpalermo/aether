@@ -201,8 +201,9 @@ func TestVirtualHostVhostsHostlessMerge(t *testing.T) {
 	require.NotNil(t, starVH)
 	assert.Equal(t, []string{"*"}, starVH.GetDomains())
 	require.Len(t, starVH.GetRoutes(), 2, "both hostname-less routes land in the * vhost")
-	assert.Equal(t, "/a", starVH.GetRoutes()[0].GetMatch().GetPrefix())
-	assert.Equal(t, "/b", starVH.GetRoutes()[1].GetMatch().GetPrefix())
+	// FIX 1: non-"/" prefixes use path_separated_prefix.
+	assert.Equal(t, "/a", starVH.GetRoutes()[0].GetMatch().GetPathSeparatedPrefix())
+	assert.Equal(t, "/b", starVH.GetRoutes()[1].GetMatch().GetPathSeparatedPrefix())
 }
 
 // TestVirtualHostPathRoutes verifies one virtual host fans different paths to
@@ -237,10 +238,10 @@ func TestVirtualHostPathRoutes(t *testing.T) {
 	// Exact match first (highest Gateway API precedence).
 	assert.Equal(t, "/healthz", routes[0].GetMatch().GetPath())
 	assert.Equal(t, "svc-2.aether.internal", routes[0].GetRoute().GetCluster())
-	// Longer prefix second.
-	assert.Equal(t, "/users", routes[1].GetMatch().GetPrefix())
+	// Longer prefix second: FIX 1 — non-"/" prefix uses path_separated_prefix.
+	assert.Equal(t, "/users", routes[1].GetMatch().GetPathSeparatedPrefix())
 	assert.Equal(t, "svc-1.aether.internal", routes[1].GetRoute().GetCluster())
-	// Catch-all prefix last.
+	// Catch-all prefix last: "/" stays as plain prefix.
 	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix())
 	assert.Equal(t, "svc-3.aether.internal", routes[2].GetRoute().GetCluster())
 }
@@ -816,7 +817,8 @@ func TestVirtualHostVhostsSameHostMerge(t *testing.T) {
 	require.Len(t, sharedVH, 1, "two VirtualHosts sharing a hostname must merge into ONE Envoy vhost")
 	routes := sharedVH[0].GetRoutes()
 	require.Len(t, routes, 2, "both routes from both VirtualHosts must be present")
-	prefixes := []string{routes[0].GetMatch().GetPrefix(), routes[1].GetMatch().GetPrefix()}
+	// FIX 1: non-"/" prefixes use path_separated_prefix.
+	prefixes := []string{routes[0].GetMatch().GetPathSeparatedPrefix(), routes[1].GetMatch().GetPathSeparatedPrefix()}
 	assert.ElementsMatch(t, []string{"/api", "/web"}, prefixes, "both routes present after merge")
 }
 
@@ -849,9 +851,9 @@ func TestVirtualHostVhostsSameHostMerge_Specificity(t *testing.T) {
 	require.Len(t, routes, 3)
 	// Exact first.
 	assert.Equal(t, "/v2/exact", routes[0].GetMatch().GetPath(), "exact match must be first")
-	// Longer prefix second.
-	assert.Equal(t, "/v2", routes[1].GetMatch().GetPrefix(), "longer prefix must be second")
-	// Catch-all prefix last.
+	// Longer prefix second: FIX 1 — non-"/" prefix uses path_separated_prefix.
+	assert.Equal(t, "/v2", routes[1].GetMatch().GetPathSeparatedPrefix(), "longer prefix must be second")
+	// Catch-all prefix last: "/" stays as plain prefix.
 	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix(), "catch-all prefix must be last")
 }
 
@@ -963,7 +965,7 @@ func TestVirtualHostPathRoutes_SpecificitySort(t *testing.T) {
 	require.Len(t, routes, 3, "three application routes (no 404 on named vhosts — 404 is on the catch-all only)")
 	assert.NotEmpty(t, routes[0].GetMatch().GetPath(), "first route must be exact")
 	assert.Equal(t, "/v2/exact", routes[0].GetMatch().GetPath())
-	assert.Equal(t, "/v2", routes[1].GetMatch().GetPrefix(), "longer prefix second")
+	assert.Equal(t, "/v2", routes[1].GetMatch().GetPathSeparatedPrefix(), "longer prefix second")
 	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix(), "catch-all prefix last")
 }
 
@@ -1005,7 +1007,7 @@ func TestCatchAllVhostSpecificitySort(t *testing.T) {
 	require.Len(t, routes, 3, "three application routes before 404 is appended")
 	assert.NotEmpty(t, routes[0].GetMatch().GetPath(), "first route must be exact match")
 	assert.Equal(t, "/v2/exact", routes[0].GetMatch().GetPath())
-	assert.Equal(t, "/v2", routes[1].GetMatch().GetPrefix(), "longer prefix second")
+	assert.Equal(t, "/v2", routes[1].GetMatch().GetPathSeparatedPrefix(), "longer prefix second")
 	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix(), "catch-all prefix third")
 
 	// Build the full route config to verify the 404 is appended last.

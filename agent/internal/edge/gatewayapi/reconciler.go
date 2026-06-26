@@ -200,11 +200,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		// assigns by attachment, not by the vhost's cert tag).
 		gwKeys := attachedGatewayKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
 		vh.Gateways = gwKeys
-		// Compute effective hostnames: route.Hostnames ∩ each attached Gateway's
-		// listener hostnames (union across all attached Gateways). This makes
-		// hostname-less routes inherit the listener's hostname, and ensures a request
-		// to an unknown host returns 404 rather than matching the catch-all "*".
-		vh.Hosts = effectiveHostnames(vh.Hosts, gwKeys, gwListenerHostnames)
+		// Compute effective hostnames: route.Hostnames ∩ each attached listener's
+		// hostnames. When a parentRef has a sectionName, intersect with that
+		// listener only (not the whole Gateway). This makes hostname-less routes
+		// inherit the specific listener's hostname and ensures routes with explicit
+		// hostnames that don't match any listener are discarded rather than leaking
+		// into the catch-all "*" vhost (where they would incorrectly match requests
+		// to unrelated hosts — the no-intersecting-hosts 500 bug).
+		hostnameLookupKeys := attachedHostnameLookupKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
+		vh.Hosts = effectiveHostnames(vh.Hosts, hostnameLookupKeys, gwListenerHostnames)
+		// If the route declared explicit hostnames but none intersect with any
+		// attached listener, discard the vhost entirely. An empty effective-hostname
+		// set means "no listener admits this route" — it must not produce routes at
+		// all, not even in the catch-all "*" vhost.
+		if len(hr.Spec.Hostnames) > 0 && len(vh.Hosts) == 0 {
+			continue
+		}
 		vhosts = append(vhosts, vh)
 	}
 
@@ -1227,10 +1238,16 @@ func buildEdgeHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.Gam
 // into a map keyed by "<namespace>/<name>". A listener with no hostname is
 // represented by an empty string "". The returned value is used to compute
 // effective route hostnames via effectiveHostnames.
+//
+// Keys: "ns/name" for the per-Gateway union (used by routes without a
+// sectionName), and "ns/name/sectionName" for per-section lookup (used when
+// a parentRef specifies a sectionName). The per-section value contains only
+// that listener's hostname so effectiveHostnames scopes the route to exactly
+// the hostnames of the listener it attached to.
 func buildGatewayListenerHostnames(gws []gatewayv1.Gateway) map[string][]string {
 	out := make(map[string][]string, len(gws))
 	for _, gw := range gws {
-		key := gw.Namespace + "/" + gw.Name
+		gwKey := gw.Namespace + "/" + gw.Name
 		seen := make(map[string]struct{}, len(gw.Spec.Listeners))
 		var hostnames []string
 		for _, ln := range gw.Spec.Listeners {
@@ -1238,14 +1255,51 @@ func buildGatewayListenerHostnames(gws []gatewayv1.Gateway) map[string][]string 
 			if ln.Hostname != nil {
 				h = string(*ln.Hostname)
 			}
+			// Per-section key: "ns/name/sectionName" → exactly this listener's hostname.
+			sectionKey := gwKey + "/" + string(ln.Name)
+			out[sectionKey] = []string{h}
+			// Per-gateway key: union of all listener hostnames (deduplicated).
 			if _, ok := seen[h]; !ok {
 				seen[h] = struct{}{}
 				hostnames = append(hostnames, h)
 			}
 		}
-		out[key] = hostnames
+		out[gwKey] = hostnames
 	}
 	return out
+}
+
+// attachedHostnameLookupKeys returns the hostname-lookup keys for
+// effectiveHostnames. When a parentRef specifies a sectionName the key is
+// "ns/name/sectionName" so effectiveHostnames uses only that listener's
+// hostname; otherwise it uses the gateway-level "ns/name" key (union of all
+// listener hostnames). This implements Gateway API §hostname-intersection:
+// "If the listener section name and/or port is specified, Hostnames must match
+// only that listener."
+func attachedHostnameLookupKeys(parentRefs []gatewayv1.ParentReference, routeNamespace string, gateways map[gatewayKey]struct{}) []string {
+	seen := map[string]struct{}{}
+	var keys []string
+	for _, p := range parentRefs {
+		if !parentRefIsGateway(p) {
+			continue
+		}
+		gk := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
+		if _, ok := gateways[gk]; !ok {
+			continue
+		}
+		gwKeyStr := gk.Namespace + "/" + gk.Name
+		var lookupKey string
+		if p.SectionName != nil && *p.SectionName != "" {
+			lookupKey = gwKeyStr + "/" + string(*p.SectionName)
+		} else {
+			lookupKey = gwKeyStr
+		}
+		if _, dup := seen[lookupKey]; !dup {
+			seen[lookupKey] = struct{}{}
+			keys = append(keys, lookupKey)
+		}
+	}
+	return keys
 }
 
 // effectiveHostnames computes the Gateway API effective hostname set for a route:

@@ -483,7 +483,8 @@ func TestBuildEdgeRouteWeighted_MultipleBackends(t *testing.T) {
 	r := BuildEdgeRouteWeighted("/split", "", nil, "", nil, backends, nil, nil, nil, nil)
 
 	require.NotNil(t, r)
-	assert.Equal(t, "/split", r.GetMatch().GetPrefix())
+	// FIX 1: non-"/" prefix must use path_separated_prefix (segment-boundary match).
+	assert.Equal(t, "/split", r.GetMatch().GetPathSeparatedPrefix())
 
 	ra := r.GetRoute()
 	require.NotNil(t, ra, "must have a RouteAction")
@@ -663,7 +664,8 @@ func TestBuildEdgeRoute_HeaderMatch(t *testing.T) {
 
 	require.NotNil(t, r)
 	match := r.GetMatch()
-	require.Equal(t, "/api", match.GetPrefix())
+	// FIX 1: non-"/" prefix uses path_separated_prefix.
+	require.Equal(t, "/api", match.GetPathSeparatedPrefix())
 	require.Len(t, match.GetHeaders(), 2)
 
 	// First header: exact match.
@@ -742,10 +744,13 @@ func TestBuildEdgeRoute_CombinedPredicates(t *testing.T) {
 // TestBuildEdgeDirectResponseRoute_Status500 verifies that a direct_response route
 // emits status 500 and no upstream cluster.
 func TestBuildEdgeDirectResponseRoute_Status500(t *testing.T) {
+	// Non-"/" prefix: must use path_separated_prefix (segment-boundary match).
 	r := BuildEdgeDirectResponseRoute("/bad", "", nil, "", nil, 500)
 
 	require.NotNil(t, r)
-	assert.Equal(t, "/bad", r.GetMatch().GetPrefix())
+	assert.Equal(t, "/bad", r.GetMatch().GetPathSeparatedPrefix(),
+		"non-/ prefix must use path_separated_prefix")
+	assert.Empty(t, r.GetMatch().GetPrefix(), "plain prefix must be empty for non-/ paths")
 
 	dr, ok := r.GetAction().(*routev3.Route_DirectResponse)
 	require.True(t, ok, "action must be Route_DirectResponse")
@@ -757,14 +762,14 @@ func TestBuildEdgeDirectResponseRoute_Status500(t *testing.T) {
 // so the 500 only fires for the right request shape.
 func TestBuildEdgeDirectResponseRoute_PredicatesPreserved(t *testing.T) {
 	hdrs := []RouteHeaderMatch{{Name: "x-env", Value: "prod", Regex: false}}
-	// Use prefix path so we can assert on GetPrefix() without type-asserting the oneof.
+	// Non-"/" prefix uses path_separated_prefix (FIX 1: segment-boundary matching).
 	r := BuildEdgeDirectResponseRoute("/scoped", "", hdrs, "GET", nil, 500)
 
 	require.NotNil(t, r)
 	match := r.GetMatch()
 
-	// Path: prefix="/scoped".
-	assert.Equal(t, "/scoped", match.GetPrefix())
+	// Path: path_separated_prefix="/scoped" (not plain prefix).
+	assert.Equal(t, "/scoped", match.GetPathSeparatedPrefix(), "non-/ prefix uses path_separated_prefix")
 
 	// Header: x-env exact + :method GET.
 	headers := match.GetHeaders()
@@ -927,4 +932,75 @@ func TestBuildEdgeRouteWeighted_Timeout(t *testing.T) {
 	require.NotNil(t, ra)
 	require.NotNil(t, ra.GetTimeout(), "timeout must be set on weighted route's RouteAction")
 	assert.Equal(t, int64(2), ra.GetTimeout().GetSeconds())
+}
+
+// --- FIX 1: segment-boundary PathPrefix matching (HTTPRouteMatching) ---
+
+// TestSetEdgePrefixPathSpecifier verifies that setEdgePrefixPathSpecifier emits
+// path_separated_prefix for non-"/" prefixes (segment-boundary match) and plain
+// prefix for "/" (Envoy rejects path_separated_prefix:"/").
+func TestSetEdgePrefixPathSpecifier(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantPSP string // expected path_separated_prefix value (empty = use Prefix)
+		wantPfx string // expected plain prefix value (empty = use PSP)
+	}{
+		{input: "/", wantPfx: "/"},
+		{input: "/v2", wantPSP: "/v2"},
+		{input: "/api/v1", wantPSP: "/api/v1"},
+		// Trailing slash is normalized: /v2/ → /v2.
+		{input: "/v2/", wantPSP: "/v2"},
+		// Only slash: //// still collapses to "/".
+		{input: "////", wantPfx: "/"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			match := &routev3.RouteMatch{}
+			setEdgePrefixPathSpecifier(match, tc.input)
+			if tc.wantPSP != "" {
+				assert.Equal(t, tc.wantPSP, match.GetPathSeparatedPrefix(), "PathSeparatedPrefix")
+				assert.Empty(t, match.GetPrefix(), "Prefix must be empty when using PathSeparatedPrefix")
+			} else {
+				assert.Equal(t, tc.wantPfx, match.GetPrefix(), "Prefix")
+				assert.Empty(t, match.GetPathSeparatedPrefix(), "PathSeparatedPrefix must be empty when using Prefix")
+			}
+		})
+	}
+}
+
+// TestBuildEdgeRoute_PathSeparatedPrefix verifies that BuildEdgeRoute emits
+// path_separated_prefix for a non-"/" PathPrefix match so that "/v2" matches "/v2"
+// and "/v2/x" but NOT "/v2example" (segment-boundary semantics, HTTPRouteMatching).
+func TestBuildEdgeRoute_PathSeparatedPrefix(t *testing.T) {
+	r := BuildEdgeRoute("/v2", "", nil, "", nil, "svc.aether.internal", nil, nil, nil, nil)
+
+	require.NotNil(t, r)
+	match := r.GetMatch()
+	assert.Equal(t, "/v2", match.GetPathSeparatedPrefix(),
+		"/v2 prefix must use path_separated_prefix for segment-boundary matching")
+	assert.Empty(t, match.GetPrefix(), "plain prefix must be empty for a non-/ PathPrefix")
+	assert.Empty(t, match.GetPath(), "path must be empty for a PathPrefix match")
+}
+
+// TestBuildEdgeRoute_CatchAllPrefixPlain verifies that "/" stays plain prefix
+// (not path_separated_prefix) so Envoy accepts it without rejection.
+func TestBuildEdgeRoute_CatchAllPrefixPlain(t *testing.T) {
+	r := BuildEdgeRoute("/", "", nil, "", nil, "svc.aether.internal", nil, nil, nil, nil)
+
+	require.NotNil(t, r)
+	match := r.GetMatch()
+	assert.Equal(t, "/", match.GetPrefix(),
+		"catch-all '/' must remain a plain prefix (Envoy rejects path_separated_prefix:'/')")
+	assert.Empty(t, match.GetPathSeparatedPrefix())
+}
+
+// TestBuildEdgeRoute_TrailingSlashNormalized verifies that a trailing slash in a
+// PathPrefix is stripped: "/v2/" produces path_separated_prefix:"/v2" so that
+// "/v2" and "/v2/foo" match while "/v2example" does not.
+func TestBuildEdgeRoute_TrailingSlashNormalized(t *testing.T) {
+	r := BuildEdgeRoute("/v2/", "", nil, "", nil, "svc.aether.internal", nil, nil, nil, nil)
+
+	require.NotNil(t, r)
+	assert.Equal(t, "/v2", r.GetMatch().GetPathSeparatedPrefix(),
+		"trailing slash must be stripped: /v2/ → path_separated_prefix:/v2")
 }
