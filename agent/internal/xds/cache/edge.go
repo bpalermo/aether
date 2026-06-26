@@ -41,11 +41,12 @@ type EdgeGatewayEntry struct {
 	VirtualHosts []VirtualHost
 }
 
-// VirtualHost is the cache's projection of a VirtualHost CR (without the
-// Kubernetes types): a set of external hosts carrying an ordered list of
-// path-matched routes to mesh services, optionally served under a downstream
-// cert. Empty Hosts or empty Routes makes it inert (it exposes nothing — the
-// internal mesh FQDN is never routable from the edge).
+// VirtualHost is the cache's projection of an HTTPRoute (and the legacy
+// VirtualHost CR): a set of external hosts carrying an ordered list of
+// path-matched routes to backend services, optionally served under a downstream
+// cert. Empty Routes makes it inert. Empty Hosts is NOT inert — per Gateway API a
+// hostname-less route matches every host on its listener, so it is served via the
+// edge's catch-all "*" vhost (see buildEdgeVhostsLocked).
 type VirtualHost struct {
 	Hosts  []string
 	Routes []Route
@@ -174,23 +175,23 @@ func (c *SnapshotCache) edgeGatewayRouteConfigs() []types.Resource {
 // slice. It is identical to virtualHostVhosts but scoped to one Gateway's vhosts.
 // Caller must hold clusterMu.
 func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost) []*routev3.VirtualHost {
+	return c.buildEdgeVhostsLocked(vhosts)
+}
+
+// buildEdgeVhostsLocked converts cache VirtualHosts into Envoy virtual hosts.
+// A route with explicit hostnames becomes a vhost whose domains are those hosts
+// (a host already claimed by an earlier vhost is dropped — keep-first, since Envoy
+// NACKs duplicate domains). A route with NO hostnames matches EVERY host on its
+// listener (Gateway API semantics — a hostname-less HTTPRoute is not host-scoped);
+// such routes are merged into a single catch-all "*" vhost. There can be only one
+// "*" per route table (duplicate domains NACK), so all hostname-less routes share
+// it, in input order (the reconciler sorts by namespace/name for determinism).
+// Caller must hold clusterMu.
+func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.VirtualHost {
 	used := make(map[string]struct{})
 	out := make([]*routev3.VirtualHost, 0, len(vhosts))
+	var catchAll []*routev3.Route
 	for _, v := range vhosts {
-		domains := make([]string, 0, len(v.Hosts))
-		for _, h := range v.Hosts {
-			if h == "" {
-				continue
-			}
-			if _, ok := used[h]; ok {
-				continue
-			}
-			used[h] = struct{}{}
-			domains = append(domains, h)
-		}
-		if len(domains) == 0 {
-			continue
-		}
 		routes := make([]*routev3.Route, 0, len(v.Routes))
 		for _, r := range v.Routes {
 			if r.Redirect == nil && r.Service == "" {
@@ -205,7 +206,29 @@ func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost) []*routev3.Vir
 		if len(routes) == 0 {
 			continue
 		}
+		domains := make([]string, 0, len(v.Hosts))
+		for _, h := range v.Hosts {
+			if h == "" {
+				continue
+			}
+			if _, ok := used[h]; ok {
+				continue
+			}
+			used[h] = struct{}{}
+			domains = append(domains, h)
+		}
+		if len(domains) == 0 {
+			// Hostname-less route: matches all hosts on its listener. Accumulate into
+			// the single "*" catch-all vhost emitted after the loop.
+			catchAll = append(catchAll, routes...)
+			continue
+		}
 		out = append(out, proxy.BuildEdgeVirtualHost(domains[0], domains, routes))
+	}
+	if len(catchAll) > 0 {
+		if _, ok := used["*"]; !ok {
+			out = append(out, proxy.BuildEdgeVirtualHost("*", []string{"*"}, catchAll))
+		}
 	}
 	return out
 }
@@ -247,12 +270,10 @@ func (c *SnapshotCache) SetVirtualHosts(vhosts []VirtualHost) {
 }
 
 // virtualHostVhosts builds the edge listener's Envoy virtual hosts from the
-// configured VirtualHosts: one Envoy vhost per CR — its hosts as domains, its
-// routes emitted IN ORDER (first match wins). A host already claimed by an
-// earlier vhost is dropped from later ones (Envoy NACKs duplicate domains): the
-// runtime backstop to the controller webhook's duplicate-FQDN rejection, with
-// keep-first determinism (the reconciler sorts the input by namespace/name). A
-// vhost left with no domains, or with no routable routes, is skipped.
+// configured VirtualHosts (see buildEdgeVhostsLocked): a host already claimed by an
+// earlier vhost is dropped (keep-first; Envoy NACKs duplicate domains) — the
+// runtime backstop to the controller webhook's duplicate-FQDN rejection — and
+// hostname-less routes are merged into a single catch-all "*" vhost.
 func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 	c.edgeMu.RLock()
 	vhosts := slices.Clone(c.virtualHosts)
@@ -261,40 +282,7 @@ func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
-	used := make(map[string]struct{})
-	out := make([]*routev3.VirtualHost, 0, len(vhosts))
-	for _, v := range vhosts {
-		domains := make([]string, 0, len(v.Hosts))
-		for _, h := range v.Hosts {
-			if h == "" {
-				continue
-			}
-			if _, ok := used[h]; ok {
-				continue
-			}
-			used[h] = struct{}{}
-			domains = append(domains, h)
-		}
-		if len(domains) == 0 {
-			continue
-		}
-		routes := make([]*routev3.Route, 0, len(v.Routes))
-		for _, r := range v.Routes {
-			if r.Redirect == nil && r.Service == "" {
-				continue
-			}
-			cluster := ""
-			if r.Service != "" {
-				cluster = c.edgeClusterNameLocked(r.Service, r.Port)
-			}
-			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
-		}
-		if len(routes) == 0 {
-			continue
-		}
-		out = append(out, proxy.BuildEdgeVirtualHost(domains[0], domains, routes))
-	}
-	return out
+	return c.buildEdgeVhostsLocked(vhosts)
 }
 
 // edgeClusterNameLocked resolves a (service, port) backend to the data-plane
@@ -370,9 +358,9 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 	var services []string
 
 	addVhost := func(v VirtualHost) {
-		if len(v.Hosts) == 0 {
-			return
-		}
+		// A hostname-less route is NOT inert: per Gateway API it matches every host
+		// on its listener (the edge serves it via the catch-all "*" vhost), so its
+		// backend services must be scoped in (their clusters loaded) too.
 		for _, r := range v.Routes {
 			if r.Service == "" {
 				continue

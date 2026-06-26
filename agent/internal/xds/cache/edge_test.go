@@ -109,19 +109,20 @@ func TestSetVirtualHostsDependencySet(t *testing.T) {
 			{Prefix: "/a", Service: "svc-1"},
 			{Prefix: "/b", Service: "svc-2", Port: 9090},
 		}},
-		{Routes: []Route{{Prefix: "/", Service: "svc-3"}}}, // no hosts -> inert, never scoped
+		{Routes: []Route{{Prefix: "/", Service: "svc-3"}}}, // no hosts -> catch-all "*", IS routable + scoped
 	})
 
 	deps := c.DependencySet()
-	assert.Len(t, deps, 2)
+	assert.Len(t, deps, 3)
 	assert.Contains(t, deps, "svc-1")
 	assert.Contains(t, deps, "svc-2")
-	assert.NotContains(t, deps, "svc-3", "a hostless virtual host exposes nothing and must not scope its service")
+	assert.Contains(t, deps, "svc-3", "a hostname-less route matches all hosts (catch-all) and must scope its service")
 }
 
 // TestVirtualHostVhosts checks host->cluster resolution: external hosts become
-// the vhost domains and a non-default port targets the per-port cluster. A vhost
-// without hosts is NOT routable — the mesh FQDN is never an edge entrypoint.
+// the vhost domains, a non-default port targets the per-port cluster, and a route
+// WITHOUT hosts becomes the catch-all "*" vhost (Gateway API: a hostname-less route
+// matches all hosts on its listener).
 func TestVirtualHostVhosts(t *testing.T) {
 	c := newTestCache("edge-1")
 
@@ -132,27 +133,58 @@ func TestVirtualHostVhosts(t *testing.T) {
 
 	c.SetVirtualHosts([]VirtualHost{
 		{Hosts: []string{"api.example.com", "api2.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-1"}}},
-		{Routes: []Route{{Prefix: "/", Service: "svc-3"}}}, // no hosts -> NOT routable (no vhost)
+		{Routes: []Route{{Prefix: "/", Service: "svc-3"}}}, // no hosts -> catch-all "*"
 		{Hosts: []string{"grpc.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-2", Port: 9090}}},
 	})
 
 	vhosts := c.virtualHostVhosts()
-	require.Len(t, vhosts, 2)
+	require.Len(t, vhosts, 3)
 
-	assert.Equal(t, "api.example.com", vhosts[0].GetName())
-	assert.Equal(t, []string{"api.example.com", "api2.example.com"}, vhosts[0].GetDomains())
-	assert.Equal(t, "svc-1.aether.internal", vhosts[0].GetRoutes()[0].GetRoute().GetCluster())
-
-	assert.Equal(t, "grpc.example.com", vhosts[1].GetName())
-	assert.Equal(t, []string{"grpc.example.com"}, vhosts[1].GetDomains())
-	assert.Equal(t, "svc-2.aether.internal:9090", vhosts[1].GetRoutes()[0].GetRoute().GetCluster())
-
-	// No vhost exposes a mesh FQDN as a routable domain.
+	byName := map[string]*routev3.VirtualHost{}
 	for _, vh := range vhosts {
-		for _, d := range vh.GetDomains() {
-			assert.NotContains(t, d, ".aether.internal", "the mesh FQDN must not be routable from the edge")
+		byName[vh.GetName()] = vh
+	}
+
+	require.NotNil(t, byName["api.example.com"])
+	assert.Equal(t, []string{"api.example.com", "api2.example.com"}, byName["api.example.com"].GetDomains())
+	assert.Equal(t, "svc-1.aether.internal", byName["api.example.com"].GetRoutes()[0].GetRoute().GetCluster())
+
+	require.NotNil(t, byName["grpc.example.com"])
+	assert.Equal(t, []string{"grpc.example.com"}, byName["grpc.example.com"].GetDomains())
+	assert.Equal(t, "svc-2.aether.internal:9090", byName["grpc.example.com"].GetRoutes()[0].GetRoute().GetCluster())
+
+	// The hostname-less route is served by the catch-all "*" vhost.
+	require.NotNil(t, byName["*"], "a hostname-less route must produce the catch-all * vhost")
+	assert.Equal(t, []string{"*"}, byName["*"].GetDomains())
+	assert.Equal(t, "svc-3.aether.internal", byName["*"].GetRoutes()[0].GetRoute().GetCluster())
+}
+
+// TestVirtualHostVhostsHostlessMerge verifies that MULTIPLE hostname-less routes
+// merge into a SINGLE catch-all "*" vhost (Envoy NACKs duplicate domains, so there
+// can be only one "*"), preserving their routes in order.
+func TestVirtualHostVhostsHostlessMerge(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetVirtualHosts([]VirtualHost{
+		{Routes: []Route{{Prefix: "/a", Service: "svc-a"}}},                              // no hosts
+		{Hosts: []string{"x.example.com"}, Routes: []Route{{Prefix: "/", Service: "x"}}}, // hosted
+		{Routes: []Route{{Prefix: "/b", Service: "svc-b"}}},                              // no hosts
+	})
+
+	vhosts := c.virtualHostVhosts()
+	star := 0
+	var starVH *routev3.VirtualHost
+	for _, vh := range vhosts {
+		if vh.GetName() == "*" {
+			star++
+			starVH = vh
 		}
 	}
+	require.Equal(t, 1, star, "all hostname-less routes share ONE catch-all * vhost")
+	require.NotNil(t, starVH)
+	assert.Equal(t, []string{"*"}, starVH.GetDomains())
+	require.Len(t, starVH.GetRoutes(), 2, "both hostname-less routes land in the * vhost")
+	assert.Equal(t, "/a", starVH.GetRoutes()[0].GetMatch().GetPrefix())
+	assert.Equal(t, "/b", starVH.GetRoutes()[1].GetMatch().GetPrefix())
 }
 
 // TestVirtualHostPathRoutes verifies one virtual host fans different paths to
