@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,10 +13,70 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+// A real self-signed ECDSA keypair (CN=test) for the listener-TLS tests: the
+// kubernetes secret provider validates the keypair with tls.X509KeyPair, so a
+// "valid cert" fixture must hold parseable material.
+const (
+	validListenerTLSCert = `-----BEGIN CERTIFICATE-----
+MIIBHzCBxqADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMTBHRlc3QwHhcN
+MjYwNjI2MTU1MzUwWhcNMjcwNjI2MTY1MzUwWjAPMQ0wCwYDVQQDEwR0ZXN0MFkw
+EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEn4alJ26H8ozmsdz28/d8BUxOcmTuHYiT
+IdRPGfJR6P6CHstygFvJD1N7mvblUBSGyaJq8jI9p0eIFI+km0F5k6MTMBEwDwYD
+VR0RBAgwBoIEdGVzdDAKBggqhkjOPQQDAgNIADBFAiEA8t876pZRDOkFPAoZV0gg
+36yLul1OYTpOylOe9NsAyHwCIE7SBys13i6g5re4YmKgv1GBo6wW3VhxZWO6qm/Y
+KTqF
+-----END CERTIFICATE-----
+`
+	validListenerTLSKey = `-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIIsvYanqaRRY782l1DBVdbGmnaBSmptup19WIFXx2vdjoAoGCCqGSM49
+AwEHoUQDQgAEn4alJ26H8ozmsdz28/d8BUxOcmTuHYiTIdRPGfJR6P6CHstygFvJ
+D1N7mvblUBSGyaJq8jI9p0eIFI+km0F5kw==
+-----END EC PRIVATE KEY-----
+`
+)
+
+// listenerTLSGateway builds an HTTPS Gateway of our class whose single listener
+// references the named Secret as its certificateRef.
+func listenerTLSGateway(name, secretName string) *gatewayv1.Gateway {
+	secretKind := gatewayv1.Kind("Secret")
+	emptyGroup := gatewayv1.Group("")
+	return &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "aether",
+			Listeners: []gatewayv1.Listener{{
+				Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
+				TLS: &gatewayv1.ListenerTLSConfig{
+					CertificateRefs: []gatewayv1.SecretObjectReference{{
+						Group: &emptyGroup, Kind: &secretKind, Name: gatewayv1.ObjectName(secretName),
+					}},
+				},
+			}},
+		},
+	}
+}
+
+// tlsTypeSecret builds a kubernetes.io/tls Secret with the given cert/key bytes
+// (used to construct missing-key, malformed, and valid fixtures).
+func tlsTypeSecret(name, cert, key string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		Type:       corev1.SecretTypeTLS,
+		Data:       map[string][]byte{corev1.TLSCertKey: []byte(cert), corev1.TLSPrivateKeyKey: []byte(key)},
+	}
+}
+
+// secretsRegistryFor builds a real Secrets Registry backed by the given fake
+// client so the reconciler resolves (and validates) certificateRefs end-to-end.
+func secretsRegistryFor(c client.Client) *secret.Registry {
+	return secret.NewRegistry(secret.NewKubernetesProvider(c, "ns"))
+}
 
 func ourClass() *gatewayv1.GatewayClass {
 	return &gatewayv1.GatewayClass{
@@ -167,6 +228,98 @@ func TestListenerInvalidTLS(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, gwAcc.Status, "Accepted stays True even with an invalid-TLS listener")
 	assert.Equal(t, got.Generation, gwAcc.ObservedGeneration, "Accepted observedGeneration must track metadata.generation on the invalid-TLS path")
 	assert.Equal(t, got.Generation, gwProg.ObservedGeneration, "Programmed observedGeneration must track metadata.generation on the invalid-TLS path")
+}
+
+// TestListenerInvalidTLSWithProvider exercises the real Secrets provider on the
+// listener-TLS resolution path (the GatewayInvalidTLSConfiguration conformance
+// cases): a certificateRef to a missing Secret, a Secret missing tls.key, and a
+// Secret of the right type whose cert/key bytes don't parse as a keypair all yield
+// ResolvedRefs=False/InvalidCertificateRef + Programmed=False (observedGeneration
+// stamped). A VALID keypair stays ResolvedRefs=True/Programmed=True (regression
+// guard — api.palermo.dev must stay green).
+func TestListenerInvalidTLSWithProvider(t *testing.T) {
+	cases := []struct {
+		name        string
+		gwName      string
+		secretName  string
+		secret      *corev1.Secret // nil → no Secret created (nonexistent ref)
+		wantInvalid bool
+	}{
+		{
+			name:        "nonexistent secret",
+			gwName:      "gw-tls-missing",
+			secretName:  "nonexistent-certificate",
+			secret:      nil,
+			wantInvalid: true,
+		},
+		{
+			name:        "secret missing tls.key",
+			gwName:      "gw-tls-no-key",
+			secretName:  "no-key",
+			secret:      tlsTypeSecret("no-key", validListenerTLSCert, ""),
+			wantInvalid: true,
+		},
+		{
+			name:        "malformed cert/key bytes",
+			gwName:      "gw-tls-malformed",
+			secretName:  "malformed-certificate",
+			secret:      tlsTypeSecret("malformed-certificate", "Hello world\n", "Hello world\n"),
+			wantInvalid: true,
+		},
+		{
+			name:        "valid keypair (regression)",
+			gwName:      "gw-tls-valid",
+			secretName:  "valid-certificate",
+			secret:      tlsTypeSecret("valid-certificate", validListenerTLSCert, validListenerTLSKey),
+			wantInvalid: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gw := listenerTLSGateway(tc.gwName, tc.secretName)
+			b := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+				WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{})
+			objs := []client.Object{ourClass(), gw}
+			if tc.secret != nil {
+				objs = append(objs, tc.secret)
+			}
+			c := b.WithObjects(objs...).Build()
+			r := &Reconciler{
+				Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns",
+				GatewayClassName: "aether", MeshDomain: "mesh",
+				Secrets: secretsRegistryFor(c), Log: slog.Default(),
+			}
+
+			_, err := r.Reconcile(context.Background(), reconcile.Request{})
+			require.NoError(t, err)
+
+			got := &gatewayv1.Gateway{}
+			require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: tc.gwName}, got))
+			require.Len(t, got.Status.Listeners, 1)
+			rr := meta.FindStatusCondition(got.Status.Listeners[0].Conditions, string(gatewayv1.ListenerConditionResolvedRefs))
+			require.NotNil(t, rr)
+			prog := meta.FindStatusCondition(got.Status.Listeners[0].Conditions, string(gatewayv1.ListenerConditionProgrammed))
+			require.NotNil(t, prog)
+			gwProg := meta.FindStatusCondition(got.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
+			require.NotNil(t, gwProg)
+
+			if tc.wantInvalid {
+				assert.Equal(t, metav1.ConditionFalse, rr.Status, "invalid cert → ResolvedRefs=False")
+				assert.Equal(t, string(gatewayv1.ListenerReasonInvalidCertificateRef), rr.Reason)
+				assert.Equal(t, metav1.ConditionFalse, prog.Status, "invalid cert → listener not Programmed")
+				assert.Equal(t, string(gatewayv1.ListenerReasonInvalid), prog.Reason)
+				assert.Equal(t, metav1.ConditionFalse, gwProg.Status, "invalid cert → Gateway not Programmed")
+				// observedGeneration must still be stamped on the invalid path (#361 guard).
+				assert.Equal(t, got.Generation, rr.ObservedGeneration)
+				assert.Equal(t, got.Generation, prog.ObservedGeneration)
+			} else {
+				assert.Equal(t, metav1.ConditionTrue, rr.Status, "valid cert → ResolvedRefs=True (regression)")
+				assert.Equal(t, string(gatewayv1.ListenerReasonResolvedRefs), rr.Reason)
+				assert.Equal(t, metav1.ConditionTrue, prog.Status, "valid cert → listener Programmed (regression)")
+				assert.Equal(t, metav1.ConditionTrue, gwProg.Status, "valid cert → Gateway Programmed (regression)")
+			}
+		})
+	}
 }
 
 // TestRouteNotMatchingSectionName: a route whose parentRef names a sectionName
