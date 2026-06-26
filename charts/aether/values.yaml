@@ -274,6 +274,13 @@ edge:
   # your own (cert-manager, kubectl, …). The edge->pod upstream hop stays mTLS.
   tls:
     enabled: false
+  # Envoy admin endpoint, bound to pod-local loopback (127.0.0.1) only — never
+  # exposed via a Service. Off by default (it is an unauthenticated control surface
+  # even on loopback); enable for diagnostics (config_dump/stats) and reach it with
+  # `kubectl port-forward <edge-pod> 9901:9901`.
+  admin:
+    enabled: false
+    port: 9901
   service:
     type: LoadBalancer
     port: 80
