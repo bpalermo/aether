@@ -50,6 +50,13 @@ type RouteSink interface {
 	// (one per Gateway, bound on allocated internal ports) instead of the shared
 	// Phase 1 listeners. When empty, falls back to Phase 1 behavior.
 	SetEdgeGateways(gateways []cache.EdgeGatewayEntry)
+	// HasRegistryService reports whether the named service is currently known to
+	// the mesh registry (namespace-blind, bare service name). Used by the
+	// backend-existence check to distinguish mesh/registry services (which need
+	// no k8s Service object in the route namespace) from k8s-only Services.
+	// Returns false when the registry does not implement ServiceCatalog or no
+	// registry has been configured (safe default = not a registry service).
+	HasRegistryService(name string) bool
 }
 
 // Reconciler watches Gateway API HTTPRoutes, TCPRoutes, and TLSRoutes (and the
@@ -703,6 +710,37 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 	return vh
 }
 
+// backendExists reports whether a named backend is admissible on the data plane:
+// it exists if it is a mesh/registry service (resolved namespace-blind via the
+// registry ServiceCatalog) OR if a k8s Service with the given name/namespace can
+// be read from the API server. The registry is checked first (cheap, in-memory).
+//
+// Only a hard k8s NotFound with no registry hit causes the backend to be treated
+// as non-existent. Transient API errors leave the backend admitted to avoid
+// false-positive 500s on a momentary API server hiccup.
+//
+// When r.Sink is nil or r.Client is nil, the check degrades gracefully (the
+// backend is admitted) to preserve prior behavior for callers that don't wire up
+// those dependencies (e.g. unit tests that focus on other behavior).
+func (r *Reconciler) backendExists(ctx context.Context, name, namespace string) bool {
+	// Registry check first: mesh services are namespace-blind (bare name).
+	if r.Sink != nil && r.Sink.HasRegistryService(name) {
+		return true
+	}
+	// Fall back to k8s Service existence check.
+	if r.Client == nil {
+		return true // no client → treat as admitted (safe degradation)
+	}
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, svc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false // neither a registry service nor a k8s Service → BackendNotFound
+		}
+		// Transient error: admit the backend to avoid false-positive 500s.
+	}
+	return true
+}
+
 // buildHTTPRouteBackends converts the HTTPRoute rule's backendRefs into a list of
 // RouteBackend values, applying Gateway API admission rules: non-core group/kind
 // refs are skipped; ungranted cross-namespace refs are skipped (RefNotPermitted).
@@ -733,22 +771,12 @@ func (r *Reconciler) buildHTTPRouteBackends(ctx context.Context, refs []gatewayv
 		if b.Namespace != nil && string(*b.Namespace) != "" {
 			ns = string(*b.Namespace)
 		}
-		// Existence check: drop backends whose Service does not exist. This mirrors the
-		// check backendsResolveL4 (status.go) already performs for status, and ensures
-		// that a rule whose only backends are missing (BackendNotFound) arrives at
-		// buildVirtualHost with len(backends)==0 so the 500 direct_response path fires
-		// (see Gateway API invalid-backend semantics). Mesh services have a generated
-		// Service object; real k8s Services are real. Only drop on hard NotFound — a
-		// transient API error leaves the backend admitted so we don't break the data
-		// plane on a momentary API server hiccup.
-		if r.Client != nil {
-			svc := &corev1.Service{}
-			if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, svc); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue // BackendNotFound: drop from admitted set
-				}
-				// Transient error: admit the backend to avoid false-positive 500s.
-			}
+		// Registry-aware existence check: a backend is admissible if it is a
+		// mesh/registry service OR a real k8s Service. Only drop on confirmed
+		// non-existence in both (BackendNotFound). Transient API errors leave the
+		// backend admitted to avoid false-positive 500s on API server hiccups.
+		if !r.backendExists(ctx, name, ns) {
+			continue // BackendNotFound: drop from admitted set
 		}
 		var port uint32
 		if b.Port != nil {

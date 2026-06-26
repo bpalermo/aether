@@ -35,6 +35,7 @@ func (statusFakeSink) SetEdgeTCPRoutes([]proxy.EdgeL4TCPRoute)  {}
 func (statusFakeSink) SetEdgeTLSRoutes([]proxy.EdgeL4TLSRoute)  {}
 func (statusFakeSink) SetEdgeHTTPRedirect(bool)                 {}
 func (statusFakeSink) SetEdgeGateways([]cache.EdgeGatewayEntry) {}
+func (statusFakeSink) HasRegistryService(string) bool           { return false }
 
 func statusScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -162,6 +163,24 @@ func routeResolvedRefs(t *testing.T, c client.Client) *metav1.Condition {
 	return meta.FindStatusCondition(gotHR.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionResolvedRefs))
 }
 
+// statusFakeSinkWithRegistry is a RouteSink that reports specific service names as
+// registry/mesh services. Used to test registry-aware backend-existence behavior.
+type statusFakeSinkWithRegistry struct {
+	registryServices map[string]bool
+}
+
+func (s statusFakeSinkWithRegistry) SetVirtualHosts([]cache.VirtualHost) {}
+func (s statusFakeSinkWithRegistry) SetEdgeTLSSecrets(context.Context, map[string]cache.EdgeTLSCert) error {
+	return nil
+}
+func (s statusFakeSinkWithRegistry) SetEdgeTCPRoutes([]proxy.EdgeL4TCPRoute)  {}
+func (s statusFakeSinkWithRegistry) SetEdgeTLSRoutes([]proxy.EdgeL4TLSRoute)  {}
+func (s statusFakeSinkWithRegistry) SetEdgeHTTPRedirect(bool)                 {}
+func (s statusFakeSinkWithRegistry) SetEdgeGateways([]cache.EdgeGatewayEntry) {}
+func (s statusFakeSinkWithRegistry) HasRegistryService(name string) bool {
+	return s.registryServices[name]
+}
+
 // TestReconcile_BackendNotFound: an HTTPRoute whose core-Service backendRef names a
 // Service that does not exist gets ResolvedRefs=False/BackendNotFound.
 func TestReconcile_BackendNotFound(t *testing.T) {
@@ -200,6 +219,33 @@ func TestReconcile_BackendExists(t *testing.T) {
 	rres := routeResolvedRefs(t, c)
 	require.NotNil(t, rres)
 	assert.Equal(t, metav1.ConditionTrue, rres.Status, "existing Service backend → ResolvedRefs True")
+	assert.Equal(t, string(gatewayv1.RouteReasonResolvedRefs), rres.Reason)
+}
+
+// TestReconcile_RegistryOnlyBackend_ResolvedRefs: an HTTPRoute whose backendRef is a
+// mesh/registry service (HasRegistryService=true) but has no k8s Service in the route
+// namespace gets ResolvedRefs=True. This is the regression guard for #367: before the
+// fix, such a backend returned BackendNotFound because the namespaced Service.Get
+// failed. The registry-aware check must report it as resolved.
+func TestReconcile_RegistryOnlyBackend_ResolvedRefs(t *testing.T) {
+	gc, gw, hr := resolvedRefsFixture(gatewayv1.BackendObjectReference{Name: "echo", Port: ptr(gatewayv1.PortNumber(8080))})
+
+	// Client has NO Services — "echo" is registry-only (no k8s Service in "ns").
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gc, gw, hr).
+		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
+		Build()
+	// Sink reports "echo" as a mesh/registry service.
+	sink := statusFakeSinkWithRegistry{registryServices: map[string]bool{"echo": true}}
+	r := &Reconciler{Client: c, APIReader: c, Sink: sink, Namespace: "ns", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	rres := routeResolvedRefs(t, c)
+	require.NotNil(t, rres)
+	assert.Equal(t, metav1.ConditionTrue, rres.Status,
+		"registry-only backend must report ResolvedRefs=True (not BackendNotFound)")
 	assert.Equal(t, string(gatewayv1.RouteReasonResolvedRefs), rres.Reason)
 }
 
