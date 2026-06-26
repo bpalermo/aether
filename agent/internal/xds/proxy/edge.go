@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
@@ -540,6 +541,27 @@ func buildRouteMatchPredicates(match *routev3.RouteMatch, headers []RouteHeaderM
 	}
 }
 
+// setEdgePrefixPathSpecifier sets the PathSpecifier on match for a Gateway API
+// PathPrefix match. Gateway API prefix matching is SEGMENT-BOUNDARY: "/v2"
+// matches "/v2" and "/v2/x" but NOT "/v2example". Envoy's path_separated_prefix
+// implements this. The catch-all "/" is the exception: Envoy rejects
+// path_separated_prefix:"/" so "/" keeps plain prefix matching.
+// Trailing slashes are normalized ("/v2/" → "/v2") since a trailing slash is
+// only a segment boundary itself and path_separated_prefix already requires that.
+func setEdgePrefixPathSpecifier(match *routev3.RouteMatch, prefix string) {
+	if prefix == "/" {
+		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
+		return
+	}
+	p := strings.TrimRight(prefix, "/")
+	if p == "" {
+		// After trimming, empty string collapses to "/" (catch-all).
+		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
+		return
+	}
+	match.PathSpecifier = &routev3.RouteMatch_PathSeparatedPrefix{PathSeparatedPrefix: p}
+}
+
 // BuildEdgeDirectResponseRoute builds an Envoy route that matches on path +
 // headers + method + query params and returns a fixed direct_response (no
 // backend). Used when a rule's backendRef(s) are unresolvable; Gateway API
@@ -549,7 +571,7 @@ func BuildEdgeDirectResponseRoute(prefix, exact string, headers []RouteHeaderMat
 	if exact != "" {
 		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
 	} else {
-		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
+		setEdgePrefixPathSpecifier(match, prefix)
 	}
 	buildRouteMatchPredicates(match, headers, method, queryParams)
 	return &routev3.Route{
@@ -595,7 +617,7 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 	if exact != "" {
 		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
 	} else {
-		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
+		setEdgePrefixPathSpecifier(match, prefix)
 	}
 	buildRouteMatchPredicates(match, headers, method, queryParams)
 	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(mutation)
@@ -647,7 +669,7 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 	if exact != "" {
 		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
 	} else {
-		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
+		setEdgePrefixPathSpecifier(match, prefix)
 	}
 	buildRouteMatchPredicates(match, headers, method, queryParams)
 	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(mutation)
