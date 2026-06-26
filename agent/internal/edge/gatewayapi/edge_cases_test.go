@@ -154,6 +154,19 @@ func TestListenerInvalidTLS(t *testing.T) {
 	gwProg := meta.FindStatusCondition(got.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
 	require.NotNil(t, gwProg)
 	assert.Equal(t, metav1.ConditionFalse, gwProg.Status)
+
+	// observedGeneration must be stamped to the Gateway's current generation on BOTH
+	// the Accepted AND Programmed conditions even on the invalid-TLS path — the
+	// controller must not early-return before stamping it (rev13 regression: the
+	// cert-error Gateways reported observedGeneration 0 while generation was 1, so
+	// GatewayInvalidTLSConfiguration failed waiting for observedGeneration==1). The
+	// conformance suite waits for status.conditions[].observedGeneration ==
+	// metadata.generation before asserting the condition values.
+	gwAcc := meta.FindStatusCondition(got.Status.Conditions, string(gatewayv1.GatewayConditionAccepted))
+	require.NotNil(t, gwAcc)
+	assert.Equal(t, metav1.ConditionTrue, gwAcc.Status, "Accepted stays True even with an invalid-TLS listener")
+	assert.Equal(t, got.Generation, gwAcc.ObservedGeneration, "Accepted observedGeneration must track metadata.generation on the invalid-TLS path")
+	assert.Equal(t, got.Generation, gwProg.ObservedGeneration, "Programmed observedGeneration must track metadata.generation on the invalid-TLS path")
 }
 
 // TestRouteNotMatchingSectionName: a route whose parentRef names a sectionName
