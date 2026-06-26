@@ -1203,3 +1203,143 @@ func TestBuildHTTPRouteBackends_HeadlessDialPort(t *testing.T) {
 	assert.Equal(t, uint32(8080), got[0].Port, "cluster name stays keyed by service port")
 	assert.Equal(t, uint32(3000), got[0].DialPort, "headless backend dials the targetPort")
 }
+
+// --- FIX 1: Nonexistent backend Service → HTTP 500 direct_response ---
+
+// TestBuildHTTPRouteBackends_NonExistentService_Dropped verifies that a backendRef
+// pointing to a Service that does not exist in the cluster is dropped from the
+// admitted set. This causes buildVirtualHost to see len(backends)==0 with
+// len(rule.BackendRefs)>0, which triggers the HTTP 500 direct_response route.
+func TestBuildHTTPRouteBackends_NonExistentService_Dropped(t *testing.T) {
+	// Client has no Services registered — "ghost-svc" does not exist.
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
+	r := &Reconciler{Client: c}
+
+	got := r.buildHTTPRouteBackends(
+		context.Background(),
+		backend("ghost-svc", 8080),
+		"ns",
+		nil,
+	)
+	assert.Empty(t, got, "nonexistent Service must be dropped from the admitted backend set")
+}
+
+// TestBuildVirtualHost_NonExistentBackend_DirectResponse500 verifies the end-to-end
+// contract: a rule with a valid-shaped but nonexistent Service backendRef must
+// produce a DirectResponseStatus=500 route (not a forwarding route to a ghost cluster).
+func TestBuildVirtualHost_NonExistentBackend_DirectResponse500(t *testing.T) {
+	// Fake client: Service "ghost-svc" in "ns" is NOT in the store.
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
+	r := &Reconciler{Client: c}
+
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/app"),
+			BackendRefs: backend("ghost-svc", 8080),
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1, "nonexistent backend must produce exactly one 500 route")
+	rt := vh.Routes[0]
+	assert.Equal(t, "/app", rt.Prefix, "path match must be preserved on the 500 route")
+	assert.Equal(t, uint32(500), rt.DirectResponseStatus,
+		"nonexistent Service backendRef must produce DirectResponseStatus=500")
+	assert.Empty(t, rt.Service, "500 route must carry no backend Service")
+}
+
+// TestBuildHTTPRouteBackends_ExistingService_Admitted verifies that a backendRef
+// whose Service DOES exist is admitted normally (not dropped by the existence check).
+func TestBuildHTTPRouteBackends_ExistingService_Admitted(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(svcWith("real-svc", "ns", "10.0.0.1", 8080, intstr.FromInt(8080))).
+		Build()
+	r := &Reconciler{Client: c}
+
+	got := r.buildHTTPRouteBackends(
+		context.Background(),
+		backend("real-svc", 8080),
+		"ns",
+		nil,
+	)
+	require.Len(t, got, 1, "existing Service must be admitted into the backend set")
+	assert.Equal(t, "real-svc", got[0].Service)
+}
+
+// --- FIX 4: HTTPRouteTimeoutRequest threading into cache.Route ---
+
+// TestBuildVirtualHost_TimeoutRequest verifies that a rule with timeouts.request
+// set propagates the parsed duration onto every cache.Route.Timeout produced from
+// that rule.
+func TestBuildVirtualHost_TimeoutRequest(t *testing.T) {
+	req := gatewayv1.Duration("5s")
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: pathMatch(gatewayv1.PathMatchPathPrefix, "/slow"),
+			Timeouts: &gatewayv1.HTTPRouteTimeouts{
+				Request: &req,
+			},
+			Filters: []gatewayv1.HTTPRouteFilter{{
+				Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+				RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
+					Scheme: ptr("https"),
+				},
+			}},
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	rt := vh.Routes[0]
+	require.NotNil(t, rt.Timeout, "Timeout must be set from timeouts.request")
+	assert.Equal(t, int64(5), rt.Timeout.GetSeconds(), "timeout must be 5s")
+}
+
+// TestBuildVirtualHost_NoTimeout verifies that a rule without timeouts.request
+// leaves cache.Route.Timeout nil (no timeout applied at the route level).
+func TestBuildVirtualHost_NoTimeout(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: pathMatch(gatewayv1.PathMatchPathPrefix, "/fast"),
+			Filters: []gatewayv1.HTTPRouteFilter{{
+				Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+				RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
+					Scheme: ptr("https"),
+				},
+			}},
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	assert.Nil(t, vh.Routes[0].Timeout, "absent timeouts.request must leave Timeout nil")
+}
+
+// TestBuildVirtualHost_TimeoutRequest_MultiMatch verifies that when a rule produces
+// multiple routes (one per HTTPRouteMatch), all routes carry the same timeout.
+func TestBuildVirtualHost_TimeoutRequest_MultiMatch(t *testing.T) {
+	req := gatewayv1.Duration("2s")
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: []gatewayv1.HTTPRouteMatch{
+				{Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchExact), Value: ptr("/a")}},
+				{Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchExact), Value: ptr("/b")}},
+			},
+			Timeouts: &gatewayv1.HTTPRouteTimeouts{Request: &req},
+			Filters: []gatewayv1.HTTPRouteFilter{{
+				Type:            gatewayv1.HTTPRouteFilterRequestRedirect,
+				RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{Scheme: ptr("https")},
+			}},
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 2, "two matches must produce two routes")
+	for i, rt := range vh.Routes {
+		require.NotNil(t, rt.Timeout, "route %d must have Timeout set", i)
+		assert.Equal(t, int64(2), rt.Timeout.GetSeconds(), "route %d timeout must be 2s", i)
+	}
+}

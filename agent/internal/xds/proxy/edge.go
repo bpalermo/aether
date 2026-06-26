@@ -579,15 +579,16 @@ type WeightedRouteBackend struct {
 //
 // headers/method/queryParams add per-match predicates (ANDed with the path).
 // redirect is applied ahead of backend resolution (no backends needed for a
-// redirect). urlRewrite is applied on forwarding routes only.
-func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch, backends []WeightedRouteBackend, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
+// redirect). urlRewrite is applied on forwarding routes only. timeout sets the
+// per-route request timeout (nil = no timeout / inherit cluster default).
+func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch, backends []WeightedRouteBackend, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite, timeout *durationpb.Duration) *routev3.Route {
 	if redirect != nil || len(backends) <= 1 {
 		// Redirect path or single backend: delegate to the plain builder.
 		cluster := ""
 		if len(backends) == 1 {
 			cluster = backends[0].Cluster
 		}
-		return BuildEdgeRoute(prefix, exact, headers, method, queryParams, cluster, mutation, redirect, urlRewrite)
+		return BuildEdgeRoute(prefix, exact, headers, method, queryParams, cluster, mutation, redirect, urlRewrite, timeout)
 	}
 	// Multiple backends: weighted_clusters action.
 	match := &routev3.RouteMatch{}
@@ -617,6 +618,9 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 		ClusterSpecifier: &routev3.RouteAction_WeightedClusters{WeightedClusters: wc},
 		RetryPolicy:      outboundRetryPolicy(),
 	}
+	if timeout != nil {
+		ra.Timeout = timeout
+	}
 	applyURLRewrite(ra, urlRewrite)
 
 	return &routev3.Route{
@@ -633,11 +637,12 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 // is non-empty (exact takes precedence if both are set). Prefix "/" matches all.
 // headers/method/queryParams add per-match predicates (ANDed with the path match).
 // mutation applies RequestHeaderModifier / ResponseHeaderModifier at the route level.
+// timeout sets the per-route request timeout (nil = no timeout / inherit default).
 //
 // When redirect is non-nil the route emits a Route_Redirect (no cluster). When
 // urlRewrite is non-nil the route rewrite fields are applied before forwarding to
 // cluster. Both nil → plain forwarding route.
-func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch, cluster string, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
+func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch, cluster string, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite, timeout *durationpb.Duration) *routev3.Route {
 	match := &routev3.RouteMatch{}
 	if exact != "" {
 		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
@@ -659,6 +664,9 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 		ra := &routev3.RouteAction{
 			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: cluster},
 			RetryPolicy:      outboundRetryPolicy(),
+		}
+		if timeout != nil {
+			ra.Timeout = timeout
 		}
 		applyURLRewrite(ra, urlRewrite)
 		r.Action = &routev3.Route_Route{Route: ra}
