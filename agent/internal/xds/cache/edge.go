@@ -223,24 +223,26 @@ func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost) []*routev3.Vir
 }
 
 // buildEdgeVhostsLocked converts cache VirtualHosts into Envoy virtual hosts.
-// A route with explicit hostnames becomes a vhost whose domains are those hosts
-// (a host already claimed by an earlier vhost is dropped — keep-first, since Envoy
-// NACKs duplicate domains). A route with NO hostnames matches EVERY host on its
-// listener (Gateway API semantics — a hostname-less HTTPRoute is not host-scoped);
-// such routes are merged into a single catch-all "*" vhost. There can be only one
-// "*" per route table (duplicate domains NACK), so all hostname-less routes share
-// it.
 //
-// Gateway API route-matching precedence (applied per output vhost):
-// Exact > PathPrefix by descending prefix length. Within ties the input order is
-// preserved — the reconciler sorts HTTPRoutes by creationTimestamp/namespace/name
-// before building vhosts, so that tie-break carries through the stable sort here.
+// Grouping: routes from all VirtualHosts that share a hostname are MERGED into
+// one Envoy virtual host for that hostname (Gateway API allows multiple HTTPRoutes
+// to share a hostname on one Gateway; the data plane merges them). Routes are
+// ordered by Gateway API path-specificity (Exact > longer prefix > shorter prefix)
+// and the reconciler's input order (creationTimestamp/namespace/name) serves as
+// the stable tie-break. There can be only one Envoy vhost per hostname (Envoy
+// NACKs duplicate domains) — merge, never keep-first-drop.
+//
+// Hostname-less vhosts (Hosts == nil/empty) represent routes whose effective
+// hostname set spans all of the listener's hostnames; they are merged into the
+// single catch-all "*" vhost (there can be only one "*" per route table).
 //
 // Caller must hold clusterMu.
 func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.VirtualHost {
-	used := make(map[string]struct{})
-	out := make([]*routev3.VirtualHost, 0, len(vhosts))
+	// domain → []Route accumulator; ordered first-seen for domain name ordering.
+	domainRoutes := make(map[string][]Route)
+	var domainOrder []string // first-seen order for deterministic output
 	var catchAllRoutes []Route
+
 	for _, v := range vhosts {
 		// Collect admissible routes (has a service or redirect).
 		admitted := make([]Route, 0, len(v.Routes))
@@ -253,51 +255,59 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 		if len(admitted) == 0 {
 			continue
 		}
-		domains := make([]string, 0, len(v.Hosts))
+
+		// Determine the set of domains for this vhost. Empty Hosts = catch-all.
+		var domains []string
 		for _, h := range v.Hosts {
-			if h == "" {
-				continue
+			if h != "" {
+				domains = append(domains, h)
 			}
-			if _, ok := used[h]; ok {
-				continue
-			}
-			used[h] = struct{}{}
-			domains = append(domains, h)
 		}
 		if len(domains) == 0 {
-			// Hostname-less route: matches all hosts on its listener. Accumulate into
-			// the single "*" catch-all vhost emitted after the loop. Preserve input
-			// order here; the catchAllRoutes slice is sorted as a whole below.
+			// Hostname-less route: accumulate into the single "*" catch-all vhost.
 			catchAllRoutes = append(catchAllRoutes, admitted...)
 			continue
 		}
-		// Apply Gateway API path-specificity sort (stable — preserves tie-break order).
-		sortRoutesBySpecificity(admitted)
-		routes := make([]*routev3.Route, 0, len(admitted))
-		for _, r := range admitted {
+
+		// Group by domain: each domain in this vhost gets all admitted routes.
+		// Multiple VirtualHosts sharing a domain are merged here.
+		for _, h := range domains {
+			if _, seen := domainRoutes[h]; !seen {
+				domainOrder = append(domainOrder, h)
+			}
+			domainRoutes[h] = append(domainRoutes[h], admitted...)
+		}
+	}
+
+	// Emit one Envoy virtual host per domain group, sorted by path specificity.
+	out := make([]*routev3.VirtualHost, 0, len(domainOrder))
+	for _, domain := range domainOrder {
+		merged := domainRoutes[domain]
+		sortRoutesBySpecificity(merged)
+		routes := make([]*routev3.Route, 0, len(merged))
+		for _, r := range merged {
 			cluster := ""
 			if r.Service != "" {
 				cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
 			}
 			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
 		}
-		out = append(out, proxy.BuildEdgeVirtualHost(domains[0], domains, routes))
+		out = append(out, proxy.BuildEdgeVirtualHost(domain, []string{domain}, routes))
 	}
+
 	if len(catchAllRoutes) > 0 {
-		if _, ok := used["*"]; !ok {
-			// Sort the merged catch-all routes by path specificity. Ties preserve the
-			// input order (creationTimestamp/namespace/name tie-break from the reconciler).
-			sortRoutesBySpecificity(catchAllRoutes)
-			catchAll := make([]*routev3.Route, 0, len(catchAllRoutes))
-			for _, r := range catchAllRoutes {
-				cluster := ""
-				if r.Service != "" {
-					cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
-				}
-				catchAll = append(catchAll, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
+		// Sort the merged catch-all routes by path specificity. Ties preserve the
+		// input order (creationTimestamp/namespace/name tie-break from the reconciler).
+		sortRoutesBySpecificity(catchAllRoutes)
+		catchAll := make([]*routev3.Route, 0, len(catchAllRoutes))
+		for _, r := range catchAllRoutes {
+			cluster := ""
+			if r.Service != "" {
+				cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
 			}
-			out = append(out, proxy.BuildEdgeVirtualHost("*", []string{"*"}, catchAll))
+			catchAll = append(catchAll, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
 		}
+		out = append(out, proxy.BuildEdgeVirtualHost("*", []string{"*"}, catchAll))
 	}
 	return out
 }
