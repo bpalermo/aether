@@ -176,6 +176,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 				"route", hr.Namespace+"/"+hr.Name, "rules", len(hr.Spec.Rules))
 			continue
 		}
+		// Scope the vhost to the Gateways the route actually attaches to (Phase 2
+		// assigns by attachment, not by the vhost's cert tag).
+		vh.Gateways = attachedGatewayKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
 		vhosts = append(vhosts, vh)
 	}
 
@@ -587,6 +590,30 @@ func attachedToOurGateway(parentRefs []gatewayv1.ParentReference, routeNamespace
 		}
 	}
 	return false
+}
+
+// attachedGatewayKeys returns the "<ns>/<name>" keys of OUR Gateways a route's
+// parentRefs attach to. Used to scope a vhost to its actual Gateways' route tables
+// (Phase 2 assignment by attachment, not by cert).
+func attachedGatewayKeys(parentRefs []gatewayv1.ParentReference, routeNamespace string, gateways map[gatewayKey]struct{}) []string {
+	seen := map[string]struct{}{}
+	var keys []string
+	for _, p := range parentRefs {
+		if !parentRefIsGateway(p) {
+			continue
+		}
+		key := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
+		if _, ok := gateways[key]; !ok {
+			continue
+		}
+		s := key.Namespace + "/" + key.Name
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		keys = append(keys, s)
+	}
+	return keys
 }
 
 // parentRefIsGateway reports whether a parentRef targets a Gateway (the default

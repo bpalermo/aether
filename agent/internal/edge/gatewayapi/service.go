@@ -3,6 +3,7 @@ package gatewayapi
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/bpalermo/aether/agent/internal/edge/portalloc"
@@ -360,14 +361,6 @@ func buildEdgeGatewayEntries(
 		redirect := gatewayHTTPRedirect[gk]
 		lns := make([]cache.EdgeGatewayListenerEntry, 0, len(allocs))
 
-		// Determine which TLS certs are used by this Gateway's listeners.
-		tlsSecretSet := map[string]struct{}{}
-		for _, a := range allocs {
-			for _, s := range a.tlsSecretNames {
-				tlsSecretSet[s] = struct{}{}
-			}
-		}
-
 		for _, a := range allocs {
 			isHTTPRedirect := redirect && len(a.tlsSecretNames) == 0
 			lns = append(lns, cache.EdgeGatewayListenerEntry{
@@ -378,24 +371,17 @@ func buildEdgeGatewayEntries(
 			})
 		}
 
-		// Assign vhosts to this Gateway: those whose TLSSecret matches one of this
-		// Gateway's TLS certs (for HTTPS Gateways), or those with no TLSSecret (for
-		// HTTP Gateways, or HTTPS Gateways also serve plain-HTTP routes on their
-		// HTTP listener).
+		// Assign vhosts to this Gateway by ATTACHMENT: a vhost goes to this Gateway's
+		// route table iff the route attaches to it (vh.Gateways contains this Gateway).
+		// A vhost with no recorded Gateways (legacy/Phase 1 fallback) attaches to all.
+		// Assigning by the vhost's cert tag was wrong: a plain-HTTP route could pick up
+		// an unrelated Gateway's catch-all cert and then attach to ZERO Gateways
+		// (present-but-empty route table → 404).
+		gwKey := gw.Namespace + "/" + gw.Name
 		var gwVhosts []cache.VirtualHost
 		for _, vh := range allVhosts {
-			if vh.TLSSecret == "" {
-				// Plain HTTP vhost: attach to all Gateways (the listener serving HTTP
-				// for this Gateway will route it). In a multi-Gateway setup this means
-				// every Gateway's HTTP listener has access to all plain-HTTP vhosts.
-				// The per-Gateway route config + per-listener port demux ensures
-				// isolation at the network level.
+			if len(vh.Gateways) == 0 || slices.Contains(vh.Gateways, gwKey) {
 				gwVhosts = append(gwVhosts, vh)
-			} else {
-				// TLS vhost: attach only to the Gateway whose listener resolved this cert.
-				if _, ok := tlsSecretSet[vh.TLSSecret]; ok {
-					gwVhosts = append(gwVhosts, vh)
-				}
 			}
 		}
 
