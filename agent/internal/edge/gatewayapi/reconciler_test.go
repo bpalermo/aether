@@ -50,7 +50,7 @@ func TestBuildVirtualHost(t *testing.T) {
 		{Matches: pathMatch(gatewayv1.PathMatchExact, "/exact"), BackendRefs: backend("svc-2", 8080)},
 		{BackendRefs: backend("svc-1", 0)}, // no match → default "/"
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 
 	assert.Equal(t, []string{"api.example.com"}, vh.Hosts)
 	require.Len(t, vh.Routes, 3)
@@ -86,10 +86,10 @@ func TestBuildVirtualHost_TLS(t *testing.T) {
 	r := &Reconciler{}
 	hostCerts := map[string]string{"*.example.com": "kubernetes/wild", "": "kubernetes/default"}
 
-	wild := r.buildVirtualHost(httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts, nil)
+	wild := r.buildVirtualHost(context.Background(), httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts, nil)
 	assert.Equal(t, "kubernetes/wild", wild.TLSSecret, "wildcard listener covers the host")
 
-	other := r.buildVirtualHost(httpRoute([]string{"foo.other.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts, nil)
+	other := r.buildVirtualHost(context.Background(), httpRoute([]string{"foo.other.com"}, []gatewayv1.HTTPRouteRule{{BackendRefs: backend("svc-1", 0)}}), hostCerts, nil)
 	assert.Equal(t, "kubernetes/default", other.TLSSecret, "falls back to the catch-all listener")
 }
 
@@ -242,7 +242,7 @@ func TestBuildVirtualHost_WeightedBackends(t *testing.T) {
 	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
 		{Matches: pathMatch(gatewayv1.PathMatchPathPrefix, "/split"), BackendRefs: refs},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 
 	require.Len(t, vh.Routes, 1)
 	rt := vh.Routes[0]
@@ -403,7 +403,7 @@ func TestBuildVirtualHost_RequestHeaderModifier(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 
 	require.Len(t, vh.Routes, 1)
 	m := vh.Routes[0].HeaderMutation
@@ -436,7 +436,7 @@ func TestBuildVirtualHost_ResponseHeaderModifier(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 
 	require.Len(t, vh.Routes, 1)
 	m := vh.Routes[0].HeaderMutation
@@ -463,7 +463,7 @@ func TestBuildVirtualHost_UnknownFilterSkipped(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	assert.Nil(t, vh.Routes[0].HeaderMutation, "unknown/nil-body filter must not produce a header mutation")
 	assert.Nil(t, vh.Routes[0].Redirect, "nil-body redirect filter must produce nil Redirect")
@@ -489,7 +489,7 @@ func TestBuildVirtualHost_RequestRedirect(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 	require.Len(t, vh.Routes, 1, "redirect rule with no backend must still produce a route")
 	rt := vh.Routes[0]
 	assert.Equal(t, "/old", rt.Prefix)
@@ -523,7 +523,7 @@ func TestBuildVirtualHost_URLRewrite(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	rt := vh.Routes[0]
 	assert.Equal(t, "/api", rt.Prefix)
@@ -557,7 +557,7 @@ func TestBuildVirtualHost_URLRewrite_ReplaceFullPath(t *testing.T) {
 			},
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	require.NotNil(t, vh.Routes[0].URLRewrite)
 	assert.Equal(t, "ReplaceFullPath", vh.Routes[0].URLRewrite.PathType)
@@ -574,7 +574,7 @@ func TestBuildVirtualHost_NoMutationWhenNoFilters(t *testing.T) {
 			BackendRefs: backend("svc-1", 0),
 		},
 	})
-	vh := r.buildVirtualHost(hr, nil, nil)
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	assert.Nil(t, vh.Routes[0].HeaderMutation)
 }
@@ -856,4 +856,237 @@ func TestEffectiveHostnames_APIPalermoDev(t *testing.T) {
 	got := effectiveHostnames([]string{"api.palermo.dev"}, gwKeys, m)
 	require.Len(t, got, 1)
 	assert.Equal(t, "api.palermo.dev", got[0], "api.palermo.dev regression: must not become *")
+}
+
+// --- Header / method / query match vocabulary (P1) ---
+
+// TestBuildVirtualHost_HeaderMatch verifies that a rule with a header predicate
+// (Exact type) populates cache.Route.Headers.
+func TestBuildVirtualHost_HeaderMatch(t *testing.T) {
+	r := &Reconciler{}
+	hdrType := gatewayv1.HeaderMatchExact
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: []gatewayv1.HTTPRouteMatch{{
+				Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchPathPrefix), Value: ptr("/api")},
+				Headers: []gatewayv1.HTTPHeaderMatch{
+					{Type: &hdrType, Name: "x-env", Value: "prod"},
+				},
+			}},
+			BackendRefs: backend("svc-1", 0),
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	rt := vh.Routes[0]
+	assert.Equal(t, "/api", rt.Prefix)
+	require.Len(t, rt.Headers, 1)
+	assert.Equal(t, proxy.RouteHeaderMatch{Name: "x-env", Value: "prod", Regex: false}, rt.Headers[0])
+	assert.Empty(t, rt.Method)
+	assert.Empty(t, rt.QueryParams)
+}
+
+// TestBuildVirtualHost_HeaderMatch_Regex verifies that a RegularExpression header
+// match type sets Regex=true on the RouteHeaderMatch.
+func TestBuildVirtualHost_HeaderMatch_Regex(t *testing.T) {
+	r := &Reconciler{}
+	hdrType := gatewayv1.HeaderMatchRegularExpression
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: []gatewayv1.HTTPRouteMatch{{
+				Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchPathPrefix), Value: ptr("/")},
+				Headers: []gatewayv1.HTTPHeaderMatch{
+					{Type: &hdrType, Name: "x-version", Value: "v[12]"},
+				},
+			}},
+			BackendRefs: backend("svc-1", 0),
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	require.Len(t, vh.Routes[0].Headers, 1)
+	hm := vh.Routes[0].Headers[0]
+	assert.Equal(t, "x-version", hm.Name)
+	assert.Equal(t, "v[12]", hm.Value)
+	assert.True(t, hm.Regex, "RegularExpression match type must set Regex=true")
+}
+
+// TestBuildVirtualHost_MethodMatch verifies that a rule with a method predicate
+// populates cache.Route.Method.
+func TestBuildVirtualHost_MethodMatch(t *testing.T) {
+	r := &Reconciler{}
+	method := gatewayv1.HTTPMethodGet
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: []gatewayv1.HTTPRouteMatch{{
+				Path:   &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchPathPrefix), Value: ptr("/read")},
+				Method: &method,
+			}},
+			BackendRefs: backend("svc-1", 0),
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	assert.Equal(t, "GET", vh.Routes[0].Method)
+	assert.Empty(t, vh.Routes[0].Headers)
+	assert.Empty(t, vh.Routes[0].QueryParams)
+}
+
+// TestBuildVirtualHost_QueryParamMatch verifies that a rule with a query-param
+// predicate (Exact type) populates cache.Route.QueryParams.
+func TestBuildVirtualHost_QueryParamMatch(t *testing.T) {
+	r := &Reconciler{}
+	qpType := gatewayv1.QueryParamMatchExact
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: []gatewayv1.HTTPRouteMatch{{
+				Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchPathPrefix), Value: ptr("/search")},
+				QueryParams: []gatewayv1.HTTPQueryParamMatch{
+					{Type: &qpType, Name: "format", Value: "json"},
+				},
+			}},
+			BackendRefs: backend("svc-1", 0),
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	rt := vh.Routes[0]
+	assert.Equal(t, "/search", rt.Prefix)
+	assert.Empty(t, rt.Headers)
+	assert.Empty(t, rt.Method)
+	require.Len(t, rt.QueryParams, 1)
+	assert.Equal(t, proxy.RouteQueryParamMatch{Name: "format", Value: "json", Regex: false}, rt.QueryParams[0])
+}
+
+// TestBuildVirtualHost_CombinedMatch verifies that a single HTTPRouteMatch with
+// path + header + method + query all present produces one route with all predicates.
+func TestBuildVirtualHost_CombinedMatch(t *testing.T) {
+	r := &Reconciler{}
+	hdrType := gatewayv1.HeaderMatchExact
+	method := gatewayv1.HTTPMethodPost
+	qpType := gatewayv1.QueryParamMatchExact
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: []gatewayv1.HTTPRouteMatch{{
+				Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchExact), Value: ptr("/submit")},
+				Headers: []gatewayv1.HTTPHeaderMatch{
+					{Type: &hdrType, Name: "x-token", Value: "secret"},
+				},
+				Method: &method,
+				QueryParams: []gatewayv1.HTTPQueryParamMatch{
+					{Type: &qpType, Name: "v", Value: "2"},
+				},
+			}},
+			BackendRefs: backend("svc-1", 8080),
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	rt := vh.Routes[0]
+	assert.Equal(t, "/submit", rt.Exact, "exact path match")
+	assert.Empty(t, rt.Prefix)
+	require.Len(t, rt.Headers, 1)
+	assert.Equal(t, "x-token", rt.Headers[0].Name)
+	assert.Equal(t, "POST", rt.Method)
+	require.Len(t, rt.QueryParams, 1)
+	assert.Equal(t, "v", rt.QueryParams[0].Name)
+	assert.Equal(t, "2", rt.QueryParams[0].Value)
+}
+
+// --- Unresolvable backendRef → HTTP 500 direct_response (P2) ---
+
+// TestBuildVirtualHost_InvalidKind_DirectResponse500 verifies that a rule whose
+// backendRef has a non-core group (InvalidKind) produces a DirectResponseStatus=500
+// route rather than being silently dropped.
+func TestBuildVirtualHost_InvalidKind_DirectResponse500(t *testing.T) {
+	r := &Reconciler{}
+	badGroup := gatewayv1.Group("apps")
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: pathMatch(gatewayv1.PathMatchPathPrefix, "/bad"),
+			BackendRefs: []gatewayv1.HTTPBackendRef{{
+				BackendRef: gatewayv1.BackendRef{
+					BackendObjectReference: gatewayv1.BackendObjectReference{
+						Group: &badGroup,
+						Name:  "some-resource",
+					},
+				},
+			}},
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1, "invalid backendRef must produce a 500 direct_response route")
+	rt := vh.Routes[0]
+	assert.Equal(t, "/bad", rt.Prefix)
+	assert.Equal(t, uint32(500), rt.DirectResponseStatus, "invalid kind must produce DirectResponseStatus=500")
+	assert.Empty(t, rt.Service, "no backend service for the 500 direct_response route")
+	assert.Empty(t, rt.Backends, "no Backends for the 500 direct_response route")
+}
+
+// TestBuildVirtualHost_ValidBackend_NoDirectResponse verifies that a rule with a
+// valid same-namespace backendRef (no Service Get, so Reconciler.Client is nil)
+// does NOT produce a DirectResponseStatus route — the API-error path is treated as
+// BackendNotFound which still triggers the 500. To test the happy path without a
+// real client, use a route with a redirect (no backendRefs at all).
+func TestBuildVirtualHost_ValidBackend_NormalRoute(t *testing.T) {
+	r := &Reconciler{}
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: pathMatch(gatewayv1.PathMatchPathPrefix, "/ok"),
+			Filters: []gatewayv1.HTTPRouteFilter{{
+				Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+				RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
+					Scheme: ptr("https"),
+				},
+			}},
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1, "redirect rule must produce a route")
+	rt := vh.Routes[0]
+	assert.Equal(t, uint32(0), rt.DirectResponseStatus, "redirect rule must NOT be a direct_response")
+	require.NotNil(t, rt.Redirect)
+}
+
+// TestBuildVirtualHost_InvalidBackend_PathMatchPreserved verifies that the 500
+// direct_response route carries the path match predicates from the match block,
+// including exact path and header matches, so the route only fires for the right
+// request shape.
+func TestBuildVirtualHost_InvalidBackend_PathMatchPreserved(t *testing.T) {
+	r := &Reconciler{}
+	badKind := gatewayv1.Kind("Foo")
+	hdrType := gatewayv1.HeaderMatchExact
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{
+			Matches: []gatewayv1.HTTPRouteMatch{{
+				Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchExact), Value: ptr("/exact")},
+				Headers: []gatewayv1.HTTPHeaderMatch{
+					{Type: &hdrType, Name: "x-test", Value: "1"},
+				},
+			}},
+			BackendRefs: []gatewayv1.HTTPBackendRef{{
+				BackendRef: gatewayv1.BackendRef{
+					BackendObjectReference: gatewayv1.BackendObjectReference{
+						Kind: &badKind,
+						Name: "foo-obj",
+					},
+				},
+			}},
+		},
+	})
+	vh := r.buildVirtualHost(context.Background(), hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	rt := vh.Routes[0]
+	assert.Equal(t, "/exact", rt.Exact, "exact path match must be preserved on the 500 route")
+	assert.Equal(t, uint32(500), rt.DirectResponseStatus)
+	require.Len(t, rt.Headers, 1)
+	assert.Equal(t, "x-test", rt.Headers[0].Name, "header match must be preserved on the 500 route")
 }

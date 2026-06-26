@@ -11,27 +11,61 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
-// routeSpecificity returns the sort key for a Route per Gateway API precedence:
-// Exact matches are most specific (2), PathPrefix matches rank by descending prefix
-// length (so a longer prefix wins over a shorter one). No-path routes default to
-// prefix "/" (length 1). A higher return value means higher precedence.
-func routeSpecificity(r Route) int {
+// routeSpecificity returns a composite sort key for a Route per Gateway API
+// precedence rules. The dominant dimension is path type/length; secondary
+// dimensions (header count, method presence, query count) break ties within the
+// same path key. A higher return value means higher precedence.
+//
+// Sort key layout (descending importance):
+//
+//	bits[60..32] — path key: Exact=1<<30+1, Prefix=len(prefix) (max ~2^30)
+//	bits[31..16] — header count (capped at 0xffff, more = more specific)
+//	bits[15]     — method present (1 > 0)
+//	bits[14..0]  — query param count (capped at 0x7fff)
+//
+// Using a packed int64 ensures a single integer comparison covers all dimensions
+// in priority order.
+func routeSpecificity(r Route) int64 {
+	var pathKey int64
 	if r.Exact != "" {
-		// Exact matches outrank any prefix; use a large constant above the max path len.
-		return 1<<30 + 1
+		pathKey = int64(1)<<30 + 1
+	} else {
+		p := r.Prefix
+		if p == "" {
+			p = "/"
+		}
+		pathKey = int64(len(p))
 	}
-	p := r.Prefix
-	if p == "" {
-		p = "/"
+
+	hdrCount := int64(len(r.Headers))
+	if hdrCount > 0xffff {
+		hdrCount = 0xffff
 	}
-	return len(p)
+
+	methodBit := int64(0)
+	if r.Method != "" {
+		methodBit = 1
+	}
+
+	qpCount := int64(len(r.QueryParams))
+	if qpCount > 0x7fff {
+		qpCount = 0x7fff
+	}
+
+	return (pathKey << 32) | (hdrCount << 16) | (methodBit << 15) | qpCount
 }
 
-// sortRoutesBySpecificity stable-sorts a Route slice in-place by Gateway API path
-// precedence (most-specific first): Exact > longer PathPrefix > shorter PathPrefix.
-// It is stable so the caller's tie-break order (creationTimestamp / namespace / name
-// / rule index, established by the reconciler's sort of HTTPRoute objects) is
-// preserved for routes with equal specificity.
+// sortRoutesBySpecificity stable-sorts a Route slice in-place by Gateway API
+// precedence (most-specific first):
+//
+//  1. Path: Exact > longer PathPrefix > shorter PathPrefix
+//  2. Header count: more header matches > fewer
+//  3. Method: method present > absent
+//  4. Query params: more query matches > fewer
+//
+// It is stable so the caller's tie-break order (creationTimestamp / namespace /
+// name / rule index, established by the reconciler's sort of HTTPRoute objects)
+// is preserved for routes with equal specificity on all dimensions.
 func sortRoutesBySpecificity(routes []Route) {
 	slices.SortStableFunc(routes, func(a, b Route) int {
 		sa, sb := routeSpecificity(a), routeSpecificity(b)
@@ -127,6 +161,16 @@ type RouteBackend struct {
 // BackendNamespace is the namespace of the (first) backendRef (defaults to the
 // route's own namespace when not set by the reconciler). Used to build the k8s-
 // Service FQDN for non-mesh (cleartext) backends when Backends is not set.
+//
+// Headers, Method, QueryParams carry the additional match predicates from
+// Gateway API HTTPRouteMatch: within one Match all predicates are ANDed.
+// Headers maps to Envoy RouteMatch.headers; Method maps to a :method header
+// matcher; QueryParams maps to RouteMatch.query_parameters.
+//
+// DirectResponseStatus, when non-zero, causes the route to emit a fixed
+// direct_response with that HTTP status code (no backend). Used to implement
+// Gateway API semantics for rules whose all backends are unresolvable
+// (ResolvedRefs=False): the data plane must return 500.
 type Route struct {
 	Prefix           string
 	Exact            string
@@ -141,6 +185,20 @@ type Route struct {
 	HeaderMutation *proxy.GammaHeaderMutation
 	Redirect       *proxy.GammaRedirect
 	URLRewrite     *proxy.GammaURLRewrite
+
+	// Headers are the per-header exact/regex predicates for this match.
+	// All entries must match (AND semantics within one HTTPRouteMatch).
+	Headers []proxy.RouteHeaderMatch
+	// Method is the HTTP method that must match (e.g. "GET"). Empty = any method.
+	Method string
+	// QueryParams are the per-parameter exact/regex predicates for this match.
+	QueryParams []proxy.RouteQueryParamMatch
+
+	// DirectResponseStatus, when non-zero, causes the route to emit a fixed
+	// HTTP direct_response with this status (no backend routing). Set to 500
+	// for rules whose backendRef(s) cannot be resolved (BackendNotFound /
+	// InvalidKind / RefNotPermitted per Gateway API).
+	DirectResponseStatus uint32
 }
 
 // EdgeTLSCert is raw certificate material for an edge downstream TLS secret,
@@ -271,10 +329,10 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 	var catchAllRoutes []Route
 
 	for _, v := range vhosts {
-		// Collect admissible routes (has a service or redirect).
+		// Collect admissible routes (has a service, redirect, or direct-response status).
 		admitted := make([]Route, 0, len(v.Routes))
 		for _, r := range v.Routes {
-			if r.Redirect == nil && r.Service == "" {
+			if r.Redirect == nil && r.Service == "" && r.DirectResponseStatus == 0 {
 				continue
 			}
 			admitted = append(admitted, r)
@@ -310,6 +368,12 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 	// backend's cluster name via edgeClusterNameLocked (mesh vs k8s cleartext).
 	// Caller must hold clusterMu.
 	buildEnvoyRoute := func(r Route) *routev3.Route {
+		// DirectResponseStatus: emit a fixed direct_response (no backend).
+		// Path/header/method/query matchers still apply so the route only matches
+		// when the request would have gone to the (unresolvable) backend.
+		if r.DirectResponseStatus != 0 {
+			return proxy.BuildEdgeDirectResponseRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, r.DirectResponseStatus)
+		}
 		// Weighted multi-backend path: when Backends is populated use it.
 		if len(r.Backends) > 0 {
 			weighted := make([]proxy.WeightedRouteBackend, 0, len(r.Backends))
@@ -317,14 +381,14 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 				cn := c.edgeClusterNameLocked(b.Service, b.BackendNamespace, b.Port)
 				weighted = append(weighted, proxy.WeightedRouteBackend{Cluster: cn, Weight: b.Weight})
 			}
-			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, weighted, r.HeaderMutation, r.Redirect, r.URLRewrite)
+			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, weighted, r.HeaderMutation, r.Redirect, r.URLRewrite)
 		}
 		// Legacy single-backend path (backward compat).
 		cluster := ""
 		if r.Service != "" {
 			cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
 		}
-		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite)
+		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite)
 	}
 
 	// Emit one Envoy virtual host per domain group, sorted by path specificity.
@@ -707,6 +771,9 @@ func equalRoutes(a, b []Route) bool {
 		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port || ra.BackendNamespace != rb.BackendNamespace {
 			return false
 		}
+		if ra.Method != rb.Method || ra.DirectResponseStatus != rb.DirectResponseStatus {
+			return false
+		}
 		if !equalRouteBackends(ra.Backends, rb.Backends) {
 			return false
 		}
@@ -717,6 +784,38 @@ func equalRoutes(a, b []Route) bool {
 			return false
 		}
 		if !equalRouteURLRewrite(ra.URLRewrite, rb.URLRewrite) {
+			return false
+		}
+		if !equalHeaderMatches(ra.Headers, rb.Headers) {
+			return false
+		}
+		if !equalQueryParamMatches(ra.QueryParams, rb.QueryParams) {
+			return false
+		}
+	}
+	return true
+}
+
+// equalHeaderMatches reports whether two RouteHeaderMatch slices are identical.
+func equalHeaderMatches(a, b []proxy.RouteHeaderMatch) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// equalQueryParamMatches reports whether two RouteQueryParamMatch slices are identical.
+func equalQueryParamMatches(a, b []proxy.RouteQueryParamMatch) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

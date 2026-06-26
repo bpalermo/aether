@@ -11,6 +11,7 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -444,6 +445,98 @@ func buildEdgeRedirectRouteConfig() *routev3.RouteConfiguration {
 	}
 }
 
+// RouteHeaderMatch describes one HTTP header predicate for an HTTPRoute match.
+// When Regex is false the header value is matched exactly (case-sensitive per
+// HTTP/1.1 header value semantics); when true it is a RE2 SafeRegex pattern.
+type RouteHeaderMatch struct {
+	Name  string
+	Value string
+	Regex bool
+}
+
+// RouteQueryParamMatch describes one query-parameter predicate for an HTTPRoute
+// match. When Regex is false the parameter value is matched exactly; when true
+// it is a RE2 SafeRegex pattern.
+type RouteQueryParamMatch struct {
+	Name  string
+	Value string
+	Regex bool
+}
+
+// buildRouteMatchPredicates applies per-route header, method, and query-param
+// predicates to an Envoy RouteMatch. All predicates from a single HTTPRouteMatch
+// are ANDed (match.headers + match.query_parameters both restrict the same
+// request). method is encoded as a ":method" exact header matcher per the Envoy
+// recommendation for HTTP method matching.
+func buildRouteMatchPredicates(match *routev3.RouteMatch, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch) {
+	for _, h := range headers {
+		hm := &routev3.HeaderMatcher{Name: h.Name}
+		if h.Regex {
+			hm.HeaderMatchSpecifier = &routev3.HeaderMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_SafeRegex{
+						SafeRegex: &matcherv3.RegexMatcher{Regex: h.Value},
+					},
+				},
+			}
+		} else {
+			hm.HeaderMatchSpecifier = &routev3.HeaderMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: h.Value},
+				},
+			}
+		}
+		match.Headers = append(match.Headers, hm)
+	}
+	if method != "" {
+		match.Headers = append(match.Headers, &routev3.HeaderMatcher{
+			Name: ":method",
+			HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: method},
+				},
+			},
+		})
+	}
+	for _, q := range queryParams {
+		qm := &routev3.QueryParameterMatcher{Name: q.Name}
+		if q.Regex {
+			qm.QueryParameterMatchSpecifier = &routev3.QueryParameterMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_SafeRegex{
+						SafeRegex: &matcherv3.RegexMatcher{Regex: q.Value},
+					},
+				},
+			}
+		} else {
+			qm.QueryParameterMatchSpecifier = &routev3.QueryParameterMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: q.Value},
+				},
+			}
+		}
+		match.QueryParameters = append(match.QueryParameters, qm)
+	}
+}
+
+// BuildEdgeDirectResponseRoute builds an Envoy route that matches on path +
+// headers + method + query params and returns a fixed direct_response (no
+// backend). Used when a rule's backendRef(s) are unresolvable; Gateway API
+// mandates HTTP 500 in that case.
+func BuildEdgeDirectResponseRoute(prefix, exact string, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch, status uint32) *routev3.Route {
+	match := &routev3.RouteMatch{}
+	if exact != "" {
+		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
+	} else {
+		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
+	}
+	buildRouteMatchPredicates(match, headers, method, queryParams)
+	return &routev3.Route{
+		Match:  match,
+		Action: &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{Status: status}},
+	}
+}
+
 // WeightedRouteBackend is one entry in a weighted_clusters route action. Cluster
 // is the resolved Envoy cluster name; Weight is the Gateway API backendRef weight
 // (default 1; 0 = receives no traffic but is a valid backend per spec).
@@ -463,16 +556,17 @@ type WeightedRouteBackend struct {
 //     "no healthy backend" and returns 500 — this is the expected behavior per
 //     the Gateway API spec for that edge case; we do not special-case it.
 //
+// headers/method/queryParams add per-match predicates (ANDed with the path).
 // redirect is applied ahead of backend resolution (no backends needed for a
 // redirect). urlRewrite is applied on forwarding routes only.
-func BuildEdgeRouteWeighted(prefix, exact string, backends []WeightedRouteBackend, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
+func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch, backends []WeightedRouteBackend, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
 	if redirect != nil || len(backends) <= 1 {
 		// Redirect path or single backend: delegate to the plain builder.
 		cluster := ""
 		if len(backends) == 1 {
 			cluster = backends[0].Cluster
 		}
-		return BuildEdgeRoute(prefix, exact, cluster, mutation, redirect, urlRewrite)
+		return BuildEdgeRoute(prefix, exact, headers, method, queryParams, cluster, mutation, redirect, urlRewrite)
 	}
 	// Multiple backends: weighted_clusters action.
 	match := &routev3.RouteMatch{}
@@ -481,6 +575,7 @@ func BuildEdgeRouteWeighted(prefix, exact string, backends []WeightedRouteBacken
 	} else {
 		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
 	}
+	buildRouteMatchPredicates(match, headers, method, queryParams)
 	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(mutation)
 
 	var totalWeight uint32
@@ -515,18 +610,20 @@ func BuildEdgeRouteWeighted(prefix, exact string, backends []WeightedRouteBacken
 
 // BuildEdgeRoute builds one Envoy route for the edge. Exactly one of prefix/exact
 // is non-empty (exact takes precedence if both are set). Prefix "/" matches all.
+// headers/method/queryParams add per-match predicates (ANDed with the path match).
 // mutation applies RequestHeaderModifier / ResponseHeaderModifier at the route level.
 //
 // When redirect is non-nil the route emits a Route_Redirect (no cluster). When
 // urlRewrite is non-nil the route rewrite fields are applied before forwarding to
 // cluster. Both nil → plain forwarding route.
-func BuildEdgeRoute(prefix, exact, cluster string, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
+func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method string, queryParams []RouteQueryParamMatch, cluster string, mutation *GammaHeaderMutation, redirect *GammaRedirect, urlRewrite *GammaURLRewrite) *routev3.Route {
 	match := &routev3.RouteMatch{}
 	if exact != "" {
 		match.PathSpecifier = &routev3.RouteMatch_Path{Path: exact}
 	} else {
 		match.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: prefix}
 	}
+	buildRouteMatchPredicates(match, headers, method, queryParams)
 	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(mutation)
 	r := &routev3.Route{
 		Match:                   match,

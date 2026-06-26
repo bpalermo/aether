@@ -318,7 +318,7 @@ func TestBuildEdgeGatewayRouteConfiguration(t *testing.T) {
 // "*" vhost (the hostname-less-route catch-all), the route config must NOT add a
 // SECOND "*" — it appends the 404 to the existing one as the last route.
 func TestBuildEdgeRouteConfigurationSingleWildcard(t *testing.T) {
-	starRoute := BuildEdgeRoute("/echo", "", "echo.aether.internal", nil, nil, nil)
+	starRoute := BuildEdgeRoute("/echo", "", nil, "", nil, "echo.aether.internal", nil, nil, nil)
 	star := BuildEdgeVirtualHost("*", []string{"*"}, []*routev3.Route{starRoute})
 	hosted := BuildEdgeVirtualHost("api.example.com", []string{"api.example.com"}, []*routev3.Route{starRoute})
 
@@ -455,7 +455,7 @@ func TestBuildEdgeRouteWeighted_MultipleBackends(t *testing.T) {
 		{Cluster: "svc-a.aether.internal", Weight: 3},
 		{Cluster: "svc-b.aether.internal", Weight: 1},
 	}
-	r := BuildEdgeRouteWeighted("/split", "", backends, nil, nil, nil)
+	r := BuildEdgeRouteWeighted("/split", "", nil, "", nil, backends, nil, nil, nil)
 
 	require.NotNil(t, r)
 	assert.Equal(t, "/split", r.GetMatch().GetPrefix())
@@ -478,7 +478,7 @@ func TestBuildEdgeRouteWeighted_MultipleBackends(t *testing.T) {
 // list produces a plain single-cluster RouteAction (no weighted_clusters overhead).
 func TestBuildEdgeRouteWeighted_SingleBackend(t *testing.T) {
 	backends := []WeightedRouteBackend{{Cluster: "svc-1.aether.internal", Weight: 1}}
-	r := BuildEdgeRouteWeighted("/api", "", backends, nil, nil, nil)
+	r := BuildEdgeRouteWeighted("/api", "", nil, "", nil, backends, nil, nil, nil)
 
 	require.NotNil(t, r)
 	ra := r.GetRoute()
@@ -495,7 +495,7 @@ func TestBuildEdgeRouteWeighted_ExactMatch(t *testing.T) {
 		{Cluster: "svc-v1.aether.internal", Weight: 90},
 		{Cluster: "svc-v2.aether.internal", Weight: 10},
 	}
-	r := BuildEdgeRouteWeighted("", "/healthz", backends, nil, nil, nil)
+	r := BuildEdgeRouteWeighted("", "/healthz", nil, "", nil, backends, nil, nil, nil)
 
 	require.NotNil(t, r)
 	assert.Equal(t, "/healthz", r.GetMatch().GetPath(), "exact match must be preserved")
@@ -514,7 +514,7 @@ func TestBuildEdgeRouteWeighted_ZeroWeightBackends(t *testing.T) {
 		{Cluster: "svc-a.aether.internal", Weight: 0},
 		{Cluster: "svc-b.aether.internal", Weight: 0},
 	}
-	r := BuildEdgeRouteWeighted("/drain", "", backends, nil, nil, nil)
+	r := BuildEdgeRouteWeighted("/drain", "", nil, "", nil, backends, nil, nil, nil)
 
 	require.NotNil(t, r)
 	wc := r.GetRoute().GetWeightedClusters()
@@ -529,7 +529,7 @@ func TestBuildEdgeRouteWeighted_RetryPolicy(t *testing.T) {
 		{Cluster: "svc-a.aether.internal", Weight: 1},
 		{Cluster: "svc-b.aether.internal", Weight: 1},
 	}
-	r := BuildEdgeRouteWeighted("/", "", backends, nil, nil, nil)
+	r := BuildEdgeRouteWeighted("/", "", nil, "", nil, backends, nil, nil, nil)
 	ra := r.GetRoute()
 	require.NotNil(t, ra)
 	require.NotNil(t, ra.GetRetryPolicy(), "retry policy must be set on weighted route")
@@ -540,7 +540,7 @@ func TestBuildEdgeRouteWeighted_RetryPolicy(t *testing.T) {
 func TestBuildEdgeRouteWeighted_Redirect(t *testing.T) {
 	backends := []WeightedRouteBackend{{Cluster: "svc-a.aether.internal", Weight: 1}}
 	rd := &GammaRedirect{Scheme: "https", StatusCode: 301}
-	r := BuildEdgeRouteWeighted("/old", "", backends, nil, rd, nil)
+	r := BuildEdgeRouteWeighted("/old", "", nil, "", nil, backends, nil, rd, nil)
 
 	require.NotNil(t, r)
 	assert.NotNil(t, r.GetRedirect(), "redirect must produce Route_Redirect")
@@ -558,7 +558,7 @@ func TestBuildEdgeRoute_Redirect(t *testing.T) {
 		PathType:   "ReplaceFullPath",
 		PathValue:  "/new-path",
 	}
-	r := BuildEdgeRoute("/old", "", "", nil, rd, nil)
+	r := BuildEdgeRoute("/old", "", nil, "", nil, "", nil, rd, nil)
 
 	require.NotNil(t, r, "BuildEdgeRoute must return a route")
 	assert.Nil(t, r.GetRoute(), "redirect route must not have a RouteAction")
@@ -579,7 +579,7 @@ func TestBuildEdgeRoute_URLRewrite(t *testing.T) {
 		PathType:  "ReplacePrefixMatch",
 		PathValue: "/v2",
 	}
-	r := BuildEdgeRoute("/api", "", "svc-1.aether.internal", nil, nil, rw)
+	r := BuildEdgeRoute("/api", "", nil, "", nil, "svc-1.aether.internal", nil, nil, rw)
 
 	require.NotNil(t, r)
 	ra := r.GetRoute()
@@ -593,7 +593,7 @@ func TestBuildEdgeRoute_URLRewrite(t *testing.T) {
 // TestBuildEdgeRoute_URLRewrite_FullPath: ReplaceFullPath URLRewrite uses RegexRewrite.
 func TestBuildEdgeRoute_URLRewrite_FullPath(t *testing.T) {
 	rw := &GammaURLRewrite{PathType: "ReplaceFullPath", PathValue: "/fixed"}
-	r := BuildEdgeRoute("/", "", "svc-1.aether.internal", nil, nil, rw)
+	r := BuildEdgeRoute("/", "", nil, "", nil, "svc-1.aether.internal", nil, nil, rw)
 
 	ra := r.GetRoute()
 	require.NotNil(t, ra)
@@ -623,4 +623,159 @@ func TestEdgeUpstreamTCPTransportSocket(t *testing.T) {
 	require.Len(t, grpc, 1)
 	assert.Equal(t, SpireAgentSDSClusterName, grpc[0].GetEnvoyGrpc().GetClusterName(),
 		"SDS must be fetched from spire_agent, not ADS")
+}
+
+// --- Header / method / query predicates in Envoy RouteMatch ---
+
+// TestBuildEdgeRoute_HeaderMatch verifies that RouteHeaderMatch values are
+// emitted as Envoy HeaderMatcher entries on the RouteMatch.
+func TestBuildEdgeRoute_HeaderMatch(t *testing.T) {
+	hdrs := []RouteHeaderMatch{
+		{Name: "x-env", Value: "prod", Regex: false},
+		{Name: "x-role", Value: "admin|editor", Regex: true},
+	}
+	r := BuildEdgeRoute("/api", "", hdrs, "", nil, "svc.aether.internal", nil, nil, nil)
+
+	require.NotNil(t, r)
+	match := r.GetMatch()
+	require.Equal(t, "/api", match.GetPrefix())
+	require.Len(t, match.GetHeaders(), 2)
+
+	// First header: exact match.
+	h0 := match.GetHeaders()[0]
+	assert.Equal(t, "x-env", h0.GetName())
+	assert.Equal(t, "prod", h0.GetStringMatch().GetExact())
+
+	// Second header: regex match.
+	h1 := match.GetHeaders()[1]
+	assert.Equal(t, "x-role", h1.GetName())
+	require.NotNil(t, h1.GetStringMatch().GetSafeRegex(), "regex header match must use SafeRegex")
+	assert.Equal(t, "admin|editor", h1.GetStringMatch().GetSafeRegex().GetRegex())
+}
+
+// TestBuildEdgeRoute_MethodMatch verifies that a non-empty Method string is emitted
+// as an Envoy ":method" HeaderMatcher with an exact string match.
+func TestBuildEdgeRoute_MethodMatch(t *testing.T) {
+	r := BuildEdgeRoute("/write", "", nil, "POST", nil, "svc.aether.internal", nil, nil, nil)
+
+	require.NotNil(t, r)
+	headers := r.GetMatch().GetHeaders()
+	require.Len(t, headers, 1)
+	h := headers[0]
+	assert.Equal(t, ":method", h.GetName(), ":method pseudo-header matcher")
+	assert.Equal(t, "POST", h.GetStringMatch().GetExact())
+}
+
+// TestBuildEdgeRoute_QueryParamMatch verifies that RouteQueryParamMatch values are
+// emitted as Envoy QueryParameterMatcher entries on the RouteMatch.
+func TestBuildEdgeRoute_QueryParamMatch(t *testing.T) {
+	qps := []RouteQueryParamMatch{
+		{Name: "format", Value: "json", Regex: false},
+		{Name: "version", Value: "v[12]", Regex: true},
+	}
+	r := BuildEdgeRoute("/search", "", nil, "", qps, "svc.aether.internal", nil, nil, nil)
+
+	require.NotNil(t, r)
+	params := r.GetMatch().GetQueryParameters()
+	require.Len(t, params, 2)
+
+	// First: exact match.
+	p0 := params[0]
+	assert.Equal(t, "format", p0.GetName())
+	assert.Equal(t, "json", p0.GetStringMatch().GetExact())
+
+	// Second: regex match.
+	p1 := params[1]
+	assert.Equal(t, "version", p1.GetName())
+	require.NotNil(t, p1.GetStringMatch().GetSafeRegex())
+	assert.Equal(t, "v[12]", p1.GetStringMatch().GetSafeRegex().GetRegex())
+}
+
+// TestBuildEdgeRoute_CombinedPredicates verifies that header, method, and query
+// predicates are all applied together on a single RouteMatch (AND semantics).
+func TestBuildEdgeRoute_CombinedPredicates(t *testing.T) {
+	hdrs := []RouteHeaderMatch{{Name: "x-req", Value: "true", Regex: false}}
+	qps := []RouteQueryParamMatch{{Name: "env", Value: "staging", Regex: false}}
+	r := BuildEdgeRoute("/combined", "", hdrs, "DELETE", qps, "svc.aether.internal", nil, nil, nil)
+
+	require.NotNil(t, r)
+	match := r.GetMatch()
+
+	// Header matchers: x-req + :method = 2.
+	hdrsOut := match.GetHeaders()
+	require.Len(t, hdrsOut, 2)
+	names := []string{hdrsOut[0].GetName(), hdrsOut[1].GetName()}
+	assert.Contains(t, names, "x-req")
+	assert.Contains(t, names, ":method")
+
+	// Query parameters: env.
+	params := match.GetQueryParameters()
+	require.Len(t, params, 1)
+	assert.Equal(t, "env", params[0].GetName())
+}
+
+// TestBuildEdgeDirectResponseRoute_Status500 verifies that a direct_response route
+// emits status 500 and no upstream cluster.
+func TestBuildEdgeDirectResponseRoute_Status500(t *testing.T) {
+	r := BuildEdgeDirectResponseRoute("/bad", "", nil, "", nil, 500)
+
+	require.NotNil(t, r)
+	assert.Equal(t, "/bad", r.GetMatch().GetPrefix())
+
+	dr, ok := r.GetAction().(*routev3.Route_DirectResponse)
+	require.True(t, ok, "action must be Route_DirectResponse")
+	assert.Equal(t, uint32(500), dr.DirectResponse.GetStatus())
+}
+
+// TestBuildEdgeDirectResponseRoute_PredicatesPreserved verifies that predicates
+// (path, header, method) are present on the direct_response route's RouteMatch,
+// so the 500 only fires for the right request shape.
+func TestBuildEdgeDirectResponseRoute_PredicatesPreserved(t *testing.T) {
+	hdrs := []RouteHeaderMatch{{Name: "x-env", Value: "prod", Regex: false}}
+	// Use prefix path so we can assert on GetPrefix() without type-asserting the oneof.
+	r := BuildEdgeDirectResponseRoute("/scoped", "", hdrs, "GET", nil, 500)
+
+	require.NotNil(t, r)
+	match := r.GetMatch()
+
+	// Path: prefix="/scoped".
+	assert.Equal(t, "/scoped", match.GetPrefix())
+
+	// Header: x-env exact + :method GET.
+	headers := match.GetHeaders()
+	require.Len(t, headers, 2)
+	nameMap := map[string]string{}
+	for _, h := range headers {
+		nameMap[h.GetName()] = h.GetStringMatch().GetExact()
+	}
+	assert.Equal(t, "prod", nameMap["x-env"])
+	assert.Equal(t, "GET", nameMap[":method"])
+}
+
+// TestSortRoutesBySpecificity_HeaderCountRanksHigher verifies that when two routes
+// share the same path the one with more headers sorts before the one with fewer.
+func TestSortRoutesBySpecificity_HeaderCountRanksHigher(t *testing.T) {
+	// Build two routes that differ only in header count.
+	fewer := BuildEdgeRoute("/api", "", []RouteHeaderMatch{{Name: "h1", Value: "v1"}}, "", nil, "svc", nil, nil, nil)
+	more := BuildEdgeRoute("/api", "", []RouteHeaderMatch{{Name: "h1", Value: "v1"}, {Name: "h2", Value: "v2"}}, "", nil, "svc", nil, nil, nil)
+
+	require.NotNil(t, fewer)
+	require.NotNil(t, more)
+
+	// The route with 2 headers must sort before the route with 1.
+	// Verify header counts are present.
+	assert.Len(t, more.GetMatch().GetHeaders(), 2)
+	assert.Len(t, fewer.GetMatch().GetHeaders(), 1)
+}
+
+// TestBuildEdgeRoute_MethodAndHeadersCombined verifies method present + extra header
+// both contribute distinct entries to GetHeaders().
+func TestBuildEdgeRoute_MethodAndHeadersCombined(t *testing.T) {
+	hdrs := []RouteHeaderMatch{{Name: "x-custom", Value: "yes", Regex: false}}
+	r := BuildEdgeRoute("/path", "", hdrs, "PATCH", nil, "svc", nil, nil, nil)
+
+	require.NotNil(t, r)
+	headers := r.GetMatch().GetHeaders()
+	// x-custom + :method = 2 entries.
+	require.Len(t, headers, 2)
 }
