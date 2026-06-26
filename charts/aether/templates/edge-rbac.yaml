@@ -39,6 +39,13 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # Read Namespaces (their labels) to evaluate a listener's
+  # allowedRoutes.namespaces.from: Selector during route attachment. The cached
+  # client builds a Namespace informer for this, which needs list+watch — without
+  # it the informer never syncs and stalls cross-namespace route reconciliation.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
   # Per-Gateway LoadBalancer Services (proposal 021 Phase 2): the edge controller
   # creates/updates/deletes one LoadBalancer Service per Gateway in its own
   # namespace so MetalLB assigns each Gateway its own external IP.
