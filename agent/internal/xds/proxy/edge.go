@@ -179,9 +179,16 @@ func appendEdgeCatchAll404(vhosts []*routev3.VirtualHost) []*routev3.VirtualHost
 		Action: &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{Status: 404}},
 	}
 	all := append([]*routev3.VirtualHost{}, vhosts...)
-	for _, vh := range all {
+	for i, vh := range all {
 		if len(vh.GetDomains()) == 1 && vh.GetDomains()[0] == "*" {
-			vh.Routes = append(vh.Routes, notFound)
+			// Append the 404 to a COPY of the "*" vhost — never mutate the input vhost
+			// (it may be shared/reused across snapshot builds, which would accumulate
+			// duplicate 404 routes).
+			all[i] = &routev3.VirtualHost{
+				Name:    vh.GetName(),
+				Domains: vh.GetDomains(),
+				Routes:  append(append([]*routev3.Route{}, vh.GetRoutes()...), notFound),
+			}
 			return all
 		}
 	}
