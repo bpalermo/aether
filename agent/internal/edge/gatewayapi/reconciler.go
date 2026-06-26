@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/referencegrant"
@@ -19,7 +20,9 @@ import (
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	constants "github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -530,6 +533,7 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 	for _, rule := range hr.Spec.Rules {
 		redirect := buildHTTPRedirect(rule.Filters)
 		urlRewrite := buildHTTPURLRewrite(rule.Filters)
+		timeout := buildRouteTimeout(rule.Timeouts)
 
 		// Collect ALL admissible backends in this rule with their weights.
 		// backendRef.weight nil → default 1 (per Gateway API spec).
@@ -633,6 +637,7 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 				HeaderMutation:   mutation,
 				Redirect:         redirect,
 				URLRewrite:       urlRewrite,
+				Timeout:          timeout,
 			})
 			continue
 		}
@@ -688,6 +693,7 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 				Headers:          hdrs,
 				Method:           method,
 				QueryParams:      qps,
+				Timeout:          timeout,
 			})
 		}
 	}
@@ -726,6 +732,23 @@ func (r *Reconciler) buildHTTPRouteBackends(ctx context.Context, refs []gatewayv
 		ns := routeNamespace
 		if b.Namespace != nil && string(*b.Namespace) != "" {
 			ns = string(*b.Namespace)
+		}
+		// Existence check: drop backends whose Service does not exist. This mirrors the
+		// check backendsResolveL4 (status.go) already performs for status, and ensures
+		// that a rule whose only backends are missing (BackendNotFound) arrives at
+		// buildVirtualHost with len(backends)==0 so the 500 direct_response path fires
+		// (see Gateway API invalid-backend semantics). Mesh services have a generated
+		// Service object; real k8s Services are real. Only drop on hard NotFound — a
+		// transient API error leaves the backend admitted so we don't break the data
+		// plane on a momentary API server hiccup.
+		if r.Client != nil {
+			svc := &corev1.Service{}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, svc); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue // BackendNotFound: drop from admitted set
+				}
+				// Transient error: admit the backend to avoid false-positive 500s.
+			}
 		}
 		var port uint32
 		if b.Port != nil {
@@ -1041,6 +1064,21 @@ func ptrType(p *gatewayv1.PathMatchType, def gatewayv1.PathMatchType) gatewayv1.
 		return def
 	}
 	return *p
+}
+
+// buildRouteTimeout parses the HTTPRoute rule's timeouts.request field into a
+// protobuf Duration for the edge route action. Returns nil when no timeout is set
+// or the duration is zero/unparseable (GEP-2257: a zero-value timeout means "no
+// timeout", and an invalid string is treated as unset rather than an error).
+func buildRouteTimeout(timeouts *gatewayv1.HTTPRouteTimeouts) *durationpb.Duration {
+	if timeouts == nil || timeouts.Request == nil {
+		return nil
+	}
+	d, err := time.ParseDuration(string(*timeouts.Request))
+	if err != nil || d <= 0 {
+		return nil
+	}
+	return durationpb.New(d)
 }
 
 // buildHTTPRedirect extracts the first RequestRedirect filter and converts it to a

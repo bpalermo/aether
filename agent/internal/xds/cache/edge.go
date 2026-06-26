@@ -9,6 +9,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // routeSpecificity returns a composite sort key for a Route per Gateway API
@@ -212,6 +213,12 @@ type Route struct {
 	// for rules whose backendRef(s) cannot be resolved (BackendNotFound /
 	// InvalidKind / RefNotPermitted per Gateway API).
 	DirectResponseStatus uint32
+
+	// Timeout is the per-route request timeout from the HTTPRoute rule's
+	// timeouts.request field (GEP-2257 duration). Nil means no timeout is applied
+	// on this route (Envoy inherits the listener/cluster default). When set it is
+	// applied as RouteAction.timeout on the forwarding route.
+	Timeout *durationpb.Duration
 }
 
 // EdgeTLSCert is raw certificate material for an edge downstream TLS secret,
@@ -394,14 +401,14 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 				cn := c.edgeClusterNameLocked(b.Service, b.BackendNamespace, b.Port)
 				weighted = append(weighted, proxy.WeightedRouteBackend{Cluster: cn, Weight: b.Weight})
 			}
-			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, weighted, r.HeaderMutation, r.Redirect, r.URLRewrite)
+			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, weighted, r.HeaderMutation, r.Redirect, r.URLRewrite, r.Timeout)
 		}
 		// Legacy single-backend path (backward compat).
 		cluster := ""
 		if r.Service != "" {
 			cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
 		}
-		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite)
+		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite, r.Timeout)
 	}
 
 	// Emit one Envoy virtual host per domain group, sorted by path specificity.
@@ -796,6 +803,9 @@ func equalRoutes(a, b []Route) bool {
 		if ra.Method != rb.Method || ra.DirectResponseStatus != rb.DirectResponseStatus {
 			return false
 		}
+		if !equalRouteDuration(ra.Timeout, rb.Timeout) {
+			return false
+		}
 		if !equalRouteBackends(ra.Backends, rb.Backends) {
 			return false
 		}
@@ -855,6 +865,17 @@ func equalRouteBackends(a, b []RouteBackend) bool {
 		}
 	}
 	return true
+}
+
+// equalRouteDuration reports content equality for two *durationpb.Duration values.
+func equalRouteDuration(a, b *durationpb.Duration) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Seconds == b.Seconds && a.Nanos == b.Nanos
 }
 
 // equalRouteRedirect reports content equality for two *proxy.GammaRedirect values.

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
@@ -405,6 +406,13 @@ func gammaRouteAction(serviceCluster string, rule GammaRoute) *routev3.Route_Rou
 
 // gammaRedirectAction converts a GammaRedirect into an Envoy Route_Redirect action.
 // The returned action replaces the RouteAction entirely — no backend cluster is used.
+//
+// Port semantics (Gateway API compliance): when an explicit Port is set, it is used
+// directly. When Port is 0 (not set in the filter) but Scheme is set, we must NOT
+// preserve the original request port — Envoy's default (port_redirect = 0) copies the
+// original request port, which violates Gateway API semantics where a scheme change
+// implies the scheme's default port. We emit the scheme-default port explicitly so
+// the redirect URL uses the correct port for the new scheme.
 func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
 	a := &routev3.RedirectAction{}
 	if rd.Scheme != "" {
@@ -413,8 +421,17 @@ func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
 	if rd.Hostname != "" {
 		a.HostRedirect = rd.Hostname
 	}
-	if rd.Port != 0 {
+	switch {
+	case rd.Port != 0:
+		// Explicit port: use as specified.
 		a.PortRedirect = rd.Port
+	case rd.Scheme == "https":
+		// Scheme changed to https, no explicit port: use the https default (443) so
+		// the original request port is not preserved in the redirect URL.
+		a.PortRedirect = 443
+	case rd.Scheme == "http":
+		// Scheme changed to http, no explicit port: use the http default (80).
+		a.PortRedirect = 80
 	}
 	switch rd.StatusCode {
 	case 302:
@@ -433,8 +450,17 @@ func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
 }
 
 // applyURLRewrite writes URLRewrite fields onto an existing RouteAction.
-// hostname → HostRewriteLiteral; ReplacePrefixMatch → PrefixRewrite;
+// hostname → HostRewriteLiteral; ReplacePrefixMatch → PrefixRewrite (normalized);
 // ReplaceFullPath → RegexRewrite matching .* → the new path.
+//
+// Gateway API ReplacePrefixMatch semantics: the matched prefix is replaced by
+// PathValue. Envoy's prefix_rewrite literally substitutes the matched prefix bytes,
+// so a trailing slash in the replacement causes a double slash when the unmatched
+// suffix starts with "/" (e.g. match "/prefix", replacement "/", path "/prefix/three"
+// → "/" + "/three" = "//three"). To comply with Gateway API, we strip the trailing
+// slash from the replacement: the remaining suffix already carries its own leading
+// slash, so trimming produces the correct join. Trimming "/" to "" is also correct —
+// Envoy leaves path without a prefix and the suffix provides the leading slash.
 func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite) {
 	if rw == nil {
 		return
@@ -444,7 +470,9 @@ func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite) {
 	}
 	switch rw.PathType {
 	case "ReplacePrefixMatch":
-		ra.PrefixRewrite = rw.PathValue
+		// Strip trailing slash to avoid double-slash when the suffix starts with "/".
+		// strings.TrimRight is used (not TrimSuffix) so "/foo/" → "/foo", "/" → "".
+		ra.PrefixRewrite = strings.TrimRight(rw.PathValue, "/")
 	case "ReplaceFullPath":
 		ra.RegexRewrite = &matcherv3.RegexMatchAndSubstitute{
 			Pattern:      &matcherv3.RegexMatcher{Regex: ".*"},
