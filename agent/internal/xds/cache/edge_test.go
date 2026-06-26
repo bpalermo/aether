@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -126,8 +127,12 @@ func TestSetVirtualHostsDependencySet(t *testing.T) {
 func TestVirtualHostVhosts(t *testing.T) {
 	c := newTestCache("edge-1")
 
-	// A per-port cluster must exist for the explicit-port backend to resolve to it.
+	// Register services as mesh-registered so edgeClusterNameLocked uses the mesh path.
+	// A per-port cluster must also exist for the explicit-port backend to resolve to it.
 	c.clusterMu.Lock()
+	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
+	c.clusters["svc-3"] = clusterEntry{service: "svc-3"}
+	c.clusters["svc-2"] = clusterEntry{service: "svc-2"}
 	c.clusters["svc-2.aether.internal:9090"] = clusterEntry{service: "svc-2", sni: "9090"}
 	c.clusterMu.Unlock()
 
@@ -191,6 +196,14 @@ func TestVirtualHostVhostsHostlessMerge(t *testing.T) {
 // different services, preserving CR order (first match wins) and prefix vs exact.
 func TestVirtualHostPathRoutes(t *testing.T) {
 	c := newTestCache("edge-1")
+
+	// Register services as mesh so edgeClusterNameLocked resolves to mesh names.
+	c.clusterMu.Lock()
+	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
+	c.clusters["svc-2"] = clusterEntry{service: "svc-2"}
+	c.clusters["svc-3"] = clusterEntry{service: "svc-3"}
+	c.clusterMu.Unlock()
+
 	c.SetVirtualHosts([]VirtualHost{
 		{Hosts: []string{"api.example.com"}, Routes: []Route{
 			{Prefix: "/users", Service: "svc-1"},
@@ -217,6 +230,13 @@ func TestVirtualHostPathRoutes(t *testing.T) {
 // backstop to the controller's duplicate-FQDN webhook, keep-first by input order.
 func TestVirtualHostVhostsDedupDomains(t *testing.T) {
 	c := newTestCache("edge-1")
+
+	// Register services as mesh so edgeClusterNameLocked resolves to mesh names.
+	c.clusterMu.Lock()
+	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
+	c.clusters["svc-2"] = clusterEntry{service: "svc-2"}
+	c.clusterMu.Unlock()
+
 	c.SetVirtualHosts([]VirtualHost{
 		{Hosts: []string{"a.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-1"}}},
 		{Hosts: []string{"a.example.com", "b.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-2"}}},
@@ -488,4 +508,90 @@ func TestPerGatewayCertWired(t *testing.T) {
 	assert.Equal(t, "edge_gw_ns-tls_secure-gw_18110", l.GetName())
 	// TLS transport socket must be wired (not nil).
 	require.NotNil(t, l.GetFilterChains()[0].GetTransportSocket(), "per-Gateway HTTPS listener must terminate TLS")
+}
+
+// TestEdgeClusterNameLocked_MeshVsNonMesh verifies that edgeClusterNameLocked
+// returns the mesh cluster name when the service IS in the registry, and the
+// edge_k8s_… cleartext name when it is NOT.
+func TestEdgeClusterNameLocked_MeshVsNonMesh(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+
+	// Register "mesh-svc" as a registry service.
+	c.clusterMu.Lock()
+	c.clusters["mesh-svc"] = clusterEntry{service: "mesh-svc"}
+	c.clusterMu.Unlock()
+
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
+
+	// Mesh path: service in registry → mesh FQDN.
+	name := c.edgeClusterNameLocked("mesh-svc", "default", 0)
+	assert.Equal(t, "mesh-svc.aether.internal", name, "registry service resolves to mesh cluster")
+
+	// Non-mesh path: service NOT in registry → edge_k8s_… cleartext name.
+	name2 := c.edgeClusterNameLocked("plain-svc", "conformance-ns", 8080)
+	assert.Equal(t, "edge_k8s_conformance-ns_plain-svc_8080", name2, "non-registry service resolves to cleartext k8s cluster")
+
+	// Non-mesh with port 0 defaults to :80.
+	name3 := c.edgeClusterNameLocked("plain-svc", "conformance-ns", 0)
+	assert.Equal(t, "edge_k8s_conformance-ns_plain-svc_80", name3, "non-registry service with port 0 defaults to :80")
+}
+
+// TestEdgeK8sBackendClusters_NonMeshOnly verifies that edgeK8sBackendClusters
+// emits one STRICT_DNS cleartext cluster per unique (namespace, service, port)
+// that is NOT in the registry, and skips any service that IS registry-registered.
+func TestEdgeK8sBackendClusters_NonMeshOnly(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+
+	// Register "mesh-svc" as a registry service; "plain-svc" is NOT registered.
+	c.clusterMu.Lock()
+	c.clusters["mesh-svc"] = clusterEntry{service: "mesh-svc"}
+	c.clusterMu.Unlock()
+
+	c.SetVirtualHosts([]VirtualHost{
+		{
+			Hosts: []string{"api.example.com"},
+			Routes: []Route{
+				{Prefix: "/mesh", Service: "mesh-svc", Port: 8080, BackendNamespace: "default"},
+				{Prefix: "/plain", Service: "plain-svc", Port: 9000, BackendNamespace: "conformance-ns"},
+			},
+		},
+		{
+			Hosts: []string{"other.example.com"},
+			Routes: []Route{
+				// Same (namespace, service, port) as above — must be deduped to one cluster.
+				{Prefix: "/", Service: "plain-svc", Port: 9000, BackendNamespace: "conformance-ns"},
+			},
+		},
+	})
+
+	clusters := c.edgeK8sBackendClusters()
+	// Only one cleartext cluster: plain-svc/9000 (mesh-svc is in registry → no cleartext cluster).
+	require.Len(t, clusters, 1, "exactly one non-mesh backend cluster (mesh-svc skipped; duplicate plain-svc/9000 deduped)")
+
+	cl, ok := clusters[0].(*clusterv3.Cluster)
+	require.True(t, ok)
+	assert.Equal(t, "edge_k8s_conformance-ns_plain-svc_9000", cl.GetName())
+	assert.Equal(t, clusterv3.Cluster_STRICT_DNS, cl.GetType())
+	assert.Nil(t, cl.GetTransportSocket(), "cleartext cluster must have NO transport socket")
+	ep := cl.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "plain-svc.conformance-ns.svc.cluster.local", ep.GetAddress())
+	assert.Equal(t, uint32(9000), ep.GetPortValue())
+}
+
+// TestBuildEdgeK8sCluster verifies the cluster builder produces a STRICT_DNS
+// cleartext cluster with the right FQDN and no transport socket.
+func TestBuildEdgeK8sCluster_Shape(t *testing.T) {
+	cl := proxy.BuildEdgeK8sCluster("edge_k8s_ns_svc_8080", "svc.ns.svc.cluster.local", 8080)
+
+	assert.Equal(t, "edge_k8s_ns_svc_8080", cl.GetName())
+	assert.Equal(t, clusterv3.Cluster_STRICT_DNS, cl.GetType())
+	assert.Nil(t, cl.GetTransportSocket(), "k8s cleartext cluster must have NO transport socket")
+	la := cl.GetLoadAssignment()
+	require.NotNil(t, la)
+	ep := la.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "svc.ns.svc.cluster.local", ep.GetAddress())
+	assert.Equal(t, uint32(8080), ep.GetPortValue())
 }

@@ -2,12 +2,16 @@ package proxy
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -493,5 +497,57 @@ func BuildEdgeRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.RouteCo
 	return &routev3.RouteConfiguration{
 		Name:         EdgeHTTPRouteName,
 		VirtualHosts: appendEdgeCatchAll404(vhosts),
+	}
+}
+
+// EdgeK8sClusterName returns the data-plane name for a cleartext k8s-Service
+// cluster that reaches a non-mesh (non-registry) HTTPRoute backend. The name is
+// unique per (namespace, service, port) and DNS-safe.
+// Scheme: edge_k8s_<namespace>_<service>_<port>
+func EdgeK8sClusterName(namespace, service string, port uint32) string {
+	return fmt.Sprintf("edge_k8s_%s_%s_%d", namespace, service, port)
+}
+
+// BuildEdgeK8sCluster builds a STRICT_DNS cleartext cluster that reaches a
+// non-mesh HTTPRoute backend via the k8s Service FQDN. It has NO transport socket
+// (cleartext — the backend is a plain k8s Service, not a mesh endpoint). HTTP/1.1
+// upstream (no h2 options), STRICT_DNS so CoreDNS resolves the FQDN on demand.
+// fqdn must be the full cluster-local FQDN (e.g. "svc.ns.svc.cluster.local").
+func BuildEdgeK8sCluster(name, fqdn string, port uint32) *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:                          name,
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		ConnectTimeout:                durationpb.New(2 * time.Second),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_STRICT_DNS,
+		},
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			ClusterName: name,
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{
+					LbEndpoints: []*endpointv3.LbEndpoint{
+						{
+							HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+								Endpoint: &endpointv3.Endpoint{
+									Address: &corev3.Address{
+										Address: &corev3.Address_SocketAddress{
+											SocketAddress: &corev3.SocketAddress{
+												Protocol: corev3.SocketAddress_TCP,
+												Address:  fqdn,
+												PortSpecifier: &corev3.SocketAddress_PortValue{
+													PortValue: port,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		// No TransportSocket: cleartext connection to the k8s Service (non-mesh backend).
+		// No TypedExtensionProtocolOptions: plain HTTP/1.1 upstream.
 	}
 }

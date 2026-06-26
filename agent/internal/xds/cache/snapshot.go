@@ -69,6 +69,10 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// the edge SPIRE identity and fetch SDS from spire_agent directly.
 	if c.edge {
 		clusters = append(clusters, c.edgeTCPClusters()...)
+		// Cleartext k8s-Service clusters: one per unique non-mesh HTTPRoute backend
+		// (BackendNamespace, service, port). STRICT_DNS, no transport socket — the
+		// backend is a plain k8s Service, not a mesh-registered endpoint.
+		clusters = append(clusters, c.edgeK8sBackendClusters()...)
 	}
 	// UDP floor clusters (proposal 018, Phase 3b): one per service with UDPRoute
 	// backends. These are plain EDS clusters with no transport socket — UDP datagrams

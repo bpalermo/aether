@@ -157,13 +157,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return strings.Compare(a.Name, b.Name)
 	})
 	vhosts := make([]cache.VirtualHost, 0, len(httpRoutes.Items))
-	var droppedUnattached, droppedNoRoutes int // DIAGNOSTIC (projection investigation)
 	for i := range httpRoutes.Items {
 		hr := &httpRoutes.Items[i]
 		if !attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways) {
-			droppedUnattached++
-			r.Log.DebugContext(ctx, "DIAG route dropped: not attached to our gateway",
-				"route", hr.Namespace+"/"+hr.Name, "parentRefs", len(hr.Spec.ParentRefs))
 			continue
 		}
 		vh := r.buildVirtualHost(hr, hostCerts, grants)
@@ -171,9 +167,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		// its listener, served via the cache's catch-all "*" vhost. Only an empty
 		// route set (no backend/redirect produced a route) makes it skippable.
 		if len(vh.Routes) == 0 {
-			droppedNoRoutes++
-			r.Log.DebugContext(ctx, "DIAG route dropped: built 0 routes (backend unresolved?)",
-				"route", hr.Namespace+"/"+hr.Name, "rules", len(hr.Spec.Rules))
 			continue
 		}
 		// Scope the vhost to the Gateways the route actually attaches to (Phase 2
@@ -286,28 +279,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			perGWAssignedIPs = ips
 			entries := buildEdgeGatewayEntries(ourGateways, vhosts, allocations, gatewayHTTPRedirect)
 			r.Sink.SetEdgeGateways(entries)
-			// DIAGNOSTIC (projection investigation): per-Gateway alloc/vhost/entry
-			// detail, and which of our Gateways did NOT make it into the snapshot.
-			entryByKey := make(map[gatewayKey]int, len(entries))
-			for ei := range entries {
-				entryByKey[gatewayKey{Namespace: entries[ei].Namespace, Name: entries[ei].Name}] = len(entries[ei].VirtualHosts)
-			}
-			for gi := range ourGateways {
-				gk := gatewayKey{Namespace: ourGateways[gi].Namespace, Name: ourGateways[gi].Name}
-				vhCount, projected := entryByKey[gk]
-				if !projected {
-					r.Log.DebugContext(ctx, "DIAG gateway NOT projected into snapshot",
-						"gateway", gk.Namespace+"/"+gk.Name,
-						"listeners", len(ourGateways[gi].Spec.Listeners),
-						"allocs", len(allocations[gk]))
-				} else if vhCount == 0 {
-					r.Log.DebugContext(ctx, "DIAG gateway projected but EMPTY (0 vhosts)",
-						"gateway", gk.Namespace+"/"+gk.Name, "allocs", len(allocations[gk]))
-				}
-			}
 			r.Log.DebugContext(ctx, "projected per-Gateway entries",
 				"gateways", len(entries), "ourGateways", len(ourGateways),
-				"totalVhosts", len(vhosts), "droppedUnattached", droppedUnattached, "droppedNoRoutes", droppedNoRoutes)
+				"totalVhosts", len(vhosts))
 			// In Phase 2 we still call SetVirtualHosts with the full vhosts so
 			// the Phase 1 fallback route table is up-to-date (no-op at snapshot
 			// time when per-Gateway mode is active, but keeps state consistent
@@ -433,11 +407,6 @@ func (r *Reconciler) resolveGateways(ctx context.Context, grants []gatewayv1beta
 			tlsResults[lk] = res
 		}
 	}
-	// DIAGNOSTIC (projection investigation): raw listed Gateways vs ours (our class).
-	// A gap between len(list.Items) and what exists in the cluster points at a partial
-	// informer cache; a small ourGateways under suite churn points there too.
-	r.Log.DebugContext(ctx, "DIAG resolved gateways",
-		"listed", len(list.Items), "ours", len(ourGateways))
 	return gateways, ourGateways, listenerKeys, hostCerts, certs, tlsResults, nil
 }
 
@@ -536,25 +505,32 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 		if p := firstBackendPort(rule.BackendRefs, hr.Namespace, grants); p != 0 {
 			port = p
 		}
+		// Resolve the namespace of the first admissible backendRef for the cleartext
+		// cluster FQDN. Same-namespace refs default to the route's own namespace;
+		// cross-namespace refs use their explicit namespace (already validated by
+		// backendPermitted / firstBackendService above).
+		backendNS := firstBackendNamespace(rule.BackendRefs, hr.Namespace, grants)
 		mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
 		if len(rule.Matches) == 0 {
 			vh.Routes = append(vh.Routes, cache.Route{
-				Prefix:         "/",
-				Service:        backend,
-				Port:           port,
-				HeaderMutation: mutation,
-				Redirect:       redirect,
-				URLRewrite:     urlRewrite,
+				Prefix:           "/",
+				Service:          backend,
+				Port:             port,
+				BackendNamespace: backendNS,
+				HeaderMutation:   mutation,
+				Redirect:         redirect,
+				URLRewrite:       urlRewrite,
 			})
 			continue
 		}
 		for _, m := range rule.Matches {
 			route := cache.Route{
-				Service:        backend,
-				Port:           port,
-				HeaderMutation: mutation,
-				Redirect:       redirect,
-				URLRewrite:     urlRewrite,
+				Service:          backend,
+				Port:             port,
+				BackendNamespace: backendNS,
+				HeaderMutation:   mutation,
+				Redirect:         redirect,
+				URLRewrite:       urlRewrite,
 			}
 			if m.Path != nil && m.Path.Value != nil {
 				switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
@@ -761,6 +737,30 @@ func firstBackendPort(refs []gatewayv1.HTTPBackendRef, routeNamespace string, gr
 		}
 	}
 	return 0
+}
+
+// firstBackendNamespace returns the resolved namespace of the first admissible
+// (same-namespace or granted cross-namespace) backendRef. Same-namespace refs
+// default to the route's own namespace when backendRef.Namespace is unset.
+// Matches the selection logic of firstBackendService so they return data for
+// the same ref.
+func firstBackendNamespace(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) string {
+	for _, b := range refs {
+		if b.Group != nil && string(*b.Group) != "" {
+			continue
+		}
+		if b.Kind != nil && string(*b.Kind) != "Service" {
+			continue
+		}
+		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
+			continue
+		}
+		if b.Namespace != nil && string(*b.Namespace) != "" {
+			return string(*b.Namespace)
+		}
+		return routeNamespace
+	}
+	return routeNamespace
 }
 
 // derefBackendNamespace returns the backendRef namespace ("" when unset).
