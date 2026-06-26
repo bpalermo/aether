@@ -458,8 +458,9 @@ func TestReconcile_GatewayStatusAddresses_NoLBIP(t *testing.T) {
 }
 
 // TestReconcile_GatewayClassSupportedFeatures: the GatewayClass status carries the
-// advertised supportedFeatures, sorted ascending and including HTTPRoute/GRPCRoute,
-// and omitting features aether does not implement.
+// advertised supportedFeatures, sorted ascending and including HTTPRoute plus the
+// implemented redirect/rewrite filter features, and omitting features aether does
+// not implement (mirror) or does not serve on the north-south Gateway (GRPCRoute).
 func TestReconcile_GatewayClassSupportedFeatures(t *testing.T) {
 	gc := &gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "aether", Generation: 1},
@@ -484,11 +485,25 @@ func TestReconcile_GatewayClassSupportedFeatures(t *testing.T) {
 	}
 	assert.True(t, sort.StringsAreSorted(names), "supportedFeatures must be ascending by name")
 	assert.Contains(t, names, "HTTPRoute")
-	assert.Contains(t, names, "GRPCRoute")
 	assert.Contains(t, names, "HTTPRouteRequestTimeout")
 	// ReferenceGrant is now implemented (cross-namespace backendRef admission +
 	// status) and therefore advertised so the suite runs those tests.
 	assert.Contains(t, names, "ReferenceGrant")
-	// Unsupported features must NOT be advertised (so their suites skip).
+	// The RequestRedirect filter (port/scheme/path redirect) and URLRewrite filter
+	// (host/path rewrite) are implemented on edge + GAMMA HTTPRoute, so the suite
+	// should RUN (not skip) those tests.
+	assert.Contains(t, names, "HTTPRoutePortRedirect")
+	assert.Contains(t, names, "HTTPRouteSchemeRedirect")
+	assert.Contains(t, names, "HTTPRoutePathRedirect")
+	assert.Contains(t, names, "HTTPRouteHostRewrite")
+	assert.Contains(t, names, "HTTPRoutePathRewrite")
+	// GRPCRoute is served only east-west via GAMMA (parentRef=Service), not on the
+	// north-south Gateway, so it must NOT be advertised on the GatewayClass — else
+	// the GATEWAY-GRPC suite runs gRPC traffic the edge Gateway cannot serve.
+	assert.NotContains(t, names, "GRPCRoute")
+	// Unsupported features must NOT be advertised (so their suites skip): request
+	// mirroring is not implemented, and the 303/307/308 redirect status codes are not
+	// (only 301/302).
 	assert.NotContains(t, names, "HTTPRouteRequestMirror")
+	assert.NotContains(t, names, "HTTPRoute303RedirectStatusCode")
 }

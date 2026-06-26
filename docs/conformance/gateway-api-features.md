@@ -73,14 +73,28 @@ address; distinct per-Gateway addresses are proposal 021 Phase 2.
 
 The GatewayClass also publishes a machine-readable `status.supportedFeatures` list so
 the suite skips (rather than fails) the features aether does not implement. The
-advertised set is: `Gateway`, `GatewayPort8080`, `HTTPRoute`, `GRPCRoute`,
-`HTTPRouteMethodMatching`, `HTTPRouteRequestTimeout`,
-`HTTPRouteResponseHeaderModification`, `ReferenceGrant`. Path/header/method match,
-weighted backends, and the `RequestHeaderModifier` filter are part of HTTPRoute *core*
-and carry no separate feature flag. Redirect/rewrite/mirror are deliberately omitted
-(not implemented). `ReferenceGrant` is advertised now that cross-namespace backendRef
-admission + status enforcement is implemented (resolution stays namespace-blind until
-proposal 020 Part 1).
+advertised set (sorted) is: `Gateway`, `GatewayPort8080`, `HTTPRoute`,
+`HTTPRouteHostRewrite`, `HTTPRouteMethodMatching`, `HTTPRoutePathRedirect`,
+`HTTPRoutePathRewrite`, `HTTPRoutePortRedirect`, `HTTPRouteRequestTimeout`,
+`HTTPRouteResponseHeaderModification`, `HTTPRouteSchemeRedirect`, `ReferenceGrant`.
+Path/header/method match, weighted backends, and the `RequestHeaderModifier` filter
+are part of HTTPRoute *core* and carry no separate feature flag. The `RequestRedirect`
+filter (`HTTPRoutePortRedirect`/`HTTPRouteSchemeRedirect`/`HTTPRoutePathRedirect`) and
+`URLRewrite` filter (`HTTPRouteHostRewrite`/`HTTPRoutePathRewrite`) are advertised now
+that both are implemented on edge + GAMMA HTTPRoute; host redirect carries no separate
+flag (host+status is core), and only the 301/302 redirect status codes are implemented
+(the `303`/`307`/`308` status-code features are not advertised). Request mirroring is
+deliberately omitted (not implemented). `ReferenceGrant` is advertised now that
+cross-namespace backendRef admission + status enforcement is implemented (resolution
+stays namespace-blind until proposal 020 Part 1).
+
+`GRPCRoute` is **not** advertised on the GatewayClass: aether serves `GRPCRoute` only
+east-west via GAMMA (`parentRef: Service`), which is a mesh feature with no
+GatewayClass, so the north-south Gateway does not serve `GRPCRoute`. Advertising
+`SupportGRPCRoute` on the GatewayClass makes the upstream `GATEWAY-GRPC` suite send
+gRPC traffic through a Gateway the edge cannot serve (the tests run and fail/timeout),
+so it is omitted here while GAMMA continues to implement `GRPCRoute` for the mesh
+profile (see "Route types" above).
 
 ### Data-plane / addressing gap
 
