@@ -495,12 +495,12 @@ func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite, matchPrefix s
 			//   - (.*)              captures the remainder (empty or path tail without leading /)
 			//   - $                 anchors the end
 			//
-			// Substitution: /$1
+			// Substitution: /\1  (Envoy/RE2 capture-group syntax is \1, NOT $1)
 			//   - empty remainder → / (the replacement value)
 			//   - /foo remainder   → /foo
 			ra.RegexRewrite = &matcherv3.RegexMatchAndSubstitute{
 				Pattern:      &matcherv3.RegexMatcher{Regex: "^" + regexp.QuoteMeta(matchPrefix) + `/?(.*)$`},
-				Substitution: "/$1",
+				Substitution: `/\1`,
 			}
 			return
 		}
