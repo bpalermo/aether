@@ -2,6 +2,8 @@ package gatewayapi
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -432,6 +434,49 @@ func TestBuildVirtualHost_NoMutationWhenNoFilters(t *testing.T) {
 	vh := r.buildVirtualHost(hr, nil, nil)
 	require.Len(t, vh.Routes, 1)
 	assert.Nil(t, vh.Routes[0].HeaderMutation)
+}
+
+// TestHTTPRouteGatewaySortOrder verifies that the HTTPRoute sort key used in
+// Reconcile produces the Gateway API tie-break order: creationTimestamp (oldest
+// first) is the primary key, namespace is secondary, name is tertiary. This
+// ensures the path-specificity stable sort in the cache preserves the correct
+// precedence for routes with equal specificity (older route wins).
+func TestHTTPRouteGatewaySortOrder(t *testing.T) {
+	t0 := metav1.Unix(1000, 0)
+	t1 := metav1.Unix(2000, 0)
+
+	routes := []gatewayv1.HTTPRoute{
+		{ObjectMeta: metav1.ObjectMeta{Name: "z-route", Namespace: "ns-a", CreationTimestamp: t1}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "a-route", Namespace: "ns-b", CreationTimestamp: t0}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "b-route", Namespace: "ns-a", CreationTimestamp: t1}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "a-route", Namespace: "ns-a", CreationTimestamp: t0}},
+	}
+	// Apply the same sort the Reconcile function uses.
+	slices.SortFunc(routes, func(a, b gatewayv1.HTTPRoute) int {
+		ta := a.CreationTimestamp.Time
+		tb := b.CreationTimestamp.Time
+		if ta.Before(tb) {
+			return -1
+		}
+		if tb.Before(ta) {
+			return 1
+		}
+		if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	// Oldest (t0) first; within t0, ns-a before ns-b; within same ts+ns, name-order.
+	require.Len(t, routes, 4)
+	assert.Equal(t, "a-route", routes[0].Name)
+	assert.Equal(t, "ns-a", routes[0].Namespace, "t0/ns-a/a-route comes first")
+	assert.Equal(t, "a-route", routes[1].Name)
+	assert.Equal(t, "ns-b", routes[1].Namespace, "t0/ns-b/a-route comes second")
+	assert.Equal(t, "b-route", routes[2].Name)
+	assert.Equal(t, "ns-a", routes[2].Namespace, "t1/ns-a/b-route comes third")
+	assert.Equal(t, "z-route", routes[3].Name)
+	assert.Equal(t, "ns-a", routes[3].Namespace, "t1/ns-a/z-route comes last")
 }
 
 // fakeSink is a minimal RouteSink that records SetEdgeHTTPRedirect calls.

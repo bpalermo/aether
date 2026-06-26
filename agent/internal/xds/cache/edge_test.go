@@ -193,7 +193,9 @@ func TestVirtualHostVhostsHostlessMerge(t *testing.T) {
 }
 
 // TestVirtualHostPathRoutes verifies one virtual host fans different paths to
-// different services, preserving CR order (first match wins) and prefix vs exact.
+// different services, ordered by Gateway API path specificity: Exact >
+// longer PathPrefix > shorter PathPrefix (most-specific first so Envoy's
+// first-match-wins logic applies correctly).
 func TestVirtualHostPathRoutes(t *testing.T) {
 	c := newTestCache("edge-1")
 
@@ -204,6 +206,8 @@ func TestVirtualHostPathRoutes(t *testing.T) {
 	c.clusters["svc-3"] = clusterEntry{service: "svc-3"}
 	c.clusterMu.Unlock()
 
+	// Input order: /users (prefix, len 6), /healthz (exact), / (prefix, len 1).
+	// Expected output order: /healthz (exact) → /users (prefix len 6) → / (prefix len 1).
 	c.SetVirtualHosts([]VirtualHost{
 		{Hosts: []string{"api.example.com"}, Routes: []Route{
 			{Prefix: "/users", Service: "svc-1"},
@@ -217,10 +221,13 @@ func TestVirtualHostPathRoutes(t *testing.T) {
 	routes := vhosts[0].GetRoutes()
 	require.Len(t, routes, 3)
 
-	assert.Equal(t, "/users", routes[0].GetMatch().GetPrefix())
-	assert.Equal(t, "svc-1.aether.internal", routes[0].GetRoute().GetCluster())
-	assert.Equal(t, "/healthz", routes[1].GetMatch().GetPath())
-	assert.Equal(t, "svc-2.aether.internal", routes[1].GetRoute().GetCluster())
+	// Exact match first (highest Gateway API precedence).
+	assert.Equal(t, "/healthz", routes[0].GetMatch().GetPath())
+	assert.Equal(t, "svc-2.aether.internal", routes[0].GetRoute().GetCluster())
+	// Longer prefix second.
+	assert.Equal(t, "/users", routes[1].GetMatch().GetPrefix())
+	assert.Equal(t, "svc-1.aether.internal", routes[1].GetRoute().GetCluster())
+	// Catch-all prefix last.
 	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix())
 	assert.Equal(t, "svc-3.aether.internal", routes[2].GetRoute().GetCluster())
 }
@@ -594,4 +601,133 @@ func TestBuildEdgeK8sCluster_Shape(t *testing.T) {
 	ep := la.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
 	assert.Equal(t, "svc.ns.svc.cluster.local", ep.GetAddress())
 	assert.Equal(t, uint32(8080), ep.GetPortValue())
+}
+
+// TestSortRoutesBySpecificity verifies Gateway API path-precedence ordering:
+// Exact beats any prefix; longer prefix beats shorter prefix; ties preserve
+// input order (stable sort).
+func TestSortRoutesBySpecificity(t *testing.T) {
+	// Input order: / (shortest prefix), /v2 (prefix), /v2/exact (exact).
+	// Expected after sort: /v2/exact (exact), /v2 (longer prefix), / (shorter prefix).
+	routes := []Route{
+		{Prefix: "/", Service: "svc-root"},
+		{Prefix: "/v2", Service: "svc-v2"},
+		{Exact: "/v2/exact", Service: "svc-exact"},
+	}
+	sortRoutesBySpecificity(routes)
+
+	require.Len(t, routes, 3)
+	assert.Equal(t, "/v2/exact", routes[0].Exact, "exact match must come first")
+	assert.Equal(t, "svc-exact", routes[0].Service)
+	assert.Equal(t, "/v2", routes[1].Prefix, "longer prefix before shorter")
+	assert.Equal(t, "svc-v2", routes[1].Service)
+	assert.Equal(t, "/", routes[2].Prefix, "catch-all prefix last")
+	assert.Equal(t, "svc-root", routes[2].Service)
+}
+
+// TestSortRoutesBySpecificity_StableOnTie verifies that routes with the same
+// path specificity preserve their input order (stable sort = tie-break order).
+func TestSortRoutesBySpecificity_StableOnTie(t *testing.T) {
+	// Three routes all with prefix "/api" — same length, same type, different services.
+	// Input order must be preserved.
+	routes := []Route{
+		{Prefix: "/api", Service: "svc-a"},
+		{Prefix: "/api", Service: "svc-b"},
+		{Prefix: "/api", Service: "svc-c"},
+	}
+	sortRoutesBySpecificity(routes)
+
+	require.Len(t, routes, 3)
+	assert.Equal(t, "svc-a", routes[0].Service, "first equal-specificity route stays first")
+	assert.Equal(t, "svc-b", routes[1].Service)
+	assert.Equal(t, "svc-c", routes[2].Service)
+}
+
+// TestVirtualHostPathRoutes_SpecificitySort verifies that routes on a named vhost
+// are re-ordered by path specificity regardless of their input order:
+// Exact > longer prefix > shorter prefix; the 404 stays last.
+func TestVirtualHostPathRoutes_SpecificitySort(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-root"] = clusterEntry{service: "svc-root"}
+	c.clusters["svc-v2"] = clusterEntry{service: "svc-v2"}
+	c.clusters["svc-exact"] = clusterEntry{service: "svc-exact"}
+	c.clusterMu.Unlock()
+
+	// Input order: / (shortest) → /v2 (prefix) → /v2/exact (exact).
+	// Envoy must see them as: exact → /v2 → / (most-specific first).
+	c.SetVirtualHosts([]VirtualHost{
+		{Hosts: []string{"api.example.com"}, Routes: []Route{
+			{Prefix: "/", Service: "svc-root"},
+			{Prefix: "/v2", Service: "svc-v2"},
+			{Exact: "/v2/exact", Service: "svc-exact"},
+		}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	require.Len(t, vhosts, 1)
+	routes := vhosts[0].GetRoutes()
+	require.Len(t, routes, 3, "three application routes (no 404 on named vhosts — 404 is on the catch-all only)")
+	assert.NotEmpty(t, routes[0].GetMatch().GetPath(), "first route must be exact")
+	assert.Equal(t, "/v2/exact", routes[0].GetMatch().GetPath())
+	assert.Equal(t, "/v2", routes[1].GetMatch().GetPrefix(), "longer prefix second")
+	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix(), "catch-all prefix last")
+}
+
+// TestCatchAllVhostSpecificitySort verifies that routes merged into the "*" catch-all
+// vhost (from multiple hostname-less HTTPRoutes) are ordered by path specificity.
+// The 404 fallback is appended by appendEdgeCatchAll404 (called inside
+// BuildEdgeRouteConfiguration), so this test uses the full route config to verify
+// the 404 stays last.
+func TestCatchAllVhostSpecificitySort(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-root"] = clusterEntry{service: "svc-root"}
+	c.clusters["svc-v2"] = clusterEntry{service: "svc-v2"}
+	c.clusters["svc-exact"] = clusterEntry{service: "svc-exact"}
+	c.clusterMu.Unlock()
+
+	// Three hostname-less vhosts (different HTTPRoutes) in order: /, /v2, /v2/exact.
+	// They merge into the single "*" vhost and must be sorted most-specific-first.
+	c.SetVirtualHosts([]VirtualHost{
+		{Routes: []Route{{Prefix: "/", Service: "svc-root"}}},
+		{Routes: []Route{{Prefix: "/v2", Service: "svc-v2"}}},
+		{Routes: []Route{{Exact: "/v2/exact", Service: "svc-exact"}}},
+	})
+
+	// virtualHostVhosts returns vhosts without the 404 (that is added by
+	// appendEdgeCatchAll404 inside BuildEdgeRouteConfiguration).
+	vhosts := c.virtualHostVhosts()
+	var starVH *routev3.VirtualHost
+	for _, vh := range vhosts {
+		if vh.GetName() == "*" {
+			starVH = vh
+			break
+		}
+	}
+	require.NotNil(t, starVH, "catch-all * vhost must be present")
+
+	// Verify path-specificity order (no 404 at this stage).
+	routes := starVH.GetRoutes()
+	require.Len(t, routes, 3, "three application routes before 404 is appended")
+	assert.NotEmpty(t, routes[0].GetMatch().GetPath(), "first route must be exact match")
+	assert.Equal(t, "/v2/exact", routes[0].GetMatch().GetPath())
+	assert.Equal(t, "/v2", routes[1].GetMatch().GetPrefix(), "longer prefix second")
+	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix(), "catch-all prefix third")
+
+	// Build the full route config to verify the 404 is appended last.
+	rc := proxy.BuildEdgeRouteConfiguration(vhosts)
+	var starFull *routev3.VirtualHost
+	for _, vh := range rc.GetVirtualHosts() {
+		if vh.GetName() == "*" {
+			starFull = vh
+			break
+		}
+	}
+	require.NotNil(t, starFull, "* vhost must exist in full route config")
+	allRoutes := starFull.GetRoutes()
+	require.Len(t, allRoutes, 4, "3 application routes + 1 catch-all 404")
+	last := allRoutes[len(allRoutes)-1]
+	require.NotNil(t, last.GetDirectResponse(), "last route must be the 404 fallback")
+	assert.Equal(t, uint32(404), last.GetDirectResponse().GetStatus())
 }
