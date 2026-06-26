@@ -67,14 +67,18 @@ type VirtualHost struct {
 // this rule (nil = no header mutations).
 // When Redirect is non-nil the route returns a redirect response (no backend).
 // When URLRewrite is non-nil the route rewrites the request URL before forwarding.
+// BackendNamespace is the namespace of the backendRef (defaults to the route's own
+// namespace when not set by the reconciler). Used to build the k8s-Service FQDN
+// for non-mesh (cleartext) backends: <service>.<BackendNamespace>.svc.cluster.local.
 type Route struct {
-	Prefix         string
-	Exact          string
-	Service        string
-	Port           uint32
-	HeaderMutation *proxy.GammaHeaderMutation
-	Redirect       *proxy.GammaRedirect
-	URLRewrite     *proxy.GammaURLRewrite
+	Prefix           string
+	Exact            string
+	Service          string
+	Port             uint32
+	BackendNamespace string
+	HeaderMutation   *proxy.GammaHeaderMutation
+	Redirect         *proxy.GammaRedirect
+	URLRewrite       *proxy.GammaURLRewrite
 }
 
 // EdgeTLSCert is raw certificate material for an edge downstream TLS secret,
@@ -204,7 +208,7 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 			}
 			cluster := ""
 			if r.Service != "" {
-				cluster = c.edgeClusterNameLocked(r.Service, r.Port)
+				cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
 			}
 			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
 		}
@@ -290,24 +294,64 @@ func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 	return c.buildEdgeVhostsLocked(vhosts)
 }
 
-// edgeClusterNameLocked resolves a (service, port) backend to the data-plane
-// cluster it targets. Port 0 -> the default cluster (ServiceClusterName). A
-// non-zero port -> its per-port cluster if one exists; otherwise, if the port is
-// the service's default port (no dedicated per-port cluster), the default
-// cluster serves it. Caller must hold clusterMu.
-func (c *SnapshotCache) edgeClusterNameLocked(service string, port uint32) string {
-	fqdn := proxy.ServiceClusterName(service, c.meshDomain)
-	if port == 0 {
-		return fqdn
-	}
-	portName := proxy.PortClusterName(service, c.meshDomain, port)
-	if _, ok := c.clusters[portName]; ok {
+// edgeClusterNameLocked resolves a (service, backendNamespace, port) backend to
+// the data-plane cluster it targets.
+//
+// Dual-mode decision: if the service IS in the registry (c.clusters), this is a
+// mesh-registered backend — use the existing mTLS mesh cluster path (unchanged).
+// If NOT in the registry, the backend is a plain k8s Service: return the cleartext
+// STRICT_DNS cluster name (EdgeK8sClusterName) so the edge dials the k8s Service
+// FQDN over cleartext instead of attempting a mesh mTLS connection to :15008.
+//
+// Mesh path: Port 0 -> the default cluster (ServiceClusterName). A non-zero port ->
+// its per-port cluster if one exists; otherwise, if the port is the service's
+// default port (no dedicated per-port cluster), the default cluster serves it.
+//
+// Caller must hold clusterMu.
+func (c *SnapshotCache) edgeClusterNameLocked(service, backendNamespace string, port uint32) string {
+	// Check whether the service is mesh-registered (in the registry cluster map).
+	// The registry keys services by bare name (and by per-port name), so check both
+	// the bare name and the per-port name.
+	meshFQDN := proxy.ServiceClusterName(service, c.meshDomain)
+	if _, ok := c.clusters[service]; ok {
+		// Mesh path: service is in the registry.
+		if port == 0 {
+			return meshFQDN
+		}
+		portName := proxy.PortClusterName(service, c.meshDomain, port)
+		if _, ok := c.clusters[portName]; ok {
+			return portName
+		}
+		if entry, ok := c.clusters[service]; ok && entry.sni == strconv.Itoa(int(port)) {
+			return meshFQDN
+		}
 		return portName
 	}
-	if entry, ok := c.clusters[service]; ok && entry.sni == strconv.Itoa(int(port)) {
-		return fqdn
+	// Also check by mesh FQDN and per-port mesh name (some callers may have added
+	// clusters under those keys directly).
+	if _, ok := c.clusters[meshFQDN]; ok {
+		if port == 0 {
+			return meshFQDN
+		}
+		portName := proxy.PortClusterName(service, c.meshDomain, port)
+		if _, ok := c.clusters[portName]; ok {
+			return portName
+		}
+		return portName
 	}
-	return portName
+	if port != 0 {
+		portName := proxy.PortClusterName(service, c.meshDomain, port)
+		if _, ok := c.clusters[portName]; ok {
+			return portName
+		}
+	}
+	// Non-mesh path: service is not in the registry. Route to the k8s Service FQDN
+	// over cleartext (STRICT_DNS, no transport socket). Port defaults to 80 if unset.
+	p := port
+	if p == 0 {
+		p = 80
+	}
+	return proxy.EdgeK8sClusterName(backendNamespace, service, p)
 }
 
 // SetEdgeTCPRoutes replaces the edge's TCP listener routes (one per Gateway TCP
@@ -436,6 +480,88 @@ func (c *SnapshotCache) edgeTCPListeners() []types.Resource {
 	return out
 }
 
+// edgeK8sBackendClusters returns cleartext STRICT_DNS clusters for every
+// non-mesh backend referenced by the edge's HTTP routes (Phase 1 virtual hosts
+// and Phase 2 per-Gateway virtual hosts). A backend is non-mesh when its service
+// name is NOT present in the registry cluster map (c.clusters). One cluster is
+// emitted per unique (BackendNamespace, service, port) triple, using the k8s
+// Service FQDN <service>.<namespace>.svc.cluster.local.
+//
+// These clusters have NO transport socket (cleartext). They are appended to the
+// CDS snapshot alongside the mTLS mesh clusters so Envoy can reach plain k8s
+// Service backends that are not registered in the mesh.
+//
+// Caller need not hold any lock — all maps are read under their own locks.
+func (c *SnapshotCache) edgeK8sBackendClusters() []types.Resource {
+	c.edgeMu.RLock()
+	vhosts := slices.Clone(c.virtualHosts)
+	gws := slices.Clone(c.edgeGateways)
+	c.edgeMu.RUnlock()
+
+	// key: "namespace/service:port"
+	type k8sBackend struct {
+		namespace string
+		service   string
+		port      uint32
+	}
+	seen := make(map[k8sBackend]struct{})
+	var backends []k8sBackend
+
+	collectRoutes := func(routes []Route) {
+		for _, r := range routes {
+			if r.Service == "" {
+				continue
+			}
+			p := r.Port
+			if p == 0 {
+				p = 80
+			}
+			bk := k8sBackend{namespace: r.BackendNamespace, service: r.Service, port: p}
+			if _, dup := seen[bk]; dup {
+				continue
+			}
+			seen[bk] = struct{}{}
+			backends = append(backends, bk)
+		}
+	}
+
+	for _, v := range vhosts {
+		collectRoutes(v.Routes)
+	}
+	for _, gw := range gws {
+		for _, v := range gw.VirtualHosts {
+			collectRoutes(v.Routes)
+		}
+	}
+	if len(backends) == 0 {
+		return nil
+	}
+
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
+
+	var out []types.Resource
+	for _, bk := range backends {
+		// Only emit a cleartext cluster if the service is NOT a registry cluster.
+		// If it IS in the registry, the mesh mTLS cluster covers it.
+		if _, ok := c.clusters[bk.service]; ok {
+			continue
+		}
+		meshFQDN := proxy.ServiceClusterName(bk.service, c.meshDomain)
+		if _, ok := c.clusters[meshFQDN]; ok {
+			continue
+		}
+		portName := proxy.PortClusterName(bk.service, c.meshDomain, bk.port)
+		if _, ok := c.clusters[portName]; ok {
+			continue
+		}
+		name := proxy.EdgeK8sClusterName(bk.namespace, bk.service, bk.port)
+		fqdn := bk.service + "." + bk.namespace + ".svc.cluster.local"
+		out = append(out, proxy.BuildEdgeK8sCluster(name, fqdn, bk.port))
+	}
+	return out
+}
+
 // equalRoutes reports whether two Route slices are content-equal. Route carries
 // pointer fields (*GammaHeaderMutation, *GammaRedirect, *GammaURLRewrite), so we
 // cannot rely on slices.Equal (pointer identity) — we need a deep comparison.
@@ -445,7 +571,7 @@ func equalRoutes(a, b []Route) bool {
 	}
 	for i := range a {
 		ra, rb := a[i], b[i]
-		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port {
+		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port || ra.BackendNamespace != rb.BackendNamespace {
 			return false
 		}
 		if !equalHeaderMutation(ra.HeaderMutation, rb.HeaderMutation) {

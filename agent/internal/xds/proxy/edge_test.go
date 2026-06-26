@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
@@ -153,6 +154,39 @@ func TestBuildEdgeRouteConfiguration(t *testing.T) {
 func TestEdgeL4ListenerNames(t *testing.T) {
 	assert.Equal(t, "edge_tcp_5432", EdgeTCPListenerName(5432))
 	assert.Equal(t, "edge_tls_8443", EdgeTLSListenerName(8443))
+}
+
+// TestEdgeK8sClusterName verifies the naming scheme is stable and unique across
+// (namespace, service, port) tuples.
+func TestEdgeK8sClusterName(t *testing.T) {
+	assert.Equal(t, "edge_k8s_default_my-svc_8080", EdgeK8sClusterName("default", "my-svc", 8080))
+	assert.Equal(t, "edge_k8s_conformance-ns_infra-backend_80", EdgeK8sClusterName("conformance-ns", "infra-backend", 80))
+	// Different port → different name.
+	assert.NotEqual(t, EdgeK8sClusterName("ns", "svc", 80), EdgeK8sClusterName("ns", "svc", 8080))
+	// Different namespace → different name.
+	assert.NotEqual(t, EdgeK8sClusterName("ns-a", "svc", 80), EdgeK8sClusterName("ns-b", "svc", 80))
+}
+
+// TestBuildEdgeK8sCluster verifies STRICT_DNS discovery, inline load assignment,
+// and absence of a transport socket (cleartext).
+func TestBuildEdgeK8sCluster(t *testing.T) {
+	cl := BuildEdgeK8sCluster("edge_k8s_default_my-svc_8080", "my-svc.default.svc.cluster.local", 8080)
+
+	require.NotNil(t, cl)
+	assert.Equal(t, "edge_k8s_default_my-svc_8080", cl.GetName())
+
+	// Must be STRICT_DNS (not EDS or STATIC).
+	assert.Equal(t, clusterv3.Cluster_STRICT_DNS, cl.GetType())
+
+	// No transport socket → cleartext upstream.
+	assert.Nil(t, cl.GetTransportSocket(), "k8s cleartext cluster must have NO transport socket")
+
+	// Load assignment must be inline with the correct FQDN and port.
+	la := cl.GetLoadAssignment()
+	require.NotNil(t, la)
+	ep := la.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "my-svc.default.svc.cluster.local", ep.GetAddress())
+	assert.Equal(t, uint32(8080), ep.GetPortValue())
 }
 
 // TestEdgeGatewayListenerNaming verifies per-Gateway listener and route names are
