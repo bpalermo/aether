@@ -3,6 +3,7 @@ package gatewayapi
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/bpalermo/aether/agent/internal/edge/portalloc"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -52,28 +53,39 @@ func gatewayLabelValue(namespace, name string) string {
 	return namespace + "." + name
 }
 
-// gatewayListenerAllocations holds the port allocation result for one Gateway's
-// listeners: the list of (externalPort → internalPort, TLS, redirect) entries.
+// gatewayListenerAllocation holds the allocation for ONE external port of a Gateway.
+// Listeners that share an external port share one internal port + one edge listener
+// (which demuxes by hostname/SNI), so this is keyed per external port, not per
+// listener — a Gateway with several listeners on :80 yields ONE allocation (and one
+// Service port). Per-listener allocation emitted duplicate Service ports, which k8s
+// rejects ("Duplicate value: port-80"), leaving the Gateway un-projected (empty
+// route table → 404).
 type gatewayListenerAllocation struct {
-	externalPort  uint32
-	internalPort  uint32
-	tlsSecretName string // first resolved TLS cert SDS name (empty = plain HTTP)
-	httpRedirect  bool
-	listenerName  string // Gateway listener section name (for the port allocator key)
+	externalPort   uint32
+	internalPort   uint32
+	tlsSecretNames []string // merged TLS cert SDS names for this port (empty = plain HTTP)
 }
 
-// allocateGatewayListenerPorts runs the port allocator for all listeners across
-// all Gateways in one batch, returning the allocation map.
+// allocateGatewayListenerPorts runs the port allocator once per (Gateway, external
+// port) across all Gateways and returns, per Gateway, ONE allocation per external
+// port with the listeners' TLS certs merged. Listeners sharing an external port
+// share one internal port + one edge listener; allocating per listener would emit
+// duplicate Service ports (rejected by k8s) and drop the Gateway.
 func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, hostCerts map[string]string) (map[gatewayKey][]gatewayListenerAllocation, error) {
-	// Build allocator keys from all (Gateway, listener) pairs.
+	portKey := func(ns, name string, port uint32) portalloc.Key {
+		return portalloc.Key{Namespace: ns, GatewayName: name, ListenerName: fmt.Sprintf("port-%d", port)}
+	}
+
+	// One allocator key per (Gateway, external port).
 	var keys []portalloc.Key
+	seen := map[portalloc.Key]struct{}{}
 	for _, gw := range gws {
 		for _, ln := range gw.Spec.Listeners {
-			keys = append(keys, portalloc.Key{
-				Namespace:    gw.Namespace,
-				GatewayName:  gw.Name,
-				ListenerName: string(ln.Name),
-			})
+			k := portKey(gw.Namespace, gw.Name, uint32(ln.Port))
+			if _, ok := seen[k]; !ok {
+				seen[k] = struct{}{}
+				keys = append(keys, k)
+			}
 		}
 	}
 	ports, err := portalloc.AssignAll(keys)
@@ -84,42 +96,52 @@ func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, hostCerts map[string]
 	result := make(map[gatewayKey][]gatewayListenerAllocation, len(gws))
 	for _, gw := range gws {
 		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
-		var allocs []gatewayListenerAllocation
+		// Group listeners by external port, unioning their certs (an HTTPS port may
+		// host several listeners with different hostnames/certs — SNI selects).
+		certsByPort := map[uint32]map[string]struct{}{}
+		var portOrder []uint32
 		for _, ln := range gw.Spec.Listeners {
-			key := portalloc.Key{
-				Namespace:    gw.Namespace,
-				GatewayName:  gw.Name,
-				ListenerName: string(ln.Name),
+			ep := uint32(ln.Port)
+			if _, ok := certsByPort[ep]; !ok {
+				certsByPort[ep] = map[string]struct{}{}
+				portOrder = append(portOrder, ep)
 			}
-			internalPort := ports[key]
-			// Determine TLS cert for this listener (from already-resolved hostCerts).
-			tlsSecret := ""
-			if ln.TLS != nil && ln.Hostname != nil {
-				h := string(*ln.Hostname)
-				if c, ok := hostCerts[h]; ok {
-					tlsSecret = c
-				} else if c, ok = hostCerts[""]; ok {
-					tlsSecret = c
-				}
-			} else if ln.TLS != nil {
-				tlsSecret = hostCerts[""]
+			if c := listenerCert(ln, hostCerts); c != "" {
+				certsByPort[ep][c] = struct{}{}
 			}
-			httpRedirect := false
-			// HTTP→HTTPS redirect: determined per-Gateway from the annotation (passed
-			// in from the reconciler); here we track whether this listener is the HTTP
-			// port on a redirect-enabled Gateway. Since we receive the per-Gateway flag,
-			// we set it on HTTP listeners when the Gateway opted in.
+		}
+		allocs := make([]gatewayListenerAllocation, 0, len(portOrder))
+		for _, ep := range portOrder {
+			certSet := certsByPort[ep]
+			certs := make([]string, 0, len(certSet))
+			for c := range certSet {
+				certs = append(certs, c)
+			}
+			sort.Strings(certs)
 			allocs = append(allocs, gatewayListenerAllocation{
-				externalPort:  uint32(ln.Port),
-				internalPort:  internalPort,
-				tlsSecretName: tlsSecret,
-				httpRedirect:  httpRedirect,
-				listenerName:  string(ln.Name),
+				externalPort:   ep,
+				internalPort:   ports[portKey(gw.Namespace, gw.Name, ep)],
+				tlsSecretNames: certs,
 			})
 		}
 		result[gk] = allocs
 	}
 	return result, nil
+}
+
+// listenerCert resolves the SDS cert name for one listener from the already-resolved
+// hostCerts: by the listener's hostname, falling back to the catch-all ("") cert.
+// Plain-HTTP listeners (no TLS) return "".
+func listenerCert(ln gatewayv1.Listener, hostCerts map[string]string) string {
+	if ln.TLS == nil {
+		return ""
+	}
+	if ln.Hostname != nil {
+		if c, ok := hostCerts[string(*ln.Hostname)]; ok {
+			return c
+		}
+	}
+	return hostCerts[""]
 }
 
 // reconcileGatewayServices creates/updates the per-Gateway LoadBalancer Service
@@ -341,21 +363,17 @@ func buildEdgeGatewayEntries(
 		// Determine which TLS certs are used by this Gateway's listeners.
 		tlsSecretSet := map[string]struct{}{}
 		for _, a := range allocs {
-			if a.tlsSecretName != "" {
-				tlsSecretSet[a.tlsSecretName] = struct{}{}
+			for _, s := range a.tlsSecretNames {
+				tlsSecretSet[s] = struct{}{}
 			}
 		}
 
 		for _, a := range allocs {
-			var tlsNames []string
-			if a.tlsSecretName != "" {
-				tlsNames = []string{a.tlsSecretName}
-			}
-			isHTTPRedirect := redirect && len(tlsNames) == 0
+			isHTTPRedirect := redirect && len(a.tlsSecretNames) == 0
 			lns = append(lns, cache.EdgeGatewayListenerEntry{
 				ExternalPort:   a.externalPort,
 				InternalPort:   a.internalPort,
-				TLSSecretNames: tlsNames,
+				TLSSecretNames: a.tlsSecretNames,
 				HTTPRedirect:   isHTTPRedirect,
 			})
 		}

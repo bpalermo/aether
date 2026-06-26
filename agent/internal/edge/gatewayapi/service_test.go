@@ -2,6 +2,7 @@ package gatewayapi
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestAllocateGatewayListenerPorts_Stable(t *testing.T) {
 
 	for i := range allocs1[gk] {
 		assert.Equal(t, allocs1[gk][i].internalPort, allocs2[gk][i].internalPort,
-			"port allocation for listener %q must be stable across calls", allocs1[gk][i].listenerName)
+			"port allocation for external port %d must be stable across calls", allocs1[gk][i].externalPort)
 	}
 }
 
@@ -95,13 +96,55 @@ func TestAllocateGatewayListenerPorts_UniqueInRange(t *testing.T) {
 		for _, a := range as {
 			assert.GreaterOrEqual(t, a.internalPort, portalloc.BasePort, "port must be >= %d", portalloc.BasePort)
 			assert.Less(t, a.internalPort, portalloc.BasePort+portalloc.RangeSize, "port must be < %d", portalloc.BasePort+portalloc.RangeSize)
-			label := gk.Namespace + "/" + gk.Name + ":" + a.listenerName
+			label := fmt.Sprintf("%s/%s:%d", gk.Namespace, gk.Name, a.externalPort)
 			if prev, dup := seen[a.internalPort]; dup {
 				t.Errorf("internal port %d allocated to both %q and %q", a.internalPort, prev, label)
 			}
 			seen[a.internalPort] = label
 		}
 	}
+}
+
+// TestAllocateGatewayListenerPorts_MultiListenerSamePort is the regression guard for
+// the rev8 conformance 404: a Gateway with multiple listeners on the SAME external
+// port must yield ONE allocation for that port (with the certs merged), not one per
+// listener — per-listener allocation produced duplicate "port-80" Service ports,
+// which k8s rejects, dropping the Gateway (empty route table → 404).
+func TestAllocateGatewayListenerPorts_MultiListenerSamePort(t *testing.T) {
+	hn := func(s string) *gatewayv1.Hostname { h := gatewayv1.Hostname(s); return &h }
+	tls := &gatewayv1.ListenerTLSConfig{}
+	gws := []gatewayv1.Gateway{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "conformance", Name: "multi"},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					// Three listeners on :80 (distinct hostnames), two on :443 with certs.
+					{Name: "h1", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: hn("a.example.com")},
+					{Name: "h2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: hn("b.example.com")},
+					{Name: "h3", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+					{Name: "s1", Port: 443, Protocol: gatewayv1.HTTPSProtocolType, Hostname: hn("a.example.com"), TLS: tls},
+					{Name: "s2", Port: 443, Protocol: gatewayv1.HTTPSProtocolType, Hostname: hn("b.example.com"), TLS: tls},
+				},
+			},
+		},
+	}
+	hostCerts := map[string]string{"a.example.com": "kubernetes/cert-a", "b.example.com": "kubernetes/cert-b"}
+
+	allocs, err := allocateGatewayListenerPorts(gws, hostCerts)
+	require.NoError(t, err)
+	gk := gatewayKey{Namespace: "conformance", Name: "multi"}
+	require.Len(t, allocs[gk], 2, "one allocation per external port (80, 443), not per listener")
+
+	byPort := map[uint32]gatewayListenerAllocation{}
+	for _, a := range allocs[gk] {
+		byPort[a.externalPort] = a
+	}
+	require.Contains(t, byPort, uint32(80))
+	require.Contains(t, byPort, uint32(443))
+	assert.Empty(t, byPort[80].tlsSecretNames, "the :80 port is plain HTTP")
+	assert.Equal(t, []string{"kubernetes/cert-a", "kubernetes/cert-b"}, byPort[443].tlsSecretNames,
+		"both :443 listeners' certs merge onto the one port (SNI selects)")
+	assert.NotEqual(t, byPort[80].internalPort, byPort[443].internalPort, "distinct internal ports per external port")
 }
 
 // TestBuildEdgeGatewayEntries_HTTPVhostsAttachedToAllGateways verifies that
@@ -132,10 +175,10 @@ func TestBuildEdgeGatewayEntries_HTTPVhostsAttachedToAllGateways(t *testing.T) {
 	}
 	allocs := map[gatewayKey][]gatewayListenerAllocation{
 		{Namespace: "ns-a", Name: "gw-http"}: {
-			{externalPort: 80, internalPort: 18100, listenerName: "http"},
+			{externalPort: 80, internalPort: 18100},
 		},
 		{Namespace: "ns-b", Name: "gw-https"}: {
-			{externalPort: 443, internalPort: 18200, tlsSecretName: "kubernetes/my-cert", listenerName: "https"},
+			{externalPort: 443, internalPort: 18200, tlsSecretNames: []string{"kubernetes/my-cert"}},
 		},
 	}
 
