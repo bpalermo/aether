@@ -620,14 +620,21 @@ func l4BackendObjectRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.Backe
 	return refs
 }
 
-// backendsResolveL4 reports whether every backendRef is resolvable. aether resolves
-// backends by NAME via the registry (namespace-free): the generated mesh Service
-// objects live in the workload namespace, not the route's, and aren't in the edge's
-// namespace-scoped cache, so a k8s Service Get is the wrong (false-negative) check.
-// A valid core Service-kind ref with a non-empty name is therefore resolved here; a
-// genuinely-absent backend surfaces at runtime as no endpoints / 503, not a static
-// ResolvedRefs failure. Only the ref *shape* is validated.
-func (r *Reconciler) backendsResolveL4(_ context.Context, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
+// backendsResolveL4 reports whether every backendRef is resolvable, per the Gateway
+// API ResolvedRefs semantics. A backendRef is resolved when (in precedence order):
+//   - its group/kind is the core ("") Service kind — otherwise InvalidKind;
+//   - it has a non-empty name — otherwise BackendNotFound (empty name);
+//   - if cross-namespace, a ReferenceGrant permits it — otherwise RefNotPermitted;
+//   - the referenced Service actually EXISTS — otherwise BackendNotFound.
+//
+// Existence is a cached r.Get on the Service {namespace: backendRef.namespace ||
+// routeNamespace, name}. The edge reads Services cluster-wide (services get/list/
+// watch RBAC + a Service watch), so a Service create/delete re-triggers reconciliation
+// and flips the condition. A mesh/registry backend has a generated Service object and
+// conformance backends are real Services, so a Service Get covers both cases. Across
+// the refs in a rule the first/most-specific failure wins, with InvalidKind taking
+// precedence over BackendNotFound (it short-circuits before the existence check).
+func (r *Reconciler) backendsResolveL4(ctx context.Context, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
 	for _, ref := range refs {
 		if (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
 			return false, string(gatewayv1.RouteReasonInvalidKind), fmt.Sprintf("backendRef %q is not a core Service", ref.Name)
@@ -635,10 +642,31 @@ func (r *Reconciler) backendsResolveL4(_ context.Context, routeNamespace, routeK
 		if string(ref.Name) == "" {
 			return false, string(gatewayv1.RouteReasonBackendNotFound), "backendRef has an empty name"
 		}
-		if ns := derefBackendNamespace(ref.Namespace); referencegrant.CrossNamespace(ns, routeNamespace) &&
-			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, string(ref.Name)) {
+		backendNS := derefBackendNamespace(ref.Namespace)
+		if referencegrant.CrossNamespace(backendNS, routeNamespace) &&
+			!referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, backendNS, string(ref.Name)) {
 			return false, string(gatewayv1.RouteReasonRefNotPermitted),
-				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, ns)
+				fmt.Sprintf("cross-namespace backendRef to Service %q in namespace %q is not permitted by any ReferenceGrant", ref.Name, backendNS)
+		}
+		// Existence: the backend must resolve to a real k8s Service (mesh services
+		// have a generated Service; conformance backends are real Services). The
+		// namespace defaults to the route's namespace when the ref omits it.
+		svcNS := backendNS
+		if svcNS == "" {
+			svcNS = routeNamespace
+		}
+		svc := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: svcNS, Name: string(ref.Name)}, svc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, string(gatewayv1.RouteReasonBackendNotFound),
+					fmt.Sprintf("backendRef Service %q in namespace %q does not exist", ref.Name, svcNS)
+			}
+			// Transient API error: don't assert BackendNotFound on an unknown state;
+			// surface it as unresolved so the next reconcile re-evaluates.
+			r.Log.WarnContext(ctx, "failed to get backendRef Service for ResolvedRefs",
+				"service", ref.Name, "namespace", svcNS, "error", err.Error())
+			return false, string(gatewayv1.RouteReasonBackendNotFound),
+				fmt.Sprintf("backendRef Service %q in namespace %q could not be resolved: %v", ref.Name, svcNS, err)
 		}
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"

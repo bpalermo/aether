@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -122,6 +123,110 @@ func TestReconcile_GatewayAndRouteStatus(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, rres.Status)
 }
 
+// resolvedRefsFixture builds a class-aether GatewayClass + an HTTP Gateway "edge" in
+// "ns" + an HTTPRoute "r1" in "ns" whose single backendRef is `ref`. Used by the
+// ResolvedRefs existence/kind tests.
+func resolvedRefsFixture(ref gatewayv1.BackendObjectReference) (*gatewayv1.GatewayClass, *gatewayv1.Gateway, *gatewayv1.HTTPRoute) {
+	gc := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "aether", Generation: 1},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: gatewaystatus.EdgeControllerName},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "ns", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "aether",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	hr := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: "ns", Generation: 1},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{
+				{Kind: ptr(gatewayv1.Kind("Gateway")), Name: "edge"},
+			}},
+			Hostnames: []gatewayv1.Hostname{"api.example.com"},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{BackendObjectReference: ref}}},
+			}},
+		},
+	}
+	return gc, gw, hr
+}
+
+// routeResolvedRefs returns the edge controller's ResolvedRefs condition on r1.
+func routeResolvedRefs(t *testing.T, c client.Client) *metav1.Condition {
+	t.Helper()
+	gotHR := &gatewayv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "r1"}, gotHR))
+	require.Len(t, gotHR.Status.Parents, 1)
+	return meta.FindStatusCondition(gotHR.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionResolvedRefs))
+}
+
+// TestReconcile_BackendNotFound: an HTTPRoute whose core-Service backendRef names a
+// Service that does not exist gets ResolvedRefs=False/BackendNotFound.
+func TestReconcile_BackendNotFound(t *testing.T) {
+	gc, gw, hr := resolvedRefsFixture(gatewayv1.BackendObjectReference{Name: "missing-svc", Port: ptr(gatewayv1.PortNumber(8080))})
+
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gc, gw, hr).
+		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	rres := routeResolvedRefs(t, c)
+	require.NotNil(t, rres)
+	assert.Equal(t, metav1.ConditionFalse, rres.Status, "missing Service backend → ResolvedRefs False")
+	assert.Equal(t, string(gatewayv1.RouteReasonBackendNotFound), rres.Reason)
+}
+
+// TestReconcile_BackendExists: once the referenced Service is created, ResolvedRefs
+// flips to True (the Service watch re-triggers reconciliation in production).
+func TestReconcile_BackendExists(t *testing.T) {
+	gc, gw, hr := resolvedRefsFixture(gatewayv1.BackendObjectReference{Name: "svc-1", Port: ptr(gatewayv1.PortNumber(8080))})
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc-1", Namespace: "ns"}}
+
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gc, gw, hr, svc).
+		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	rres := routeResolvedRefs(t, c)
+	require.NotNil(t, rres)
+	assert.Equal(t, metav1.ConditionTrue, rres.Status, "existing Service backend → ResolvedRefs True")
+	assert.Equal(t, string(gatewayv1.RouteReasonResolvedRefs), rres.Reason)
+}
+
+// TestReconcile_BackendInvalidKind: a backendRef whose kind is not the core Service
+// kind gets ResolvedRefs=False/InvalidKind, and InvalidKind takes precedence over
+// BackendNotFound (the existence check never runs for a bad kind).
+func TestReconcile_BackendInvalidKind(t *testing.T) {
+	notService := gatewayv1.Kind("Frobnicator")
+	gc, gw, hr := resolvedRefsFixture(gatewayv1.BackendObjectReference{
+		Kind: &notService, Name: "missing-svc", Port: ptr(gatewayv1.PortNumber(8080)),
+	})
+
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gc, gw, hr).
+		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	rres := routeResolvedRefs(t, c)
+	require.NotNil(t, rres)
+	assert.Equal(t, metav1.ConditionFalse, rres.Status, "non-core-Service kind → ResolvedRefs False")
+	assert.Equal(t, string(gatewayv1.RouteReasonInvalidKind), rres.Reason, "InvalidKind wins over BackendNotFound")
+}
+
 // TestReconcile_CrossNamespaceBackend_RefNotPermitted: an HTTPRoute in ns A whose
 // backendRef targets a Service in ns B with NO ReferenceGrant gets ResolvedRefs=
 // False/RefNotPermitted; adding a matching grant flips it to True.
@@ -152,9 +257,12 @@ func TestReconcile_CrossNamespaceBackend_RefNotPermitted(t *testing.T) {
 			}},
 		},
 	}
+	// The cross-ns backend Service exists in ns-b; the gating condition under test is
+	// the ReferenceGrant, not existence (RefNotPermitted must win over BackendNotFound).
+	svcB := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc-b", Namespace: "ns-b"}}
 
 	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
-		WithObjects(gc, gw, hr).
+		WithObjects(gc, gw, hr, svcB).
 		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
 		Build()
 	r := &Reconciler{Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns-a", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
@@ -225,9 +333,12 @@ func TestReconcile_GatewayInNonEdgeNamespace(t *testing.T) {
 			}},
 		},
 	}
+	// The backend Service exists so the route resolves cleanly (Accepted is the
+	// assertion under test, not ResolvedRefs).
+	infraSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "infra-backend", Namespace: "gateway-conformance-infra"}}
 
 	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
-		WithObjects(gc, gw, hr).
+		WithObjects(gc, gw, hr, infraSvc).
 		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
 		Build()
 	// Edge's own namespace is aether-ingress; the Gateway lives elsewhere.
