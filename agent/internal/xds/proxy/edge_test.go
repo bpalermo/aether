@@ -279,6 +279,37 @@ func TestBuildEdgeGatewayRouteConfiguration(t *testing.T) {
 	assert.Equal(t, uint32(404), last.GetRoutes()[0].GetDirectResponse().GetStatus())
 }
 
+// TestBuildEdgeRouteConfigurationSingleWildcard is the regression guard for the
+// NACK "Only a single wildcard domain is permitted": when the input already has a
+// "*" vhost (the hostname-less-route catch-all), the route config must NOT add a
+// SECOND "*" — it appends the 404 to the existing one as the last route.
+func TestBuildEdgeRouteConfigurationSingleWildcard(t *testing.T) {
+	starRoute := BuildEdgeRoute("/echo", "", "echo.aether.internal", nil, nil, nil)
+	star := BuildEdgeVirtualHost("*", []string{"*"}, []*routev3.Route{starRoute})
+	hosted := BuildEdgeVirtualHost("api.example.com", []string{"api.example.com"}, []*routev3.Route{starRoute})
+
+	for _, rc := range []*routev3.RouteConfiguration{
+		BuildEdgeGatewayRouteConfiguration("ns-a", "gw1", []*routev3.VirtualHost{hosted, star}),
+		BuildEdgeRouteConfiguration([]*routev3.VirtualHost{hosted, star}),
+	} {
+		wildcards := 0
+		var starVH *routev3.VirtualHost
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, d := range vh.GetDomains() {
+				if d == "*" {
+					wildcards++
+					starVH = vh
+				}
+			}
+		}
+		require.Equal(t, 1, wildcards, "exactly one * vhost (Envoy NACKs duplicates) in %s", rc.GetName())
+		// The 404 fallback is appended to the existing "*" vhost as the last route.
+		require.NotNil(t, starVH)
+		require.Len(t, starVH.GetRoutes(), 2)
+		assert.Equal(t, uint32(404), starVH.GetRoutes()[1].GetDirectResponse().GetStatus())
+	}
+}
+
 // TestBuildEdgeTCPListener_SingleBackend verifies the TCP listener: INBOUND on 0.0.0.0,
 // one filter chain with a tcp_proxy (single-cluster form), no TLS transport socket.
 func TestBuildEdgeTCPListener_SingleBackend(t *testing.T) {
