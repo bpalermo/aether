@@ -533,7 +533,7 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 
 		// Collect ALL admissible backends in this rule with their weights.
 		// backendRef.weight nil → default 1 (per Gateway API spec).
-		backends := buildHTTPRouteBackends(rule.BackendRefs, hr.Namespace, grants)
+		backends := r.buildHTTPRouteBackends(ctx, rule.BackendRefs, hr.Namespace, grants)
 
 		// A rule must have either at least one backend or a redirect to produce a route.
 		// Exception: a rule where all backends are UNRESOLVABLE (InvalidKind /
@@ -613,11 +613,12 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 		// For backward-compat we also populate the legacy Service/Port/BackendNamespace
 		// from the first backend so that code paths that read those fields still work.
 		var legacySvc, legacyNS string
-		var legacyPort uint32
+		var legacyPort, legacyDialPort uint32
 		if len(backends) > 0 {
 			legacySvc = backends[0].Service
 			legacyPort = backends[0].Port
 			legacyNS = backends[0].BackendNamespace
+			legacyDialPort = backends[0].DialPort
 		}
 
 		if len(rule.Matches) == 0 {
@@ -627,6 +628,7 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 				Service:          legacySvc,
 				Port:             legacyPort,
 				BackendNamespace: legacyNS,
+				DialPort:         legacyDialPort,
 				Backends:         backends,
 				HeaderMutation:   mutation,
 				Redirect:         redirect,
@@ -678,6 +680,7 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 				Service:          legacySvc,
 				Port:             legacyPort,
 				BackendNamespace: legacyNS,
+				DialPort:         legacyDialPort,
 				Backends:         backends,
 				HeaderMutation:   mutation,
 				Redirect:         redirect,
@@ -698,7 +701,13 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 // RouteBackend values, applying Gateway API admission rules: non-core group/kind
 // refs are skipped; ungranted cross-namespace refs are skipped (RefNotPermitted).
 // Weight nil → default 1 per spec. Returns an empty slice when no backend is admissible.
-func buildHTTPRouteBackends(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) []cache.RouteBackend {
+//
+// For each admitted backend it resolves the cleartext STRICT_DNS dial port via
+// resolveDialPort: a HEADLESS Service's FQDN resolves to pod IPs (no kube-proxy in
+// the path), so the edge must dial the Service's numeric targetPort rather than the
+// service port. A mesh-registered or ClusterIP backend leaves DialPort 0 (the cache
+// falls back to Port).
+func (r *Reconciler) buildHTTPRouteBackends(ctx context.Context, refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) []cache.RouteBackend {
 	out := make([]cache.RouteBackend, 0, len(refs))
 	for _, b := range refs {
 		if b.Group != nil && string(*b.Group) != "" {
@@ -731,9 +740,47 @@ func buildHTTPRouteBackends(refs []gatewayv1.HTTPBackendRef, routeNamespace stri
 			BackendNamespace: ns,
 			Port:             port,
 			Weight:           weight,
+			DialPort:         r.resolveDialPort(ctx, ns, name, port),
 		})
 	}
 	return out
+}
+
+// resolveDialPort returns the TCP port the edge's cleartext STRICT_DNS cluster must
+// connect to for a non-mesh backend Service. It only differs from servicePort for a
+// HEADLESS Service (clusterIP: None): its FQDN resolves straight to pod IPs, so the
+// edge must dial the numeric targetPort of the matching ServicePort instead of the
+// service port (there is no kube-proxy VIP to remap port→targetPort). For a ClusterIP
+// Service — or when the Service can't be read, the targetPort is named (we cannot
+// resolve a named targetPort to a number without the pod spec), or there is no match —
+// it returns 0, signalling the cache to fall back to servicePort (the existing,
+// already-correct ClusterIP behavior). It never returns an error: a missing/unreadable
+// Service degrades to the prior behavior rather than breaking the route.
+func (r *Reconciler) resolveDialPort(ctx context.Context, namespace, service string, servicePort uint32) uint32 {
+	if servicePort == 0 || r.Client == nil {
+		return 0
+	}
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: service}, svc); err != nil {
+		return 0 // unreadable/missing → fall back to servicePort (no change)
+	}
+	if svc.Spec.ClusterIP != corev1.ClusterIPNone {
+		return 0 // ClusterIP Service: kube-proxy remaps port→targetPort; dial servicePort.
+	}
+	// Headless Service: find the ServicePort matching servicePort and dial its
+	// numeric targetPort. A named (string) targetPort can't be resolved here without
+	// the pod spec, so fall back to servicePort for that (uncommon) case.
+	for _, sp := range svc.Spec.Ports {
+		if uint32(sp.Port) != servicePort {
+			continue
+		}
+		if tp := sp.TargetPort.IntValue(); tp > 0 {
+			return uint32(tp)
+		}
+		// targetPort unset → defaults to the service port; named → unresolved here.
+		return 0
+	}
+	return 0
 }
 
 // attachedToOurGateway reports whether the given parentRefs (belonging to a route
