@@ -163,7 +163,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			continue
 		}
 		vh := r.buildVirtualHost(hr, hostCerts, grants)
-		if len(vh.Hosts) == 0 || len(vh.Routes) == 0 {
+		// A hostname-less route is NOT inert: per Gateway API it matches every host on
+		// its listener, served via the cache's catch-all "*" vhost. Only an empty
+		// route set (no backend/redirect produced a route) makes it skippable.
+		if len(vh.Routes) == 0 {
 			continue
 		}
 		vhosts = append(vhosts, vh)
