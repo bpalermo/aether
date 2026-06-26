@@ -142,6 +142,16 @@ type RouteBackend struct {
 	// The Envoy weighted_clusters total_weight is the sum of all backend weights
 	// within the rule. Weight 0 = backend receives no traffic.
 	Weight uint32
+	// DialPort is the TCP port a non-mesh (cleartext STRICT_DNS) cluster actually
+	// connects to. It differs from Port for a HEADLESS Service: the Service FQDN
+	// resolves directly to pod IPs (no kube-proxy in the path to remap the port), so
+	// the edge must dial the Service's numeric targetPort, not its service port.
+	// For a ClusterIP Service the FQDN resolves to the ClusterIP and kube-proxy
+	// DNATs port->targetPort, so DialPort == Port. Zero means "same as Port" (the
+	// reconciler leaves it 0 when no Service-type-specific remap is needed); the
+	// cluster builder falls back to Port. The cluster NAME stays keyed by Port so
+	// route->cluster names remain stable regardless of the resolved dial port.
+	DialPort uint32
 }
 
 // Route is one path-match -> backend rule within a VirtualHost. Exactly one of
@@ -177,6 +187,9 @@ type Route struct {
 	Service          string
 	Port             uint32
 	BackendNamespace string
+	// DialPort is the cleartext STRICT_DNS dial port for the legacy single-backend
+	// path (mirrors RouteBackend.DialPort). Zero = dial Port. See RouteBackend.DialPort.
+	DialPort uint32
 	// Backends is the weighted backend list for this rule. A single-element list
 	// is equivalent to the legacy Service/Port/BackendNamespace fields. An empty
 	// Backends with a non-empty Service falls back to the legacy single-backend
@@ -683,21 +696,28 @@ func (c *SnapshotCache) edgeK8sBackendClusters() []types.Resource {
 	gws := slices.Clone(c.edgeGateways)
 	c.edgeMu.RUnlock()
 
-	// key: "namespace/service:port"
+	// key: "namespace/service:port" — the cluster NAME is keyed by the service port,
+	// matching edgeClusterNameLocked. dialPort is the resolved STRICT_DNS connect
+	// port (differs from port for headless Services; see RouteBackend.DialPort).
 	type k8sBackend struct {
 		namespace string
 		service   string
 		port      uint32
+		dialPort  uint32
 	}
 	seen := make(map[k8sBackend]struct{})
 	var backends []k8sBackend
 
-	addBackend := func(service, namespace string, port uint32) {
+	addBackend := func(service, namespace string, port, dialPort uint32) {
 		p := port
 		if p == 0 {
 			p = 80
 		}
-		bk := k8sBackend{namespace: namespace, service: service, port: p}
+		dp := dialPort
+		if dp == 0 {
+			dp = p
+		}
+		bk := k8sBackend{namespace: namespace, service: service, port: p, dialPort: dp}
 		if _, dup := seen[bk]; dup {
 			return
 		}
@@ -712,13 +732,13 @@ func (c *SnapshotCache) edgeK8sBackendClusters() []types.Resource {
 				if b.Service == "" {
 					continue
 				}
-				addBackend(b.Service, b.BackendNamespace, b.Port)
+				addBackend(b.Service, b.BackendNamespace, b.Port, b.DialPort)
 			}
 			// Legacy single-backend field (also populated for single-backend routes).
 			if r.Service == "" {
 				continue
 			}
-			addBackend(r.Service, r.BackendNamespace, r.Port)
+			addBackend(r.Service, r.BackendNamespace, r.Port, r.DialPort)
 		}
 	}
 
@@ -754,7 +774,9 @@ func (c *SnapshotCache) edgeK8sBackendClusters() []types.Resource {
 		}
 		name := proxy.EdgeK8sClusterName(bk.namespace, bk.service, bk.port)
 		fqdn := bk.service + "." + bk.namespace + ".svc.cluster.local"
-		out = append(out, proxy.BuildEdgeK8sCluster(name, fqdn, bk.port))
+		// Dial bk.dialPort, not bk.port: for a headless Service the FQDN resolves to
+		// pod IPs and must reach the targetPort; for ClusterIP they are equal.
+		out = append(out, proxy.BuildEdgeK8sCluster(name, fqdn, bk.dialPort))
 	}
 	return out
 }
@@ -768,7 +790,7 @@ func equalRoutes(a, b []Route) bool {
 	}
 	for i := range a {
 		ra, rb := a[i], b[i]
-		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port || ra.BackendNamespace != rb.BackendNamespace {
+		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port || ra.BackendNamespace != rb.BackendNamespace || ra.DialPort != rb.DialPort {
 			return false
 		}
 		if ra.Method != rb.Method || ra.DirectResponseStatus != rb.DirectResponseStatus {

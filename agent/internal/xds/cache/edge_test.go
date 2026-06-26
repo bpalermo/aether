@@ -757,6 +757,37 @@ func TestEdgeK8sBackendClusters_NonMeshOnly(t *testing.T) {
 	assert.Equal(t, uint32(9000), ep.GetPortValue())
 }
 
+// TestEdgeK8sBackendClusters_HeadlessDialPort verifies that a non-mesh backend with a
+// DialPort (set for a headless Service, whose FQDN resolves to pod IPs) produces a
+// STRICT_DNS cluster that DIALS the DialPort while keeping the cluster name keyed by
+// the service Port. This is the HTTPRouteServiceTypes conformance fix: dialing the
+// service port (8080) against pod IPs is refused; the pods listen on targetPort 3000.
+func TestEdgeK8sBackendClusters_HeadlessDialPort(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+
+	c.SetVirtualHosts([]VirtualHost{
+		{
+			Hosts: []string{"api.example.com"},
+			Routes: []Route{
+				// Headless backend: service port 8080, but pods listen on 3000.
+				{Prefix: "/headless", Service: "headless-svc", Port: 8080, DialPort: 3000, BackendNamespace: "ns"},
+			},
+		},
+	})
+
+	clusters := c.edgeK8sBackendClusters()
+	require.Len(t, clusters, 1)
+	cl, ok := clusters[0].(*clusterv3.Cluster)
+	require.True(t, ok)
+	// Cluster name stays keyed by the SERVICE port so route→cluster names match.
+	assert.Equal(t, "edge_k8s_ns_headless-svc_8080", cl.GetName())
+	ep := cl.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "headless-svc.ns.svc.cluster.local", ep.GetAddress())
+	// The endpoint DIALS the targetPort (3000), not the service port (8080).
+	assert.Equal(t, uint32(3000), ep.GetPortValue(), "headless cluster must dial the targetPort")
+}
+
 // TestVirtualHostVhostsSameHostMerge verifies that two VirtualHosts sharing a
 // hostname have their routes MERGED into ONE Envoy vhost — not keep-first-drop.
 // This is the Gateway API HTTPRouteMatchingAcrossRoutes behavior: multiple

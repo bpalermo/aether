@@ -10,7 +10,11 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -178,7 +182,7 @@ func TestBuildHTTPRouteBackends_WeightedSplit(t *testing.T) {
 			weight int32
 		}{"svc-b", 9090, 1},
 	)
-	got := buildHTTPRouteBackends(refs, "my-ns", nil)
+	got := (&Reconciler{}).buildHTTPRouteBackends(context.Background(), refs, "my-ns", nil)
 	require.Len(t, got, 2, "both backends must be admitted")
 	assert.Equal(t, cache.RouteBackend{Service: "svc-a", BackendNamespace: "my-ns", Port: 8080, Weight: 3}, got[0])
 	assert.Equal(t, cache.RouteBackend{Service: "svc-b", BackendNamespace: "my-ns", Port: 9090, Weight: 1}, got[1])
@@ -188,7 +192,7 @@ func TestBuildHTTPRouteBackends_WeightedSplit(t *testing.T) {
 // explicit weight defaults to 1 (per Gateway API spec).
 func TestBuildHTTPRouteBackends_DefaultWeight(t *testing.T) {
 	refs := backend("svc-1", 8080) // uses the single-backend helper (no Weight field)
-	got := buildHTTPRouteBackends(refs, "ns", nil)
+	got := (&Reconciler{}).buildHTTPRouteBackends(context.Background(), refs, "ns", nil)
 	require.Len(t, got, 1)
 	assert.Equal(t, uint32(1), got[0].Weight, "nil weight must default to 1")
 }
@@ -203,7 +207,7 @@ func TestBuildHTTPRouteBackends_ZeroWeight(t *testing.T) {
 	}{"svc-x", 80, 0})
 	// Note: our helper only sets Weight when > 0, so we need to set it explicitly.
 	refs[0].Weight = ptr(int32(0))
-	got := buildHTTPRouteBackends(refs, "ns", nil)
+	got := (&Reconciler{}).buildHTTPRouteBackends(context.Background(), refs, "ns", nil)
 	require.Len(t, got, 1)
 	assert.Equal(t, uint32(0), got[0].Weight, "explicit zero weight must be preserved")
 }
@@ -217,7 +221,7 @@ func TestBuildHTTPRouteBackends_UngrantedCrossNsSkipped(t *testing.T) {
 		{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "cross", Namespace: &otherNs}}},
 		{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "local"}}},
 	}
-	got := buildHTTPRouteBackends(refs, "ns", nil)
+	got := (&Reconciler{}).buildHTTPRouteBackends(context.Background(), refs, "ns", nil)
 	require.Len(t, got, 1, "ungranted cross-ns backend dropped, same-ns backend admitted")
 	assert.Equal(t, "local", got[0].Service)
 }
@@ -1089,4 +1093,68 @@ func TestBuildVirtualHost_InvalidBackend_PathMatchPreserved(t *testing.T) {
 	assert.Equal(t, uint32(500), rt.DirectResponseStatus)
 	require.Len(t, rt.Headers, 1)
 	assert.Equal(t, "x-test", rt.Headers[0].Name, "header match must be preserved on the 500 route")
+}
+
+// svcWith builds a core Service with one port (port -> targetPort) and the given
+// clusterIP (use corev1.ClusterIPNone for a headless Service).
+func svcWith(name, ns, clusterIP string, port int32, targetPort intstr.IntOrString) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: clusterIP,
+			Ports:     []corev1.ServicePort{{Port: port, TargetPort: targetPort}},
+		},
+	}
+}
+
+// TestResolveDialPort covers the headless-vs-ClusterIP Service-type distinction that
+// drives the edge's cleartext STRICT_DNS dial port (the HTTPRouteServiceTypes
+// conformance fix). A headless Service's FQDN resolves to pod IPs, so the edge must
+// dial the numeric targetPort; a ClusterIP Service keeps the service port (kube-proxy
+// remaps). Unresolvable cases fall back to 0 (= dial service port).
+func TestResolveDialPort(t *testing.T) {
+	objs := []client.Object{
+		svcWith("headless", "ns", corev1.ClusterIPNone, 8080, intstr.FromInt(3000)),
+		svcWith("clusterip", "ns", "10.0.0.1", 8080, intstr.FromInt(3000)),
+		svcWith("headless-named", "ns", corev1.ClusterIPNone, 8080, intstr.FromString("http")),
+		svcWith("headless-defaulttp", "ns", corev1.ClusterIPNone, 8080, intstr.IntOrString{}),
+	}
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).WithObjects(objs...).Build()
+	r := &Reconciler{Client: c}
+	ctx := context.Background()
+
+	// Headless: dial the numeric targetPort, not the service port.
+	assert.Equal(t, uint32(3000), r.resolveDialPort(ctx, "ns", "headless", 8080),
+		"headless Service must dial its numeric targetPort (pods, not VIP)")
+	// ClusterIP: kube-proxy remaps; keep the service port (0 = fall back to Port).
+	assert.Equal(t, uint32(0), r.resolveDialPort(ctx, "ns", "clusterip", 8080),
+		"ClusterIP Service keeps the service port")
+	// Headless with a NAMED targetPort: unresolvable here → fall back (0).
+	assert.Equal(t, uint32(0), r.resolveDialPort(ctx, "ns", "headless-named", 8080),
+		"headless Service with named targetPort falls back to service port")
+	// Headless with targetPort unset (defaults to service port) → fall back (0).
+	assert.Equal(t, uint32(0), r.resolveDialPort(ctx, "ns", "headless-defaulttp", 8080),
+		"headless Service with unset targetPort falls back to service port")
+	// Missing Service → fall back (0), no error.
+	assert.Equal(t, uint32(0), r.resolveDialPort(ctx, "ns", "absent", 8080),
+		"missing Service falls back to service port")
+	// servicePort 0 → fall back (0) without a Get.
+	assert.Equal(t, uint32(0), r.resolveDialPort(ctx, "ns", "headless", 0),
+		"zero service port falls back without lookup")
+	// Nil client → fall back (0), no panic.
+	assert.Equal(t, uint32(0), (&Reconciler{}).resolveDialPort(ctx, "ns", "headless", 8080),
+		"nil client degrades gracefully")
+}
+
+// TestBuildHTTPRouteBackends_HeadlessDialPort verifies the dial port is threaded onto
+// the RouteBackend for a headless backend so the cleartext cluster reaches targetPort.
+func TestBuildHTTPRouteBackends_HeadlessDialPort(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(svcWith("headless", "ns", corev1.ClusterIPNone, 8080, intstr.FromInt(3000))).
+		Build()
+	r := &Reconciler{Client: c}
+	got := r.buildHTTPRouteBackends(context.Background(), backend("headless", 8080), "ns", nil)
+	require.Len(t, got, 1)
+	assert.Equal(t, uint32(8080), got[0].Port, "cluster name stays keyed by service port")
+	assert.Equal(t, uint32(3000), got[0].DialPort, "headless backend dials the targetPort")
 }
