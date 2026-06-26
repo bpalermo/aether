@@ -888,7 +888,7 @@ func TestBuildEdgeRoute_URLRewrite_ReplacePrefixMatch(t *testing.T) {
 			matchPrefix:    "/prefix",
 			pathValue:      "/",
 			wantRegexPat:   `^/prefix/?(.*)$`,
-			wantRegexSubst: "/$1",
+			wantRegexSubst: `/\1`,
 		},
 		{
 			// No trailing slash: plain prefix_rewrite, value unchanged.
@@ -910,7 +910,7 @@ func TestBuildEdgeRoute_URLRewrite_ReplacePrefixMatch(t *testing.T) {
 			matchPrefix:    "/strip-prefix",
 			pathValue:      "/",
 			wantRegexPat:   `^/strip-prefix/?(.*)$`,
-			wantRegexSubst: "/$1",
+			wantRegexSubst: `/\1`,
 		},
 	}
 
