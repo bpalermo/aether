@@ -49,6 +49,7 @@ go_test(
     embed = [":gatewayapi"],
     deps = [
         "//agent/internal/edge/portalloc",
+        "//agent/internal/edge/secret",
         "//agent/internal/gatewaystatus",
         "//agent/internal/xds/cache",
         "//agent/internal/xds/proxy",

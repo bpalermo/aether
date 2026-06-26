@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"strings"
 
@@ -56,6 +57,14 @@ func (k *kubernetesProvider) Resolve(ctx context.Context, ref string) (TLSCert, 
 	key := sec.Data[corev1.TLSPrivateKeyKey]
 	if len(cert) == 0 || len(key) == 0 {
 		return TLSCert{}, fmt.Errorf("secret %s/%s missing %s/%s", ns, name, corev1.TLSCertKey, corev1.TLSPrivateKeyKey)
+	}
+	// The Secret may be the right type with both keys present yet hold material
+	// that is not a usable TLS keypair (malformed PEM, a cert/key mismatch, or
+	// the conformance "Hello world" bytes). Reject it here so the listener path
+	// reports ResolvedRefs=False/InvalidCertificateRef instead of pushing
+	// unservable cert bytes to Envoy over SDS.
+	if _, err := tls.X509KeyPair(cert, key); err != nil {
+		return TLSCert{}, fmt.Errorf("secret %s/%s is not a valid TLS keypair: %w", ns, name, err)
 	}
 	return TLSCert{Cert: cert, Key: key, Version: sec.ResourceVersion}, nil
 }
