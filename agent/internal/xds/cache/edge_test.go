@@ -1086,3 +1086,116 @@ func TestDirectResponseRoute_AdmittedByBuildEdgeVhosts(t *testing.T) {
 	assert.NotNil(t, routes[0].GetDirectResponse(), "direct_response action must be present")
 	assert.Equal(t, uint32(500), routes[0].GetDirectResponse().GetStatus())
 }
+
+// --- Wildcard hostname vhost routing (HTTPRouteListenerHostnameMatching /
+// HTTPRouteHostnameIntersection conformance regression guards) ---
+
+// TestBuildEdgeVhostsLocked_SpecificHostUnderWildcard is the conformance
+// regression guard for HTTPRouteListenerHostnameMatching: when effectiveHostnames
+// computes "baz.bar.com" for a *.bar.com listener ∩ baz.bar.com route,
+// buildEdgeVhostsLocked must emit a vhost with domain "baz.bar.com" (not the
+// catch-all "*"). This ensures requests to baz.bar.com route to the correct
+// backend instead of the catch-all.
+func TestBuildEdgeVhostsLocked_SpecificHostUnderWildcard(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-v3"] = clusterEntry{service: "svc-v3"}
+	c.clusters["svc-v1"] = clusterEntry{service: "svc-v1"}
+	c.clusterMu.Unlock()
+
+	// effectiveHostnames("baz.bar.com", listener "*.bar.com") = "baz.bar.com".
+	// The vhost is given the intersection result as its Hosts.
+	c.SetVirtualHosts([]VirtualHost{
+		// v3 backend: specific intersection host baz.bar.com (from *.bar.com ∩ baz.bar.com).
+		{Hosts: []string{"baz.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-v3"}}},
+		// v1 catch-all: hostname-less route → "*" catch-all.
+		{Routes: []Route{{Prefix: "/", Service: "svc-v1"}}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	// Expected: one named vhost "baz.bar.com" + one catch-all "*".
+	require.Len(t, vhosts, 2)
+
+	byDomain := map[string]*routev3.VirtualHost{}
+	for _, vh := range vhosts {
+		byDomain[vh.GetName()] = vh
+	}
+
+	// baz.bar.com must be a named vhost, NOT the catch-all.
+	bazVH := byDomain["baz.bar.com"]
+	require.NotNil(t, bazVH, "baz.bar.com must get its own named vhost (intersection result)")
+	assert.Equal(t, []string{"baz.bar.com"}, bazVH.GetDomains())
+	assert.Equal(t, "svc-v3.aether.internal", bazVH.GetRoutes()[0].GetRoute().GetCluster())
+
+	// The catch-all "*" holds the v1 backend.
+	starVH := byDomain["*"]
+	require.NotNil(t, starVH)
+	assert.Equal(t, "svc-v1.aether.internal", starVH.GetRoutes()[0].GetRoute().GetCluster())
+}
+
+// TestBuildEdgeVhostsLocked_WildcardDomain verifies that when the effective
+// hostname is a wildcard "*.bar.com" (from *.bar.com listener ∩ *.bar.com route),
+// buildEdgeVhostsLocked emits a vhost with domain "*.bar.com" — NOT the catch-all
+// "*". Envoy matches "*.bar.com" to any request whose Host has bar.com as suffix,
+// so this is a real named vhost, not the catch-all.
+func TestBuildEdgeVhostsLocked_WildcardDomain(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-backend"] = clusterEntry{service: "svc-backend"}
+	c.clusterMu.Unlock()
+
+	// effectiveHostnames("*.bar.com", listener "*.bar.com") = "*.bar.com".
+	c.SetVirtualHosts([]VirtualHost{
+		{Hosts: []string{"*.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-backend"}}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	// Only one vhost: "*.bar.com". No catch-all "*" (there are no hostname-less routes).
+	require.Len(t, vhosts, 1)
+	vh := vhosts[0]
+	assert.Equal(t, "*.bar.com", vh.GetName(), "wildcard hostname must produce named vhost, NOT catch-all *")
+	assert.Equal(t, []string{"*.bar.com"}, vh.GetDomains())
+	assert.Equal(t, "svc-backend.aether.internal", vh.GetRoutes()[0].GetRoute().GetCluster())
+}
+
+// TestBuildEdgeVhostsLocked_WildcardAndSpecificIsolated verifies the full
+// HTTPRouteHostnameIntersection conformance shape: a *.bar.com listener has two
+// routes — one with hostname baz.bar.com (intersection = baz.bar.com) and one
+// with hostname *.bar.com (intersection = *.bar.com). Each must get its own
+// named vhost; neither must land in the catch-all "*".
+// This mirrors the data-plane state after effectiveHostnames runs correctly.
+func TestBuildEdgeVhostsLocked_WildcardAndSpecificIsolated(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-specific"] = clusterEntry{service: "svc-specific"}
+	c.clusters["svc-wildcard"] = clusterEntry{service: "svc-wildcard"}
+	c.clusterMu.Unlock()
+
+	c.SetVirtualHosts([]VirtualHost{
+		// baz.bar.com route: intersection of *.bar.com listener ∩ baz.bar.com route.
+		{Hosts: []string{"baz.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-specific"}}},
+		// *.bar.com route: intersection of *.bar.com listener ∩ *.bar.com route.
+		{Hosts: []string{"*.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-wildcard"}}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	// Two named vhosts; no catch-all "*".
+	require.Len(t, vhosts, 2)
+
+	byName := map[string]*routev3.VirtualHost{}
+	for _, vh := range vhosts {
+		byName[vh.GetName()] = vh
+	}
+
+	bazVH := byName["baz.bar.com"]
+	require.NotNil(t, bazVH, "baz.bar.com must be a named vhost")
+	assert.Equal(t, "svc-specific.aether.internal", bazVH.GetRoutes()[0].GetRoute().GetCluster())
+
+	wildVH := byName["*.bar.com"]
+	require.NotNil(t, wildVH, "*.bar.com must be a named vhost (not catch-all *)")
+	assert.Equal(t, []string{"*.bar.com"}, wildVH.GetDomains())
+	assert.Equal(t, "svc-wildcard.aether.internal", wildVH.GetRoutes()[0].GetRoute().GetCluster())
+
+	// Confirm no catch-all "*" was emitted.
+	assert.Nil(t, byName["*"], "no hostname-less routes → no catch-all * vhost")
+}
