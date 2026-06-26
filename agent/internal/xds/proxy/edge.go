@@ -161,21 +161,35 @@ func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort u
 // given virtual hosts. It has a catch-all 404 (no ODCDS — the edge serves only
 // explicitly routed services). The route config name is unique per Gateway.
 func BuildEdgeGatewayRouteConfiguration(namespace, gatewayName string, vhosts []*routev3.VirtualHost) *routev3.RouteConfiguration {
-	all := append([]*routev3.VirtualHost{}, vhosts...)
-	all = append(all, &routev3.VirtualHost{
-		Name:    "edge_not_found",
-		Domains: []string{"*"},
-		Routes: []*routev3.Route{
-			{
-				Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-				Action: &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{Status: 404}},
-			},
-		},
-	})
 	return &routev3.RouteConfiguration{
 		Name:         EdgeGatewayRouteName(namespace, gatewayName),
-		VirtualHosts: all,
+		VirtualHosts: appendEdgeCatchAll404(vhosts),
 	}
+}
+
+// appendEdgeCatchAll404 ensures the route table has exactly ONE wildcard "*" vhost
+// ending in a 404 for unmatched paths (Envoy permits only a single "*" domain per
+// route config). If a "*" vhost already exists — the catch-all built from
+// hostname-less HTTPRoutes (see buildEdgeVhostsLocked) — the 404 is appended to it
+// as the last (lowest-priority) route; otherwise a dedicated edge_not_found "*"
+// vhost is added. An unmatched authority thus gets an immediate 404.
+func appendEdgeCatchAll404(vhosts []*routev3.VirtualHost) []*routev3.VirtualHost {
+	notFound := &routev3.Route{
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+		Action: &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{Status: 404}},
+	}
+	all := append([]*routev3.VirtualHost{}, vhosts...)
+	for _, vh := range all {
+		if len(vh.GetDomains()) == 1 && vh.GetDomains()[0] == "*" {
+			vh.Routes = append(vh.Routes, notFound)
+			return all
+		}
+	}
+	return append(all, &routev3.VirtualHost{
+		Name:    "edge_not_found",
+		Domains: []string{"*"},
+		Routes:  []*routev3.Route{notFound},
+	})
 }
 
 // EdgeTCPListenerName returns the name of an edge TCP listener for a given port.
@@ -469,21 +483,8 @@ func BuildEdgeVirtualHost(name string, domains []string, routes []*routev3.Route
 // it has NO on-demand catch-all (the edge serves only its explicit exposed set);
 // an unmatched authority gets an immediate 404 from the catch-all default vhost.
 func BuildEdgeRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.RouteConfiguration {
-	all := append([]*routev3.VirtualHost{}, vhosts...)
-	all = append(all, &routev3.VirtualHost{
-		Name:    "edge_not_found",
-		Domains: []string{"*"},
-		Routes: []*routev3.Route{
-			{
-				Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-				Action: &routev3.Route_DirectResponse{
-					DirectResponse: &routev3.DirectResponseAction{Status: 404},
-				},
-			},
-		},
-	})
 	return &routev3.RouteConfiguration{
 		Name:         EdgeHTTPRouteName,
-		VirtualHosts: all,
+		VirtualHosts: appendEdgeCatchAll404(vhosts),
 	}
 }
