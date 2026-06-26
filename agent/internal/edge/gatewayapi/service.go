@@ -182,9 +182,21 @@ func (r *Reconciler) reconcileGatewayServices(
 			}
 		}
 
-		// Build the desired port list from the allocation.
+		// Build the desired port list from the allocation. Dedup by external port:
+		// a Service may have at most ONE ServicePort per (name, port) tuple — k8s
+		// rejects duplicates ("Duplicate value: port-80"), which drops the whole
+		// Service and leaves the Gateway without a status address. allocs is already
+		// one-per-external-port (allocateGatewayListenerPorts groups by external port),
+		// but we dedup here as a defensive backstop so any caller — present or future —
+		// that passes multiple allocations for the same external port still yields a
+		// single ServicePort rather than a Service the API server refuses.
 		ports := make([]corev1.ServicePort, 0, len(allocs))
+		seenPort := make(map[uint32]struct{}, len(allocs))
 		for _, a := range allocs {
+			if _, dup := seenPort[a.externalPort]; dup {
+				continue
+			}
+			seenPort[a.externalPort] = struct{}{}
 			portName := fmt.Sprintf("port-%d", a.externalPort)
 			ports = append(ports, corev1.ServicePort{
 				Name:       portName,

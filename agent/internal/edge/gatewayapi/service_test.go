@@ -285,6 +285,111 @@ func TestGatewayServiceShape(t *testing.T) {
 	})
 }
 
+// TestReconcileGatewayServices_MultiListenerSamePort is the end-to-end regression
+// guard for the HTTPRouteRedirectPortAndScheme conformance failure: a Gateway with
+// MULTIPLE listeners on the SAME external port (e.g. the conformance
+// `same-namespace-with-https-listener` Gateway, which has three HTTPS listeners on
+// :443) must produce a per-Gateway Service with EXACTLY ONE ServicePort for that
+// port. Per-listener Service ports yield a duplicate "port-443" entry that the API
+// server rejects ("Duplicate value: port-443"), so the Service is never created and
+// the Gateway never gets a status address — failing every test gated on readiness.
+func TestReconcileGatewayServices_MultiListenerSamePort(t *testing.T) {
+	hn := func(s string) *gatewayv1.Hostname { h := gatewayv1.Hostname(s); return &h }
+	tls := &gatewayv1.ListenerTLSConfig{}
+	gw := gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "gateway-conformance-infra", Name: "same-namespace-with-https-listener"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				// Three HTTPS listeners on :443, distinct hostnames — the conformance shape.
+				{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType, TLS: tls},
+				{Name: "https-with-hostname", Port: 443, Protocol: gatewayv1.HTTPSProtocolType, Hostname: hn("second-example.org"), TLS: tls},
+				{Name: "https-with-wildcard-hostname", Port: 443, Protocol: gatewayv1.HTTPSProtocolType, Hostname: hn("*.wildcard.org"), TLS: tls},
+			},
+		},
+	}
+	gws := []gatewayv1.Gateway{gw}
+	hostCerts := map[string]string{"": "kubernetes/cert"}
+
+	allocs, err := allocateGatewayListenerPorts(gws, hostCerts)
+	require.NoError(t, err)
+
+	fc := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
+	r := &Reconciler{
+		Client:          fc,
+		Namespace:       "aether-ingress",
+		EdgeServiceName: "aether-edge",
+		Log:             slog.New(slog.DiscardHandler),
+	}
+
+	_, err = r.reconcileGatewayServices(context.Background(), gws, allocs)
+	require.NoError(t, err)
+
+	svcName := gatewayServiceName("aether-edge", gw.Namespace, gw.Name)
+	got := &corev1.Service{}
+	require.NoError(t, fc.Get(context.Background(), types.NamespacedName{Namespace: "aether-ingress", Name: svcName}, got))
+
+	require.Len(t, got.Spec.Ports, 1, "exactly one ServicePort for the three :443 listeners")
+	assert.Equal(t, "port-443", got.Spec.Ports[0].Name)
+	assert.Equal(t, int32(443), got.Spec.Ports[0].Port)
+
+	// No two ServicePorts may share a (name, port) tuple — the k8s validation that
+	// rejects "Duplicate value".
+	seenName := map[string]struct{}{}
+	seenPort := map[int32]struct{}{}
+	for _, p := range got.Spec.Ports {
+		_, dupName := seenName[p.Name]
+		_, dupPort := seenPort[p.Port]
+		assert.False(t, dupName, "duplicate ServicePort name %q", p.Name)
+		assert.False(t, dupPort, "duplicate ServicePort port %d", p.Port)
+		seenName[p.Name] = struct{}{}
+		seenPort[p.Port] = struct{}{}
+	}
+}
+
+// TestReconcileGatewayServices_DedupBackstop verifies the ServicePort build dedups
+// by external port even if it is handed multiple allocations for the same external
+// port (a defensive backstop against any future regression in the upstream
+// allocator). Two allocations for :80 must collapse to ONE ServicePort "port-80".
+func TestReconcileGatewayServices_DedupBackstop(t *testing.T) {
+	gw := gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "conformance", Name: "dup"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+	gk := gatewayKey{Namespace: "conformance", Name: "dup"}
+	// Deliberately malformed input: two allocations for the SAME external port.
+	allocs := map[gatewayKey][]gatewayListenerAllocation{
+		gk: {
+			{externalPort: 80, internalPort: 18100},
+			{externalPort: 80, internalPort: 18101},
+		},
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
+	r := &Reconciler{
+		Client:          fc,
+		Namespace:       "aether-ingress",
+		EdgeServiceName: "aether-edge",
+		Log:             slog.New(slog.DiscardHandler),
+	}
+
+	_, err := r.reconcileGatewayServices(context.Background(), []gatewayv1.Gateway{gw}, allocs)
+	require.NoError(t, err)
+
+	svcName := gatewayServiceName("aether-edge", gw.Namespace, gw.Name)
+	got := &corev1.Service{}
+	require.NoError(t, fc.Get(context.Background(), types.NamespacedName{Namespace: "aether-ingress", Name: svcName}, got))
+
+	require.Len(t, got.Spec.Ports, 1, "duplicate :80 allocations must collapse to one ServicePort")
+	assert.Equal(t, "port-80", got.Spec.Ports[0].Name)
+	assert.Equal(t, int32(80), got.Spec.Ports[0].Port)
+	// First allocation wins (target 18100).
+	assert.Equal(t, intstr.FromInt32(18100), got.Spec.Ports[0].TargetPort)
+}
+
 // TestGatewayServiceGC verifies stale per-Gateway Services (whose Gateway no
 // longer exists) are deleted, while active ones are preserved.
 func TestGatewayServiceGC(t *testing.T) {
