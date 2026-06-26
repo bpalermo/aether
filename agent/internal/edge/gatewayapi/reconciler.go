@@ -179,7 +179,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if !attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways) {
 			continue
 		}
-		vh := r.buildVirtualHost(hr, hostCerts, grants)
+		vh := r.buildVirtualHost(ctx, hr, hostCerts, grants)
 		// A hostname-less route is NOT inert: per Gateway API it matches every host on
 		// its listener, served via the cache's catch-all "*" vhost. Only an empty
 		// route set (no backend/redirect produced a route) makes it skippable.
@@ -515,7 +515,14 @@ func (r *Reconciler) resolveListenerTLS(
 // where ALL backends are invalid/ungranted is skipped (no route). A rule where all
 // valid backends have weight 0 is a valid route that produces no traffic (spec
 // allows it; Envoy returns 500 for that case — acceptable).
-func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[string]string, grants []gatewayv1beta1.ReferenceGrant) cache.VirtualHost {
+//
+// Gateway API invalid-backend semantics: a rule whose backendRef(s) are
+// unresolvable (BackendNotFound / InvalidKind / RefNotPermitted — the conditions
+// that set ResolvedRefs=False on the route status) must return HTTP 500 on the
+// data plane rather than 503/404. The route still matches on path + headers +
+// method + query (so the right rule is exercised) but emits a fixed
+// direct_response 500 instead of routing to any cluster.
+func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRoute, hostCerts map[string]string, grants []gatewayv1beta1.ReferenceGrant) cache.VirtualHost {
 	vh := cache.VirtualHost{}
 	for _, h := range hr.Spec.Hostnames {
 		vh.Hosts = append(vh.Hosts, string(h))
@@ -529,8 +536,76 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 		backends := buildHTTPRouteBackends(rule.BackendRefs, hr.Namespace, grants)
 
 		// A rule must have either at least one backend or a redirect to produce a route.
-		if len(backends) == 0 && redirect == nil {
-			continue
+		// Exception: a rule where all backends are UNRESOLVABLE (InvalidKind /
+		// BackendNotFound / RefNotPermitted) must still produce a route that returns
+		// HTTP 500 — the Gateway API data-plane contract for invalid backends.
+		// Detect this: no admissible backends (buildHTTPRouteBackends filtered them
+		// all out) AND no redirect AND the rule actually has declared backendRefs
+		// (so it is "invalid" rather than "empty").
+		if redirect == nil {
+			if len(backends) == 0 && len(rule.BackendRefs) > 0 {
+				// All backendRefs are unresolvable (invalid kind, missing Service, or
+				// ungranted cross-namespace ref). Check via backendsResolveL4 to confirm
+				// (it reuses the same admission logic used by the status writer), then
+				// emit a fixed 500 route with the path/header match still applied.
+				resolved, _, _ := r.backendsResolveHTTP(ctx, hr.Namespace, []gatewayv1.HTTPRouteRule{rule}, grants)
+				if !resolved {
+					mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
+					if len(rule.Matches) == 0 {
+						vh.Routes = append(vh.Routes, cache.Route{
+							Prefix:               "/",
+							HeaderMutation:       mutation,
+							DirectResponseStatus: 500,
+						})
+					} else {
+						for _, m := range rule.Matches {
+							prefix, exact := "/", ""
+							if m.Path != nil && m.Path.Value != nil {
+								switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
+								case gatewayv1.PathMatchExact:
+									exact = *m.Path.Value
+									prefix = ""
+								default:
+									prefix = *m.Path.Value
+								}
+							}
+							var hdrs []proxy.RouteHeaderMatch
+							for _, h := range m.Headers {
+								hm := proxy.RouteHeaderMatch{Name: string(h.Name), Value: h.Value}
+								if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
+									hm.Regex = true
+								}
+								hdrs = append(hdrs, hm)
+							}
+							method := ""
+							if m.Method != nil {
+								method = string(*m.Method)
+							}
+							var qps []proxy.RouteQueryParamMatch
+							for _, q := range m.QueryParams {
+								qm := proxy.RouteQueryParamMatch{Name: string(q.Name), Value: q.Value}
+								if q.Type != nil && *q.Type == gatewayv1.QueryParamMatchRegularExpression {
+									qm.Regex = true
+								}
+								qps = append(qps, qm)
+							}
+							vh.Routes = append(vh.Routes, cache.Route{
+								Prefix:               prefix,
+								Exact:                exact,
+								Headers:              hdrs,
+								Method:               method,
+								QueryParams:          qps,
+								HeaderMutation:       mutation,
+								DirectResponseStatus: 500,
+							})
+						}
+					}
+					continue
+				}
+			} else if len(backends) == 0 {
+				// No backends, no redirect, no declared backendRefs → skip (inert rule).
+				continue
+			}
 		}
 
 		mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
@@ -545,10 +620,10 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 			legacyNS = backends[0].BackendNamespace
 		}
 
-		appendRoute := func(prefix, exact string) {
+		if len(rule.Matches) == 0 {
 			vh.Routes = append(vh.Routes, cache.Route{
-				Prefix:           prefix,
-				Exact:            exact,
+				Prefix:           "/",
+				Exact:            "",
 				Service:          legacySvc,
 				Port:             legacyPort,
 				BackendNamespace: legacyNS,
@@ -557,10 +632,6 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 				Redirect:         redirect,
 				URLRewrite:       urlRewrite,
 			})
-		}
-
-		if len(rule.Matches) == 0 {
-			appendRoute("/", "")
 			continue
 		}
 		for _, m := range rule.Matches {
@@ -574,7 +645,47 @@ func (r *Reconciler) buildVirtualHost(hr *gatewayv1.HTTPRoute, hostCerts map[str
 					prefix = *m.Path.Value
 				}
 			}
-			appendRoute(prefix, exact)
+
+			// Build per-match header predicates.
+			var hdrs []proxy.RouteHeaderMatch
+			for _, h := range m.Headers {
+				hm := proxy.RouteHeaderMatch{Name: string(h.Name), Value: h.Value}
+				if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
+					hm.Regex = true
+				}
+				hdrs = append(hdrs, hm)
+			}
+
+			// Method match: convert to uppercase string (Gateway API enum).
+			method := ""
+			if m.Method != nil {
+				method = string(*m.Method)
+			}
+
+			// Build per-match query-parameter predicates.
+			var qps []proxy.RouteQueryParamMatch
+			for _, q := range m.QueryParams {
+				qm := proxy.RouteQueryParamMatch{Name: string(q.Name), Value: q.Value}
+				if q.Type != nil && *q.Type == gatewayv1.QueryParamMatchRegularExpression {
+					qm.Regex = true
+				}
+				qps = append(qps, qm)
+			}
+
+			vh.Routes = append(vh.Routes, cache.Route{
+				Prefix:           prefix,
+				Exact:            exact,
+				Service:          legacySvc,
+				Port:             legacyPort,
+				BackendNamespace: legacyNS,
+				Backends:         backends,
+				HeaderMutation:   mutation,
+				Redirect:         redirect,
+				URLRewrite:       urlRewrite,
+				Headers:          hdrs,
+				Method:           method,
+				QueryParams:      qps,
+			})
 		}
 	}
 	if cert := certForHosts(vh.Hosts, hostCerts); cert != "" {

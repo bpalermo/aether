@@ -993,3 +993,96 @@ func TestCatchAllVhostSpecificitySort(t *testing.T) {
 	require.NotNil(t, last.GetDirectResponse(), "last route must be the 404 fallback")
 	assert.Equal(t, uint32(404), last.GetDirectResponse().GetStatus())
 }
+
+// --- Header/method/query sort dimension tests ---
+
+// TestSortRoutesBySpecificity_HeaderCountRanksHigher verifies that two routes with
+// identical paths are ordered so the one with MORE header matchers sorts first.
+func TestSortRoutesBySpecificity_HeaderCountRanksHigher(t *testing.T) {
+	routes := []Route{
+		{Prefix: "/api", Service: "svc-fewer", Headers: []proxy.RouteHeaderMatch{{Name: "h1", Value: "v1"}}},
+		{Prefix: "/api", Service: "svc-more", Headers: []proxy.RouteHeaderMatch{{Name: "h1", Value: "v1"}, {Name: "h2", Value: "v2"}}},
+	}
+	sortRoutesBySpecificity(routes)
+
+	require.Len(t, routes, 2)
+	assert.Equal(t, "svc-more", routes[0].Service, "route with 2 headers must sort before route with 1")
+	assert.Equal(t, "svc-fewer", routes[1].Service)
+}
+
+// TestSortRoutesBySpecificity_MethodRanksAboveNoMethod verifies that a route with a
+// method matcher ranks higher than an identical route without one.
+func TestSortRoutesBySpecificity_MethodRanksAboveNoMethod(t *testing.T) {
+	routes := []Route{
+		{Prefix: "/form", Service: "svc-any"},
+		{Prefix: "/form", Service: "svc-post", Method: "POST"},
+	}
+	sortRoutesBySpecificity(routes)
+
+	require.Len(t, routes, 2)
+	assert.Equal(t, "svc-post", routes[0].Service, "route with method must sort before route without")
+	assert.Equal(t, "svc-any", routes[1].Service)
+}
+
+// TestSortRoutesBySpecificity_QueryCountRanksHigher verifies that a route with more
+// query-param matchers sorts before one with fewer (path and headers equal).
+func TestSortRoutesBySpecificity_QueryCountRanksHigher(t *testing.T) {
+	routes := []Route{
+		{Prefix: "/q", Service: "svc-one", QueryParams: []proxy.RouteQueryParamMatch{{Name: "a", Value: "1"}}},
+		{Prefix: "/q", Service: "svc-two", QueryParams: []proxy.RouteQueryParamMatch{{Name: "a", Value: "1"}, {Name: "b", Value: "2"}}},
+	}
+	sortRoutesBySpecificity(routes)
+
+	require.Len(t, routes, 2)
+	assert.Equal(t, "svc-two", routes[0].Service, "route with 2 query params must sort before route with 1")
+	assert.Equal(t, "svc-one", routes[1].Service)
+}
+
+// TestSortRoutesBySpecificity_FullDimensionOrder verifies the full priority:
+// path key > header count > method present > query count.
+func TestSortRoutesBySpecificity_FullDimensionOrder(t *testing.T) {
+	// All routes share prefix "/api" so path keys are equal.
+	// Expected order: most-specific first.
+	routes := []Route{
+		// headers=0, method="", query=0 — least specific.
+		{Prefix: "/api", Service: "svc-bare"},
+		// headers=0, method="GET", query=0.
+		{Prefix: "/api", Service: "svc-method", Method: "GET"},
+		// headers=1, method="", query=0.
+		{Prefix: "/api", Service: "svc-hdr", Headers: []proxy.RouteHeaderMatch{{Name: "x", Value: "1"}}},
+		// headers=1, method="POST", query=1 — most specific.
+		{
+			Prefix: "/api", Service: "svc-full",
+			Headers:     []proxy.RouteHeaderMatch{{Name: "x", Value: "1"}},
+			Method:      "POST",
+			QueryParams: []proxy.RouteQueryParamMatch{{Name: "v", Value: "2"}},
+		},
+	}
+	sortRoutesBySpecificity(routes)
+
+	require.Len(t, routes, 4)
+	assert.Equal(t, "svc-full", routes[0].Service, "headers+method+query = most specific")
+	assert.Equal(t, "svc-hdr", routes[1].Service, "header only = second")
+	assert.Equal(t, "svc-method", routes[2].Service, "method only = third")
+	assert.Equal(t, "svc-bare", routes[3].Service, "bare path = least specific")
+}
+
+// TestDirectResponseRoute_AdmittedByBuildEdgeVhosts verifies that a
+// DirectResponseStatus=500 route is admitted (not dropped as inadmissible) and
+// appears in the Envoy vhost's route list as a direct_response action.
+func TestDirectResponseRoute_AdmittedByBuildEdgeVhosts(t *testing.T) {
+	c := newTestCache("edge-1")
+	// No cluster registration needed; direct_response routes have no upstream.
+	c.SetVirtualHosts([]VirtualHost{
+		{Hosts: []string{"api.example.com"}, Routes: []Route{
+			{Prefix: "/bad", DirectResponseStatus: 500},
+		}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	require.Len(t, vhosts, 1)
+	routes := vhosts[0].GetRoutes()
+	require.Len(t, routes, 1)
+	assert.NotNil(t, routes[0].GetDirectResponse(), "direct_response action must be present")
+	assert.Equal(t, uint32(500), routes[0].GetDirectResponse().GetStatus())
+}
