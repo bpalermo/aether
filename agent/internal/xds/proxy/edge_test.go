@@ -324,6 +324,59 @@ func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
 		"per-Gateway HTTPS listener must strip :port from Host header for hostname matching")
 }
 
+// TestBuildEdgeGatewayHTTPListener_MultiListenerHostPortStrip is the FIX A test for
+// HTTPRouteHostnameIntersection conformance. It proves that:
+//  1. The per-Gateway HTTP listener HCM carries strip_any_host_port = true.
+//  2. The per-Gateway route config contains a vhost with domain "very.specific.com"
+//     (no port suffix), so that after Envoy strips ":1234" from the request authority
+//     the vhost matches.
+//
+// The conformance Gateway has three HTTP listeners on port 80 with hostnames
+// "very.specific.com", "*.wildcard.io", "*.anotherwildcard.io". All three share
+// one internal port (per-Gateway addressing deduplicates by external port).
+// A request "Host: very.specific.com:1234" must route to the "very.specific.com"
+// vhost; stripping the port is the only layer needed — the vhost domain itself must
+// carry no port.
+func TestBuildEdgeGatewayHTTPListener_MultiListenerHostPortStrip(t *testing.T) {
+	// Build the per-Gateway HTTP listener (one per (ns, gw, internal-port) tuple).
+	l := BuildEdgeGatewayHTTPListener("gateway-conformance-infra", "httproute-hostname-intersection", 18100, false)
+
+	// 1. HCM must strip the port from :authority before vhost matching.
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	assert.True(t, hcm.GetStripAnyHostPort(),
+		"per-Gateway HCM must strip :port so Host: very.specific.com:1234 matches the very.specific.com vhost")
+	// Routes via per-Gateway RDS (not the shared "edge_http" route config).
+	assert.Equal(t, "edge_rt_gateway-conformance-infra_httproute-hostname-intersection", hcm.GetRds().GetRouteConfigName())
+
+	// 2. The per-Gateway route config carries a vhost for "very.specific.com" with NO
+	//    port. Envoy strips ":1234" (step 1) then matches against this domain list.
+	route := BuildEdgeRoute("/s1", "", nil, "", nil, "infra-backend-v1", nil, nil, nil, nil)
+	specificVH := BuildEdgeVirtualHost("very.specific.com", []string{"very.specific.com"}, []*routev3.Route{route})
+	wildcardIOVH := BuildEdgeVirtualHost("*.wildcard.io", []string{"*.wildcard.io"}, []*routev3.Route{route})
+	wildcardAnotherVH := BuildEdgeVirtualHost("*.anotherwildcard.io", []string{"*.anotherwildcard.io"}, []*routev3.Route{route})
+
+	rc := BuildEdgeGatewayRouteConfiguration(
+		"gateway-conformance-infra",
+		"httproute-hostname-intersection",
+		[]*routev3.VirtualHost{specificVH, wildcardIOVH, wildcardAnotherVH},
+	)
+
+	// Verify "very.specific.com" vhost exists in the route config with no port.
+	var found bool
+	for _, vh := range rc.GetVirtualHosts() {
+		for _, d := range vh.GetDomains() {
+			if d == "very.specific.com" {
+				found = true
+				// Domain must be bare hostname, no port — Envoy matches against
+				// the stripped authority.
+				assert.NotContains(t, d, ":", "vhost domain must not contain a port")
+			}
+		}
+	}
+	assert.True(t, found, "route config must have a vhost with domain very.specific.com")
+}
+
 // TestBuildEdgeGatewayRouteConfiguration verifies per-Gateway route config:
 // correct name, provided vhosts, catch-all 404.
 func TestBuildEdgeGatewayRouteConfiguration(t *testing.T) {
@@ -810,37 +863,54 @@ func TestBuildEdgeRoute_MethodAndHeadersCombined(t *testing.T) {
 	require.Len(t, headers, 2)
 }
 
-// --- FIX 2: HTTPRouteRewritePath prefix slash normalization ---
+// --- FIX 2: HTTPRouteRewritePath prefix slash normalization + empty-remainder ---
 
-// TestBuildEdgeRoute_URLRewrite_PrefixSlashNormalization verifies that
-// ReplacePrefixMatch with PathValue "/" does NOT produce a double-slash path
-// (Envoy concatenates match prefix + rewrite value; a trailing "/" on the rewrite
-// produces "//suffix"). The fix strips the trailing slash from PathValue before
-// setting PrefixRewrite, so "/prefix/three" → "/" not "//three".
-func TestBuildEdgeRoute_URLRewrite_PrefixSlashNormalization(t *testing.T) {
+// TestBuildEdgeRoute_URLRewrite_ReplacePrefixMatch verifies Gateway API
+// ReplacePrefixMatch segment semantics for all cases:
+//   - Non-slash replacement: trailing slash stripped to prevent double-slash
+//     when the suffix starts with "/" (the #367 fix).
+//   - Slash-only replacement ("/") must NOT produce an empty path on exact-match
+//     requests (the empty-remainder fix). Envoy prefix_rewrite="" on path
+//     "/strip-prefix" → ""; we emit regex_rewrite instead.
+//   - Slash-only replacement with a suffix must produce "/suffix".
+func TestBuildEdgeRoute_URLRewrite_ReplacePrefixMatch(t *testing.T) {
 	tests := []struct {
-		name        string
-		matchPrefix string
-		pathValue   string
-		wantRewrite string
+		name           string
+		matchPrefix    string
+		pathValue      string
+		wantPrefix     string // if non-empty, expect PrefixRewrite (no RegexRewrite)
+		wantRegexPat   string // if non-empty, expect RegexRewrite with this pattern
+		wantRegexSubst string // expected regex substitution
 	}{
 		{
-			name:        "trailing slash stripped to empty → avoids double-slash",
-			matchPrefix: "/prefix",
-			pathValue:   "/",
-			wantRewrite: "",
+			// "/" replacement with known prefix → regex_rewrite (empty-remainder fix).
+			name:           "slash replacement uses regex for empty-remainder",
+			matchPrefix:    "/prefix",
+			pathValue:      "/",
+			wantRegexPat:   `^/prefix/?(.*)$`,
+			wantRegexSubst: "/$1",
 		},
 		{
+			// No trailing slash: plain prefix_rewrite, value unchanged.
 			name:        "no trailing slash → value unchanged",
 			matchPrefix: "/api",
 			pathValue:   "/v2",
-			wantRewrite: "/v2",
+			wantPrefix:  "/v2",
 		},
 		{
+			// Multi-segment value with trailing slash: slash stripped.
 			name:        "trailing slash on multi-segment → stripped",
 			matchPrefix: "/foo",
 			pathValue:   "/bar/",
-			wantRewrite: "/bar",
+			wantPrefix:  "/bar",
+		},
+		{
+			// Conformance strip-prefix: /strip-prefix → /, /strip-prefix/foo → /foo.
+			name:           "strip-prefix conformance case",
+			matchPrefix:    "/strip-prefix",
+			pathValue:      "/",
+			wantRegexPat:   `^/strip-prefix/?(.*)$`,
+			wantRegexSubst: "/$1",
 		},
 	}
 
@@ -851,8 +921,20 @@ func TestBuildEdgeRoute_URLRewrite_PrefixSlashNormalization(t *testing.T) {
 			require.NotNil(t, r)
 			ra := r.GetRoute()
 			require.NotNil(t, ra, "ReplacePrefixMatch must produce a RouteAction")
-			assert.Equal(t, tc.wantRewrite, ra.GetPrefixRewrite(),
-				"PrefixRewrite must have trailing slash stripped to prevent double-slash")
+			switch {
+			case tc.wantPrefix != "":
+				assert.Equal(t, tc.wantPrefix, ra.GetPrefixRewrite(),
+					"non-slash replacement must use PrefixRewrite with trailing slash stripped")
+				assert.Nil(t, ra.GetRegexRewrite(), "non-slash replacement must not use RegexRewrite")
+			case tc.wantRegexPat != "":
+				rr := ra.GetRegexRewrite()
+				require.NotNil(t, rr, "slash-only replacement must use RegexRewrite for empty-remainder correctness")
+				assert.Equal(t, tc.wantRegexPat, rr.GetPattern().GetRegex(),
+					"regex pattern must anchor, match prefix, optional slash, capture remainder")
+				assert.Equal(t, tc.wantRegexSubst, rr.GetSubstitution(),
+					"regex substitution must prepend / and append captured remainder")
+				assert.Empty(t, ra.GetPrefixRewrite(), "slash-only replacement must not set PrefixRewrite")
+			}
 		})
 	}
 }

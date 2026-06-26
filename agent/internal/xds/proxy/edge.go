@@ -643,7 +643,7 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 	if timeout != nil {
 		ra.Timeout = timeout
 	}
-	applyURLRewrite(ra, urlRewrite)
+	applyURLRewrite(ra, urlRewrite, prefix)
 
 	return &routev3.Route{
 		Match:                   match,
@@ -690,7 +690,7 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 		if timeout != nil {
 			ra.Timeout = timeout
 		}
-		applyURLRewrite(ra, urlRewrite)
+		applyURLRewrite(ra, urlRewrite, prefix)
 		r.Action = &routev3.Route_Route{Route: ra}
 	}
 	return r

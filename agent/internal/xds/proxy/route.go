@@ -297,7 +297,7 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 			if rule.Redirect != nil {
 				r.Action = gammaRedirectAction(rule.Redirect)
 			} else {
-				r.Action = gammaRouteAction(name, rule)
+				r.Action = gammaRouteAction(name, rule, m.Prefix)
 			}
 			routes = append(routes, r)
 		}
@@ -380,7 +380,7 @@ func gammaRouteMatch(m GammaMatch) *routev3.RouteMatch {
 	return rm
 }
 
-func gammaRouteAction(serviceCluster string, rule GammaRoute) *routev3.Route_Route {
+func gammaRouteAction(serviceCluster string, rule GammaRoute, matchPrefix string) *routev3.Route_Route {
 	ra := &routev3.RouteAction{RetryPolicy: outboundRetryPolicy()}
 	if rule.Timeout != nil {
 		ra.Timeout = rule.Timeout
@@ -400,7 +400,7 @@ func gammaRouteAction(serviceCluster string, rule GammaRoute) *routev3.Route_Rou
 		}
 		ra.ClusterSpecifier = &routev3.RouteAction_WeightedClusters{WeightedClusters: weighted}
 	}
-	applyURLRewrite(ra, rule.URLRewrite)
+	applyURLRewrite(ra, rule.URLRewrite, matchPrefix)
 	return &routev3.Route_Route{Route: ra}
 }
 
@@ -450,18 +450,31 @@ func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
 }
 
 // applyURLRewrite writes URLRewrite fields onto an existing RouteAction.
-// hostname → HostRewriteLiteral; ReplacePrefixMatch → PrefixRewrite (normalized);
-// ReplaceFullPath → RegexRewrite matching .* → the new path.
+// hostname → HostRewriteLiteral; ReplacePrefixMatch → PrefixRewrite (normalized)
+// or RegexRewrite (empty-remainder case); ReplaceFullPath → RegexRewrite matching
+// .* → the new path.
 //
-// Gateway API ReplacePrefixMatch semantics: the matched prefix is replaced by
-// PathValue. Envoy's prefix_rewrite literally substitutes the matched prefix bytes,
-// so a trailing slash in the replacement causes a double slash when the unmatched
-// suffix starts with "/" (e.g. match "/prefix", replacement "/", path "/prefix/three"
-// → "/" + "/three" = "//three"). To comply with Gateway API, we strip the trailing
-// slash from the replacement: the remaining suffix already carries its own leading
-// slash, so trimming produces the correct join. Trimming "/" to "" is also correct —
-// Envoy leaves path without a prefix and the suffix provides the leading slash.
-func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite) {
+// Gateway API ReplacePrefixMatch segment semantics:
+//
+//	prefix "/strip-prefix", replacement "/" →
+//	  /strip-prefix        → /       (exact match, empty remainder)
+//	  /strip-prefix/foo    → /foo
+//	  /strip-prefix/       → /
+//
+// Envoy's prefix_rewrite substitutes the matched prefix bytes, so:
+//   - A trailing slash in the replacement causes a double slash when the suffix
+//     starts with "/": match "/prefix", replacement "/", path "/prefix/foo"
+//     → "/" + "/foo" = "//foo". Fix: strip the trailing slash.
+//   - But stripping "/" to "" causes an empty path when the match is exact (no
+//     suffix): match "/strip-prefix", replacement "", path "/strip-prefix" → "".
+//     Fix: when the replacement is all-slash (e.g. "/"), use regex_rewrite with
+//     pattern ^<prefix>/?(.*)$ and substitution /$1, which correctly handles both
+//     the empty-remainder (→ /) and suffix (→ /suffix) cases.
+//
+// matchPrefix is the Envoy path match value (e.g. "/strip-prefix") used to build
+// the regex pattern for the empty-remainder case. When empty (unknown at call
+// site), the fallback behaviour is the legacy TrimRight approach.
+func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite, matchPrefix string) {
 	if rw == nil {
 		return
 	}
@@ -470,9 +483,30 @@ func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite) {
 	}
 	switch rw.PathType {
 	case "ReplacePrefixMatch":
-		// Strip trailing slash to avoid double-slash when the suffix starts with "/".
-		// strings.TrimRight is used (not TrimSuffix) so "/foo/" → "/foo", "/" → "".
-		ra.PrefixRewrite = strings.TrimRight(rw.PathValue, "/")
+		trimmed := strings.TrimRight(rw.PathValue, "/")
+		if trimmed == "" && matchPrefix != "" {
+			// Replacement is "/" (all-slash): plain prefix_rewrite = "" would produce
+			// an empty path for exact-match requests (e.g. GET /strip-prefix with no
+			// trailing content). Use regex_rewrite instead.
+			//
+			// Pattern: ^<prefix>/?(.*)$
+			//   - ^<prefix>         matches the prefix exactly
+			//   - /?                optionally consumes the separator slash
+			//   - (.*)              captures the remainder (empty or path tail without leading /)
+			//   - $                 anchors the end
+			//
+			// Substitution: /$1
+			//   - empty remainder → / (the replacement value)
+			//   - /foo remainder   → /foo
+			ra.RegexRewrite = &matcherv3.RegexMatchAndSubstitute{
+				Pattern:      &matcherv3.RegexMatcher{Regex: "^" + regexp.QuoteMeta(matchPrefix) + `/?(.*)$`},
+				Substitution: "/$1",
+			}
+			return
+		}
+		// Non-empty trimmed value or unknown match prefix: use plain prefix_rewrite.
+		// Trailing slash stripped to prevent double-slash when the suffix starts with "/".
+		ra.PrefixRewrite = trimmed
 	case "ReplaceFullPath":
 		ra.RegexRewrite = &matcherv3.RegexMatchAndSubstitute{
 			Pattern:      &matcherv3.RegexMatcher{Regex: ".*"},
