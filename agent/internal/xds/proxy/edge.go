@@ -112,9 +112,12 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 	if httpRedirect {
 		// Redirect listener: inline route config (no RDS), no separate route config
 		// resource needed. Re-uses the redirect route logic but names the HCM and
-		// vhost after the Gateway to keep stats distinct.
+		// vhost after the Gateway to keep stats distinct. The redirect route table
+		// uses a catch-all "*" domain so strip_any_host_port is irrelevant here, but
+		// set it for consistency with the routing listeners.
 		hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", buildEdgeRedirectRouteConfig())
 		hcm.GetRouteConfig().Name = name // unique inline config name avoids any residual collision
+		hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
 		filterChain := &listenerv3.FilterChain{
 			Name:    name,
 			Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
@@ -122,9 +125,19 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 		return edgeListener(name, internalPort, filterChain)
 	}
 	// Plain HTTP routing listener: RDS-driven, per-Gateway route config.
+	// strip_any_host_port: strip the port from the :authority pseudo-header before
+	// vhost domain matching. Gateway API hostname matching is port-agnostic: a
+	// route hostname "baz.bar.com" must match a request with Host: baz.bar.com:80
+	// or Host: baz.bar.com:1234. Without stripping, Go HTTP clients (including the
+	// conformance suite) send the port in the Host header even for standard ports,
+	// causing the authority "baz.bar.com:80" to miss the "baz.bar.com" vhost domain
+	// and fall through to the catch-all "*". This ONLY applies to edge (external)
+	// listeners — the node/east-west outbound HCM must NOT strip ports because the
+	// port is a first-class FQDN:port routing selector (proposal 005).
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
 	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+	hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			RouteConfigName: routeName,
@@ -146,6 +159,11 @@ func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort u
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
 	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+	// strip_any_host_port: see BuildEdgeGatewayHTTPListener for the rationale.
+	// HTTPS clients connecting on a non-standard port (e.g. :8443 or the
+	// conformance port :1234) include the port in the Host header, causing the
+	// same catch-all fall-through without stripping.
+	hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			RouteConfigName: routeName,
@@ -327,6 +345,9 @@ func BuildEdgeTLSPassthroughListener(port uint32, rules []L4ServiceRoute) *liste
 func BuildEdgeListener(name string, port uint32, tlsSecretNames []string) *listenerv3.Listener {
 	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
+	// strip_any_host_port: see BuildEdgeGatewayHTTPListener for the rationale.
+	// The Phase 1 shared listener faces the same port-in-Host-header issue.
+	hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			// Both the HTTP and HTTPS listeners serve the same edge route table.

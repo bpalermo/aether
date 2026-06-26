@@ -53,7 +53,8 @@ func TestNewServiceCluster_EdgePoolingOff(t *testing.T) {
 
 // TestBuildEdgeListener verifies the public-facing edge listener: bound on all
 // interfaces at the configured port, RDS-driven, with the readiness filter
-// ahead of the router.
+// ahead of the router, and strip_any_host_port enabled for Gateway API hostname
+// matching (port-agnostic per the spec).
 func TestBuildEdgeListener(t *testing.T) {
 	l := BuildEdgeListener(EdgeListenerName, 8080, nil)
 
@@ -75,6 +76,17 @@ func TestBuildEdgeListener(t *testing.T) {
 	require.GreaterOrEqual(t, len(hcm.GetHttpFilters()), 2)
 	assert.Equal(t, httpHealthCheckFilterName, hcm.GetHttpFilters()[0].GetName())
 	assert.Equal(t, httpRouterFilterName, hcm.GetHttpFilters()[len(hcm.GetHttpFilters())-1].GetName())
+
+	// strip_any_host_port must be set on edge listeners: Gateway API hostname
+	// matching is port-agnostic, but Go HTTP clients (including the Gateway API
+	// conformance suite) include the port in the Host header even for the standard
+	// port (e.g. "baz.bar.com:80"). Without stripping, the ":authority" header
+	// "baz.bar.com:80" misses the vhost domain "baz.bar.com" and falls to the
+	// catch-all "*", causing HTTPRouteListenerHostnameMatching and
+	// HTTPRouteHostnameIntersection to fail. The node/east-west outbound HCM must
+	// NOT strip ports (FQDN:port is a routing selector there — proposal 005).
+	assert.True(t, hcm.GetStripAnyHostPort(),
+		"edge listener must strip :port from Host header for Gateway API hostname matching")
 }
 
 // TestBuildEdgeListenerTLS verifies downstream TLS termination: the filter chain
@@ -248,7 +260,8 @@ func TestEdgeGatewayRouteNameUnique(t *testing.T) {
 }
 
 // TestBuildEdgeGatewayHTTPListener verifies the per-Gateway plain-HTTP listener:
-// unique name, bound on the internal port, RDS to the per-Gateway route config.
+// unique name, bound on the internal port, RDS to the per-Gateway route config,
+// and strip_any_host_port enabled.
 func TestBuildEdgeGatewayHTTPListener(t *testing.T) {
 	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18150, false)
 	assert.Equal(t, "edge_gw_ns-a_my-gw_18150", l.GetName())
@@ -262,10 +275,14 @@ func TestBuildEdgeGatewayHTTPListener(t *testing.T) {
 	assert.Equal(t, "edge_rt_ns-a_my-gw", hcm.GetRds().GetRouteConfigName())
 	// Plain HTTP: no transport socket.
 	assert.Nil(t, l.GetFilterChains()[0].GetTransportSocket())
+	// strip_any_host_port must be set (Gateway API hostname matching is port-agnostic).
+	assert.True(t, hcm.GetStripAnyHostPort(),
+		"per-Gateway HTTP listener must strip :port from Host header for hostname matching")
 }
 
 // TestBuildEdgeGatewayHTTPListener_Redirect verifies the per-Gateway HTTP→HTTPS
-// redirect listener uses an inline route config (no RDS) with the per-Gateway name.
+// redirect listener uses an inline route config (no RDS) with the per-Gateway name
+// and carries strip_any_host_port.
 func TestBuildEdgeGatewayHTTPListener_Redirect(t *testing.T) {
 	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18151, true)
 	assert.Equal(t, "edge_gw_ns-a_my-gw_18151", l.GetName())
@@ -279,10 +296,14 @@ func TestBuildEdgeGatewayHTTPListener_Redirect(t *testing.T) {
 	red := rc.GetVirtualHosts()[0].GetRoutes()[0].GetRedirect()
 	require.NotNil(t, red)
 	assert.True(t, red.GetHttpsRedirect())
+	// strip_any_host_port: set for consistency with routing listeners.
+	assert.True(t, hcm.GetStripAnyHostPort(),
+		"redirect listener carries strip_any_host_port for consistency")
 }
 
 // TestBuildEdgeGatewayHTTPSListener verifies the per-Gateway HTTPS listener
-// terminates TLS, uses the per-Gateway route config, and has the unique name.
+// terminates TLS, uses the per-Gateway route config, has the unique name, and
+// carries strip_any_host_port.
 func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
 	l := BuildEdgeGatewayHTTPSListener("ns-b", "secure-gw", 18160, []string{"kubernetes/my-cert"})
 	assert.Equal(t, "edge_gw_ns-b_secure-gw_18160", l.GetName())
@@ -297,6 +318,9 @@ func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
 	require.NoError(t, fc.GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 	// Routes via per-Gateway RDS route config.
 	assert.Equal(t, "edge_rt_ns-b_secure-gw", hcm.GetRds().GetRouteConfigName())
+	// strip_any_host_port must be set (HTTPS clients include the port in Host).
+	assert.True(t, hcm.GetStripAnyHostPort(),
+		"per-Gateway HTTPS listener must strip :port from Host header for hostname matching")
 }
 
 // TestBuildEdgeGatewayRouteConfiguration verifies per-Gateway route config:

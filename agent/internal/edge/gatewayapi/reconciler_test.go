@@ -1055,6 +1055,51 @@ func TestBuildVirtualHost_ValidBackend_NormalRoute(t *testing.T) {
 	require.NotNil(t, rt.Redirect)
 }
 
+// --- Wildcard hostname intersection (HTTPRouteListenerHostnameMatching /
+// HTTPRouteHostnameIntersection conformance regression guards) ---
+
+// TestEffectiveHostnames_WildcardIntersectSpecific is the primary conformance
+// regression guard for HTTPRouteListenerHostnameMatching: a route with hostname
+// "baz.bar.com" on a Gateway listener "*.bar.com" must yield effective host
+// "baz.bar.com" (specific wins over wildcard), never the catch-all "".
+func TestEffectiveHostnames_WildcardIntersectSpecific(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("ns", "gw", "*.bar.com")}
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"ns/gw"}
+
+	got := effectiveHostnames([]string{"baz.bar.com"}, gwKeys, m)
+	require.Len(t, got, 1)
+	assert.Equal(t, "baz.bar.com", got[0],
+		"wildcard listener ∩ specific route → specific host (never catch-all)")
+}
+
+// TestEffectiveHostnames_WildcardIntersectWildcard verifies that
+// "*.bar.com" listener ∩ "*.bar.com" route = "*.bar.com" (wildcard vhost,
+// NOT the catch-all "").
+func TestEffectiveHostnames_WildcardIntersectWildcard(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("ns", "gw", "*.bar.com")}
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"ns/gw"}
+
+	got := effectiveHostnames([]string{"*.bar.com"}, gwKeys, m)
+	require.Len(t, got, 1)
+	assert.Equal(t, "*.bar.com", got[0],
+		"wildcard listener ∩ wildcard route (same suffix) → wildcard named vhost (not catch-all)")
+}
+
+// TestEffectiveHostnames_NoIntersection_DifferentSuffix verifies that
+// "*.a.com" ∩ "*.b.com" = no match (empty → route discarded). This is the
+// negative case that must return 404 for an unmatched hostname.
+func TestEffectiveHostnames_NoIntersection_DifferentSuffix(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("ns", "gw", "*.a.com")}
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"ns/gw"}
+
+	got := effectiveHostnames([]string{"foo.b.com"}, gwKeys, m)
+	assert.Empty(t, got,
+		"different-suffix wildcard ∩ specific → no match (route discarded, request gets 404)")
+}
+
 // TestBuildVirtualHost_InvalidBackend_PathMatchPreserved verifies that the 500
 // direct_response route carries the path match predicates from the match block,
 // including exact path and header matches, so the route only fires for the right
