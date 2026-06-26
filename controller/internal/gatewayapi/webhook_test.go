@@ -72,13 +72,15 @@ func TestAllowsUniqueHost(t *testing.T) {
 	assert.True(t, resp.Allowed, "a host claimed by nobody else is admitted")
 }
 
-func TestRejectsDuplicateHostSameGateway(t *testing.T) {
+func TestAllowsDuplicateHostSameGateway(t *testing.T) {
 	// Two routes (in different namespaces) attached to the SAME shared Gateway
-	// (aether-ingress/edge) claiming the same FQDN collide.
+	// claiming the same FQDN are now ADMITTED: the data plane merges their routes in
+	// path-specificity / creationTimestamp order. Previously this was rejected
+	// (each FQDN allowed only one route per Gateway), but Gateway API allows it and
+	// the conformance suite's HTTPRouteMatchingAcrossRoutes test requires it.
 	v := newValidator(route("owner", "team-a", "aether-ingress/edge", "api.example.com"))
-	resp := handle(t, v, route("intruder", "team-b", "aether-ingress/edge", "api.example.com"))
-	require.False(t, resp.Allowed, "a host claimed by another HTTPRoute on the same Gateway is rejected")
-	assert.Contains(t, resp.Result.Message, "team-a/owner")
+	resp := handle(t, v, route("peer", "team-b", "aether-ingress/edge", "api.example.com"))
+	assert.True(t, resp.Allowed, "same-host routes on the same Gateway are now admitted (data plane merges)")
 }
 
 func TestAllowsDuplicateHostDifferentGateway(t *testing.T) {
@@ -112,4 +114,29 @@ func TestAllowsHostlessRoute(t *testing.T) {
 	v := newValidator(route("owner", "aether-ingress", "edge", "api.example.com"))
 	resp := handle(t, v, route("paths", "aether-ingress", "edge"))
 	assert.True(t, resp.Allowed, "a hostname-less HTTPRoute is admitted")
+}
+
+// TestAllowsMultipleSameHostSameGateway verifies that three HTTPRoutes sharing one
+// hostname on one Gateway are all admitted — this is the Gateway API
+// HTTPRouteMatchingAcrossRoutes scenario.
+func TestAllowsMultipleSameHostSameGateway(t *testing.T) {
+	existing := []client.Object{
+		route("route-a", "ns", "aether-ingress/edge", "shared.example.com"),
+		route("route-b", "ns", "aether-ingress/edge", "shared.example.com"),
+	}
+	v := newValidator(existing...)
+	resp := handle(t, v, route("route-c", "ns", "aether-ingress/edge", "shared.example.com"))
+	assert.True(t, resp.Allowed, "multiple HTTPRoutes sharing a hostname on one Gateway are all admitted (merge semantics)")
+}
+
+// TestInvalidJSONDenied verifies that a structurally-broken HTTPRoute is rejected
+// at the JSON decode step.
+func TestInvalidJSONDenied(t *testing.T) {
+	v := newValidator()
+	resp := v.Handle(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Object: runtime.RawExtension{Raw: []byte("not-json")},
+		},
+	})
+	assert.False(t, resp.Allowed, "malformed JSON must be denied")
 }

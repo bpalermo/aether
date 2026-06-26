@@ -488,9 +488,10 @@ func (f *fakeSink) SetVirtualHosts(_ []cache.VirtualHost) {}
 func (f *fakeSink) SetEdgeTLSSecrets(_ context.Context, _ map[string]cache.EdgeTLSCert) error {
 	return nil
 }
-func (f *fakeSink) SetEdgeTCPRoutes(_ []proxy.EdgeL4TCPRoute) {}
-func (f *fakeSink) SetEdgeTLSRoutes(_ []proxy.EdgeL4TLSRoute) {}
-func (f *fakeSink) SetEdgeHTTPRedirect(enabled bool)          { f.httpRedirect = enabled }
+func (f *fakeSink) SetEdgeTCPRoutes(_ []proxy.EdgeL4TCPRoute)  {}
+func (f *fakeSink) SetEdgeTLSRoutes(_ []proxy.EdgeL4TLSRoute)  {}
+func (f *fakeSink) SetEdgeHTTPRedirect(enabled bool)           { f.httpRedirect = enabled }
+func (f *fakeSink) SetEdgeGateways(_ []cache.EdgeGatewayEntry) {}
 
 // TestHTTPRedirectAnnotation verifies that the reconciler reads the
 // gateway.aether.io/http-redirect annotation from Gateways and calls
@@ -565,4 +566,151 @@ func TestHTTPRedirectAnnotation(t *testing.T) {
 			assert.Equal(t, tc.wantRedirect, sink.httpRedirect)
 		})
 	}
+}
+
+// --- Gateway hostname intersection tests ---
+
+// makeGateway constructs a Gateway with listener hostnames for testing.
+// Empty string in hostnames = listener with no hostname constraint.
+func makeGateway(ns, name string, hostnames ...string) gatewayv1.Gateway {
+	gw := gatewayv1.Gateway{}
+	gw.Namespace = ns
+	gw.Name = name
+	for i, h := range hostnames {
+		ln := gatewayv1.Listener{
+			Name:     gatewayv1.SectionName(strings.Repeat("l", i+1)),
+			Port:     80,
+			Protocol: gatewayv1.HTTPProtocolType,
+		}
+		if h != "" {
+			hn := gatewayv1.Hostname(h)
+			ln.Hostname = &hn
+		}
+		gw.Spec.Listeners = append(gw.Spec.Listeners, ln)
+	}
+	return gw
+}
+
+// TestBuildGatewayListenerHostnames verifies the listener-hostname map is built
+// correctly: one entry per Gateway key, with deduplication of repeated hostnames.
+func TestBuildGatewayListenerHostnames(t *testing.T) {
+	gws := []gatewayv1.Gateway{
+		makeGateway("ns", "gw-a", "*.example.com", "other.example.com"),
+		makeGateway("ns", "gw-b", ""), // no hostname = catch-all
+	}
+	m := buildGatewayListenerHostnames(gws)
+	require.Len(t, m, 2)
+	assert.ElementsMatch(t, []string{"*.example.com", "other.example.com"}, m["ns/gw-a"])
+	assert.Equal(t, []string{""}, m["ns/gw-b"])
+}
+
+// TestBuildGatewayListenerHostnames_DedupListenerHostnames verifies that a Gateway
+// with two listeners sharing the same hostname (e.g. two ports) yields only one
+// hostname entry.
+func TestBuildGatewayListenerHostnames_DedupListenerHostnames(t *testing.T) {
+	gw := makeGateway("ns", "gw", "*.example.com", "*.example.com")
+	m := buildGatewayListenerHostnames([]gatewayv1.Gateway{gw})
+	assert.Equal(t, []string{"*.example.com"}, m["ns/gw"], "duplicate listener hostname is deduped")
+}
+
+// TestHostnameIntersect covers the pairwise intersection cases.
+func TestHostnameIntersect(t *testing.T) {
+	tests := []struct {
+		a, b    string
+		wantH   string
+		wantOK  bool
+		comment string
+	}{
+		{"a.example.com", "a.example.com", "a.example.com", true, "exact == exact"},
+		{"a.example.com", "b.example.com", "", false, "different exacts don't match"},
+		{"*.example.com", "a.example.com", "a.example.com", true, "listener wildcard ∩ route specific → specific"},
+		{"*.example.com", "a.other.com", "", false, "wildcard does not match different suffix"},
+		{"a.example.com", "*.example.com", "a.example.com", true, "route wildcard ∩ listener specific → specific"},
+		{"*.example.com", "*.example.com", "*.example.com", true, "wildcard == wildcard"},
+		{"*.example.com", "*.other.com", "", false, "different wildcards don't match"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.comment, func(t *testing.T) {
+			h, ok := hostnameIntersect(tc.a, tc.b)
+			assert.Equal(t, tc.wantOK, ok, "match result")
+			if tc.wantOK {
+				assert.Equal(t, tc.wantH, h, "result hostname")
+			}
+		})
+	}
+}
+
+// TestEffectiveHostnames_WildcardListener verifies the primary conformance case:
+// route "a.example.com" on listener "*.example.com" → effective host "a.example.com"
+// (NOT "*"), and route "" (no hostname) → inherits "*.example.com" from the listener.
+func TestEffectiveHostnames_WildcardListener(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("ns", "gw", "*.example.com")}
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"ns/gw"}
+
+	// Route with explicit hostname that matches the wildcard listener.
+	got := effectiveHostnames([]string{"a.example.com"}, gwKeys, m)
+	assert.Equal(t, []string{"a.example.com"}, got, "specific route host ∩ wildcard listener → specific host")
+
+	// Route with no hostnames inherits the listener's hostname.
+	got2 := effectiveHostnames(nil, gwKeys, m)
+	assert.Equal(t, []string{"*.example.com"}, got2, "hostname-less route inherits listener's hostname")
+}
+
+// TestEffectiveHostnames_NoIntersection verifies that a route whose hostname does
+// not match any listener hostname on the attached Gateway returns an empty slice.
+func TestEffectiveHostnames_NoIntersection(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("ns", "gw", "*.example.com")}
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"ns/gw"}
+
+	got := effectiveHostnames([]string{"a.other.com"}, gwKeys, m)
+	assert.Empty(t, got, "host not matching any listener hostname → empty (not admitted)")
+}
+
+// TestEffectiveHostnames_ListenerNoHostname verifies that a listener with no
+// hostname constraint admits all route hostnames unchanged. A route with no
+// hostnames on a no-hostname listener is the true catch-all — the returned slice
+// is empty, causing buildEdgeVhostsLocked to route to the "*" catch-all vhost.
+func TestEffectiveHostnames_ListenerNoHostname(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("ns", "gw", "")} // listener with no hostname
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"ns/gw"}
+
+	// Route with explicit hostnames: all admitted through the no-hostname listener.
+	got := effectiveHostnames([]string{"a.example.com", "b.example.com"}, gwKeys, m)
+	assert.ElementsMatch(t, []string{"a.example.com", "b.example.com"}, got, "no-hostname listener admits all route hosts")
+
+	// Route with no hostnames on no-hostname listener: catch-all, empty result.
+	got2 := effectiveHostnames(nil, gwKeys, m)
+	assert.Empty(t, got2, "hostname-less route on no-hostname listener → catch-all (empty)")
+}
+
+// TestEffectiveHostnames_MultiGatewayUnion verifies the multi-Gateway union
+// semantics: a route attaching to two Gateways with different listener hostnames
+// gets the union of both intersections.
+func TestEffectiveHostnames_MultiGatewayUnion(t *testing.T) {
+	gws := []gatewayv1.Gateway{
+		makeGateway("ns", "gw-a", "*.example.com"),
+		makeGateway("ns", "gw-b", "*.other.com"),
+	}
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"ns/gw-a", "ns/gw-b"}
+
+	// Route declares hosts from both wildcard domains.
+	got := effectiveHostnames([]string{"api.example.com", "api.other.com"}, gwKeys, m)
+	assert.ElementsMatch(t, []string{"api.example.com", "api.other.com"}, got, "multi-Gateway union of intersections")
+}
+
+// TestEffectiveHostnames_APIPalermoDev is the api.palermo.dev regression guard:
+// a route declaring "api.palermo.dev" attached to a Gateway with listener
+// "*.palermo.dev" must yield effective host "api.palermo.dev" (never "*").
+func TestEffectiveHostnames_APIPalermoDev(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("aether-ingress", "edge", "*.palermo.dev")}
+	m := buildGatewayListenerHostnames(gws)
+	gwKeys := []string{"aether-ingress/edge"}
+
+	got := effectiveHostnames([]string{"api.palermo.dev"}, gwKeys, m)
+	require.Len(t, got, 1)
+	assert.Equal(t, "api.palermo.dev", got[0], "api.palermo.dev regression: must not become *")
 }

@@ -124,6 +124,12 @@ func TestSetVirtualHostsDependencySet(t *testing.T) {
 // the vhost domains, a non-default port targets the per-port cluster, and a route
 // WITHOUT hosts becomes the catch-all "*" vhost (Gateway API: a hostname-less route
 // matches all hosts on its listener).
+//
+// With the hostname-merge design, each domain in a VirtualHost.Hosts list gets its
+// own Envoy vhost entry (one vhost per distinct hostname). A VirtualHost with two
+// hostnames emits two Envoy vhosts that share the same routes — this is equivalent
+// to the old single-vhost-with-multiple-domains output and passes Envoy validation
+// (no duplicate domains across vhosts).
 func TestVirtualHostVhosts(t *testing.T) {
 	c := newTestCache("edge-1")
 
@@ -143,7 +149,10 @@ func TestVirtualHostVhosts(t *testing.T) {
 	})
 
 	vhosts := c.virtualHostVhosts()
-	require.Len(t, vhosts, 3)
+	// 4 = api.example.com + api2.example.com + grpc.example.com + catch-all "*".
+	// (One Envoy vhost per distinct hostname; "api.example.com" and "api2.example.com"
+	// are siblings from the same VirtualHost and each gets its own Envoy vhost.)
+	require.Len(t, vhosts, 4)
 
 	byName := map[string]*routev3.VirtualHost{}
 	for _, vh := range vhosts {
@@ -151,8 +160,12 @@ func TestVirtualHostVhosts(t *testing.T) {
 	}
 
 	require.NotNil(t, byName["api.example.com"])
-	assert.Equal(t, []string{"api.example.com", "api2.example.com"}, byName["api.example.com"].GetDomains())
+	assert.Equal(t, []string{"api.example.com"}, byName["api.example.com"].GetDomains())
 	assert.Equal(t, "svc-1.aether.internal", byName["api.example.com"].GetRoutes()[0].GetRoute().GetCluster())
+
+	require.NotNil(t, byName["api2.example.com"], "api2.example.com gets its own Envoy vhost (one per domain)")
+	assert.Equal(t, []string{"api2.example.com"}, byName["api2.example.com"].GetDomains())
+	assert.Equal(t, "svc-1.aether.internal", byName["api2.example.com"].GetRoutes()[0].GetRoute().GetCluster())
 
 	require.NotNil(t, byName["grpc.example.com"])
 	assert.Equal(t, []string{"grpc.example.com"}, byName["grpc.example.com"].GetDomains())
@@ -232,10 +245,13 @@ func TestVirtualHostPathRoutes(t *testing.T) {
 	assert.Equal(t, "svc-3.aether.internal", routes[2].GetRoute().GetCluster())
 }
 
-// TestVirtualHostVhostsDedupDomains verifies a host claimed by an earlier vhost
-// is dropped from later ones (Envoy NACKs duplicate domains) — the runtime
-// backstop to the controller's duplicate-FQDN webhook, keep-first by input order.
-func TestVirtualHostVhostsDedupDomains(t *testing.T) {
+// TestVirtualHostVhostsMergeSharedDomains verifies that a host appearing in
+// multiple VirtualHosts is MERGED into one Envoy vhost (routes from all
+// contributors combined) rather than kept-first-drop. Envoy NACKs duplicate
+// domains, so the merge guarantees exactly one domain entry in the output.
+// This replaces the old keep-first behavior now that Gateway API allows multiple
+// HTTPRoutes to share a hostname on one Gateway.
+func TestVirtualHostVhostsMergeSharedDomains(t *testing.T) {
 	c := newTestCache("edge-1")
 
 	// Register services as mesh so edgeClusterNameLocked resolves to mesh names.
@@ -244,17 +260,40 @@ func TestVirtualHostVhostsDedupDomains(t *testing.T) {
 	c.clusters["svc-2"] = clusterEntry{service: "svc-2"}
 	c.clusterMu.Unlock()
 
+	// First vhost: only a.example.com → svc-1.
+	// Second vhost: a.example.com AND b.example.com → svc-2.
+	// Expected: a.example.com gets routes from BOTH vhosts merged; b.example.com
+	// gets only svc-2.
 	c.SetVirtualHosts([]VirtualHost{
-		{Hosts: []string{"a.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-1"}}},
-		{Hosts: []string{"a.example.com", "b.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-2"}}},
+		{Hosts: []string{"a.example.com"}, Routes: []Route{{Prefix: "/a1", Service: "svc-1"}}},
+		{Hosts: []string{"a.example.com", "b.example.com"}, Routes: []Route{{Prefix: "/a2", Service: "svc-2"}}},
 	})
 
 	vhosts := c.virtualHostVhosts()
-	require.Len(t, vhosts, 2)
-	assert.Equal(t, []string{"a.example.com"}, vhosts[0].GetDomains())
-	assert.Equal(t, "svc-1.aether.internal", vhosts[0].GetRoutes()[0].GetRoute().GetCluster())
-	assert.Equal(t, []string{"b.example.com"}, vhosts[1].GetDomains(), "the duplicate host is dropped from the later vhost")
-	assert.Equal(t, "svc-2.aether.internal", vhosts[1].GetRoutes()[0].GetRoute().GetCluster())
+	require.Len(t, vhosts, 2, "one vhost per distinct hostname")
+
+	byDomain := map[string]*routev3.VirtualHost{}
+	for _, vh := range vhosts {
+		byDomain[vh.GetName()] = vh
+	}
+
+	// a.example.com: domains listed exactly once; routes from both contributors.
+	aVH := byDomain["a.example.com"]
+	require.NotNil(t, aVH)
+	assert.Equal(t, []string{"a.example.com"}, aVH.GetDomains(), "domain listed exactly once (no duplicates)")
+	require.Len(t, aVH.GetRoutes(), 2, "routes from both VirtualHosts are present")
+	clusters := []string{
+		aVH.GetRoutes()[0].GetRoute().GetCluster(),
+		aVH.GetRoutes()[1].GetRoute().GetCluster(),
+	}
+	assert.ElementsMatch(t, []string{"svc-1.aether.internal", "svc-2.aether.internal"}, clusters)
+
+	// b.example.com: only the second vhost's route.
+	bVH := byDomain["b.example.com"]
+	require.NotNil(t, bVH)
+	assert.Equal(t, []string{"b.example.com"}, bVH.GetDomains())
+	require.Len(t, bVH.GetRoutes(), 1)
+	assert.Equal(t, "svc-2.aether.internal", bVH.GetRoutes()[0].GetRoute().GetCluster())
 }
 
 func TestPerDownstreamConnectionPool(t *testing.T) {
@@ -586,6 +625,99 @@ func TestEdgeK8sBackendClusters_NonMeshOnly(t *testing.T) {
 	ep := cl.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
 	assert.Equal(t, "plain-svc.conformance-ns.svc.cluster.local", ep.GetAddress())
 	assert.Equal(t, uint32(9000), ep.GetPortValue())
+}
+
+// TestVirtualHostVhostsSameHostMerge verifies that two VirtualHosts sharing a
+// hostname have their routes MERGED into ONE Envoy vhost — not keep-first-drop.
+// This is the Gateway API HTTPRouteMatchingAcrossRoutes behavior: multiple
+// HTTPRoutes sharing a hostname on one Gateway must all contribute their routes.
+func TestVirtualHostVhostsSameHostMerge(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-a"] = clusterEntry{service: "svc-a"}
+	c.clusters["svc-b"] = clusterEntry{service: "svc-b"}
+	c.clusterMu.Unlock()
+
+	// Two VirtualHosts sharing "shared.example.com" — different services on different prefixes.
+	c.SetVirtualHosts([]VirtualHost{
+		{Hosts: []string{"shared.example.com"}, Routes: []Route{{Prefix: "/api", Service: "svc-a"}}},
+		{Hosts: []string{"shared.example.com"}, Routes: []Route{{Prefix: "/web", Service: "svc-b"}}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	// Must produce exactly ONE vhost for shared.example.com (not two, not one with the other dropped).
+	var sharedVH []*routev3.VirtualHost
+	for _, vh := range vhosts {
+		if vh.GetName() == "shared.example.com" {
+			sharedVH = append(sharedVH, vh)
+		}
+	}
+	require.Len(t, sharedVH, 1, "two VirtualHosts sharing a hostname must merge into ONE Envoy vhost")
+	routes := sharedVH[0].GetRoutes()
+	require.Len(t, routes, 2, "both routes from both VirtualHosts must be present")
+	prefixes := []string{routes[0].GetMatch().GetPrefix(), routes[1].GetMatch().GetPrefix()}
+	assert.ElementsMatch(t, []string{"/api", "/web"}, prefixes, "both routes present after merge")
+}
+
+// TestVirtualHostVhostsSameHostMerge_Specificity verifies that merged routes are
+// ordered by Gateway API path specificity: Exact > longer prefix > shorter prefix.
+func TestVirtualHostVhostsSameHostMerge_Specificity(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-a"] = clusterEntry{service: "svc-a"}
+	c.clusters["svc-b"] = clusterEntry{service: "svc-b"}
+	c.clusters["svc-c"] = clusterEntry{service: "svc-c"}
+	c.clusterMu.Unlock()
+
+	// Three VirtualHosts sharing "api.example.com", routes at /, /v2, /v2/exact.
+	c.SetVirtualHosts([]VirtualHost{
+		{Hosts: []string{"api.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-a"}}},
+		{Hosts: []string{"api.example.com"}, Routes: []Route{{Prefix: "/v2", Service: "svc-b"}}},
+		{Hosts: []string{"api.example.com"}, Routes: []Route{{Exact: "/v2/exact", Service: "svc-c"}}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	var merged *routev3.VirtualHost
+	for _, vh := range vhosts {
+		if vh.GetName() == "api.example.com" {
+			merged = vh
+		}
+	}
+	require.NotNil(t, merged, "merged vhost must be present")
+	routes := merged.GetRoutes()
+	require.Len(t, routes, 3)
+	// Exact first.
+	assert.Equal(t, "/v2/exact", routes[0].GetMatch().GetPath(), "exact match must be first")
+	// Longer prefix second.
+	assert.Equal(t, "/v2", routes[1].GetMatch().GetPrefix(), "longer prefix must be second")
+	// Catch-all prefix last.
+	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix(), "catch-all prefix must be last")
+}
+
+// TestVirtualHostVhostsSameHostMerge_DomainsNotDuplicated verifies that the merged
+// Envoy vhost only has the domain listed ONCE, not once per contributing VirtualHost
+// (Envoy NACKs duplicate domains).
+func TestVirtualHostVhostsSameHostMerge_DomainsNotDuplicated(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.clusterMu.Lock()
+	c.clusters["svc-a"] = clusterEntry{service: "svc-a"}
+	c.clusters["svc-b"] = clusterEntry{service: "svc-b"}
+	c.clusterMu.Unlock()
+
+	c.SetVirtualHosts([]VirtualHost{
+		{Hosts: []string{"shared.example.com"}, Routes: []Route{{Prefix: "/a", Service: "svc-a"}}},
+		{Hosts: []string{"shared.example.com"}, Routes: []Route{{Prefix: "/b", Service: "svc-b"}}},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	for _, vh := range vhosts {
+		if vh.GetName() == "shared.example.com" {
+			domains := vh.GetDomains()
+			assert.Equal(t, []string{"shared.example.com"}, domains, "domain must appear exactly ONCE (Envoy NACKs duplicates)")
+			return
+		}
+	}
+	t.Fatal("shared.example.com vhost not found")
 }
 
 // TestBuildEdgeK8sCluster verifies the cluster builder produces a STRICT_DNS
