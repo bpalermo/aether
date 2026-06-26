@@ -148,9 +148,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	if err := r.List(ctx, httpRoutes); err != nil {
 		return reconcile.Result{}, err
 	}
-	// Deterministic order so keep-first host-dedup in the cache is stable. Sort by
-	// namespace+name now that routes may span namespaces.
+	// Deterministic order so (a) keep-first host-dedup in the cache is stable and
+	// (b) the Gateway API tie-break for routes of equal path specificity is correct:
+	// oldest creationTimestamp first, then namespace, then name. The cache's stable
+	// path-specificity sort preserves this order for equal-specificity routes.
 	slices.SortFunc(httpRoutes.Items, func(a, b gatewayv1.HTTPRoute) int {
+		ta := a.CreationTimestamp.Time
+		tb := b.CreationTimestamp.Time
+		if ta.Before(tb) {
+			return -1
+		}
+		if tb.Before(ta) {
+			return 1
+		}
 		if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
 			return c
 		}

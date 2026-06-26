@@ -11,6 +11,41 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
+// routeSpecificity returns the sort key for a Route per Gateway API precedence:
+// Exact matches are most specific (2), PathPrefix matches rank by descending prefix
+// length (so a longer prefix wins over a shorter one). No-path routes default to
+// prefix "/" (length 1). A higher return value means higher precedence.
+func routeSpecificity(r Route) int {
+	if r.Exact != "" {
+		// Exact matches outrank any prefix; use a large constant above the max path len.
+		return 1<<30 + 1
+	}
+	p := r.Prefix
+	if p == "" {
+		p = "/"
+	}
+	return len(p)
+}
+
+// sortRoutesBySpecificity stable-sorts a Route slice in-place by Gateway API path
+// precedence (most-specific first): Exact > longer PathPrefix > shorter PathPrefix.
+// It is stable so the caller's tie-break order (creationTimestamp / namespace / name
+// / rule index, established by the reconciler's sort of HTTPRoute objects) is
+// preserved for routes with equal specificity.
+func sortRoutesBySpecificity(routes []Route) {
+	slices.SortStableFunc(routes, func(a, b Route) int {
+		sa, sb := routeSpecificity(a), routeSpecificity(b)
+		if sa != sb {
+			// Descending: higher specificity comes first.
+			if sa > sb {
+				return -1
+			}
+			return 1
+		}
+		return 0
+	})
+}
+
 // EdgeGatewayListenerEntry describes one listener port within a per-Gateway entry.
 // ExternalPort is the Gateway listener's declared port (e.g. 80 or 443).
 // InternalPort is the container port allocated by the port allocator that the
@@ -194,25 +229,28 @@ func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost) []*routev3.Vir
 // listener (Gateway API semantics — a hostname-less HTTPRoute is not host-scoped);
 // such routes are merged into a single catch-all "*" vhost. There can be only one
 // "*" per route table (duplicate domains NACK), so all hostname-less routes share
-// it, in input order (the reconciler sorts by namespace/name for determinism).
+// it.
+//
+// Gateway API route-matching precedence (applied per output vhost):
+// Exact > PathPrefix by descending prefix length. Within ties the input order is
+// preserved — the reconciler sorts HTTPRoutes by creationTimestamp/namespace/name
+// before building vhosts, so that tie-break carries through the stable sort here.
+//
 // Caller must hold clusterMu.
 func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.VirtualHost {
 	used := make(map[string]struct{})
 	out := make([]*routev3.VirtualHost, 0, len(vhosts))
-	var catchAll []*routev3.Route
+	var catchAllRoutes []Route
 	for _, v := range vhosts {
-		routes := make([]*routev3.Route, 0, len(v.Routes))
+		// Collect admissible routes (has a service or redirect).
+		admitted := make([]Route, 0, len(v.Routes))
 		for _, r := range v.Routes {
 			if r.Redirect == nil && r.Service == "" {
 				continue
 			}
-			cluster := ""
-			if r.Service != "" {
-				cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
-			}
-			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
+			admitted = append(admitted, r)
 		}
-		if len(routes) == 0 {
+		if len(admitted) == 0 {
 			continue
 		}
 		domains := make([]string, 0, len(v.Hosts))
@@ -228,14 +266,36 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 		}
 		if len(domains) == 0 {
 			// Hostname-less route: matches all hosts on its listener. Accumulate into
-			// the single "*" catch-all vhost emitted after the loop.
-			catchAll = append(catchAll, routes...)
+			// the single "*" catch-all vhost emitted after the loop. Preserve input
+			// order here; the catchAllRoutes slice is sorted as a whole below.
+			catchAllRoutes = append(catchAllRoutes, admitted...)
 			continue
+		}
+		// Apply Gateway API path-specificity sort (stable — preserves tie-break order).
+		sortRoutesBySpecificity(admitted)
+		routes := make([]*routev3.Route, 0, len(admitted))
+		for _, r := range admitted {
+			cluster := ""
+			if r.Service != "" {
+				cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
+			}
+			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
 		}
 		out = append(out, proxy.BuildEdgeVirtualHost(domains[0], domains, routes))
 	}
-	if len(catchAll) > 0 {
+	if len(catchAllRoutes) > 0 {
 		if _, ok := used["*"]; !ok {
+			// Sort the merged catch-all routes by path specificity. Ties preserve the
+			// input order (creationTimestamp/namespace/name tie-break from the reconciler).
+			sortRoutesBySpecificity(catchAllRoutes)
+			catchAll := make([]*routev3.Route, 0, len(catchAllRoutes))
+			for _, r := range catchAllRoutes {
+				cluster := ""
+				if r.Service != "" {
+					cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
+				}
+				catchAll = append(catchAll, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
+			}
 			out = append(out, proxy.BuildEdgeVirtualHost("*", []string{"*"}, catchAll))
 		}
 	}
