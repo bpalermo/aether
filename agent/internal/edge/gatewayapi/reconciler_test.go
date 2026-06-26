@@ -41,7 +41,8 @@ func pathMatch(t gatewayv1.PathMatchType, v string) []gatewayv1.HTTPRouteMatch {
 }
 
 // TestBuildVirtualHost: hostnames → domains, path matches → routes (prefix/exact),
-// first backendRef → service, default "/" when no match.
+// backends → Backends list + legacy Service/Port/BackendNamespace from first backend,
+// default "/" when no match.
 func TestBuildVirtualHost(t *testing.T) {
 	r := &Reconciler{}
 	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
@@ -52,11 +53,30 @@ func TestBuildVirtualHost(t *testing.T) {
 	vh := r.buildVirtualHost(hr, nil, nil)
 
 	assert.Equal(t, []string{"api.example.com"}, vh.Hosts)
-	assert.Equal(t, []cache.Route{
-		{Prefix: "/echo", Service: "echo"},
-		{Exact: "/exact", Service: "svc-2", Port: 8080},
-		{Prefix: "/", Service: "svc-1"},
-	}, vh.Routes)
+	require.Len(t, vh.Routes, 3)
+
+	// Route 0: /echo → echo (weight=1, default). Namespace defaults to route's own (empty).
+	r0 := vh.Routes[0]
+	assert.Equal(t, "/echo", r0.Prefix)
+	assert.Equal(t, "echo", r0.Service)
+	require.Len(t, r0.Backends, 1)
+	assert.Equal(t, cache.RouteBackend{Service: "echo", BackendNamespace: "", Port: 0, Weight: 1}, r0.Backends[0])
+
+	// Route 1: /exact → svc-2:8080 (weight=1, default).
+	r1 := vh.Routes[1]
+	assert.Equal(t, "/exact", r1.Exact)
+	assert.Equal(t, "svc-2", r1.Service)
+	assert.Equal(t, uint32(8080), r1.Port)
+	require.Len(t, r1.Backends, 1)
+	assert.Equal(t, cache.RouteBackend{Service: "svc-2", BackendNamespace: "", Port: 8080, Weight: 1}, r1.Backends[0])
+
+	// Route 2: default "/" → svc-1 (weight=1, default).
+	r2 := vh.Routes[2]
+	assert.Equal(t, "/", r2.Prefix)
+	assert.Equal(t, "svc-1", r2.Service)
+	require.Len(t, r2.Backends, 1)
+	assert.Equal(t, cache.RouteBackend{Service: "svc-1", BackendNamespace: "", Port: 0, Weight: 1}, r2.Backends[0])
+
 	assert.Empty(t, vh.TLSSecret)
 }
 
@@ -113,6 +133,129 @@ func TestFirstBackendService(t *testing.T) {
 		},
 	}}
 	assert.Equal(t, "echo", firstBackendService(crossRefs, "ns", grants), "granted cross-ns backend kept")
+}
+
+// --- Weighted backendRefs ---
+
+// weightedBackend constructs a multi-backend HTTPBackendRef slice for testing
+// weighted splits (each entry has an explicit weight).
+func weightedBackend(entries ...struct {
+	svc    string
+	port   int32
+	weight int32
+},
+) []gatewayv1.HTTPBackendRef {
+	refs := make([]gatewayv1.HTTPBackendRef, 0, len(entries))
+	for _, e := range entries {
+		ref := gatewayv1.HTTPBackendRef{BackendRef: gatewayv1.BackendRef{
+			BackendObjectReference: gatewayv1.BackendObjectReference{Name: gatewayv1.ObjectName(e.svc)},
+		}}
+		if e.port != 0 {
+			ref.Port = ptr(gatewayv1.PortNumber(e.port))
+		}
+		if e.weight != 0 {
+			w := e.weight
+			ref.Weight = &w
+		}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+// TestBuildHTTPRouteBackends_WeightedSplit verifies that buildHTTPRouteBackends
+// collects all admissible backends with their weights. The primary test for the
+// core weighted backendRefs logic.
+func TestBuildHTTPRouteBackends_WeightedSplit(t *testing.T) {
+	refs := weightedBackend(
+		struct {
+			svc    string
+			port   int32
+			weight int32
+		}{"svc-a", 8080, 3},
+		struct {
+			svc    string
+			port   int32
+			weight int32
+		}{"svc-b", 9090, 1},
+	)
+	got := buildHTTPRouteBackends(refs, "my-ns", nil)
+	require.Len(t, got, 2, "both backends must be admitted")
+	assert.Equal(t, cache.RouteBackend{Service: "svc-a", BackendNamespace: "my-ns", Port: 8080, Weight: 3}, got[0])
+	assert.Equal(t, cache.RouteBackend{Service: "svc-b", BackendNamespace: "my-ns", Port: 9090, Weight: 1}, got[1])
+}
+
+// TestBuildHTTPRouteBackends_DefaultWeight verifies that a backendRef without an
+// explicit weight defaults to 1 (per Gateway API spec).
+func TestBuildHTTPRouteBackends_DefaultWeight(t *testing.T) {
+	refs := backend("svc-1", 8080) // uses the single-backend helper (no Weight field)
+	got := buildHTTPRouteBackends(refs, "ns", nil)
+	require.Len(t, got, 1)
+	assert.Equal(t, uint32(1), got[0].Weight, "nil weight must default to 1")
+}
+
+// TestBuildHTTPRouteBackends_ZeroWeight verifies that an explicit weight=0 is
+// preserved (per spec: zero-weight backend receives no traffic but is valid).
+func TestBuildHTTPRouteBackends_ZeroWeight(t *testing.T) {
+	refs := weightedBackend(struct {
+		svc    string
+		port   int32
+		weight int32
+	}{"svc-x", 80, 0})
+	// Note: our helper only sets Weight when > 0, so we need to set it explicitly.
+	refs[0].Weight = ptr(int32(0))
+	got := buildHTTPRouteBackends(refs, "ns", nil)
+	require.Len(t, got, 1)
+	assert.Equal(t, uint32(0), got[0].Weight, "explicit zero weight must be preserved")
+}
+
+// TestBuildHTTPRouteBackends_UngrantedCrossNsSkipped verifies that a cross-namespace
+// backendRef without a ReferenceGrant is dropped (RefNotPermitted). A same-namespace
+// backend in the same rule is still admitted.
+func TestBuildHTTPRouteBackends_UngrantedCrossNsSkipped(t *testing.T) {
+	otherNs := gatewayv1.Namespace("other")
+	refs := []gatewayv1.HTTPBackendRef{
+		{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "cross", Namespace: &otherNs}}},
+		{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "local"}}},
+	}
+	got := buildHTTPRouteBackends(refs, "ns", nil)
+	require.Len(t, got, 1, "ungranted cross-ns backend dropped, same-ns backend admitted")
+	assert.Equal(t, "local", got[0].Service)
+}
+
+// TestBuildVirtualHost_WeightedBackends verifies that buildVirtualHost projects
+// multiple backendRefs as a Backends list, with per-backend weights and namespaces.
+// The legacy Service/Port/BackendNamespace fields are set from the FIRST backend.
+func TestBuildVirtualHost_WeightedBackends(t *testing.T) {
+	r := &Reconciler{}
+	refs := weightedBackend(
+		struct {
+			svc    string
+			port   int32
+			weight int32
+		}{"svc-a", 8080, 3},
+		struct {
+			svc    string
+			port   int32
+			weight int32
+		}{"svc-b", 9090, 1},
+	)
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
+		{Matches: pathMatch(gatewayv1.PathMatchPathPrefix, "/split"), BackendRefs: refs},
+	})
+	vh := r.buildVirtualHost(hr, nil, nil)
+
+	require.Len(t, vh.Routes, 1)
+	rt := vh.Routes[0]
+	assert.Equal(t, "/split", rt.Prefix)
+
+	// Backends list must contain both entries.
+	require.Len(t, rt.Backends, 2)
+	assert.Equal(t, cache.RouteBackend{Service: "svc-a", BackendNamespace: "", Port: 8080, Weight: 3}, rt.Backends[0])
+	assert.Equal(t, cache.RouteBackend{Service: "svc-b", BackendNamespace: "", Port: 9090, Weight: 1}, rt.Backends[1])
+
+	// Legacy fields must be populated from the first backend.
+	assert.Equal(t, "svc-a", rt.Service, "legacy Service = first backend")
+	assert.Equal(t, uint32(8080), rt.Port, "legacy Port = first backend's port")
 }
 
 // --- L4 edge helpers ---

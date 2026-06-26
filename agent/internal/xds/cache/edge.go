@@ -96,24 +96,51 @@ type VirtualHost struct {
 	Gateways []string
 }
 
+// RouteBackend is one weighted backend within an HTTPRoute rule. It corresponds
+// to one element of backendRefs with its resolved service name, namespace, port,
+// and weight. Weight 0 means the backend receives no traffic but is still a
+// valid entry (per Gateway API — a zero-weight backend is not an error).
+type RouteBackend struct {
+	Service          string
+	BackendNamespace string
+	Port             uint32
+	// Weight is the Gateway API backendRef weight. Defaults to 1 when unset.
+	// The Envoy weighted_clusters total_weight is the sum of all backend weights
+	// within the rule. Weight 0 = backend receives no traffic.
+	Weight uint32
+}
+
 // Route is one path-match -> backend rule within a VirtualHost. Exactly one of
-// Prefix/Exact is set; Port 0 means the service's default port.
+// Prefix/Exact is set.
 // HeaderMutation carries the merged request/response header modifier filters for
 // this rule (nil = no header mutations).
 // When Redirect is non-nil the route returns a redirect response (no backend).
 // When URLRewrite is non-nil the route rewrites the request URL before forwarding.
-// BackendNamespace is the namespace of the backendRef (defaults to the route's own
-// namespace when not set by the reconciler). Used to build the k8s-Service FQDN
-// for non-mesh (cleartext) backends: <service>.<BackendNamespace>.svc.cluster.local.
+//
+// Backends holds the weighted backend list for this rule. When populated,
+// BuildEdgeRoute emits a weighted_clusters action (multiple backends) or a
+// plain single-cluster action (one backend). Backends supersedes the legacy
+// Service/Port/BackendNamespace fields; all three are populated for backward
+// compatibility when there is exactly one backend so existing single-backend
+// code paths continue to work.
+//
+// BackendNamespace is the namespace of the (first) backendRef (defaults to the
+// route's own namespace when not set by the reconciler). Used to build the k8s-
+// Service FQDN for non-mesh (cleartext) backends when Backends is not set.
 type Route struct {
 	Prefix           string
 	Exact            string
 	Service          string
 	Port             uint32
 	BackendNamespace string
-	HeaderMutation   *proxy.GammaHeaderMutation
-	Redirect         *proxy.GammaRedirect
-	URLRewrite       *proxy.GammaURLRewrite
+	// Backends is the weighted backend list for this rule. A single-element list
+	// is equivalent to the legacy Service/Port/BackendNamespace fields. An empty
+	// Backends with a non-empty Service falls back to the legacy single-backend
+	// path so old callers remain compatible.
+	Backends       []RouteBackend
+	HeaderMutation *proxy.GammaHeaderMutation
+	Redirect       *proxy.GammaRedirect
+	URLRewrite     *proxy.GammaURLRewrite
 }
 
 // EdgeTLSCert is raw certificate material for an edge downstream TLS secret,
@@ -279,6 +306,27 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 		}
 	}
 
+	// buildEnvoyRoute converts a cache Route to an Envoy route, resolving each
+	// backend's cluster name via edgeClusterNameLocked (mesh vs k8s cleartext).
+	// Caller must hold clusterMu.
+	buildEnvoyRoute := func(r Route) *routev3.Route {
+		// Weighted multi-backend path: when Backends is populated use it.
+		if len(r.Backends) > 0 {
+			weighted := make([]proxy.WeightedRouteBackend, 0, len(r.Backends))
+			for _, b := range r.Backends {
+				cn := c.edgeClusterNameLocked(b.Service, b.BackendNamespace, b.Port)
+				weighted = append(weighted, proxy.WeightedRouteBackend{Cluster: cn, Weight: b.Weight})
+			}
+			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, weighted, r.HeaderMutation, r.Redirect, r.URLRewrite)
+		}
+		// Legacy single-backend path (backward compat).
+		cluster := ""
+		if r.Service != "" {
+			cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
+		}
+		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite)
+	}
+
 	// Emit one Envoy virtual host per domain group, sorted by path specificity.
 	out := make([]*routev3.VirtualHost, 0, len(domainOrder))
 	for _, domain := range domainOrder {
@@ -286,11 +334,7 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 		sortRoutesBySpecificity(merged)
 		routes := make([]*routev3.Route, 0, len(merged))
 		for _, r := range merged {
-			cluster := ""
-			if r.Service != "" {
-				cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
-			}
-			routes = append(routes, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
+			routes = append(routes, buildEnvoyRoute(r))
 		}
 		out = append(out, proxy.BuildEdgeVirtualHost(domain, []string{domain}, routes))
 	}
@@ -301,11 +345,7 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 		sortRoutesBySpecificity(catchAllRoutes)
 		catchAll := make([]*routev3.Route, 0, len(catchAllRoutes))
 		for _, r := range catchAllRoutes {
-			cluster := ""
-			if r.Service != "" {
-				cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
-			}
-			catchAll = append(catchAll, proxy.BuildEdgeRoute(r.Prefix, r.Exact, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite))
+			catchAll = append(catchAll, buildEnvoyRoute(r))
 		}
 		out = append(out, proxy.BuildEdgeVirtualHost("*", []string{"*"}, catchAll))
 	}
@@ -481,6 +521,17 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 		// on its listener (the edge serves it via the catch-all "*" vhost), so its
 		// backend services must be scoped in (their clusters loaded) too.
 		for _, r := range v.Routes {
+			// Collect from Backends (weighted multi-backend).
+			for _, b := range r.Backends {
+				if b.Service == "" {
+					continue
+				}
+				if _, ok := seen[b.Service]; !ok {
+					seen[b.Service] = struct{}{}
+					services = append(services, b.Service)
+				}
+			}
+			// Legacy single-backend field (also populated for single-backend routes).
 			if r.Service == "" {
 				continue
 			}
@@ -577,21 +628,33 @@ func (c *SnapshotCache) edgeK8sBackendClusters() []types.Resource {
 	seen := make(map[k8sBackend]struct{})
 	var backends []k8sBackend
 
+	addBackend := func(service, namespace string, port uint32) {
+		p := port
+		if p == 0 {
+			p = 80
+		}
+		bk := k8sBackend{namespace: namespace, service: service, port: p}
+		if _, dup := seen[bk]; dup {
+			return
+		}
+		seen[bk] = struct{}{}
+		backends = append(backends, bk)
+	}
+
 	collectRoutes := func(routes []Route) {
 		for _, r := range routes {
+			// Weighted multi-backend: iterate each backend in the list.
+			for _, b := range r.Backends {
+				if b.Service == "" {
+					continue
+				}
+				addBackend(b.Service, b.BackendNamespace, b.Port)
+			}
+			// Legacy single-backend field (also populated for single-backend routes).
 			if r.Service == "" {
 				continue
 			}
-			p := r.Port
-			if p == 0 {
-				p = 80
-			}
-			bk := k8sBackend{namespace: r.BackendNamespace, service: r.Service, port: p}
-			if _, dup := seen[bk]; dup {
-				continue
-			}
-			seen[bk] = struct{}{}
-			backends = append(backends, bk)
+			addBackend(r.Service, r.BackendNamespace, r.Port)
 		}
 	}
 
@@ -644,6 +707,9 @@ func equalRoutes(a, b []Route) bool {
 		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port || ra.BackendNamespace != rb.BackendNamespace {
 			return false
 		}
+		if !equalRouteBackends(ra.Backends, rb.Backends) {
+			return false
+		}
 		if !equalHeaderMutation(ra.HeaderMutation, rb.HeaderMutation) {
 			return false
 		}
@@ -651,6 +717,19 @@ func equalRoutes(a, b []Route) bool {
 			return false
 		}
 		if !equalRouteURLRewrite(ra.URLRewrite, rb.URLRewrite) {
+			return false
+		}
+	}
+	return true
+}
+
+// equalRouteBackends reports whether two RouteBackend slices are identical.
+func equalRouteBackends(a, b []RouteBackend) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

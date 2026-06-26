@@ -446,6 +446,107 @@ func TestBuildEdgeTLSPassthroughListener_EmptyRules(t *testing.T) {
 	}))
 }
 
+// TestBuildEdgeRouteWeighted_MultipleBackends verifies that BuildEdgeRouteWeighted
+// emits a weighted_clusters RouteAction when multiple backends are present.
+// The total_weight must equal the sum of individual weights; each entry maps to its
+// cluster name. This is the primary test for the Gateway API HTTPRouteWeight split.
+func TestBuildEdgeRouteWeighted_MultipleBackends(t *testing.T) {
+	backends := []WeightedRouteBackend{
+		{Cluster: "svc-a.aether.internal", Weight: 3},
+		{Cluster: "svc-b.aether.internal", Weight: 1},
+	}
+	r := BuildEdgeRouteWeighted("/split", "", backends, nil, nil, nil)
+
+	require.NotNil(t, r)
+	assert.Equal(t, "/split", r.GetMatch().GetPrefix())
+
+	ra := r.GetRoute()
+	require.NotNil(t, ra, "must have a RouteAction")
+	assert.Nil(t, r.GetRedirect(), "no redirect for a weighted forwarding route")
+
+	wc := ra.GetWeightedClusters()
+	require.NotNil(t, wc, "must use weighted_clusters for multiple backends")
+	assert.Equal(t, uint32(4), wc.GetTotalWeight().GetValue(), "total_weight = 3+1 = 4")
+	require.Len(t, wc.GetClusters(), 2)
+	assert.Equal(t, "svc-a.aether.internal", wc.GetClusters()[0].GetName())
+	assert.Equal(t, uint32(3), wc.GetClusters()[0].GetWeight().GetValue())
+	assert.Equal(t, "svc-b.aether.internal", wc.GetClusters()[1].GetName())
+	assert.Equal(t, uint32(1), wc.GetClusters()[1].GetWeight().GetValue())
+}
+
+// TestBuildEdgeRouteWeighted_SingleBackend verifies that a single-entry backends
+// list produces a plain single-cluster RouteAction (no weighted_clusters overhead).
+func TestBuildEdgeRouteWeighted_SingleBackend(t *testing.T) {
+	backends := []WeightedRouteBackend{{Cluster: "svc-1.aether.internal", Weight: 1}}
+	r := BuildEdgeRouteWeighted("/api", "", backends, nil, nil, nil)
+
+	require.NotNil(t, r)
+	ra := r.GetRoute()
+	require.NotNil(t, ra)
+	// Single backend: plain cluster specifier, NOT weighted_clusters.
+	assert.Equal(t, "svc-1.aether.internal", ra.GetCluster(), "single-backend route uses plain cluster")
+	assert.Nil(t, ra.GetWeightedClusters(), "single backend must NOT use weighted_clusters")
+}
+
+// TestBuildEdgeRouteWeighted_ExactMatch verifies the exact path match is preserved
+// correctly when using weighted_clusters.
+func TestBuildEdgeRouteWeighted_ExactMatch(t *testing.T) {
+	backends := []WeightedRouteBackend{
+		{Cluster: "svc-v1.aether.internal", Weight: 90},
+		{Cluster: "svc-v2.aether.internal", Weight: 10},
+	}
+	r := BuildEdgeRouteWeighted("", "/healthz", backends, nil, nil, nil)
+
+	require.NotNil(t, r)
+	assert.Equal(t, "/healthz", r.GetMatch().GetPath(), "exact match must be preserved")
+	assert.Empty(t, r.GetMatch().GetPrefix())
+
+	wc := r.GetRoute().GetWeightedClusters()
+	require.NotNil(t, wc)
+	assert.Equal(t, uint32(100), wc.GetTotalWeight().GetValue(), "total_weight = 90+10")
+}
+
+// TestBuildEdgeRouteWeighted_ZeroWeightBackends verifies that all-zero-weight
+// backends produce a weighted_clusters route with total_weight=0. Per the Gateway
+// API spec this is valid; Envoy returns 500 for such a route (no healthy backend).
+func TestBuildEdgeRouteWeighted_ZeroWeightBackends(t *testing.T) {
+	backends := []WeightedRouteBackend{
+		{Cluster: "svc-a.aether.internal", Weight: 0},
+		{Cluster: "svc-b.aether.internal", Weight: 0},
+	}
+	r := BuildEdgeRouteWeighted("/drain", "", backends, nil, nil, nil)
+
+	require.NotNil(t, r)
+	wc := r.GetRoute().GetWeightedClusters()
+	require.NotNil(t, wc, "must still produce weighted_clusters (not a redirect/error)")
+	assert.Equal(t, uint32(0), wc.GetTotalWeight().GetValue(), "total_weight=0 is valid per spec")
+}
+
+// TestBuildEdgeRouteWeighted_RetryPolicy verifies the retry policy is wired on the
+// weighted_clusters RouteAction (same as the single-cluster path).
+func TestBuildEdgeRouteWeighted_RetryPolicy(t *testing.T) {
+	backends := []WeightedRouteBackend{
+		{Cluster: "svc-a.aether.internal", Weight: 1},
+		{Cluster: "svc-b.aether.internal", Weight: 1},
+	}
+	r := BuildEdgeRouteWeighted("/", "", backends, nil, nil, nil)
+	ra := r.GetRoute()
+	require.NotNil(t, ra)
+	require.NotNil(t, ra.GetRetryPolicy(), "retry policy must be set on weighted route")
+}
+
+// TestBuildEdgeRouteWeighted_Redirect verifies that a redirect (non-nil GammaRedirect)
+// takes precedence over backends and produces a Route_Redirect action.
+func TestBuildEdgeRouteWeighted_Redirect(t *testing.T) {
+	backends := []WeightedRouteBackend{{Cluster: "svc-a.aether.internal", Weight: 1}}
+	rd := &GammaRedirect{Scheme: "https", StatusCode: 301}
+	r := BuildEdgeRouteWeighted("/old", "", backends, nil, rd, nil)
+
+	require.NotNil(t, r)
+	assert.NotNil(t, r.GetRedirect(), "redirect must produce Route_Redirect")
+	assert.Nil(t, r.GetRoute(), "redirect must not have a RouteAction")
+}
+
 // TestBuildEdgeRoute_Redirect: BuildEdgeRoute with a non-nil GammaRedirect emits a
 // Route_Redirect action (no cluster) with the correct fields.
 func TestBuildEdgeRoute_Redirect(t *testing.T) {

@@ -556,6 +556,136 @@ func TestPerGatewayCertWired(t *testing.T) {
 	require.NotNil(t, l.GetFilterChains()[0].GetTransportSocket(), "per-Gateway HTTPS listener must terminate TLS")
 }
 
+// TestVirtualHostVhosts_WeightedSplit verifies end-to-end that a route with
+// multiple weighted Backends produces a weighted_clusters Envoy route action.
+// Each backend independently resolves via edgeClusterNameLocked (mesh vs cleartext).
+func TestVirtualHostVhosts_WeightedSplit(t *testing.T) {
+	c := newTestCache("edge-1")
+
+	// Register svc-a in the mesh registry; svc-b is a plain k8s Service (non-mesh).
+	c.clusterMu.Lock()
+	c.clusters["svc-a"] = clusterEntry{service: "svc-a"}
+	c.clusterMu.Unlock()
+
+	c.SetVirtualHosts([]VirtualHost{
+		{
+			Hosts: []string{"split.example.com"},
+			Routes: []Route{{
+				Prefix: "/split",
+				// Weighted backends: svc-a (mesh, port 0 = default cluster) weight=3,
+				// svc-b (k8s cleartext, port 9090) weight=1.
+				Backends: []RouteBackend{
+					{Service: "svc-a", BackendNamespace: "default", Port: 0, Weight: 3},
+					{Service: "svc-b", BackendNamespace: "conformance-ns", Port: 9090, Weight: 1},
+				},
+				Service:          "svc-a", // legacy field: first backend
+				Port:             0,
+				BackendNamespace: "default",
+			}},
+		},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	require.Len(t, vhosts, 1)
+	routes := vhosts[0].GetRoutes()
+	require.Len(t, routes, 1)
+
+	ra := routes[0].GetRoute()
+	require.NotNil(t, ra, "must have a RouteAction (not a redirect)")
+
+	wc := ra.GetWeightedClusters()
+	require.NotNil(t, wc, "multiple backends must produce weighted_clusters")
+	assert.Equal(t, uint32(4), wc.GetTotalWeight().GetValue(), "total_weight = 3+1 = 4")
+
+	require.Len(t, wc.GetClusters(), 2)
+	// First backend: svc-a is in the registry → mesh default cluster.
+	assert.Equal(t, "svc-a.aether.internal", wc.GetClusters()[0].GetName())
+	assert.Equal(t, uint32(3), wc.GetClusters()[0].GetWeight().GetValue())
+	// Second backend: svc-b is NOT in the registry → edge_k8s cleartext cluster.
+	assert.Equal(t, "edge_k8s_conformance-ns_svc-b_9090", wc.GetClusters()[1].GetName())
+	assert.Equal(t, uint32(1), wc.GetClusters()[1].GetWeight().GetValue())
+}
+
+// TestVirtualHostVhosts_SingleBackendNoWeightedClusters verifies that a route with
+// a single Backends entry uses the plain single-cluster RouteAction (not weighted_clusters).
+func TestVirtualHostVhosts_SingleBackendNoWeightedClusters(t *testing.T) {
+	c := newTestCache("edge-1")
+	// Register svc-1 in mesh (default port path — no explicit per-port cluster needed).
+	c.clusterMu.Lock()
+	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
+	c.clusterMu.Unlock()
+
+	c.SetVirtualHosts([]VirtualHost{
+		{
+			Hosts: []string{"api.example.com"},
+			Routes: []Route{{
+				Prefix: "/",
+				Backends: []RouteBackend{
+					// Port 0 → default mesh cluster (svc-1.aether.internal).
+					{Service: "svc-1", BackendNamespace: "default", Port: 0, Weight: 1},
+				},
+				Service:          "svc-1",
+				Port:             0,
+				BackendNamespace: "default",
+			}},
+		},
+	})
+
+	vhosts := c.virtualHostVhosts()
+	require.Len(t, vhosts, 1)
+	routes := vhosts[0].GetRoutes()
+	require.Len(t, routes, 1)
+
+	ra := routes[0].GetRoute()
+	require.NotNil(t, ra)
+	assert.Equal(t, "svc-1.aether.internal", ra.GetCluster(), "single backend must use plain cluster")
+	assert.Nil(t, ra.GetWeightedClusters(), "single backend must NOT use weighted_clusters")
+}
+
+// TestEdgeK8sBackendClusters_WeightedBackends verifies that edgeK8sBackendClusters
+// emits a cleartext cluster for every non-mesh weighted backend (iterating Backends),
+// deduplicating by (namespace, service, port) as with single-backend routes.
+func TestEdgeK8sBackendClusters_WeightedBackends(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+
+	// mesh-svc in registry; plain-svc-a and plain-svc-b are non-mesh.
+	c.clusterMu.Lock()
+	c.clusters["mesh-svc"] = clusterEntry{service: "mesh-svc"}
+	c.clusterMu.Unlock()
+
+	c.SetVirtualHosts([]VirtualHost{
+		{
+			Hosts: []string{"split.example.com"},
+			Routes: []Route{{
+				Prefix: "/",
+				Backends: []RouteBackend{
+					{Service: "mesh-svc", BackendNamespace: "default", Port: 8080, Weight: 1}, // mesh → skipped
+					{Service: "plain-svc-a", BackendNamespace: "ns-a", Port: 9000, Weight: 2}, // non-mesh → cluster
+					{Service: "plain-svc-b", BackendNamespace: "ns-b", Port: 8080, Weight: 1}, // non-mesh → cluster
+					// Duplicate of plain-svc-a/9000 — must be deduped.
+					{Service: "plain-svc-a", BackendNamespace: "ns-a", Port: 9000, Weight: 1},
+				},
+				Service:          "mesh-svc",
+				BackendNamespace: "default",
+			}},
+		},
+	})
+
+	clusters := c.edgeK8sBackendClusters()
+	// mesh-svc → skipped; plain-svc-a deduplicated to 1; plain-svc-b → 1. Total = 2.
+	require.Len(t, clusters, 2, "mesh cluster skipped; duplicates deduped; 2 cleartext clusters")
+
+	names := make(map[string]bool)
+	for _, r := range clusters {
+		cl, ok := r.(*clusterv3.Cluster)
+		require.True(t, ok)
+		names[cl.GetName()] = true
+	}
+	assert.True(t, names["edge_k8s_ns-a_plain-svc-a_9000"], "non-mesh svc-a cluster must be emitted")
+	assert.True(t, names["edge_k8s_ns-b_plain-svc-b_8080"], "non-mesh svc-b cluster must be emitted")
+}
+
 // TestEdgeClusterNameLocked_MeshVsNonMesh verifies that edgeClusterNameLocked
 // returns the mesh cluster name when the service IS in the registry, and the
 // edge_k8s_… cleartext name when it is NOT.
