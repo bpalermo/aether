@@ -240,7 +240,7 @@ func TestReconcile_RegistryOnlyBackend_ResolvedRefs(t *testing.T) {
 		WithStatusSubresource(&gatewayv1.GatewayClass{}, &gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}).
 		Build()
 	// Sink reports "echo" as a mesh/registry service.
-	sink := statusFakeSinkWithRegistry{registryServices: map[string]bool{"echo": true}}
+	sink := statusFakeSinkWithRegistry{registryServices: map[string]bool{"ns/echo": true}}
 	r := &Reconciler{Client: c, APIReader: c, Sink: sink, Namespace: "ns", GatewayClassName: "aether", MeshDomain: "mesh", Log: slog.Default()}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})

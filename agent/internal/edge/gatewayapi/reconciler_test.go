@@ -1305,7 +1305,7 @@ func TestBuildHTTPRouteBackends_RegistryService_Admitted(t *testing.T) {
 	// Client has no Services — "echo" does not exist as a k8s Service.
 	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
 	// Sink reports "echo" as a registry/mesh service.
-	sink := &fakeSink{hasRegistryService: func(name string) bool { return name == "echo" }}
+	sink := &fakeSink{hasRegistryService: func(name string) bool { return name == "aether-ingress/echo" }}
 	r := &Reconciler{Client: c, Sink: sink}
 
 	got := r.buildHTTPRouteBackends(
