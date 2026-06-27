@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
@@ -86,10 +87,13 @@ func (r *Reconciler) writeGatewayStatuses(
 	}
 	for i := range ourGateways {
 		gw := &ourGateways[i]
-		desired := *gw.DeepCopy()
-
 		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
-		listeners := make([]gatewayv1.ListenerStatus, 0, len(gw.Spec.Listeners))
+
+		// Compute the SPEC-derived desired status once. These inputs depend on the
+		// Gateway spec + the routes/certs/assigned-IP we resolved this reconcile —
+		// NOT on the Gateway's current status — so they're stable across the
+		// conflict-retry re-Gets in writeGatewayStatus below.
+		listenerInputs := make([]listenerStatusInput, 0, len(gw.Spec.Listeners))
 		allListenersProgrammed := true
 		for _, ln := range gw.Spec.Listeners {
 			attached := r.attachedRoutesForListener(ctx, gw, ln, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys)
@@ -119,10 +123,6 @@ func (r *Reconciler) writeGatewayStatuses(
 				}
 			}
 
-			acceptedStatus := metav1.ConditionTrue
-			acceptedReason := string(gatewayv1.ListenerReasonAccepted)
-			acceptedMsg := "Listener accepted"
-
 			programmedStatus := metav1.ConditionTrue
 			programmedReason := string(gatewayv1.ListenerReasonProgrammed)
 			programmedMsg := "Listener programmed"
@@ -133,90 +133,141 @@ func (r *Reconciler) writeGatewayStatuses(
 				allListenersProgrammed = false
 			}
 
-			lc, _ := gatewaystatus.MergeConditions(existingListenerConditions(gw.Status.Listeners, ln.Name), gw.Generation,
-				gatewaystatus.Condition{
+			listenerInputs = append(listenerInputs, listenerStatusInput{
+				name:           ln.Name,
+				supportedKinds: listenerSupportedKinds(ln),
+				attached:       attached,
+				accepted: gatewaystatus.Condition{
 					Type:    string(gatewayv1.ListenerConditionAccepted),
-					Status:  acceptedStatus,
-					Reason:  acceptedReason,
-					Message: acceptedMsg,
+					Status:  metav1.ConditionTrue,
+					Reason:  string(gatewayv1.ListenerReasonAccepted),
+					Message: "Listener accepted",
 				},
-				gatewaystatus.Condition{
+				programmed: gatewaystatus.Condition{
 					Type:    string(gatewayv1.ListenerConditionProgrammed),
 					Status:  programmedStatus,
 					Reason:  programmedReason,
 					Message: programmedMsg,
 				},
-				gatewaystatus.Condition{
+				resolved: gatewaystatus.Condition{
 					Type:    string(gatewayv1.ListenerConditionResolvedRefs),
 					Status:  resolvedStatus,
 					Reason:  resolvedReason,
 					Message: resolvedMsg,
 				},
-			)
-			listeners = append(listeners, gatewayv1.ListenerStatus{
-				Name:           ln.Name,
-				SupportedKinds: listenerSupportedKinds(ln),
-				AttachedRoutes: attached,
-				Conditions:     lc,
 			})
 		}
 
 		// Top-level Programmed is False when any listener failed to program (e.g.
 		// invalid TLS or invalid route kinds), so the Gateway is not advertised as
 		// fully programmed while a listener is broken.
-		programmedCond := gatewaystatus.Condition{
+		programmedTop := gatewaystatus.Condition{
 			Type:    string(gatewayv1.GatewayConditionProgrammed),
 			Status:  metav1.ConditionTrue,
 			Reason:  string(gatewayv1.GatewayReasonProgrammed),
 			Message: "Gateway programmed into the aether edge data plane",
 		}
 		if !allListenersProgrammed {
-			programmedCond.Status = metav1.ConditionFalse
-			programmedCond.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
-			programmedCond.Message = "One or more listeners are not programmed (invalid TLS or route kinds)"
+			programmedTop.Status = metav1.ConditionFalse
+			programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+			programmedTop.Message = "One or more listeners are not programmed (invalid TLS or route kinds)"
 		}
-		conds, topChanged := gatewaystatus.MergeConditions(desired.Status.Conditions, gw.Generation,
-			gatewaystatus.Condition{
-				Type:    string(gatewayv1.GatewayConditionAccepted),
-				Status:  metav1.ConditionTrue,
-				Reason:  string(gatewayv1.GatewayReasonAccepted),
-				Message: "Gateway accepted by the aether edge controller",
-			},
-			programmedCond,
-		)
-		desired.Status.Conditions = conds
+		acceptedTop := gatewaystatus.Condition{
+			Type:    string(gatewayv1.GatewayConditionAccepted),
+			Status:  metav1.ConditionTrue,
+			Reason:  string(gatewayv1.GatewayReasonAccepted),
+			Message: "Gateway accepted by the aether edge controller",
+		}
 
-		listenersChanged := !listenerStatusesEqual(gw.Status.Listeners, listeners)
-		desired.Status.Listeners = listeners
-
-		// Publish status.addresses: Phase 2 uses the per-Gateway LB IP; Phase 1
-		// uses the shared edge LB IP. Never overwrite a previously-published address
-		// with an empty list — leave the old address in place and wait for the next
-		// reconcile once MetalLB assigns an IP.
-		addrsChanged := false
+		// status.addresses: Phase 2 uses the per-Gateway LB IP; Phase 1 uses the
+		// shared edge LB IP. An empty list never overwrites a previously-published
+		// address (writeGatewayStatus leaves the old one and waits for the next
+		// reconcile once MetalLB assigns an IP).
 		var addrs []gatewayv1.GatewayStatusAddress
 		if ip, ok := perGWAssignedIPs[gk]; ok && ip != "" {
-			// Phase 2: per-Gateway IP from the per-Gateway LoadBalancer Service.
 			addrs = []gatewayv1.GatewayStatusAddress{{
 				Type:  ptr(gatewayv1.IPAddressType),
 				Value: ip,
 			}}
 		} else {
-			// Phase 1: shared edge LB IP.
 			addrs = sharedAddrs
 		}
-		if len(addrs) > 0 {
-			addrsChanged = !gatewayAddressesEqual(gw.Status.Addresses, addrs)
-			desired.Status.Addresses = addrs
-		}
 
-		if !topChanged && !listenersChanged && !addrsChanged {
-			continue
-		}
-		if err := r.Status().Update(ctx, &desired); err != nil {
+		key := types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}
+		if err := r.writeGatewayStatus(ctx, key, listenerInputs, acceptedTop, programmedTop, addrs); err != nil {
 			r.Log.WarnContext(ctx, "failed to write Gateway status", "gateway", gw.Name, "error", err.Error())
 		}
 	}
+}
+
+// listenerStatusInput holds the spec-derived inputs for one listener's status,
+// computed once per reconcile and merged against the Gateway's *latest* status
+// inside the conflict-retry loop in writeGatewayStatus.
+type listenerStatusInput struct {
+	name           gatewayv1.SectionName
+	supportedKinds []gatewayv1.RouteGroupKind
+	attached       int32
+	accepted       gatewaystatus.Condition
+	programmed     gatewaystatus.Condition
+	resolved       gatewaystatus.Condition
+}
+
+// writeGatewayStatus merges the computed desired status onto the LATEST version
+// of the Gateway and writes it, retrying on optimistic-lock conflicts.
+//
+// Both edge replicas reconcile the same cluster-wide Gateways active-active, so
+// their status writes collide with 409 Conflict. Dropping the losing write (the
+// previous behavior) let a Gateway sit address-less past the conformance
+// GatewayMustHaveAddress window under churn — the HTTPRouteRedirectPortAndScheme
+// timeout. RetryOnConflict re-Gets and re-merges; because the desired status is a
+// deterministic function of spec, a re-applied identical status reports no change
+// and the write converges without inter-replica lastTransitionTime flapping.
+func (r *Reconciler) writeGatewayStatus(
+	ctx context.Context,
+	key types.NamespacedName,
+	listenerInputs []listenerStatusInput,
+	acceptedTop, programmedTop gatewaystatus.Condition,
+	addrs []gatewayv1.GatewayStatusAddress,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		gw := &gatewayv1.Gateway{}
+		if err := r.Get(ctx, key, gw); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Gateway deleted mid-reconcile; nothing to write.
+				return nil
+			}
+			return err
+		}
+
+		listeners := make([]gatewayv1.ListenerStatus, 0, len(listenerInputs))
+		for _, in := range listenerInputs {
+			lc, _ := gatewaystatus.MergeConditions(
+				existingListenerConditions(gw.Status.Listeners, in.name), gw.Generation,
+				in.accepted, in.programmed, in.resolved,
+			)
+			listeners = append(listeners, gatewayv1.ListenerStatus{
+				Name:           in.name,
+				SupportedKinds: in.supportedKinds,
+				AttachedRoutes: in.attached,
+				Conditions:     lc,
+			})
+		}
+
+		conds, topChanged := gatewaystatus.MergeConditions(gw.Status.Conditions, gw.Generation, acceptedTop, programmedTop)
+		listenersChanged := !listenerStatusesEqual(gw.Status.Listeners, listeners)
+		addrsChanged := len(addrs) > 0 && !gatewayAddressesEqual(gw.Status.Addresses, addrs)
+
+		if !topChanged && !listenersChanged && !addrsChanged {
+			return nil
+		}
+
+		gw.Status.Conditions = conds
+		gw.Status.Listeners = listeners
+		if len(addrs) > 0 {
+			gw.Status.Addresses = addrs
+		}
+		return r.Status().Update(ctx, gw)
+	})
 }
 
 // resolveGatewayAddresses returns the edge's shared LoadBalancer address as a
