@@ -28,6 +28,7 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/constants",
         "//common/log",
+        "//common/serviceref",
         "//common/telemetry",
         "//registry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",

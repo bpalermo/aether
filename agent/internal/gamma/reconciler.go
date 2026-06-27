@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -86,7 +88,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	routes := map[string][]proxy.GammaRoute{}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
-		for _, svc := range serviceParents(hr.Spec.ParentRefs) {
+		for _, svc := range serviceParents(hr.Spec.ParentRefs, hr.Namespace) {
 			for _, rule := range hr.Spec.Rules {
 				routes[svc] = append(routes[svc], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants))
 			}
@@ -94,7 +96,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
-		for _, svc := range serviceParents(gr.Spec.ParentRefs) {
+		for _, svc := range serviceParents(gr.Spec.ParentRefs, gr.Namespace) {
 			for _, rule := range gr.Spec.Rules {
 				routes[svc] = append(routes[svc], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants))
 			}
@@ -242,7 +244,10 @@ func grpcBackendRefs(rules []gatewayv1.GRPCRouteRule) []gatewayv1.BackendObjectR
 
 // serviceParents returns the names of the Services these parentRefs attach to
 // (kind=Service, core group). Shared by HTTPRoute and GRPCRoute.
-func serviceParents(refs []gatewayv1.ParentReference) []string {
+// serviceParents returns the namespace-qualified "<ns>/<svc>" keys of the Service
+// parentRefs (020 Part 1). A parentRef without an explicit namespace inherits the
+// route's namespace (Gateway API default).
+func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []string {
 	var svcs []string
 	for _, p := range refs {
 		if p.Group != nil && string(*p.Group) != "" {
@@ -251,7 +256,11 @@ func serviceParents(refs []gatewayv1.ParentReference) []string {
 		if p.Kind == nil || string(*p.Kind) != "Service" {
 			continue
 		}
-		svcs = append(svcs, string(p.Name))
+		ns := routeNamespace
+		if p.Namespace != nil && string(*p.Namespace) != "" {
+			ns = string(*p.Namespace)
+		}
+		svcs = append(svcs, serviceref.New(ns, string(p.Name)).Key())
 	}
 	return svcs
 }

@@ -189,7 +189,9 @@ func TestServiceParents(t *testing.T) {
 			{Name: "no-kind"}, // no kind → ignored
 		},
 	}}}
-	assert.Equal(t, []string{"svc-1"}, serviceParents(hr.Spec.ParentRefs))
+	// 020 Part 1: parentRef without a namespace inherits the route's namespace,
+	// and the key is "<ns>/<svc>".
+	assert.Equal(t, []string{"team-a/svc-1"}, serviceParents(hr.Spec.ParentRefs, "team-a"))
 }
 
 // TestBuildGammaRoute: matches → GammaMatch, weighted backendRefs → GammaBackend

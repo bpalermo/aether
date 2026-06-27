@@ -175,9 +175,9 @@ func TestServiceClusterDrainPoolClose(t *testing.T) {
 		"drain-time reset bursts must not be sacrificed to the retry breaker")
 }
 
-// TestServiceFromClusterName pins the deterministic authority<->service
-// bijection: only single-label names directly under the mesh domain map back
-// to a service.
+// TestServiceFromClusterName pins the deterministic authority<->service-key
+// bijection (020 Part 1): a two-label <svc>.<ns> directly under the mesh domain
+// maps back to the "<ns>/<svc>" key.
 func TestServiceFromClusterName(t *testing.T) {
 	tests := []struct {
 		name string
@@ -185,11 +185,13 @@ func TestServiceFromClusterName(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{name: "mesh authority", in: "payments.aether.internal", want: "payments", ok: true},
+		{name: "mesh authority", in: "payments.team-a.aether.internal", want: "team-a/payments", ok: true},
+		{name: "default namespace", in: "echo.default.aether.internal", want: "default/echo", ok: true},
 		{name: "bare name rejected", in: "payments", ok: false},
-		{name: "nested label rejected", in: "a.b.aether.internal", ok: false},
-		{name: "empty service rejected", in: ".aether.internal", ok: false},
-		{name: "foreign domain rejected", in: "payments.example.com", ok: false},
+		{name: "single label (no ns) rejected", in: "payments.aether.internal", ok: false},
+		{name: "three labels rejected", in: "a.b.c.aether.internal", ok: false},
+		{name: "empty service rejected", in: ".team-a.aether.internal", ok: false},
+		{name: "foreign domain rejected", in: "payments.team-a.example.com", ok: false},
 		{name: "domain itself rejected", in: "aether.internal", ok: false},
 	}
 	for _, tt := range tests {

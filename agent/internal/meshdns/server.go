@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/miekg/dns"
 )
@@ -116,19 +118,21 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	s.forward(w, r)
 }
 
-// lookup maps <svc>.<meshDomain> -> its A-record IP, or "" if not a known mesh name.
+// lookup maps <svc>.<ns>.<meshDomain> -> its A-record IP, or "" if not a known
+// mesh name (proposal 020 Part 1; records are keyed by the "<ns>/<svc>" key).
 func (s *Server) lookup(qname string) string {
 	name := strings.TrimSuffix(strings.ToLower(qname), ".")
 	suffix := "." + s.meshDomain
 	if !strings.HasSuffix(name, suffix) {
 		return ""
 	}
-	svc := strings.TrimSuffix(name, suffix)
-	if svc == "" || strings.Contains(svc, ".") {
+	// "<svc>.<ns>" — exactly two labels (service name, then namespace).
+	svc, ns, found := strings.Cut(strings.TrimSuffix(name, suffix), ".")
+	if !found || svc == "" || ns == "" || strings.Contains(ns, ".") {
 		return ""
 	}
 	s.mu.RLock()
-	ip := s.records[svc]
+	ip := s.records[serviceref.New(ns, svc).Key()]
 	s.mu.RUnlock()
 	return ip
 }

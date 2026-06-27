@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	"github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
 	corev1 "k8s.io/api/core/v1"
@@ -95,11 +97,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	var tcpServices []CaptureTCPService
 	for i := range list.Items {
 		s := &list.Items[i]
-		svc := s.Annotations[constants.AnnotationMeshService]
-		if svc == "" {
-			svc = s.Name
+		name := s.Annotations[constants.AnnotationMeshService]
+		if name == "" {
+			name = s.Name
 		}
-		authorities[svc] = fmt.Sprintf("%s.%s.svc.cluster.local", s.Name, s.Namespace)
+		// 020 Part 1: the service key is namespace-qualified "<ns>/<svc>"; the mesh
+		// Service lives in <ns> with the bare ServiceAccount name.
+		svc := serviceref.New(s.Namespace, name).Key()
+		authorities[svc] = fmt.Sprintf("%s.%s.svc.cluster.local", name, s.Namespace)
 		ip := s.Spec.ClusterIP
 		// The mesh-Service ClusterIP is the A record for <svc>.<meshDomain>. Skip
 		// headless/unallocated Services (no routable VIP to answer with).

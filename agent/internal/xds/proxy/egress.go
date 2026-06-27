@@ -8,6 +8,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/serviceref"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -20,12 +21,17 @@ import (
 )
 
 // ServiceClusterName returns the data-plane name of a service's outbound
-// cluster: <service>.<meshDomain>. Authorities are FQDN-only, and the cluster
-// name equals the authority so the warm path (service vhost) and the cold
-// path (catch-all cluster_header: ":authority" + ODCDS) resolve the same
-// resource deterministically. The bare service name remains the
-// control-plane key (registry, watch filter, dependency set, EDS, stats).
+// cluster: <svc>.<ns>.<meshDomain> (proposal 020 Part 1). The control-plane key
+// (registry, watch filter, dependency set, EDS, stats) is the namespace-qualified
+// "<ns>/<svc>" serviceref key; this renders it as the FQDN authority, so the warm
+// path (service vhost) and the cold path (catch-all cluster_header: ":authority"
+// + ODCDS) resolve the same resource deterministically.
 func ServiceClusterName(serviceName, meshDomain string) string {
+	if ref, ok := serviceref.ParseKey(serviceName); ok {
+		return ref.FQDN(meshDomain)
+	}
+	// Defensive: a non-namespaced key must not occur post-cutover; render it flat
+	// rather than panic so a stray legacy key degrades instead of crashing.
 	return serviceName + "." + meshDomain
 }
 
@@ -55,12 +61,13 @@ func UDPClusterName(serviceName, meshDomain string) string {
 }
 
 // ServiceFromClusterName maps a data-plane cluster name (a mesh authority,
-// <service>.<meshDomain>) back to the bare service name. ok is false when the
-// name is not under the mesh domain or the remainder is not a single DNS
-// label (service names are ServiceAccount names — single lowercase labels),
-// so nested or foreign authorities are rejected deterministically.
+// <svc>.<ns>.<meshDomain>) back to the namespace-qualified "<ns>/<svc>" service
+// key (proposal 020 Part 1). ok is false when the name is not under the mesh
+// domain or the remainder is not exactly two DNS labels (<svc>.<ns> — service
+// names are ServiceAccount names and namespaces are both single lowercase
+// labels), so nested or foreign authorities are rejected deterministically.
 func ServiceFromClusterName(clusterName, meshDomain string) (string, bool) {
-	// Strip an optional :port (multi-port authority <svc>.<domain>:<port>).
+	// Strip an optional :port (multi-port authority <svc>.<ns>.<domain>:<port>).
 	name := clusterName
 	if i := strings.LastIndexByte(name, ':'); i >= 0 {
 		if _, err := strconv.Atoi(name[i+1:]); err == nil {
@@ -71,11 +78,12 @@ func ServiceFromClusterName(clusterName, meshDomain string) (string, bool) {
 	if !strings.HasSuffix(name, suffix) {
 		return "", false
 	}
-	service := strings.TrimSuffix(name, suffix)
-	if service == "" || strings.Contains(service, ".") {
+	// "<svc>.<ns>" — exactly two labels (service name, then namespace).
+	svc, ns, found := strings.Cut(strings.TrimSuffix(name, suffix), ".")
+	if !found || svc == "" || ns == "" || strings.Contains(ns, ".") {
 		return "", false
 	}
-	return service, true
+	return serviceref.New(ns, svc).Key(), true
 }
 
 // NewServiceCluster builds the outbound service cluster, named

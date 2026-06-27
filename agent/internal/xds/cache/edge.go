@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -564,19 +566,24 @@ func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 // Caller must hold clusterMu.
 func (c *SnapshotCache) edgeClusterNameLocked(service, backendNamespace string, port uint32) string {
 	// Check whether the service is mesh-registered (in the registry cluster map).
-	// The registry keys services by bare name (and by per-port name), so check both
-	// the bare name and the per-port name.
-	meshFQDN := proxy.ServiceClusterName(service, c.meshDomain)
-	if _, ok := c.clusters[service]; ok {
+	// The registry keys services by the namespace-qualified "<ns>/<svc>" key (020
+	// Part 1); the mesh cluster map and ServiceClusterName/PortClusterName all use
+	// that key. The non-mesh k8s fallback below still uses the bare name + namespace.
+	key := service
+	if backendNamespace != "" {
+		key = serviceref.New(backendNamespace, service).Key()
+	}
+	meshFQDN := proxy.ServiceClusterName(key, c.meshDomain)
+	if _, ok := c.clusters[key]; ok {
 		// Mesh path: service is in the registry.
 		if port == 0 {
 			return meshFQDN
 		}
-		portName := proxy.PortClusterName(service, c.meshDomain, port)
+		portName := proxy.PortClusterName(key, c.meshDomain, port)
 		if _, ok := c.clusters[portName]; ok {
 			return portName
 		}
-		if entry, ok := c.clusters[service]; ok && entry.sni == strconv.Itoa(int(port)) {
+		if entry, ok := c.clusters[key]; ok && entry.sni == strconv.Itoa(int(port)) {
 			return meshFQDN
 		}
 		return portName
@@ -587,14 +594,14 @@ func (c *SnapshotCache) edgeClusterNameLocked(service, backendNamespace string, 
 		if port == 0 {
 			return meshFQDN
 		}
-		portName := proxy.PortClusterName(service, c.meshDomain, port)
+		portName := proxy.PortClusterName(key, c.meshDomain, port)
 		if _, ok := c.clusters[portName]; ok {
 			return portName
 		}
 		return portName
 	}
 	if port != 0 {
-		portName := proxy.PortClusterName(service, c.meshDomain, port)
+		portName := proxy.PortClusterName(key, c.meshDomain, port)
 		if _, ok := c.clusters[portName]; ok {
 			return portName
 		}
@@ -664,25 +671,28 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 		// A hostname-less route is NOT inert: per Gateway API it matches every host
 		// on its listener (the edge serves it via the catch-all "*" vhost), so its
 		// backend services must be scoped in (their clusters loaded) too.
+		// The dependency set is matched against the registry's namespace-qualified
+		// "<ns>/<svc>" keys (020 Part 1), so scope in the key, not the bare name.
+		addDep := func(svc, ns string) {
+			if svc == "" {
+				return
+			}
+			key := svc
+			if ns != "" {
+				key = serviceref.New(ns, svc).Key()
+			}
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				services = append(services, key)
+			}
+		}
 		for _, r := range v.Routes {
 			// Collect from Backends (weighted multi-backend).
 			for _, b := range r.Backends {
-				if b.Service == "" {
-					continue
-				}
-				if _, ok := seen[b.Service]; !ok {
-					seen[b.Service] = struct{}{}
-					services = append(services, b.Service)
-				}
+				addDep(b.Service, b.BackendNamespace)
 			}
 			// Legacy single-backend field (also populated for single-backend routes).
-			if r.Service == "" {
-				continue
-			}
-			if _, ok := seen[r.Service]; !ok {
-				seen[r.Service] = struct{}{}
-				services = append(services, r.Service)
-			}
+			addDep(r.Service, r.BackendNamespace)
 		}
 	}
 
@@ -827,15 +837,20 @@ func (c *SnapshotCache) edgeK8sBackendClusters() []types.Resource {
 	var out []types.Resource
 	for _, bk := range backends {
 		// Only emit a cleartext cluster if the service is NOT a registry cluster.
-		// If it IS in the registry, the mesh mTLS cluster covers it.
-		if _, ok := c.clusters[bk.service]; ok {
+		// If it IS in the registry, the mesh mTLS cluster covers it. The registry
+		// keys clusters by the namespace-qualified "<ns>/<svc>" key (020 Part 1).
+		key := bk.service
+		if bk.namespace != "" {
+			key = serviceref.New(bk.namespace, bk.service).Key()
+		}
+		if _, ok := c.clusters[key]; ok {
 			continue
 		}
-		meshFQDN := proxy.ServiceClusterName(bk.service, c.meshDomain)
+		meshFQDN := proxy.ServiceClusterName(key, c.meshDomain)
 		if _, ok := c.clusters[meshFQDN]; ok {
 			continue
 		}
-		portName := proxy.PortClusterName(bk.service, c.meshDomain, bk.port)
+		portName := proxy.PortClusterName(key, c.meshDomain, bk.port)
 		if _, ok := c.clusters[portName]; ok {
 			continue
 		}

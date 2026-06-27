@@ -679,7 +679,7 @@ func TestVirtualHostVhosts_WeightedSplit(t *testing.T) {
 
 	// Register svc-a in the mesh registry; svc-b is a plain k8s Service (non-mesh).
 	c.clusterMu.Lock()
-	c.clusters["svc-a"] = clusterEntry{service: "svc-a"}
+	c.clusters["default/svc-a"] = clusterEntry{service: "default/svc-a"}
 	c.clusterMu.Unlock()
 
 	c.SetVirtualHosts([]VirtualHost{
@@ -714,7 +714,7 @@ func TestVirtualHostVhosts_WeightedSplit(t *testing.T) {
 
 	require.Len(t, wc.GetClusters(), 2)
 	// First backend: svc-a is in the registry → mesh default cluster.
-	assert.Equal(t, "svc-a.aether.internal", wc.GetClusters()[0].GetName())
+	assert.Equal(t, "svc-a.default.aether.internal", wc.GetClusters()[0].GetName())
 	assert.Equal(t, uint32(3), wc.GetClusters()[0].GetWeight().GetValue())
 	// Second backend: svc-b is NOT in the registry → edge_k8s cleartext cluster.
 	assert.Equal(t, "edge_k8s_conformance-ns_svc-b_9090", wc.GetClusters()[1].GetName())
@@ -727,7 +727,7 @@ func TestVirtualHostVhosts_SingleBackendNoWeightedClusters(t *testing.T) {
 	c := newTestCache("edge-1")
 	// Register svc-1 in mesh (default port path — no explicit per-port cluster needed).
 	c.clusterMu.Lock()
-	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
+	c.clusters["default/svc-1"] = clusterEntry{service: "default/svc-1"}
 	c.clusterMu.Unlock()
 
 	c.SetVirtualHosts([]VirtualHost{
@@ -736,7 +736,7 @@ func TestVirtualHostVhosts_SingleBackendNoWeightedClusters(t *testing.T) {
 			Routes: []Route{{
 				Prefix: "/",
 				Backends: []RouteBackend{
-					// Port 0 → default mesh cluster (svc-1.aether.internal).
+					// Port 0 → default mesh cluster (svc-1.default.aether.internal).
 					{Service: "svc-1", BackendNamespace: "default", Port: 0, Weight: 1},
 				},
 				Service:          "svc-1",
@@ -753,7 +753,7 @@ func TestVirtualHostVhosts_SingleBackendNoWeightedClusters(t *testing.T) {
 
 	ra := routes[0].GetRoute()
 	require.NotNil(t, ra)
-	assert.Equal(t, "svc-1.aether.internal", ra.GetCluster(), "single backend must use plain cluster")
+	assert.Equal(t, "svc-1.default.aether.internal", ra.GetCluster(), "single backend must use plain cluster")
 	assert.Nil(t, ra.GetWeightedClusters(), "single backend must NOT use weighted_clusters")
 }
 
@@ -766,7 +766,7 @@ func TestEdgeK8sBackendClusters_WeightedBackends(t *testing.T) {
 
 	// mesh-svc in registry; plain-svc-a and plain-svc-b are non-mesh.
 	c.clusterMu.Lock()
-	c.clusters["mesh-svc"] = clusterEntry{service: "mesh-svc"}
+	c.clusters["default/mesh-svc"] = clusterEntry{service: "default/mesh-svc"}
 	c.clusterMu.Unlock()
 
 	c.SetVirtualHosts([]VirtualHost{
@@ -810,7 +810,7 @@ func TestEdgeClusterNameLocked_MeshVsNonMesh(t *testing.T) {
 
 	// Register "mesh-svc" as a registry service.
 	c.clusterMu.Lock()
-	c.clusters["mesh-svc"] = clusterEntry{service: "mesh-svc"}
+	c.clusters["default/mesh-svc"] = clusterEntry{service: "default/mesh-svc"}
 	c.clusterMu.Unlock()
 
 	c.clusterMu.RLock()
@@ -818,7 +818,7 @@ func TestEdgeClusterNameLocked_MeshVsNonMesh(t *testing.T) {
 
 	// Mesh path: service in registry → mesh FQDN.
 	name := c.edgeClusterNameLocked("mesh-svc", "default", 0)
-	assert.Equal(t, "mesh-svc.aether.internal", name, "registry service resolves to mesh cluster")
+	assert.Equal(t, "mesh-svc.default.aether.internal", name, "registry service resolves to mesh cluster")
 
 	// Non-mesh path: service NOT in registry → edge_k8s_… cleartext name.
 	name2 := c.edgeClusterNameLocked("plain-svc", "conformance-ns", 8080)
@@ -838,7 +838,7 @@ func TestEdgeK8sBackendClusters_NonMeshOnly(t *testing.T) {
 
 	// Register "mesh-svc" as a registry service; "plain-svc" is NOT registered.
 	c.clusterMu.Lock()
-	c.clusters["mesh-svc"] = clusterEntry{service: "mesh-svc"}
+	c.clusters["default/mesh-svc"] = clusterEntry{service: "default/mesh-svc"}
 	c.clusterMu.Unlock()
 
 	c.SetVirtualHosts([]VirtualHost{

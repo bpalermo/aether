@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -783,8 +785,13 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 // backend is admitted) to preserve prior behavior for callers that don't wire up
 // those dependencies (e.g. unit tests that focus on other behavior).
 func (r *Reconciler) backendExists(ctx context.Context, name, namespace string) bool {
-	// Registry check first: mesh services are namespace-blind (bare name).
-	if r.Sink != nil && r.Sink.HasRegistryService(name) {
+	// Registry check first: the catalog is keyed by the namespace-qualified
+	// "<ns>/<svc>" key (020 Part 1).
+	regName := name
+	if namespace != "" {
+		regName = serviceref.New(namespace, name).Key()
+	}
+	if r.Sink != nil && r.Sink.HasRegistryService(regName) {
 		return true
 	}
 	// Fall back to k8s Service existence check.
