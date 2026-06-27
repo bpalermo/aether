@@ -2,6 +2,7 @@ package gatewayapi
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sort"
 	"testing"
@@ -12,13 +13,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
@@ -552,4 +556,66 @@ func TestReconcile_GatewayClassSupportedFeatures(t *testing.T) {
 	// (only 301/302).
 	assert.NotContains(t, names, "HTTPRouteRequestMirror")
 	assert.NotContains(t, names, "HTTPRoute303RedirectStatusCode")
+}
+
+// TestWriteGatewayStatus_RetriesOnConflict: both edge replicas reconcile the same
+// cluster-wide Gateways active-active, so their status writes collide with 409
+// Conflict. writeGatewayStatus must re-Get + re-merge + retry so the address still
+// lands (the previous code logged the conflict and dropped the write, leaving the
+// Gateway address-less past the conformance GatewayMustHaveAddress window — the
+// HTTPRouteRedirectPortAndScheme timeout).
+func TestWriteGatewayStatus_RetriesOnConflict(t *testing.T) {
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "ns", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "aether",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+
+	var statusUpdates int
+	c := fake.NewClientBuilder().WithScheme(statusScheme(t)).
+		WithObjects(gw).
+		WithStatusSubresource(&gatewayv1.Gateway{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				statusUpdates++
+				if statusUpdates == 1 {
+					// Simulate the other replica winning the first write.
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: gatewayv1.GroupName, Resource: "gateways"},
+						obj.GetName(), errors.New("the object has been modified"))
+				}
+				return cl.Status().Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	r := &Reconciler{Client: c, APIReader: c, Sink: statusFakeSink{}, Namespace: "ns", Log: slog.Default()}
+
+	inputs := []listenerStatusInput{{
+		name:           "http",
+		supportedKinds: []gatewayv1.RouteGroupKind{{Kind: "HTTPRoute"}},
+		attached:       0,
+		accepted:       gatewaystatus.Condition{Type: string(gatewayv1.ListenerConditionAccepted), Status: metav1.ConditionTrue, Reason: string(gatewayv1.ListenerReasonAccepted)},
+		programmed:     gatewaystatus.Condition{Type: string(gatewayv1.ListenerConditionProgrammed), Status: metav1.ConditionTrue, Reason: string(gatewayv1.ListenerReasonProgrammed)},
+		resolved:       gatewaystatus.Condition{Type: string(gatewayv1.ListenerConditionResolvedRefs), Status: metav1.ConditionTrue, Reason: string(gatewayv1.ListenerReasonResolvedRefs)},
+	}}
+	acceptedTop := gatewaystatus.Condition{Type: string(gatewayv1.GatewayConditionAccepted), Status: metav1.ConditionTrue, Reason: string(gatewayv1.GatewayReasonAccepted)}
+	programmedTop := gatewaystatus.Condition{Type: string(gatewayv1.GatewayConditionProgrammed), Status: metav1.ConditionTrue, Reason: string(gatewayv1.GatewayReasonProgrammed)}
+	addrs := []gatewayv1.GatewayStatusAddress{{Type: ptr(gatewayv1.IPAddressType), Value: "192.168.100.50"}}
+
+	key := types.NamespacedName{Namespace: "ns", Name: "edge"}
+	require.NoError(t, r.writeGatewayStatus(context.Background(), key, inputs, acceptedTop, programmedTop, addrs))
+
+	// The first write conflicted; the retry must have written (≥2 attempts) and the
+	// address must have landed despite the conflict.
+	assert.GreaterOrEqual(t, statusUpdates, 2, "expected a retry after the 409 conflict")
+	got := &gatewayv1.Gateway{}
+	require.NoError(t, c.Get(context.Background(), key, got))
+	require.Len(t, got.Status.Addresses, 1)
+	assert.Equal(t, "192.168.100.50", got.Status.Addresses[0].Value)
+	prog := meta.FindStatusCondition(got.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
+	require.NotNil(t, prog)
+	assert.Equal(t, metav1.ConditionTrue, prog.Status)
 }
