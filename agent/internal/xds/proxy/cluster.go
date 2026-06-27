@@ -237,6 +237,11 @@ func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_ORIGINAL_DST,
 		},
+		// ORIGINAL_DST clusters MUST use CLUSTER_PROVIDED LB — the upstream host is
+		// resolved per-connection from SO_ORIGINAL_DST, not a load-balanced pool.
+		// Any other policy (the ROUND_ROBIN default) makes Envoy reject the cluster
+		// and NACK the entire CDS update.
+		LbPolicy:                      clusterv3.Cluster_CLUSTER_PROVIDED,
 		ConnectTimeout:                durationpb.New(2 * time.Second),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		// No TypedExtensionProtocolOptions: passthrough is plain TCP.

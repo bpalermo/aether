@@ -3,6 +3,8 @@ package proxy
 import (
 	"testing"
 
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -157,6 +159,9 @@ func TestNewPassthroughOriginalDstCluster(t *testing.T) {
 	assert.Equal(t, PassthroughClusterName, cl.GetName())
 	// Must be ORIGINAL_DST type (4).
 	assert.Equal(t, int32(4), int32(cl.GetType()))
+	// ORIGINAL_DST REQUIRES CLUSTER_PROVIDED LB — any other policy (the
+	// ROUND_ROBIN default) makes Envoy reject the cluster and NACK CDS.
+	assert.Equal(t, clusterv3.Cluster_CLUSTER_PROVIDED, cl.GetLbPolicy())
 	// No transport socket — passthrough is plaintext.
 	assert.Nil(t, cl.GetTransportSocket())
 	// No upstream HTTP protocol options — raw TCP.
