@@ -118,14 +118,20 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	cfg.CacheOptions = nil
 
-	// Run the Gateway API reconciler as a SINGLETON via leader election. The edge
-	// is a 2-replica Deployment whose reconciler watches Gateways/HTTPRoutes
-	// cluster-wide; active-active, both replicas wrote Gateway status and collided
-	// with HTTP 409 Conflict (PR #378 band-aided the write with retry-on-conflict).
-	// With leader election on, only the leader's builder controller reconciles, so
-	// there is a single status writer. The per-pod data-plane runnables (xDS server
-	// + registry refresher) opt OUT (NeedLeaderElection()==false) so every replica
-	// keeps feeding its own co-located Envoy — data-plane HA is unaffected.
+	// Run the Gateway API reconciler on EVERY replica (NeedLeaderElection=false,
+	// set inside SetupWithManager). The edge is a 2-replica Deployment; each
+	// replica hosts its own xDS server + SnapshotCache that feeds its co-located
+	// Envoy. Per-Gateway listeners are injected via SetEdgeGateways — if only the
+	// leader's reconciler ran (the controller-runtime default), the follower's
+	// Envoy would see no listeners on the allocated internal ports, causing
+	// "connection refused" for ~50% of connections (those routed to the follower
+	// by kube-proxy / MetalLB). K8s writes (Service create/update, status patches)
+	// are idempotent under concurrent reconciliation; the CreateOrUpdate pattern
+	// and server-side-apply status patches handle 409 Conflict without retries.
+	//
+	// Leader election is still enabled on the manager so the coordination
+	// infrastructure is present (e.g. for future leader-only runnables), but the
+	// Gateway API reconciler itself does not require it.
 	//
 	// LeaderElectionNamespace is pinned to the edge pod's own namespace so the
 	// coordination.k8s.io Lease lives where the namespaced edge Role grants it (and

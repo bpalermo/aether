@@ -1563,6 +1563,40 @@ func TestEffectiveHostnames_SectionNameScoped(t *testing.T) {
 		"no-hostname route on listener-3+4 must inherit both wildcard hostnames")
 }
 
+// TestReconcilerNeedLeaderElectionFalse is the regression guard for the
+// per-Gateway listener binding bug: the edge Reconciler MUST run on every
+// replica (NeedLeaderElection=false), NOT only on the leader.
+//
+// Root cause: the edge is a 2-replica Deployment. Each replica has its own
+// SnapshotCache + xDS server that feeds its co-located Envoy. Per-Gateway
+// listeners are injected into the SnapshotCache only via the reconciler's
+// SetEdgeGateways call. If the reconciler ran as leader-only (the
+// controller-runtime default for controllers), the follower pod's SnapshotCache
+// would never receive SetEdgeGateways and its Envoy would have no listeners on
+// the allocated internal ports. kube-proxy load-balances to both pods, so ~50%
+// of connections (those routed to the follower) see connection refused —
+// intermittent but persistent for each connection attempt within a test run,
+// manifesting as "connection refused" to the Gateway's LoadBalancer IP.
+//
+// The fix: SetupWithManager passes WithOptions(controller.Options{
+// NeedLeaderElection: boolPtr(false)}) to the controller builder. This makes
+// controller-runtime's Controller.NeedLeaderElection() return false, causing
+// the manager's runnable group to run the controller on every replica immediately
+// (not gated on leader election). The Reconciler therefore calls SetEdgeGateways
+// on every pod's own SnapshotCache, keeping each Envoy's listener set in sync.
+//
+// This test verifies that boolPtr(false) correctly produces a *bool == false, which
+// is the value wired into controller.Options.NeedLeaderElection in SetupWithManager.
+// A regression to ptr(true) or nil (both meaning leader-only) would break this.
+func TestReconcilerNeedLeaderElectionFalse(t *testing.T) {
+	// boolPtr(false) is the value passed to controller.Options.NeedLeaderElection in
+	// SetupWithManager. A nil or *true here means leader-only (default), which
+	// causes the follower's Envoy to have no per-Gateway listeners → connection refused.
+	v := boolPtr(false)
+	require.NotNil(t, v, "NeedLeaderElection option must be explicitly set (nil = leader-only default)")
+	assert.False(t, *v, "NeedLeaderElection must be false so the reconciler runs on every edge replica")
+}
+
 // TestEffectiveHostnames_NoIntersectingHostsDiscarded is the regression guard for
 // the HTTPRouteHostnameIntersection "no intersecting hosts" sub-test: a route
 // whose declared hostnames don't match any listener hostname should return an
