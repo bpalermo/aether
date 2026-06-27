@@ -5,7 +5,7 @@
 // deterministic prefix and partitions stay disjoint regardless of pod-CIDR
 // overlap across clusters. Full key layout:
 //
-//	<root>/<region>/clusters/<cluster>/services/<service>/protocols/<protocol>/endpoints/<ip>
+//	<root>/<region>/clusters/<cluster>/ns/<namespace>/services/<service>/protocols/<protocol>/endpoints/<ip>
 //
 // A registry instance OWNS one (region, cluster): it writes/deletes only under
 // its own partition, but reads (List*, watch) range the whole root so consumers
@@ -24,6 +24,7 @@ import (
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/serviceref"
 	"github.com/bpalermo/aether/registry/export"
 )
 
@@ -480,32 +481,63 @@ func (r *EtcdRegistry) Close() error {
 	return nil
 }
 
-// serviceMarker delimits the service-name segment within a key, after the
-// origin (region/cluster) prefix.
-const serviceMarker = "/services/"
+// nsMarker / serviceMarker delimit the namespace and service segments of a key,
+// after the origin (region/cluster) prefix: a service is keyed
+// .../ns/<namespace>/services/<service>/... (proposal 020 Part 1, namespace-aware).
+const (
+	nsMarker      = "/ns/"
+	serviceMarker = "/services/"
+)
+
+// serviceKeySegment renders a namespace-qualified "<ns>/<svc>" service key as the
+// etcd path segment "/ns/<ns>/services/<svc>" (proposal 020 Part 1). A malformed
+// (non-namespaced) key falls back to the legacy "/services/<key>" so a stray key
+// still produces a usable path rather than corrupting the tree.
+func serviceKeySegment(serviceName string) string {
+	if ref, ok := serviceref.ParseKey(serviceName); ok {
+		return nsMarker + ref.Namespace + serviceMarker + ref.Name
+	}
+	return serviceMarker + serviceName
+}
 
 // endpointKey builds the full key for one of THIS registry's own endpoints,
 // under its authoritative partition.
-// Format: <ownPrefix>/services/<serviceName>/protocols/<protocol>/endpoints/<ip>
+// Format: <ownPrefix>/ns/<ns>/services/<svc>/protocols/<protocol>/endpoints/<ip>
 func (r *EtcdRegistry) endpointKey(serviceName string, protocol registryv1.Service_Protocol, ip string) string {
-	return fmt.Sprintf("%s%s%s/protocols/%s/endpoints/%s", r.ownPrefix, serviceMarker, serviceName, protocol.String(), ip)
+	return fmt.Sprintf("%s%s/protocols/%s/endpoints/%s", r.ownPrefix, serviceKeySegment(serviceName), protocol.String(), ip)
 }
 
 // endpointsMatch is the substring an endpoint key carries for a given service
 // and protocol, used to filter a root-range read across all origins.
 func endpointsMatch(serviceName string, protocol registryv1.Service_Protocol) string {
-	return fmt.Sprintf("%s%s/protocols/%s/endpoints/", serviceMarker, serviceName, protocol.String())
+	return fmt.Sprintf("%s/protocols/%s/endpoints/", serviceKeySegment(serviceName), protocol.String())
 }
 
 // protocolsPrefix builds the prefix for all protocols of one of THIS registry's
 // own services (used to enumerate protocols before deleting own endpoints).
 func (r *EtcdRegistry) protocolsPrefix(serviceName string) string {
-	return fmt.Sprintf("%s%s%s/protocols/", r.ownPrefix, serviceMarker, serviceName)
+	return fmt.Sprintf("%s%s/protocols/", r.ownPrefix, serviceKeySegment(serviceName))
 }
 
-// extractServiceName extracts the service name from a full key path, regardless
-// of which origin (region/cluster) partition it lives under.
+// extractServiceName extracts the namespace-qualified "<ns>/<svc>" service key
+// from a full key path (.../ns/<ns>/services/<svc>/...), regardless of which
+// origin (region/cluster) partition it lives under. Falls back to the legacy
+// namespace-free scheme for any key without the /ns/ segment.
 func (r *EtcdRegistry) extractServiceName(key string) string {
+	if i := strings.Index(key, nsMarker); i >= 0 {
+		ns, after, found := strings.Cut(key[i+len(nsMarker):], serviceMarker)
+		if found && ns != "" {
+			svc := after
+			if j := strings.IndexByte(svc, '/'); j >= 0 {
+				svc = svc[:j]
+			}
+			if svc != "" {
+				return serviceref.New(ns, svc).Key()
+			}
+		}
+		return ""
+	}
+	// Legacy namespace-free fallback.
 	i := strings.Index(key, serviceMarker)
 	if i < 0 {
 		return ""
