@@ -64,7 +64,8 @@ func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, "echo", service)
+			// 020 Part 1: the registry key is namespace-qualified "<ns>/<svc>".
+			assert.Equal(t, "default/echo", service)
 			assert.Equal(t, tt.want, protocol)
 			require.NotNil(t, ep)
 			assert.Equal(t, "10.0.0.1", ep.GetIp())

@@ -8,6 +8,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/common/serviceref"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -20,12 +21,17 @@ import (
 )
 
 // ServiceClusterName returns the data-plane name of a service's outbound
-// cluster: <service>.<meshDomain>. Authorities are FQDN-only, and the cluster
-// name equals the authority so the warm path (service vhost) and the cold
-// path (catch-all cluster_header: ":authority" + ODCDS) resolve the same
-// resource deterministically. The bare service name remains the
-// control-plane key (registry, watch filter, dependency set, EDS, stats).
+// cluster: <svc>.<ns>.<meshDomain> (proposal 020 Part 1). The control-plane key
+// (registry, watch filter, dependency set, EDS, stats) is the namespace-qualified
+// "<ns>/<svc>" serviceref key; this renders it as the FQDN authority, so the warm
+// path (service vhost) and the cold path (catch-all cluster_header: ":authority"
+// + ODCDS) resolve the same resource deterministically.
 func ServiceClusterName(serviceName, meshDomain string) string {
+	if ref, ok := serviceref.ParseKey(serviceName); ok {
+		return ref.FQDN(meshDomain)
+	}
+	// Defensive: a non-namespaced key must not occur post-cutover; render it flat
+	// rather than panic so a stray legacy key degrades instead of crashing.
 	return serviceName + "." + meshDomain
 }
 

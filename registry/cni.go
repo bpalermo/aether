@@ -9,6 +9,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	"github.com/bpalermo/aether/common/serviceref"
 )
 
 // NewServiceEndpointFromCNIPod creates a ServiceEndpoint from a CNIPod.
@@ -78,13 +79,22 @@ func ExtractCNIPodInformation(pod *cniv1.CNIPod) (string, []string, error) {
 	return serviceName, pod.GetIps(), nil
 }
 
-// getServiceName extracts the service name from the pod's service account.
+// getServiceName returns the namespace-qualified registry key for the pod's mesh
+// service: "<namespace>/<serviceAccount>" (proposal 020 Part 1). The identity
+// unit is still the ServiceAccount, but the key is now namespace-qualified so two
+// workloads sharing a ServiceAccount name across namespaces (e.g. "default") no
+// longer collapse into one service. serviceref is the single source of truth for
+// the key format.
 func getServiceName(cniPod *cniv1.CNIPod) (string, error) {
 	sa := cniPod.GetServiceAccount()
 	if sa == "" {
 		return "", fmt.Errorf("missing service account")
 	}
-	return sa, nil
+	ns := cniPod.GetNamespace()
+	if ns == "" {
+		return "", fmt.Errorf("missing namespace")
+	}
+	return serviceref.New(ns, sa).Key(), nil
 }
 
 // getProtocolFromAnnotations maps the endpoint.aether.io/protocol annotation to
