@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -106,12 +107,33 @@ type Reconciler struct {
 // SetupWithManager registers the reconciler to watch HTTPRoutes, TCPRoutes,
 // TLSRoutes, Gateways and (when TLS is enabled) Secrets — any change
 // re-projects the whole set.
+//
+// The reconciler runs on EVERY edge replica (NeedLeaderElection=false). The
+// edge is a multi-replica Deployment; each replica hosts its own xDS server
+// that serves a co-located Envoy. Per-Gateway Envoy listeners are injected
+// into the replica's own SnapshotCache via SetEdgeGateways — a call that only
+// the leader's reconciler would make if leader-only. The follower's Envoy
+// would then see no listeners on the allocated internal ports, causing
+// "connection refused" for ~50% of connections (those kube-proxy routes to the
+// follower pod). Running the reconciler on all replicas ensures each pod's
+// SnapshotCache is updated and its co-located Envoy receives the correct
+// per-Gateway listener set.
+//
+// K8s resource writes (per-Gateway Service create/update, Gateway status
+// patches) are safe under concurrent reconciliation: the CreateOrUpdate pattern
+// is idempotent, and status patches use server-side apply / optimistic
+// concurrency (the controller-runtime client retries on 409 Conflict).
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Log = commonlog.Named(r.Log, "gatewayapi")
 	resync := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: r.Namespace, Name: "resync"}}}
 	})
 	b := ctrl.NewControllerManagedBy(mgr).
+		// Run on every replica, not just the leader: each edge pod's co-located
+		// Envoy must receive its own SnapshotCache update (per-Gateway listeners).
+		// Without this, the follower replica's Envoy has no listener on the
+		// internal ports and any connection kube-proxy routes to it is refused.
+		WithOptions(controller.Options{NeedLeaderElection: boolPtr(false)}).
 		For(&gatewayv1.HTTPRoute{}).
 		// GatewayClass: a spec change must re-publish status (observedGeneration
 		// bump). We reconcile any GatewayClass bearing our controllerName.
@@ -1405,6 +1427,10 @@ func effectiveHostnames(routeHosts []string, gwKeys []string, gwListenerHostname
 	}
 	return result
 }
+
+// boolPtr returns a pointer to the given bool value. Used to set
+// controller.Options.NeedLeaderElection without importing k8s.io/utils/ptr.
+func boolPtr(b bool) *bool { return &b }
 
 // hostnameIntersect returns the more-specific of two hostnames if they match,
 // and reports whether they intersect at all. The Gateway API rules are:

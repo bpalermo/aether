@@ -8,6 +8,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/edge/portalloc"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -521,4 +523,111 @@ func TestGatewayServiceGC(t *testing.T) {
 	gotStale := &corev1.Service{}
 	err = fc.Get(context.Background(), types.NamespacedName{Namespace: "aether-ingress", Name: "aether-edge-gw-old-ns-old-gw"}, gotStale)
 	assert.True(t, errors.IsNotFound(err), "stale Service must be deleted, got: %v", err)
+}
+
+// capturingSink is a RouteSink that records the last SetEdgeGateways call.
+// Used in TestTwoReplicasBothGetPerGatewayListeners to assert that two
+// independent reconciler instances (one per edge pod) each update their own sink.
+type capturingSink struct {
+	gateways []cache.EdgeGatewayEntry
+}
+
+func (s *capturingSink) SetVirtualHosts([]cache.VirtualHost) {}
+func (s *capturingSink) SetEdgeTLSSecrets(context.Context, map[string]cache.EdgeTLSCert) error {
+	return nil
+}
+func (s *capturingSink) SetEdgeTCPRoutes([]proxy.EdgeL4TCPRoute)      {}
+func (s *capturingSink) SetEdgeTLSRoutes([]proxy.EdgeL4TLSRoute)      {}
+func (s *capturingSink) SetEdgeHTTPRedirect(bool)                     {}
+func (s *capturingSink) SetEdgeGateways(gws []cache.EdgeGatewayEntry) { s.gateways = gws }
+func (s *capturingSink) HasRegistryService(string) bool               { return false }
+
+// TestTwoReplicasBothGetPerGatewayListeners is the regression guard for the
+// per-Gateway listener binding bug (connection refused to LB IP under churn).
+//
+// Symptom: HTTPRouteWeight and HTTPRouteRedirectPortAndScheme conformance tests
+// got "connection refused" to the Gateway's LoadBalancer IP on 10/10 attempts
+// over 182 s, persistent (not a brief race), because the follower edge pod's
+// Envoy had no listeners on the allocated internal ports.
+//
+// Root cause: the edge is a 2-replica Deployment. Each replica runs its own
+// SnapshotCache + xDS server. The gatewayapi.Reconciler was registered WITHOUT
+// WithOptions(controller.Options{NeedLeaderElection: boolPtr(false)}), so it
+// used the controller-runtime default of NeedLeaderElection=true (leader-only).
+// The leader's reconciler called SetEdgeGateways on the leader's own
+// SnapshotCache, but the follower's SnapshotCache never received any call —
+// leaving its Envoy with no per-Gateway listeners. kube-proxy routes incoming
+// connections to either pod; any connection hitting the follower got refused.
+//
+// Fix: SetupWithManager sets WithOptions(controller.Options{NeedLeaderElection:
+// boolPtr(false)}), so both replicas' reconcilers fire on every event, each
+// updating their own pod's SnapshotCache independently.
+//
+// This test simulates two replicas by constructing two Reconciler instances
+// with separate (capturingSink) sinks and the same shared k8s API fake client,
+// then calling Reconcile on both. Both sinks must receive the same
+// per-Gateway listener entries — proving that each pod's Envoy would be kept
+// in sync with the allocated ports.
+func TestTwoReplicasBothGetPerGatewayListeners(t *testing.T) {
+	scheme := statusScheme(t)
+	// Shared fake k8s API, as both replicas share the same cluster state.
+	svcListeningOnGW := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "backend"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.0.0.1"},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "aether"},
+			Spec:       gatewayv1.GatewayClassSpec{ControllerName: "gateway.aether.io/edge"},
+		},
+		&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "gw"},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "aether",
+				Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+			},
+		},
+		svcListeningOnGW,
+	).WithStatusSubresource(&gatewayv1.Gateway{}, &gatewayv1.GatewayClass{}).Build()
+
+	makeReconciler := func(sink RouteSink) *Reconciler {
+		return &Reconciler{
+			Client:               fc,
+			APIReader:            fc,
+			Sink:                 sink,
+			Namespace:            "ns",
+			EdgeServiceName:      "aether-edge",
+			GatewayClassName:     "aether",
+			PerGatewayAddressing: true,
+			Log:                  slog.New(slog.DiscardHandler),
+		}
+	}
+
+	// Two replicas: each has its own independent SnapshotCache sink.
+	sinkA := &capturingSink{}
+	sinkB := &capturingSink{}
+	rA := makeReconciler(sinkA)
+	rB := makeReconciler(sinkB)
+
+	req := ctrl.Request{}
+	_, errA := rA.Reconcile(context.Background(), req)
+	require.NoError(t, errA, "replica A reconcile must not error")
+	_, errB := rB.Reconcile(context.Background(), req)
+	require.NoError(t, errB, "replica B reconcile must not error")
+
+	// Both replicas must have received per-Gateway entries (not nil/empty).
+	// If only the leader ran, the follower's sink would be empty — causing
+	// "connection refused" for connections routed to the follower's Envoy.
+	require.NotEmpty(t, sinkA.gateways, "replica A sink must receive per-Gateway listener entries")
+	require.NotEmpty(t, sinkB.gateways, "replica B sink must receive per-Gateway listener entries (regression: was empty when reconciler was leader-only)")
+
+	// Both sinks must agree on the same Gateway entries (same namespace/name/internal port).
+	require.Len(t, sinkA.gateways, len(sinkB.gateways), "both replicas must see the same number of gateways")
+	assert.Equal(t, sinkA.gateways[0].Namespace, sinkB.gateways[0].Namespace)
+	assert.Equal(t, sinkA.gateways[0].Name, sinkB.gateways[0].Name)
+	require.NotEmpty(t, sinkA.gateways[0].Listeners, "gateway must have listeners")
+	require.NotEmpty(t, sinkB.gateways[0].Listeners, "gateway must have listeners on both replicas")
+	// Both replicas must see the SAME internal port (deterministic allocation).
+	assert.Equal(t, sinkA.gateways[0].Listeners[0].InternalPort, sinkB.gateways[0].Listeners[0].InternalPort,
+		"both replicas must allocate the same internal port for the same Gateway")
 }
