@@ -25,15 +25,15 @@ func TestOnDemandObserver_RecordsNamedCDSSubscriptions(t *testing.T) {
 	// data-plane cluster name and the control-plane keys).
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
-		ResourceNamesSubscribe: []string{"svc-on-demand.aether.internal"},
+		ResourceNamesSubscribe: []string{"svc-on-demand.team-a.aether.internal"},
 	}))
-	assert.Contains(t, c.DependencySet(), "svc-on-demand")
+	assert.Contains(t, c.DependencySet(), "team-a/svc-on-demand")
 
 	// Wildcard, per-pod names, names outside the mesh domain, and nested
 	// labels under it: all ignored.
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
-		ResourceNamesSubscribe: []string{"*", "", "app_pod-1", "health_pod-1", "svc-bare", "a.b.aether.internal", ".aether.internal"},
+		ResourceNamesSubscribe: []string{"*", "", "app_pod-1", "health_pod-1", "svc-bare", "a.b.c.aether.internal", ".aether.internal"},
 	}))
 	deps := c.DependencySet()
 	assert.Len(t, deps, 1, "only the mesh-authority subscription is observed")
@@ -57,10 +57,10 @@ func TestCombinedCallbacks_Dispatch(t *testing.T) {
 
 	require.NoError(t, combined.OnStreamDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
-		ResourceNamesSubscribe: []string{"svc-x.aether.internal"},
+		ResourceNamesSubscribe: []string{"svc-x.team-a.aether.internal"},
 	}))
-	assert.Contains(t, c1.DependencySet(), "svc-x")
-	assert.Contains(t, c2.DependencySet(), "svc-x")
+	assert.Contains(t, c1.DependencySet(), "team-a/svc-x")
+	assert.Contains(t, c2.DependencySet(), "team-a/svc-x")
 
 	// Unwired hooks are nil-safe.
 	require.NoError(t, combined.OnStreamOpen(context.Background(), 1, resourcev3.ClusterType))
@@ -79,14 +79,14 @@ func (c *catalogRegistry) HasService(name string) bool { return c.known[name] }
 // before touching the dependency set, while known services are observed.
 func TestOnDemandObserver_CatalogGate(t *testing.T) {
 	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
-	reg := &catalogRegistry{mockRegistry: &mockRegistry{}, known: map[string]bool{"svc-real": true}}
+	reg := &catalogRegistry{mockRegistry: &mockRegistry{}, known: map[string]bool{"team-a/svc-real": true}}
 	o := newOnDemandObserver(c, reg, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, o.onDeltaRequest(1, &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:                resourcev3.ClusterType,
-		ResourceNamesSubscribe: []string{"svc-real.aether.internal", "svc-ghost.aether.internal"},
+		ResourceNamesSubscribe: []string{"svc-real.team-a.aether.internal", "svc-ghost.team-a.aether.internal"},
 	}))
 	deps := c.DependencySet()
-	assert.Contains(t, deps, "svc-real", "catalog hit is observed")
-	assert.NotContains(t, deps, "svc-ghost", "catalog miss never pollutes the dependency set")
+	assert.Contains(t, deps, "team-a/svc-real", "catalog hit is observed")
+	assert.NotContains(t, deps, "team-a/svc-ghost", "catalog miss never pollutes the dependency set")
 }

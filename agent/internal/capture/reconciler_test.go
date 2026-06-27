@@ -92,7 +92,7 @@ func TestReconcile_ProjectsTCPServices(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, sink.tcpServices, 1, "only the non-headless TCP service should produce a TCP floor entry")
-	assert.Equal(t, "svc-tcp", sink.tcpServices[0].ServiceName)
+	assert.Equal(t, "aether-test/svc-tcp", sink.tcpServices[0].ServiceName)
 	assert.Equal(t, "10.96.0.99", sink.tcpServices[0].ClusterIP)
 }
 
@@ -114,6 +114,6 @@ func TestReconcile_ProjectsAuthoritiesAndDNSRecords(t *testing.T) {
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"svc-1": "svc-1.aether-test.svc.cluster.local"}, sink.got)
-	assert.Equal(t, map[string]string{"svc-1": "10.96.0.42"}, sink.records, "ClusterIP -> the <svc>.<meshDomain> A record")
+	assert.Equal(t, map[string]string{"aether-test/svc-1": "svc-1.aether-test.svc.cluster.local"}, sink.got)
+	assert.Equal(t, map[string]string{"aether-test/svc-1": "10.96.0.42"}, sink.records, "ClusterIP -> the <svc>.<meshDomain> A record")
 }

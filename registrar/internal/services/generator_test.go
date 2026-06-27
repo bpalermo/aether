@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/registrar/internal/server"
@@ -21,7 +23,7 @@ import (
 func seed(svc, ns string, port uint32) *server.Snapshot {
 	s := server.NewSnapshot()
 	s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
-		svc: {registryv1.Service_PROTOCOL_HTTP: {{
+		serviceref.New(ns, svc).Key(): {registryv1.Service_PROTOCOL_HTTP: {{
 			Ip:                 "10.0.0.1",
 			Port:               port,
 			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{Namespace: ns},
@@ -113,7 +115,7 @@ func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
 func seedProtocol(svc, ns string, port uint32, protocol registryv1.Service_Protocol) *server.Snapshot {
 	s := server.NewSnapshot()
 	s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
-		svc: {protocol: {{
+		serviceref.New(ns, svc).Key(): {protocol: {{
 			Ip:                 "10.0.0.1",
 			Port:               port,
 			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{Namespace: ns},

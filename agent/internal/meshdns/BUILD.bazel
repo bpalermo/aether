@@ -11,6 +11,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/log",
+        "//common/serviceref",
         "@com_github_miekg_dns//:dns",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",

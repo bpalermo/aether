@@ -166,7 +166,7 @@ func TestSweepRegistersMissingEndpoint(t *testing.T) {
 
 	s.sweepGhostEndpoints(ctx)
 
-	ep, ok := reg.registered["default/10.0.0.1"]
+	ep, ok := reg.registered["default/default/10.0.0.1"]
 	require.True(t, ok, "missing endpoint must be re-registered (service from SA, ip from pod)")
 	assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY, ep.GetHealth(), "EDS-mode re-registration starts UNHEALTHY pending promotion")
 
@@ -282,6 +282,6 @@ func TestSweepPrefersAuthoritativeListing(t *testing.T) {
 
 	s.sweepGhostEndpoints(ctx)
 
-	_, ok := reg.registered["default/10.0.0.1"]
+	_, ok := reg.registered["default/default/10.0.0.1"]
 	require.True(t, ok, "sweep must re-register from the authoritative (empty) listing, not the stale cache")
 }

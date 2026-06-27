@@ -26,11 +26,11 @@ func TestParseKey(t *testing.T) {
 	}{
 		{"team-a/echo", ServiceRef{Namespace: "team-a", Name: "echo"}, true},
 		{"default/svc-1", ServiceRef{Namespace: "default", Name: "svc-1"}, true},
-		{"echo", ServiceRef{}, false},       // namespace-free (the old key) must NOT parse
-		{"/echo", ServiceRef{}, false},      // empty namespace
-		{"team-a/", ServiceRef{}, false},    // empty name
-		{"", ServiceRef{}, false},           // empty
-		{"a/b/c", ServiceRef{}, false},      // ambiguous extra "/"
+		{"echo", ServiceRef{}, false},    // namespace-free (the old key) must NOT parse
+		{"/echo", ServiceRef{}, false},   // empty namespace
+		{"team-a/", ServiceRef{}, false}, // empty name
+		{"", ServiceRef{}, false},        // empty
+		{"a/b/c", ServiceRef{}, false},   // ambiguous extra "/"
 	}
 	for _, tt := range tests {
 		gotRef, gotOK := ParseKey(tt.in)

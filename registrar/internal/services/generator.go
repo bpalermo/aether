@@ -15,6 +15,7 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/serviceref"
 	"github.com/bpalermo/aether/registrar/internal/server"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -79,19 +80,25 @@ func (g *Generator) reconcile(ctx context.Context) {
 	// deterministic if a name ever appeared under both.
 	for _, protocol := range []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP} {
 		appProto := protocolAppProtocol[protocol]
-		for svc, eps := range g.Snapshot.GetAll(protocol) {
+		for svcKey, eps := range g.Snapshot.GetAll(protocol) {
+			// The registry key is namespace-qualified "<ns>/<svc>" (020 Part 1):
+			// the mesh VIP Service lives in <ns> with the bare ServiceAccount name.
+			ref, ok := serviceref.ParseKey(svcKey)
+			if !ok {
+				g.Log.WarnContext(ctx, "skipping malformed (non-namespaced) service key", "key", svcKey)
+				continue
+			}
 			ep := firstNamespaced(eps)
 			if ep == nil {
 				continue
 			}
-			ns := ep.GetKubernetesMetadata().GetNamespace()
-			key := client.ObjectKey{Namespace: ns, Name: svc}
+			key := client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}
 			if _, exists := desired[key]; exists {
 				continue // already claimed by an earlier protocol; one Service per name
 			}
 			desired[key] = desiredService{
-				service:     svc,
-				namespace:   ns,
+				service:     ref.Name,
+				namespace:   ref.Namespace,
 				port:        ep.GetPort(),
 				appProtocol: appProto,
 			}
