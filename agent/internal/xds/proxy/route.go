@@ -190,7 +190,7 @@ type GammaRedirect struct {
 	Scheme string
 	// Hostname is the target hostname. Empty = unchanged.
 	Hostname string
-	// Port is the target port (0 = unchanged).
+	// Port is the target port (0 = unchanged / preserve original).
 	Port uint32
 	// StatusCode is the HTTP redirect code (301 or 302; default 301).
 	StatusCode int
@@ -198,6 +198,17 @@ type GammaRedirect struct {
 	// "ReplaceFullPath" → Envoy PathRedirect; "ReplacePrefixMatch" → PrefixRewrite.
 	PathType  string
 	PathValue string
+	// ListenerPort is the external port of the Gateway listener serving this route
+	// (e.g. 8080 when the Gateway declares port: 8080 and the LB Service maps
+	// 8080 → some internal port). It is set by the per-Gateway route builder and
+	// ONLY used when Port == 0 and Scheme == "" (i.e. the redirect preserves the
+	// original port). Without this, Envoy's RedirectAction with port_redirect=0
+	// emits the listener's bound (internal) port in the Location header — not the
+	// external port the client connected to. For default HTTP ports (80, 443) this
+	// field is left 0 so the port is omitted from Location (correct for default
+	// ports). For non-default ports it is set to ExternalPort so Envoy encodes the
+	// correct port in Location.
+	ListenerPort uint32
 }
 
 // GammaURLRewrite describes a URLRewrite filter: rewrites the request host
@@ -407,12 +418,21 @@ func gammaRouteAction(serviceCluster string, rule GammaRoute, matchPrefix string
 // gammaRedirectAction converts a GammaRedirect into an Envoy Route_Redirect action.
 // The returned action replaces the RouteAction entirely — no backend cluster is used.
 //
-// Port semantics (Gateway API compliance): when an explicit Port is set, it is used
-// directly. When Port is 0 (not set in the filter) but Scheme is set, we must NOT
-// preserve the original request port — Envoy's default (port_redirect = 0) copies the
-// original request port, which violates Gateway API semantics where a scheme change
-// implies the scheme's default port. We emit the scheme-default port explicitly so
-// the redirect URL uses the correct port for the new scheme.
+// Port semantics (Gateway API compliance):
+//
+//   - Explicit Port set: use it directly (rd.Port != 0).
+//
+//   - Scheme changed but no explicit Port: use the scheme-default port (443 for https,
+//     80 for http). Without this, Envoy's port_redirect=0 would copy the original
+//     request port — wrong when changing scheme (e.g. https://host:80/path).
+//
+//   - No Port, no Scheme (pure "preserve original"): rd.ListenerPort carries the
+//     external port the Gateway listener declared (e.g. 8080). Envoy's port_redirect=0
+//     emits the listener's BOUND port, which is the internal/container port allocated
+//     by aether's port allocator — NOT the external port the client used. For a
+//     non-standard port (not 80 or 443) we must set port_redirect explicitly so the
+//     Location reflects the external port. For default ports (80/443) we leave
+//     port_redirect=0 so the port is omitted from Location (correct per RFC 3986).
 func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
 	a := &routev3.RedirectAction{}
 	if rd.Scheme != "" {
@@ -423,7 +443,7 @@ func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
 	}
 	switch {
 	case rd.Port != 0:
-		// Explicit port: use as specified.
+		// Explicit port from the HTTPRoute RequestRedirect filter: use as specified.
 		a.PortRedirect = rd.Port
 	case rd.Scheme == "https":
 		// Scheme changed to https, no explicit port: use the https default (443) so
@@ -432,6 +452,13 @@ func gammaRedirectAction(rd *GammaRedirect) *routev3.Route_Redirect {
 	case rd.Scheme == "http":
 		// Scheme changed to http, no explicit port: use the http default (80).
 		a.PortRedirect = 80
+	case rd.ListenerPort != 0 && rd.ListenerPort != 80 && rd.ListenerPort != 443:
+		// No explicit port, no scheme change, non-standard listener port: set
+		// port_redirect to the external port so Location carries the right port.
+		// Envoy's port_redirect=0 would use the listener's bound (internal) port
+		// instead. For default ports (80/443) we leave port_redirect=0 so the port
+		// is omitted from Location (browsers treat absent port as the scheme default).
+		a.PortRedirect = rd.ListenerPort
 	}
 	switch rd.StatusCode {
 	case 302:
