@@ -39,35 +39,48 @@ var edgeSelectorLabels = map[string]string{
 	"app.kubernetes.io/component": "edge",
 }
 
-// gatewayServiceName returns the name of the per-Gateway LoadBalancer Service.
-// Scheme: <edgeFullName>-gw-<ns>-<gwname>, kept within the 63-char DNS label limit.
+// truncateTo63 returns s unchanged when it fits Kubernetes' 63-byte cap (which
+// applies to BOTH a DNS-1035 label — the Service name — AND a label *value*),
+// otherwise it truncates to 54 chars and appends "-" + an 8-hex-char hash of
+// identity. The hash disambiguates distinct identities that share a long common
+// prefix, so they don't collide on the truncated result.
 //
-// When the full name exceeds 63 chars it is truncated AND suffixed with a short
-// hash of the full (ns, gw) identity, so two Gateways whose names share a long
-// common prefix don't collide onto the same truncated Service name. A naive
-// truncate-only scheme mapped e.g. "same-namespace-with-https-listener" and
-// "same-namespace-with-http-listener-on-8080" (in the same namespace) to the
-// identical 63-char string, so the two Gateways fought over one Service — one of
-// them ended up with no LoadBalancer address at all (status.addresses empty →
-// the conformance suite's GatewayMustHaveAddress wait timed out).
-func gatewayServiceName(edgeServiceName, namespace, gatewayName string) string {
-	s := fmt.Sprintf("%s-gw-%s-%s", edgeServiceName, namespace, gatewayName)
+// Both the per-Gateway Service name and its identifying label value are derived
+// from <namespace>/<gatewayName>, which routinely exceeds 63 bytes (e.g. the
+// conformance "gateway-conformance-infra/same-namespace-with-http-listener-on-8080").
+// The Service NAME was already capped, but the label VALUE was not — the API
+// server then rejected the whole Service ("metadata.labels: must be no more than
+// 63 bytes"), so no per-Gateway Service was ever created, the Gateway never got
+// an address, and the conformance GatewayMustHaveAddress wait timed out.
+func truncateTo63(s, identity string) string {
 	if len(s) <= 63 {
 		return s
 	}
-	// Disambiguate with an 8-char hex hash of the full identity, keeping the total
-	// length at 63 (54-char prefix + '-' + 8 hex chars). DNS labels are
+	// Disambiguate with an 8-char hex hash of the full identity, keeping the
+	// total length at 63 (54-char prefix + '-' + 8 hex chars). Names/values are
 	// case-insensitive, so use lowercase hex from a stable hash.
-	sum := sha256.Sum256([]byte(namespace + "/" + gatewayName))
+	sum := sha256.Sum256([]byte(identity))
 	suffix := hex.EncodeToString(sum[:])[:8]
 	const maxPrefix = 63 - 1 - 8 // room for "-<8 hex>"
 	return s[:maxPrefix] + "-" + suffix
 }
 
-// gatewayLabelValue returns the label value for a per-Gateway Service.
-// Format: "<namespace>.<name>" — uniquely identifies a Gateway.
+// gatewayServiceName returns the name of the per-Gateway LoadBalancer Service.
+// Scheme: <edgeFullName>-gw-<ns>-<gwname>, kept within the 63-char DNS label
+// limit via truncateTo63 (a naive truncate-only scheme collided e.g.
+// "same-namespace-with-https-listener" and "same-namespace-with-http-listener-on-8080"
+// onto one name; the hash suffix disambiguates them).
+func gatewayServiceName(edgeServiceName, namespace, gatewayName string) string {
+	return truncateTo63(fmt.Sprintf("%s-gw-%s-%s", edgeServiceName, namespace, gatewayName), namespace+"/"+gatewayName)
+}
+
+// gatewayLabelValue returns the GC label value for a per-Gateway Service.
+// Format: "<namespace>.<name>" — identifies a Gateway, capped at 63 bytes
+// (label-value limit) via truncateTo63. The value is informational; the GC
+// matches per-Gateway Services by the label KEY (client.HasLabels), so a
+// truncated/hashed value never affects garbage collection.
 func gatewayLabelValue(namespace, name string) string {
-	return namespace + "." + name
+	return truncateTo63(namespace+"."+name, namespace+"/"+name)
 }
 
 // gatewayListenerAllocation holds the allocation for ONE external port of a Gateway.

@@ -47,6 +47,21 @@ func TestGatewayServiceName(t *testing.T) {
 func TestGatewayLabelValue(t *testing.T) {
 	assert.Equal(t, "aether-ingress.edge", gatewayLabelValue("aether-ingress", "edge"))
 	assert.Equal(t, "conformance.same-namespace", gatewayLabelValue("conformance", "same-namespace"))
+
+	// Regression: a <namespace>.<name> longer than 63 bytes must be capped — the API
+	// server rejects a Service whose label VALUE exceeds 63 bytes, which previously
+	// blocked the per-Gateway Service create entirely (Gateway never got an address →
+	// conformance GatewayMustHaveAddress timeout). The conformance Gateway below has a
+	// 67-byte <ns>.<name>.
+	v := gatewayLabelValue("gateway-conformance-infra", "same-namespace-with-http-listener-on-8080")
+	assert.LessOrEqual(t, len(v), 63, "label value must fit the 63-byte Kubernetes limit")
+
+	// Distinct Gateways sharing a long common prefix must still get distinct (truncated)
+	// values, and the truncation is deterministic.
+	v2 := gatewayLabelValue("gateway-conformance-infra", "same-namespace-with-https-listener")
+	assert.LessOrEqual(t, len(v2), 63)
+	assert.NotEqual(t, v, v2)
+	assert.Equal(t, v, gatewayLabelValue("gateway-conformance-infra", "same-namespace-with-http-listener-on-8080"))
 }
 
 // TestAllocateGatewayListenerPorts_Stable verifies that the port allocator returns
