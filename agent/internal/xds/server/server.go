@@ -78,6 +78,15 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 	return aXdsServer, nil
 }
 
+// NeedLeaderElection returns false so the xDS server runs on EVERY replica, not
+// just the leader. Each edge/agent pod serves xDS to its own co-located Envoy
+// over a node-local UDS; leader-gating it would leave all non-leader proxies
+// without a control plane and break data-plane HA. (The embedded xds.Server
+// already declares this; AgentXdsServer states it explicitly so the
+// per-pod-runnable contract is visible at this type.) On the node agent (leader
+// election off) this method is a no-op.
+func (s *AgentXdsServer) NeedLeaderElection() bool { return false }
+
 // PreListen generates the initial Envoy snapshot from local pod storage and the service registry.
 // It creates listeners, clusters, endpoints, and routes, then sets the snapshot in the cache
 // before the server starts accepting xDS client connections.

@@ -74,4 +74,40 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "aether.edge.serviceAccountName" . }}
     namespace: {{ include "aether.edge.namespace" . }}
+---
+# Namespaced: leader election. The edge is a 2-replica Deployment whose Gateway
+# API reconciler runs as a SINGLETON via controller-runtime leader election (the
+# per-pod xDS/data-plane runnables opt out and run on every replica). Leader
+# election needs a coordination.k8s.io Lease in the edge's own namespace plus
+# Event create/patch for the standard election records.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aether.edge.fullname" . }}-leader-election
+  namespace: {{ include "aether.edge.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "aether.edge.fullname" . }}-leader-election
+  namespace: {{ include "aether.edge.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "aether.edge.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.edge.serviceAccountName" . }}
+    namespace: {{ include "aether.edge.namespace" . }}
 {{- end }}

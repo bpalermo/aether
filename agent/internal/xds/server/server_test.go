@@ -13,6 +13,7 @@ import (
 	"github.com/bpalermo/aether/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 // mockRegistry implements registry.Registry for testing purposes.
@@ -110,6 +111,33 @@ func TestNewAgentXdsServer_ImplementsServerCallback(t *testing.T) {
 	// PreListen directly. The compile-time check below ensures the interface is met
 	// without depending on unexported fields.
 	var _ interface{ PreListen(context.Context) error } = got
+}
+
+// TestPerPodRunnablesOptOutOfLeaderElection verifies that the two per-pod
+// data-plane runnables — the xDS server and the registry refresher — report
+// NeedLeaderElection()==false. The edge enables leader election so its Gateway
+// API reconciler is a singleton (one status writer), but every replica must keep
+// feeding its own co-located Envoy; if either of these were leader-gated,
+// non-leader proxies would lose their control plane and data-plane HA would
+// break. Both must satisfy manager.LeaderElectionRunnable and answer false.
+func TestPerPodRunnablesOptOutOfLeaderElection(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	snapshotCache := cache.NewSnapshotCache("node-1", log)
+	mockStore := storage.NewMockStorage[*cniv1.CNIPod]()
+	reg := &mockRegistry{}
+
+	xdsSrv, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, log)
+	require.NoError(t, err)
+
+	refresher := NewRegistryRefresher("cluster-1", "node-1", snapshotCache, reg, log)
+
+	// Both are manager.LeaderElectionRunnable and must opt OUT (false) so they run
+	// on every replica, not just the leader.
+	var xdsLE manager.LeaderElectionRunnable = xdsSrv
+	var refresherLE manager.LeaderElectionRunnable = refresher
+	assert.False(t, xdsLE.NeedLeaderElection(), "xDS server must run on every replica (per-pod data plane)")
+	assert.False(t, refresherLE.NeedLeaderElection(), "registry refresher must run on every replica (per-pod data plane)")
 }
 
 // TestAgentXdsServer_PreListen verifies the PreListen method's error propagation behavior.

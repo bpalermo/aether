@@ -118,6 +118,24 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	cfg.CacheOptions = nil
 
+	// Run the Gateway API reconciler as a SINGLETON via leader election. The edge
+	// is a 2-replica Deployment whose reconciler watches Gateways/HTTPRoutes
+	// cluster-wide; active-active, both replicas wrote Gateway status and collided
+	// with HTTP 409 Conflict (PR #378 band-aided the write with retry-on-conflict).
+	// With leader election on, only the leader's builder controller reconciles, so
+	// there is a single status writer. The per-pod data-plane runnables (xDS server
+	// + registry refresher) opt OUT (NeedLeaderElection()==false) so every replica
+	// keeps feeding its own co-located Envoy — data-plane HA is unaffected.
+	//
+	// LeaderElectionNamespace is pinned to the edge pod's own namespace so the
+	// coordination.k8s.io Lease lives where the namespaced edge Role grants it (and
+	// so out-of-cluster runs don't fall back to "default"). controller-runtime would
+	// default this to the in-cluster namespace; setting it explicitly keeps the
+	// Lease location tied to the same namespace the RBAC targets.
+	cfg.LeaderElection = true
+	cfg.LeaderElectionID = "aether-edge-leader"
+	edgeNamespace := currentNamespace()
+
 	// Manager scheme = client-go built-ins + the Gateway API types so the
 	// reconciler reads typed Gateways/HTTPRoutes (no unstructured).
 	scheme := runtime.NewScheme()
@@ -137,7 +155,11 @@ func runEdge(ctx context.Context) (retErr error) {
 		return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
 	}
 
-	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) { o.Scheme = scheme })
+	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) {
+		o.Scheme = scheme
+		// Pin the leader-election Lease to the edge's namespace (see above).
+		o.LeaderElectionNamespace = edgeNamespace
+	})
 	if err != nil {
 		return err
 	}
