@@ -852,6 +852,57 @@ func TestEffectiveHostnames_ListenerNoHostname(t *testing.T) {
 	assert.Empty(t, got2, "hostname-less route on no-hostname listener → catch-all (empty)")
 }
 
+// TestEffectiveHostnames_MultiListenerCatchAllOverrides is the regression test for
+// HTTPRouteRedirectPortAndScheme (https-listener-on-443 subtests).
+//
+// A Gateway with three HTTPS listeners on port 443:
+//   - "https"                  hostname: "" (no restriction)
+//   - "https-with-hostname"    hostname: "second-example.org"
+//   - "https-with-wildcard"    hostname: "*.wildcard.org"
+//
+// An HTTPRoute with no hostnames attaches without a sectionName (gateway-level key).
+// buildGatewayListenerHostnames produces a gateway-level union of
+// ["", "second-example.org", "*.wildcard.org"].
+//
+// Before the fix, effectiveHostnames processed all three entries:
+//   - lh="" + routeHosts=[] → continue (adds nothing)
+//   - lh="second-example.org" → add "second-example.org"
+//   - lh="*.wildcard.org" → add "*.wildcard.org"
+//
+// Result: ["second-example.org", "*.wildcard.org"] — the no-hostname listener's
+// "admit all" semantics were silently dropped. A request with Host: example.org
+// matched neither, fell to the 404 catch-all vhost, and returned 404 instead of
+// the expected 302 redirect.
+//
+// After the fix, the first lh="" hit immediately returns nil (true catch-all),
+// so the vhost receives empty Hosts → the "*" catch-all vhost → correct match.
+func TestEffectiveHostnames_MultiListenerCatchAllOverrides(t *testing.T) {
+	// Build a Gateway matching same-namespace-with-https-listener from the
+	// conformance suite: three HTTPS listeners, first has no hostname.
+	gw := makeGateway("ns", "gw", "", "second-example.org", "*.wildcard.org")
+	m := buildGatewayListenerHostnames([]gatewayv1.Gateway{gw})
+
+	gwKeys := []string{"ns/gw"} // gateway-level key (no sectionName in parentRef)
+
+	// Route with no hostnames: must be catch-all (nil) regardless of the other
+	// listeners' specific hostnames.
+	got := effectiveHostnames(nil, gwKeys, m)
+	assert.Nil(t, got,
+		"no-hostname route on a Gateway with a no-hostname listener must be catch-all (nil), "+
+			"not narrowed to the other listeners' specific hostnames")
+
+	// Route with explicit hostnames: the no-hostname listener admits them unchanged.
+	got2 := effectiveHostnames([]string{"example.org"}, gwKeys, m)
+	assert.ElementsMatch(t, []string{"example.org"}, got2,
+		"route with explicit hostname 'example.org' should be admitted by the no-hostname listener")
+
+	// Attaching to only the specific-hostname section must still scope correctly.
+	sectionKey := "ns/gw/ll" // "https-with-hostname" is the second listener → "ll"
+	got3 := effectiveHostnames(nil, []string{sectionKey}, m)
+	assert.ElementsMatch(t, []string{"second-example.org"}, got3,
+		"no-hostname route scoped to the 'second-example.org' section must inherit that hostname")
+}
+
 // TestEffectiveHostnames_MultiGatewayUnion verifies the multi-Gateway union
 // semantics: a route attaching to two Gateways with different listener hostnames
 // gets the union of both intersections.
