@@ -1367,3 +1367,174 @@ func TestBuildEdgeVhostsLocked_WildcardAndSpecificIsolated(t *testing.T) {
 	// Confirm no catch-all "*" was emitted.
 	assert.Nil(t, byName["*"], "no hostname-less routes → no catch-all * vhost")
 }
+
+// TestPerGatewayRedirectPreservesExternalPort is the regression test for
+// HTTPRouteRedirectPortAndScheme subtest "scheme-nil-and-port-nil" on a
+// http-listener-on-8080 Gateway (the LONE remaining Extended conformance fail
+// before this fix).
+//
+// Root cause: edgeGatewayRouteConfigs builds the per-Gateway route config without
+// passing the listener's ExternalPort. A redirect route with neither Port nor Scheme
+// (pure "preserve original port" semantics) ends up with GammaRedirect.Port=0 and
+// GammaRedirect.Scheme="". gammaRedirectAction then leaves port_redirect=0, which
+// makes Envoy use the listener's BOUND (internal) port — not the external port 8080
+// the client connected to via the LB Service. The Location header becomes
+// "http://host:18101/path" instead of "http://host:8080/path".
+//
+// Fix: gatewayExternalHTTPPort finds the external port of the non-redirect, non-TLS
+// listener. buildEdgeVhostsLocked injects it into GammaRedirect.ListenerPort for
+// redirect routes with Port=0 and Scheme="". gammaRedirectAction emits
+// port_redirect=8080 for non-standard ports; for default ports (80, 443) it leaves
+// port_redirect=0 so the port is correctly omitted from Location.
+func TestPerGatewayRedirectPreservesExternalPort(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+
+	// Gateway with HTTP listener on external port 8080, internal port 18101.
+	// This is the per-Gateway addressing pattern: LB Service maps 8080 → 18101.
+	entry := EdgeGatewayEntry{
+		Namespace: "gateway-conformance-infra",
+		Name:      "http-gateway-8080",
+		Listeners: []EdgeGatewayListenerEntry{
+			{ExternalPort: 8080, InternalPort: 18101, HTTPRedirect: false},
+		},
+		VirtualHosts: []VirtualHost{
+			{
+				// Catch-all: no hostname, matches all requests.
+				Hosts: nil,
+				Routes: []Route{
+					{
+						// scheme-nil-and-port-nil: no Scheme, no Port → must emit port_redirect=8080.
+						Prefix:   "/scheme-nil-and-port-nil",
+						Redirect: &proxy.GammaRedirect{StatusCode: 302},
+					},
+					{
+						// scheme-nil-and-port-80: explicit Port=80 → port_redirect=80 always.
+						Prefix:   "/scheme-nil-and-port-80",
+						Redirect: &proxy.GammaRedirect{Port: 80, StatusCode: 302},
+					},
+					{
+						// scheme-https-and-port-nil: Scheme=https → port_redirect=443 (scheme default).
+						Prefix:   "/scheme-https-and-port-nil",
+						Redirect: &proxy.GammaRedirect{Scheme: "https", StatusCode: 302},
+					},
+				},
+			},
+		},
+	}
+	c.SetEdgeGateways([]EdgeGatewayEntry{entry})
+
+	rcs := c.edgeGatewayRouteConfigs()
+	require.Len(t, rcs, 1)
+	rc, ok := rcs[0].(*routev3.RouteConfiguration)
+	require.True(t, ok)
+	assert.Equal(t, proxy.EdgeGatewayRouteName("gateway-conformance-infra", "http-gateway-8080"), rc.GetName())
+
+	// Find the "*" catch-all vhost (from nil Hosts).
+	var catchAll *routev3.VirtualHost
+	for _, vh := range rc.GetVirtualHosts() {
+		if len(vh.GetDomains()) == 1 && vh.GetDomains()[0] == "*" {
+			catchAll = vh
+			break
+		}
+	}
+	require.NotNil(t, catchAll, "catch-all '*' vhost must be present for the hostname-less VirtualHost")
+
+	// Index redirect routes by path prefix for easy lookup.
+	redirectByPath := make(map[string]*routev3.RedirectAction)
+	for _, r := range catchAll.GetRoutes() {
+		rd := r.GetRedirect()
+		if rd == nil {
+			continue
+		}
+		// Extract the path matcher to key the result.
+		path := r.GetMatch().GetPrefix()
+		if path == "" {
+			path = r.GetMatch().GetPathSeparatedPrefix()
+		}
+		redirectByPath[path] = rd
+	}
+
+	// scheme-nil-and-port-nil on 8080 listener → port_redirect MUST be 8080.
+	// This is the conformance-failing case before the fix.
+	nilNil := redirectByPath["/scheme-nil-and-port-nil"]
+	require.NotNil(t, nilNil, "scheme-nil-and-port-nil route must be present")
+	assert.Equal(t, uint32(8080), nilNil.GetPortRedirect(),
+		"scheme-nil-and-port-nil on 8080 listener must set port_redirect=8080 so Location contains :8080")
+	assert.Empty(t, nilNil.GetSchemeRedirect(), "no scheme change")
+
+	// scheme-nil-and-port-80 → explicit port=80 is preserved as-is.
+	nilPort80 := redirectByPath["/scheme-nil-and-port-80"]
+	require.NotNil(t, nilPort80, "scheme-nil-and-port-80 route must be present")
+	assert.Equal(t, uint32(80), nilPort80.GetPortRedirect(),
+		"explicit port=80 must be preserved")
+
+	// scheme-https-and-port-nil → scheme change uses scheme default (443).
+	httpsNil := redirectByPath["/scheme-https-and-port-nil"]
+	require.NotNil(t, httpsNil, "scheme-https-and-port-nil route must be present")
+	assert.Equal(t, uint32(443), httpsNil.GetPortRedirect(),
+		"https scheme-only redirect must use port 443, not the listener port 8080")
+	assert.Equal(t, "https", httpsNil.GetSchemeRedirect())
+}
+
+// TestGatewayExternalHTTPPort verifies gatewayExternalHTTPPort returns the correct
+// port for various listener configurations.
+func TestGatewayExternalHTTPPort(t *testing.T) {
+	tests := []struct {
+		name      string
+		listeners []EdgeGatewayListenerEntry
+		want      uint32
+	}{
+		{
+			name:      "single HTTP listener on 8080",
+			listeners: []EdgeGatewayListenerEntry{{ExternalPort: 8080, InternalPort: 18101}},
+			want:      8080,
+		},
+		{
+			name:      "default HTTP listener on 80",
+			listeners: []EdgeGatewayListenerEntry{{ExternalPort: 80, InternalPort: 18100}},
+			want:      80,
+		},
+		{
+			name: "TLS listener only — no HTTP port",
+			listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 443, InternalPort: 18102, TLSSecretNames: []string{"my/cert"}},
+			},
+			want: 0,
+		},
+		{
+			name: "redirect listener only — no routable port",
+			listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 80, InternalPort: 18100, HTTPRedirect: true},
+			},
+			want: 0,
+		},
+		{
+			name: "redirect + TLS — no plain HTTP port",
+			listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 80, InternalPort: 18100, HTTPRedirect: true},
+				{ExternalPort: 443, InternalPort: 18101, TLSSecretNames: []string{"my/cert"}},
+			},
+			want: 0,
+		},
+		{
+			name: "HTTP + TLS mixed — returns HTTP port",
+			listeners: []EdgeGatewayListenerEntry{
+				{ExternalPort: 8080, InternalPort: 18100},
+				{ExternalPort: 8443, InternalPort: 18101, TLSSecretNames: []string{"my/cert"}},
+			},
+			want: 8080,
+		},
+		{
+			name:      "empty listeners",
+			listeners: nil,
+			want:      0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gatewayExternalHTTPPort(tc.listeners)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

@@ -327,18 +327,42 @@ func (c *SnapshotCache) edgeGatewayRouteConfigs() []types.Resource {
 
 	var out []types.Resource
 	for _, gw := range gws {
-		vhosts := c.gatewayVhostsLocked(gw.VirtualHosts)
+		// Find the external port for this Gateway's primary (non-redirect) HTTP listener.
+		// This is needed so that RequestRedirect filters with no explicit port can encode
+		// the correct external port in the Location header — Envoy's port_redirect=0 would
+		// otherwise use the listener's bound (internal) port instead.
+		// When a Gateway has multiple non-redirect listeners (unusual), we use the first
+		// one; the redirect route cannot be simultaneously correct for two different ports
+		// on a shared route config, so we favour the first declared port.
+		listenerPort := gatewayExternalHTTPPort(gw.Listeners)
+		vhosts := c.gatewayVhostsLocked(gw.VirtualHosts, listenerPort)
 		rc := proxy.BuildEdgeGatewayRouteConfiguration(gw.Namespace, gw.Name, vhosts)
 		out = append(out, rc)
 	}
 	return out
 }
 
+// gatewayExternalHTTPPort returns the external port of the first non-redirect,
+// non-TLS listener entry in the given list. This is the port clients connect to
+// when the Gateway exposes an HTTP listener (e.g. 8080). Returns 0 when there is
+// no such listener (TLS-only or redirect-only Gateways).
+func gatewayExternalHTTPPort(listeners []EdgeGatewayListenerEntry) uint32 {
+	for _, ln := range listeners {
+		if !ln.HTTPRedirect && len(ln.TLSSecretNames) == 0 {
+			return ln.ExternalPort
+		}
+	}
+	return 0
+}
+
 // gatewayVhostsLocked builds Envoy virtual hosts for one Gateway's VirtualHost
-// slice. It is identical to virtualHostVhosts but scoped to one Gateway's vhosts.
+// slice. listenerPort is the external port of the Gateway's primary HTTP listener
+// (0 when unknown) and is used to populate GammaRedirect.ListenerPort on redirect
+// routes so that port-preserving redirects emit the correct external port in
+// Location (not the internal/container port the listener is bound to).
 // Caller must hold clusterMu.
-func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost) []*routev3.VirtualHost {
-	return c.buildEdgeVhostsLocked(vhosts)
+func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost, listenerPort uint32) []*routev3.VirtualHost {
+	return c.buildEdgeVhostsLocked(vhosts, listenerPort)
 }
 
 // buildEdgeVhostsLocked converts cache VirtualHosts into Envoy virtual hosts.
@@ -355,8 +379,14 @@ func (c *SnapshotCache) gatewayVhostsLocked(vhosts []VirtualHost) []*routev3.Vir
 // hostname set spans all of the listener's hostnames; they are merged into the
 // single catch-all "*" vhost (there can be only one "*" per route table).
 //
+// listenerPort is the external port of the Gateway listener this route config
+// serves (e.g. 8080). It is injected into redirect routes' GammaRedirect.ListenerPort
+// so that a RequestRedirect with no explicit port or scheme emits the correct
+// external port in the Location header. Pass 0 for the Phase 1 shared listener
+// (external port = 80 = default, port_redirect=0 is correct).
+//
 // Caller must hold clusterMu.
-func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.VirtualHost {
+func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost, listenerPort uint32) []*routev3.VirtualHost {
 	// domain → []Route accumulator; ordered first-seen for domain name ordering.
 	domainRoutes := make(map[string][]Route)
 	var domainOrder []string // first-seen order for deterministic output
@@ -408,6 +438,19 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 		if r.DirectResponseStatus != 0 {
 			return proxy.BuildEdgeDirectResponseRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, r.DirectResponseStatus)
 		}
+
+		// Inject the listener's external port into redirect routes when the redirect
+		// filter specifies neither Port nor Scheme (pure "preserve original" semantics).
+		// Without this, gammaRedirectAction leaves port_redirect=0, which makes Envoy
+		// use the listener's bound (internal) port — not the external port the client
+		// connected to. See GammaRedirect.ListenerPort for the full explanation.
+		redirect := r.Redirect
+		if redirect != nil && listenerPort != 0 && redirect.Port == 0 && redirect.Scheme == "" {
+			cp := *redirect
+			cp.ListenerPort = listenerPort
+			redirect = &cp
+		}
+
 		// Weighted multi-backend path: when Backends is populated use it.
 		if len(r.Backends) > 0 {
 			weighted := make([]proxy.WeightedRouteBackend, 0, len(r.Backends))
@@ -415,14 +458,14 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost) []*routev3.V
 				cn := c.edgeClusterNameLocked(b.Service, b.BackendNamespace, b.Port)
 				weighted = append(weighted, proxy.WeightedRouteBackend{Cluster: cn, Weight: b.Weight})
 			}
-			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, weighted, r.HeaderMutation, r.Redirect, r.URLRewrite, r.Timeout)
+			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, weighted, r.HeaderMutation, redirect, r.URLRewrite, r.Timeout)
 		}
 		// Legacy single-backend path (backward compat).
 		cluster := ""
 		if r.Service != "" {
 			cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
 		}
-		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, cluster, r.HeaderMutation, r.Redirect, r.URLRewrite, r.Timeout)
+		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, cluster, r.HeaderMutation, redirect, r.URLRewrite, r.Timeout)
 	}
 
 	// Emit one Envoy virtual host per domain group, sorted by path specificity.
@@ -491,6 +534,9 @@ func (c *SnapshotCache) SetVirtualHosts(vhosts []VirtualHost) {
 // earlier vhost is dropped (keep-first; Envoy NACKs duplicate domains) — the
 // runtime backstop to the controller webhook's duplicate-FQDN rejection — and
 // hostname-less routes are merged into a single catch-all "*" vhost.
+// Phase 1 (shared listener): listener port is 0 — no redirect port injection needed
+// because the shared listener is on the default HTTP port (80) and port_redirect=0
+// is correct for default ports (Location omits ":80").
 func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 	c.edgeMu.RLock()
 	vhosts := slices.Clone(c.virtualHosts)
@@ -499,7 +545,7 @@ func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
-	return c.buildEdgeVhostsLocked(vhosts)
+	return c.buildEdgeVhostsLocked(vhosts, 0)
 }
 
 // edgeClusterNameLocked resolves a (service, backendNamespace, port) backend to

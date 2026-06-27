@@ -997,6 +997,87 @@ func TestBuildEdgeRoute_Redirect_ExplicitPortOverridesSchemeDefault(t *testing.T
 		"explicit port must override scheme default")
 }
 
+// --- FIX 4b: HTTPRouteRedirectPortAndScheme — non-standard listener port preservation ---
+
+// TestBuildEdgeRoute_Redirect_NonDefaultListenerPort_PreservesPort verifies that a
+// redirect with neither scheme nor explicit port (pure "preserve original" semantics)
+// sets port_redirect to the ListenerPort when the listener is on a non-standard port
+// (not 80 or 443). This is the fix for HTTPRouteRedirectPortAndScheme subtest
+// "scheme-nil-and-port-nil" on an http-listener-on-8080 Gateway.
+//
+// Root cause: Envoy's port_redirect=0 uses the listener's bound port — which for
+// aether's per-Gateway addressing is the INTERNAL container port (e.g. 18101), not
+// the external port (8080) the client connected to via the LB Service.
+func TestBuildEdgeRoute_Redirect_NonDefaultListenerPort_PreservesPort(t *testing.T) {
+	tests := []struct {
+		name         string
+		listenerPort uint32
+		wantPort     uint32
+		desc         string
+	}{
+		{
+			name:         "non-standard port 8080",
+			listenerPort: 8080,
+			wantPort:     8080,
+			desc:         "non-standard port must appear in port_redirect so Location contains :8080",
+		},
+		{
+			name:         "port 80 is default — omit from Location",
+			listenerPort: 80,
+			wantPort:     0,
+			desc:         "default HTTP port 80 must NOT set port_redirect (Location omits :80 per RFC 3986)",
+		},
+		{
+			name:         "port 443 is default — omit from Location",
+			listenerPort: 443,
+			wantPort:     0,
+			desc:         "default HTTPS port 443 must NOT set port_redirect (Location omits :443 per RFC 3986)",
+		},
+		{
+			name:         "listener port 0 (unknown) — no injection",
+			listenerPort: 0,
+			wantPort:     0,
+			desc:         "listener port 0 (Phase 1 shared listener) must not inject port_redirect",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// No Scheme, no Port: pure "preserve original port" redirect.
+			rd := &GammaRedirect{StatusCode: 302, ListenerPort: tc.listenerPort}
+			r := BuildEdgeRoute("/", "", nil, "", nil, "", nil, rd, nil, nil)
+			require.NotNil(t, r)
+			rdr := r.GetRedirect()
+			require.NotNil(t, rdr)
+			assert.Equal(t, tc.wantPort, rdr.GetPortRedirect(), tc.desc)
+		})
+	}
+}
+
+// TestBuildEdgeRoute_Redirect_ExplicitPortBeatsListenerPort verifies that an explicit
+// Port on the GammaRedirect takes precedence over ListenerPort (explicit wins always).
+func TestBuildEdgeRoute_Redirect_ExplicitPortBeatsListenerPort(t *testing.T) {
+	rd := &GammaRedirect{Port: 9090, ListenerPort: 8080, StatusCode: 302}
+	r := BuildEdgeRoute("/", "", nil, "", nil, "", nil, rd, nil, nil)
+	require.NotNil(t, r)
+	rdr := r.GetRedirect()
+	require.NotNil(t, rdr)
+	assert.Equal(t, uint32(9090), rdr.GetPortRedirect(),
+		"explicit Port must override ListenerPort")
+}
+
+// TestBuildEdgeRoute_Redirect_SchemeBeatsListenerPort verifies that when Scheme is set
+// (no explicit Port), the scheme-default port is used even if ListenerPort is set.
+func TestBuildEdgeRoute_Redirect_SchemeBeatsListenerPort(t *testing.T) {
+	// Scheme https + ListenerPort 8080 — scheme wins; port_redirect should be 443.
+	rd := &GammaRedirect{Scheme: "https", ListenerPort: 8080, StatusCode: 302}
+	r := BuildEdgeRoute("/", "", nil, "", nil, "", nil, rd, nil, nil)
+	require.NotNil(t, r)
+	rdr := r.GetRedirect()
+	require.NotNil(t, rdr)
+	assert.Equal(t, uint32(443), rdr.GetPortRedirect(),
+		"scheme https must use port 443 even when ListenerPort is set")
+}
+
 // --- FIX 4: HTTPRouteTimeoutRequest enforcement in BuildEdgeRoute ---
 
 // TestBuildEdgeRoute_Timeout verifies that a non-nil timeout is wired onto
