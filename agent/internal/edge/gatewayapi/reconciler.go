@@ -148,7 +148,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	grants := grantList.Items
 
-	gateways, ourGateways, gatewayListeners, hostCerts, certs, tlsResults, err := r.resolveGateways(ctx, grants)
+	gateways, ourGateways, gatewayListeners, perGWHostCerts, hostCerts, certs, tlsResults, err := r.resolveGateways(ctx, grants)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -309,7 +309,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// Phase 1 (shared SetVirtualHosts path).
 	var perGWAssignedIPs map[gatewayKey]string
 	if r.PerGatewayAddressing && r.EdgeServiceName != "" && len(ourGateways) > 0 {
-		allocations, allocErr := allocateGatewayListenerPorts(ourGateways, hostCerts)
+		allocations, allocErr := allocateGatewayListenerPorts(ourGateways, perGWHostCerts)
 		if allocErr != nil {
 			r.Log.WarnContext(ctx, "per-Gateway port allocation failed, falling back to Phase 1",
 				"error", allocErr.Error())
@@ -411,20 +411,38 @@ type listenerTLSResult struct {
 // resolveGateways lists the Gateways of our GatewayClass CLUSTER-WIDE and resolves
 // each TLS listener's cert. It returns the set of our Gateways (by namespaced
 // name), the Gateway objects themselves (for status), a set of listener keys (for
-// TCPRoute/TLSRoute port matching), a hostname→SDS-name map for HTTP cert
-// selection, and the SDS-name→bytes map to push. Selection is by
-// GatewayClassName: every Gateway whose gatewayClassName is the class this edge
-// serves (whose controllerName is gateway.aether.io/edge) is ours, regardless of
-// namespace.
-func (r *Reconciler) resolveGateways(ctx context.Context, grants []gatewayv1beta1.ReferenceGrant) (map[gatewayKey]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[string]string, map[string]cache.EdgeTLSCert, map[listenerStatusKey]listenerTLSResult, error) {
+// TCPRoute/TLSRoute port matching), a per-Gateway hostname→SDS-name map (for
+// per-Gateway cert selection in Phase 2), a merged hostname→SDS-name map (for
+// Phase 1 / VirtualHost cert tagging), and the SDS-name→bytes map to push.
+// Selection is by GatewayClassName: every Gateway whose gatewayClassName is the
+// class this edge serves (whose controllerName is gateway.aether.io/edge) is ours,
+// regardless of namespace.
+//
+// The per-Gateway hostCerts map is keyed by gatewayKey; each value is the
+// hostname→SDS-name map for that Gateway's listeners only. This prevents cert
+// cross-contamination when multiple Gateways share a catch-all TLS listener (empty
+// hostname): the shared flat map would let a later-resolved Gateway overwrite the
+// catch-all entry and cause an earlier Gateway's listeners to reference the wrong
+// cert (presenting a cert for a different domain → TLS handshake failure).
+func (r *Reconciler) resolveGateways(ctx context.Context, grants []gatewayv1beta1.ReferenceGrant) (map[gatewayKey]struct{}, []gatewayv1.Gateway, map[gatewayListenerKey]struct{}, map[gatewayKey]map[string]string, map[string]string, map[string]cache.EdgeTLSCert, map[listenerStatusKey]listenerTLSResult, error) {
 	list := &gatewayv1.GatewayList{}
 	if err := r.List(ctx, list); err != nil {
-		return nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, err
 	}
 	gateways := map[gatewayKey]struct{}{}
 	var ourGateways []gatewayv1.Gateway
 	listenerKeys := map[gatewayListenerKey]struct{}{}
-	hostCerts := map[string]string{} // listener hostname ("" = catch-all) -> SDS name
+	// perGWHostCerts is keyed per Gateway: each Gateway's TLS listeners populate only
+	// their own entry. allocateGatewayListenerPorts uses this map so that cert
+	// selection is scoped to the Gateway whose listener is being allocated — not
+	// contaminated by another Gateway's certs that happen to share the same hostname
+	// key (e.g., the catch-all "").
+	perGWHostCerts := map[gatewayKey]map[string]string{}
+	// mergedHostCerts is the flat union of all Gateways' hostCerts, used for Phase 1
+	// VirtualHost cert tagging (buildVirtualHost) where the exact-gateway scope is
+	// not required. Last-writer-wins on key collisions here is acceptable because
+	// Phase 1 VirtualHost.TLSSecret is not used in Phase 2 listener selection.
+	mergedHostCerts := map[string]string{}
 	certs := map[string]cache.EdgeTLSCert{}
 	tlsResults := map[listenerStatusKey]listenerTLSResult{}
 	for i := range list.Items {
@@ -442,16 +460,25 @@ func (r *Reconciler) resolveGateways(ctx context.Context, grants []gatewayv1beta
 				Protocol: ln.Protocol,
 			}] = struct{}{}
 		}
+		// Resolve TLS for each listener into a per-Gateway hostCerts map and the
+		// global certs map (SDS secret bytes). Use a fresh per-Gateway hostCerts so
+		// that resolveListenerTLS writes only into this Gateway's own scope.
+		gwHostCerts := map[string]string{}
 		for _, ln := range gw.Spec.Listeners {
 			if ln.TLS == nil {
 				continue
 			}
 			lk := listenerStatusKey{Gateway: gk, Name: ln.Name}
-			res := r.resolveListenerTLS(ctx, gw, ln, hostCerts, certs, grants)
+			res := r.resolveListenerTLS(ctx, gw, ln, gwHostCerts, certs, grants)
 			tlsResults[lk] = res
 		}
+		perGWHostCerts[gk] = gwHostCerts
+		// Merge into the flat map for Phase 1 / buildVirtualHost usage.
+		for k, v := range gwHostCerts {
+			mergedHostCerts[k] = v
+		}
 	}
-	return gateways, ourGateways, listenerKeys, hostCerts, certs, tlsResults, nil
+	return gateways, ourGateways, listenerKeys, perGWHostCerts, mergedHostCerts, certs, tlsResults, nil
 }
 
 // resolveListenerTLS resolves a single TLS listener's certificateRefs, recording

@@ -101,7 +101,13 @@ type gatewayListenerAllocation struct {
 // port with the listeners' TLS certs merged. Listeners sharing an external port
 // share one internal port + one edge listener; allocating per listener would emit
 // duplicate Service ports (rejected by k8s) and drop the Gateway.
-func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, hostCerts map[string]string) (map[gatewayKey][]gatewayListenerAllocation, error) {
+//
+// perGWHostCerts maps each Gateway key to its own hostname→SDS-name map, built by
+// resolveGateways. Using a per-Gateway map prevents cert cross-contamination: when
+// multiple Gateways each have a catch-all TLS listener (empty hostname), they all
+// write to hostCerts[""], and the catch-all listener of any given Gateway would
+// end up referencing another Gateway's cert if a shared map were used.
+func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, perGWHostCerts map[gatewayKey]map[string]string) (map[gatewayKey][]gatewayListenerAllocation, error) {
 	portKey := func(ns, name string, port uint32) portalloc.Key {
 		return portalloc.Key{Namespace: ns, GatewayName: name, ListenerName: fmt.Sprintf("port-%d", port)}
 	}
@@ -126,6 +132,11 @@ func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, hostCerts map[string]
 	result := make(map[gatewayKey][]gatewayListenerAllocation, len(gws))
 	for _, gw := range gws {
 		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
+		// Use this Gateway's own hostCerts map so cert lookup is scoped to certs
+		// resolved for THIS Gateway only. A shared map would let a later-resolved
+		// Gateway overwrite the catch-all entry ("") and contaminate the cert set of
+		// an earlier-resolved Gateway that also had a catch-all TLS listener.
+		gwHostCerts := perGWHostCerts[gk] // nil-safe: listenerCert handles nil map
 		// Group listeners by external port, unioning their certs (an HTTPS port may
 		// host several listeners with different hostnames/certs — SNI selects).
 		certsByPort := map[uint32]map[string]struct{}{}
@@ -136,7 +147,7 @@ func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, hostCerts map[string]
 				certsByPort[ep] = map[string]struct{}{}
 				portOrder = append(portOrder, ep)
 			}
-			if c := listenerCert(ln, hostCerts); c != "" {
+			if c := listenerCert(ln, gwHostCerts); c != "" {
 				certsByPort[ep][c] = struct{}{}
 			}
 		}

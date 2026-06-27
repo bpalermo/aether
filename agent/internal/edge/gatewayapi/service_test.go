@@ -157,11 +157,14 @@ func TestAllocateGatewayListenerPorts_MultiListenerSamePort(t *testing.T) {
 			},
 		},
 	}
-	hostCerts := map[string]string{"a.example.com": "kubernetes/cert-a", "b.example.com": "kubernetes/cert-b"}
-
-	allocs, err := allocateGatewayListenerPorts(gws, hostCerts)
-	require.NoError(t, err)
+	// perGWHostCerts scopes certs to the single gateway under test.
 	gk := gatewayKey{Namespace: "conformance", Name: "multi"}
+	perGWHostCerts := map[gatewayKey]map[string]string{
+		gk: {"a.example.com": "kubernetes/cert-a", "b.example.com": "kubernetes/cert-b"},
+	}
+
+	allocs, err := allocateGatewayListenerPorts(gws, perGWHostCerts)
+	require.NoError(t, err)
 	require.Len(t, allocs[gk], 2, "one allocation per external port (80, 443), not per listener")
 
 	byPort := map[uint32]gatewayListenerAllocation{}
@@ -174,6 +177,60 @@ func TestAllocateGatewayListenerPorts_MultiListenerSamePort(t *testing.T) {
 	assert.Equal(t, []string{"kubernetes/cert-a", "kubernetes/cert-b"}, byPort[443].tlsSecretNames,
 		"both :443 listeners' certs merge onto the one port (SNI selects)")
 	assert.NotEqual(t, byPort[80].internalPort, byPort[443].internalPort, "distinct internal ports per external port")
+}
+
+// TestAllocateGatewayListenerPorts_NoCertCrossContamination is the regression guard
+// for the cert cross-contamination bug: when two Gateways each have a catch-all TLS
+// listener (empty hostname → hostCerts[""] key), a shared hostCerts map lets the
+// later-resolved Gateway's cert overwrite the catch-all entry and contaminate the
+// earlier Gateway's listener. The fix scopes hostCerts per-Gateway so each Gateway's
+// allocations only see certs resolved for that Gateway.
+//
+// Scenario: GW-A (ns-a/gw-a) has a catch-all HTTPS listener with "cert-a".
+// GW-B (ns-b/gw-b) has a catch-all HTTPS listener with "cert-b".
+// GW-A's port-443 allocation must reference only "cert-a", and GW-B's only "cert-b".
+func TestAllocateGatewayListenerPorts_NoCertCrossContamination(t *testing.T) {
+	tlsCfg := &gatewayv1.ListenerTLSConfig{}
+	gws := []gatewayv1.Gateway{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "gw-a"},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType, TLS: tlsCfg},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns-b", Name: "gw-b"},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType, TLS: tlsCfg},
+				},
+			},
+		},
+	}
+	// Per-Gateway hostCerts: each Gateway has its own catch-all cert.
+	gkA := gatewayKey{Namespace: "ns-a", Name: "gw-a"}
+	gkB := gatewayKey{Namespace: "ns-b", Name: "gw-b"}
+	perGWHostCerts := map[gatewayKey]map[string]string{
+		gkA: {"": "kubernetes/ns-a/cert-a"},
+		gkB: {"": "kubernetes/ns-b/cert-b"},
+	}
+
+	allocs, err := allocateGatewayListenerPorts(gws, perGWHostCerts)
+	require.NoError(t, err)
+
+	require.Len(t, allocs[gkA], 1, "gw-a: one allocation for port 443")
+	require.Len(t, allocs[gkB], 1, "gw-b: one allocation for port 443")
+
+	allocA := allocs[gkA][0]
+	allocB := allocs[gkB][0]
+
+	// Each Gateway must reference ONLY its own cert — not the other Gateway's.
+	assert.Equal(t, []string{"kubernetes/ns-a/cert-a"}, allocA.tlsSecretNames,
+		"gw-a must reference only its own cert, not gw-b's cert-b")
+	assert.Equal(t, []string{"kubernetes/ns-b/cert-b"}, allocB.tlsSecretNames,
+		"gw-b must reference only its own cert, not gw-a's cert-a")
 }
 
 // TestBuildEdgeGatewayEntries_AssignByAttachment verifies vhosts are assigned to a
@@ -337,9 +394,12 @@ func TestReconcileGatewayServices_MultiListenerSamePort(t *testing.T) {
 		},
 	}
 	gws := []gatewayv1.Gateway{gw}
-	hostCerts := map[string]string{"": "kubernetes/cert"}
+	gwKey := gatewayKey{Namespace: "gateway-conformance-infra", Name: "same-namespace-with-https-listener"}
+	perGWHostCerts := map[gatewayKey]map[string]string{
+		gwKey: {"": "kubernetes/cert"},
+	}
 
-	allocs, err := allocateGatewayListenerPorts(gws, hostCerts)
+	allocs, err := allocateGatewayListenerPorts(gws, perGWHostCerts)
 	require.NoError(t, err)
 
 	fc := fake.NewClientBuilder().WithScheme(statusScheme(t)).Build()
