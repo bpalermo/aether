@@ -67,8 +67,16 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // HTTP services; the TCP chains are more specific (destination-IP match) and only
 // exist for non-HTTP ClusterIPs so there is no precedence conflict.
 //
+// withPassthrough (proposal 022, M2a spike): when true, a passthrough filter chain
+// is appended as the LAST chain (lowest precedence, after the HCM catch-all). The
+// passthrough chain has no FilterChainMatch criteria — but in Envoy, the
+// default_filter_chain field (not an entry in filter_chains) is the true
+// fall-through. The passthrough is implemented as DefaultFilterChain so it is only
+// used when no named chain matches. It routes via the passthrough_original_dst
+// ORIGINAL_DST cluster, forwarding the original destination in plain TCP.
+//
 // Default off (no listener is generated unless transparent capture is on).
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService) (*listenerv3.Listener, error) {
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -83,6 +91,8 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 	//   2. Per-ClusterIP TCP floor chains (TCPRoute or passthrough, Phase 3a/3b):
 	//      destination-IP match only (prefix_ranges=/32).
 	//   3. Global HCM catch-all: no match criteria (catches all HTTP/gRPC traffic).
+	//   4. (withPassthrough only) DefaultFilterChain: routes everything else to the
+	//      ORIGINAL_DST passthrough cluster — non-mesh egress in plain TCP.
 	//
 	// TLS SNI chains are inserted first so Envoy evaluates server_names+IP before
 	// the destination-IP-only TCP floor chain (more specific wins).
@@ -99,7 +109,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 	}
 	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod))
 
-	return &listenerv3.Listener{
+	l := &listenerv3.Listener{
 		Name: CaptureListenerName(cniPod),
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
@@ -125,7 +135,20 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 		StatPrefix:                    fmt.Sprintf("capture_%s", cniPod.GetName()),
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
 		FilterChains:                  chains,
-	}, nil
+	}
+
+	// SPIKE/M2a passthrough: the DefaultFilterChain is Envoy's true "no named chain
+	// matched" fallback (distinct from filter_chains entries with no match criteria,
+	// which would conflict with the HCM catch-all). Any connection whose original-dst
+	// doesn't match a mesh-service ClusterIP (TCP floor chain) and doesn't look like
+	// HTTP (HCM chain) falls through here and is forwarded plaintext to its real dst
+	// via the ORIGINAL_DST cluster. This covers: HTTPS-to-external, TLS to kube-apiserver,
+	// any non-HTTP non-mesh service, and in-cluster-but-not-mesh services.
+	if withPassthrough {
+		l.DefaultFilterChain = BuildCapturePassthroughFilterChain()
+	}
+
+	return l, nil
 }
 
 // buildCaptureListenerFilters: recover the original destination, then sniff HTTP and TLS.
@@ -202,6 +225,39 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitSt
 		Filters: []*listenerv3.Filter{
 			buildNetworkNamespaceFilterState(),
 			buildHTTPConnectionManagerFilter(hcm),
+		},
+	}
+}
+
+// BuildCapturePassthroughFilterChain returns the DefaultFilterChain for the
+// redirect-all capture listener (proposal 022, M2a spike). It is used as
+// Listener.DefaultFilterChain — the fallback when no named filter chain matches.
+//
+// It routes ALL unmatched TCP traffic (non-mesh destinations) to the
+// passthrough_original_dst ORIGINAL_DST cluster, which connects to the original
+// pre-REDIRECT destination in plain TCP. This is the passthrough "egress intact"
+// proof path: HTTPS to github.com, DNS, kube-apiserver, non-mesh in-cluster
+// services — all of these have NO matching per-ClusterIP TCP floor chain and
+// (being non-HTTP or TLS-encrypted) also do not match the HCM chain's route
+// table, so they fall here.
+//
+// Note on filter chain matching vs DefaultFilterChain:
+//   - filter_chains entries with empty FilterChainMatch are evaluated as "any"
+//     and ARE compared against other chains (Envoy rejects a listener with
+//     conflicting empty-match chains).
+//   - DefaultFilterChain is evaluated only after ALL named chains fail to match.
+//     It is the correct mechanism for a true "catch everything else" passthrough.
+//
+// No buildNetworkNamespaceFilterState filter is added: the passthrough path needs
+// the network namespace to resolve the ORIGINAL_DST address, but the namespace
+// is already known to Envoy via the listener binding — the ORIGINAL_DST cluster
+// type uses the SO_ORIGINAL_DST sockopt recovered by the original_dst listener
+// filter, not filter state.
+func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
+	return &listenerv3.FilterChain{
+		Name: "cap_passthrough",
+		Filters: []*listenerv3.Filter{
+			buildTCPProxyNetworkFilter("cap_passthrough", PassthroughClusterName),
 		},
 	}
 }

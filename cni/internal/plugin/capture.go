@@ -14,6 +14,9 @@ import (
 // captureTableName is the nft table the redirect rule lives in, inside the pod netns.
 const captureTableName = "aether_capture"
 
+// captureRedirectAllTableName is the nft table for the redirect-all mode (spike/M2a).
+const captureRedirectAllTableName = "aether_capture_all"
+
 // installCaptureRedirect programs, inside the pod's network namespace, an nftables
 // REDIRECT of outbound TCP destined for a mesh ClusterIP:<meshPort> to the pod-local
 // transparent-capture listener on <capturePort> (proposal 018, Phase 3a).
@@ -123,4 +126,173 @@ func beUint16(v uint16) []byte {
 	b := make([]byte, 2)
 	binary.BigEndian.PutUint16(b, v)
 	return b
+}
+
+// installCaptureRedirectAll programs, inside the pod's network namespace, an
+// nftables REDIRECT of ALL outbound non-local TCP into the capture listener
+// (:ProxyCapturePort). This is the M2a spike for proposal 022 "redirect-all +
+// ORIGINAL_DST passthrough". Non-mesh destinations are forwarded in plain TCP
+// by the Envoy passthrough_original_dst cluster; mesh destinations continue to
+// route through the per-source mTLS path as with Phase 3a.
+//
+// EXPERIMENTAL: default false. Do NOT enable cluster-wide. The Envoy capture
+// listener MUST carry the passthrough fallback filter chain (requires the agent
+// --capture-redirect-all flag) or non-mesh egress will be dropped.
+//
+// Exclusions to prevent loops and proxy self-traffic:
+//   - loopback (127.0.0.0/8): the 127.x fast-lane and the proxy's own loopback
+//     conns are never intercepted.
+//   - capture port (:ProxyCapturePort TCP): if Envoy itself originates a TCP
+//     connection on the capture port (health checks dialing app clusters bound in
+//     the pod netns come from 127.x, but belt-and-suspenders), we must not
+//     re-redirect it — that would loop back into the capture listener.
+//   - established / related connections: conntrack prevents mid-flow re-direction.
+//     Without this exclusion, the response path of an already-established
+//     connection would be RE-redirected to :18001 on each packet, breaking the
+//     connection. Conntrack tracks established TCP state; ESTABLISHED skips the
+//     redirect for them.
+//
+// The rule lives in a SEPARATE nft table (aether_capture_all) from the scoped
+// rule (aether_capture) so both can be installed independently. When
+// CaptureRedirectAllEnabled is true AND TransparentCaptureEnabled is false, only
+// the broad rule is installed. When both are true, both tables exist and the
+// redirect-all subsumes the scoped rule (all traffic is already captured).
+func installCaptureRedirectAll(netnsPath string, logger *zap.Logger) error {
+	return withPodNetns(netnsPath, func() error { return programCaptureRedirectAll(logger) })
+}
+
+// programCaptureRedirectAll adds the redirect-all nat/output rule in the CURRENT
+// netns. Two rules are added in priority order:
+//  1. ACCEPT established/related connections (conntrack bypass — avoids looping
+//     the response path of outbound connections back into the capture listener).
+//  2. REDIRECT all outbound TCP, excluding loopback and the capture port itself,
+//     to ProxyCapturePort.
+//
+// The conntrack ACCEPT must come BEFORE the redirect in the same chain. We put
+// it in a separate higher-priority "conntrack" chain to avoid coupling to
+// rule position, but for a single-table approach both rules go in "output" with
+// the conntrack rule first (lower rule index wins in nft).
+func programCaptureRedirectAll(logger *zap.Logger) error {
+	capturePort := uint16(commonconstants.ProxyCapturePort)
+
+	c, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("open nftables netlink: %w", err)
+	}
+
+	table := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: captureRedirectAllTableName})
+	chain := c.AddChain(&nftables.Chain{
+		Name:     "output",
+		Table:    table,
+		Type:     nftables.ChainTypeNAT,
+		Hooknum:  nftables.ChainHookOutput,
+		Priority: nftables.ChainPriorityNATDest,
+	})
+
+	// Rule 1: skip established/related connections (conntrack).
+	// ct state {established, related} -> accept
+	// This must come before the redirect rule so that response traffic for
+	// outbound connections (e.g. curl responding) is not re-redirected.
+	c.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: chain,
+		Exprs: conntrackEstablishedAcceptExprs(),
+	})
+
+	// Rule 2: skip capture port itself to prevent re-entry loops.
+	// tcp dport capturePort -> accept
+	c.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: chain,
+		Exprs: skipCaptureSelfExprs(capturePort),
+	})
+
+	// Rule 3: redirect all other outbound TCP (non-loopback) to capturePort.
+	// meta l4proto tcp · ip daddr & /8 != 127.0.0.0 → redirect to capturePort
+	c.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: chain,
+		Exprs: redirectAllTCPExprs(capturePort),
+	})
+
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("apply redirect-all capture (nft flush): %w", err)
+	}
+	logger.Info("installed redirect-all transparent-capture (spike/M2a)",
+		zap.Uint16("capture_port", capturePort))
+	return nil
+}
+
+// conntrackEstablishedAcceptExprs builds the nft rule:
+//
+//	ct state established,related accept
+//
+// This prevents the nat/output hook from seeing response packets for existing
+// outbound connections — without it, the redirect rule would try to re-redirect
+// ACK/data packets of an already-NATted connection, corrupting the flow.
+//
+// nftables conntrack state is expressed via CtStateBitMask:
+//
+//	established = 0x2 (NFT_CT_STATE_ESTABLISHED)
+//	related     = 0x4 (NFT_CT_STATE_RELATED)
+func conntrackEstablishedAcceptExprs() []expr.Any {
+	// Conntrack state bitmask: established(2) | related(4) = 6.
+	const ctStateEstablishedRelated = 0x00000006
+	return []expr.Any{
+		// load ct state into reg1
+		&expr.Ct{Register: 1, SourceRegister: false, Key: expr.CtKeySTATE},
+		// reg1 & ctStateEstablishedRelated != 0  (bitwise AND then NEQ 0)
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            4,
+			Mask:           []byte{0x06, 0x00, 0x00, 0x00},
+			Xor:            []byte{0x00, 0x00, 0x00, 0x00},
+		},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{0x00, 0x00, 0x00, 0x00}},
+		// ACCEPT
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// skipCaptureSelfExprs builds the nft rule:
+//
+//	meta l4proto tcp tcp dport capturePort accept
+//
+// This prevents Envoy (or the pod itself) from re-redirecting a connection that
+// is already destined for the capture listener. Without this, a loopback
+// connection to :capturePort in the pod netns would be redirected to itself,
+// forming a redirect loop.
+func skipCaptureSelfExprs(capturePort uint16) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		// tcp dport == capturePort
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(capturePort)},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// redirectAllTCPExprs builds the broad-redirect rule:
+//
+//	meta l4proto tcp · ip daddr & 255.0.0.0 != 127.0.0.0 → redirect to capturePort
+//
+// Unlike captureRedirectExprs, there is no dport match: ALL non-loopback outbound
+// TCP is redirected. The loopback exclusion is identical to the scoped rule so
+// the pod-local fast-lane (127.x:18081 → proxy) and Envoy's own app-cluster
+// connections (127.x:appPort inside netns) are never re-captured.
+func redirectAllTCPExprs(capturePort uint16) []expr.Any {
+	return []expr.Any{
+		// meta l4proto == tcp
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		// ip daddr (IPv4 dest = offset 16, len 4), masked to /8, != 127.0.0.0
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: []byte{0xff, 0x00, 0x00, 0x00}, Xor: []byte{0x00, 0x00, 0x00, 0x00}},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{127, 0, 0, 0}},
+		// redirect to capturePort (no dport constraint)
+		&expr.Immediate{Register: 1, Data: beUint16(capturePort)},
+		&expr.Redir{RegisterProtoMin: 1},
+	}
 }

@@ -111,6 +111,18 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
+	// SPIKE/EXPERIMENTAL (proposal 022, M2a): redirect ALL outbound non-local TCP
+	// into the capture listener; non-mesh egress passes through via ORIGINAL_DST.
+	// Best-effort: failure leaves the scoped-redirect (or no capture) in place.
+	// Requires the agent --capture-redirect-all flag on the xDS side so the capture
+	// listener carries the passthrough fallback filter chain.
+	if netConf.CaptureRedirectAllEnabled {
+		if err := installCaptureRedirectAll(args.Netns, p.logger); err != nil {
+			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
+				zap.String("netns", args.Netns), zap.Error(err))
+		}
+	}
+
 	// Mesh DNS (proposal 018, mesh-global FQDN): redirect the pod's :53 to the
 	// pod-local mesh-DNS listener. Best-effort — a failure leaves the pod's DNS on
 	// the original resolver (mesh names just won't resolve), never breaks networking.

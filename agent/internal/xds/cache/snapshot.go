@@ -80,6 +80,13 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// enabled and there are UDPRoute rules.
 	clusters = append(clusters, c.captureUDPClusters()...)
 
+	// ORIGINAL_DST passthrough cluster (proposal 022, M2a spike): emitted only when
+	// redirect-all capture is enabled. The capture listener's DefaultFilterChain
+	// routes unrecognised (non-mesh) egress here in plain TCP.
+	if pt := c.capturePassthroughCluster(); pt != nil {
+		clusters = append(clusters, pt)
+	}
+
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
 	for _, s := range c.secrets {

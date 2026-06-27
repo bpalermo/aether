@@ -7,13 +7,14 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGenerateCaptureListener(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil, false)
 	require.NoError(t, err)
 
 	assert.Equal(t, "capture_p1", l.GetName())
@@ -29,8 +30,9 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, listenerFilterHTTPInspectorName, l.GetListenerFilters()[1].GetName())
 	assert.Equal(t, listenerFilterTLSInspectorName, l.GetListenerFilters()[2].GetName())
 
-	// no TCP services → single HCM filter chain.
+	// no TCP services → single HCM filter chain; no DefaultFilterChain (withPassthrough=false).
 	require.Len(t, l.GetFilterChains(), 1)
+	assert.Nil(t, l.GetDefaultFilterChain(), "no DefaultFilterChain when withPassthrough=false")
 	filters := l.GetFilterChains()[0].GetFilters()
 	hcmFilter := filters[len(filters)-1]
 	var hcm http_connection_managerv3.HttpConnectionManager
@@ -39,7 +41,7 @@ func TestGenerateCaptureListener(t *testing.T) {
 }
 
 func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
-	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, 15001, "aether.internal", false, nil)
+	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, 15001, "aether.internal", false, nil, false)
 	assert.Error(t, err)
 }
 
@@ -51,7 +53,7 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10"},
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20"},
 	}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, false)
 	require.NoError(t, err)
 
 	// 2 TCP floor chains + 1 HCM catch-all.
@@ -97,11 +99,83 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip"},  // bad IP
 		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30"}, // valid
 	}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, false)
 	require.NoError(t, err)
 
 	// Only the valid service should produce a chain; 1 TCP + 1 HCM.
 	require.Len(t, l.GetFilterChains(), 2)
+}
+
+// TestGenerateCaptureListener_WithPassthrough verifies that withPassthrough=true adds
+// a DefaultFilterChain routing to the passthrough_original_dst cluster, without adding
+// an extra named chain (DefaultFilterChain is separate from filter_chains).
+func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil, true)
+	require.NoError(t, err)
+
+	// Named filter_chains: only the HCM catch-all (no TCP services).
+	require.Len(t, l.GetFilterChains(), 1, "one HCM chain, passthrough is in DefaultFilterChain")
+
+	// DefaultFilterChain must be set.
+	require.NotNil(t, l.GetDefaultFilterChain(), "DefaultFilterChain must be set when withPassthrough=true")
+	dfc := l.GetDefaultFilterChain()
+	assert.Equal(t, "cap_passthrough", dfc.GetName())
+
+	// DefaultFilterChain must have a single tcp_proxy filter routing to passthrough_original_dst.
+	require.Len(t, dfc.GetFilters(), 1)
+	assert.Equal(t, "envoy.filters.network.tcp_proxy", dfc.GetFilters()[0].GetName())
+	var tp tcp_proxyv3.TcpProxy
+	require.NoError(t, dfc.GetFilters()[0].GetTypedConfig().UnmarshalTo(&tp))
+	assert.Equal(t, PassthroughClusterName, tp.GetCluster())
+	assert.Equal(t, "cap_passthrough", tp.GetStatPrefix())
+}
+
+// TestGenerateCaptureListener_WithPassthroughAndTCPServices verifies that named
+// TCP floor chains coexist with the DefaultFilterChain passthrough when both are
+// enabled. The named chains take precedence (Envoy evaluates them first).
+func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+	tcpSvcs := []CaptureTCPService{
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10"},
+	}
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, true)
+	require.NoError(t, err)
+
+	// Named chains: 1 TCP floor + 1 HCM.
+	require.Len(t, l.GetFilterChains(), 2)
+	// DefaultFilterChain carries the passthrough.
+	require.NotNil(t, l.GetDefaultFilterChain())
+	assert.Equal(t, "cap_passthrough", l.GetDefaultFilterChain().GetName())
+}
+
+// TestNewPassthroughOriginalDstCluster verifies the passthrough cluster is an
+// ORIGINAL_DST cluster with the correct name and no transport socket.
+func TestNewPassthroughOriginalDstCluster(t *testing.T) {
+	cl := NewPassthroughOriginalDstCluster()
+	require.NotNil(t, cl)
+	assert.Equal(t, PassthroughClusterName, cl.GetName())
+	// Must be ORIGINAL_DST type (4).
+	assert.Equal(t, int32(4), int32(cl.GetType()))
+	// No transport socket — passthrough is plaintext.
+	assert.Nil(t, cl.GetTransportSocket())
+	// No upstream HTTP protocol options — raw TCP.
+	assert.Empty(t, cl.GetTypedExtensionProtocolOptions())
+}
+
+// TestBuildCapturePassthroughFilterChain verifies the DefaultFilterChain structure.
+func TestBuildCapturePassthroughFilterChain(t *testing.T) {
+	fc := BuildCapturePassthroughFilterChain()
+	require.NotNil(t, fc)
+	assert.Equal(t, "cap_passthrough", fc.GetName())
+	// No FilterChainMatch: this is used as DefaultFilterChain, not a named chain.
+	assert.Nil(t, fc.GetFilterChainMatch())
+	// Single tcp_proxy filter.
+	require.Len(t, fc.GetFilters(), 1)
+	assert.Equal(t, "envoy.filters.network.tcp_proxy", fc.GetFilters()[0].GetName())
+	var tp tcp_proxyv3.TcpProxy
+	require.NoError(t, fc.GetFilters()[0].GetTypedConfig().UnmarshalTo(&tp))
+	assert.Equal(t, PassthroughClusterName, tp.GetCluster())
 }
 
 func TestBuildCaptureRouteConfiguration(t *testing.T) {

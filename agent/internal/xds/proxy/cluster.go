@@ -204,6 +204,47 @@ func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
 	return fmt.Sprintf("%s%s", healthProbeClusterPrefix, cniPod.GetName())
 }
 
+// PassthroughClusterName is the cluster name for the ORIGINAL_DST passthrough
+// used by the redirect-all capture mode (proposal 022, M2a spike). Envoy
+// resolves the upstream from the SO_ORIGINAL_DST recovered by the
+// original_dst listener filter, so no endpoint configuration is needed.
+const PassthroughClusterName = "passthrough_original_dst"
+
+// NewPassthroughOriginalDstCluster builds an ORIGINAL_DST cluster for the
+// redirect-all capture passthrough path (proposal 022, M2a spike).
+//
+// Envoy's ORIGINAL_DST cluster type uses the SO_ORIGINAL_DST socket option
+// (set by the netfilter REDIRECT target) to recover the pre-NAT destination
+// address and connects directly to it, bypassing mesh mTLS. This is the
+// correct mechanism for forwarding non-mesh egress in plaintext from within
+// the capture listener: Envoy learned the original destination from the
+// listener filter (original_dst), and the ORIGINAL_DST cluster type tells
+// Envoy to use exactly that address/port as the upstream. No load assignment
+// or EDS resource is needed — each connection resolves its own upstream from
+// the socket metadata.
+//
+// Security: traffic forwarded via this cluster is PLAINTEXT. It is
+// intentionally used only for NON-mesh destinations (ones the capture listener
+// does not recognize via its HCM route table or TCP floor chains). All mesh
+// traffic continues to use per-source mTLS clusters as before.
+func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name: PassthroughClusterName,
+		// ORIGINAL_DST: Envoy connects to the address recovered from
+		// SO_ORIGINAL_DST (the pre-REDIRECT/DNAT destination). No load
+		// assignment, no EDS, no health checking — the destination is
+		// known per-connection from the kernel NAT table.
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_ORIGINAL_DST,
+		},
+		ConnectTimeout:                durationpb.New(2 * time.Second),
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		// No TypedExtensionProtocolOptions: passthrough is plain TCP.
+		// No TransportSocket: plaintext — mesh mTLS does NOT apply here.
+		// No LbSubsetConfig / OutlierDetection: single-connection, no pool.
+	}
+}
+
 // NewAppHealthProbeCluster builds a per-pod cluster that only exists to actively
 // health-check the pod's application at 127.0.0.1:<port> (delegated liveness). It
 // is NOT referenced by any route — the agent scrapes its host health from the
