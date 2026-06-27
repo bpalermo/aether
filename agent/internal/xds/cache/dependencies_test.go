@@ -44,11 +44,13 @@ func TestDependencySet_UnionsPodsAndOwnServices(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
 
-	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "svc-x, svc-y"), "example.org"))
-	require.NoError(t, c.AddPod(ctx, makeDepPod("b-1", "svc-b", "/proc/2/ns/net", "svc-y,svc-z"), "example.org"))
+	// 020 Part 1: own services are keyed <ns>/<sa>; declared upstreams are the
+	// namespace-qualified keys the annotation now carries.
+	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "default/svc-x, default/svc-y"), "example.org"))
+	require.NoError(t, c.AddPod(ctx, makeDepPod("b-1", "svc-b", "/proc/2/ns/net", "default/svc-y,default/svc-z"), "example.org"))
 
 	deps := c.DependencySet()
-	for _, want := range []string{"svc-a", "svc-b", "svc-x", "svc-y", "svc-z"} {
+	for _, want := range []string{"default/svc-a", "default/svc-b", "default/svc-x", "default/svc-y", "default/svc-z"} {
 		assert.Contains(t, deps, want)
 	}
 	assert.Len(t, deps, 5)
@@ -60,16 +62,16 @@ func TestDependencySet_PodRemovalShrinks(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
 
-	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "svc-x,svc-shared"), "example.org"))
-	require.NoError(t, c.AddPod(ctx, makeDepPod("b-1", "svc-b", "/proc/2/ns/net", "svc-shared"), "example.org"))
+	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "default/svc-x,default/svc-shared"), "example.org"))
+	require.NoError(t, c.AddPod(ctx, makeDepPod("b-1", "svc-b", "/proc/2/ns/net", "default/svc-shared"), "example.org"))
 
 	require.NoError(t, c.RemovePod(ctx, "/proc/1/ns/net"))
 
 	deps := c.DependencySet()
-	assert.NotContains(t, deps, "svc-a", "removed pod's own service leaves the set")
-	assert.NotContains(t, deps, "svc-x", "removed pod's exclusive upstream leaves the set")
-	assert.Contains(t, deps, "svc-shared", "upstream still declared by another pod survives")
-	assert.Contains(t, deps, "svc-b")
+	assert.NotContains(t, deps, "default/svc-a", "removed pod's own service leaves the set")
+	assert.NotContains(t, deps, "default/svc-x", "removed pod's exclusive upstream leaves the set")
+	assert.Contains(t, deps, "default/svc-shared", "upstream still declared by another pod survives")
+	assert.Contains(t, deps, "default/svc-b")
 }
 
 // TestDependencyChanges_SignalsOnRealChangesOnly verifies the coalesced change
@@ -104,24 +106,24 @@ func TestLoadClustersFromRegistry_ScopesToDependencySet(t *testing.T) {
 	ctx := context.Background()
 
 	// Local pod: own service svc-self, declared upstream svc-dep.
-	require.NoError(t, c.AddPod(ctx, makeDepPod("self-1", "svc-self", "/proc/1/ns/net", "svc-dep"), "example.org"))
+	require.NoError(t, c.AddPod(ctx, makeDepPod("self-1", "svc-self", "/proc/1/ns/net", "default/svc-dep"), "example.org"))
 
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{
-				"svc-self":  {makeEndpoint("10.0.0.1", "cluster-1", "node-1", 8080)},
-				"svc-dep":   {makeEndpoint("10.0.0.2", "cluster-1", "node-2", 8080)},
-				"svc-other": {makeEndpoint("10.0.0.3", "cluster-1", "node-3", 8080)},
-				"svc-more":  {makeEndpoint("10.0.0.4", "cluster-1", "node-4", 8080)},
+				"default/svc-self":  {makeEndpoint("10.0.0.1", "cluster-1", "node-1", 8080)},
+				"default/svc-dep":   {makeEndpoint("10.0.0.2", "cluster-1", "node-2", 8080)},
+				"default/svc-other": {makeEndpoint("10.0.0.3", "cluster-1", "node-3", 8080)},
+				"default/svc-more":  {makeEndpoint("10.0.0.4", "cluster-1", "node-4", 8080)},
 			}, nil
 		},
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
-	assert.Contains(t, c.clusters, "svc-self", "a pod's own service is always in scope")
-	assert.Contains(t, c.clusters, "svc-dep", "declared upstreams are in scope")
-	assert.NotContains(t, c.clusters, "svc-other", "undeclared services are not distributed")
-	assert.NotContains(t, c.clusters, "svc-more", "undeclared services are not distributed")
+	assert.Contains(t, c.clusters, "default/svc-self", "a pod's own service is always in scope")
+	assert.Contains(t, c.clusters, "default/svc-dep", "declared upstreams are in scope")
+	assert.NotContains(t, c.clusters, "default/svc-other", "undeclared services are not distributed")
+	assert.NotContains(t, c.clusters, "default/svc-more", "undeclared services are not distributed")
 }
 
 // TestLoadClustersFromRegistry_EmptyDependencySet verifies a node with no

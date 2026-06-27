@@ -70,7 +70,10 @@ const onDemandClusterHeader = ":authority"
 // Envoy 1.38) while supporting FQDN:port (proposal 005). Nonexistent in-domain
 // services/ports fail when the ODCDS timeout expires.
 func buildOnDemandCatchAllVirtualHost(meshDomain string) *routev3.VirtualHost {
-	meshAuthorityRegex := "^[a-z0-9-]+\\." + regexp.QuoteMeta(meshDomain) + "(:[0-9]+)?$"
+	// 020 Part 1: mesh authorities are <svc>.<ns>.<meshDomain> (two labels before the
+	// mesh domain), with an optional :port. Cold/off-node services that miss the
+	// scoped vhost fall here and resolve via ODCDS (ClusterHeader=:authority).
+	meshAuthorityRegex := "^[a-z0-9-]+\\.[a-z0-9-]+\\." + regexp.QuoteMeta(meshDomain) + "(:[0-9]+)?$"
 	return &routev3.VirtualHost{
 		Name:    "on_demand_catch_all",
 		Domains: []string{"*"},
