@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 )
@@ -32,7 +34,10 @@ type podDependencies struct {
 // the registry refresher rebuilds the scoped cluster snapshot.
 func (c *SnapshotCache) setPodDependencies(netns string, cniPod *cniv1.CNIPod) {
 	deps := podDependencies{
-		service:   cniPod.GetServiceAccount(),
+		// 020 Part 1: the dependency set is keyed by the namespace-qualified
+		// "<ns>/<svc>" service key (matching the registry / cluster map), so the
+		// pod's own service is keyed by <ns>/<sa>, not the bare ServiceAccount.
+		service:   serviceref.New(cniPod.GetNamespace(), cniPod.GetServiceAccount()).Key(),
 		upstreams: proxy.UpstreamsFromPod(cniPod),
 	}
 

@@ -37,7 +37,7 @@ func TestServiceClusterMTLSInjected(t *testing.T) {
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{
-				"echo": {makeEndpoint("10.0.0.9", "cluster-1", "node-1", 18080)},
+				"aether-test/echo": {makeEndpoint("10.0.0.9", "cluster-1", "node-1", 18080)},
 			}, nil
 		},
 	}
@@ -47,7 +47,7 @@ func TestServiceClusterMTLSInjected(t *testing.T) {
 	require.NoError(t, err)
 	clusters := snap.GetResources(resourcev3.ClusterType)
 
-	echo, ok := clusters["echo.aether.internal"].(*clusterv3.Cluster)
+	echo, ok := clusters["echo.aether-test.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
 	require.NotNil(t, echo.GetTransportSocketMatcher(), "service cluster must carry the per-source mTLS matcher")
 
@@ -74,13 +74,13 @@ func TestServiceClusterMTLSInjected(t *testing.T) {
 // identity).
 func TestServiceClusterNoMTLSWithoutNodeIdentity(t *testing.T) {
 	c := newTestCache("node-1")
-	declareDeps(c, "echo")
+	declareDeps(c, "aether-test/echo")
 	ctx := context.Background()
 
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			return map[string][]*registryv1.ServiceEndpoint{
-				"echo": {makeEndpoint("10.0.0.9", "cluster-1", "node-2", 18080)},
+				"aether-test/echo": {makeEndpoint("10.0.0.9", "cluster-1", "node-2", 18080)},
 			}, nil
 		},
 	}
@@ -88,7 +88,7 @@ func TestServiceClusterNoMTLSWithoutNodeIdentity(t *testing.T) {
 
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
-	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo.aether.internal"].(*clusterv3.Cluster)
+	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo.aether-test.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
 	assert.Nil(t, echo.GetTransportSocketMatcher(), "no mTLS matcher before the node SVID is served")
 }
@@ -116,14 +116,14 @@ func TestServiceClusterSANPinning(t *testing.T) {
 	ep2.KubernetesMetadata.Namespace = "aether-test"
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-			return map[string][]*registryv1.ServiceEndpoint{"echo": {ep1, ep2}}, nil
+			return map[string][]*registryv1.ServiceEndpoint{"aether-test/echo": {ep1, ep2}}, nil
 		},
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
-	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo.aether.internal"].(*clusterv3.Cluster)
+	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo.aether-test.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok)
 
 	wantSANs := []string{
