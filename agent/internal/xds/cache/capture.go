@@ -58,7 +58,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	}
 	c.captureMu.RUnlock()
 
-	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices)
+	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll)
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +69,23 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 // before the manager starts: it gates per-pod capture listener generation and the
 // cap_http route table.
 func (c *SnapshotCache) SetCaptureEnabled(v bool) { c.captureEnabled = v }
+
+// SetCaptureRedirectAll enables the redirect-all + ORIGINAL_DST passthrough mode
+// (proposal 022, M2a spike). Must be called after SetCaptureEnabled(true): redirect-all
+// only makes sense when the capture listener is being generated. Call once before the
+// manager starts; read without locking.
+func (c *SnapshotCache) SetCaptureRedirectAll(v bool) { c.captureRedirectAll = v }
+
+// capturePassthroughCluster returns the ORIGINAL_DST passthrough cluster when
+// redirect-all capture is enabled, or nil otherwise. The cluster is emitted into
+// the CDS snapshot so Envoy can resolve the "passthrough_original_dst" reference
+// from the capture listener's DefaultFilterChain.
+func (c *SnapshotCache) capturePassthroughCluster() types.Resource {
+	if !c.captureEnabled || !c.captureRedirectAll {
+		return nil
+	}
+	return proxy.NewPassthroughOriginalDstCluster()
+}
 
 // SetMeshDNSServer wires the agent's in-process DNS resolver (proposal 018, mesh-global
 // FQDN), or nil when mesh DNS is off. The CNI DNATs each pod's :53 directly to the

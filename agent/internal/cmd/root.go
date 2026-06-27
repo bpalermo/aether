@@ -122,6 +122,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", false, "Enable GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2)")
 	rootCmd.Flags().BoolVar(&cfg.L4Routes, "l4-routes", false, "Enable L4 route types (TCPRoute/TLSRoute/UDPRoute) parented to a Service: weighted TCP floor chains and SNI-routed TLS chains on the capture listener (proposal 018, Phase 3b). NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.")
 	rootCmd.Flags().BoolVar(&cfg.TransparentCapture, "transparent-capture", false, "Enable transparent capture: per-pod capture listeners + cap_http route table from the generated mesh Services (proposal 018, Phase 3a)")
+	rootCmd.Flags().BoolVar(&cfg.CaptureRedirectAll, "capture-redirect-all", false, "Add the dormant ORIGINAL_DST passthrough DefaultFilterChain to capture listeners (proposal 022 M2a spike). Harmless unless a pod is redirect-all'd via the capture.aether.io/redirect-all annotation; only then does non-mesh egress reach the passthrough.")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
 	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
 }
@@ -271,6 +272,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
+	snapshotCache.SetCaptureRedirectAll(cfg.CaptureRedirectAll)
 	if cfg.MeshDNS {
 		// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
 		// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The CNI DNATs

@@ -208,6 +208,13 @@ type SnapshotCache struct {
 	// capture listeners + the cap_http route table. Set once before the manager
 	// starts (SetCaptureEnabled); read without locking. Default off.
 	captureEnabled bool
+	// captureRedirectAll enables the redirect-all + ORIGINAL_DST passthrough mode
+	// (proposal 022, M2a spike). When true, the capture listener carries a
+	// DefaultFilterChain that routes unrecognised (non-mesh) destinations to the
+	// passthrough_original_dst ORIGINAL_DST cluster. The passthrough cluster is
+	// also emitted into the xDS snapshot. Set once before the manager starts
+	// (SetCaptureRedirectAll); read without locking. Default off.
+	captureRedirectAll bool
 	// captureMu guards captureAuthorities and captureTCPServices.
 	// captureAuthorities: mesh service -> its cluster.local FQDN, fed by the
 	// mesh-Service reconciler, for the cap_http route table.

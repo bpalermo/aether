@@ -102,6 +102,14 @@ type AgentConfig struct {
 	// Default off.
 	TransparentCapture bool
 
+	// CaptureRedirectAll adds the dormant ORIGINAL_DST passthrough DefaultFilterChain
+	// to capture listeners (proposal 022 M2a spike). Harmless for pods that are not
+	// redirect-all'd (only :18081 reaches their capture listener, which matches the
+	// HCM/mesh chain, so the passthrough never fires). The per-pod CNI redirect-all
+	// (gated by the capture.aether.io/redirect-all annotation) is what actually sends
+	// all egress into the listener. Default off.
+	CaptureRedirectAll bool
+
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
 	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
 	// and forwards the rest to MeshDNSUpstream. Pairs with the CNI :53 redirect.

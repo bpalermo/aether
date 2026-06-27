@@ -37,6 +37,12 @@ import (
 	  ]
 	}
 */
+
+// podAnnotationsCapability is the CNI capability key that makes containerd pass
+// the pod's annotations to the plugin via runtimeConfig. The plugin reads the
+// redirect-all opt-in annotation from there (proposal 022, M2a).
+const podAnnotationsCapability = "io.kubernetes.cri.pod-annotations"
+
 func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, error) {
 	pluginConfig := config.AetherConf{}
 
@@ -48,6 +54,11 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig.TransparentCaptureEnabled = cfg.TransparentCaptureEnabled
 	pluginConfig.MeshDNSEnabled = cfg.MeshDNSEnabled
 	pluginConfig.HostIP = cfg.HostIP
+	// Declare the pod-annotations capability so containerd populates
+	// runtimeConfig["io.kubernetes.cri.pod-annotations"] on each ADD. The plugin
+	// reads the capture.aether.io/redirect-all annotation from it to scope the
+	// redirect-all spike (proposal 022, M2a) to opt-in pods.
+	pluginConfig.Capabilities = map[string]bool{podAnnotationsCapability: true}
 
 	marshalledJSON, err := json.MarshalIndent(pluginConfig, "", "  ")
 	if err != nil {

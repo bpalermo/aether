@@ -68,6 +68,26 @@ type AetherConf struct {
 	// loopback exclusion keeps the explicit 127.0.0.1:18081 fast-lane working.
 	TransparentCaptureEnabled bool `json:"transparent_capture_enabled"`
 
+	// CaptureRedirectAllEnabled is a SPIKE/EXPERIMENTAL flag (proposal 022, M2a).
+	// When true, replaces the scoped :18081 REDIRECT with a broad redirect of ALL
+	// outbound non-local TCP into the capture listener (:18001), which then uses
+	// Envoy's ORIGINAL_DST to recover the real destination. Unrecognised (non-mesh)
+	// destinations are forwarded in plain TCP via the passthrough cluster, leaving
+	// non-mesh egress intact.
+	//
+	// REQUIRES CaptureRedirectAllEnabled=true on the xDS agent side
+	// (--capture-redirect-all flag) so that the capture listener carries the
+	// passthrough fallback filter chain and the passthrough_original_dst cluster.
+	//
+	// EXPERIMENTAL: default false. Do NOT enable cluster-wide in production.
+	// Exclusions installed to prevent loops and proxy self-traffic:
+	//   - loopback (127.0.0.0/8) skipped — the :18081 fast-lane is untouched
+	//   - the capture port itself (:18001 TCP) skipped — prevents re-entry
+	//   - established/related connections skipped via conntrack (RELATED,ESTABLISHED)
+	//   - DNS (:53 UDP+TCP) NOT excluded — passes through Envoy if MeshDNSEnabled=false,
+	//     or remains DNAT'd to the mesh-DNS resolver if MeshDNSEnabled=true
+	CaptureRedirectAllEnabled bool `json:"capture_redirect_all_enabled"`
+
 	// MeshDNSEnabled installs, inside each pod's netns, an nft DNAT of outbound DNS
 	// (UDP+TCP :53, non-loopback) -> the node agent's resolver at HostIP:18054
 	// (proposal 018, mesh-global FQDN). Off by default; pairs with the agent's
