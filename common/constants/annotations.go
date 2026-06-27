@@ -10,6 +10,20 @@ const (
 	// client configuration), distinct from endpoint.aether.io/* which states
 	// endpoint registration facts (what the pod serves).
 	annotationAetherConfigPrefix = "config." + annotationAetherPrefix
+	// capture.aether.io/* annotations control the pod's transparent-capture
+	// behaviour (what the CNI intercepts for the pod).
+	annotationAetherCapturePrefix = "capture." + annotationAetherPrefix
+
+	// AnnotationCaptureRedirectAll opts a single pod into the redirect-all
+	// transparent-capture mode (proposal 022, M2a spike): the CNI installs the
+	// broad nft rule that sends ALL outbound non-local TCP into the pod-local
+	// capture listener, where non-mesh egress is forwarded in plaintext via the
+	// Envoy passthrough_original_dst cluster. Per-pod opt-in (value "true") so a
+	// node-wide rollout can be tested on one annotated pod without affecting
+	// other workloads. REQUIRES the agent --capture-redirect-all flag so the
+	// capture listener carries the passthrough fallback filter chain. Absent or
+	// any value other than "true" leaves the pod on the scoped :18081 redirect.
+	AnnotationCaptureRedirectAll = annotationAetherCapturePrefix + "redirect-all"
 
 	// AnnotationConfigUpstreams is the pod annotation declaring the upstream
 	// services the pod calls, as a comma-separated list of service names

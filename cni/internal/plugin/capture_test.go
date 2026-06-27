@@ -3,6 +3,7 @@ package plugin
 import (
 	"testing"
 
+	"github.com/bpalermo/aether/cni/config"
 	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/google/nftables/expr"
 	"github.com/stretchr/testify/assert"
@@ -166,6 +167,53 @@ func TestRedirectAllTCPExprs(t *testing.T) {
 	require.IsType(t, &expr.Immediate{}, exprs[5])
 	assert.Equal(t, []byte{0x46, 0x51}, exprs[5].(*expr.Immediate).Data) // 18001
 	require.IsType(t, &expr.Redir{}, exprs[6])
+}
+
+// TestPodWantsRedirectAll verifies that the per-pod redirect-all opt-in is driven
+// strictly by the capture.aether.io/redirect-all="true" annotation reaching the
+// plugin via the runtime config. This is the safety gate: without the annotation a
+// pod stays on the scoped redirect even when the spike build is rolled out.
+func TestPodWantsRedirectAll(t *testing.T) {
+	annoTrue := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "true"}
+	annoFalse := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "false"}
+	annoOther := map[string]string{"some.other/annotation": "true"}
+
+	tests := []struct {
+		name string
+		conf config.AetherConf
+		want bool
+	}{
+		{
+			name: "annotation true opts in",
+			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoTrue}},
+			want: true,
+		},
+		{
+			name: "annotation false does not opt in",
+			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoFalse}},
+			want: false,
+		},
+		{
+			name: "unrelated annotation does not opt in",
+			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoOther}},
+			want: false,
+		},
+		{
+			name: "nil pod annotations does not opt in",
+			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{}},
+			want: false,
+		},
+		{
+			name: "nil runtime config does not opt in",
+			conf: config.AetherConf{},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, podWantsRedirectAll(tc.conf))
+		})
+	}
 }
 
 // TestRedirectAllVsScopedDifference verifies that redirectAllTCPExprs has FEWER

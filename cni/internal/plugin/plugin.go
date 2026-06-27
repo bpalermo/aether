@@ -116,7 +116,13 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// Best-effort: failure leaves the scoped-redirect (or no capture) in place.
 	// Requires the agent --capture-redirect-all flag on the xDS side so the capture
 	// listener carries the passthrough fallback filter chain.
-	if netConf.CaptureRedirectAllEnabled {
+	//
+	// Per-pod opt-in for safe scoping: redirect-all is applied for a pod ONLY when
+	// it carries the capture.aether.io/redirect-all="true" annotation (so a single
+	// pod can be tested without affecting other workloads on the node). The global
+	// CaptureRedirectAllEnabled netconf flag is retained as an optional node-wide
+	// override (off by default).
+	if netConf.CaptureRedirectAllEnabled || podWantsRedirectAll(netConf) {
 		if err := installCaptureRedirectAll(args.Netns, p.logger); err != nil {
 			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
 				zap.String("netns", args.Netns), zap.Error(err))
@@ -605,4 +611,17 @@ func fileExists(path string) bool {
 
 func ignorableNamespace(namespace string) bool {
 	return constants.IsIgnoredNamespace(namespace)
+}
+
+// podWantsRedirectAll reports whether the pod opted into redirect-all transparent
+// capture (proposal 022, M2a) via the capture.aether.io/redirect-all="true"
+// annotation. Pod annotations reach the CNI plugin through the runtime config
+// (io.kubernetes.cri.pod-annotations), populated by containerd when the aether
+// CNI conf declares that capability. The per-pod opt-in keeps the spike safe to
+// roll out node-wide while only redirecting the explicitly annotated pods.
+func podWantsRedirectAll(conf config.AetherConf) bool {
+	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+		return false
+	}
+	return (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureRedirectAll] == "true"
 }
