@@ -118,29 +118,18 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	cfg.CacheOptions = nil
 
-	// Run the Gateway API reconciler on EVERY replica (NeedLeaderElection=false,
-	// set inside SetupWithManager). The edge is a 2-replica Deployment; each
-	// replica hosts its own xDS server + SnapshotCache that feeds its co-located
-	// Envoy. Per-Gateway listeners are injected via SetEdgeGateways — if only the
-	// leader's reconciler ran (the controller-runtime default), the follower's
-	// Envoy would see no listeners on the allocated internal ports, causing
-	// "connection refused" for ~50% of connections (those routed to the follower
-	// by kube-proxy / MetalLB). K8s writes (Service create/update, status patches)
-	// are idempotent under concurrent reconciliation; the CreateOrUpdate pattern
-	// and server-side-apply status patches handle 409 Conflict without retries.
-	//
-	// Leader election is still enabled on the manager so the coordination
-	// infrastructure is present (e.g. for future leader-only runnables), but the
-	// Gateway API reconciler itself does not require it.
-	//
-	// LeaderElectionNamespace is pinned to the edge pod's own namespace so the
-	// coordination.k8s.io Lease lives where the namespaced edge Role grants it (and
-	// so out-of-cluster runs don't fall back to "default"). controller-runtime would
-	// default this to the in-cluster namespace; setting it explicitly keeps the
-	// Lease location tied to the same namespace the RBAC targets.
-	cfg.LeaderElection = true
-	cfg.LeaderElectionID = "aether-edge-leader"
-	edgeNamespace := currentNamespace()
+	// The edge runs NO leader election. It is a 2-replica Deployment where each
+	// replica hosts its own xDS server + SnapshotCache feeding its co-located Envoy,
+	// and the Gateway API reconciler injects per-Gateway listeners into that LOCAL
+	// cache via SetEdgeGateways. The reconciler — and the xDS server and registry
+	// refresher — must therefore run on EVERY replica: a leader-only reconciler
+	// left the follower's Envoy with no listeners on the allocated internal ports,
+	// causing "connection refused" for the ~half of connections kube-proxy/MetalLB
+	// routed to it. K8s writes (Service CreateOrUpdate, Gateway status patches) are
+	// idempotent / optimistic-concurrency-safe under concurrent reconciliation
+	// across replicas (status writes retry on conflict). The NeedLeaderElection()
+	// ==false opt-outs on the runnables are defensive — they preserve this
+	// invariant if leader election is ever enabled on the manager.
 
 	// Manager scheme = client-go built-ins + the Gateway API types so the
 	// reconciler reads typed Gateways/HTTPRoutes (no unstructured).
@@ -163,8 +152,6 @@ func runEdge(ctx context.Context) (retErr error) {
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) {
 		o.Scheme = scheme
-		// Pin the leader-election Lease to the edge's namespace (see above).
-		o.LeaderElectionNamespace = edgeNamespace
 	})
 	if err != nil {
 		return err
