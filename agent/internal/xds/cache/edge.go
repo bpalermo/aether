@@ -14,28 +14,42 @@ import (
 
 // routeSpecificity returns a composite sort key for a Route per Gateway API
 // precedence rules. The dominant dimension is path type/length; secondary
-// dimensions (header count, method presence, query count) break ties within the
+// dimensions (method presence, header count, query count) break ties within the
 // same path key. A higher return value means higher precedence.
 //
-// Sort key layout (descending importance):
+// The Gateway API spec (HTTPRoute.spec.rules.matches) fixes the precedence order
+// as: Exact path > longest Prefix > METHOD match > most header matches > most
+// query-param matches. Method therefore ranks ABOVE header count — a rule that
+// matches on method outranks a rule that only matches on a header. (A previous
+// layout placed header count above method, which mis-routed e.g. "PATCH /" with
+// header version=four to the header rule instead of the method rule —
+// HTTPRouteMethodMatching probe 11.)
 //
-//	bits[60..32] — path key: Exact=1<<30+1, Prefix=len(prefix) (max ~2^30)
+// Sort key layout (descending importance), packed into an int64. The path key is
+// kept within 30 bits so that, shifted left by 33, it stays in the positive int64
+// range (33+30 = 63 bits, sign bit clear):
+//
+//	bits[62..33] — path key: Exact=1<<29, Prefix=len(prefix) (capped at 1<<29-1)
+//	bits[32]     — method present (1 > 0)
 //	bits[31..16] — header count (capped at 0xffff, more = more specific)
-//	bits[15]     — method present (1 > 0)
-//	bits[14..0]  — query param count (capped at 0x7fff)
+//	bits[15..0]  — query param count (capped at 0xffff)
 //
 // Using a packed int64 ensures a single integer comparison covers all dimensions
 // in priority order.
 func routeSpecificity(r Route) int64 {
+	const exactPathKey = int64(1) << 29 // sentinel above any prefix length
 	var pathKey int64
 	if r.Exact != "" {
-		pathKey = int64(1)<<30 + 1
+		pathKey = exactPathKey
 	} else {
 		p := r.Prefix
 		if p == "" {
 			p = "/"
 		}
 		pathKey = int64(len(p))
+		if pathKey >= exactPathKey {
+			pathKey = exactPathKey - 1 // keep prefixes strictly below the Exact sentinel
+		}
 	}
 
 	hdrCount := int64(len(r.Headers))
@@ -49,19 +63,19 @@ func routeSpecificity(r Route) int64 {
 	}
 
 	qpCount := int64(len(r.QueryParams))
-	if qpCount > 0x7fff {
-		qpCount = 0x7fff
+	if qpCount > 0xffff {
+		qpCount = 0xffff
 	}
 
-	return (pathKey << 32) | (hdrCount << 16) | (methodBit << 15) | qpCount
+	return (pathKey << 33) | (methodBit << 32) | (hdrCount << 16) | qpCount
 }
 
 // sortRoutesBySpecificity stable-sorts a Route slice in-place by Gateway API
 // precedence (most-specific first):
 //
 //  1. Path: Exact > longer PathPrefix > shorter PathPrefix
-//  2. Header count: more header matches > fewer
-//  3. Method: method present > absent
+//  2. Method: method present > absent
+//  3. Header count: more header matches > fewer
 //  4. Query params: more query matches > fewer
 //
 // It is stable so the caller's tie-break order (creationTimestamp / namespace /

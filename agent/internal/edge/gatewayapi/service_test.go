@@ -27,6 +27,20 @@ func TestGatewayServiceName(t *testing.T) {
 	// Verify DNS label limit (63 chars) is respected.
 	long := gatewayServiceName("aether-edge", "very-long-namespace-name", "very-long-gateway-name-that-exceeds-limits")
 	assert.LessOrEqual(t, len(long), 63)
+
+	// Regression: two Gateways in the SAME namespace whose names share a long common
+	// prefix must NOT collide onto the same (truncated) Service name. These two
+	// conformance Gateways previously both truncated to
+	// "aether-edge-gw-gateway-conformance-infra-same-namespace-with-ht", so one of
+	// them never got a per-Gateway Service / LoadBalancer address.
+	a := gatewayServiceName("aether-edge", "gateway-conformance-infra", "same-namespace-with-https-listener")
+	b := gatewayServiceName("aether-edge", "gateway-conformance-infra", "same-namespace-with-http-listener-on-8080")
+	assert.LessOrEqual(t, len(a), 63)
+	assert.LessOrEqual(t, len(b), 63)
+	assert.NotEqual(t, a, b, "distinct Gateways must map to distinct per-Gateway Service names even after truncation")
+
+	// The hash suffix is deterministic: same identity → same name across calls.
+	assert.Equal(t, a, gatewayServiceName("aether-edge", "gateway-conformance-infra", "same-namespace-with-https-listener"))
 }
 
 // TestGatewayLabelValue verifies the GC label value format.

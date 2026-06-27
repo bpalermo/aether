@@ -54,8 +54,9 @@ func TestNewServiceCluster_EdgePoolingOff(t *testing.T) {
 
 // TestBuildEdgeListener verifies the public-facing edge listener: bound on all
 // interfaces at the configured port, RDS-driven, with the readiness filter
-// ahead of the router, and strip_any_host_port enabled for Gateway API hostname
-// matching (port-agnostic per the spec).
+// ahead of the router, and the host-port NOT stripped on the HCM (port-agnostic
+// matching is done via the route config's ignore_port_in_host_matching, so the
+// forwarded upstream :authority keeps the client's original port).
 func TestBuildEdgeListener(t *testing.T) {
 	l := BuildEdgeListener(EdgeListenerName, 8080, nil)
 
@@ -78,16 +79,14 @@ func TestBuildEdgeListener(t *testing.T) {
 	assert.Equal(t, httpHealthCheckFilterName, hcm.GetHttpFilters()[0].GetName())
 	assert.Equal(t, httpRouterFilterName, hcm.GetHttpFilters()[len(hcm.GetHttpFilters())-1].GetName())
 
-	// strip_any_host_port must be set on edge listeners: Gateway API hostname
-	// matching is port-agnostic, but Go HTTP clients (including the Gateway API
-	// conformance suite) include the port in the Host header even for the standard
-	// port (e.g. "baz.bar.com:80"). Without stripping, the ":authority" header
-	// "baz.bar.com:80" misses the vhost domain "baz.bar.com" and falls to the
-	// catch-all "*", causing HTTPRouteListenerHostnameMatching and
-	// HTTPRouteHostnameIntersection to fail. The node/east-west outbound HCM must
-	// NOT strip ports (FQDN:port is a routing selector there — proposal 005).
-	assert.True(t, hcm.GetStripAnyHostPort(),
-		"edge listener must strip :port from Host header for Gateway API hostname matching")
+	// strip_any_host_port must NOT be set: it would mutate the :authority for the
+	// whole request (including the upstream forward), so the backend would lose the
+	// client's original port. Port-agnostic vhost matching is instead done by the
+	// route config's ignore_port_in_host_matching, which preserves the forwarded
+	// authority. The node/east-west outbound HCM never stripped ports (FQDN:port is
+	// a routing selector there — proposal 005).
+	assert.False(t, hcm.GetStripAnyHostPort(),
+		"edge listener must NOT strip :port — ignore_port_in_host_matching handles matching while preserving the upstream authority")
 }
 
 // TestBuildEdgeListenerTLS verifies downstream TLS termination: the filter chain
@@ -154,6 +153,8 @@ func TestBuildEdgeRouteConfiguration(t *testing.T) {
 	rc := BuildEdgeRouteConfiguration([]*routev3.VirtualHost{vh})
 
 	assert.Equal(t, EdgeHTTPRouteName, rc.GetName())
+	assert.True(t, rc.GetIgnorePortInHostMatching(),
+		"shared edge route config must ignore the host-port when matching vhost domains")
 	require.Len(t, rc.GetVirtualHosts(), 2)
 	assert.Equal(t, "svc-1.aether.internal", rc.GetVirtualHosts()[0].GetName())
 
@@ -262,7 +263,8 @@ func TestEdgeGatewayRouteNameUnique(t *testing.T) {
 
 // TestBuildEdgeGatewayHTTPListener verifies the per-Gateway plain-HTTP listener:
 // unique name, bound on the internal port, RDS to the per-Gateway route config,
-// and strip_any_host_port enabled.
+// and the host-port NOT stripped on the HCM (matching is port-agnostic via the
+// route config's ignore_port_in_host_matching).
 func TestBuildEdgeGatewayHTTPListener(t *testing.T) {
 	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18150, false)
 	assert.Equal(t, "edge_gw_ns-a_my-gw_18150", l.GetName())
@@ -276,14 +278,17 @@ func TestBuildEdgeGatewayHTTPListener(t *testing.T) {
 	assert.Equal(t, "edge_rt_ns-a_my-gw", hcm.GetRds().GetRouteConfigName())
 	// Plain HTTP: no transport socket.
 	assert.Nil(t, l.GetFilterChains()[0].GetTransportSocket())
-	// strip_any_host_port must be set (Gateway API hostname matching is port-agnostic).
-	assert.True(t, hcm.GetStripAnyHostPort(),
-		"per-Gateway HTTP listener must strip :port from Host header for hostname matching")
+	// strip_any_host_port must NOT be set — port-agnostic matching is done by the
+	// route config's ignore_port_in_host_matching, which preserves the forwarded
+	// upstream :authority (incl. the client's port).
+	assert.False(t, hcm.GetStripAnyHostPort(),
+		"per-Gateway HTTP listener must NOT strip :port — ignore_port_in_host_matching handles matching")
 }
 
 // TestBuildEdgeGatewayHTTPListener_Redirect verifies the per-Gateway HTTP→HTTPS
 // redirect listener uses an inline route config (no RDS) with the per-Gateway name
-// and carries strip_any_host_port.
+// and does NOT strip the host-port (so the 301 Location preserves the client's
+// original authority).
 func TestBuildEdgeGatewayHTTPListener_Redirect(t *testing.T) {
 	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18151, true)
 	assert.Equal(t, "edge_gw_ns-a_my-gw_18151", l.GetName())
@@ -297,14 +302,15 @@ func TestBuildEdgeGatewayHTTPListener_Redirect(t *testing.T) {
 	red := rc.GetVirtualHosts()[0].GetRoutes()[0].GetRedirect()
 	require.NotNil(t, red)
 	assert.True(t, red.GetHttpsRedirect())
-	// strip_any_host_port: set for consistency with routing listeners.
-	assert.True(t, hcm.GetStripAnyHostPort(),
-		"redirect listener carries strip_any_host_port for consistency")
+	// strip_any_host_port must NOT be set: the redirect Location must preserve the
+	// client's original host:port. The catch-all "*" domain matches regardless of port.
+	assert.False(t, hcm.GetStripAnyHostPort(),
+		"redirect listener must NOT strip the host-port so the 301 Location keeps the original authority")
 }
 
 // TestBuildEdgeGatewayHTTPSListener verifies the per-Gateway HTTPS listener
 // terminates TLS, uses the per-Gateway route config, has the unique name, and
-// carries strip_any_host_port.
+// does NOT strip the host-port (matching is port-agnostic via the route config).
 func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
 	l := BuildEdgeGatewayHTTPSListener("ns-b", "secure-gw", 18160, []string{"kubernetes/my-cert"})
 	assert.Equal(t, "edge_gw_ns-b_secure-gw_18160", l.GetName())
@@ -319,38 +325,43 @@ func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
 	require.NoError(t, fc.GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 	// Routes via per-Gateway RDS route config.
 	assert.Equal(t, "edge_rt_ns-b_secure-gw", hcm.GetRds().GetRouteConfigName())
-	// strip_any_host_port must be set (HTTPS clients include the port in Host).
-	assert.True(t, hcm.GetStripAnyHostPort(),
-		"per-Gateway HTTPS listener must strip :port from Host header for hostname matching")
+	// strip_any_host_port must NOT be set: HTTPS clients include the port in Host,
+	// but ignore_port_in_host_matching on the route config matches them without
+	// stripping the port from the forwarded upstream :authority.
+	assert.False(t, hcm.GetStripAnyHostPort(),
+		"per-Gateway HTTPS listener must NOT strip :port — ignore_port_in_host_matching handles matching")
 }
 
-// TestBuildEdgeGatewayHTTPListener_MultiListenerHostPortStrip is the FIX A test for
-// HTTPRouteHostnameIntersection conformance. It proves that:
-//  1. The per-Gateway HTTP listener HCM carries strip_any_host_port = true.
-//  2. The per-Gateway route config contains a vhost with domain "very.specific.com"
-//     (no port suffix), so that after Envoy strips ":1234" from the request authority
-//     the vhost matches.
+// TestBuildEdgeGatewayHTTPListener_MultiListenerHostPort is the regression test for
+// the HTTPRouteHostnameIntersection conformance case (Host: very.specific.com:1234).
+// It proves that:
+//  1. The per-Gateway HTTP listener HCM does NOT strip the host-port (so the port is
+//     preserved on the request forwarded upstream — the conformance suite asserts the
+//     backend observes "very.specific.com:1234").
+//  2. The per-Gateway route config sets ignore_port_in_host_matching = true, so Envoy
+//     ignores ":1234" when selecting the vhost.
+//  3. That route config contains a vhost with domain "very.specific.com" (no port
+//     suffix), which the port-ignored authority matches.
 //
 // The conformance Gateway has three HTTP listeners on port 80 with hostnames
 // "very.specific.com", "*.wildcard.io", "*.anotherwildcard.io". All three share
 // one internal port (per-Gateway addressing deduplicates by external port).
 // A request "Host: very.specific.com:1234" must route to the "very.specific.com"
-// vhost; stripping the port is the only layer needed — the vhost domain itself must
-// carry no port.
-func TestBuildEdgeGatewayHTTPListener_MultiListenerHostPortStrip(t *testing.T) {
+// vhost while the backend still observes the original ":1234".
+func TestBuildEdgeGatewayHTTPListener_MultiListenerHostPort(t *testing.T) {
 	// Build the per-Gateway HTTP listener (one per (ns, gw, internal-port) tuple).
 	l := BuildEdgeGatewayHTTPListener("gateway-conformance-infra", "httproute-hostname-intersection", 18100, false)
 
-	// 1. HCM must strip the port from :authority before vhost matching.
+	// 1. HCM must NOT strip the port (preserve it on the upstream-forwarded authority).
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
-	assert.True(t, hcm.GetStripAnyHostPort(),
-		"per-Gateway HCM must strip :port so Host: very.specific.com:1234 matches the very.specific.com vhost")
+	assert.False(t, hcm.GetStripAnyHostPort(),
+		"per-Gateway HCM must NOT strip :port — the backend must observe Host: very.specific.com:1234")
 	// Routes via per-Gateway RDS (not the shared "edge_http" route config).
 	assert.Equal(t, "edge_rt_gateway-conformance-infra_httproute-hostname-intersection", hcm.GetRds().GetRouteConfigName())
 
-	// 2. The per-Gateway route config carries a vhost for "very.specific.com" with NO
-	//    port. Envoy strips ":1234" (step 1) then matches against this domain list.
+	// 2. The per-Gateway route config ignores the port for vhost matching and carries a
+	//    vhost for "very.specific.com" with NO port. Envoy ignores ":1234" then matches.
 	route := BuildEdgeRoute("/s1", "", nil, "", nil, "infra-backend-v1", nil, nil, nil, nil)
 	specificVH := BuildEdgeVirtualHost("very.specific.com", []string{"very.specific.com"}, []*routev3.Route{route})
 	wildcardIOVH := BuildEdgeVirtualHost("*.wildcard.io", []string{"*.wildcard.io"}, []*routev3.Route{route})
@@ -361,6 +372,11 @@ func TestBuildEdgeGatewayHTTPListener_MultiListenerHostPortStrip(t *testing.T) {
 		"httproute-hostname-intersection",
 		[]*routev3.VirtualHost{specificVH, wildcardIOVH, wildcardAnotherVH},
 	)
+
+	// Route config must ignore the port for host matching (the layer that lets
+	// "very.specific.com:1234" select the "very.specific.com" vhost).
+	assert.True(t, rc.GetIgnorePortInHostMatching(),
+		"per-Gateway route config must set ignore_port_in_host_matching so a ported Host matches the bare vhost domain")
 
 	// Verify "very.specific.com" vhost exists in the route config with no port.
 	var found bool
@@ -384,6 +400,8 @@ func TestBuildEdgeGatewayRouteConfiguration(t *testing.T) {
 	rc := BuildEdgeGatewayRouteConfiguration("ns-a", "gw1", []*routev3.VirtualHost{vh})
 
 	assert.Equal(t, "edge_rt_ns-a_gw1", rc.GetName())
+	assert.True(t, rc.GetIgnorePortInHostMatching(),
+		"per-Gateway route config must ignore the host-port when matching vhost domains")
 	require.Len(t, rc.GetVirtualHosts(), 2)
 	assert.Equal(t, "api.example.com", rc.GetVirtualHosts()[0].GetName())
 	last := rc.GetVirtualHosts()[len(rc.GetVirtualHosts())-1]

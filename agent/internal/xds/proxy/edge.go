@@ -114,11 +114,11 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 		// Redirect listener: inline route config (no RDS), no separate route config
 		// resource needed. Re-uses the redirect route logic but names the HCM and
 		// vhost after the Gateway to keep stats distinct. The redirect route table
-		// uses a catch-all "*" domain so strip_any_host_port is irrelevant here, but
-		// set it for consistency with the routing listeners.
+		// uses a catch-all "*" domain so port handling is irrelevant for matching; we
+		// deliberately do NOT strip the host-port so the 301 Location preserves the
+		// client's original authority.
 		hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", buildEdgeRedirectRouteConfig())
 		hcm.GetRouteConfig().Name = name // unique inline config name avoids any residual collision
-		hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
 		filterChain := &listenerv3.FilterChain{
 			Name:    name,
 			Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
@@ -126,19 +126,17 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 		return edgeListener(name, internalPort, filterChain)
 	}
 	// Plain HTTP routing listener: RDS-driven, per-Gateway route config.
-	// strip_any_host_port: strip the port from the :authority pseudo-header before
-	// vhost domain matching. Gateway API hostname matching is port-agnostic: a
-	// route hostname "baz.bar.com" must match a request with Host: baz.bar.com:80
-	// or Host: baz.bar.com:1234. Without stripping, Go HTTP clients (including the
-	// conformance suite) send the port in the Host header even for standard ports,
-	// causing the authority "baz.bar.com:80" to miss the "baz.bar.com" vhost domain
-	// and fall through to the catch-all "*". This ONLY applies to edge (external)
-	// listeners — the node/east-west outbound HCM must NOT strip ports because the
-	// port is a first-class FQDN:port routing selector (proposal 005).
+	// Port-agnostic hostname matching is handled by the route config's
+	// ignore_port_in_host_matching (see BuildEdgeGatewayRouteConfiguration), NOT by
+	// strip_any_host_port on the HCM. strip_any_host_port would mutate the :authority
+	// for the WHOLE request lifecycle — including the request forwarded upstream — so
+	// the backend would observe "very.specific.com" instead of the client's
+	// "very.specific.com:1234". The Gateway API conformance suite asserts the backend
+	// receives the original ported authority (HTTPRouteHostnameIntersection), so the
+	// port must be ignored for matching but PRESERVED on the forwarded request.
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
 	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
-	hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			RouteConfigName: routeName,
@@ -160,11 +158,12 @@ func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort u
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
 	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
-	// strip_any_host_port: see BuildEdgeGatewayHTTPListener for the rationale.
-	// HTTPS clients connecting on a non-standard port (e.g. :8443 or the
-	// conformance port :1234) include the port in the Host header, causing the
-	// same catch-all fall-through without stripping.
-	hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
+	// Port-agnostic hostname matching is handled by the route config's
+	// ignore_port_in_host_matching, NOT strip_any_host_port — see
+	// BuildEdgeGatewayHTTPListener. HTTPS clients connecting on a non-standard port
+	// (e.g. :8443 or the conformance port :1234) still include the port in the Host
+	// header; ignore_port_in_host_matching matches them without stripping the port
+	// from the upstream-forwarded :authority.
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			RouteConfigName: routeName,
@@ -188,6 +187,14 @@ func BuildEdgeGatewayRouteConfiguration(namespace, gatewayName string, vhosts []
 	return &routev3.RouteConfiguration{
 		Name:         EdgeGatewayRouteName(namespace, gatewayName),
 		VirtualHosts: appendEdgeCatchAll404(vhosts),
+		// Gateway API hostname matching is port-agnostic: Host: very.specific.com:1234
+		// must match the very.specific.com vhost. ignore_port_in_host_matching strips
+		// the :port only for vhost-domain selection, leaving the forwarded upstream
+		// :authority untouched (so the backend still observes the original port — the
+		// HTTPRouteHostnameIntersection conformance assertion). This replaces the old
+		// strip_any_host_port HCM mode, which mutated the authority for the whole
+		// request and broke that assertion.
+		IgnorePortInHostMatching: true,
 	}
 }
 
@@ -346,9 +353,11 @@ func BuildEdgeTLSPassthroughListener(port uint32, rules []L4ServiceRoute) *liste
 func BuildEdgeListener(name string, port uint32, tlsSecretNames []string) *listenerv3.Listener {
 	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	hcm.HttpFilters = append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, hcm.HttpFilters...)
-	// strip_any_host_port: see BuildEdgeGatewayHTTPListener for the rationale.
-	// The Phase 1 shared listener faces the same port-in-Host-header issue.
-	hcm.StripPortMode = &http_connection_managerv3.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
+	// Port-agnostic hostname matching is handled by the route config's
+	// ignore_port_in_host_matching (see BuildEdgeRouteConfiguration), NOT
+	// strip_any_host_port — the Phase 1 shared listener faces the same
+	// port-in-Host-header issue but must likewise preserve the port on the
+	// upstream-forwarded :authority.
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			// Both the HTTP and HTTPS listeners serve the same edge route table.
@@ -714,6 +723,10 @@ func BuildEdgeRouteConfiguration(vhosts []*routev3.VirtualHost) *routev3.RouteCo
 	return &routev3.RouteConfiguration{
 		Name:         EdgeHTTPRouteName,
 		VirtualHosts: appendEdgeCatchAll404(vhosts),
+		// Port-agnostic hostname matching (see BuildEdgeGatewayRouteConfiguration):
+		// ignore the :port for vhost selection while preserving it on the forwarded
+		// upstream :authority.
+		IgnorePortInHostMatching: true,
 	}
 }
 

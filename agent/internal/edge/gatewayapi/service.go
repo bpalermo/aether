@@ -2,6 +2,8 @@ package gatewayapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sort"
@@ -38,14 +40,28 @@ var edgeSelectorLabels = map[string]string{
 }
 
 // gatewayServiceName returns the name of the per-Gateway LoadBalancer Service.
-// Scheme: <edgeFullName>-gw-<ns>-<gwname>, truncated to 63 chars (DNS label).
+// Scheme: <edgeFullName>-gw-<ns>-<gwname>, kept within the 63-char DNS label limit.
+//
+// When the full name exceeds 63 chars it is truncated AND suffixed with a short
+// hash of the full (ns, gw) identity, so two Gateways whose names share a long
+// common prefix don't collide onto the same truncated Service name. A naive
+// truncate-only scheme mapped e.g. "same-namespace-with-https-listener" and
+// "same-namespace-with-http-listener-on-8080" (in the same namespace) to the
+// identical 63-char string, so the two Gateways fought over one Service — one of
+// them ended up with no LoadBalancer address at all (status.addresses empty →
+// the conformance suite's GatewayMustHaveAddress wait timed out).
 func gatewayServiceName(edgeServiceName, namespace, gatewayName string) string {
 	s := fmt.Sprintf("%s-gw-%s-%s", edgeServiceName, namespace, gatewayName)
-	if len(s) > 63 {
-		// Truncate to 63 chars; unlikely in practice for normal names.
-		s = s[:63]
+	if len(s) <= 63 {
+		return s
 	}
-	return s
+	// Disambiguate with an 8-char hex hash of the full identity, keeping the total
+	// length at 63 (54-char prefix + '-' + 8 hex chars). DNS labels are
+	// case-insensitive, so use lowercase hex from a stable hash.
+	sum := sha256.Sum256([]byte(namespace + "/" + gatewayName))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	const maxPrefix = 63 - 1 - 8 // room for "-<8 hex>"
+	return s[:maxPrefix] + "-" + suffix
 }
 
 // gatewayLabelValue returns the label value for a per-Gateway Service.

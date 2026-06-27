@@ -1071,18 +1071,19 @@ func TestSortRoutesBySpecificity_QueryCountRanksHigher(t *testing.T) {
 	assert.Equal(t, "svc-one", routes[1].Service)
 }
 
-// TestSortRoutesBySpecificity_FullDimensionOrder verifies the full priority:
-// path key > header count > method present > query count.
+// TestSortRoutesBySpecificity_FullDimensionOrder verifies the full priority per the
+// Gateway API spec: path key > METHOD present > header count > query count. Method
+// ranks ABOVE header count (a method-only rule outranks a header-only rule).
 func TestSortRoutesBySpecificity_FullDimensionOrder(t *testing.T) {
 	// All routes share prefix "/api" so path keys are equal.
 	// Expected order: most-specific first.
 	routes := []Route{
 		// headers=0, method="", query=0 — least specific.
 		{Prefix: "/api", Service: "svc-bare"},
-		// headers=0, method="GET", query=0.
-		{Prefix: "/api", Service: "svc-method", Method: "GET"},
 		// headers=1, method="", query=0.
 		{Prefix: "/api", Service: "svc-hdr", Headers: []proxy.RouteHeaderMatch{{Name: "x", Value: "1"}}},
+		// headers=0, method="GET", query=0 — method outranks header-only.
+		{Prefix: "/api", Service: "svc-method", Method: "GET"},
 		// headers=1, method="POST", query=1 — most specific.
 		{
 			Prefix: "/api", Service: "svc-full",
@@ -1094,10 +1095,30 @@ func TestSortRoutesBySpecificity_FullDimensionOrder(t *testing.T) {
 	sortRoutesBySpecificity(routes)
 
 	require.Len(t, routes, 4)
-	assert.Equal(t, "svc-full", routes[0].Service, "headers+method+query = most specific")
-	assert.Equal(t, "svc-hdr", routes[1].Service, "header only = second")
-	assert.Equal(t, "svc-method", routes[2].Service, "method only = third")
+	assert.Equal(t, "svc-full", routes[0].Service, "method+headers+query = most specific")
+	assert.Equal(t, "svc-method", routes[1].Service, "method match outranks header-only (spec: method > headers)")
+	assert.Equal(t, "svc-hdr", routes[2].Service, "header only = third")
 	assert.Equal(t, "svc-bare", routes[3].Service, "bare path = least specific")
+}
+
+// TestSortRoutesBySpecificity_MethodVsHeader_ConformanceProbe11 is the regression
+// test for HTTPRouteMethodMatching probe 11 ("PATCH /" with header version=four).
+// Two pathless rules match: one on method PATCH (→ backend-v2), one on header
+// version=four (→ backend-v3). The Gateway API spec ranks Method ABOVE header count,
+// so the method rule must win. The old layout (header count above method) sent the
+// request to the header rule (backend-v3), failing conformance.
+func TestSortRoutesBySpecificity_MethodVsHeader_ConformanceProbe11(t *testing.T) {
+	routes := []Route{
+		// Header-only rule (version=four → infra-backend-v3).
+		{Prefix: "/", Service: "infra-backend-v3", Headers: []proxy.RouteHeaderMatch{{Name: "version", Value: "four"}}},
+		// Method-only rule (PATCH → infra-backend-v2).
+		{Prefix: "/", Service: "infra-backend-v2", Method: "PATCH"},
+	}
+	sortRoutesBySpecificity(routes)
+
+	require.Len(t, routes, 2)
+	assert.Equal(t, "infra-backend-v2", routes[0].Service,
+		"a method match must outrank a header match (Gateway API precedence: method > headers)")
 }
 
 // TestDirectResponseRoute_AdmittedByBuildEdgeVhosts verifies that a
