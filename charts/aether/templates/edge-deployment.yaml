@@ -30,6 +30,14 @@ spec:
         aether.io/managed: "false"
     spec:
       serviceAccountName: {{ include "aether.edge.serviceAccountName" . }}
+      # Hitless rollouts: the per-Gateway LoadBalancer Services use
+      # externalTrafficPolicy: Cluster, so kube-proxy keeps routing to a terminating
+      # pod for the endpoint-propagation window. The preStop `sleep` below holds
+      # SIGTERM off both containers while the pod is already Terminating, so the
+      # endpoint is withdrawn before Envoy stops accepting; this grace period must
+      # comfortably exceed that sleep plus Envoy's own graceful drain so the kubelet
+      # SIGKILL never lands mid-drain. See edge.drain in values.yaml.
+      terminationGracePeriodSeconds: {{ .Values.edge.drain.terminationGracePeriodSeconds }}
       # Tolerate the aether startup taint: the edge is an ingress gateway, not a
       # mesh workload — it dials pods directly and never uses the node proxy, so it
       # must not wait for a node's agent to become ready. (Its own CNI ADD goes
@@ -142,6 +150,16 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
+          {{- if gt (int .Values.edge.drain.preStopSeconds) 0 }}
+          # Keep the xDS control plane alive through the drain window so Envoy never
+          # loses its config source mid-drain. Native `sleep` action (no shell in the
+          # distroless agent image). The kubelet runs preStop on every container in
+          # parallel on pod deletion.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ .Values.edge.drain.preStopSeconds }}
+          {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -215,6 +233,20 @@ spec:
             initialDelaySeconds: 2
             periodSeconds: 2
             failureThreshold: 3
+          {{- if gt (int .Values.edge.drain.preStopSeconds) 0 }}
+          # Two-phase drain, mirroring the node proxy (proxy.hotRestart.drainTime).
+          # The pod is Terminating the moment deletion begins, so kube-proxy starts
+          # withdrawing this pod's Service endpoint. This native `sleep` preStop holds
+          # SIGTERM off Envoy for that propagation window WHILE Envoy keeps accepting
+          # and serving (no shell in the distroless proxy image, so the native
+          # lifecycle action is used, not exec). Only after the sleep does Envoy get
+          # SIGTERM and drain in-flight requests gracefully — by which point kube-proxy
+          # no longer routes new connections here.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ .Values.edge.drain.preStopSeconds }}
+          {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

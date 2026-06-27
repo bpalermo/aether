@@ -302,6 +302,30 @@ edge:
   overload:
     enabled: true
     maxHeapSizeBytes: 201326592 # 192Mi = 75% of 256Mi
+  # Hitless-rollout drain. The per-Gateway LoadBalancer Services use
+  # externalTrafficPolicy: Cluster, so on a rollout kube-proxy keeps routing to a
+  # terminating pod for the endpoint-propagation window. Without a drain, the edge
+  # Envoy receives SIGTERM and stops accepting BEFORE that endpoint is withdrawn,
+  # so connections kube-proxy still steers to it are reset (measured ~0.25%/roll).
+  #
+  # Mirrors the node proxy's two-phase drain (proxy.hotRestart.drainTime = 10s, the
+  # empirically 0-fail value): a native kubelet `sleep` preStop holds SIGTERM off
+  # both containers for preStopSeconds. The pod is already Terminating, so kube-proxy
+  # withdraws its endpoint during the sleep WHILE Envoy keeps accepting and serving
+  # in-flight requests. Only after the sleep does Envoy get SIGTERM and drain
+  # gracefully. terminationGracePeriodSeconds must comfortably exceed the sleep plus
+  # Envoy's own graceful-shutdown drain. The native `sleep` lifecycle action (GA
+  # k8s 1.30+) is used so no in-container shell is required — the edge Envoy/agent
+  # images are distroless (no /bin/sleep, curl, or wget).
+  drain:
+    # Seconds the preStop sleep holds off SIGTERM so kube-proxy propagates the
+    # endpoint removal while Envoy still serves. Matches proxy.hotRestart.drainTime.
+    # 0 disables the preStop hook entirely.
+    preStopSeconds: 10
+    # Pod terminationGracePeriodSeconds. Must exceed preStopSeconds plus Envoy's
+    # graceful drain so SIGKILL never lands mid-drain. Default 30 = 10s sleep +
+    # ~15s Envoy drain + buffer.
+    terminationGracePeriodSeconds: 30
   # SPIRE identity for the edge (when spire.enabled): create a ClusterSPIFFEID so
   # SPIRE issues the edge pod its SVID. Mirrors controller.webhook.clusterSpiffeID.
   spire:
