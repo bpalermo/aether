@@ -1368,11 +1368,21 @@ func effectiveHostnames(routeHosts []string, gwKeys []string, gwListenerHostname
 			if lh == "" {
 				// Listener has no hostname restriction: admit all route hostnames.
 				if len(routeHosts) == 0 {
-					// route "" + listener "" = "*" (true catch-all). Represent as empty
-					// slice so buildEdgeVhostsLocked emits the "*" catch-all vhost.
-					// We signal this by NOT adding anything — the caller keeps vh.Hosts
-					// nil/empty → cache catch-all path.
-					continue
+					// route "" + listener "" = "*" (true catch-all). A no-hostname
+					// listener with a no-hostname route admits ALL hosts. Return nil
+					// immediately — no specific hostname from any other listener in
+					// this key's union can narrow a catch-all back down. The caller
+					// treats nil/empty Hosts as the "*" catch-all vhost.
+					//
+					// Previously this was `continue` (add nothing and keep processing),
+					// which caused a multi-listener Gateway (e.g. one listener with no
+					// hostname + two listeners with specific hostnames) to produce a
+					// Hosts set of only the specific listener hostnames — silently
+					// dropping the catch-all listener's "admit all" contribution. A
+					// request like Host:example.org matched neither specific hostname,
+					// fell through to the 404 catch-all vhost, and returned 404 instead
+					// of the expected redirect. (HTTPRouteRedirectPortAndScheme, 443 subtests)
+					return nil
 				}
 				for _, rh := range routeHosts {
 					add(rh)

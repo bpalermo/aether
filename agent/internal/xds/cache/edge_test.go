@@ -8,6 +8,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -555,6 +556,119 @@ func TestPerGatewayCertWired(t *testing.T) {
 	assert.Equal(t, "edge_gw_ns-tls_secure-gw_18110", l.GetName())
 	// TLS transport socket must be wired (not nil).
 	require.NotNil(t, l.GetFilterChains()[0].GetTransportSocket(), "per-Gateway HTTPS listener must terminate TLS")
+}
+
+// TestPerGatewayHTTPSListenerRoutesMatchHTTP is the regression guard for
+// HTTPRouteRedirectPortAndScheme (https-listener-on-443 subtests returning 404).
+//
+// When a Gateway has an HTTPS listener (TLSSecretNames set) AND a catch-all
+// virtual host (Hosts: nil/empty, i.e. the "*" vhost from effectiveHostnames
+// returning nil for a no-hostname route on a no-hostname HTTPS listener), the
+// per-Gateway route config must include the redirect routes in the "*" catch-all
+// vhost — not only in named-hostname vhosts. Without this, a request like
+// "Host: example.org" falls through to the 404 catch-all and returns 404 instead
+// of the expected redirect.
+//
+// This test verifies that:
+//  1. The HTTPS per-Gateway listener uses RDS (not inline route config) and
+//     references the same route config name as the HTTP case.
+//  2. The per-Gateway route config built from a catch-all VirtualHost (empty Hosts)
+//     carrying redirect routes exposes those routes in the "*" vhost domain — so
+//     any Host header matches and gets the redirect, not the 404.
+func TestPerGatewayHTTPSListenerRoutesMatchHTTP(t *testing.T) {
+	c := newTestCache("edge-1")
+	c.SetEdgeMode(80)
+
+	// Simulate the effective hostname computation result for a route with no
+	// hostnames attached to a Gateway with a no-hostname HTTPS listener: Hosts=nil
+	// (true catch-all). The redirect route must survive into the route config.
+	entry := EdgeGatewayEntry{
+		Namespace: "ns-https",
+		Name:      "tls-gw",
+		Listeners: []EdgeGatewayListenerEntry{
+			// HTTPS listener: TLSSecretNames set, ExternalPort 443.
+			{ExternalPort: 443, InternalPort: 18300, TLSSecretNames: []string{"ns-https/tls-cert"}},
+		},
+		// VirtualHost with empty Hosts (catch-all): produced when
+		// effectiveHostnames returns nil for no-hostname route on no-hostname HTTPS listener.
+		VirtualHosts: []VirtualHost{
+			{
+				Hosts: nil, // catch-all — must produce "*" vhost domain in Envoy
+				Routes: []Route{
+					{
+						Prefix:   "/scheme-nil-and-port-nil",
+						Redirect: &proxy.GammaRedirect{Hostname: "example.org"},
+					},
+					{
+						Prefix:   "/scheme-http-and-port-80",
+						Redirect: &proxy.GammaRedirect{Scheme: "http", Port: 80, Hostname: "example.org"},
+					},
+				},
+			},
+		},
+	}
+	c.SetEdgeGateways([]EdgeGatewayEntry{entry})
+
+	// 1. Listener check: the HTTPS listener must use RDS (not inline route config)
+	//    and reference edge_rt_ns-https_tls-gw.
+	ls := stripReadiness(t, c.Listeners())
+	require.Len(t, ls, 1)
+	l := ls[0]
+	assert.Equal(t, "edge_gw_ns-https_tls-gw_18300", l.GetName())
+	require.NotNil(t, l.GetFilterChains()[0].GetTransportSocket(), "HTTPS listener must terminate TLS")
+
+	hcm := extractHCM(t, l.GetFilterChains()[0])
+	rds := hcm.GetRds()
+	require.NotNil(t, rds, "per-Gateway HTTPS listener must use RDS (not inline route config)")
+	assert.Equal(t, proxy.EdgeGatewayRouteName("ns-https", "tls-gw"), rds.GetRouteConfigName(),
+		"HTTPS listener RDS must reference the per-Gateway route config")
+
+	// 2. Route config check: the "*" catch-all vhost must contain the redirect routes,
+	//    not only a 404. This is the root cause of the 404 regression:
+	//    effectiveHostnames was incorrectly returning ["second-example.org", "*.wildcard.org"]
+	//    instead of nil for a no-hostname route on a no-hostname HTTPS listener.
+	rcs := c.edgeGatewayRouteConfigs()
+	require.Len(t, rcs, 1)
+	rc, ok := rcs[0].(*routev3.RouteConfiguration)
+	require.True(t, ok)
+	assert.Equal(t, proxy.EdgeGatewayRouteName("ns-https", "tls-gw"), rc.GetName())
+	assert.True(t, rc.GetIgnorePortInHostMatching(), "IgnorePortInHostMatching must be set")
+
+	// The catch-all vhost ("*") must exist and carry the redirect routes.
+	var catchAllVH *routev3.VirtualHost
+	for _, vh := range rc.GetVirtualHosts() {
+		if len(vh.GetDomains()) == 1 && vh.GetDomains()[0] == "*" {
+			catchAllVH = vh
+			break
+		}
+	}
+	require.NotNil(t, catchAllVH, "route config must have a '*' catch-all virtual host (from empty Hosts)")
+
+	// The "*" vhost must contain the redirect routes before the terminal 404.
+	routes := catchAllVH.GetRoutes()
+	require.GreaterOrEqual(t, len(routes), 3, "catch-all vhost must have the 2 redirect routes + the 404 route")
+
+	// Verify at least one redirect action (not a direct-response 404) is present.
+	var hasRedirect bool
+	for _, r := range routes {
+		if r.GetRedirect() != nil {
+			hasRedirect = true
+			break
+		}
+	}
+	assert.True(t, hasRedirect,
+		"'*' catch-all vhost must contain redirect route actions, not only the 404 terminal route")
+}
+
+// extractHCM extracts the HttpConnectionManager from a filter chain's first
+// network filter. Fails the test if the filter is absent or the wrong type.
+func extractHCM(t *testing.T, fc *listenerv3.FilterChain) *hcmv3.HttpConnectionManager {
+	t.Helper()
+	require.NotEmpty(t, fc.GetFilters(), "filter chain must have at least one filter")
+	f := fc.GetFilters()[0]
+	hcm := &hcmv3.HttpConnectionManager{}
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(hcm), "first filter must be HttpConnectionManager")
+	return hcm
 }
 
 // TestVirtualHostVhosts_WeightedSplit verifies end-to-end that a route with
