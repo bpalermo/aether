@@ -110,6 +110,12 @@ agent:
   # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.
   # Default ON (validated hitless under churn); adds the services-read RBAC.
   transparentCapture: true
+  # SPIKE (proposal 022 M2a): redirect-ALL outbound TCP into the capture listener
+  # with an ORIGINAL_DST passthrough for non-mesh destinations, so GAMMA routing
+  # can apply to real Services on real ports. Requires --transparent-capture. This
+  # only adds the (dormant) passthrough filter chain; a pod is redirect-all'd ONLY
+  # when it carries the capture.aether.io/redirect-all="true" annotation. Default OFF.
+  captureRedirectAll: false
   # Mesh DNS (proposal 018, mesh-global FQDN): the node agent runs an in-process
   # resolver answering <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
   # (namespace-free, globally routable) and forwarding the rest to meshDnsUpstream;
