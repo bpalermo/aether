@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
@@ -114,12 +116,18 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 		cluster := entry.cluster
 		if nodeSpiffeID != "" {
 			// Expected server identities for this service: one SPIFFE ID per
-			// endpoint namespace (entry.service is the bare name even for
-			// per-port clusters). The handshake then proves the peer IS the
-			// service asked for, not merely some workload in the trust domain.
+			// endpoint namespace. The peer SVID's SA is the BARE service name —
+			// entry.service is now the namespace-qualified "<ns>/<svc>" key
+			// (020 Part 1), so parse out the bare name for the sa/ segment (the
+			// namespace comes from sanNamespaces). The handshake then proves the
+			// peer IS the service asked for, not merely some workload in the TD.
+			saName := entry.service
+			if ref, ok := serviceref.ParseKey(entry.service); ok {
+				saName = ref.Name
+			}
 			sanURIs := make([]string, 0, len(entry.sanNamespaces))
 			for _, ns := range entry.sanNamespaces {
-				sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, entry.service))
+				sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, saName))
 			}
 			cl, _ := proto.Clone(entry.cluster).(*clusterv3.Cluster)
 			// entry.sni carries the destination port so the peer's inbound
