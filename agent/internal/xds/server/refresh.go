@@ -65,6 +65,15 @@ func AssertWatchFilter(c *cache.SnapshotCache, reg registry.Registry) {
 	scoper.SetServiceFilter(services)
 }
 
+// NeedLeaderElection returns false so the refresher runs on EVERY replica, not
+// just the leader. Each edge/agent pod feeds its own co-located Envoy via the
+// snapshot cache; leader-gating this runnable would starve all non-leader
+// proxies of cluster/endpoint updates and break data-plane HA. The reconciler
+// (status writer) is the only component that must be a singleton — it stays
+// leader-election-aware via the controller-runtime builder. On the node agent
+// (leader election off) this method is a no-op.
+func (r *RegistryRefresher) NeedLeaderElection() bool { return false }
+
 // NewRegistryRefresher creates a RegistryRefresher.
 func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.SnapshotCache, reg registry.Registry, log *slog.Logger) *RegistryRefresher {
 	r := &RegistryRefresher{
