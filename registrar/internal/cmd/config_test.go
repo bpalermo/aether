@@ -47,6 +47,19 @@ func TestRegistrarConfig_DefaultValues(t *testing.T) {
 			got:      c.Debug,
 			expected: false,
 		},
+		{
+			// Leader election must be on so the leader-only mesh-Service / MCS
+			// generators run on exactly one replica (two replicas otherwise fight
+			// create-vs-prune on the selectorless mesh Services).
+			name:     "leader election is enabled by default",
+			got:      c.LeaderElection,
+			expected: true,
+		},
+		{
+			name:     "leader election ID is set",
+			got:      c.LeaderElectionID,
+			expected: "aether-registrar.registry.aether.io",
+		},
 	}
 
 	for _, tt := range tests {
