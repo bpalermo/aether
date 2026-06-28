@@ -202,6 +202,18 @@ func (r *Reconciler) backendsResolve(_ context.Context, routeNamespace, routeKin
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
 }
 
+// backendServiceKey resolves a backendRef to its namespace-qualified "<ns>/<svc>"
+// registry key (020 Part 1): the backendRef's own namespace when set, else the
+// route's namespace. The resulting key feeds both the data-plane cluster name
+// (ServiceClusterName) and the node dependency set (routeBackendsLocked).
+func backendServiceKey(backendNamespace *gatewayv1.Namespace, routeNamespace, name string) string {
+	ns := routeNamespace
+	if bn := derefBackendNamespace(backendNamespace); bn != "" {
+		ns = bn
+	}
+	return serviceref.New(ns, name).Key()
+}
+
 // derefBackendNamespace returns the backendRef namespace ("" when unset).
 func derefBackendNamespace(ns *gatewayv1.Namespace) string {
 	if ns == nil {
@@ -290,9 +302,13 @@ func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespac
 		if b.Weight != nil {
 			weight = uint32(*b.Weight)
 		}
+		// 020 Part 1: the backend's data-plane cluster and dependency-set key are
+		// namespace-qualified "<ns>/<svc>". A canary/split to a different backend
+		// service therefore resolves the right registry cluster.
+		key := backendServiceKey(b.Namespace, routeNamespace, name)
 		gr.Backends = append(gr.Backends, proxy.GammaBackend{
-			Service: name,
-			Cluster: proxy.ServiceClusterName(name, r.MeshDomain),
+			Service: key,
+			Cluster: proxy.ServiceClusterName(key, r.MeshDomain),
 			Weight:  weight,
 		})
 	}
@@ -500,9 +516,13 @@ func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, route
 		if b.Weight != nil {
 			weight = uint32(*b.Weight)
 		}
+		// 020 Part 1: the backend's data-plane cluster and dependency-set key are
+		// namespace-qualified "<ns>/<svc>". A canary/split to a different backend
+		// service therefore resolves the right registry cluster.
+		key := backendServiceKey(b.Namespace, routeNamespace, name)
 		gr.Backends = append(gr.Backends, proxy.GammaBackend{
-			Service: name,
-			Cluster: proxy.ServiceClusterName(name, r.MeshDomain),
+			Service: key,
+			Cluster: proxy.ServiceClusterName(key, r.MeshDomain),
 			Weight:  weight,
 		})
 	}
