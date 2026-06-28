@@ -70,11 +70,39 @@ const onDemandClusterHeader = ":authority"
 // 404s immediately. This keeps instant foreign-404 determinism (spike-verified,
 // Envoy 1.38) while supporting FQDN:port (proposal 005). Nonexistent in-domain
 // services/ports fail when the ODCDS timeout expires.
-func buildOnDemandCatchAllVirtualHost(meshDomain string) *routev3.VirtualHost {
+func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool) *routev3.VirtualHost {
 	// 020 Part 1: mesh authorities are <svc>.<ns>.<meshDomain> (two labels before the
 	// mesh domain), with an optional :port. Cold/off-node services that miss the
 	// scoped vhost fall here and resolve via ODCDS (ClusterHeader=:authority).
 	meshAuthorityRegex := "^[a-z0-9-]+\\.[a-z0-9-]+\\." + regexp.QuoteMeta(meshDomain) + "(:[0-9]+)?$"
+	// Final fallthrough for a non-mesh authority. Normally a hard 404 (foreign egress,
+	// typos). But with redirect-all capture (proposal 022) ALL of the pod's egress is
+	// intercepted — including requests to real Kubernetes Service names
+	// (<svc>.<ns>.svc.cluster.local / a bare ClusterIP) that carry no mesh authority
+	// and are in no node dependency set (a client dialing a Service with no
+	// HTTPRoute/upstream declaration). A 404 there breaks plain Service-to-Service
+	// reachability, so route those to the ORIGINAL_DST passthrough (the original
+	// pre-REDIRECT destination, reached in plain HTTP), symmetric with the L4
+	// cap_passthrough default chain. The capture HCM's set_filter_state filter
+	// preserves the original destination for the ORIGINAL_DST cluster. Without
+	// redirect-all (scoped capture / outbound) the 404 is kept — there is no
+	// passthrough cluster to route to.
+	fallthrough_ := &routev3.Route{
+		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+		Action: &routev3.Route_DirectResponse{
+			DirectResponse: &routev3.DirectResponseAction{Status: 404},
+		},
+	}
+	if passthrough {
+		fallthrough_ = &routev3.Route{
+			Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+			Action: &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: PassthroughClusterName},
+				},
+			},
+		}
+	}
 	return &routev3.VirtualHost{
 		Name:    "on_demand_catch_all",
 		Domains: []string{"*"},
@@ -118,23 +146,20 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string) *routev3.VirtualHost {
 					},
 				},
 			},
-			{
-				Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-				Action: &routev3.Route_DirectResponse{
-					DirectResponse: &routev3.DirectResponseAction{Status: 404},
-				},
-			},
+			fallthrough_,
 		},
 	}
 }
 
 // BuildOutboundRouteConfiguration creates a route configuration for outbound traffic.
 // It includes the provided virtual hosts plus the universal on-demand catch-all
-// virtual host (mesh-shaped authorities → ODCDS, everything else → 404).
+// virtual host (mesh-shaped authorities → ODCDS, everything else → 404). The outbound
+// listener never passes through (it only sees mesh-DNS authorities), so the catch-all
+// keeps its hard-404 fallthrough.
 func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
-		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain)),
+		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain, false)),
 	}
 }
 

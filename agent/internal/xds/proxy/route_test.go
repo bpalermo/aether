@@ -91,7 +91,7 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 func TestOutboundRetryPolicy(t *testing.T) {
 	for name, vh := range map[string]*routev3.VirtualHost{
 		"cluster vhost":   BuildOutboundClusterVirtualHost("svc-1.aether.internal", []string{"svc-1.aether.internal"}),
-		"catch-all vhost": buildOnDemandCatchAllVirtualHost("aether.internal"),
+		"catch-all vhost": buildOnDemandCatchAllVirtualHost("aether.internal", false),
 	} {
 		// Find the routed (non-direct-response) route; the catch-all leads with a
 		// liveness direct_response route (see TestEgressLivenessRoute).
@@ -115,7 +115,7 @@ func TestOutboundRetryPolicy(t *testing.T) {
 // MeshLivePath (proposal 013 prober), matched by exact path before the
 // authority-regex/404 routes, so it wins regardless of authority.
 func TestEgressLivenessRoute(t *testing.T) {
-	vh := buildOnDemandCatchAllVirtualHost("aether.internal")
+	vh := buildOnDemandCatchAllVirtualHost("aether.internal", false)
 	require.NotEmpty(t, vh.GetRoutes())
 	live := vh.GetRoutes()[0]
 	assert.Equal(t, MeshLivePath, live.GetMatch().GetPath(), "liveness must be an exact-path match")

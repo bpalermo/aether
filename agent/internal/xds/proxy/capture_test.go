@@ -211,7 +211,7 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 		ServiceClusterName("aether-test/svc-1", "aether.internal"),
 		[]string{"svc-1.aether-test.svc.cluster.local", "svc-1.aether-test.svc.cluster.local:18081"},
 	)
-	rc := BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vh}, "aether.internal")
+	rc := BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vh}, "aether.internal", false)
 	assert.Equal(t, CaptureHTTPRouteName, rc.GetName())
 	require.Len(t, rc.GetVirtualHosts(), 2, "the service vhost + the on-demand catch-all")
 
@@ -233,5 +233,31 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 		}
 	}
 	assert.True(t, hasOnDemand, "catch-all routes mesh authorities to ODCDS via :authority")
-	assert.True(t, has404, "catch-all 404s non-mesh authorities")
+	assert.True(t, has404, "scoped-capture catch-all 404s non-mesh authorities")
+}
+
+// TestBuildCaptureRouteConfigurationRedirectAll verifies that with redirect-all
+// capture the catch-all's final fallthrough routes to the ORIGINAL_DST passthrough
+// (so a captured request to a real Kubernetes Service with no mesh authority and no
+// dependency-set vhost still reaches its backend via kube-proxy) instead of 404'ing.
+func TestBuildCaptureRouteConfigurationRedirectAll(t *testing.T) {
+	rc := BuildCaptureRouteConfiguration(nil, "aether.internal", true)
+	require.Len(t, rc.GetVirtualHosts(), 1, "just the on-demand catch-all")
+	catchAll := rc.GetVirtualHosts()[0]
+
+	var hasOnDemand, hasPassthrough, has404 bool
+	for _, r := range catchAll.GetRoutes() {
+		if r.GetRoute().GetClusterHeader() == ":authority" {
+			hasOnDemand = true
+		}
+		if r.GetRoute().GetCluster() == PassthroughClusterName {
+			hasPassthrough = true
+		}
+		if r.GetDirectResponse().GetStatus() == 404 {
+			has404 = true
+		}
+	}
+	assert.True(t, hasOnDemand, "mesh authorities still resolve via ODCDS")
+	assert.True(t, hasPassthrough, "redirect-all fallthrough routes to the ORIGINAL_DST passthrough")
+	assert.False(t, has404, "redirect-all catch-all does not hard-404 non-mesh authorities")
 }

@@ -388,6 +388,22 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	// just the mesh :18081 spelling, or the request 404s.
 	routeTargetPorts := c.routeTargetPortsSnapshot()
 
+	// Bare route-target names (the same-namespace short dial, e.g. "echo") are only
+	// unambiguous when a single namespace owns that name. If two namespaces each have
+	// an "echo" route target, emitting "echo" as a domain twice makes Envoy NACK the
+	// whole route config. Count bare names across in-scope route targets so the bare
+	// spelling is emitted only when globally unique; the namespace-qualified spellings
+	// (<name>.<ns>...) are always unambiguous and always emitted.
+	bareNameCount := make(map[string]int)
+	for svc := range gammaRoutes {
+		if _, ok := deps[svc]; !ok {
+			continue
+		}
+		if ref, ok := serviceref.ParseKey(svc); ok {
+			bareNameCount[ref.Name]++
+		}
+	}
+
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.captureAuthorities)+len(gammaRoutes))
@@ -423,23 +439,43 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		}
 		fqdn := ref.ClusterLocalFQDN()
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		domains := []string{
-			fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
-			mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
+		// A captured request carries whatever authority the client used to dial the
+		// route target. Kubernetes search-domain resolution lets a client reach a
+		// Service by any of its short names — the bare name (same namespace), the
+		// <name>.<namespace> form, and the <name>.<namespace>.svc form — in addition
+		// to the full cluster.local FQDN and aether's mesh name. The captured request's
+		// :authority is exactly the (un-resolved) name the client typed, so cap_http
+		// must host-match every spelling or a same-namespace `echo` dial misses the
+		// route-target vhost and falls through to the kube-proxy passthrough (round
+		// robin), bypassing the GAMMA rules. Emit all spellings; real-port variants
+		// are added per port below.
+		baseNames := []string{
+			ref.Name + "." + ref.Namespace,          // <name>.<namespace>
+			ref.Name + "." + ref.Namespace + ".svc", // <name>.<namespace>.svc
+			fqdn,                                    // <name>.<namespace>.svc.cluster.local
+			mesh,                                    // <svc>.<ns>.<meshDomain>
+		}
+		// The bare same-namespace name is only collision-free when one namespace owns it.
+		if bareNameCount[ref.Name] == 1 {
+			baseNames = append(baseNames, ref.Name)
+		}
+		domains := make([]string, 0, len(baseNames)*2)
+		for _, n := range baseNames {
+			// Portless + the mesh :18081 spelling (the mesh-DNS path uses the latter).
+			domains = append(domains, n, fmt.Sprintf("%s:%d", n, constants.ProxyOutboundPort))
 		}
 		// proposal 023 M2: also match the route target's REAL Service port(s), the
 		// authority a client actually presents when dialing the captured ClusterIP:port
-		// (echo:8080) rather than the mesh :18081. Emit both the cluster.local and the
-		// mesh-name spellings at each real port so the request host-matches regardless
-		// of which name the client used.
+		// (echo:80 / echo:8080) rather than the mesh :18081. Emit every short-name and
+		// FQDN spelling at each real port so the request host-matches regardless of
+		// which name the client used.
 		for _, p := range routeTargetPorts[svc] {
 			if p == 0 || p == constants.ProxyOutboundPort {
 				continue // 0 = unset; :18081 already emitted above.
 			}
-			domains = append(domains,
-				fmt.Sprintf("%s:%d", fqdn, p),
-				fmt.Sprintf("%s:%d", mesh, p),
-			)
+			for _, n := range baseNames {
+				domains = append(domains, fmt.Sprintf("%s:%d", n, p))
+			}
 		}
 		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc]))
 	}
