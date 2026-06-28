@@ -25,7 +25,7 @@ func TestNewInboundListener(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	l, err := NewInboundListener(pod, "example.org", false)
+	l, err := NewInboundListener(pod, "example.org", false, false)
 	require.NoError(t, err)
 	assert.Equal(t, InboundListenerName(pod), l.GetName())
 
@@ -79,11 +79,48 @@ func TestNewInboundListener(t *testing.T) {
 	assert.Equal(t, AppClusterName(pod, AppPortFromPod(pod)), vh.GetRoutes()[0].GetRoute().GetCluster())
 }
 
+// TestNewInboundListenerCleartext verifies the SPIRE-off inbound listener: a
+// single default HCM chain with NO transport socket (plain TCP), no tls_inspector
+// listener filter, and no XFCC (no verified peer). This is what makes the mesh hop
+// routable without SPIRE — symmetric with the cleartext outbound clusters.
+func TestNewInboundListenerCleartext(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "pod-a",
+		Namespace:        "aether-test",
+		ServiceAccount:   "echo",
+		NetworkNamespace: "/var/run/netns/cni-a",
+		Ips:              []string{"10.0.0.1"},
+	}
+
+	l, err := NewInboundListener(pod, "example.org", false, true)
+	require.NoError(t, err)
+
+	// No tls_inspector: there is no TLS to inspect in cleartext mode.
+	assert.Empty(t, l.GetListenerFilters(), "cleartext listener needs no listener filters")
+
+	// Exactly one chain: the default HCM chain, no match, no transport socket.
+	require.Len(t, l.GetFilterChains(), 1, "cleartext inbound is a single default HCM chain")
+	fc := l.GetFilterChains()[0]
+	assert.Nil(t, fc.GetFilterChainMatch(), "cleartext chain is the default (no ALPN/SNI to demux on)")
+	assert.Nil(t, fc.GetTransportSocket(), "cleartext chain must NOT terminate mTLS")
+	require.Len(t, fc.GetFilters(), 1)
+	assert.Equal(t, "envoy.http_connection_manager", fc.GetFilters()[0].GetName())
+
+	hcm := decodeHCM(t, l)
+	// AUTO codec detects both cleartext h2c (from the source proxy) and HTTP/1.
+	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_AUTO, hcm.GetCodecType())
+	// No XFCC: there is no verified peer identity to forward.
+	assert.Equal(t, http_connection_managerv3.HttpConnectionManager_SANITIZE, hcm.GetForwardClientCertDetails())
+	// Health-check + stats + router filters are still present.
+	require.Len(t, hcm.GetHttpFilters(), 4)
+	assert.Equal(t, livenessHealthCheckFilterName, hcm.GetHttpFilters()[0].GetName())
+}
+
 func TestNewInboundListener_Errors(t *testing.T) {
-	_, err := NewInboundListener(nil, "example.org", false)
+	_, err := NewInboundListener(nil, "example.org", false, false)
 	require.Error(t, err)
 
-	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false)
+	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false, false)
 	require.Error(t, err)
 }
 
@@ -126,7 +163,7 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 		Annotations:      map[string]string{constants.AnnotationEndpointPorts: "8080,9090"},
 	}
-	l, err := NewInboundListener(pod, "example.org", false)
+	l, err := NewInboundListener(pod, "example.org", false, false)
 	require.NoError(t, err)
 
 	bySNI := map[string]*listenerv3.FilterChain{}
@@ -170,7 +207,7 @@ func TestInboundChainStatsFilter(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-a",
 		Ips:              []string{"10.0.0.1"},
 	}
-	l, err := NewInboundListener(pod, "aether.internal", false)
+	l, err := NewInboundListener(pod, "aether.internal", false, false)
 	require.NoError(t, err)
 	require.NotEmpty(t, l.GetFilterChains())
 
@@ -207,7 +244,7 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-tcp",
 		Ips:              []string{"10.0.0.5"},
 	}
-	l, err := NewInboundListener(pod, "aether.internal", false)
+	l, err := NewInboundListener(pod, "aether.internal", false, false)
 	require.NoError(t, err)
 
 	// Find the TCP floor chain: the default chain (no match), named in_tcp_<pod>.

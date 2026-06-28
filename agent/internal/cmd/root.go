@@ -271,6 +271,10 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
+	// With SPIRE off no SVIDs/SDS exist; the cache builds the per-pod inbound
+	// listener cleartext so the mesh hop stays routable (the outbound clusters
+	// already go cleartext without a node SVID). Production keeps mTLS.
+	snapshotCache.SetSpireEnabled(cfg.SpireEnabled)
 	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
 	snapshotCache.SetCaptureRedirectAll(cfg.CaptureRedirectAll)
 	if cfg.MeshDNS {

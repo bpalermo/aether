@@ -112,8 +112,9 @@ func lookupMapping(t *testing.T, path, apparent string) (string, bool) {
 	return "", false
 }
 
-// TestEnvoyValidate generates three representative aether bootstrap configs
-// and validates each one with "envoy --mode validate".
+// TestEnvoyValidate generates the representative aether bootstrap configs
+// (node mTLS, node cleartext/SPIRE-off, transparent capture, capture route-target,
+// edge) and validates each one with "envoy --mode validate".
 //
 // Envoy exits 0 when the config is structurally valid; exits 1 on any error.
 func TestEnvoyValidate(t *testing.T) {
@@ -126,6 +127,7 @@ func TestEnvoyValidate(t *testing.T) {
 		fn   func() ([]byte, error)
 	}{
 		{"node_bootstrap.json", NodeBootstrapJSON},
+		{"node_cleartext_bootstrap.json", NodeCleartextBootstrapJSON},
 		{"capture_bootstrap.json", CaptureBootstrapJSON},
 		{"capture_route_target_bootstrap.json", CaptureRouteTargetBootstrapJSON},
 		{"edge_bootstrap.json", EdgeBootstrapJSON},

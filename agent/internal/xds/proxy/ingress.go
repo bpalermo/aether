@@ -53,7 +53,16 @@ func InboundListenerName(cniPod *cniv1.CNIPod) string {
 // verified peer (SANITIZE_SET), and forwards the request to the pod's application
 // on loopback (app_<pod>). Because the listener lives in the pod's netns, it follows
 // the pod's lifecycle (drains on removal) and pod-scoped network policy applies to it.
-func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod bool) (*listenerv3.Listener, error) {
+//
+// When cleartext is true (SPIRE disabled) the listener accepts CLEARTEXT instead
+// of terminating mTLS: no SVID is issued, the SPIRE bridge delivers no SDS
+// secrets, and the outbound clusters already dial cleartext (h2c) — so the inbound
+// side must accept cleartext to keep the mesh hop routable. In that mode the
+// listener carries a single default HCM chain (no transport socket, AUTO codec so
+// h2c and HTTP/1 are both detected, no ALPN/SNI demux, no XFCC since there is no
+// verified peer). This is for SPIRE-off testing/conformance (the suite asserts
+// routing correctness, not mTLS); the production posture keeps per-pod mTLS.
+func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod bool, cleartext bool) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -63,6 +72,17 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 
 	tlsCertificateSecretName := SpiffeIDFromPod(cniPod, trustDomain)
 	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
+
+	var chains []*listenerv3.FilterChain
+	var listenerFilters []*listenerv3.ListenerFilter
+	if cleartext {
+		// No tls_inspector listener filter: there is no TLS to inspect, and a single
+		// default HCM chain serves every request.
+		chains = []*listenerv3.FilterChain{buildInboundCleartextFilterChain(cniPod, emitStatsPod)}
+	} else {
+		listenerFilters = buildInboundListenerFilters()
+		chains = buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName, emitStatsPod)
+	}
 
 	return &listenerv3.Listener{
 		Name:                          InboundListenerName(cniPod),
@@ -86,9 +106,30 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 		// stay per-pod. HCM stats (5x larger) aggregate node-wide instead.
 		StatPrefix:       fmt.Sprintf("inbound_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_INBOUND,
-		ListenerFilters:  buildInboundListenerFilters(),
-		FilterChains:     buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName, emitStatsPod),
+		ListenerFilters:  listenerFilters,
+		FilterChains:     chains,
 	}, nil
+}
+
+// buildInboundCleartextFilterChain builds the single default HCM chain used when
+// SPIRE is disabled: no transport socket (plain TCP), AUTO codec (so cleartext h2c
+// from the source proxy and HTTP/1 are both handled), routing every request to the
+// pod's primary application cluster. XFCC is not set (no verified peer identity).
+func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool) *listenerv3.FilterChain {
+	defaultPort := AppPortFromPod(cniPod)
+	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), buildInboundRouteConfiguration(AppClusterName(cniPod, defaultPort)))
+	hcm.HttpFilters = []*http_connection_managerv3.HttpFilter{
+		buildLivenessHealthCheckFilter(),
+		buildReadinessHealthCheckFilter(HealthProbeClusterName(cniPod)),
+		inboundStatsFilter(cniPod, emitStatsPod),
+		routerHttpFilter(),
+	}
+	return &listenerv3.FilterChain{
+		Name:             fmt.Sprintf("in_%s", cniPod.GetName()),
+		FilterChainMatch: nil, // default chain: cleartext has no ALPN/SNI to demux on
+		Filters:          []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
+		// No TransportSocket: cleartext (SPIRE off).
+	}
 }
 
 // buildInboundFilterChains builds the full set of inbound filter chains, demuxed by
