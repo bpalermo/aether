@@ -80,6 +80,72 @@ func TestCaptureVhosts_RouteTargetRealPort(t *testing.T) {
 	assert.True(t, sawV1, "the '/' rule routes to echo-v1")
 }
 
+// TestCaptureVhosts_SABackedRouteTargetShortNames reproduces the MESH-HTTP
+// MeshFrontend scenario: an HTTPRoute (with a ResponseHeaderModifier filter)
+// whose parentRef is a Service that IS its own SA-backed mesh Service and its own
+// backend (the "echo-v2" route target — a real backend, not a versioned-fanout
+// pseudo-target). The client dials the route target by its BARE short name
+// ("echo-v2", port 80 implied) so the captured :authority is "echo-v2". The
+// cap_http vhost that carries the GAMMA rules must host-match every short-name +
+// real-port spelling, exactly like a pure route target — otherwise the dial misses
+// the vhost, falls through to passthrough, and the GAMMA header mutation is never
+// applied (the X-Header-Set assertion fails).
+func TestCaptureVhosts_SABackedRouteTargetShortNames(t *testing.T) {
+	c := newTestCache("node-1")
+
+	// echo-v2 is BOTH an SA-backed mesh authority (it has its own pods/Service)
+	// AND the route target the HTTPRoute attaches to. The reconciler projects its
+	// cluster.local FQDN into captureAuthorities.
+	c.SetCaptureAuthorities(map[string]string{
+		"gateway-conformance-mesh/echo-v2": "echo-v2.gateway-conformance-mesh.svc.cluster.local",
+	})
+	// The GAMMA rule on the echo-v2 route target (a single self-backend rule with a
+	// header mutation — the ResponseHeaderModifier in MeshFrontend).
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"gateway-conformance-mesh/echo-v2": {
+			{
+				Backends: []proxy.GammaBackend{{
+					Service: "gateway-conformance-mesh/echo-v2",
+					Cluster: "echo-v2.gateway-conformance-mesh.aether.internal",
+					Weight:  1,
+				}},
+			},
+		},
+	})
+	// The route target is addressed on its real Service port 80 (echo Service :80).
+	c.SetRouteTargetPorts(map[string][]uint32{"gateway-conformance-mesh/echo-v2": {80}})
+
+	vhosts := c.captureVhosts()
+
+	// The client dials the bare short name (same-namespace) with no port -> :authority
+	// "echo-v2". With a single owner the bare spelling must be emitted, AND the
+	// real-port spelling for clients that present "echo-v2:80".
+	require.NotNil(t, findVHost(vhosts, "echo-v2"),
+		"SA-backed route target must host-match its bare short name; got vhosts=%v", domainsOf(vhosts))
+
+	vh := findVHost(vhosts, "echo-v2.gateway-conformance-mesh.svc.cluster.local")
+	require.NotNil(t, vh)
+	domains := vh.GetDomains()
+	assert.Contains(t, domains, "echo-v2")
+	assert.Contains(t, domains, "echo-v2.gateway-conformance-mesh")
+	assert.Contains(t, domains, "echo-v2.gateway-conformance-mesh.svc")
+	assert.Contains(t, domains, "echo-v2:80")
+	assert.Contains(t, domains, "echo-v2.gateway-conformance-mesh.svc.cluster.local:80")
+
+	// The GAMMA rule (header mutation) must be projected onto the vhost — the route
+	// carries a backend cluster (so the mutation lowers to ResponseHeadersToAdd on
+	// the matched route, not the passthrough default).
+	routes := vh.GetRoutes()
+	require.GreaterOrEqual(t, len(routes), 1)
+	var sawBackend bool
+	for _, rt := range routes {
+		if rt.GetRoute().GetCluster() == "echo-v2.gateway-conformance-mesh.aether.internal" {
+			sawBackend = true
+		}
+	}
+	assert.True(t, sawBackend, "the route target's GAMMA rule routes to its backend cluster")
+}
+
 // TestCaptureVhosts_RouteTargetNoPort verifies a route target whose parentRef
 // declares no port falls back to the M1 behavior (portless + :18081 only) — no
 // spurious :0 domain.
