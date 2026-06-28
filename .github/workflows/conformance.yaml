@@ -158,15 +158,20 @@ jobs:
             $(img cniInstall cni-install) \
             $(img registrar registrar) \
             $(img controller controller) \
-            --set proxy.image.pullPolicy=IfNotPresent \
-            --wait --timeout 8m
+            --set proxy.image.pullPolicy=IfNotPresent
           kubectl get gatewayclass aether -o yaml || true
 
-      - name: Wait for edge + agent to be Ready
+      # GATEWAY-HTTP only needs the EDGE (it routes to unmeshed conformance backends over
+      # STRICT_DNS and runs in local-only mode), so gate on the edge rollout rather than
+      # `helm --wait` over the whole release — the registrar/agent DaemonSet need not be
+      # Ready for the north-south suite, and blocking on them would fail the install.
+      - name: Wait for edge to be Ready
         run: |
-          kubectl rollout status deploy/aether-edge -n aether-ingress --timeout=5m || \
-            kubectl get pods -A
-          kubectl rollout status daemonset/aether-agent -n aether-system --timeout=5m || true
+          kubectl rollout status deploy/aether-edge -n aether-ingress --timeout=5m || {
+            echo "edge not ready; cluster state:"; kubectl get pods -A -o wide; exit 1;
+          }
+          kubectl rollout status daemonset/aether-agent -n aether-system --timeout=2m || \
+            echo "agent DaemonSet not Ready (not required for GATEWAY-HTTP); continuing"
 
       # --- Check out the gateway-api source at the suite version ---
       # The conformance suite is a SEPARATE Go module with `replace ... => ../`, so it
@@ -218,14 +223,18 @@ jobs:
         run: |
           mkdir -p /tmp/conformance-logs
           kind export logs /tmp/conformance-logs --name "${KIND_CLUSTER}" || true
+          echo "=== all pods ==="
+          kubectl get pods -A -o wide || true
+          echo "=== not-ready pods (described) ==="
+          kubectl get pods -A --field-selector=status.phase!=Running -o name | while read -r p; do
+            kubectl describe -n "$(echo "$p" | cut -d/ -f1 2>/dev/null || true)" "$p" 2>/dev/null | tail -25 || true
+          done || true
           echo "=== gatewayclass / gateways / httproutes ==="
           kubectl get gatewayclass,gateways,httproutes -A -o wide || true
-          echo "=== edge pods ==="
-          kubectl get pods -n aether-ingress -o wide || true
+          echo "=== edge / registrar / controller / agent logs ==="
           kubectl logs -n aether-ingress -l app.kubernetes.io/name=aether-edge --all-containers --tail=200 || true
-          echo "=== agent / registrar ==="
-          kubectl logs -n aether-system -l app=aether-agent --all-containers --tail=100 || true
-          kubectl logs -n aether-system -l app=aether-registrar --all-containers --tail=100 || true
+          for d in registrar controller; do kubectl logs -n aether-system deploy/aether-$d --all-containers --tail=120 || true; done
+          kubectl logs -n aether-system daemonset/aether-agent --all-containers --tail=100 || true
           cp /tmp/cloud-provider-kind.log /tmp/conformance-logs/ || true
 
       - name: Upload logs on failure
