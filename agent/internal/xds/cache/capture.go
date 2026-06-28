@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/bpalermo/aether/common/serviceref"
+
 	"github.com/bpalermo/aether/agent/internal/capture"
 	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -383,7 +385,7 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
-	vhosts := make([]*routev3.VirtualHost, 0, len(c.captureAuthorities))
+	vhosts := make([]*routev3.VirtualHost, 0, len(c.captureAuthorities)+len(gammaRoutes))
 	for svc, fqdn := range c.captureAuthorities {
 		if _, ok := deps[svc]; !ok {
 			continue
@@ -392,6 +394,30 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		// Route both the cluster.local authority and the mesh-global <svc>.<meshDomain>
 		// authority (portless + :meshPort) to the service cluster, so a captured
 		// request reaches it under either name (the mesh-DNS path uses the latter).
+		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, []string{
+			fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
+			mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
+		}, gammaRoutes[svc]))
+	}
+	// Service-based routing (proposal 023): a GAMMA route TARGET with no SA-backed
+	// mesh Service of its own (the versioned-fanout shape — an "echo" target routed
+	// to echo-v1/echo-v2) still needs a cap_http vhost. Its cluster.local authority
+	// is derived from the namespace-qualified key, and the GAMMA rules route to the
+	// backendRef (SA-backed) clusters. Skip targets already handled as SA-backed
+	// authorities above (a Service that is both a target and its own backend).
+	for svc := range gammaRoutes {
+		if _, ok := c.captureAuthorities[svc]; ok {
+			continue
+		}
+		if _, ok := deps[svc]; !ok {
+			continue
+		}
+		ref, ok := serviceref.ParseKey(svc)
+		if !ok {
+			continue
+		}
+		fqdn := ref.ClusterLocalFQDN()
+		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
 		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, []string{
 			fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
 			mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),

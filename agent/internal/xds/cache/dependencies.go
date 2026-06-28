@@ -158,6 +158,15 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 			set[svc] = struct{}{}
 		}
 	}
+	// Service-based routing (proposal 023): a GAMMA route TARGET — the k8s Service an
+	// HTTPRoute/GRPCRoute is attached to (parentRef) — is always in scope, so its
+	// cap_http vhost builds even when the target Service has no ServiceAccount-backed
+	// pods of its own (the versioned-fanout shape: an "echo" target routed to
+	// echo-v1/echo-v2). Its backendRefs are unioned in by routeBackendsLocked below.
+	// GAMMA routes are explicit, cluster-wide config (few), so global scope is fine.
+	for svc := range c.serviceRoutes {
+		set[svc] = struct{}{}
+	}
 	// GAMMA (proposal 018 Phase 2): a depended-on service's L7 rule backends must
 	// also be resolvable, so union them in (their EDS clusters then generate).
 	// L4 routes (proposal 018 Phase 3b): same principle for TCP/TLS/UDP backends.
