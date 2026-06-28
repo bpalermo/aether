@@ -38,14 +38,16 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	}
 	require.NoError(t, c.AddPod(ctx, pod, "aether.internal"))
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
-	declareDeps(c, "echo-tcp")
+	// Registry/dependency/capture keys are namespace-qualified "<ns>/<svc>"
+	// (020 Part 1): aether-test/echo-tcp.
+	declareDeps(c, "aether-test/echo-tcp")
 
 	reg := &mockRegistry{
 		tcpAware: true,
 		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			if protocol == registryv1.Service_PROTOCOL_TCP {
 				return map[string][]*registryv1.ServiceEndpoint{
-					"echo-tcp": {makeEndpoint("10.0.0.9", "cluster-1", "node-2", 9000)},
+					"aether-test/echo-tcp": {makeEndpoint("10.0.0.9", "cluster-1", "node-2", 9000)},
 				}, nil
 			}
 			return map[string][]*registryv1.ServiceEndpoint{}, nil
@@ -54,7 +56,7 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 
 	// The capture reconciler classified echo-tcp as a TCP service (annotation
 	// "tcp" on its mesh Service) and projected its ClusterIP.
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "echo-tcp", ClusterIP: "10.96.0.50"}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.0.50"}})
 
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
@@ -62,11 +64,11 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	require.NoError(t, err)
 
 	clusters := snap.GetResources(resourcev3.ClusterType)
-	// The TCP floor cluster is present, named tcp:<svc>.<domain>.
-	tcpCluster, ok := clusters["tcp:echo-tcp.aether.internal"].(*clusterv3.Cluster)
+	// The TCP floor cluster is present, named tcp:<svc>.<ns>.<domain>.
+	tcpCluster, ok := clusters["tcp:echo-tcp.aether-test.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "tcp floor cluster must be present")
-	assert.Equal(t, "echo-tcp", tcpCluster.GetEdsClusterConfig().GetServiceName(),
-		"tcp cluster EDS resource is the bare service name")
+	assert.Equal(t, "aether-test/echo-tcp", tcpCluster.GetEdsClusterConfig().GetServiceName(),
+		"tcp cluster EDS resource is the namespace-qualified service key")
 	// With a local pod present, the per-source mTLS transport socket is injected
 	// via the matcher (not a single TransportSocket).
 	require.NotNil(t, tcpCluster.GetTransportSocketMatcher(), "tcp floor cluster must carry the per-source mTLS matcher")
@@ -84,14 +86,14 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 		"TCP floor cluster transport_socket_matcher must use envoy.matching.inputs.transport_socket_filter_state")
 
 	// No HTTP cluster/vhost for a TCP-only service.
-	_, hasHTTP := clusters["echo-tcp.aether.internal"]
+	_, hasHTTP := clusters["echo-tcp.aether-test.aether.internal"]
 	assert.False(t, hasHTTP, "a TCP service must not also emit an HTTP cluster")
 
-	// EDS for the bare service name carries the endpoint (the tcp: cluster
-	// references it by ServiceName).
+	// EDS for the service key carries the endpoint (the tcp: cluster references it
+	// by ServiceName).
 	endpoints := snap.GetResources(resourcev3.EndpointType)
-	cla, ok := endpoints["echo-tcp"].(*endpointv3.ClusterLoadAssignment)
-	require.True(t, ok, "bare-name EDS load assignment must be present for the tcp cluster")
+	cla, ok := endpoints["aether-test/echo-tcp"].(*endpointv3.ClusterLoadAssignment)
+	require.True(t, ok, "service-key EDS load assignment must be present for the tcp cluster")
 	require.NotEmpty(t, cla.GetEndpoints(), "tcp cluster EDS must carry the registry endpoint")
 	require.NotEmpty(t, cla.GetEndpoints()[0].GetLbEndpoints())
 	addr := cla.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()

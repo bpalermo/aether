@@ -292,10 +292,11 @@ func TestBuildL4Backends(t *testing.T) {
 	}
 	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 2)
-	assert.Equal(t, "pg", backends[0].Service)
-	assert.Equal(t, proxy.TCPClusterName("pg", "aether.internal"), backends[0].Cluster)
+	assert.Equal(t, "ns/pg", backends[0].Service)
+	assert.Equal(t, proxy.TCPClusterName("ns/pg", "aether.internal"), backends[0].Cluster)
+	assert.Equal(t, "tcp:pg.ns.aether.internal", backends[0].Cluster)
 	assert.Equal(t, uint32(1), backends[0].Weight)
-	assert.Equal(t, "cache", backends[1].Service)
+	assert.Equal(t, "ns/cache", backends[1].Service)
 	assert.Equal(t, uint32(2), backends[1].Weight)
 }
 
@@ -310,7 +311,7 @@ func TestBuildL4Backends_ForeignGroupSkipped(t *testing.T) {
 	}
 	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 1)
-	assert.Equal(t, "keep", backends[0].Service)
+	assert.Equal(t, "ns/keep", backends[0].Service)
 }
 
 // TestAttachedToOurGateway_L4 verifies the refactored attachedToOurGateway accepts

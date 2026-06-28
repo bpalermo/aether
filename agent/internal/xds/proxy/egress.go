@@ -26,38 +26,58 @@ import (
 // "<ns>/<svc>" serviceref key; this renders it as the FQDN authority, so the warm
 // path (service vhost) and the cold path (catch-all cluster_header: ":authority"
 // + ODCDS) resolve the same resource deterministically.
+//
+// The cutover is complete (GAMMA #397, l4route + edge L4): every caller passes a
+// namespace-qualified key. A bare (non-namespaced) name therefore can't occur in
+// production; rather than render a flat <name>.<meshDomain> that would silently
+// mis-route, it returns "" — an empty cluster name matches no cluster, so a stray
+// bare key degrades to a clean no-route instead of a wrong route.
 func ServiceClusterName(serviceName, meshDomain string) string {
-	if ref, ok := serviceref.ParseKey(serviceName); ok {
-		return ref.FQDN(meshDomain)
+	ref, ok := serviceref.ParseKey(serviceName)
+	if !ok {
+		return ""
 	}
-	// Defensive: a non-namespaced key must not occur post-cutover; render it flat
-	// rather than panic so a stray legacy key degrades instead of crashing.
-	return serviceName + "." + meshDomain
+	return ref.FQDN(meshDomain)
 }
 
 // PortClusterName returns the data-plane name of a service's per-port cluster:
-// <service>.<meshDomain>:<port>. Equals the FQDN:port authority a client
-// addresses, so the catch-all cluster_header resolves it directly.
+// <svc>.<ns>.<meshDomain>:<port>. Equals the FQDN:port authority a client
+// addresses, so the catch-all cluster_header resolves it directly. Returns ""
+// when the service key is not namespace-qualified (see ServiceClusterName).
 func PortClusterName(serviceName, meshDomain string, port uint32) string {
-	return fmt.Sprintf("%s:%d", ServiceClusterName(serviceName, meshDomain), port)
+	base := ServiceClusterName(serviceName, meshDomain)
+	if base == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", base, port)
 }
 
 // TCPClusterName returns the data-plane name of a service's TCP-floor cluster:
-// "tcp:<service>.<meshDomain>". This cluster is identical to the HTTP cluster
-// (<service>.<meshDomain>) except it uses ALPN "aether-tcp" on its upstream
+// "tcp:<svc>.<ns>.<meshDomain>". This cluster is identical to the HTTP cluster
+// (<svc>.<ns>.<meshDomain>) except it uses ALPN "aether-tcp" on its upstream
 // transport socket so the destination inbound demuxes to the TCP floor chain.
 // The capture TCP floor filter chains reference this cluster by this name.
+// Returns "" when the service key is not namespace-qualified.
 func TCPClusterName(serviceName, meshDomain string) string {
-	return "tcp:" + ServiceClusterName(serviceName, meshDomain)
+	base := ServiceClusterName(serviceName, meshDomain)
+	if base == "" {
+		return ""
+	}
+	return "tcp:" + base
 }
 
 // UDPClusterName returns the data-plane name of a service's UDP-floor cluster:
-// "udp:<service>.<meshDomain>". This cluster carries the same backend endpoints
+// "udp:<svc>.<ns>.<meshDomain>". This cluster carries the same backend endpoints
 // as the HTTP cluster but is a plain EDS cluster with no transport socket (UDP
 // datagrams are not wrapped in mTLS — mesh mTLS is a TCP/TLS construct and
 // DTLS is not supported). The udp_proxy capture listener references this cluster.
+// Returns "" when the service key is not namespace-qualified.
 func UDPClusterName(serviceName, meshDomain string) string {
-	return "udp:" + ServiceClusterName(serviceName, meshDomain)
+	base := ServiceClusterName(serviceName, meshDomain)
+	if base == "" {
+		return ""
+	}
+	return "udp:" + base
 }
 
 // ServiceFromClusterName maps a data-plane cluster name (a mesh authority,

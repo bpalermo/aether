@@ -1018,6 +1018,11 @@ func gatewayParentPorts(
 // cluster names. Refs with a non-core group or non-Service kind are skipped, as are
 // ungranted cross-namespace refs (RefNotPermitted: dropped from the data plane).
 // routeKind is the referring route's kind (TCPRoute/TLSRoute).
+//
+// Edge L4 backends are mesh-only (the cache's edgeTCPClusters builds a registry
+// TCP cluster per backend), so the backend's data-plane cluster and dependency key
+// are the namespace-qualified "<ns>/<svc>" serviceref key (020 Part 1): the
+// backendRef's own namespace when set, else the route's namespace.
 func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
 	backends := make([]proxy.L4Backend, 0, len(refs))
 	for _, b := range refs {
@@ -1038,9 +1043,14 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace
 		if b.Weight != nil {
 			weight = uint32(*b.Weight)
 		}
+		ns := routeNamespace
+		if bn := derefBackendNamespace(b.Namespace); bn != "" {
+			ns = bn
+		}
+		key := serviceref.New(ns, name).Key()
 		backends = append(backends, proxy.L4Backend{
-			Service: name,
-			Cluster: proxy.TCPClusterName(name, r.MeshDomain),
+			Service: key,
+			Cluster: proxy.TCPClusterName(key, r.MeshDomain),
 			Weight:  weight,
 		})
 	}

@@ -135,18 +135,20 @@ func TestVirtualHostVhosts(t *testing.T) {
 	c := newTestCache("edge-1")
 
 	// Register services as mesh-registered so edgeClusterNameLocked uses the mesh path.
-	// A per-port cluster must also exist for the explicit-port backend to resolve to it.
+	// Registry/cluster keys are namespace-qualified "<ns>/<svc>" (020 Part 1); the
+	// route carries the backend namespace so the key resolves. A per-port cluster
+	// must also exist for the explicit-port backend to resolve to it.
 	c.clusterMu.Lock()
-	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
-	c.clusters["svc-3"] = clusterEntry{service: "svc-3"}
-	c.clusters["svc-2"] = clusterEntry{service: "svc-2"}
-	c.clusters["svc-2.aether.internal:9090"] = clusterEntry{service: "svc-2", sni: "9090"}
+	c.clusters["ns/svc-1"] = clusterEntry{service: "ns/svc-1"}
+	c.clusters["ns/svc-3"] = clusterEntry{service: "ns/svc-3"}
+	c.clusters["ns/svc-2"] = clusterEntry{service: "ns/svc-2"}
+	c.clusters["svc-2.ns.aether.internal:9090"] = clusterEntry{service: "ns/svc-2", sni: "9090"}
 	c.clusterMu.Unlock()
 
 	c.SetVirtualHosts([]VirtualHost{
-		{Hosts: []string{"api.example.com", "api2.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-1"}}},
-		{Routes: []Route{{Prefix: "/", Service: "svc-3"}}}, // no hosts -> catch-all "*"
-		{Hosts: []string{"grpc.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-2", Port: 9090}}},
+		{Hosts: []string{"api.example.com", "api2.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-1", BackendNamespace: "ns"}}},
+		{Routes: []Route{{Prefix: "/", Service: "svc-3", BackendNamespace: "ns"}}}, // no hosts -> catch-all "*"
+		{Hosts: []string{"grpc.example.com"}, Routes: []Route{{Prefix: "/", Service: "svc-2", BackendNamespace: "ns", Port: 9090}}},
 	})
 
 	vhosts := c.virtualHostVhosts()
@@ -162,20 +164,20 @@ func TestVirtualHostVhosts(t *testing.T) {
 
 	require.NotNil(t, byName["api.example.com"])
 	assert.Equal(t, []string{"api.example.com"}, byName["api.example.com"].GetDomains())
-	assert.Equal(t, "svc-1.aether.internal", byName["api.example.com"].GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-1.ns.aether.internal", byName["api.example.com"].GetRoutes()[0].GetRoute().GetCluster())
 
 	require.NotNil(t, byName["api2.example.com"], "api2.example.com gets its own Envoy vhost (one per domain)")
 	assert.Equal(t, []string{"api2.example.com"}, byName["api2.example.com"].GetDomains())
-	assert.Equal(t, "svc-1.aether.internal", byName["api2.example.com"].GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-1.ns.aether.internal", byName["api2.example.com"].GetRoutes()[0].GetRoute().GetCluster())
 
 	require.NotNil(t, byName["grpc.example.com"])
 	assert.Equal(t, []string{"grpc.example.com"}, byName["grpc.example.com"].GetDomains())
-	assert.Equal(t, "svc-2.aether.internal:9090", byName["grpc.example.com"].GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-2.ns.aether.internal:9090", byName["grpc.example.com"].GetRoutes()[0].GetRoute().GetCluster())
 
 	// The hostname-less route is served by the catch-all "*" vhost.
 	require.NotNil(t, byName["*"], "a hostname-less route must produce the catch-all * vhost")
 	assert.Equal(t, []string{"*"}, byName["*"].GetDomains())
-	assert.Equal(t, "svc-3.aether.internal", byName["*"].GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-3.ns.aether.internal", byName["*"].GetRoutes()[0].GetRoute().GetCluster())
 }
 
 // TestVirtualHostVhostsHostlessMerge verifies that MULTIPLE hostname-less routes
@@ -215,19 +217,20 @@ func TestVirtualHostPathRoutes(t *testing.T) {
 	c := newTestCache("edge-1")
 
 	// Register services as mesh so edgeClusterNameLocked resolves to mesh names.
+	// Registry/cluster keys are namespace-qualified "<ns>/<svc>" (020 Part 1).
 	c.clusterMu.Lock()
-	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
-	c.clusters["svc-2"] = clusterEntry{service: "svc-2"}
-	c.clusters["svc-3"] = clusterEntry{service: "svc-3"}
+	c.clusters["ns/svc-1"] = clusterEntry{service: "ns/svc-1"}
+	c.clusters["ns/svc-2"] = clusterEntry{service: "ns/svc-2"}
+	c.clusters["ns/svc-3"] = clusterEntry{service: "ns/svc-3"}
 	c.clusterMu.Unlock()
 
 	// Input order: /users (prefix, len 6), /healthz (exact), / (prefix, len 1).
 	// Expected output order: /healthz (exact) → /users (prefix len 6) → / (prefix len 1).
 	c.SetVirtualHosts([]VirtualHost{
 		{Hosts: []string{"api.example.com"}, Routes: []Route{
-			{Prefix: "/users", Service: "svc-1"},
-			{Exact: "/healthz", Service: "svc-2"},
-			{Prefix: "/", Service: "svc-3"},
+			{Prefix: "/users", Service: "svc-1", BackendNamespace: "ns"},
+			{Exact: "/healthz", Service: "svc-2", BackendNamespace: "ns"},
+			{Prefix: "/", Service: "svc-3", BackendNamespace: "ns"},
 		}},
 	})
 
@@ -238,13 +241,13 @@ func TestVirtualHostPathRoutes(t *testing.T) {
 
 	// Exact match first (highest Gateway API precedence).
 	assert.Equal(t, "/healthz", routes[0].GetMatch().GetPath())
-	assert.Equal(t, "svc-2.aether.internal", routes[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-2.ns.aether.internal", routes[0].GetRoute().GetCluster())
 	// Longer prefix second: FIX 1 — non-"/" prefix uses path_separated_prefix.
 	assert.Equal(t, "/users", routes[1].GetMatch().GetPathSeparatedPrefix())
-	assert.Equal(t, "svc-1.aether.internal", routes[1].GetRoute().GetCluster())
+	assert.Equal(t, "svc-1.ns.aether.internal", routes[1].GetRoute().GetCluster())
 	// Catch-all prefix last: "/" stays as plain prefix.
 	assert.Equal(t, "/", routes[2].GetMatch().GetPrefix())
-	assert.Equal(t, "svc-3.aether.internal", routes[2].GetRoute().GetCluster())
+	assert.Equal(t, "svc-3.ns.aether.internal", routes[2].GetRoute().GetCluster())
 }
 
 // TestVirtualHostVhostsMergeSharedDomains verifies that a host appearing in
@@ -257,9 +260,10 @@ func TestVirtualHostVhostsMergeSharedDomains(t *testing.T) {
 	c := newTestCache("edge-1")
 
 	// Register services as mesh so edgeClusterNameLocked resolves to mesh names.
+	// Registry/cluster keys are namespace-qualified "<ns>/<svc>" (020 Part 1).
 	c.clusterMu.Lock()
-	c.clusters["svc-1"] = clusterEntry{service: "svc-1"}
-	c.clusters["svc-2"] = clusterEntry{service: "svc-2"}
+	c.clusters["ns/svc-1"] = clusterEntry{service: "ns/svc-1"}
+	c.clusters["ns/svc-2"] = clusterEntry{service: "ns/svc-2"}
 	c.clusterMu.Unlock()
 
 	// First vhost: only a.example.com → svc-1.
@@ -267,8 +271,8 @@ func TestVirtualHostVhostsMergeSharedDomains(t *testing.T) {
 	// Expected: a.example.com gets routes from BOTH vhosts merged; b.example.com
 	// gets only svc-2.
 	c.SetVirtualHosts([]VirtualHost{
-		{Hosts: []string{"a.example.com"}, Routes: []Route{{Prefix: "/a1", Service: "svc-1"}}},
-		{Hosts: []string{"a.example.com", "b.example.com"}, Routes: []Route{{Prefix: "/a2", Service: "svc-2"}}},
+		{Hosts: []string{"a.example.com"}, Routes: []Route{{Prefix: "/a1", Service: "svc-1", BackendNamespace: "ns"}}},
+		{Hosts: []string{"a.example.com", "b.example.com"}, Routes: []Route{{Prefix: "/a2", Service: "svc-2", BackendNamespace: "ns"}}},
 	})
 
 	vhosts := c.virtualHostVhosts()
@@ -288,14 +292,14 @@ func TestVirtualHostVhostsMergeSharedDomains(t *testing.T) {
 		aVH.GetRoutes()[0].GetRoute().GetCluster(),
 		aVH.GetRoutes()[1].GetRoute().GetCluster(),
 	}
-	assert.ElementsMatch(t, []string{"svc-1.aether.internal", "svc-2.aether.internal"}, clusters)
+	assert.ElementsMatch(t, []string{"svc-1.ns.aether.internal", "svc-2.ns.aether.internal"}, clusters)
 
 	// b.example.com: only the second vhost's route.
 	bVH := byDomain["b.example.com"]
 	require.NotNil(t, bVH)
 	assert.Equal(t, []string{"b.example.com"}, bVH.GetDomains())
 	require.Len(t, bVH.GetRoutes(), 1)
-	assert.Equal(t, "svc-2.aether.internal", bVH.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-2.ns.aether.internal", bVH.GetRoutes()[0].GetRoute().GetCluster())
 }
 
 func TestPerDownstreamConnectionPool(t *testing.T) {
@@ -1267,17 +1271,17 @@ func TestDirectResponseRoute_AdmittedByBuildEdgeVhosts(t *testing.T) {
 func TestBuildEdgeVhostsLocked_SpecificHostUnderWildcard(t *testing.T) {
 	c := newTestCache("edge-1")
 	c.clusterMu.Lock()
-	c.clusters["svc-v3"] = clusterEntry{service: "svc-v3"}
-	c.clusters["svc-v1"] = clusterEntry{service: "svc-v1"}
+	c.clusters["ns/svc-v3"] = clusterEntry{service: "ns/svc-v3"}
+	c.clusters["ns/svc-v1"] = clusterEntry{service: "ns/svc-v1"}
 	c.clusterMu.Unlock()
 
 	// effectiveHostnames("baz.bar.com", listener "*.bar.com") = "baz.bar.com".
 	// The vhost is given the intersection result as its Hosts.
 	c.SetVirtualHosts([]VirtualHost{
 		// v3 backend: specific intersection host baz.bar.com (from *.bar.com ∩ baz.bar.com).
-		{Hosts: []string{"baz.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-v3"}}},
+		{Hosts: []string{"baz.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-v3", BackendNamespace: "ns"}}},
 		// v1 catch-all: hostname-less route → "*" catch-all.
-		{Routes: []Route{{Prefix: "/", Service: "svc-v1"}}},
+		{Routes: []Route{{Prefix: "/", Service: "svc-v1", BackendNamespace: "ns"}}},
 	})
 
 	vhosts := c.virtualHostVhosts()
@@ -1293,12 +1297,12 @@ func TestBuildEdgeVhostsLocked_SpecificHostUnderWildcard(t *testing.T) {
 	bazVH := byDomain["baz.bar.com"]
 	require.NotNil(t, bazVH, "baz.bar.com must get its own named vhost (intersection result)")
 	assert.Equal(t, []string{"baz.bar.com"}, bazVH.GetDomains())
-	assert.Equal(t, "svc-v3.aether.internal", bazVH.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-v3.ns.aether.internal", bazVH.GetRoutes()[0].GetRoute().GetCluster())
 
 	// The catch-all "*" holds the v1 backend.
 	starVH := byDomain["*"]
 	require.NotNil(t, starVH)
-	assert.Equal(t, "svc-v1.aether.internal", starVH.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-v1.ns.aether.internal", starVH.GetRoutes()[0].GetRoute().GetCluster())
 }
 
 // TestBuildEdgeVhostsLocked_WildcardDomain verifies that when the effective
@@ -1309,12 +1313,12 @@ func TestBuildEdgeVhostsLocked_SpecificHostUnderWildcard(t *testing.T) {
 func TestBuildEdgeVhostsLocked_WildcardDomain(t *testing.T) {
 	c := newTestCache("edge-1")
 	c.clusterMu.Lock()
-	c.clusters["svc-backend"] = clusterEntry{service: "svc-backend"}
+	c.clusters["ns/svc-backend"] = clusterEntry{service: "ns/svc-backend"}
 	c.clusterMu.Unlock()
 
 	// effectiveHostnames("*.bar.com", listener "*.bar.com") = "*.bar.com".
 	c.SetVirtualHosts([]VirtualHost{
-		{Hosts: []string{"*.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-backend"}}},
+		{Hosts: []string{"*.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-backend", BackendNamespace: "ns"}}},
 	})
 
 	vhosts := c.virtualHostVhosts()
@@ -1323,7 +1327,7 @@ func TestBuildEdgeVhostsLocked_WildcardDomain(t *testing.T) {
 	vh := vhosts[0]
 	assert.Equal(t, "*.bar.com", vh.GetName(), "wildcard hostname must produce named vhost, NOT catch-all *")
 	assert.Equal(t, []string{"*.bar.com"}, vh.GetDomains())
-	assert.Equal(t, "svc-backend.aether.internal", vh.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-backend.ns.aether.internal", vh.GetRoutes()[0].GetRoute().GetCluster())
 }
 
 // TestBuildEdgeVhostsLocked_WildcardAndSpecificIsolated verifies the full
@@ -1335,15 +1339,15 @@ func TestBuildEdgeVhostsLocked_WildcardDomain(t *testing.T) {
 func TestBuildEdgeVhostsLocked_WildcardAndSpecificIsolated(t *testing.T) {
 	c := newTestCache("edge-1")
 	c.clusterMu.Lock()
-	c.clusters["svc-specific"] = clusterEntry{service: "svc-specific"}
-	c.clusters["svc-wildcard"] = clusterEntry{service: "svc-wildcard"}
+	c.clusters["ns/svc-specific"] = clusterEntry{service: "ns/svc-specific"}
+	c.clusters["ns/svc-wildcard"] = clusterEntry{service: "ns/svc-wildcard"}
 	c.clusterMu.Unlock()
 
 	c.SetVirtualHosts([]VirtualHost{
 		// baz.bar.com route: intersection of *.bar.com listener ∩ baz.bar.com route.
-		{Hosts: []string{"baz.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-specific"}}},
+		{Hosts: []string{"baz.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-specific", BackendNamespace: "ns"}}},
 		// *.bar.com route: intersection of *.bar.com listener ∩ *.bar.com route.
-		{Hosts: []string{"*.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-wildcard"}}},
+		{Hosts: []string{"*.bar.com"}, Routes: []Route{{Prefix: "/", Service: "svc-wildcard", BackendNamespace: "ns"}}},
 	})
 
 	vhosts := c.virtualHostVhosts()
@@ -1357,12 +1361,12 @@ func TestBuildEdgeVhostsLocked_WildcardAndSpecificIsolated(t *testing.T) {
 
 	bazVH := byName["baz.bar.com"]
 	require.NotNil(t, bazVH, "baz.bar.com must be a named vhost")
-	assert.Equal(t, "svc-specific.aether.internal", bazVH.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-specific.ns.aether.internal", bazVH.GetRoutes()[0].GetRoute().GetCluster())
 
 	wildVH := byName["*.bar.com"]
 	require.NotNil(t, wildVH, "*.bar.com must be a named vhost (not catch-all *)")
 	assert.Equal(t, []string{"*.bar.com"}, wildVH.GetDomains())
-	assert.Equal(t, "svc-wildcard.aether.internal", wildVH.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-wildcard.ns.aether.internal", wildVH.GetRoutes()[0].GetRoute().GetCluster())
 
 	// Confirm no catch-all "*" was emitted.
 	assert.Nil(t, byName["*"], "no hostname-less routes → no catch-all * vhost")

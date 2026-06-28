@@ -20,6 +20,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/serviceref"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,8 +35,8 @@ import (
 // reconciler. Typically implemented by the snapshot cache.
 type L4RouteSink interface {
 	// SetTCPServiceRoutes replaces the TCPRoute-derived per-service L4 rules.
-	// Each key is the bare service name (parentRef.Name); values are the ordered
-	// rules from all TCPRoutes attached to that service.
+	// Each key is the namespace-qualified "<ns>/<svc>" serviceref key (020 Part 1);
+	// values are the ordered rules from all TCPRoutes attached to that service.
 	SetTCPServiceRoutes(routes map[string][]proxy.L4ServiceRoute)
 	// SetTLSServiceRoutes replaces the TLSRoute-derived per-service L4 rules.
 	SetTLSServiceRoutes(routes map[string][]proxy.L4ServiceRoute)
@@ -100,7 +101,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	tcpRoutes := map[string][]proxy.L4ServiceRoute{}
 	for i := range tcpList.Items {
 		tr := &tcpList.Items[i]
-		for _, svc := range serviceParents(tr.Spec.ParentRefs) {
+		for _, svc := range serviceParents(tr.Spec.ParentRefs, tr.Namespace) {
 			for _, rule := range tr.Spec.Rules {
 				tcpRoutes[svc] = append(tcpRoutes[svc], r.buildTCPRoute(rule, tr.Namespace, "TCPRoute", grants))
 			}
@@ -110,7 +111,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	tlsRoutes := map[string][]proxy.L4ServiceRoute{}
 	for i := range tlsList.Items {
 		tr := &tlsList.Items[i]
-		for _, svc := range serviceParents(tr.Spec.ParentRefs) {
+		for _, svc := range serviceParents(tr.Spec.ParentRefs, tr.Namespace) {
 			hostnames := make([]string, 0, len(tr.Spec.Hostnames))
 			for _, h := range tr.Spec.Hostnames {
 				hostnames = append(hostnames, string(h))
@@ -124,7 +125,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	udpRoutes := map[string][]proxy.L4Backend{}
 	for i := range udpList.Items {
 		ur := &udpList.Items[i]
-		for _, svc := range serviceParents(ur.Spec.ParentRefs) {
+		for _, svc := range serviceParents(ur.Spec.ParentRefs, ur.Namespace) {
 			for _, rule := range ur.Spec.Rules {
 				udpRoutes[svc] = append(udpRoutes[svc], r.buildUDPBackends(rule, ur.Namespace, "UDPRoute", grants)...)
 			}
@@ -296,9 +297,11 @@ func udpBackendRefs(rules []gatewayv1alpha2.UDPRouteRule) []gatewayv1.BackendObj
 	return refs
 }
 
-// serviceParents returns the names of the Services these parentRefs attach to
-// (kind=Service, core group — empty group string or nil group).
-func serviceParents(refs []gatewayv1alpha2.ParentReference) []string {
+// serviceParents returns the namespace-qualified "<ns>/<svc>" keys of the Service
+// parentRefs (kind=Service, core group — empty group string or nil group; 020
+// Part 1). A parentRef without an explicit namespace inherits the route's
+// namespace (Gateway API default).
+func serviceParents(refs []gatewayv1alpha2.ParentReference, routeNamespace string) []string {
 	var svcs []string
 	for _, p := range refs {
 		if p.Group != nil && string(*p.Group) != "" {
@@ -307,9 +310,25 @@ func serviceParents(refs []gatewayv1alpha2.ParentReference) []string {
 		if p.Kind == nil || string(*p.Kind) != "Service" {
 			continue
 		}
-		svcs = append(svcs, string(p.Name))
+		ns := routeNamespace
+		if p.Namespace != nil && string(*p.Namespace) != "" {
+			ns = string(*p.Namespace)
+		}
+		svcs = append(svcs, serviceref.New(ns, string(p.Name)).Key())
 	}
 	return svcs
+}
+
+// backendServiceKey resolves a backendRef to its namespace-qualified "<ns>/<svc>"
+// registry key (020 Part 1): the backendRef's own namespace when set, else the
+// route's namespace. The resulting key feeds both the data-plane cluster name
+// (TCP/TLS/UDP ClusterName) and the node dependency set (L4Backend.Service).
+func backendServiceKey(backendNamespace *gatewayv1.Namespace, routeNamespace, name string) string {
+	ns := routeNamespace
+	if bn := derefBackendNamespace(backendNamespace); bn != "" {
+		ns = bn
+	}
+	return serviceref.New(ns, name).Key()
 }
 
 // buildTCPRoute translates a TCPRouteRule into an L4ServiceRoute (no SNI match).
@@ -340,11 +359,12 @@ func (r *Reconciler) buildUDPBackends(rule gatewayv1alpha2.UDPRouteRule, routeNa
 // buildL4Backends converts a BackendRef slice into L4Backends with resolved
 // TCP cluster names. Refs with a non-core group or non-Service kind are skipped.
 func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
-	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(name string) string {
+	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(key string) string {
 		// TCP clusters share the same EDS endpoints as HTTP clusters but use
 		// ALPN "aether-tcp" (see TCPClusterName). The capture TCP floor chains
-		// already reference "tcp:<svc>.<domain>" clusters.
-		return proxy.TCPClusterName(name, r.MeshDomain)
+		// already reference "tcp:<svc>.<ns>.<domain>" clusters. The key is the
+		// backend's namespace-qualified "<ns>/<svc>" (020 Part 1).
+		return proxy.TCPClusterName(key, r.MeshDomain)
 	})
 }
 
@@ -352,8 +372,9 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef, routeNam
 // UDP cluster names ("udp:<svc>.<domain>"). These clusters are plain EDS without
 // a transport socket — UDP traffic is not covered by mesh mTLS.
 func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
-	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(name string) string {
-		return proxy.UDPClusterName(name, r.MeshDomain)
+	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(key string) string {
+		// key is the backend's namespace-qualified "<ns>/<svc>" (020 Part 1).
+		return proxy.UDPClusterName(key, r.MeshDomain)
 	})
 }
 
@@ -361,7 +382,7 @@ func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1alpha2.BackendRef, route
 // the cluster name via clusterNameFn. Refs with a non-core group or non-Service
 // kind are skipped, as are ungranted cross-namespace refs (RefNotPermitted: dropped
 // from the data plane, mirroring the route's ResolvedRefs status).
-func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, clusterNameFn func(name string) string) []proxy.L4Backend {
+func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, clusterNameFn func(key string) string) []proxy.L4Backend {
 	backends := make([]proxy.L4Backend, 0, len(refs))
 	for _, b := range refs {
 		if b.Group != nil && string(*b.Group) != "" {
@@ -381,9 +402,14 @@ func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef,
 		if b.Weight != nil {
 			weight = uint32(*b.Weight)
 		}
+		// 020 Part 1: the backend's data-plane cluster and dependency-set key are
+		// namespace-qualified "<ns>/<svc>" (backendRef namespace if set, else the
+		// route's). A split to a different backend service therefore resolves the
+		// right registry cluster.
+		key := backendServiceKey(b.Namespace, routeNamespace, name)
 		backends = append(backends, proxy.L4Backend{
-			Service: name,
-			Cluster: clusterNameFn(name),
+			Service: key,
+			Cluster: clusterNameFn(key),
 			Weight:  weight,
 		})
 	}
