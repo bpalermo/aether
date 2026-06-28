@@ -219,7 +219,7 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 		fmt.Sprintf("%s:%d", targetMesh, realPort),
 	}
 	vhost := proxy.BuildOutboundServiceVirtualHost(targetMesh, domains, rules)
-	routeCfg := proxy.BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vhost}, meshDomain)
+	routeCfg := proxy.BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vhost}, meshDomain, true)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: "cap_http_validate",
@@ -252,9 +252,12 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 	target := newServiceCluster(targetMesh, trustDomain, "team-a", "echo")
 	v1 := newServiceCluster(v1Cluster, trustDomain, "team-a", "echo-v1")
 	v2 := newServiceCluster(v2Cluster, trustDomain, "team-a", "echo-v2")
+	// The redirect-all capture catch-all routes its final fallthrough to the
+	// ORIGINAL_DST passthrough cluster, so include it for the validate.
+	passthrough := proxy.NewPassthroughOriginalDstCluster()
 
 	return newBootstrap(
-		[]*clusterv3.Cluster{xdsCluster(), target, v1, v2},
+		[]*clusterv3.Cluster{xdsCluster(), target, v1, v2, passthrough},
 		[]*listenerv3.Listener{listener},
 	), nil
 }

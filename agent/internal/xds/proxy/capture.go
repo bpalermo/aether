@@ -284,13 +284,18 @@ func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
 // from the generated mesh Services, scoped to the node dependency set), plus the
 // same on-demand catch-all the outbound listener uses. A captured request for a mesh
 // authority (<svc>.<meshDomain>) with no scoped vhost — a cold or off-node service —
-// then resolves via ODCDS (proposal 004 cold path) instead of a dead 404; anything
-// outside the mesh domain still 404s. This makes capture symmetric with outbound:
-// without it, a service whose pods all leave this node drops from the dependency set
-// and its scoped vhost vanishes, leaving it stuck 404 until something re-reconciles.
-func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
+// then resolves via ODCDS (proposal 004 cold path) instead of a dead 404.
+//
+// When redirectAll is true (proposal 022 redirect-all capture), the catch-all's final
+// fallthrough — a non-mesh authority in no dependency set, e.g. a real Kubernetes
+// Service name a client dials with no HTTPRoute/upstream declaration — routes to the
+// ORIGINAL_DST passthrough instead of 404'ing, so plain Service-to-Service
+// reachability is preserved (the passthrough_original_dst cluster is only emitted in
+// this mode). With scoped capture (redirectAll false) the catch-all keeps its hard
+// 404: only mesh VIPs are captured, so a non-mesh authority is genuinely foreign.
+func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string, redirectAll bool) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name:         CaptureHTTPRouteName,
-		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain)),
+		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll)),
 	}
 }

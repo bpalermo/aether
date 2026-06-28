@@ -130,7 +130,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// carries the on-demand catch-all) so the listeners' RDS resolves even with no
 		// in-scope authorities yet, and cold/off-node services recover via ODCDS.
 		if c.captureEnabled {
-			routes = append(routes, proxy.BuildCaptureRouteConfiguration(c.captureVhosts(), c.meshDomain))
+			routes = append(routes, proxy.BuildCaptureRouteConfiguration(c.captureVhosts(), c.meshDomain, c.captureRedirectAll))
 		}
 		if len(routes) > 0 {
 			resources[resourcev3.RouteType] = routes

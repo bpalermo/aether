@@ -186,9 +186,16 @@ spec:
             - name: netns-dir
               mountPath: /var/run/netns
               mountPropagation: HostToContainer
+            {{- if .Values.spire.enabled }}
+            # The SPIRE workload UDS is mounted from the csi.spiffe.io CSI driver,
+            # which only exists when SPIRE is deployed. With spire.enabled=false the
+            # mesh runs cleartext (no SDS), so mounting it would wedge the proxy pod
+            # in FailedMount ("driver name csi.spiffe.io not found"). Gate it exactly
+            # like the agent DaemonSet does.
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
+            {{- end }}
             - name: supervisor-bin
               mountPath: /opt/aether
               readOnly: true
@@ -223,8 +230,10 @@ spec:
           hostPath:
             path: /run/aether
             type: DirectoryOrCreate
+        {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:
             driver: "csi.spiffe.io"
             readOnly: true
+        {{- end }}
 {{- end }}
