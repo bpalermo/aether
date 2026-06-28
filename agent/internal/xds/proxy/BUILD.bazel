@@ -26,7 +26,10 @@ go_library(
         "upstreams.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/xds/proxy",
-    visibility = ["//agent:__subpackages__"],
+    visibility = [
+        "//agent:__subpackages__",
+        "//test:__subpackages__",  # envoy_validate bootstrap generator
+    ],
     deps = [
         "//agent/internal/xds/config",
         "//api/aether/cni/v1:cni",

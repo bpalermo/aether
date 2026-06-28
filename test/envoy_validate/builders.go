@@ -1,0 +1,398 @@
+// Package envoy_validate provides functions to build representative Envoy
+// bootstrap JSON configurations derived from the aether node-agent's actual
+// xDS proxy builders.  The resulting configs are validated with
+// "envoy --mode validate" in the test to catch structural regressions before
+// production.
+//
+// Three scenarios are modelled:
+//
+//  1. Node proxy  – per-pod inbound (mTLS) + outbound HTTP listener, ORIGINAL_DST
+//     passthrough cluster, per-pod app cluster, EDS service cluster with SPIRE mTLS.
+//  2. Capture     – transparent-capture listener, HTTP + TCP service clusters,
+//     passthrough chain.
+//  3. Edge        – service EDS cluster with direct-to-SPIRE SDS, spire_agent
+//     static cluster.
+//
+// Custom extensions (aether_stats) that require the custom Envoy binary are
+// stripped before serialisation so that stock Envoy can validate the structural
+// correctness of the config.
+package envoy_validate
+
+import (
+	"fmt"
+
+	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/bpalermo/aether/agent/internal/xds/config"
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+)
+
+const (
+	// trustDomain is the SPIFFE trust domain used in generated resource names.
+	trustDomain = "aether.internal"
+	// meshDomain is the DNS-style suffix for mesh service cluster names.
+	meshDomain = "mesh.local"
+	// fakeNetns is a placeholder netns path.  Envoy --mode validate checks
+	// field presence, not whether the path exists on disk.
+	fakeNetns = "/proc/1/ns/net"
+	// xdsSockPath is the agent's UDS; the static xds_cluster points here so all
+	// ADS config-source references resolve when Envoy validates the bootstrap.
+	xdsSockPath = "/var/run/aether/xds.sock"
+
+	// aetherStatsFilterName mirrors the unexported statsFilterName constant in
+	// agent/internal/xds/proxy/stats_filter.go.  This filter requires the custom
+	// C++ extension compiled into the proxy workspace Envoy (proposal 012); it is
+	// stripped before stock-Envoy validation.  Keep in sync if the constant changes.
+	aetherStatsFilterName = "aether.filters.http.aether_stats"
+)
+
+// NodeBootstrapJSON builds the core node-proxy bootstrap config and returns
+// its JSON representation (after stripping custom extensions).
+func NodeBootstrapJSON() ([]byte, error) {
+	bs, err := buildNodeBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+// CaptureBootstrapJSON builds the transparent-capture bootstrap config and
+// returns its JSON representation.
+func CaptureBootstrapJSON() ([]byte, error) {
+	bs, err := buildCaptureBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+// EdgeBootstrapJSON builds the edge proxy bootstrap config and returns its
+// JSON representation.
+func EdgeBootstrapJSON() ([]byte, error) {
+	bs, err := buildEdgeBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+// buildNodeBootstrap builds the core node-proxy bootstrap config.
+func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
+	pod := testPod()
+
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateListenersFromRegistryPod: %w", err)
+	}
+
+	passthrough := proxy.NewPassthroughOriginalDstCluster()
+	svcCluster := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
+
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster}
+	staticClusters = append(staticClusters, appClusters...)
+	staticClusters = append(staticClusters, healthCluster)
+
+	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound}), nil
+}
+
+// buildCaptureBootstrap builds the transparent-capture bootstrap config.
+func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
+	pod := testPod()
+
+	tcpSvc := proxy.CaptureTCPService{
+		ClusterName: "redis." + meshDomain,
+		ClusterIP:   "10.96.1.10",
+	}
+	captureListener, err := proxy.GenerateCaptureListener(
+		pod,
+		15006,
+		meshDomain,
+		false, // emitStatsPod
+		[]proxy.CaptureTCPService{tcpSvc},
+		true, // withPassthrough
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateCaptureListener: %w", err)
+	}
+
+	passthrough := proxy.NewPassthroughOriginalDstCluster()
+	httpSvc := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
+	tcpSvc2 := newServiceCluster("redis."+meshDomain, trustDomain, "default", "redis")
+
+	return newBootstrap(
+		[]*clusterv3.Cluster{xdsCluster(), passthrough, httpSvc, tcpSvc2},
+		[]*listenerv3.Listener{captureListener},
+	), nil
+}
+
+// buildEdgeBootstrap builds the edge (north-south ingress) proxy bootstrap.
+func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
+	edgeSvc := newEdgeServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
+	spire := newSpireAgentCluster()
+
+	return newBootstrap(
+		[]*clusterv3.Cluster{xdsCluster(), spire, edgeSvc},
+		nil,
+	), nil
+}
+
+// marshalBootstrap serialises a Bootstrap proto to protojson, stripping
+// custom extensions that require the proxy-workspace Envoy binary.
+func marshalBootstrap(bs *bootstrapv3.Bootstrap) ([]byte, error) {
+	stripCustomFilters(bs)
+	opts := protojson.MarshalOptions{
+		Multiline:     true,
+		Indent:        "  ",
+		UseProtoNames: true,
+	}
+	data, err := opts.Marshal(bs)
+	if err != nil {
+		return nil, fmt.Errorf("marshal bootstrap: %w", err)
+	}
+	return data, nil
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// testPod returns a minimal CNIPod for proxy builder calls.
+func testPod() *cniv1.CNIPod {
+	return &cniv1.CNIPod{
+		Name:             "test-pod",
+		Namespace:        "default",
+		NetworkNamespace: fakeNetns,
+		ContainerId:      "abc123",
+		Ips:              []string{"10.96.0.1"},
+		ServiceAccount:   "default",
+	}
+}
+
+// newBootstrap assembles a Bootstrap proto with static resources and ADS-backed
+// dynamic_resources pointing at the static xds_cluster.
+func newBootstrap(clusters []*clusterv3.Cluster, listeners []*listenerv3.Listener) *bootstrapv3.Bootstrap {
+	return &bootstrapv3.Bootstrap{
+		Node: &corev3.Node{Id: "test-node", Cluster: "aether"},
+		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
+			Clusters:  clusters,
+			Listeners: listeners,
+		},
+		DynamicResources: &bootstrapv3.Bootstrap_DynamicResources{
+			AdsConfig: &corev3.ApiConfigSource{
+				ApiType:             corev3.ApiConfigSource_GRPC,
+				TransportApiVersion: corev3.ApiVersion_V3,
+				GrpcServices: []*corev3.GrpcService{{
+					TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
+						EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: "xds_cluster"},
+					},
+				}},
+			},
+			CdsConfig: &corev3.ConfigSource{ConfigSourceSpecifier: &corev3.ConfigSource_Ads{}},
+			LdsConfig: &corev3.ConfigSource{ConfigSourceSpecifier: &corev3.ConfigSource_Ads{}},
+		},
+		Admin: &bootstrapv3.Admin{
+			Address: &corev3.Address{
+				Address: &corev3.Address_SocketAddress{
+					SocketAddress: &corev3.SocketAddress{
+						Address:       "127.0.0.1",
+						PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 19000},
+					},
+				},
+			},
+		},
+	}
+}
+
+// xdsCluster is the static cluster the agent's xDS server listens on (UDS).
+// All ADS config-source references inside generated resources resolve to it.
+func xdsCluster() *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:           "xds_cluster",
+		ConnectTimeout: durationpb.New(5e9), // 5 s
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_STATIC,
+		},
+		LoadAssignment: pipeEndpoint("xds_cluster", xdsSockPath),
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				config.Http2ProtocolOptions(),
+			),
+		},
+	}
+}
+
+// newServiceCluster builds an EDS cluster with SPIRE mTLS upstream transport
+// socket — the exact shape the agent distributes to node proxies.
+func newServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
+	tlsCertName := fmt.Sprintf("spiffe://%s/node/test-node", td)
+	validationCtxName := fmt.Sprintf("spiffe://%s", td)
+	sanURI := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, svcName)
+
+	ts := proxy.UpstreamTransportSocket(tlsCertName, validationCtxName, []string{sanURI}, clusterName)
+
+	return &clusterv3.Cluster{
+		Name:           clusterName,
+		ConnectTimeout: durationpb.New(5e9),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_EDS,
+		},
+		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			EdsConfig: config.XDSConfigSourceADS(),
+		},
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
+		TransportSocket:               ts,
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				config.Http2ProtocolOptions(),
+			),
+		},
+	}
+}
+
+// newEdgeServiceCluster is like newServiceCluster but fetches SDS certs from
+// the static spire_agent cluster (edge proxy shape: direct-SPIRE, not ADS).
+func newEdgeServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
+	tlsCertName := fmt.Sprintf("spiffe://%s/edge/aether-ingress/edge", td)
+	validationCtxName := fmt.Sprintf("spiffe://%s", td)
+	sanURI := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, svcName)
+
+	ts := proxy.EdgeUpstreamTransportSocket(tlsCertName, validationCtxName, []string{sanURI}, clusterName)
+
+	return &clusterv3.Cluster{
+		Name:           clusterName,
+		ConnectTimeout: durationpb.New(5e9),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_EDS,
+		},
+		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			EdsConfig: config.XDSConfigSourceADS(),
+		},
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
+		TransportSocket:               ts,
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				config.Http2ProtocolOptions(),
+			),
+		},
+	}
+}
+
+// newSpireAgentCluster is the static cluster the edge proxy uses to reach the
+// SPIRE Agent's native SDS API (Workload API Unix socket).
+func newSpireAgentCluster() *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:           "spire_agent",
+		ConnectTimeout: durationpb.New(5e9),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_STATIC,
+		},
+		LoadAssignment: pipeEndpoint("spire_agent", "/run/spire/sockets/agent.sock"),
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				&httpv3.HttpProtocolOptions{
+					UpstreamProtocolOptions: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
+						ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
+							ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
+								Http2ProtocolOptions: &corev3.Http2ProtocolOptions{},
+							},
+						},
+					},
+				},
+			),
+		},
+	}
+}
+
+// pipeEndpoint builds a ClusterLoadAssignment with a single Unix-socket endpoint.
+func pipeEndpoint(clusterName, path string) *endpointv3.ClusterLoadAssignment {
+	return &endpointv3.ClusterLoadAssignment{
+		ClusterName: clusterName,
+		Endpoints: []*endpointv3.LocalityLbEndpoints{{
+			LbEndpoints: []*endpointv3.LbEndpoint{{
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+					Endpoint: &endpointv3.Endpoint{
+						Address: &corev3.Address{
+							Address: &corev3.Address_Pipe{
+								Pipe: &corev3.Pipe{Path: path},
+							},
+						},
+					},
+				},
+			}},
+		}},
+	}
+}
+
+// stripCustomFilters removes HTTP filters that require the custom aether_stats
+// C++ extension compiled into the proxy workspace Envoy (proposal 012).
+// Stock Envoy does not have this extension and would fail --mode validate.
+// All other structural elements (TLS, addresses, cluster types, SAN matchers)
+// remain and are validated; aether_stats is tested by the proxy workspace's
+// envoy_cc_test targets.
+func stripCustomFilters(bs *bootstrapv3.Bootstrap) {
+	for _, lis := range bs.GetStaticResources().GetListeners() {
+		for _, fc := range lis.GetFilterChains() {
+			stripHCMCustomFilters(fc)
+		}
+		if fc := lis.GetDefaultFilterChain(); fc != nil {
+			stripHCMCustomFilters(fc)
+		}
+	}
+}
+
+// stripHCMCustomFilters removes the aether_stats HTTP filter from a
+// FilterChain's HttpConnectionManager.  Other network filter types are unchanged.
+func stripHCMCustomFilters(fc *listenerv3.FilterChain) {
+	for _, f := range fc.GetFilters() {
+		// aether uses the legacy name "envoy.http_connection_manager".
+		// Check both the legacy and canonical names for safety.
+		name := f.GetName()
+		if name != "envoy.http_connection_manager" &&
+			name != "envoy.filters.network.http_connection_manager" {
+			continue
+		}
+		hcmAny := f.GetTypedConfig()
+		if hcmAny == nil {
+			continue
+		}
+		hcm := &http_connection_managerv3.HttpConnectionManager{}
+		if err := hcmAny.UnmarshalTo(hcm); err != nil {
+			continue
+		}
+		filtered := make([]*http_connection_managerv3.HttpFilter, 0, len(hcm.GetHttpFilters()))
+		for _, hf := range hcm.GetHttpFilters() {
+			if hf.GetName() == aetherStatsFilterName {
+				continue // strip: requires custom binary
+			}
+			filtered = append(filtered, hf)
+		}
+		hcm.HttpFilters = filtered
+		packed, err := anypb.New(hcm)
+		if err != nil {
+			panic(fmt.Sprintf("re-pack HCM: %v", err))
+		}
+		f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: packed}
+	}
+}
+
+// mustAny packs a proto.Message into anypb.Any, panicking on error.
+// All types used here are well-formed static configs.
+func mustAny(m proto.Message) *anypb.Any {
+	a, err := anypb.New(m)
+	if err != nil {
+		panic(fmt.Sprintf("mustAny: %v", err))
+	}
+	return a
+}

@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "generate_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/test/envoy_validate/generate",
+    visibility = ["//visibility:private"],
+    deps = ["//test/envoy_validate"],
+)
+
+go_binary(
+    name = "generate",
+    embed = [":generate_lib"],
+    visibility = ["//visibility:public"],
+)

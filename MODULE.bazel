@@ -164,6 +164,33 @@ buildbuddy = use_extension("@toolchains_buildbuddy//:extensions.bzl", "buildbudd
 buildbuddy.platform(buildbuddy_container_image = "UBUNTU22_04_IMAGE")
 use_repo(buildbuddy, "buildbuddy_toolchain")
 
+# ---------------------------------------------------------------------------
+# Pinned stock Envoy binary — used by //test/envoy_validate to run
+# "envoy --mode validate" over aether-generated bootstrap configs without
+# building Envoy from source.  Pinned to v1.38.0, matching the custom proxy
+# workspace (proxy/bazel/envoy/repository.bzl ENVOY_SHA).
+# SHA-256 values from the upstream checksums.txt.asc release asset.
+#
+# ENVOY_VERSION = "1.38.0"
+# ---------------------------------------------------------------------------
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "envoy_binary_linux_amd64",
+    downloaded_file_path = "envoy",
+    executable = True,
+    sha256 = "cca312a7c3f91852f2849995c895130c59842e21ba787dc90bafa4026d6c5ecc",
+    urls = ["https://github.com/envoyproxy/envoy/releases/download/v1.38.0/envoy-1.38.0-linux-x86_64"],
+)
+
+http_file(
+    name = "envoy_binary_linux_arm64",
+    downloaded_file_path = "envoy",
+    executable = True,
+    sha256 = "9f00678c0cc433d7a342c422415eb3fdd163e77414aee5c5b57c04bd7d579454",
+    urls = ["https://github.com/envoyproxy/envoy/releases/download/v1.38.0/envoy-1.38.0-linux-aarch_64"],
+)
+
 pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
 
 pull(
