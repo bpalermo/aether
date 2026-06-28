@@ -227,3 +227,46 @@ func TestRedirectAllVsScopedDifference(t *testing.T) {
 	// Scoped has 9, broad has 7: 2 fewer (the dport Payload + dport Cmp).
 	assert.Equal(t, len(scoped)-2, len(broad), "redirect-all omits the dport match expressions")
 }
+
+// TestPodExcludedOutboundPorts verifies the exclude-outbound-ports annotation
+// (proposal 022 M2-default) parses into a deduplicated port list and degrades
+// gracefully on malformed/blank/out-of-range entries.
+func TestPodExcludedOutboundPorts(t *testing.T) {
+	anno := func(v string) config.AetherConf {
+		m := map[string]string{commonconstants.AnnotationCaptureExcludeOutboundPorts: v}
+		return config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &m}}
+	}
+	tests := []struct {
+		name string
+		conf config.AetherConf
+		want []uint16
+	}{
+		{name: "single port", conf: anno("5432"), want: []uint16{5432}},
+		{name: "list with whitespace", conf: anno("5432, 9000 ,80"), want: []uint16{5432, 9000, 80}},
+		{name: "dedup", conf: anno("80,80,443"), want: []uint16{80, 443}},
+		{name: "skips blank/zero/non-numeric/over-range", conf: anno("80,,0,foo,70000,443"), want: []uint16{80, 443}},
+		{name: "empty value", conf: anno(""), want: nil},
+		{name: "nil annotations", conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{}}, want: nil},
+		{name: "nil runtime config", conf: config.AetherConf{}, want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, podExcludedOutboundPorts(tc.conf))
+		})
+	}
+}
+
+// TestExcludePortAcceptExprs verifies the exclusion rule matches TCP to the given
+// dport and accepts (so the redirect that follows never sees it).
+func TestExcludePortAcceptExprs(t *testing.T) {
+	exprs := excludePortAcceptExprs(5432)
+	require.Len(t, exprs, 5)
+	require.IsType(t, &expr.Meta{}, exprs[0])
+	assert.Equal(t, []byte{unix.IPPROTO_TCP}, exprs[1].(*expr.Cmp).Data)
+	// dport payload (transport header offset 2) compared to 5432 big-endian.
+	require.IsType(t, &expr.Payload{}, exprs[2])
+	assert.Equal(t, uint32(2), exprs[2].(*expr.Payload).Offset)
+	assert.Equal(t, []byte{0x15, 0x38}, exprs[3].(*expr.Cmp).Data) // 5432 = 0x1538
+	require.IsType(t, &expr.Verdict{}, exprs[4])
+	assert.Equal(t, expr.VerdictAccept, exprs[4].(*expr.Verdict).Kind)
+}

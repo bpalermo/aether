@@ -25,6 +25,17 @@ const (
 	// any value other than "true" leaves the pod on the scoped :18081 redirect.
 	AnnotationCaptureRedirectAll = annotationAetherCapturePrefix + "redirect-all"
 
+	// AnnotationCaptureExcludeOutboundPorts carves specific outbound TCP
+	// destination ports OUT of transparent capture (proposal 022, M2-default,
+	// Istio parity with traffic.sidecar.istio.io/excludeOutboundPorts). The value
+	// is a comma-separated list of ports (e.g. "5432,9000"); the CNI emits an
+	// nft RETURN for each, ahead of the redirect rule, so connections to those
+	// ports bypass the mesh entirely (a DB, a scrape target, an external
+	// dependency). Applies to both the scoped and redirect-all capture paths.
+	// Invalid/empty entries are ignored. Independent of the redirect mode — it is
+	// the operator's escape hatch once redirect-all is the managed-pod default.
+	AnnotationCaptureExcludeOutboundPorts = annotationAetherCapturePrefix + "exclude-outbound-ports"
+
 	// AnnotationConfigUpstreams is the pod annotation declaring the upstream
 	// services the pod calls, as a comma-separated list of service names
 	// (e.g. "svc-payments,svc-ledger"). The agent unions the annotations of

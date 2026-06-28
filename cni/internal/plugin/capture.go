@@ -31,8 +31,8 @@ const captureRedirectAllTableName = "aether_capture_all"
 // It enters the netns by setns on a locked OS thread (matching netnsDialContext): the
 // netlink socket nftables opens then lives in the pod netns. A failed restore leaves
 // the thread locked so the Go runtime destroys it rather than reusing a poisoned one.
-func installCaptureRedirect(netnsPath string, logger *zap.Logger) error {
-	return withPodNetns(netnsPath, func() error { return programCaptureRedirect(logger) })
+func installCaptureRedirect(netnsPath string, excludePorts []uint16, logger *zap.Logger) error {
+	return withPodNetns(netnsPath, func() error { return programCaptureRedirect(excludePorts, logger) })
 }
 
 // programCaptureRedirect adds the nat/output REDIRECT rules in the CURRENT netns:
@@ -50,7 +50,7 @@ func installCaptureRedirect(netnsPath string, logger *zap.Logger) error {
 // dropped until the agent creates the listener, which is correct behaviour
 // (UDPRoute without --l4-routes = no listener = datagrams discarded rather than
 // sent to an unexpected destination).
-func programCaptureRedirect(logger *zap.Logger) error {
+func programCaptureRedirect(excludePorts []uint16, logger *zap.Logger) error {
 	meshPort := uint16(commonconstants.ProxyOutboundPort)
 	capturePort := uint16(commonconstants.ProxyCapturePort)
 
@@ -67,6 +67,11 @@ func programCaptureRedirect(logger *zap.Logger) error {
 		Hooknum:  nftables.ChainHookOutput,
 		Priority: nftables.ChainPriorityNATDest,
 	})
+	// Excluded ports (proposal 022 M2-default): accept (RETURN) ahead of the
+	// redirect so connections to these dports bypass capture entirely.
+	for _, port := range excludePorts {
+		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludePortAcceptExprs(port)})
+	}
 	// TCP: outbound TCP to ClusterIP:meshPort → capturePort (Phase 3a).
 	c.AddRule(&nftables.Rule{
 		Table: table,
@@ -157,8 +162,8 @@ func beUint16(v uint16) []byte {
 // CaptureRedirectAllEnabled is true AND TransparentCaptureEnabled is false, only
 // the broad rule is installed. When both are true, both tables exist and the
 // redirect-all subsumes the scoped rule (all traffic is already captured).
-func installCaptureRedirectAll(netnsPath string, logger *zap.Logger) error {
-	return withPodNetns(netnsPath, func() error { return programCaptureRedirectAll(logger) })
+func installCaptureRedirectAll(netnsPath string, excludePorts []uint16, logger *zap.Logger) error {
+	return withPodNetns(netnsPath, func() error { return programCaptureRedirectAll(excludePorts, logger) })
 }
 
 // programCaptureRedirectAll adds the redirect-all nat/output rule in the CURRENT
@@ -172,7 +177,7 @@ func installCaptureRedirectAll(netnsPath string, logger *zap.Logger) error {
 // it in a separate higher-priority "conntrack" chain to avoid coupling to
 // rule position, but for a single-table approach both rules go in "output" with
 // the conntrack rule first (lower rule index wins in nft).
-func programCaptureRedirectAll(logger *zap.Logger) error {
+func programCaptureRedirectAll(excludePorts []uint16, logger *zap.Logger) error {
 	capturePort := uint16(commonconstants.ProxyCapturePort)
 
 	c, err := nftables.New()
@@ -188,6 +193,13 @@ func programCaptureRedirectAll(logger *zap.Logger) error {
 		Hooknum:  nftables.ChainHookOutput,
 		Priority: nftables.ChainPriorityNATDest,
 	})
+
+	// Rule 0: excluded ports (proposal 022 M2-default) — accept ahead of the broad
+	// redirect so connections to these dports bypass the mesh. This is where
+	// exclusions matter most: redirect-all otherwise captures every port.
+	for _, port := range excludePorts {
+		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludePortAcceptExprs(port)})
+	}
 
 	// Rule 1: skip established/related connections (conntrack).
 	// ct state {established, related} -> accept
@@ -270,6 +282,24 @@ func skipCaptureSelfExprs(capturePort uint16) []expr.Any {
 		// tcp dport == capturePort
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(capturePort)},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// excludePortAcceptExprs builds the rule:
+//
+//	meta l4proto tcp · tcp dport <port> · accept
+//
+// Placed ahead of the redirect, it carves a single outbound TCP destination port
+// OUT of capture (proposal 022 M2-default, the exclude-outbound-ports annotation):
+// connections to <port> bypass the mesh and reach their real destination directly.
+func excludePortAcceptExprs(port uint16) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		// tcp dport == port
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(port)},
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 }
