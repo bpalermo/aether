@@ -107,7 +107,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 			chains = append(chains, tc)
 		}
 	}
-	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod))
+	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod, withPassthrough))
 
 	l := &listenerv3.Listener{
 		Name: CaptureListenerName(cniPod),
@@ -202,7 +202,18 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService) *listenerv3.FilterCh
 // buildCaptureHTTPFilterChain mirrors the outbound HTTP chain but serves the capture
 // route table (cluster.local authorities) over RDS. Same readiness/subset/on-demand/
 // stats filters and per-source mTLS egress path.
-func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool) *listenerv3.FilterChain {
+//
+// scopeToCleartext (redirect-all / withPassthrough, proposal 022 M2a): match the
+// chain on transport_protocol="raw_buffer" so it catches ONLY cleartext traffic —
+// mesh egress is cleartext to this listener (the proxy adds mTLS upstream). TLS
+// egress (external HTTPS, kube-apiserver) is detected by tls_inspector as
+// transport_protocol="tls", does NOT match here, and falls to the DefaultFilterChain
+// ORIGINAL_DST passthrough. Without this the no-match HCM chain catches the TLS
+// stream and the handshake fails (it tries to parse TLS as HTTP). Scoping by
+// application_protocol does NOT work — a TLS ClientHello's ALPN (h2/http/1.1) looks
+// like HTTP. In scoped (non-redirect-all) mode the chain stays a catch-all: only
+// mesh ClusterIPs are captured (all cleartext) and there is no passthrough fallback.
+func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, scopeToCleartext bool) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
 
 	prefix := []*http_connection_managerv3.HttpFilter{
@@ -220,13 +231,19 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitSt
 		},
 	}
 
-	return &listenerv3.FilterChain{
+	fc := &listenerv3.FilterChain{
 		Name: fmt.Sprintf("capture_%s", cniPod.GetName()),
 		Filters: []*listenerv3.Filter{
 			buildNetworkNamespaceFilterState(),
 			buildHTTPConnectionManagerFilter(hcm),
 		},
 	}
+	if scopeToCleartext {
+		// raw_buffer = cleartext (tls_inspector marks TLS streams "tls"). TLS egress
+		// then misses this chain and falls to the passthrough DefaultFilterChain.
+		fc.FilterChainMatch = &listenerv3.FilterChainMatch{TransportProtocol: "raw_buffer"}
+	}
+	return fc
 }
 
 // BuildCapturePassthroughFilterChain returns the DefaultFilterChain for the
