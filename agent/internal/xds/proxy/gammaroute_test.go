@@ -291,3 +291,82 @@ func TestBuildOutboundServiceVirtualHost_URLRewrite(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildOutboundServiceVirtualHost_SegmentBoundaryPrefix: a Gateway API
+// PathPrefix "/v2" must compile to Envoy path_separated_prefix (segment-boundary),
+// NOT a raw RouteMatch_Prefix — so "/v2example" does NOT match. "/" stays a plain
+// prefix because Envoy rejects path_separated_prefix:"/".
+func TestBuildOutboundServiceVirtualHost_SegmentBoundaryPrefix(t *testing.T) {
+	rules := []GammaRoute{
+		{
+			Matches:  []GammaMatch{{Prefix: "/v2"}},
+			Backends: []GammaBackend{{Cluster: "echo-v2.mesh", Weight: 1}},
+		},
+		{
+			Matches:  []GammaMatch{{Prefix: "/"}},
+			Backends: []GammaBackend{{Cluster: "echo-v1.mesh", Weight: 1}},
+		},
+	}
+	vh := BuildOutboundServiceVirtualHost("echo.mesh", []string{"echo.mesh"}, rules)
+
+	// Find the /v2 route and assert it uses path_separated_prefix, not raw prefix.
+	var v2 *routev3.Route
+	for _, r := range vh.Routes {
+		if r.GetMatch().GetPathSeparatedPrefix() == "/v2" {
+			v2 = r
+		}
+		// A raw RouteMatch_Prefix of "/v2" would be the bug.
+		assert.NotEqual(t, "/v2", r.GetMatch().GetPrefix(),
+			"GAMMA PathPrefix /v2 must be path_separated_prefix, not raw prefix")
+	}
+	require.NotNil(t, v2, "expected a path_separated_prefix /v2 route")
+	assert.Equal(t, "echo-v2.mesh", v2.GetRoute().GetCluster())
+
+	// A trailing slash normalizes to the same segment-boundary prefix.
+	rulesSlash := []GammaRoute{{Matches: []GammaMatch{{Prefix: "/v2/"}}, Backends: []GammaBackend{{Cluster: "echo-v2.mesh", Weight: 1}}}}
+	vh2 := BuildOutboundServiceVirtualHost("echo.mesh", []string{"echo.mesh"}, rulesSlash)
+	assert.Equal(t, "/v2", vh2.Routes[0].GetMatch().GetPathSeparatedPrefix())
+}
+
+// TestBuildOutboundServiceVirtualHost_PrecedenceOrdering: routes must be emitted in
+// descending Gateway API match specificity regardless of HTTPRoute document order,
+// because Envoy is first-match. A shorter "/" prefix declared BEFORE a longer "/v2"
+// must not shadow it; an Exact match outranks any prefix; and within equal paths a
+// header-bearing match outranks a bare one.
+func TestBuildOutboundServiceVirtualHost_PrecedenceOrdering(t *testing.T) {
+	// Document order puts the least specific ("/") first; the builder must reorder.
+	rules := []GammaRoute{
+		{Matches: []GammaMatch{{Prefix: "/"}}, Backends: []GammaBackend{{Cluster: "v1.mesh", Weight: 1}}},
+		{Matches: []GammaMatch{{Prefix: "/v2/foo"}}, Backends: []GammaBackend{{Cluster: "deep.mesh", Weight: 1}}},
+		{Matches: []GammaMatch{{Exact: "/exact"}}, Backends: []GammaBackend{{Cluster: "exact.mesh", Weight: 1}}},
+		{Matches: []GammaMatch{{Prefix: "/v2"}}, Backends: []GammaBackend{{Cluster: "v2.mesh", Weight: 1}}},
+	}
+	vh := BuildOutboundServiceVirtualHost("echo.mesh", []string{"echo.mesh"}, rules)
+
+	// Collect the cluster order of the non-catch-all routes (last route is the
+	// additive "/" catch-all to the service cluster itself).
+	require.Len(t, vh.Routes, 5)
+	got := make([]string, 0, 4)
+	for _, r := range vh.Routes[:4] {
+		got = append(got, r.GetRoute().GetCluster())
+	}
+	// Exact first, then longer prefix /v2/foo, then /v2, then "/".
+	assert.Equal(t, []string{"exact.mesh", "deep.mesh", "v2.mesh", "v1.mesh"}, got)
+
+	// The trailing route is the additive default to the service's own cluster.
+	assert.Equal(t, "echo.mesh", vh.Routes[4].GetRoute().GetCluster())
+	assert.Equal(t, "/", vh.Routes[4].GetMatch().GetPrefix())
+}
+
+// TestBuildOutboundServiceVirtualHost_HeaderTieBreak: equal path length, the match
+// carrying a header is more specific and must be ordered first.
+func TestBuildOutboundServiceVirtualHost_HeaderTieBreak(t *testing.T) {
+	rules := []GammaRoute{
+		{Matches: []GammaMatch{{Prefix: "/"}}, Backends: []GammaBackend{{Cluster: "plain.mesh", Weight: 1}}},
+		{Matches: []GammaMatch{{Prefix: "/", Headers: []GammaHeaderMatch{{Name: "version", Value: "two"}}}}, Backends: []GammaBackend{{Cluster: "hdr.mesh", Weight: 1}}},
+	}
+	vh := BuildOutboundServiceVirtualHost("echo.mesh", []string{"echo.mesh"}, rules)
+	require.GreaterOrEqual(t, len(vh.Routes), 2)
+	assert.Equal(t, "hdr.mesh", vh.Routes[0].GetRoute().GetCluster(),
+		"header-bearing match must outrank the bare prefix of equal length")
+}
