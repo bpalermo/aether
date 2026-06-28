@@ -16,6 +16,7 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/serviceref"
 )
 
 // Config holds the configuration for the Kubernetes registry backend.
@@ -89,7 +90,14 @@ func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, 
 	var endpoints []*registryv1.ServiceEndpoint
 	for i := range pods {
 		pod := &pods[i]
-		if pod.Spec.ServiceAccountName != service {
+		// The registry key is the namespace-qualified "<ns>/<sa>" (020 Part 1),
+		// matching the CNI registration path (registry/cni.go) and the etcd/ddb
+		// backends. Keying by the bare ServiceAccount would collide same-named SAs
+		// across namespaces (e.g. echo-v1 in two namespaces).
+		if pod.Spec.ServiceAccountName == "" {
+			continue
+		}
+		if serviceref.New(pod.Namespace, pod.Spec.ServiceAccountName).Key() != service {
 			continue
 		}
 		ep, err := r.podToEndpoint(pod, nodeLocalities)
@@ -122,11 +130,16 @@ func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, _ registryv1.
 	endpointsByService := make(map[string][]*registryv1.ServiceEndpoint)
 	for i := range pods {
 		pod := &pods[i]
-		serviceName := pod.Spec.ServiceAccountName
-		if serviceName == "" {
+		if pod.Spec.ServiceAccountName == "" {
 			r.log.DebugContext(ctx, "skipping pod without service account", "pod", pod.Name, "namespace", pod.Namespace)
 			continue
 		}
+		// Namespace-qualified "<ns>/<sa>" key (020 Part 1), matching the CNI
+		// registration path and the etcd/ddb backends. Bare-SA keying collided
+		// same-named ServiceAccounts across namespaces — e.g. echo-v1 in two
+		// conformance namespaces merged into one entry, whose endpoint set then
+		// oscillated and churned the agent's xDS snapshot.
+		serviceName := serviceref.New(pod.Namespace, pod.Spec.ServiceAccountName).Key()
 
 		ep, err := r.podToEndpoint(pod, nodeLocalities)
 		if err != nil {
