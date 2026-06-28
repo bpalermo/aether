@@ -104,8 +104,13 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// to the pod-local capture listener. Best-effort — a failure leaves the explicit
 	// fast-lane working, so it must not fail the pod's networking. Uses the runtime
 	// netns path (the rule lives in the kernel netns, not the bind-mount pin).
+	// Ports the pod excludes from capture (proposal 022, M2-default; Istio parity):
+	// connections to these dports bypass the mesh via an nft RETURN ahead of the
+	// redirect, in whichever capture path is active.
+	excludePorts := podExcludedOutboundPorts(netConf)
+
 	if netConf.TransparentCaptureEnabled {
-		if err := installCaptureRedirect(args.Netns, p.logger); err != nil {
+		if err := installCaptureRedirect(args.Netns, excludePorts, p.logger); err != nil {
 			p.logger.Warn("failed to install transparent-capture redirect; continuing without capture",
 				zap.String("netns", args.Netns), zap.Error(err))
 		}
@@ -123,7 +128,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// CaptureRedirectAllEnabled netconf flag is retained as an optional node-wide
 	// override (off by default).
 	if netConf.CaptureRedirectAllEnabled || podWantsRedirectAll(netConf) {
-		if err := installCaptureRedirectAll(args.Netns, p.logger); err != nil {
+		if err := installCaptureRedirectAll(args.Netns, excludePorts, p.logger); err != nil {
 			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
 				zap.String("netns", args.Netns), zap.Error(err))
 		}
@@ -624,4 +629,36 @@ func podWantsRedirectAll(conf config.AetherConf) bool {
 		return false
 	}
 	return (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureRedirectAll] == "true"
+}
+
+// podExcludedOutboundPorts parses the capture.aether.io/exclude-outbound-ports
+// annotation (proposal 022, M2-default; Istio parity) into a deduplicated list of
+// TCP destination ports to carve OUT of capture. The value is comma-separated
+// (e.g. "5432, 9000"); blanks and out-of-range/non-numeric entries are skipped so
+// a malformed annotation degrades to "exclude what parses" rather than failing the
+// pod's networking. Reaches the CNI via the same pod-annotations runtime config as
+// podWantsRedirectAll. Returns nil when unset.
+func podExcludedOutboundPorts(conf config.AetherConf) []uint16 {
+	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+		return nil
+	}
+	raw := (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureExcludeOutboundPorts]
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[uint16]struct{})
+	var ports []uint16
+	for _, f := range strings.Split(raw, ",") {
+		n, err := strconv.ParseUint(strings.TrimSpace(f), 10, 16)
+		if err != nil || n == 0 {
+			continue
+		}
+		p := uint16(n)
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		ports = append(ports, p)
+	}
+	return ports
 }

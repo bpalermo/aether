@@ -116,9 +116,64 @@ on 020 Part 1: the mesh Service becomes the real Service, captured by its Cluste
 - A **non-mesh** destination → passes through unaffected.
 - Demand-scoped: only dependency-set services are captured/served on a given node.
 
+## M2-default: redirect-all by default for managed pods (amendment, 2026-06-28)
+
+The `(i)` scoped vs `(ii)` redirect-all fork is **decided: redirect-all** (the only model
+that captures the *real* `ClusterIP:port` a client actually dials — which is what proposal
+023's route targets need). Today redirect-all is a per-pod **opt-in** annotation
+(`capture.aether.io/redirect-all`, the M2a spike). This amendment makes it the **default for
+managed pods**, Istio-style, so route targets and arbitrary Services are captured with zero
+per-pod config:
+
+- **Default on.** A pod with `aether.io/managed=true` (label or namespace auto-injection)
+  gets redirect-all from the CNI by default. The annotation flips to an **opt-out**
+  (`capture.aether.io/redirect-all=false`) for pods that must not be captured (infra, the
+  prober, hostNetwork workloads).
+- **Port/range exclusions (Istio parity).** `aether.io/exclude-outbound-ports` and
+  `aether.io/exclude-outbound-ip-ranges` annotations carve out destinations that must bypass
+  the mesh (a DB port, a metrics scrape target, an external dependency). The CNI emits
+  `RETURN` rules ahead of the redirect. This is safe and verification-independent — implement
+  first.
+
+### Proxy self-traffic: netns scoping makes this narrow (don't over-exclude)
+
+The redirect rule lives in the **pod netns `nat/output` hook**, so it only fires on traffic
+*originating in that pod's netns*. The node proxy's own traffic is mostly out of scope:
+
+- **Mesh upstreams egress proxy-side, not the pod netns** — proven empirically: the scoped
+  rule (`dport == 18081`) runs hitless in production soaks; if the proxy's mesh mTLS upstream
+  originated in the pod netns it would self-match and loop, and it doesn't. So mesh upstreams
+  need no exclusion.
+- **Local-app delivery (`127.x`)** is already excluded by the loopback carve-out, and the
+  response path by the conntrack-established accept.
+- **The one open risk is the redirect-all `original_dst` passthrough**: non-mesh egress is
+  captured in the pod netns and forwarded to the real (non-loopback) destination. The
+  redirect-all rule has **no dport match**, so *if* that passthrough connection egresses from
+  the pod netns it self-matches → loop → and since all non-mesh egress uses passthrough, that
+  is the "breaks all egress" the M2a gate flagged. **This must be verified, not assumed**
+  (the in-netns listener model makes it plausible but not certain).
+
+### Self-exclusion mechanism: SO_MARK, not UID
+
+If the passthrough loops, exclude **only** the proxy's own forwarded sockets. **Not `meta
+skuid`**: the proxy runs as `runAsUser: 0`, so a UID match would also exempt any root-running
+*app* pod's egress and silently break its capture. Use **`SO_MARK`**: Envoy stamps a fixed
+mark on the passthrough cluster's upstream sockets (`upstream_bind_config.socket_options`
+`SOL_SOCKET`/`SO_MARK`), and the CNI adds `meta mark <value> → RETURN` ahead of the redirect.
+The mark is unique to the proxy's passthrough — no UID collision, app-UID-agnostic.
+
 ## Sequencing
 
-The big architectural item, after the near-term GATEWAY-HTTP work (proposal 021) and
-proposal 020 Part 1. Decide the **`(i)` scoped-redirect vs `(ii)` redirect-all** fork with
-a spike first — it shapes the CNI rules and the Envoy pass-through path, and it's the
-highest-risk change in the proposal.
+1. **Exclusion annotations** (`exclude-outbound-ports` / `-ip-ranges`) — safe, additive,
+   verification-independent. **Implement first.**
+2. **Passthrough-loop verification spike** — confirm whether the redirect-all `original_dst`
+   passthrough upstream socket egresses from the pod netns (and thus self-matches the
+   redirect). The gate for the default flip.
+3. **SO_MARK self-exclusion** (agent xDS `socket_options` + CNI `meta mark RETURN`) — only if
+   (2) shows a loop. Makes the default flip safe.
+4. **Flip redirect-all to default-on for managed pods** behind a chart value (default off
+   until validated on talos), annotation as opt-out. Validate egress volume on the
+   node-shared proxy + the non-mesh cleartext catch-all passthrough (the #288 failure mode).
+
+This is the big architectural item; the CNI redirect change is the riskiest blast radius
+(every meshed pod's egress), which is why the default flip is last and gated on the spike.
