@@ -171,3 +171,104 @@ func domainsOf(vhosts []*routev3.VirtualHost) []string {
 	}
 	return out
 }
+
+// routeForPrefix returns the first route in the vhost whose match is the given
+// segment-boundary prefix (path_separated_prefix) or plain prefix.
+func routeForPrefix(vh *routev3.VirtualHost, prefix string) *routev3.Route {
+	for _, r := range vh.GetRoutes() {
+		m := r.GetMatch()
+		if m.GetPathSeparatedPrefix() == prefix || m.GetPrefix() == prefix {
+			return r
+		}
+	}
+	return nil
+}
+
+// TestCaptureVhosts_RouteTargetGAMMAFeatures verifies that the capture (cap_http)
+// path applies the SAME full GAMMA feature set as the outbound path for a route
+// TARGET (proposal 023 shape: an "echo" target fanned out to echo-v1/echo-v2).
+// This is the MESH-HTTP conformance gap: the capture vhost must emit
+// request/response header modification, a request redirect, AND a weighted split —
+// not a reduced action. It mirrors the exact conformance HTTPRoute shapes
+// (MeshHTTPRouteRequestHeaderModifier / RedirectHostAndStatus / Weight).
+func TestCaptureVhosts_RouteTargetGAMMAFeatures(t *testing.T) {
+	const (
+		v1Cluster = "echo-v1.gateway-conformance-mesh.aether.internal"
+		v2Cluster = "echo-v2.gateway-conformance-mesh.aether.internal"
+	)
+	c := newTestCache("node-1")
+	// A single route target "gateway-conformance-mesh/echo" carrying all three
+	// conformance feature shapes as separate rules.
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"gateway-conformance-mesh/echo": {
+			{
+				// RequestHeaderModifier: set + add + remove on request, set + remove on response.
+				Matches:  []proxy.GammaMatch{{Prefix: "/set"}},
+				Backends: []proxy.GammaBackend{{Service: "gateway-conformance-mesh/echo-v1", Cluster: v1Cluster, Weight: 1}},
+				HeaderMutation: &proxy.GammaHeaderMutation{
+					SetRequest:     []proxy.GammaHeaderKV{{Name: "X-Header-Set", Value: "set-overwrites-values"}},
+					AddRequest:     []proxy.GammaHeaderKV{{Name: "X-Header-Add", Value: "add-appends-values"}},
+					RemoveRequest:  []string{"X-Header-Remove"},
+					SetResponse:    []proxy.GammaHeaderKV{{Name: "X-Resp-Set", Value: "v"}},
+					RemoveResponse: []string{"X-Resp-Remove"},
+				},
+			},
+			{
+				// RequestRedirect: host + 301, NO backend cluster.
+				Matches:  []proxy.GammaMatch{{Prefix: "/hostname-redirect"}},
+				Redirect: &proxy.GammaRedirect{Hostname: "example.org", StatusCode: 301},
+			},
+			{
+				// 70/30 weighted split on the default path.
+				Matches: []proxy.GammaMatch{{Prefix: "/"}},
+				Backends: []proxy.GammaBackend{
+					{Service: "gateway-conformance-mesh/echo-v1", Cluster: v1Cluster, Weight: 70},
+					{Service: "gateway-conformance-mesh/echo-v2", Cluster: v2Cluster, Weight: 30},
+				},
+			},
+		},
+	})
+	c.SetRouteTargetPorts(map[string][]uint32{"gateway-conformance-mesh/echo": {80}})
+
+	vhosts := c.captureVhosts()
+
+	// The route target must host-match the bare same-namespace dial "echo" (the
+	// authority the conformance client presents) — else the request falls to the
+	// redirect-all passthrough (kube-proxy bypass) and no GAMMA feature applies.
+	vh := findVHost(vhosts, "echo")
+	require.NotNil(t, vh, "route target must carry the bare 'echo' domain; got %v", domainsOf(vhosts))
+	assert.Contains(t, vh.GetDomains(), "echo:80", "real Service port spelling (M2) must host-match too")
+
+	// 1. Header modification: the /set route carries request + response header maps.
+	setRoute := routeForPrefix(vh, "/set")
+	require.NotNil(t, setRoute, "the /set rule must produce a capture route")
+	assert.Equal(t, v1Cluster, setRoute.GetRoute().GetCluster(), "/set forwards to echo-v1")
+	require.Len(t, setRoute.GetRequestHeadersToAdd(), 2, "set + add request headers emitted on the capture path")
+	assert.Equal(t, "X-Header-Set", setRoute.GetRequestHeadersToAdd()[0].GetHeader().GetKey())
+	assert.Equal(t, "X-Header-Add", setRoute.GetRequestHeadersToAdd()[1].GetHeader().GetKey())
+	assert.Equal(t, []string{"X-Header-Remove"}, setRoute.GetRequestHeadersToRemove())
+	require.Len(t, setRoute.GetResponseHeadersToAdd(), 1, "response set header emitted on the capture path")
+	assert.Equal(t, "X-Resp-Set", setRoute.GetResponseHeadersToAdd()[0].GetHeader().GetKey())
+	assert.Equal(t, []string{"X-Resp-Remove"}, setRoute.GetResponseHeadersToRemove())
+
+	// 2. Redirect: the /hostname-redirect route emits a RedirectAction (NOT a forward).
+	redirectRoute := routeForPrefix(vh, "/hostname-redirect")
+	require.NotNil(t, redirectRoute, "the redirect rule must produce a capture route")
+	rd := redirectRoute.GetRedirect()
+	require.NotNil(t, rd, "redirect rule emits a Route_Redirect on the capture path, not a cluster forward")
+	assert.Equal(t, "example.org", rd.GetHostRedirect())
+	assert.Equal(t, routev3.RedirectAction_MOVED_PERMANENTLY, rd.GetResponseCode())
+	assert.Nil(t, redirectRoute.GetRoute(), "a redirect route must not carry a RouteAction")
+
+	// 3. Weight: the default "/" route emits a 70/30 weighted_clusters split.
+	weightRoute := routeForPrefix(vh, "/")
+	require.NotNil(t, weightRoute, "the weighted '/' rule must produce a capture route")
+	wc := weightRoute.GetRoute().GetWeightedClusters().GetClusters()
+	require.Len(t, wc, 2, "two weighted backends on the capture path")
+	got := map[string]uint32{}
+	for _, w := range wc {
+		got[w.GetName()] = w.GetWeight().GetValue()
+	}
+	assert.Equal(t, uint32(70), got[v1Cluster], "echo-v1 weight 70 preserved on the capture path")
+	assert.Equal(t, uint32(30), got[v2Cluster], "echo-v2 weight 30 preserved on the capture path")
+}
