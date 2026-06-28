@@ -197,17 +197,48 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 		realPort   = 8080
 	)
 
-	// The route target's GAMMA rules: /v2 -> echo-v2, / -> echo-v1, plus a header
-	// modifier on the fallback (mirrors the conformance shape).
+	// The route target's GAMMA rules mirror the exact MESH-HTTP conformance feature
+	// shapes (MeshHTTPRouteWeight / RequestHeaderModifier / RedirectHostAndStatus) so
+	// the offline `envoy --mode validate` gate proves Envoy ACCEPTS the capture-path
+	// route action for each — a NACK here would break the whole cap_http table at
+	// runtime (every request then falls to the redirect-all passthrough, i.e. the
+	// kube-proxy bypass that manifested as the conformance timeouts / wrong split):
+	//   - /v2 -> echo-v2 (single backend, segment-prefix match)
+	//   - /redirect -> RequestRedirect (host + 301, NO backend cluster)
+	//   - /headers -> echo-v1 with a request header set+add+remove + response mutation
+	//   - / (default) -> 70/30 WEIGHTED split across echo-v1/echo-v2
 	rules := []proxy.GammaRoute{
 		{
 			Matches:  []proxy.GammaMatch{{Prefix: "/v2"}},
 			Backends: []proxy.GammaBackend{{Service: "team-a/echo-v2", Cluster: v2Cluster, Weight: 1}},
 		},
 		{
-			Matches:        []proxy.GammaMatch{{Prefix: "/"}},
-			Backends:       []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: v1Cluster, Weight: 1}},
-			HeaderMutation: &proxy.GammaHeaderMutation{SetRequest: []proxy.GammaHeaderKV{{Name: "x-aether-route", Value: "echo-v1"}}},
+			// RequestRedirect: replaces the route action with a RedirectAction and
+			// carries NO backend cluster (Gateway API redirect-takes-precedence shape).
+			Matches:  []proxy.GammaMatch{{Prefix: "/redirect"}},
+			Redirect: &proxy.GammaRedirect{Hostname: "example.org", StatusCode: 301},
+		},
+		{
+			// Full header mutation: set/add/remove on the request, set/remove on the
+			// response — exactly the RequestHeaderModifier conformance vocabulary.
+			Matches:  []proxy.GammaMatch{{Prefix: "/headers"}},
+			Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: v1Cluster, Weight: 1}},
+			HeaderMutation: &proxy.GammaHeaderMutation{
+				SetRequest:     []proxy.GammaHeaderKV{{Name: "X-Header-Set", Value: "set-overwrites-values"}},
+				AddRequest:     []proxy.GammaHeaderKV{{Name: "X-Header-Add", Value: "add-appends-values"}},
+				RemoveRequest:  []string{"X-Header-Remove"},
+				SetResponse:    []proxy.GammaHeaderKV{{Name: "X-Resp-Set", Value: "resp"}},
+				RemoveResponse: []string{"X-Resp-Remove"},
+			},
+		},
+		{
+			// 70/30 WEIGHTED split (two backends) on the default "/" — the
+			// MeshHTTPRouteWeight shape (no match → default prefix).
+			Matches: []proxy.GammaMatch{{Prefix: "/"}},
+			Backends: []proxy.GammaBackend{
+				{Service: "team-a/echo-v1", Cluster: v1Cluster, Weight: 70},
+				{Service: "team-a/echo-v2", Cluster: v2Cluster, Weight: 30},
+			},
 		},
 	}
 	// Real-port domains (M2) + portless + mesh-name spellings, the exact set
