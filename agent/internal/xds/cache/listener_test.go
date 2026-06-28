@@ -8,6 +8,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,6 +18,18 @@ import (
 // present so the missing-netns guard in LoadListenersFromStorage doesn't skip
 // them. TestLoadListenersFromStorage_SkipsMissingNetns overrides this locally.
 func init() { netnsExists = func(string) bool { return true } }
+
+// namedListenerEntry builds a listenerEntry whose inbound and outbound listeners
+// are well-formed (named) resources. Tests that inject listener entries directly
+// into the map must use named listeners: Listeners() now filters out any
+// nameless, addressless or typed-nil Listener (see appendListener), so an entry
+// built with bare nil inbound/outbound would contribute zero resources.
+func namedListenerEntry(inboundName, outboundName string) listenerEntry {
+	return listenerEntry{
+		inbound:  &listenerv3.Listener{Name: inboundName},
+		outbound: &listenerv3.Listener{Name: outboundName},
+	}
+}
 
 // makeCNIPod builds a minimal CNIPod that satisfies proxy.GenerateListenersFromRegistryPod.
 // A non-empty NetworkNamespace is the only field required for listener generation.
@@ -97,7 +110,7 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 			name: "direct map injection yields two resources per entry",
 			setupFunc: func(c *SnapshotCache) {
 				c.listeners = map[string]listenerEntry{
-					"/proc/1/ns/net": {inbound: nil, outbound: nil},
+					"/proc/1/ns/net": namedListenerEntry("inbound-1", "outbound-1"),
 				}
 			},
 			wantLen: 2,
@@ -532,8 +545,8 @@ func TestSnapshotCache_AddPod(t *testing.T) {
 func TestSnapshotCache_Listeners_ThreadSafety(t *testing.T) {
 	c := newTestCache("node-1")
 	c.listeners = map[string]listenerEntry{
-		"/proc/100/ns/net": {inbound: nil, outbound: nil},
-		"/proc/200/ns/net": {inbound: nil, outbound: nil},
+		"/proc/100/ns/net": namedListenerEntry("inbound-100", "outbound-100"),
+		"/proc/200/ns/net": namedListenerEntry("inbound-200", "outbound-200"),
 	}
 
 	const goroutines = 20
