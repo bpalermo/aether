@@ -61,14 +61,17 @@ jobs:
           bazelisk-cache: true
 
       # --- Build + load aether images (same path as the e2e job) ---
+      # The controller's validating webhook gates HTTPRoute admission, so the edge
+      # install needs it too (the published aether-proxy is pulled by kind, not built).
+      # Wrapped in a retry: bazel repository fetches from GitHub releases (gazelle,
+      # rules_multitool tools) intermittently 502 on the CDN — transient, not a build error.
       - name: Build and load container images
         run: |
-          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //agent/cmd/agent:image_load
-          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //cni/cmd/cni-install:image_load
-          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //registrar/cmd/registrar:image_load
-          # The controller's validating webhook gates HTTPRoute admission, so the edge
-          # install needs it too (the published aether-proxy is pulled by kind, not built).
-          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //controller/cmd/controller:image_load
+          retry() { for n in 1 2 3; do "$@" && return 0; echo "attempt $n failed; retrying in 20s"; sleep 20; done; return 1; }
+          for t in //agent/cmd/agent:image_load //cni/cmd/cni-install:image_load \
+                   //registrar/cmd/registrar:image_load //controller/cmd/controller:image_load; do
+            retry bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} "$t"
+          done
 
       # --- kind cluster ---
       - name: Setup kind
