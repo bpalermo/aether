@@ -101,6 +101,17 @@ jobs:
           kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
           kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
 
+      # --- aether CRDs (MeshConfig) ---
+      # The aether chart's edge-meshconfig template does a helm `lookup` for a
+      # config.aether.io/v1 MeshConfig, which requires the CRD to exist at render time.
+      # The CRDs are a SEPARATE chart (charts/crds); install it first.
+      - name: Install aether CRDs (MeshConfig)
+        run: |
+          sed -i 's/{GIT_COMMIT}/conformance/' charts/crds/Chart.yaml
+          helm install aether-crds charts/crds \
+            --namespace aether-system --create-namespace --wait --timeout 2m
+          kubectl wait --for=condition=Established crd/meshconfigs.config.aether.io --timeout=60s
+
       # --- Install aether with the EDGE enabled and SPIRE OFF ---
       # The chart gates ALL components' --spire-enabled on the single `spire.enabled`
       # (verified in agent-daemonset.yaml / edge-deployment.yaml / registrar-deployment.yaml),
