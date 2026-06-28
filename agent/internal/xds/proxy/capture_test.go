@@ -116,8 +116,14 @@ func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil, true)
 	require.NoError(t, err)
 
-	// Named filter_chains: only the HCM catch-all (no TCP services).
+	// Named filter_chains: only the HCM chain (no TCP services).
 	require.Len(t, l.GetFilterChains(), 1, "one HCM chain, passthrough is in DefaultFilterChain")
+
+	// With passthrough, the HCM chain is scoped to cleartext (transport_protocol=
+	// raw_buffer) so TLS egress (transport_protocol=tls) misses it and falls to the
+	// DefaultFilterChain passthrough instead of failing in the HTTP codec.
+	assert.Equal(t, "raw_buffer", l.GetFilterChains()[0].GetFilterChainMatch().GetTransportProtocol(),
+		"HCM chain must match raw_buffer so TLS egress falls through to the passthrough")
 
 	// DefaultFilterChain must be set.
 	require.NotNil(t, l.GetDefaultFilterChain(), "DefaultFilterChain must be set when withPassthrough=true")
