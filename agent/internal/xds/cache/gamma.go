@@ -30,6 +30,55 @@ func (c *SnapshotCache) serviceRoutesSnapshot() map[string][]proxy.GammaRoute {
 	return out
 }
 
+// SetRouteTargetPorts replaces the per-route-target real Service port map (proposal
+// 023 M2). Keyed by the same "<ns>/<svc>" route-target key as SetServiceRoutes;
+// fed by the gamma reconciler from each route's parentRef port. captureVhosts emits
+// a "<svc>.<ns>.svc.cluster.local:<port>" domain per listed port so a client dialing
+// the route target's REAL port host-matches its vhost. Signals a scoped-snapshot
+// rebuild on change. A separate side-map (not folded into GammaRoute) keeps the
+// rule-equality plumbing untouched and matches the captureAuthorities pattern.
+func (c *SnapshotCache) SetRouteTargetPorts(ports map[string][]uint32) {
+	c.depMu.Lock()
+	changed := !equalRouteTargetPorts(c.routeTargetPorts, ports)
+	c.routeTargetPorts = ports
+	c.depMu.Unlock()
+	if changed {
+		c.signalDependencyChange()
+	}
+}
+
+// routeTargetPortsSnapshot returns a shallow copy of the route-target port map for
+// use during a snapshot rebuild (read once, outside the cluster lock).
+func (c *SnapshotCache) routeTargetPortsSnapshot() map[string][]uint32 {
+	c.depMu.RLock()
+	defer c.depMu.RUnlock()
+	out := make(map[string][]uint32, len(c.routeTargetPorts))
+	for k, v := range c.routeTargetPorts {
+		out[k] = v
+	}
+	return out
+}
+
+// equalRouteTargetPorts reports content equality of two route-target port maps
+// (order-sensitive within each value; the reconciler emits a stable order).
+func equalRouteTargetPorts(a, b map[string][]uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || len(va) != len(vb) {
+			return false
+		}
+		for i := range va {
+			if va[i] != vb[i] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // routeBackendsLocked appends the bare backend services of a service's GAMMA rules
 // to set. Caller holds depMu (it reads c.serviceRoutes).
 func (c *SnapshotCache) routeBackendsLocked(service string, set map[string]struct{}) {

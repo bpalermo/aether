@@ -53,6 +53,7 @@ go_test(
     name = "cache_test",
     srcs = [
         "cache_test.go",
+        "capture_test.go",
         "cluster_alias_test.go",
         "cluster_test.go",
         "dependencies_test.go",

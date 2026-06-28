@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/bpalermo/aether/common/serviceref"
@@ -30,6 +31,11 @@ import (
 // RouteSink receives the projected per-service GAMMA rules (the snapshot cache).
 type RouteSink interface {
 	SetServiceRoutes(routes map[string][]proxy.GammaRoute)
+	// SetRouteTargetPorts receives the real Service port(s) of each route target
+	// (proposal 023 M2), keyed by the same "<ns>/<svc>" route-target key as
+	// SetServiceRoutes. Sourced from the HTTPRoute/GRPCRoute parentRef port; lets the
+	// cap_http vhost host-match a client dialing the target's REAL port.
+	SetRouteTargetPorts(ports map[string][]uint32)
 }
 
 // Reconciler watches HTTPRoutes (parentRef=Service) cluster-wide and projects, on
@@ -86,24 +92,50 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	grants := grantList.Items
 
 	routes := map[string][]proxy.GammaRoute{}
+	// routeTargetPorts: the real Service port(s) each route target is addressed on
+	// (proposal 023 M2), accumulated from the parentRef ports. A target may be
+	// addressed on several ports across routes; collect the distinct set.
+	portSets := map[string]map[uint32]struct{}{}
+	collectPort := func(key string, port uint32) {
+		if port == 0 {
+			return
+		}
+		if portSets[key] == nil {
+			portSets[key] = map[uint32]struct{}{}
+		}
+		portSets[key][port] = struct{}{}
+	}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
-		for _, svc := range serviceParents(hr.Spec.ParentRefs, hr.Namespace) {
+		for _, p := range serviceParents(hr.Spec.ParentRefs, hr.Namespace) {
+			collectPort(p.Key, p.Port)
 			for _, rule := range hr.Spec.Rules {
-				routes[svc] = append(routes[svc], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants))
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants))
 			}
 		}
 	}
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
-		for _, svc := range serviceParents(gr.Spec.ParentRefs, gr.Namespace) {
+		for _, p := range serviceParents(gr.Spec.ParentRefs, gr.Namespace) {
+			collectPort(p.Key, p.Port)
 			for _, rule := range gr.Spec.Rules {
-				routes[svc] = append(routes[svc], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants))
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants))
 			}
 		}
 	}
 
+	routeTargetPorts := make(map[string][]uint32, len(portSets))
+	for key, set := range portSets {
+		ports := make([]uint32, 0, len(set))
+		for p := range set {
+			ports = append(ports, p)
+		}
+		slices.Sort(ports) // stable order so the cache's change-detection is deterministic
+		routeTargetPorts[key] = ports
+	}
+
 	r.Sink.SetServiceRoutes(routes)
+	r.Sink.SetRouteTargetPorts(routeTargetPorts)
 	r.Log.DebugContext(ctx, "projected gamma service routes",
 		"httpRoutes", len(httpList.Items), "grpcRoutes", len(grpcList.Items), "services", len(routes))
 
@@ -254,13 +286,21 @@ func grpcBackendRefs(rules []gatewayv1.GRPCRouteRule) []gatewayv1.BackendObjectR
 	return refs
 }
 
-// serviceParents returns the names of the Services these parentRefs attach to
-// (kind=Service, core group). Shared by HTTPRoute and GRPCRoute.
-// serviceParents returns the namespace-qualified "<ns>/<svc>" keys of the Service
-// parentRefs (020 Part 1). A parentRef without an explicit namespace inherits the
-// route's namespace (Gateway API default).
-func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []string {
-	var svcs []string
+// serviceParent is a resolved Service parentRef: its namespace-qualified "<ns>/<svc>"
+// route-target key plus the real Service port the route attaches on (0 when the
+// parentRef omits a port). Port feeds the route target's cap_http vhost domains so a
+// client dialing the target's REAL port host-matches (proposal 023 M2).
+type serviceParent struct {
+	Key  string
+	Port uint32
+}
+
+// serviceParents returns the Service parentRefs these refs attach to (kind=Service,
+// core group), as namespace-qualified "<ns>/<svc>" keys plus the attached port (020
+// Part 1, 023 M2). A parentRef without an explicit namespace inherits the route's
+// namespace (Gateway API default). Shared by HTTPRoute and GRPCRoute.
+func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []serviceParent {
+	var parents []serviceParent
 	for _, p := range refs {
 		if p.Group != nil && string(*p.Group) != "" {
 			continue
@@ -272,9 +312,16 @@ func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []s
 		if p.Namespace != nil && string(*p.Namespace) != "" {
 			ns = string(*p.Namespace)
 		}
-		svcs = append(svcs, serviceref.New(ns, string(p.Name)).Key())
+		var port uint32
+		if p.Port != nil {
+			port = uint32(*p.Port)
+		}
+		parents = append(parents, serviceParent{
+			Key:  serviceref.New(ns, string(p.Name)).Key(),
+			Port: port,
+		})
 	}
-	return svcs
+	return parents
 }
 
 func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.GammaRoute {
