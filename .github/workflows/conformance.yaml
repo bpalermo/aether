@@ -139,8 +139,10 @@ jobs:
           # helm/the API reject them. Substitute valid values for the in-cluster install.
           sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
           img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+          # No --create-namespace: the chart templates the aether-system (and edge)
+          # namespaces itself, so helm creating it too would collide ("already exists").
           helm install aether charts/aether \
-            --namespace aether-system --create-namespace \
+            --namespace aether-system \
             --set spire.enabled=false \
             --set edge.enabled=true \
             $(img agent agent) \
