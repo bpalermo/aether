@@ -21,6 +21,16 @@ const (
 	// backend pods. This is a known limitation of the UDP floor — see proposal
 	// 018 Phase 3b.
 	ProxyCapturePort = 18001
+	// CapturePassthroughFwMark is the netfilter fwmark Envoy stamps (via SO_MARK on
+	// the passthrough_original_dst cluster's upstream sockets) on connections it
+	// forwards out of the redirect-all capture (proposal 022, M2-default). The CNI
+	// matches this mark with a `meta mark → RETURN` rule ahead of the redirect, so
+	// the proxy's OWN forwarded egress is never re-captured into a loop. SO_MARK
+	// (not a UID match) is used because the proxy runs as root — a UID rule would
+	// wrongly exempt any root-running app pod. Distinct from Istio's 1337 so the two
+	// meshes' marks don't collide if they share a node. Requires CAP_NET_ADMIN
+	// (the agent/proxy container has it).
+	CapturePassthroughFwMark = 0xae7e
 	// ProxyDNSResolverPort is the host port the node agent's in-process mesh-DNS
 	// resolver listens on (UDP+TCP) at HOST_IP (proposal 018, mesh-global FQDN). The
 	// CNI DNATs each pod's outbound :53 straight to HOST_IP:ProxyDNSResolverPort. In

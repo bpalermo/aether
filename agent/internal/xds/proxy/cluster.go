@@ -210,6 +210,13 @@ func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
 // original_dst listener filter, so no endpoint configuration is needed.
 const PassthroughClusterName = "passthrough_original_dst"
 
+// Linux socket-option numbers for the passthrough SO_MARK (proposal 022,
+// M2-default). Stable POSIX/Linux values; the data plane is Linux-only.
+const (
+	solSocket = 1  // SOL_SOCKET
+	soMark    = 36 // SO_MARK
+)
+
 // NewPassthroughOriginalDstCluster builds an ORIGINAL_DST cluster for the
 // redirect-all capture passthrough path (proposal 022, M2a spike).
 //
@@ -244,6 +251,22 @@ func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
 		LbPolicy:                      clusterv3.Cluster_CLUSTER_PROVIDED,
 		ConnectTimeout:                durationpb.New(2 * time.Second),
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		// SO_MARK the passthrough's upstream sockets (proposal 022, M2-default): the
+		// CNI redirect-all rule RETURNs connections carrying CapturePassthroughFwMark
+		// ahead of the redirect, so the proxy's OWN forwarded egress is never
+		// re-captured into a loop. Only socket_options is set (no source_address) so
+		// the bind address/netns are unchanged. STATE_PREBIND applies the mark before
+		// connect. Harmless if the passthrough egresses proxy-side (the mark just
+		// never matches a pod-netns rule); the safety net for when it does not.
+		UpstreamBindConfig: &corev3.BindConfig{
+			SocketOptions: []*corev3.SocketOption{{
+				Description: "aether passthrough fwmark (CNI redirect-all self-exclusion)",
+				Level:       solSocket,
+				Name:        soMark,
+				Value:       &corev3.SocketOption_IntValue{IntValue: constants.CapturePassthroughFwMark},
+				State:       corev3.SocketOption_STATE_PREBIND,
+			}},
+		},
 		// No TypedExtensionProtocolOptions: passthrough is plain TCP.
 		// No TransportSocket: plaintext — mesh mTLS does NOT apply here.
 		// No LbSubsetConfig / OutlierDetection: single-connection, no pool.
