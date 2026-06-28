@@ -9,6 +9,7 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/constants",
         "//common/log",
+        "//common/serviceref",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_sigs_controller_runtime//pkg/client",
     ],

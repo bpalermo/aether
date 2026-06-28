@@ -87,7 +87,7 @@ func TestRegisterEndpoint(t *testing.T) {
 	}{
 		{
 			name:     "no-op returns nil",
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.0.0.1",
@@ -99,7 +99,7 @@ func TestRegisterEndpoint(t *testing.T) {
 		},
 		{
 			name:     "nil endpoint returns nil",
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_UNSPECIFIED,
 			endpoint: nil,
 			wantErr:  false,
@@ -166,19 +166,19 @@ func TestUnregisterEndpoints(t *testing.T) {
 	}{
 		{
 			name:        "no-op returns nil for multiple addresses",
-			service:     "my-service",
+			service:     "default/my-service",
 			ipAddresses: []string{"10.0.0.1", "10.0.0.2"},
 			wantErr:     false,
 		},
 		{
 			name:        "no-op returns nil for empty slice",
-			service:     "my-service",
+			service:     "default/my-service",
 			ipAddresses: []string{},
 			wantErr:     false,
 		},
 		{
 			name:        "no-op returns nil for nil slice",
-			service:     "my-service",
+			service:     "default/my-service",
 			ipAddresses: nil,
 			wantErr:     false,
 		},
@@ -213,7 +213,7 @@ func TestListEndpoints(t *testing.T) {
 			name:        "no pods returns empty slice",
 			clusterName: "test-cluster",
 			objects:     nil,
-			service:     "my-service",
+			service:     "default/my-service",
 			protocol:    registryv1.Service_PROTOCOL_HTTP,
 			expected:    nil,
 			wantErr:     false,
@@ -225,7 +225,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -258,7 +258,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -288,7 +288,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "other-service", "10.0.0.1", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -304,7 +304,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -316,7 +316,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "my-service", "", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -332,7 +332,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -348,7 +348,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -381,7 +381,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -415,7 +415,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -451,7 +451,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -485,7 +485,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			// The pod is skipped (error logged, not propagated), so no endpoints are returned.
 			expected: nil,
@@ -502,7 +502,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -514,7 +514,7 @@ func TestListEndpoints(t *testing.T) {
 				// Pod references node-1 but the node is not in the fake client.
 				managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  true,
@@ -532,7 +532,7 @@ func TestListEndpoints(t *testing.T) {
 					},
 				},
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -563,7 +563,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-c", "default", "other-service", "10.0.0.3", "node-1"),
 				topologyNode("node-1", "eu-west-1", "eu-west-1b"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -646,7 +646,7 @@ func TestListAllEndpoints(t *testing.T) {
 			},
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {
+				"default/svc-a": {
 					{
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
@@ -678,7 +678,7 @@ func TestListAllEndpoints(t *testing.T) {
 			},
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {
+				"default/svc-a": {
 					{
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
@@ -712,7 +712,7 @@ func TestListAllEndpoints(t *testing.T) {
 						},
 					},
 				},
-				"svc-b": {
+				"default/svc-b": {
 					{
 						Ip:          "10.0.0.2",
 						ClusterName: "test-cluster",
@@ -809,7 +809,7 @@ func TestListAllEndpoints(t *testing.T) {
 			},
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {
+				"default/svc-a": {
 					{
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
@@ -861,6 +861,34 @@ func TestListAllEndpoints(t *testing.T) {
 			assert.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+// TestListAllEndpoints_SameSANamespaceIsolation is the regression guard for the
+// 020 keying bug: two pods sharing a ServiceAccount name across DIFFERENT
+// namespaces must produce TWO distinct "<ns>/<sa>" keys, not collide under the
+// bare SA. The collision merged their endpoint sets into one entry whose ordering
+// then oscillated and churned the agent's xDS snapshot (the MESH-HTTP MeshFrontend
+// flap). Matches the namespace-qualified keying of the CNI/etcd/ddb paths.
+func TestListAllEndpoints_SameSANamespaceIsolation(t *testing.T) {
+	r := newTestRegistry("c",
+		managedPod("echo-a", "team-a", "echo-v1", "10.0.0.1", "node-1"),
+		managedPod("echo-b", "team-b", "echo-v1", "10.0.0.2", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+
+	got, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "same SA in two namespaces must not collide into one key")
+	require.Len(t, got["team-a/echo-v1"], 1)
+	assert.Equal(t, "10.0.0.1", got["team-a/echo-v1"][0].GetIp())
+	require.Len(t, got["team-b/echo-v1"], 1)
+	assert.Equal(t, "10.0.0.2", got["team-b/echo-v1"][0].GetIp())
+
+	// The single-service read isolates by namespace too (matches by "<ns>/<sa>").
+	epsA, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, epsA, 1)
+	assert.Equal(t, "10.0.0.1", epsA[0].GetIp())
 }
 
 // ─── Annotation parsing helpers (unit-level) ─────────────────────────────────
