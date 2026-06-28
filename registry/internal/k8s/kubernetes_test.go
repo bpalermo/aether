@@ -13,6 +13,7 @@ import (
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	"github.com/bpalermo/aether/registry/registrytest"
 )
 
 // newTestRegistry constructs a KubernetesRegistry wired to a fake client built
@@ -859,6 +860,8 @@ func TestListAllEndpoints(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
+			// Shared cross-backend contract: keys must be namespace-qualified.
+			registrytest.RequireNamespaceQualifiedKeys(t, got)
 		})
 	}
 }
