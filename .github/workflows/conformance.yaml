@@ -110,7 +110,9 @@ jobs:
       # The CRDs are a SEPARATE chart (charts/crds); install it first.
       - name: Install aether CRDs (MeshConfig)
         run: |
-          sed -i 's/{GIT_COMMIT}/conformance/' charts/crds/Chart.yaml
+          # Substitute BOTH publish-time placeholders (version {GIT_COMMIT} + appVersion
+          # {STABLE_GIT_VERSION}, the latter rendered into the version label).
+          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/crds/Chart.yaml
           # CRDs are cluster-scoped — install the release into `default` so it does not
           # own (and conflict on) the aether-system namespace the aether release creates.
           helm install aether-crds charts/crds \
@@ -132,9 +134,10 @@ jobs:
       # (IfNotPresent), not Never.
       - name: Install aether (edge, no SPIRE)
         run: |
-          # The chart version carries a publish-time {GIT_COMMIT} placeholder that helm
-          # rejects; substitute a valid version for the in-cluster install.
-          sed -i 's/{GIT_COMMIT}/conformance/' charts/aether/Chart.yaml
+          # The chart carries publish-time placeholders (version {GIT_COMMIT} +
+          # appVersion {STABLE_GIT_VERSION}, the latter rendered into the version label);
+          # helm/the API reject them. Substitute valid values for the in-cluster install.
+          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
           img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
           helm install aether charts/aether \
             --namespace aether-system --create-namespace \
