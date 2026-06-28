@@ -408,6 +408,12 @@ controller:
   # list — without it, musl/Alpine clients fail to resolve mesh names. Scoped to
   # aether.io/managed pods, failurePolicy=Ignore. Default ON; pairs with mesh DNS.
   injectPodNdots: true
+  # Namespace auto-injection (Istio-style): a pod created in a namespace labeled
+  # aether.io/managed=true is given the aether.io/managed=true POD label by the
+  # pod-mutating webhook, so the CNI meshes it without a per-pod label. A pod that
+  # sets aether.io/managed=false opts out. Only acts on explicitly-labeled
+  # namespaces (no-op otherwise), failurePolicy=Ignore. Default ON.
+  namespaceInjection: true
   webhook:
     # Webhook serving cert source — DECOUPLED from mesh SPIRE (spire.enabled).
     #   false (default): a Helm self-signed cert (genSignedCert, caBundle baked
