@@ -268,3 +268,172 @@ jobs:
       - name: Cleanup
         if: always()
         run: kind delete cluster --name "${KIND_CLUSTER}" || true
+
+  # --- MESH-HTTP (east-west GAMMA) conformance ---
+  # Unlike GATEWAY-HTTP (edge-only, never touches the mesh data path), this job
+  # exercises the FULL mesh path on kind: the agent DaemonSet + CNI capture each echo
+  # pod's egress (redirect-all) and the agent routes it through the cap_http GAMMA
+  # tables (proposals 018/022/023) to the per-version backends. SPIRE is off, so the
+  # mesh hop is CLEARTEXT — the per-pod inbound listener degrades to a no-mTLS HCM
+  # chain symmetric with the cleartext outbound clusters (the suite asserts routing
+  # correctness, not mTLS). Soft (continue-on-error) until the score is green; do not
+  # let it regress the GATEWAY-HTTP gate. Runs in its own kind cluster so the two jobs
+  # don't collide.
+  mesh-http:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KIND_CLUSTER: aether-conformance-mesh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+
+      # Build + load the same four aether images as GATEWAY-HTTP. The mesh path needs
+      # the agent (xDS + per-pod listeners), cni-install (capture redirect), registrar
+      # (selectorless mesh Services / endpoint stream), and controller (namespace
+      # injection webhook + MeshConfig projection).
+      - name: Build and load container images
+        run: |
+          retry() { for n in 1 2 3; do "$@" && return 0; echo "attempt $n failed; retrying in 20s"; sleep 20; done; return 1; }
+          for t in //agent/cmd/agent:image_load //cni/cmd/cni-install:image_load \
+                   //registrar/cmd/registrar:image_load //controller/cmd/controller:image_load; do
+            retry bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} "$t"
+          done
+
+      - name: Setup kind
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: aether-conformance-mesh
+
+      - name: Load images into kind
+        run: |
+          for img in agent:latest cni-install:latest registrar:latest controller:latest; do
+            kind load docker-image "ghcr.io/bpalermo/aether/${img}" --name "${KIND_CLUSTER}"
+          done
+
+      # Experimental Gateway API CRDs (the controller/agent watch the v1alpha2 routes;
+      # the standard channel omits them → crash-loop). Same install as GATEWAY-HTTP.
+      - name: Install Gateway API CRDs
+        run: |
+          kubectl apply --server-side --force-conflicts -f \
+            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
+          kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
+          kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
+
+      - name: Install aether CRDs (MeshConfig)
+        run: |
+          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/crds/Chart.yaml
+          helm install aether-crds charts/crds \
+            --namespace default --wait --timeout 2m
+          kubectl wait --for=condition=Established crd/meshconfigs.config.aether.io --timeout=60s
+
+      # Install aether with the MESH path on and SPIRE off. spire.enabled=false flips
+      # the agent's cleartext-mesh mode (no SVID/SDS → cleartext inbound listener,
+      # already-cleartext outbound). agent.gamma=true turns on the GAMMA reconciler
+      # (HTTPRoute parentRef=Service → cap_http route tables). agent.captureRedirectAll
+      # =true adds the ORIGINAL_DST passthrough so redirect-all'd pods (the overlay
+      # annotates the echo pods) capture their real Service ClusterIP:port — the route
+      # target's real port (proposal 023 M2). transparentCapture / generateMeshServices
+      # / namespaceInjection / injectPodNdots are chart defaults (on). The edge is not
+      # needed east-west, so leave it off.
+      - name: Install aether (mesh, no SPIRE)
+        run: |
+          sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
+          img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+          helm install aether charts/aether \
+            --namespace aether-system --create-namespace \
+            --set namespace.create=false \
+            --set spire.enabled=false \
+            --set agent.gamma=true \
+            --set agent.captureRedirectAll=true \
+            $(img agent agent) \
+            $(img cniInstall cni-install) \
+            $(img registrar registrar) \
+            $(img controller controller) \
+            --set proxy.image.pullPolicy=IfNotPresent
+          kubectl get gatewayclass aether -o yaml || true
+
+      # The mesh path needs the agent DaemonSet (per-pod listeners + capture), the
+      # registrar (endpoint stream + mesh Services), and the controller (namespace
+      # injection webhook). Gate on all three before running the suite.
+      - name: Wait for mesh control plane to be Ready
+        run: |
+          kubectl rollout status daemonset/aether-agent -n aether-system --timeout=5m || {
+            echo "agent DaemonSet not ready; cluster state:"; kubectl get pods -A -o wide; exit 1;
+          }
+          kubectl rollout status deploy/aether-registrar -n aether-system --timeout=3m || \
+            echo "registrar not Ready; continuing (may still converge)"
+          kubectl rollout status deploy/aether-controller -n aether-system --timeout=3m || \
+            echo "controller not Ready; continuing (namespace injection may be degraded)"
+
+      - name: Check out gateway-api @ suite version
+        uses: actions/checkout@v6
+        with:
+          repository: kubernetes-sigs/gateway-api
+          ref: ${{ env.GATEWAY_API_VERSION }}
+          path: gateway-api
+
+      - name: Drop in the aether runner + mesh overlay
+        run: |
+          cp test/conformance/conformance_test.go \
+            gateway-api/conformance/aether_conformance_test.go
+          cp test/conformance/mesh/manifests.yaml \
+            gateway-api/conformance/mesh/manifests.yaml
+
+      # Always soft: MESH-HTTP is not green yet. The runner records per-test results in
+      # the report (always written + uploaded) and does not fail the test on a Run
+      # error, so the real score is reported regardless. continue-on-error keeps a
+      # failure from marking the workflow red while the score is being driven up.
+      - name: Run MESH-HTTP conformance
+        id: conformance
+        working-directory: gateway-api/conformance
+        continue-on-error: true
+        env:
+          AETHER_CONFORMANCE: "1"
+          AETHER_CONFORMANCE_REPORT: ${{ runner.temp }}/mesh-http-report.yaml
+        run: |
+          go test . \
+            -tags conformance \
+            -run TestAetherMeshHTTP \
+            -v -timeout 40m
+
+      - name: Upload conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-http-conformance-report
+          path: ${{ runner.temp }}/mesh-http-report.yaml
+          if-no-files-found: warn
+
+      - name: Collect logs on failure
+        if: always()
+        run: |
+          mkdir -p /tmp/mesh-conformance-logs
+          kind export logs /tmp/mesh-conformance-logs --name "${KIND_CLUSTER}" || true
+          echo "=== all pods ==="
+          kubectl get pods -A -o wide || true
+          echo "=== mesh conformance namespaces ==="
+          for ns in gateway-conformance-mesh gateway-conformance-mesh-consumer; do
+            echo "--- $ns ---"
+            kubectl get pods,httproutes,svc,sa -n "$ns" -o wide || true
+          done
+          echo "=== agent / registrar / controller logs ==="
+          kubectl logs -n aether-system daemonset/aether-agent --all-containers --tail=200 || true
+          for d in registrar controller; do kubectl logs -n aether-system deploy/aether-$d --all-containers --tail=120 || true; done
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-conformance-logs
+          path: /tmp/mesh-conformance-logs
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER}" || true

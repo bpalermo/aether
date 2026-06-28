@@ -70,6 +70,18 @@ func NodeBootstrapJSON() ([]byte, error) {
 	return marshalBootstrap(bs)
 }
 
+// NodeCleartextBootstrapJSON builds the SPIRE-off (cleartext) node-proxy bootstrap
+// and returns its JSON. It exercises the cleartext inbound listener — a single
+// default HCM chain with no downstream mTLS transport socket — so the offline
+// `envoy --mode validate` gate covers the MESH-HTTP-on-kind path, not just mTLS.
+func NodeCleartextBootstrapJSON() ([]byte, error) {
+	bs, err := buildNodeCleartextBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
 // CaptureBootstrapJSON builds the transparent-capture bootstrap config and
 // returns its JSON representation.
 func CaptureBootstrapJSON() ([]byte, error) {
@@ -94,9 +106,30 @@ func EdgeBootstrapJSON() ([]byte, error) {
 func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false)
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false)
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod: %w", err)
+	}
+
+	passthrough := proxy.NewPassthroughOriginalDstCluster()
+	svcCluster := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
+
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster}
+	staticClusters = append(staticClusters, appClusters...)
+	staticClusters = append(staticClusters, healthCluster)
+
+	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound}), nil
+}
+
+// buildNodeCleartextBootstrap builds the node-proxy bootstrap with SPIRE off: the
+// inbound listener is generated cleartext (last arg true), so the validated config
+// has no SDS-backed downstream transport socket on the inbound chain.
+func buildNodeCleartextBootstrap() (*bootstrapv3.Bootstrap, error) {
+	pod := testPod()
+
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, true)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateListenersFromRegistryPod (cleartext): %w", err)
 	}
 
 	passthrough := proxy.NewPassthroughOriginalDstCluster()

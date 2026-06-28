@@ -89,6 +89,17 @@ type SnapshotCache struct {
 	// on every listener build.
 	emitStatsPod bool
 
+	// spireEnabled reports whether SPIRE-backed mTLS is on for the mesh. It is
+	// true by default (the production posture). When false (--spire-enabled=false)
+	// no SVIDs are issued and the SPIRE bridge never delivers SDS secrets, so the
+	// per-pod inbound listener (:15008) is built CLEARTEXT — without a downstream
+	// mTLS transport socket — to stay symmetric with the outbound clusters, which
+	// already degrade to cleartext when no node SVID is set (clustersEndpointsAndVhosts).
+	// This makes the mesh data path routable without SPIRE (e.g. the MESH-HTTP
+	// conformance run on kind, which asserts routing correctness, not mTLS). Set
+	// once before the manager starts (SetSpireEnabled); read without locking.
+	spireEnabled bool
+
 	// edge marks this cache as backing an edge (north-south ingress) proxy
 	// rather than a node proxy. In edge mode the snapshot carries a single
 	// public-facing listener (no per-pod inbound/outbound or health gateway),
@@ -336,6 +347,9 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		nodeName:      nodeName,
 		meshDomain:    constants.DefaultMeshDomain,
 		metrics:       metrics,
+		// Default to the production posture: SPIRE-backed mTLS on. The agent flips
+		// this off (SetSpireEnabled(false)) only when --spire-enabled=false.
+		spireEnabled: true,
 		// Initialize the resource maps up front so callers never assign to a nil
 		// map. LoadListenersFromStorage assigns directly (no lazy init), which
 		// panics on agent restart when pods already exist in local storage.
@@ -399,6 +413,15 @@ func (c *SnapshotCache) MeshDomain() string {
 // is read without locking on every listener build.
 func (c *SnapshotCache) SetEmitStatsPod(enabled bool) {
 	c.emitStatsPod = enabled
+}
+
+// SetSpireEnabled records whether SPIRE-backed mTLS is on. The agent calls this
+// with cfg.SpireEnabled before the manager starts. When false the per-pod inbound
+// listener is built cleartext (no downstream mTLS transport socket), matching the
+// outbound clusters, which already go cleartext without a node SVID — so the mesh
+// data path is routable with SPIRE off. Read without locking on every listener build.
+func (c *SnapshotCache) SetSpireEnabled(enabled bool) {
+	c.spireEnabled = enabled
 }
 
 // SetEdgeMode switches the cache to edge (north-south ingress) snapshot

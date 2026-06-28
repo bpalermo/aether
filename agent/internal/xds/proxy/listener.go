@@ -42,8 +42,11 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 // appClusters is one per served port (the SNI-selected inbound chains forward
 // to these); healthCluster is the single delegated-liveness probe on the
 // primary port.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
-	inbound, err = NewInboundListener(cniPod, trustDomain, emitStatsPod)
+// cleartext (SPIRE off) builds the inbound listener without a downstream mTLS
+// transport socket — symmetric with the cleartext outbound clusters — so the mesh
+// data path is routable without SPIRE.
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+	inbound, err = NewInboundListener(cniPod, trustDomain, emitStatsPod, cleartext)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
