@@ -382,6 +382,11 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	// default client path (mesh-DNS), so the same L7 vocabulary the outbound listener
 	// applies must apply here; no rules = passthrough to the service cluster.
 	gammaRoutes := c.serviceRoutesSnapshot()
+	// Real Service port(s) of each route target (proposal 023 M2): a client dials the
+	// route target on its REAL port (e.g. echo:8080), and Envoy includes the port in
+	// vhost host-matching — so the vhost must carry a "<fqdn>:<realPort>" domain, not
+	// just the mesh :18081 spelling, or the request 404s.
+	routeTargetPorts := c.routeTargetPortsSnapshot()
 
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
@@ -418,10 +423,25 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		}
 		fqdn := ref.ClusterLocalFQDN()
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, []string{
+		domains := []string{
 			fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
 			mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
-		}, gammaRoutes[svc]))
+		}
+		// proposal 023 M2: also match the route target's REAL Service port(s), the
+		// authority a client actually presents when dialing the captured ClusterIP:port
+		// (echo:8080) rather than the mesh :18081. Emit both the cluster.local and the
+		// mesh-name spellings at each real port so the request host-matches regardless
+		// of which name the client used.
+		for _, p := range routeTargetPorts[svc] {
+			if p == 0 || p == constants.ProxyOutboundPort {
+				continue // 0 = unset; :18081 already emitted above.
+			}
+			domains = append(domains,
+				fmt.Sprintf("%s:%d", fqdn, p),
+				fmt.Sprintf("%s:%d", mesh, p),
+			)
+		}
+		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc]))
 	}
 	return vhosts
 }

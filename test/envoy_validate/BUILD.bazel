@@ -26,6 +26,8 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
         "@org_golang_google_protobuf//encoding/protojson",

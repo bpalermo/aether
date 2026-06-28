@@ -23,9 +23,13 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
-type fakeSink struct{ routes map[string][]proxy.GammaRoute }
+type fakeSink struct {
+	routes map[string][]proxy.GammaRoute
+	ports  map[string][]uint32
+}
 
 func (f *fakeSink) SetServiceRoutes(r map[string][]proxy.GammaRoute) { f.routes = r }
+func (f *fakeSink) SetRouteTargetPorts(p map[string][]uint32)        { f.ports = p }
 
 func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -103,6 +107,42 @@ func TestReconcile_BackendRefsResolvedByName(t *testing.T) {
 	acc := meta.FindStatusCondition(got.Status.Parents[0].Conditions, string(gatewayv1.RouteConditionAccepted))
 	require.NotNil(t, acc)
 	assert.Equal(t, metav1.ConditionTrue, acc.Status)
+}
+
+// Reconcile projects the route target's parentRef port into routeTargetPorts
+// (proposal 023 M2) so the cap_http vhost can host-match the target's REAL port.
+func TestReconcile_ProjectsRouteTargetPorts(t *testing.T) {
+	hr := httpRoute("r1", "ns", "echo", "echo-v1")
+	hr.Spec.ParentRefs[0].Port = ptr(gatewayv1.PortNumber(8080))
+	sink := &fakeSink{}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithObjects(hr).
+		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
+		Build()
+	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "mesh", Log: slog.Default()}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string][]uint32{"ns/echo": {8080}}, sink.ports,
+		"the route target's parentRef port is projected as a real Service port")
+}
+
+// A parentRef with no port projects no port entry for the target (M1 fallback).
+func TestReconcile_RouteTargetNoPort(t *testing.T) {
+	hr := httpRoute("r1", "ns", "echo", "echo-v1") // parentRef has no Port
+	sink := &fakeSink{}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithObjects(hr).
+		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
+		Build()
+	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "mesh", Log: slog.Default()}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	_, has := sink.ports["ns/echo"]
+	assert.False(t, has, "no port entry when the parentRef omits a port")
 }
 
 // backendsResolve validates the backendRef shape (aether resolves by name via the
@@ -184,14 +224,18 @@ func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
 func TestServiceParents(t *testing.T) {
 	hr := &gatewayv1.HTTPRoute{Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
 		ParentRefs: []gatewayv1.ParentReference{
-			{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-1"},
-			{Kind: ptr(gatewayv1.Kind("Gateway")), Name: "edge"}, // ignored
+			{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-1", Port: ptr(gatewayv1.PortNumber(8080))},
+			{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-2"}, // no port → 0
+			{Kind: ptr(gatewayv1.Kind("Gateway")), Name: "edge"},  // ignored
 			{Name: "no-kind"}, // no kind → ignored
 		},
 	}}}
 	// 020 Part 1: parentRef without a namespace inherits the route's namespace,
-	// and the key is "<ns>/<svc>".
-	assert.Equal(t, []string{"team-a/svc-1"}, serviceParents(hr.Spec.ParentRefs, "team-a"))
+	// and the key is "<ns>/<svc>". 023 M2: the parentRef port rides along.
+	assert.Equal(t, []serviceParent{
+		{Key: "team-a/svc-1", Port: 8080},
+		{Key: "team-a/svc-2", Port: 0},
+	}, serviceParents(hr.Spec.ParentRefs, "team-a"))
 }
 
 // TestBuildGammaRoute: matches → GammaMatch, weighted backendRefs → GammaBackend

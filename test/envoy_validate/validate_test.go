@@ -127,6 +127,7 @@ func TestEnvoyValidate(t *testing.T) {
 	}{
 		{"node_bootstrap.json", NodeBootstrapJSON},
 		{"capture_bootstrap.json", CaptureBootstrapJSON},
+		{"capture_route_target_bootstrap.json", CaptureRouteTargetBootstrapJSON},
 		{"edge_bootstrap.json", EdgeBootstrapJSON},
 	}
 

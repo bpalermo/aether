@@ -173,6 +173,14 @@ type SnapshotCache struct {
 	// dependency set so their EDS clusters generate; the per-service outbound vhost
 	// is enriched with the rules. Guarded by depMu (dependency state).
 	serviceRoutes map[string][]proxy.GammaRoute
+	// routeTargetPorts holds the real Service port(s) of each GAMMA route TARGET
+	// (proposal 023 M2), keyed by the same "<ns>/<svc>" route-target key as
+	// serviceRoutes. Sourced from the HTTPRoute/GRPCRoute parentRef port. captureVhosts
+	// emits a "<svc>.<ns>.svc.cluster.local:<port>" domain for each so a client dialing
+	// the route target's REAL port (not the mesh :18081) host-matches the vhost. Empty
+	// for a route target whose parentRefs declare no port (then only the portless +
+	// mesh :18081 spellings are emitted, as before). Guarded by depMu.
+	routeTargetPorts map[string][]uint32
 	// tcpServiceRoutes holds the TCPRoute L4 rules (parentRef=Service, proposal 018
 	// Phase 3b), keyed by the parent service. Empty unless --l4-routes is enabled.
 	// Guarded by depMu (same lock as serviceRoutes: dependency state).
@@ -339,6 +347,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		observedDeps:       make(map[string]time.Time),
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),
+		routeTargetPorts:   make(map[string][]uint32),
 		tcpServiceRoutes:   make(map[string][]proxy.L4ServiceRoute),
 		tlsServiceRoutes:   make(map[string][]proxy.L4ServiceRoute),
 		udpServiceRoutes:   make(map[string][]proxy.L4Backend),

@@ -26,6 +26,8 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -134,6 +136,93 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	return newBootstrap(
 		[]*clusterv3.Cluster{xdsCluster(), passthrough, httpSvc, tcpSvc2},
 		[]*listenerv3.Listener{captureListener},
+	), nil
+}
+
+// CaptureRouteTargetBootstrapJSON builds a bootstrap whose listener inlines the
+// cap_http RouteConfiguration for a GAMMA route TARGET addressed on its REAL
+// Service port (proposal 023 M2): the vhost carries
+// "<svc>.<ns>.svc.cluster.local:<realPort>" domains and the GAMMA rules route to
+// SA-backed backend clusters. Validating it through "envoy --mode validate" proves
+// the M2 route table (real-port domains + path-based GAMMA action) is structurally
+// accepted, complementing the Go-level captureVhosts unit test.
+func CaptureRouteTargetBootstrapJSON() ([]byte, error) {
+	bs, err := buildCaptureRouteTargetBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+// buildCaptureRouteTargetBootstrap assembles the M2 route-target capture config.
+func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
+	const (
+		targetMesh = "echo.team-a." + meshDomain
+		v1Cluster  = "echo-v1.team-a." + meshDomain
+		v2Cluster  = "echo-v2.team-a." + meshDomain
+		fqdn       = "echo.team-a.svc.cluster.local"
+		realPort   = 8080
+	)
+
+	// The route target's GAMMA rules: /v2 -> echo-v2, / -> echo-v1, plus a header
+	// modifier on the fallback (mirrors the conformance shape).
+	rules := []proxy.GammaRoute{
+		{
+			Matches:  []proxy.GammaMatch{{Prefix: "/v2"}},
+			Backends: []proxy.GammaBackend{{Service: "team-a/echo-v2", Cluster: v2Cluster, Weight: 1}},
+		},
+		{
+			Matches:        []proxy.GammaMatch{{Prefix: "/"}},
+			Backends:       []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: v1Cluster, Weight: 1}},
+			HeaderMutation: &proxy.GammaHeaderMutation{SetRequest: []proxy.GammaHeaderKV{{Name: "x-aether-route", Value: "echo-v1"}}},
+		},
+	}
+	// Real-port domains (M2) + portless + mesh-name spellings, the exact set
+	// captureVhosts emits for a route target with port 8080.
+	domains := []string{
+		fqdn, fmt.Sprintf("%s:18081", fqdn),
+		targetMesh, fmt.Sprintf("%s:18081", targetMesh),
+		fmt.Sprintf("%s:%d", fqdn, realPort),
+		fmt.Sprintf("%s:%d", targetMesh, realPort),
+	}
+	vhost := proxy.BuildOutboundServiceVirtualHost(targetMesh, domains, rules)
+	routeCfg := proxy.BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vhost}, meshDomain)
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{
+		StatPrefix: "cap_http_validate",
+		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{
+			RouteConfig: routeCfg,
+		},
+		HttpFilters: []*http_connection_managerv3.HttpFilter{{
+			Name: "envoy.filters.http.router",
+			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{
+				TypedConfig: mustAny(&routerv3.Router{}),
+			},
+		}},
+	}
+	listener := &listenerv3.Listener{
+		Name: "cap_http_validate",
+		Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+			Address:       "127.0.0.1",
+			PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 15011},
+		}}},
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: mustAny(hcm)},
+			}},
+		}},
+	}
+
+	// The backend clusters the GAMMA rules reference (SA-backed, mTLS) plus the
+	// route target's own mesh cluster (trailing default route falls back to it).
+	target := newServiceCluster(targetMesh, trustDomain, "team-a", "echo")
+	v1 := newServiceCluster(v1Cluster, trustDomain, "team-a", "echo-v1")
+	v2 := newServiceCluster(v2Cluster, trustDomain, "team-a", "echo-v2")
+
+	return newBootstrap(
+		[]*clusterv3.Cluster{xdsCluster(), target, v1, v2},
+		[]*listenerv3.Listener{listener},
 	), nil
 }
 
