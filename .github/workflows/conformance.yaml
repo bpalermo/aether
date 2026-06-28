@@ -31,8 +31,8 @@ name: conformance
 on:
   workflow_dispatch:
     inputs:
-      gate:
-        description: "Fail the job on a conformance failure (flip once validated)"
+      soft:
+        description: "Don't fail the job on a conformance failure (debugging only; default is a hard gate)"
         type: boolean
         default: false
   schedule:
@@ -214,9 +214,10 @@ jobs:
       - name: Run GATEWAY-HTTP conformance
         id: conformance
         working-directory: gateway-api/conformance
-        # Aspirational until a workflow_dispatch run proves the edge install + LB
-        # addressing on kind; flip to a hard gate via the `gate` input thereafter.
-        continue-on-error: ${{ github.event.inputs.gate != 'true' }}
+        # Hard gate: validated GREEN on kind (43 PASS / 0 FAIL, matching talos 43/43)
+        # on 2026-06-28. A regression now fails the run. Set the `soft` input to make
+        # it non-blocking for one-off debugging.
+        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
         env:
           AETHER_CONFORMANCE: "1"
           AETHER_CONFORMANCE_REPORT: ${{ runner.temp }}/gateway-http-report.yaml
