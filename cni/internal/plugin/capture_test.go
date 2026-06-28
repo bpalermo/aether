@@ -256,6 +256,22 @@ func TestPodExcludedOutboundPorts(t *testing.T) {
 	}
 }
 
+// TestPassthroughMarkAcceptExprs verifies the self-exclusion rule matches the
+// proxy's fwmark (little-endian u32) and accepts, so SO_MARK'd passthrough egress
+// bypasses the redirect (proposal 022 M2-default).
+func TestPassthroughMarkAcceptExprs(t *testing.T) {
+	exprs := passthroughMarkAcceptExprs(commonconstants.CapturePassthroughFwMark)
+	require.Len(t, exprs, 3)
+	require.IsType(t, &expr.Meta{}, exprs[0])
+	assert.Equal(t, expr.MetaKeyMARK, exprs[0].(*expr.Meta).Key)
+	require.IsType(t, &expr.Cmp{}, exprs[1])
+	assert.Equal(t, expr.CmpOpEq, exprs[1].(*expr.Cmp).Op)
+	// 0xae7e little-endian = 0x7e 0xae 0x00 0x00.
+	assert.Equal(t, []byte{0x7e, 0xae, 0x00, 0x00}, exprs[1].(*expr.Cmp).Data)
+	require.IsType(t, &expr.Verdict{}, exprs[2])
+	assert.Equal(t, expr.VerdictAccept, exprs[2].(*expr.Verdict).Kind)
+}
+
 // TestExcludePortAcceptExprs verifies the exclusion rule matches TCP to the given
 // dport and accepts (so the redirect that follows never sees it).
 func TestExcludePortAcceptExprs(t *testing.T) {

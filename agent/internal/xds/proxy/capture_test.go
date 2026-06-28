@@ -6,6 +6,8 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/constants"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
@@ -172,6 +174,18 @@ func TestNewPassthroughOriginalDstCluster(t *testing.T) {
 	assert.Nil(t, cl.GetTransportSocket())
 	// No upstream HTTP protocol options — raw TCP.
 	assert.Empty(t, cl.GetTypedExtensionProtocolOptions())
+
+	// SO_MARK on the upstream sockets (proposal 022 M2-default): the CNI
+	// redirect-all rule RETURNs this mark so the proxy's own forwarded egress is
+	// not re-captured. Only socket_options (no source_address) so the bind/netns
+	// are unchanged.
+	opts := cl.GetUpstreamBindConfig().GetSocketOptions()
+	require.Len(t, opts, 1)
+	assert.Equal(t, int64(1), opts[0].GetLevel()) // SOL_SOCKET
+	assert.Equal(t, int64(36), opts[0].GetName()) // SO_MARK
+	assert.Equal(t, int64(constants.CapturePassthroughFwMark), opts[0].GetIntValue())
+	assert.Equal(t, corev3.SocketOption_STATE_PREBIND, opts[0].GetState())
+	assert.Nil(t, cl.GetUpstreamBindConfig().GetSourceAddress(), "no source_address — bind unchanged")
 }
 
 // TestBuildCapturePassthroughFilterChain verifies the DefaultFilterChain structure.

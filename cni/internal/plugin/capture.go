@@ -194,7 +194,19 @@ func programCaptureRedirectAll(excludePorts []uint16, logger *zap.Logger) error 
 		Priority: nftables.ChainPriorityNATDest,
 	})
 
-	// Rule 0: excluded ports (proposal 022 M2-default) — accept ahead of the broad
+	// Rule 0a: skip the proxy's OWN forwarded egress (proposal 022 M2-default).
+	// Envoy SO_MARKs the passthrough_original_dst cluster's upstream sockets with
+	// CapturePassthroughFwMark; accepting it here, ahead of the redirect, prevents
+	// the proxy's passthrough connection from being re-captured into a loop — the
+	// "breaks all egress" failure mode. SO_MARK (not a UID match) because the proxy
+	// runs as root. Harmless if the passthrough egresses proxy-side (never matches).
+	c.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: chain,
+		Exprs: passthroughMarkAcceptExprs(commonconstants.CapturePassthroughFwMark),
+	})
+
+	// Rule 0b: excluded ports (proposal 022 M2-default) — accept ahead of the broad
 	// redirect so connections to these dports bypass the mesh. This is where
 	// exclusions matter most: redirect-all otherwise captures every port.
 	for _, port := range excludePorts {
@@ -300,6 +312,25 @@ func excludePortAcceptExprs(port uint16) []expr.Any {
 		// tcp dport == port
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(port)},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// passthroughMarkAcceptExprs builds the rule:
+//
+//	meta mark <fwmark> accept
+//
+// It matches the netfilter fwmark Envoy stamps (via SO_MARK) on the
+// passthrough_original_dst cluster's upstream sockets and accepts ahead of the
+// redirect, so the proxy's own forwarded egress is not re-captured (proposal 022
+// M2-default). The mark is a u32 loaded into the register in host (little-endian)
+// byte order, matching the conntrack-state encoding used above.
+func passthroughMarkAcceptExprs(fwmark uint32) []expr.Any {
+	mark := make([]byte, 4)
+	binary.LittleEndian.PutUint32(mark, fwmark)
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: mark},
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 }
