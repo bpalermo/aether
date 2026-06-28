@@ -79,6 +79,22 @@ func NewRegistrarConfig() *RegistrarConfig {
 		Config: manager.Config{
 			HealthProbeBindAddress: ":8082",
 			MetricsBindAddress:     ":8081",
+			// Leader election: the registrar runs multiple replicas (HA endpoint
+			// stream), but the leader-only runnables — the mesh-Service VIP
+			// generator and the MCS ServiceImport generator (both
+			// NeedLeaderElection()=true) — must run on exactly ONE replica. Without
+			// leader election controller-runtime ignores NeedLeaderElection and runs
+			// every runnable on every replica, so two replicas' transiently-divergent
+			// registry snapshots fight create-vs-prune on the selectorless mesh
+			// Services every sync interval. That flap forces a full agent xDS snapshot
+			// rebuild each cycle; a captured request landing in the rebuild window
+			// misses the cap_http GAMMA vhost and falls through to the ORIGINAL_DST
+			// passthrough (kube-proxy round-robin), dropping the HTTPRoute feature
+			// (header mutation / redirect / weight). The per-replica
+			// syncer/broadcaster/write-behind stay NeedLeaderElection()=false, so the
+			// endpoint stream remains served by every replica.
+			LeaderElection:   true,
+			LeaderElectionID: "aether-registrar.registry.aether.io",
 		},
 		RegistryBackend:         "kubernetes",
 		EtcdEndpoints:           []string{"localhost:2379"},
