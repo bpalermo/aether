@@ -108,8 +108,10 @@ jobs:
       - name: Install aether CRDs (MeshConfig)
         run: |
           sed -i 's/{GIT_COMMIT}/conformance/' charts/crds/Chart.yaml
+          # CRDs are cluster-scoped — install the release into `default` so it does not
+          # own (and conflict on) the aether-system namespace the aether release creates.
           helm install aether-crds charts/crds \
-            --namespace aether-system --create-namespace --wait --timeout 2m
+            --namespace default --wait --timeout 2m
           kubectl wait --for=condition=Established crd/meshconfigs.config.aether.io --timeout=60s
 
       # --- Install aether with the EDGE enabled and SPIRE OFF ---
