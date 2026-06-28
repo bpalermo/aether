@@ -1,0 +1,67 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# Arch-appropriate Envoy binary, selected at analysis time.
+# The http_file repos are declared in MODULE.bazel pinned to ENVOY_VERSION = 1.38.0
+# (matching the custom proxy workspace).
+# SHA-256 values come from the upstream release checksums.txt.asc.
+alias(
+    name = "envoy_bin",
+    actual = select({
+        "@platforms//cpu:x86_64": "@envoy_binary_linux_amd64//file",
+        "@platforms//cpu:aarch64": "@envoy_binary_linux_arm64//file",
+    }),
+)
+
+go_library(
+    name = "envoy_validate",
+    srcs = ["builders.go"],
+    importpath = "github.com/bpalermo/aether/test/envoy_validate",
+    visibility = ["//test/envoy_validate:__subpackages__"],
+    deps = [
+        "//agent/internal/xds/config",
+        "//agent/internal/xds/proxy",
+        "//api/aether/cni/v1:cni",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/anypb",
+        "@org_golang_google_protobuf//types/known/durationpb",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
+    ],
+)
+
+# Runs "envoy --mode validate" over aether-generated bootstrap configs.
+#
+# What it catches (examples from production incidents):
+#   - ORIGINAL_DST cluster with ROUND_ROBIN lb_policy (CDS NACK)
+#   - Listener with no address field (LDS NACK)
+#   - Malformed or missing SAN in TLS validation context
+#   - Unknown TypedConfig @type URL / missing extension
+#
+# Run with:
+#   bazel test //test/envoy_validate:envoy_validate_test
+#   bazel test //test/envoy_validate:envoy_validate_test --test_output=all
+#
+# Tagged "envoy-validate" (not "integration") — no Docker daemon required.
+# size=medium: 3 Envoy validation processes, ~5 s wall time.
+go_test(
+    name = "envoy_validate_test",
+    size = "medium",
+    srcs = ["validate_test.go"],
+    data = [":envoy_bin"],
+    embed = [":envoy_validate"],
+    tags = [
+        "envoy-validate",
+        # The Envoy binary reads /proc on startup; run outside strict sandbox.
+        "no-sandbox",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+)

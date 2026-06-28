@@ -8,7 +8,10 @@ go_library(
         "http.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/xds/config",
-    visibility = ["//agent:__subpackages__"],
+    visibility = [
+        "//agent:__subpackages__",
+        "//test:__subpackages__",  # envoy_validate bootstrap generator
+    ],
     deps = [
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
