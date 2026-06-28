@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/gateway-api/apis/v1alpha3"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
 	xv1alpha1 "sigs.k8s.io/gateway-api/apisx/v1alpha1"
+	gwconformance "sigs.k8s.io/gateway-api/conformance"
 	confv1 "sigs.k8s.io/gateway-api/conformance/apis/v1"
 	"sigs.k8s.io/gateway-api/conformance/tests"
 	conformanceconfig "sigs.k8s.io/gateway-api/conformance/utils/config"
@@ -173,8 +174,13 @@ func TestAetherGatewayHTTP(t *testing.T) {
 		EnableAllSupportedFeatures: false,
 		SupportedFeatures:          nil, // inferred from GatewayClass.status
 		ExemptFeatures:             nil,
-		TimeoutConfig:              aetherTimeouts(),
-		ConformanceProfiles:        sets.New(suite.GatewayHTTPConformanceProfileName),
+		// NewConformanceTestSuite (unlike the RunConformance helper) does not default
+		// ManifestFS, so set the embedded base manifests explicitly — otherwise the
+		// suite applies no base resources and the conformance namespaces (e.g.
+		// gateway-conformance-web-backend) are never created.
+		ManifestFS:          []fs.FS{&gwconformance.Manifests},
+		TimeoutConfig:       aetherTimeouts(),
+		ConformanceProfiles: sets.New(suite.GatewayHTTPConformanceProfileName),
 		Implementation:             aetherImpl(),
 		ReportOutputPath:           reportPath("gateway-http-report.yaml"),
 	}
