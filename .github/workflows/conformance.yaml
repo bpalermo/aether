@@ -99,12 +99,14 @@ jobs:
       # --- Gateway API CRDs (standard channel, matching the suite version) ---
       - name: Install Gateway API CRDs
         run: |
-          # Server-side apply: the gateway-api CRD bundle is large, and client-side
-          # apply is fragile on it (the last-applied annotation can exceed limits and
-          # fall back to a CREATE that then trips on AlreadyExists). --server-side is
-          # the recommended, idempotent way to install CRDs.
+          # Experimental channel (superset of standard): the edge agent's manager watches
+          # TCPRoute/TLSRoute/UDPRoute (gateway.networking.k8s.io/v1alpha2), which are only
+          # in the experimental bundle — without them the manager's watch fails and the
+          # edge container crash-loops. GATEWAY-HTTP only exercises Gateway+HTTPRoute, both
+          # present here. Server-side apply (the bundle is large; client-side apply flakes
+          # on AlreadyExists) — the recommended idempotent way to install CRDs.
           kubectl apply --server-side --force-conflicts -f \
-            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
           kubectl wait --for=condition=Established crd/gateways.gateway.networking.k8s.io --timeout=60s
           kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
 
