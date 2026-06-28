@@ -30,6 +30,15 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 	if err != nil {
 		return nil, err
 	}
+	if l == nil {
+		// No UDPRoute backends in scope: GenerateUDPCaptureListener returns a nil
+		// *Listener. Return an untyped nil interface — NOT the typed-nil pointer.
+		// Returning the *listenerv3.Listener directly would wrap a nil pointer in a
+		// non-nil types.Resource interface, defeating the `!= nil` guard in
+		// Listeners(); the empty-Name/nil-Address Listener then lands in the LDS
+		// snapshot and Envoy NACKs the whole push with "address is necessary".
+		return nil, nil
+	}
 	return l, nil
 }
 
@@ -61,6 +70,13 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll)
 	if err != nil {
 		return nil, err
+	}
+	if l == nil {
+		// Defensive: never wrap a nil *Listener in a non-nil types.Resource (see the
+		// note in generateUDPCaptureListener). GenerateCaptureListener does not
+		// currently return (nil, nil), but guarding here keeps the typed-nil out of
+		// the snapshot if that ever changes.
+		return nil, nil
 	}
 	return l, nil
 }

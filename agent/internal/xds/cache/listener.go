@@ -11,6 +11,7 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
@@ -157,19 +158,57 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	resources := make([]types.Resource, 0, 2*len(c.listeners)+1)
 	probeClusters := make([]string, 0, len(c.listeners))
 	for _, entry := range c.listeners {
-		resources = append(resources, entry.inbound, entry.outbound)
-		if entry.capture != nil {
-			resources = append(resources, entry.capture)
-		}
-		if entry.udpCapture != nil {
-			resources = append(resources, entry.udpCapture)
-		}
+		// appendListener filters out any nil / typed-nil / malformed listener
+		// (empty Name AND no Address) so a single bad per-pod resource cannot make
+		// Envoy NACK the entire LDS push ("address is necessary"), which would drop
+		// every good listener in the same delta and wedge a pod added in the window.
+		resources = appendListener(resources, entry.inbound)
+		resources = appendListener(resources, entry.outbound)
+		resources = appendListener(resources, entry.capture)
+		resources = appendListener(resources, entry.udpCapture)
 		if hc, ok := entry.healthCluster.(*clusterv3.Cluster); ok && hc != nil {
 			probeClusters = append(probeClusters, hc.GetName())
 		}
 	}
 	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probeClusters))
 	return resources
+}
+
+// appendListener appends r to resources only when it is a usable Listener.
+//
+// It rejects three failure modes that would otherwise poison the LDS push:
+//   - a nil interface (entry never populated);
+//   - a *typed*-nil *listener.v3.Listener wrapped in a non-nil types.Resource
+//     (the historical bug: generateUDPCaptureListener returned the nil pointer
+//     directly when there were no UDPRoute backends, so the `!= nil` guard passed);
+//   - a malformed listener with no Name AND no Address. go-control-plane assigns a
+//     random UUID name to any nameless Listener, and Envoy then rejects it with
+//     "error adding listener named '<UUID>': address is necessary" — NACK'ing the
+//     whole delta and dropping the good listeners alongside it.
+//
+// A listener that has a Name but somehow lacks an Address is still kept here (it is
+// not the typed-nil pathology); the generators always set both, so this only ever
+// drops genuinely empty resources.
+func appendListener(resources []types.Resource, r types.Resource) []types.Resource {
+	if r == nil {
+		return resources
+	}
+	l, ok := r.(*listenerv3.Listener)
+	if !ok {
+		// Not a Listener (should not happen for listener entries); keep it rather
+		// than silently dropping an unexpected-but-valid resource.
+		return append(resources, r)
+	}
+	if l == nil {
+		// Typed-nil pointer wrapped in a non-nil interface.
+		return resources
+	}
+	if l.GetName() == "" && l.GetAddress() == nil {
+		// Nameless + addressless: the exact shape Envoy rejects with
+		// "address is necessary". Drop it so the rest of the push survives.
+		return resources
+	}
+	return append(resources, l)
 }
 
 // appClusters returns the per-pod application clusters (one per managed pod)
