@@ -30,7 +30,10 @@ func TestRegistryRefresher_ReloadsOnChange(t *testing.T) {
 	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 
 	// A local pod declaring "echo" as an upstream puts it in the node
-	// dependency set — only in-scope services are distributed.
+	// dependency set — only in-scope services are distributed. The bare
+	// annotation is namespace-qualified to the pod's namespace, so the
+	// dependency-set key (and the registry key it matches) is "default/echo"
+	// (proposal 020 Part 1).
 	require.NoError(t, c.AddPod(context.Background(), &cniv1.CNIPod{
 		Name:             "client-1",
 		Namespace:        "default",
@@ -61,17 +64,17 @@ func TestRegistryRefresher_ReloadsOnChange(t *testing.T) {
 	go func() { done <- r.Start(ctx) }()
 
 	// No clusters until a change is published.
-	require.Nil(t, c.Endpoints("echo"))
+	require.Nil(t, c.Endpoints("default/echo"))
 
 	mu.Lock()
 	data = map[string][]*registryv1.ServiceEndpoint{
-		"echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
+		"default/echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
 	}
 	mu.Unlock()
 	reg.ch <- struct{}{}
 
 	require.Eventually(t, func() bool {
-		return c.Endpoints("echo") != nil
+		return c.Endpoints("default/echo") != nil
 	}, 2*time.Second, 10*time.Millisecond, "refresher should rebuild the cluster after a change signal")
 
 	cancel()
@@ -90,7 +93,7 @@ func TestRegistryRefresher_ReloadsOnDependencyChange(t *testing.T) {
 	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 
 	data := map[string][]*registryv1.ServiceEndpoint{
-		"echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
+		"default/echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
 	}
 	reg := &notifyRegistry{
 		mockRegistry: &mockRegistry{
@@ -109,10 +112,11 @@ func TestRegistryRefresher_ReloadsOnDependencyChange(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.Start(ctx) }()
 
-	// "echo" is in the registry but not in the (empty) dependency set.
-	require.Nil(t, c.Endpoints("echo"))
+	// "default/echo" is in the registry but not in the (empty) dependency set.
+	require.Nil(t, c.Endpoints("default/echo"))
 
 	// A pod declaring echo lands: the dependency change alone must surface it.
+	// The bare annotation qualifies to "default/echo" (the registry key).
 	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
 		Name:             "client-1",
 		Namespace:        "default",
@@ -122,7 +126,7 @@ func TestRegistryRefresher_ReloadsOnDependencyChange(t *testing.T) {
 	}, "example.org"))
 
 	require.Eventually(t, func() bool {
-		return c.Endpoints("echo") != nil
+		return c.Endpoints("default/echo") != nil
 	}, 2*time.Second, 10*time.Millisecond, "refresher should rebuild the scoped snapshot after a dependency change")
 
 	cancel()
@@ -159,7 +163,7 @@ func TestRegistryRefresher_LeadingEdgeDependencyChange(t *testing.T) {
 	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 
 	data := map[string][]*registryv1.ServiceEndpoint{
-		"echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
+		"default/echo": {{Ip: "10.0.0.1", ClusterName: "cluster-1", Port: 8080}},
 	}
 	reg := &notifyRegistry{
 		mockRegistry: &mockRegistry{
@@ -179,6 +183,7 @@ func TestRegistryRefresher_LeadingEdgeDependencyChange(t *testing.T) {
 	go func() { done <- r.Start(ctx) }()
 
 	start := time.Now()
+	// Bare annotation qualifies to the "default/echo" registry key.
 	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
 		Name:             "client-1",
 		Namespace:        "default",
@@ -188,7 +193,7 @@ func TestRegistryRefresher_LeadingEdgeDependencyChange(t *testing.T) {
 	}, "example.org"))
 
 	require.Eventually(t, func() bool {
-		return c.Endpoints("echo") != nil
+		return c.Endpoints("default/echo") != nil
 	}, time.Second, 5*time.Millisecond, "dependency change must reload on the leading edge")
 	assert.Less(t, time.Since(start), r.debounce, "must not have waited out the debounce")
 
