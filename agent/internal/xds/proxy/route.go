@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -293,7 +294,18 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 	if len(rules) == 0 {
 		return BuildOutboundClusterVirtualHost(name, domains)
 	}
-	var routes []*routev3.Route
+	// One route per (rule, match). Gateway API mandates that routes be evaluated by
+	// match SPECIFICITY, not document order: a longer/exact path (and tie-broken by
+	// header-match count) wins over a shorter one regardless of where it appears in
+	// the HTTPRoute. Envoy is first-match on the route list, so we must emit the
+	// routes pre-sorted (descending specificity). Without this, an earlier rule's
+	// "/" prefix shadows every later, more-specific rule (e.g. "/v2"). The edge path
+	// already does this (sortRoutesBySpecificity); GAMMA must match.
+	type scoredRoute struct {
+		route *routev3.Route
+		key   int64
+	}
+	var scored []scoredRoute
 	for _, rule := range rules {
 		matches := rule.Matches
 		if len(matches) == 0 {
@@ -313,8 +325,23 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 			} else {
 				r.Action = gammaRouteAction(name, rule, m.Prefix)
 			}
-			routes = append(routes, r)
+			scored = append(scored, scoredRoute{route: r, key: gammaMatchSpecificity(m)})
 		}
+	}
+	// Stable sort by descending specificity: ties preserve document order (Gateway
+	// API tie-break after path/method/header is creation order, approximated here).
+	slices.SortStableFunc(scored, func(a, b scoredRoute) int {
+		if a.key != b.key {
+			if a.key > b.key {
+				return -1
+			}
+			return 1
+		}
+		return 0
+	})
+	routes := make([]*routev3.Route, 0, len(scored)+1)
+	for _, s := range scored {
+		routes = append(routes, s.route)
 	}
 	routes = append(routes, &routev3.Route{
 		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
@@ -377,7 +404,12 @@ func gammaRouteMatch(m GammaMatch) *routev3.RouteMatch {
 			SafeRegex: &matcherv3.RegexMatcher{Regex: m.Regex},
 		}
 	case m.Prefix != "":
-		rm.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: m.Prefix}
+		// Gateway API PathPrefix is SEGMENT-BOUNDARY: "/v2" matches "/v2" and
+		// "/v2/x" but NOT "/v2example". Envoy's path_separated_prefix implements
+		// this; a raw Prefix would mis-match "/v2example". The "/" catch-all is the
+		// exception (Envoy rejects path_separated_prefix:"/"), and a trailing slash
+		// is normalized away since it is itself only a segment boundary.
+		setGammaPrefixPathSpecifier(rm, m.Prefix)
 	default:
 		rm.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
 	}
@@ -392,6 +424,53 @@ func gammaRouteMatch(m GammaMatch) *routev3.RouteMatch {
 		})
 	}
 	return rm
+}
+
+// gammaMatchSpecificity scores one GammaMatch for Gateway API precedence ordering
+// (higher = more specific, evaluated first). It mirrors the edge's routeSpecificity:
+// an Exact path outranks any prefix; among prefixes a longer one outranks a shorter;
+// header-match count is the next tie-break. A Regex path (gRPC method match) is
+// treated as exact-strength since it pins a full method path.
+func gammaMatchSpecificity(m GammaMatch) int64 {
+	const exactPathKey = int64(1) << 29 // sentinel above any prefix length
+	var pathKey int64
+	switch {
+	case m.Exact != "" || m.Regex != "":
+		pathKey = exactPathKey
+	default:
+		p := m.Prefix
+		if p == "" {
+			p = "/"
+		}
+		pathKey = int64(len(strings.TrimRight(p, "/")))
+		if pathKey >= exactPathKey {
+			pathKey = exactPathKey - 1
+		}
+	}
+	hdrCount := int64(len(m.Headers))
+	if hdrCount > 0xffff {
+		hdrCount = 0xffff
+	}
+	return (pathKey << 16) | hdrCount
+}
+
+// setGammaPrefixPathSpecifier sets the PathSpecifier for a Gateway API PathPrefix
+// match using segment-boundary semantics (mirrors setEdgePrefixPathSpecifier).
+// Envoy's path_separated_prefix matches "/v2" and "/v2/x" but NOT "/v2example";
+// a raw RouteMatch_Prefix would wrongly match the latter. "/" stays a plain prefix
+// (Envoy rejects path_separated_prefix:"/"), and a trailing slash is trimmed since
+// it is itself only a segment boundary that path_separated_prefix already requires.
+func setGammaPrefixPathSpecifier(rm *routev3.RouteMatch, prefix string) {
+	if prefix == "/" {
+		rm.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
+		return
+	}
+	p := strings.TrimRight(prefix, "/")
+	if p == "" {
+		rm.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
+		return
+	}
+	rm.PathSpecifier = &routev3.RouteMatch_PathSeparatedPrefix{PathSeparatedPrefix: p}
 }
 
 func gammaRouteAction(serviceCluster string, rule GammaRoute, matchPrefix string) *routev3.Route_Route {
