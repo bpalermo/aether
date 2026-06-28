@@ -412,13 +412,35 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 			continue
 		}
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		// Route both the cluster.local authority and the mesh-global <svc>.<meshDomain>
-		// authority (portless + :meshPort) to the service cluster, so a captured
-		// request reaches it under either name (the mesh-DNS path uses the latter).
-		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, []string{
-			fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
-			mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
-		}, gammaRoutes[svc]))
+		rules := gammaRoutes[svc]
+		// An SA-backed mesh Service can ALSO be a GAMMA route target — the
+		// MeshFrontend shape, where an HTTPRoute attaches (parentRef) to a Service
+		// that is its own backend (e.g. "echo-v2"). When it carries GAMMA rules, a
+		// client dials it by whatever short name Kubernetes search-domain resolution
+		// allows (the bare same-namespace name, <name>.<ns>, <name>.<ns>.svc) on its
+		// REAL Service port — so the vhost must host-match every spelling, exactly
+		// like a pure (no-own-SA) route target. Without the short-name + real-port
+		// domains the dial misses this vhost, falls through to passthrough, and the
+		// GAMMA filters (e.g. ResponseHeaderModifier) are never applied. When there
+		// are no GAMMA rules the minimal cluster.local + mesh spellings suffice (a
+		// plain mesh service has nothing to apply and passthrough reaches the same
+		// backend), and emitting bare short names for every mesh service would risk
+		// cross-namespace bare-name collisions (an NACK) — so only enrich the domain
+		// set for authorities that actually have rules.
+		var domains []string
+		if len(rules) > 0 {
+			domains = c.routeTargetDomains(svc, fqdn, mesh, bareNameCount, routeTargetPorts[svc])
+		} else {
+			// Route both the cluster.local authority and the mesh-global
+			// <svc>.<meshDomain> authority (portless + :meshPort) to the service
+			// cluster, so a captured request reaches it under either name (the
+			// mesh-DNS path uses the latter).
+			domains = []string{
+				fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
+				mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
+			}
+		}
+		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules))
 	}
 	// Service-based routing (proposal 023): a GAMMA route TARGET with no SA-backed
 	// mesh Service of its own (the versioned-fanout shape — an "echo" target routed
@@ -439,47 +461,54 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		}
 		fqdn := ref.ClusterLocalFQDN()
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		// A captured request carries whatever authority the client used to dial the
-		// route target. Kubernetes search-domain resolution lets a client reach a
-		// Service by any of its short names — the bare name (same namespace), the
-		// <name>.<namespace> form, and the <name>.<namespace>.svc form — in addition
-		// to the full cluster.local FQDN and aether's mesh name. The captured request's
-		// :authority is exactly the (un-resolved) name the client typed, so cap_http
-		// must host-match every spelling or a same-namespace `echo` dial misses the
-		// route-target vhost and falls through to the kube-proxy passthrough (round
-		// robin), bypassing the GAMMA rules. Emit all spellings; real-port variants
-		// are added per port below.
-		baseNames := []string{
-			ref.Name + "." + ref.Namespace,          // <name>.<namespace>
-			ref.Name + "." + ref.Namespace + ".svc", // <name>.<namespace>.svc
-			fqdn,                                    // <name>.<namespace>.svc.cluster.local
-			mesh,                                    // <svc>.<ns>.<meshDomain>
-		}
+		domains := c.routeTargetDomains(svc, fqdn, mesh, bareNameCount, routeTargetPorts[svc])
+		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc]))
+	}
+	return vhosts
+}
+
+// routeTargetDomains builds the cap_http host-match domains for a GAMMA route
+// target keyed "<ns>/<name>". A captured request carries whatever authority the
+// client used to dial the target. Kubernetes search-domain resolution lets a
+// client reach a Service by any of its short names — the bare name (same
+// namespace), the <name>.<namespace> form, and the <name>.<namespace>.svc form —
+// in addition to the full cluster.local FQDN and aether's mesh name. The captured
+// request's :authority is exactly the (un-resolved) name the client typed, so
+// cap_http must host-match every spelling or a same-namespace dial misses the
+// route-target vhost and falls through to the kube-proxy passthrough (round
+// robin), bypassing the GAMMA rules. Both portless and the mesh :18081 spellings
+// are emitted, plus each real Service port (proposal 023 M2) so a client dialing
+// the captured ClusterIP:port (echo:80 / echo:8080) host-matches too. The bare
+// same-namespace name is emitted only when a single namespace owns it
+// (bareNameCount==1), since a duplicate bare domain makes Envoy NACK the route
+// config.
+func (c *SnapshotCache) routeTargetDomains(svc, fqdn, mesh string, bareNameCount map[string]int, ports []uint32) []string {
+	baseNames := []string{fqdn, mesh}
+	if ref, ok := serviceref.ParseKey(svc); ok {
+		baseNames = append(baseNames,
+			ref.Name+"."+ref.Namespace,        // <name>.<namespace>
+			ref.Name+"."+ref.Namespace+".svc", // <name>.<namespace>.svc
+		)
 		// The bare same-namespace name is only collision-free when one namespace owns it.
 		if bareNameCount[ref.Name] == 1 {
 			baseNames = append(baseNames, ref.Name)
 		}
-		domains := make([]string, 0, len(baseNames)*2)
-		for _, n := range baseNames {
-			// Portless + the mesh :18081 spelling (the mesh-DNS path uses the latter).
-			domains = append(domains, n, fmt.Sprintf("%s:%d", n, constants.ProxyOutboundPort))
-		}
-		// proposal 023 M2: also match the route target's REAL Service port(s), the
-		// authority a client actually presents when dialing the captured ClusterIP:port
-		// (echo:80 / echo:8080) rather than the mesh :18081. Emit every short-name and
-		// FQDN spelling at each real port so the request host-matches regardless of
-		// which name the client used.
-		for _, p := range routeTargetPorts[svc] {
-			if p == 0 || p == constants.ProxyOutboundPort {
-				continue // 0 = unset; :18081 already emitted above.
-			}
-			for _, n := range baseNames {
-				domains = append(domains, fmt.Sprintf("%s:%d", n, p))
-			}
-		}
-		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc]))
 	}
-	return vhosts
+	domains := make([]string, 0, len(baseNames)*2)
+	for _, n := range baseNames {
+		// Portless + the mesh :18081 spelling (the mesh-DNS path uses the latter).
+		domains = append(domains, n, fmt.Sprintf("%s:%d", n, constants.ProxyOutboundPort))
+	}
+	// proposal 023 M2: also match the route target's REAL Service port(s).
+	for _, p := range ports {
+		if p == 0 || p == constants.ProxyOutboundPort {
+			continue // 0 = unset; :18081 already emitted above.
+		}
+		for _, n := range baseNames {
+			domains = append(domains, fmt.Sprintf("%s:%d", n, p))
+		}
+	}
+	return domains
 }
 
 func equalStringMaps(a, b map[string]string) bool {
