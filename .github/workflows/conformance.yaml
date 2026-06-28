@@ -132,6 +132,23 @@ jobs:
       # GATEWAY-HTTP needs (the edge dials conformance backends over cleartext; the mTLS
       # branch is never taken). registryBackend defaults to kubernetes already.
       #
+      # edge.tls.enabled=true wires the edge's downstream-TLS Secret provider (the
+      # Kubernetes provider — reads kubernetes.io/tls Secrets via the API server, NO
+      # SPIRE) and grants the cluster-wide `secrets` get/list/watch RBAC. The
+      # GATEWAY-HTTP base manifests include `same-namespace-with-https-listener`, a
+      # Gateway with HTTPS listeners whose certificateRefs point at a TLS Secret in
+      # gateway-conformance-infra. Without the Secret provider the edge cannot resolve
+      # those certs, marks the listeners (and so the whole Gateway) Programmed=False
+      # /ListenersNotValid, and the suite's "Ensuring Gateways ready" setup wait times
+      # out (307s) before any test runs — the last-mile blocker. (It is NOT an
+      # addressing problem: Accepted=True is set within ~1s and the per-Gateway LB
+      # Services get IPs from cloud-provider-kind fine.)
+      #
+      # edge.gateway.create=false disables the chart's OWN edge Gateway, which is
+      # unnecessary for conformance (the suite brings its own Gateways) and otherwise
+      # makes edge.tls.enabled=true `required` an edge.gateway.tlsSecretName (the
+      # chart-managed HTTPS Gateway needs a cert), failing the helm install.
+      #
       # Point the chart at the kind-loaded :latest images: the chart pins agent/cni/
       # registrar/controller to the publish-time `@digest` placeholders, which take
       # precedence over `tag` in the aether.image helper — so each must override
@@ -154,6 +171,8 @@ jobs:
             --set namespace.create=false \
             --set spire.enabled=false \
             --set edge.enabled=true \
+            --set edge.tls.enabled=true \
+            --set edge.gateway.create=false \
             $(img agent agent) \
             $(img cniInstall cni-install) \
             $(img registrar registrar) \
