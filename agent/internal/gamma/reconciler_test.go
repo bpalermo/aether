@@ -167,7 +167,7 @@ func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
 	// No grants: the cross-ns "remote" backend is dropped.
 	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
 	require.Len(t, gr.Backends, 1)
-	assert.Equal(t, "local", gr.Backends[0].Service)
+	assert.Equal(t, "ns/local", gr.Backends[0].Service)
 
 	// With a matching grant: both backends are kept.
 	grants := []gatewayv1beta1.ReferenceGrant{{
@@ -217,7 +217,7 @@ func TestBuildGammaRoute(t *testing.T) {
 	assert.Equal(t, proxy.GammaHeaderMatch{Name: "x-env", Value: "beta"}, gr.Matches[0].Headers[0])
 
 	require.Len(t, gr.Backends, 2)
-	assert.Equal(t, proxy.GammaBackend{Service: "svc-1-v1", Cluster: proxy.ServiceClusterName("svc-1-v1", "mesh"), Weight: 90}, gr.Backends[0])
+	assert.Equal(t, proxy.GammaBackend{Service: "ns/svc-1-v1", Cluster: proxy.ServiceClusterName("ns/svc-1-v1", "mesh"), Weight: 90}, gr.Backends[0])
 	assert.Equal(t, uint32(10), gr.Backends[1].Weight)
 
 	require.NotNil(t, gr.Timeout)
@@ -242,8 +242,8 @@ func TestBuildGammaRouteFromGRPC(t *testing.T) {
 	assert.Equal(t, "/foo.Bar/Baz", gr.Matches[0].Exact, "service+method -> exact path")
 	assert.Equal(t, "/foo.Bar/", gr.Matches[1].Prefix, "service-only -> prefix path")
 	require.Len(t, gr.Backends, 1)
-	assert.Equal(t, "svc-2", gr.Backends[0].Service)
-	assert.Equal(t, "svc-2.aether.internal", gr.Backends[0].Cluster)
+	assert.Equal(t, "ns/svc-2", gr.Backends[0].Service)
+	assert.Equal(t, "svc-2.ns.aether.internal", gr.Backends[0].Cluster)
 	assert.Equal(t, uint32(7), gr.Backends[0].Weight)
 }
 
