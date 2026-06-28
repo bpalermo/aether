@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
@@ -437,4 +439,17 @@ func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 	// No spurious :8080 (default) port cluster — the default vhost owns it.
 	_, has8080 := c.clusters["svc-mp.ns.aether.internal:8080"]
 	assert.False(t, has8080, "default port is not a separate cluster")
+}
+
+// TestDependencySet_IncludesGammaRouteTargets verifies a GAMMA route TARGET (an
+// HTTPRoute parentRef Service) is in scope even with no local pod declaring it and
+// no SA-backed pods of its own — so its cap_http vhost builds (proposal 023).
+func TestDependencySet_IncludesGammaRouteTargets(t *testing.T) {
+	c := newTestCache("node-1")
+	// A route target "team-a/echo" routing to a backend "team-a/echo-v1".
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "echo-v1.team-a.example.org", Weight: 1}}}},
+	})
+	deps := c.DependencySet()
+	assert.Contains(t, deps, "team-a/echo", "the route target is always in scope")
 }
