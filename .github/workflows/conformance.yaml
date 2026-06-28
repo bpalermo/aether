@@ -66,6 +66,9 @@ jobs:
           bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //agent/cmd/agent:image_load
           bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //cni/cmd/cni-install:image_load
           bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //registrar/cmd/registrar:image_load
+          # The controller's validating webhook gates HTTPRoute admission, so the edge
+          # install needs it too (the published aether-proxy is pulled by kind, not built).
+          bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //controller/cmd/controller:image_load
 
       # --- kind cluster ---
       - name: Setup kind
@@ -77,7 +80,7 @@ jobs:
 
       - name: Load images into kind
         run: |
-          for img in agent:latest cni-install:latest registrar:latest; do
+          for img in agent:latest cni-install:latest registrar:latest controller:latest; do
             kind load docker-image "ghcr.io/bpalermo/aether/${img}" --name "${KIND_CLUSTER}"
           done
 
@@ -105,24 +108,28 @@ jobs:
       # GATEWAY-HTTP needs (the edge dials conformance backends over cleartext; the mTLS
       # branch is never taken). registryBackend defaults to kubernetes already.
       #
-      # ASPIRATIONAL: the image-repository/tag pinning to the LOCALLY LOADED tags is
-      # left as a TODO — the chart pins images to the publish digests by default, so
-      # this step needs the right --set overrides (repository + tag + pullPolicy=Never)
-      # to use the kind-loaded images. Until that is wired, this is the one step that
-      # will not succeed unmodified; the fallback is the test/e2e-style hand-rolled
-      # manifests (`agent edge --spire-enabled=false`). See proposal 024 "Tensions".
+      # Point the chart at the kind-loaded :latest images: the chart pins agent/cni/
+      # registrar/controller to the publish-time `@digest` placeholders, which take
+      # precedence over `tag` in the aether.image helper — so each must override
+      # digest="" + tag=latest (+ pullPolicy=Never, the image is local). The custom
+      # aether-proxy is a published image (not built here), so it is PULLED
+      # (IfNotPresent), not Never.
       - name: Install aether (edge, no SPIRE)
         run: |
+          # The chart version carries a publish-time {GIT_COMMIT} placeholder that helm
+          # rejects; substitute a valid version for the in-cluster install.
+          sed -i 's/{GIT_COMMIT}/conformance/' charts/aether/Chart.yaml
+          img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
           helm install aether charts/aether \
             --namespace aether-system --create-namespace \
             --set spire.enabled=false \
             --set edge.enabled=true \
-            --set agent.image.pullPolicy=Never \
-            --set registrar.image.pullPolicy=Never \
-            --set proxy.image.pullPolicy=Never \
-            --set edge.proxy.image.pullPolicy=Never \
+            $(img agent agent) \
+            $(img cniInstall cni-install) \
+            $(img registrar registrar) \
+            $(img controller controller) \
+            --set proxy.image.pullPolicy=IfNotPresent \
             --wait --timeout 8m
-            # TODO: + --set *.image.repository / *.image.tag to the kind-loaded tags.
           kubectl get gatewayclass aether -o yaml || true
 
       - name: Wait for edge + agent to be Ready
