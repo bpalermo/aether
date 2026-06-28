@@ -52,9 +52,11 @@ type L4ServiceRoute struct {
 
 // L4Backend is one weighted backend of an L4 route.
 type L4Backend struct {
-	// Service is the bare service name (for dependency-set tracking).
+	// Service is the namespace-qualified "<ns>/<svc>" serviceref key (020 Part 1,
+	// for dependency-set tracking).
 	Service string
-	// Cluster is the resolved data-plane TCP cluster name ("tcp:<svc>.<meshDomain>").
+	// Cluster is the resolved data-plane TCP cluster name
+	// ("tcp:<svc>.<ns>.<meshDomain>").
 	Cluster string
 	// Weight is the load-balancing weight (1 when unset).
 	Weight uint32

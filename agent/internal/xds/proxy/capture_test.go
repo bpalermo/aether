@@ -185,8 +185,10 @@ func TestBuildCapturePassthroughFilterChain(t *testing.T) {
 
 func TestBuildCaptureRouteConfiguration(t *testing.T) {
 	// cluster.local authority -> service cluster, reusing the outbound vhost builder.
+	// The service key is the namespace-qualified "<ns>/<svc>" (020 Part 1), rendered
+	// as the FQDN authority svc-1.aether-test.aether.internal.
 	vh := BuildOutboundClusterVirtualHost(
-		ServiceClusterName("svc-1", "aether.internal"),
+		ServiceClusterName("aether-test/svc-1", "aether.internal"),
 		[]string{"svc-1.aether-test.svc.cluster.local", "svc-1.aether-test.svc.cluster.local:18081"},
 	)
 	rc := BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vh}, "aether.internal")
@@ -195,7 +197,7 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 
 	got := rc.GetVirtualHosts()[0]
 	assert.Contains(t, got.GetDomains(), "svc-1.aether-test.svc.cluster.local:18081")
-	assert.Equal(t, "svc-1.aether.internal", got.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "svc-1.aether-test.aether.internal", got.GetRoutes()[0].GetRoute().GetCluster())
 
 	// The catch-all recovers cold/off-node mesh services via ODCDS (ClusterHeader
 	// on :authority) and 404s only non-mesh authorities — symmetric with outbound.

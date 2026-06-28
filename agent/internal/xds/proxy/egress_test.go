@@ -360,15 +360,42 @@ func TestNewUDPServiceCluster(t *testing.T) {
 }
 
 // TestUDPClusterName verifies the naming scheme and that it does not collide with
-// the TCP or HTTP cluster names for the same service.
+// the TCP or HTTP cluster names for the same service. The input is the
+// namespace-qualified "<ns>/<svc>" key (020 Part 1); the rendered FQDN is
+// <svc>.<ns>.<meshDomain>.
 func TestUDPClusterName(t *testing.T) {
-	udp := UDPClusterName("payments", "aether.internal")
-	tcp := TCPClusterName("payments", "aether.internal")
-	http := ServiceClusterName("payments", "aether.internal")
+	udp := UDPClusterName("team-a/payments", "aether.internal")
+	tcp := TCPClusterName("team-a/payments", "aether.internal")
+	http := ServiceClusterName("team-a/payments", "aether.internal")
 
-	assert.Equal(t, "udp:payments.aether.internal", udp)
-	assert.Equal(t, "tcp:payments.aether.internal", tcp)
-	assert.Equal(t, "payments.aether.internal", http)
+	assert.Equal(t, "udp:payments.team-a.aether.internal", udp)
+	assert.Equal(t, "tcp:payments.team-a.aether.internal", tcp)
+	assert.Equal(t, "payments.team-a.aether.internal", http)
 	assert.NotEqual(t, udp, tcp, "UDP and TCP clusters must have distinct names")
 	assert.NotEqual(t, udp, http, "UDP and HTTP clusters must have distinct names")
+}
+
+// TestClusterNamesStrict verifies the post-cutover strict behavior: a bare
+// (non-namespaced) key renders to "" across all cluster-name helpers — an empty
+// name matches no cluster (clean no-route), never a silent mis-route — while a
+// namespace-qualified "<ns>/<svc>" key renders the FQDN and round-trips back
+// through ServiceFromClusterName.
+func TestClusterNamesStrict(t *testing.T) {
+	const meshDomain = "aether.internal"
+
+	// Bare key: no namespace separator → "" everywhere.
+	assert.Empty(t, ServiceClusterName("payments", meshDomain))
+	assert.Empty(t, PortClusterName("payments", meshDomain, 8080))
+	assert.Empty(t, TCPClusterName("payments", meshDomain))
+	assert.Empty(t, UDPClusterName("payments", meshDomain))
+
+	// Namespace-qualified key: rendered FQDN, and a clean round-trip.
+	key := "team-a/payments"
+	fqdn := ServiceClusterName(key, meshDomain)
+	assert.Equal(t, "payments.team-a.aether.internal", fqdn)
+	assert.Equal(t, "payments.team-a.aether.internal:8080", PortClusterName(key, meshDomain, 8080))
+
+	got, ok := ServiceFromClusterName(fqdn, meshDomain)
+	require.True(t, ok)
+	assert.Equal(t, key, got, "FQDN must round-trip back to the <ns>/<svc> key")
 }

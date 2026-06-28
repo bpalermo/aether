@@ -96,8 +96,9 @@ func (c *SnapshotCache) udpServiceRoutesSnapshot() map[string][]proxy.L4Backend 
 	return out
 }
 
-// l4RouteBackendsLocked appends the bare backend services of a service's L4
-// routes (TCP + TLS + UDP) to set. Caller holds depMu.
+// l4RouteBackendsLocked appends the namespace-qualified "<ns>/<svc>" backend
+// service keys of a service's L4 routes (TCP + TLS + UDP) to set (020 Part 1).
+// Caller holds depMu.
 func (c *SnapshotCache) l4RouteBackendsLocked(service string, set map[string]struct{}) {
 	for _, r := range c.tcpServiceRoutes[service] {
 		for _, b := range r.Backends {
