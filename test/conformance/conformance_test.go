@@ -66,8 +66,68 @@ import (
 // capture.aether.io/redirect-all=true pod annotation (so real Service ports are
 // captured). Vanilla upstream manifests would not exercise aether's mesh path.
 //
+// It deliberately contains ONLY mesh/manifests.yaml — the base mesh apply the
+// suite does once in Setup. The per-test manifests (tests/mesh/*.yaml, applied by
+// each MeshConformanceTest's Manifests field — e.g. the mesh-frontend HTTPRoute that
+// carries the ResponseHeaderModifier) live ONLY in the upstream gwconformance.Manifests
+// embed and MUST still be reachable. See meshManifestFS / overlayFS below.
+//
 //go:embed mesh/manifests.yaml
 var meshManifests embed.FS
+
+// overlayFS composes the aether mesh overlay over the upstream gateway-api manifest
+// embed: a read for overridePath ("mesh/manifests.yaml") is served from the aether
+// overlay (its managed-namespace label / per-version SAs / redirect-all annotation),
+// and every OTHER path (the per-test tests/mesh/*.yaml the conformance tests apply,
+// plus base/*) falls through to the upstream embed.
+//
+// This MUST be a single composed fs.FS rather than passing both embeds in the suite's
+// ManifestFS slice: the suite's manifest loader (getContentsFromPathOrURL) iterates
+// every fs.FS and CONCATENATES the bytes from each that has the path. With both embeds
+// present, a read of mesh/manifests.yaml would return the aether overlay AND the
+// upstream base mesh manifests glued together — duplicate/conflicting Namespaces,
+// Deployments and Services that fail to apply. The overlay returns exactly one file per
+// path: the aether version for the overridden base, the upstream version for everything
+// else.
+//
+// Without this, ManifestFS = {meshManifests} alone makes every per-test manifest read
+// (tests/mesh/mesh-frontend.yaml, …) hit fs.ErrNotExist, which the loader swallows
+// silently (it `continue`s on not-found) — so the test's HTTPRoute is NEVER applied, no
+// GAMMA rule is projected, the captured request falls to the kube-proxy passthrough, and
+// the assertion (X-Header-Set present, a redirect, a request-header set) "fails" against
+// a route that was never installed. That is precisely why MeshFrontend,
+// MeshHTTPRouteRedirectHostAndStatus and MeshHTTPRouteRequestHeaderModifier failed (the
+// last two in ~0.01s: the first request returns a plain passthrough 200 immediately).
+type overlayFS struct {
+	overridePath string
+	override     fs.FS
+	base         fs.FS
+}
+
+func (o overlayFS) Open(name string) (fs.File, error) {
+	if name == o.overridePath {
+		return o.override.Open(name)
+	}
+	return o.base.Open(name)
+}
+
+func (o overlayFS) ReadFile(name string) ([]byte, error) {
+	if name == o.overridePath {
+		return fs.ReadFile(o.override, name)
+	}
+	return fs.ReadFile(o.base, name)
+}
+
+// meshManifestFS returns the composed manifest filesystem for the MESH-HTTP profile:
+// the aether overlay for mesh/manifests.yaml, the upstream embed for the per-test
+// tests/mesh/*.yaml (and base/*) manifests.
+func meshManifestFS() fs.FS {
+	return overlayFS{
+		overridePath: "mesh/manifests.yaml",
+		override:     meshManifests,
+		base:         &gwconformance.Manifests,
+	}
+}
 
 const (
 	aetherGatewayClassName = "aether"
@@ -302,8 +362,11 @@ func TestAetherMeshHTTP(t *testing.T) {
 		CleanupBaseResources:       cleanup(),
 		EnableAllSupportedFeatures: false,
 		SupportedFeatures:          meshFeats,
-		// Use aether's mesh overlay instead of the suite's base mesh manifests.
-		ManifestFS:          []fs.FS{meshManifests},
+		// Use aether's mesh overlay for the base mesh manifests (mesh/manifests.yaml)
+		// while still serving the per-test tests/mesh/*.yaml manifests from the upstream
+		// embed (see meshManifestFS / overlayFS). A bare {meshManifests} would silently
+		// drop every per-test HTTPRoute manifest — the route would never apply.
+		ManifestFS:          []fs.FS{meshManifestFS()},
 		TimeoutConfig:       aetherMeshTimeouts(),
 		ConformanceProfiles: sets.New(suite.MeshHTTPConformanceProfileName),
 		Implementation:      aetherImpl(),
