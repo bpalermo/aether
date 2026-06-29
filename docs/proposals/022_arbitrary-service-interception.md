@@ -165,7 +165,11 @@ The mark is unique to the proxy's passthrough — no UID collision, app-UID-agno
 ## Sequencing
 
 1. **Exclusion annotations** (`exclude-outbound-ports` / `-ip-ranges`) — safe, additive,
-   verification-independent. **Implement first.**
+   verification-independent. **Implement first.** ✅ **DONE** — `capture.aether.io/exclude-outbound-ports`
+   (comma-separated TCP dports) and `capture.aether.io/exclude-outbound-ip-ranges`
+   (comma-separated IPv4 CIDRs; bare addr = /32; destination-based, carves out both TCP
+   and UDP) emit nft RETURN rules ahead of the redirect in both the scoped and
+   redirect-all capture paths. Malformed/non-IPv4 entries degrade to "exclude what parses".
 2. **Passthrough-loop verification spike** — confirm whether the redirect-all `original_dst`
    passthrough upstream socket egresses from the pod netns (and thus self-matches the
    redirect). The gate for the default flip.

@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/bpalermo/aether/cni/config"
@@ -254,6 +255,58 @@ func TestPodExcludedOutboundPorts(t *testing.T) {
 			assert.Equal(t, tc.want, podExcludedOutboundPorts(tc.conf))
 		})
 	}
+}
+
+// TestPodExcludedOutboundIPRanges verifies the exclude-outbound-ip-ranges
+// annotation (proposal 022 M2-default) parses into a deduplicated, network-masked,
+// IPv4-only prefix list and degrades gracefully on malformed/blank/non-IPv4 entries.
+func TestPodExcludedOutboundIPRanges(t *testing.T) {
+	anno := func(v string) config.AetherConf {
+		m := map[string]string{commonconstants.AnnotationCaptureExcludeOutboundIPRanges: v}
+		return config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &m}}
+	}
+	mk := func(s string) netip.Prefix { return netip.MustParsePrefix(s) }
+	tests := []struct {
+		name string
+		conf config.AetherConf
+		want []netip.Prefix
+	}{
+		{name: "single cidr", conf: anno("10.0.0.0/8"), want: []netip.Prefix{mk("10.0.0.0/8")}},
+		{name: "bare addr -> /32", conf: anno("192.168.1.5"), want: []netip.Prefix{mk("192.168.1.5/32")}},
+		{name: "list with whitespace", conf: anno("10.0.0.0/8, 192.168.1.0/24 ,172.16.0.0/12"), want: []netip.Prefix{mk("10.0.0.0/8"), mk("192.168.1.0/24"), mk("172.16.0.0/12")}},
+		{name: "host bits masked off", conf: anno("10.1.2.3/8"), want: []netip.Prefix{mk("10.0.0.0/8")}},
+		{name: "dedup after masking", conf: anno("10.1.2.3/8,10.4.5.6/8"), want: []netip.Prefix{mk("10.0.0.0/8")}},
+		{name: "skips blank/garbage/ipv6", conf: anno("10.0.0.0/8,,foo,fd00::/8,300.0.0.0/8,192.168.1.5"), want: []netip.Prefix{mk("10.0.0.0/8"), mk("192.168.1.5/32")}},
+		{name: "empty value", conf: anno(""), want: nil},
+		{name: "nil annotations", conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{}}, want: nil},
+		{name: "nil runtime config", conf: config.AetherConf{}, want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, podExcludedOutboundIPRanges(tc.conf))
+		})
+	}
+}
+
+// TestExcludeIPRangeAcceptExprs verifies the exclusion rule masks the destination
+// IPv4 address to the prefix and accepts on a network match (so the redirect that
+// follows never sees it). It matches no L4 proto — the carve-out is destination-based.
+func TestExcludeIPRangeAcceptExprs(t *testing.T) {
+	exprs := excludeIPRangeAcceptExprs(netip.MustParsePrefix("10.0.0.0/8"))
+	require.Len(t, exprs, 4)
+	// ip daddr payload (network header offset 16, len 4).
+	require.IsType(t, &expr.Payload{}, exprs[0])
+	assert.Equal(t, uint32(16), exprs[0].(*expr.Payload).Offset)
+	assert.Equal(t, uint32(4), exprs[0].(*expr.Payload).Len)
+	// reg1 &= /8 netmask.
+	require.IsType(t, &expr.Bitwise{}, exprs[1])
+	assert.Equal(t, []byte{0xff, 0x00, 0x00, 0x00}, exprs[1].(*expr.Bitwise).Mask)
+	// reg1 == network (10.0.0.0).
+	require.IsType(t, &expr.Cmp{}, exprs[2])
+	assert.Equal(t, expr.CmpOpEq, exprs[2].(*expr.Cmp).Op)
+	assert.Equal(t, []byte{10, 0, 0, 0}, exprs[2].(*expr.Cmp).Data)
+	require.IsType(t, &expr.Verdict{}, exprs[3])
+	assert.Equal(t, expr.VerdictAccept, exprs[3].(*expr.Verdict).Kind)
 }
 
 // TestPassthroughMarkAcceptExprs verifies the self-exclusion rule matches the
