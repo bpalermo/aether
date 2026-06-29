@@ -555,3 +555,39 @@ func TestEtcdRegistry_ServiceExportsCrossOrigin(t *testing.T) {
 	assert.Contains(t, remaining, "cluster-b/svc")
 	assert.Contains(t, remaining, "cluster-b/other")
 }
+
+// TestEtcdRegistry_ConfigProjection_RoundTrip verifies SetConfig/ListConfig/UnsetConfig
+// (proposal 026 EM1b): a projected GAMMA config round-trips through the registry,
+// origin_cluster is stamped from the writing instance, and ListConfig ranges all origins.
+func TestEtcdRegistry_ConfigProjection_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+	ctx := context.Background()
+	registry := setupRegistry(ctx, t)
+
+	proj := &registryv1.ServiceConfigProjection{
+		Service: "team-a/echo",
+		Version: "v7",
+		Routes: []*registryv1.GammaRoute{{
+			Matches:  []*registryv1.GammaMatch{{Prefix: "/v2"}},
+			Backends: []*registryv1.GammaBackend{{Service: "team-a/echo-v2", Cluster: "echo-v2.team-a.aether.internal", Weight: 1}},
+		}},
+	}
+	require.NoError(t, registry.SetConfig(ctx, proj))
+
+	got, err := registry.ListConfig(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "team-a/echo", got[0].GetService())
+	assert.Equal(t, "v7", got[0].GetVersion())
+	assert.NotEmpty(t, got[0].GetOriginCluster(), "origin stamped from the key path")
+	require.Len(t, got[0].GetRoutes(), 1)
+	assert.Equal(t, "/v2", got[0].GetRoutes()[0].GetMatches()[0].GetPrefix())
+	assert.Equal(t, "echo-v2.team-a.aether.internal", got[0].GetRoutes()[0].GetBackends()[0].GetCluster())
+
+	require.NoError(t, registry.UnsetConfig(ctx, "team-a/echo"))
+	after, err := registry.ListConfig(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, after)
+}
