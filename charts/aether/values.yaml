@@ -100,6 +100,11 @@ agent:
   # header / timeout). Requires the Gateway API CRDs. Default off — a no-op, and
   # adds the cluster-wide httproutes RBAC only when enabled.
   gamma: false
+  # Cross-cluster config import (proposal 026): poll the registrar for GAMMA config
+  # projections peer clusters exported and materialize them into the node proxy's
+  # routes (merged with local; local wins). Default off; no-op unless the registry
+  # backend has a cross-cluster config plane (etcd). Pairs with registrar.registryBackend=etcd.
+  importConfig: false
   # L4 route types (proposal 018, Phase 3b): watch TCPRoutes/TLSRoutes/UDPRoutes
   # parented to a Service and project weighted TCP floor chains + per-SNI TLS chains
   # onto the capture listener. Requires --transparent-capture. Default off.
