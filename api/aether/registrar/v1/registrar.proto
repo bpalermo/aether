@@ -1,10 +1,13 @@
-syntax = "proto3";
+edition = "2023";
 
 package aether.registrar.v1;
 
 import "api/aether/registry/v1/endpoint.proto";
 import "api/aether/registry/v1/service.proto";
 
+// Preserve proto3 implicit field presence so the generated Go/C++ API is
+// unchanged by the edition migration (scalars stay value types, not pointers).
+option features.field_presence = IMPLICIT;
 option go_package = "github.com/bpalermo/aether/api/aether/registrar/v1;registrarv1";
 
 service RegistrarService {
