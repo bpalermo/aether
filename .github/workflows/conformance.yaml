@@ -23,8 +23,8 @@
 #     cloud-provider-kind LoadBalancer addressing populating Gateway.status.addresses.
 #     Until validated on a workflow_dispatch run, the suite step is `continue-on-error`.
 #
-# MESH-HTTP is intentionally NOT run: it is not conformant anywhere (blocked on
-# proposal 022). The committed runner (test/conformance) keeps it reproducible.
+# MESH-HTTP (east-west GAMMA) runs as a second job and is GREEN: Core 8/8 on kind.
+# Both profiles are hard gates (set the `soft` input to bypass for debugging).
 
 name: conformance
 
@@ -385,14 +385,14 @@ jobs:
           cp test/conformance/mesh/manifests.yaml \
             gateway-api/conformance/mesh/manifests.yaml
 
-      # Always soft: MESH-HTTP is not green yet. The runner records per-test results in
-      # the report (always written + uploaded) and does not fail the test on a Run
-      # error, so the real score is reported regardless. continue-on-error keeps a
-      # failure from marking the workflow red while the score is being driven up.
+      # Hard gate: MESH-HTTP Core is GREEN on kind (8 PASS / 0 FAIL, validated 2026-06-29
+      # — #433 fixed the runner's per-test manifest loading). A regression now fails the
+      # run. Set the `soft` input to make it non-blocking for one-off debugging. The
+      # runner still records per-test results in the always-uploaded report.
       - name: Run MESH-HTTP conformance
         id: conformance
         working-directory: gateway-api/conformance
-        continue-on-error: true
+        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
         env:
           AETHER_CONFORMANCE: "1"
           AETHER_CONFORMANCE_REPORT: ${{ runner.temp }}/mesh-http-report.yaml
