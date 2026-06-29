@@ -225,3 +225,66 @@ authority topology) or D (enforce it at the waypoint).
 
 Independent of the in-flight data-plane work; this is the cross-cluster control-plane story the
 registry federation (006) and waypoint (019) imply but never specified for config.
+
+## Implementation plan — Option E (control cluster)
+
+Tracked as GitHub milestone **#2**. Runs in parallel with proposal 025; the C/E config channel is
+what unblocks 025's M3 (Service-`targetRef`). The hub is a **pure-management cluster**: it runs the
+GAMMA/edge reconcilers + the export side, **no agent data plane, no workloads**.
+
+**Core design choice — project the *reconciled* form, not the raw CRD.** The hub's GAMMA reconciler
+already turns HTTPRoute/GRPCRoute (+ MeshConfig/VirtualHost/HTTPFilter) into the internal
+`GammaRoute` / route-table types. Export **that** projection, keyed by service `<ns>/<svc>`, not the
+CRDs. Spokes then *materialize* a route table without re-running the reconciler, needing the CRDs,
+or holding cross-cluster K8s credentials — they consume registry records exactly like endpoints.
+
+### EM1 — config projection schema + export (hub write path)
+- A registry record per exported service's config: `key = /aether/v1/.../config/<ns>/<svc>`,
+  `value = { originCluster, version, gammaRoutes[], (later) meshConfig, virtualHost, httpFilters[] }`
+  — a proto mirroring the in-memory projection (reuse `GammaRoute`; define a `ConfigProjection`
+  message in `api/aether/registry/v1` or a sibling `config` package).
+- The hub's reconciler writes the projection on every reconcile (origin-stamped, monotonic version),
+  scoped to **exported** services (rides MCS `ServiceExport`, opt-in — never the whole catalog).
+- Reuse the registry backend's CDC: etcd Watch (proposal 006) is the channel; no new bus.
+- **Exit:** apply an HTTPRoute on the hub → a `ConfigProjection` for that service appears in the
+  shared store, versioned + origin-stamped.
+
+### EM2 — consumer materializer (spoke read path)
+- Spoke registrar/agent watches the config sub-tree (alongside the endpoint watch), **demand-scoped**
+  to the node dependency set (same filter `captureVhosts` already applies — only services this node
+  calls), and feeds imported `GammaRoute`s into the existing `SetServiceRoutes` path (a new
+  *imported* source merged with local routes in `captureVhosts`).
+- Read-only: a spoke never writes back; local class-2 config still layers on top (precedence:
+  define local-vs-imported — default imported wins for class-1, documented).
+- Partition/AP: last-known projection is retained and served if the channel is cut (no hard fail),
+  matching the endpoint posture.
+- **Exit:** a caller on a spoke routes by the hub-authored route table for an imported service; cut
+  the channel → still serves last-known.
+
+### EM3 — authority policy + trust
+- A control-plane flag selects topology: **control-cluster** (only the hub may export — Option E) vs
+  **federated** (each producer exports its own — Option C). Same channel; the flag is *who may
+  write a projection*. Enforced at the export side + validated on import (reject a projection whose
+  `originCluster` isn't the permitted authority).
+- Cross-trust-domain auth: imported projections are authenticated to their origin cluster over the
+  SPIFFE-federated channel the registry bus already requires for endpoints. RBAC locks CRD apply on
+  the hub (it is the high-value config authority).
+- **Exit:** a spoke rejects a projection from a non-authoritative origin; hub RBAC gates who can
+  author config.
+
+### EM4 — observability + class-2 drift
+- Metrics: projection export/import lag, per-service projection version skew across clusters, import
+  rejections. A `status`/metric surfacing **class-2** (GitOps-owned) divergence for a ClusterSet
+  service so operator-replicated drift is at least visible.
+- **Exit:** export→import lag and cross-cluster config skew are dashboarded; drift is observable.
+
+### Parallel track — D (enforcement, proposal 019)
+Class-1 policy that must hold for *all* callers (not just be evaluated consumer-side) is enforced at
+the producer waypoint as 019 lands — no projection needed for that class. EM1–EM4 cover the config
+that must be evaluated consumer-side; D covers the must-hold-near-the-service slice.
+
+### Sequencing notes
+EM1→EM2 is the minimum viable channel (HTTPRoute/GRPCRoute first; MeshConfig/VirtualHost/HTTPFilter
+reuse the same `ConfigProjection`). EM3 gates production multi-tenant use. EM4 before declaring it
+load-bearing. This delivers 025's M3 (the Service-`targetRef` escape-hatch form propagates as an
+`httpFilters[]` entry in the projection).
