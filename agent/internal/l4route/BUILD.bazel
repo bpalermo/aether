@@ -7,9 +7,9 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/gatewaystatus",
-        "//agent/internal/referencegrant",
         "//agent/internal/xds/proxy",
         "//common/log",
+        "//common/referencegrant",
         "//common/serviceref",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",

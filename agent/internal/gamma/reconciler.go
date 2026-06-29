@@ -15,11 +15,11 @@ import (
 	"github.com/bpalermo/aether/common/serviceref"
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
-	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/referencegrant"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

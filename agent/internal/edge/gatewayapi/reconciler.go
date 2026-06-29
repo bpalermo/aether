@@ -16,12 +16,12 @@ import (
 	"github.com/bpalermo/aether/common/serviceref"
 
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
-	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	constants "github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/referencegrant"
 	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

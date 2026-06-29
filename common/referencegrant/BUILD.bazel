@@ -3,8 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "referencegrant",
     srcs = ["referencegrant.go"],
-    importpath = "github.com/bpalermo/aether/agent/internal/referencegrant",
-    visibility = ["//agent:__subpackages__"],
+    importpath = "github.com/bpalermo/aether/common/referencegrant",
+    visibility = ["//visibility:public"],
     deps = [
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",
