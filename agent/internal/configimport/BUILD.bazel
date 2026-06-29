@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "configimport",
+    srcs = ["importer.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/configimport",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//agent/internal/xds/proxy",
+        "//api/aether/registry/v1:registry",
+        "//common/log",
+        "//registry",
+    ],
+)
+
+go_test(
+    name = "configimport_test",
+    srcs = ["importer_test.go"],
+    embed = [":configimport"],
+    deps = [
+        "//agent/internal/xds/proxy",
+        "//api/aether/registry/v1:registry",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

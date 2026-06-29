@@ -146,3 +146,11 @@ type ConfigExporter interface {
 	// The same service may appear once per exporting cluster.
 	ListConfig(ctx context.Context) ([]*registryv1.ServiceConfigProjection, error)
 }
+
+// ConfigImporter is the read-only consumer half of cross-cluster config propagation
+// (proposal 026): the agent's registry (the registrar client) lists imported config
+// projections via the registrar's ListAllConfig RPC — agents never read the store
+// directly. ConfigExporter (the store-backed half) also satisfies it.
+type ConfigImporter interface {
+	ListConfig(ctx context.Context) ([]*registryv1.ServiceConfigProjection, error)
+}

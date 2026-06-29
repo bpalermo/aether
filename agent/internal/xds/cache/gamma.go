@@ -18,13 +18,46 @@ func (c *SnapshotCache) SetServiceRoutes(routes map[string][]proxy.GammaRoute) {
 	}
 }
 
-// serviceRoutesSnapshot returns a shallow copy of the GAMMA rules for use during a
-// snapshot rebuild (read once, outside the cluster lock).
+// SetImportedServiceRoutes replaces the GAMMA rules IMPORTED from peer clusters
+// (proposal 026): config a remote cluster authored for a service, fetched from the
+// registrar (ConfigImporter) and materialized read-only. Merged with local routes at
+// read time — a LOCAL HTTPRoute for the same service wins (a cluster's own config is
+// authoritative for itself). Signals a scoped-snapshot rebuild on change.
+func (c *SnapshotCache) SetImportedServiceRoutes(routes map[string][]proxy.GammaRoute) {
+	c.depMu.Lock()
+	changed := !equalServiceRoutes(c.importedServiceRoutes, routes)
+	c.importedServiceRoutes = routes
+	c.depMu.Unlock()
+	if changed {
+		c.signalDependencyChange()
+	}
+}
+
+// effectiveServiceRoutesLocked returns the merged GAMMA rules: imported (peer-cluster)
+// routes overlaid by local routes (local wins on a per-service key collision). Caller
+// holds depMu. Returns the local map directly when nothing is imported (no allocation).
+func (c *SnapshotCache) effectiveServiceRoutesLocked() map[string][]proxy.GammaRoute {
+	if len(c.importedServiceRoutes) == 0 {
+		return c.serviceRoutes
+	}
+	out := make(map[string][]proxy.GammaRoute, len(c.serviceRoutes)+len(c.importedServiceRoutes))
+	for k, v := range c.importedServiceRoutes {
+		out[k] = v
+	}
+	for k, v := range c.serviceRoutes { // local overrides imported
+		out[k] = v
+	}
+	return out
+}
+
+// serviceRoutesSnapshot returns a shallow copy of the effective (local ∪ imported)
+// GAMMA rules for use during a snapshot rebuild (read once, outside the cluster lock).
 func (c *SnapshotCache) serviceRoutesSnapshot() map[string][]proxy.GammaRoute {
 	c.depMu.RLock()
 	defer c.depMu.RUnlock()
-	out := make(map[string][]proxy.GammaRoute, len(c.serviceRoutes))
-	for k, v := range c.serviceRoutes {
+	eff := c.effectiveServiceRoutesLocked()
+	out := make(map[string][]proxy.GammaRoute, len(eff))
+	for k, v := range eff {
 		out[k] = v
 	}
 	return out
@@ -79,10 +112,11 @@ func equalRouteTargetPorts(a, b map[string][]uint32) bool {
 	return true
 }
 
-// routeBackendsLocked appends the bare backend services of a service's GAMMA rules
-// to set. Caller holds depMu (it reads c.serviceRoutes).
-func (c *SnapshotCache) routeBackendsLocked(service string, set map[string]struct{}) {
-	for _, r := range c.serviceRoutes[service] {
+// routeBackendsFrom appends the bare backend services of a service's GAMMA rules
+// (from the given effective route map) to set. Used by dependencySetLocked over the
+// merged local ∪ imported routes (caller holds depMu).
+func routeBackendsFrom(routes map[string][]proxy.GammaRoute, service string, set map[string]struct{}) {
+	for _, r := range routes[service] {
 		for _, b := range r.Backends {
 			if b.Service != "" {
 				set[b.Service] = struct{}{}

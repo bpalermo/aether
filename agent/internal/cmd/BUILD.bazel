@@ -14,6 +14,7 @@ go_library(
         "//agent/constants",
         "//agent/internal/capture",
         "//agent/internal/cni/server",
+        "//agent/internal/configimport",
         "//agent/internal/edge/gatewayapi",
         "//agent/internal/edge/secret",
         "//agent/internal/gamma",

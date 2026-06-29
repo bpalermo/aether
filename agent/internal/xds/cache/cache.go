@@ -184,6 +184,11 @@ type SnapshotCache struct {
 	// dependency set so their EDS clusters generate; the per-service outbound vhost
 	// is enriched with the rules. Guarded by depMu (dependency state).
 	serviceRoutes map[string][]proxy.GammaRoute
+	// importedServiceRoutes holds GAMMA rules IMPORTED from peer clusters (proposal
+	// 026, multi-cluster config propagation), fetched from the registrar (ConfigImporter)
+	// and materialized read-only. Merged with serviceRoutes at read time; a LOCAL route
+	// for the same service wins. Guarded by depMu.
+	importedServiceRoutes map[string][]proxy.GammaRoute
 	// routeTargetPorts holds the real Service port(s) of each GAMMA route TARGET
 	// (proposal 023 M2), keyed by the same "<ns>/<svc>" route-target key as
 	// serviceRoutes. Sourced from the HTTPRoute/GRPCRoute parentRef port. captureVhosts
