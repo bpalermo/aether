@@ -1,11 +1,15 @@
 # Proposal: Proxy-extension escape hatch for Gateway API / GAMMA
 
 **Status:** Design — 2026-06-29 (Option C recommended; revised after review — validation is
-in-process proto-validate, not an Envoy binary in the webhook)
-**Relates:** proposal 018 (Gateway API/GAMMA), proposal 017 (VirtualHost CRD — the edge
-escape-hatch precedent), proposal 015 (MeshConfig CRD — the policy-attachment precedent),
-proposal 011 / #396 (`envoy --mode validate` offline gate — the optional deeper CI gate),
-proposal 023 (route-by-Service). [[project_mesh_config_crd]], [[project_gateway_api_gamma]],
+in-process proto-validate, not an Envoy binary in the webhook). The route-rule `ExtensionRef`
+form (caller-side, cluster-local) is unblocked; the Service-`targetRef` (policy-attachment) form
+is **blocked on proposal 026** (multi-cluster config propagation) — a service-global escape-hatch
+policy cannot be consistent across clusters until 026's class-1 propagation/enforcement lands.
+**Relates:** proposal 026 (multi-cluster config propagation — gates the Service-targetRef form),
+proposal 018 (Gateway API/GAMMA), proposal 017 (VirtualHost CRD — the edge escape-hatch
+precedent), proposal 015 (MeshConfig CRD — the policy-attachment precedent), proposal 011 / #396
+(`envoy --mode validate` offline gate — the optional deeper CI gate), proposal 023
+(route-by-Service). [[project_mesh_config_crd]], [[project_gateway_api_gamma]],
 [[project_edge_proxy_plan]].
 
 ## Summary
@@ -203,6 +207,13 @@ reaches the chain at all.
   *only* schema enforcement — another reason the admission floor must be fail-closed.
 - **GRPCRoute parity.** The same `ExtensionRef` path applies to GRPCRoute filters (aether supports
   GRPCRoute, #289); plumb both, not HTTPRoute only.
+- **Multi-cluster (see proposal 026).** aether federates the *registry*, not *config*: an HTTPFilter
+  applied in one cluster is visible only there, and GAMMA filters apply consumer-side (the caller's
+  egress). So the caller-side route `ExtensionRef` form is naturally cluster-local (class-2 — fine,
+  GitOps-replicate per consumer cluster), but the Service-`targetRef` form *reads* as service-global
+  while actually being enforced per consumer cluster. That form is **blocked on proposal 026**'s
+  class-1 propagation (Option C) / producer-waypoint enforcement (Option D); v1 ships route-scope
+  only.
 - **Conformance.** ExtensionRef is an *implementation-specific* extension; it does not affect
   GATEWAY-HTTP/MESH-HTTP conformance (those test the typed filters). This is purely additive.
 
