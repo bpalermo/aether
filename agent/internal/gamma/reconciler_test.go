@@ -27,6 +27,29 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
+// TestReconcile_HTTPFilterGate verifies the CRD-availability gate (the upgrade
+// crashloop hardening): when httpFilterEnabled is false (CRD absent), Reconcile must
+// NOT list HTTPFilters — so it succeeds even with no HTTPFilter type registered;
+// when true, it lists (and here errors, proving the list is actually gated).
+func TestReconcile_HTTPFilterGate(t *testing.T) {
+	ctx := context.Background()
+	// Scheme deliberately WITHOUT config.aether.io registered (simulates the CRD absent).
+	s := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(s))
+	require.NoError(t, gatewayv1.Install(s))
+	require.NoError(t, gatewayv1beta1.Install(s))
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+	mk := func(enabled bool) *Reconciler {
+		return &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "aether.internal", Log: slog.New(slog.DiscardHandler), httpFilterEnabled: enabled}
+	}
+
+	_, err := mk(false).Reconcile(ctx, reconcile.Request{})
+	require.NoError(t, err, "disabled: must skip the HTTPFilter list → no crash when the CRD is absent")
+
+	_, err = mk(true).Reconcile(ctx, reconcile.Request{})
+	require.Error(t, err, "enabled: lists HTTPFilter (here against a scheme without it → error, proving the gate)")
+}
+
 // TestBuildGammaRoute_ExtensionRef verifies an HTTPRoute ExtensionRef → allow-listed,
 // in-namespace HTTPFilter resolves to a GammaRoute.ExtensionFilter (proposal 025 M1),
 // and that dangling / non-allow-listed / wrong-group refs are skipped.
