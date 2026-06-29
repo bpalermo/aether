@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"regexp"
 	"testing"
 
@@ -174,6 +175,41 @@ func matchesAuthority(targets []proxy.KnownTargetRoute, authority string) (strin
 		}
 	}
 	return "", false
+}
+
+// TestCaptureVhosts_DemandScoped locks the M4 invariant (proposal 022/004): the
+// cap_http table is bounded by the node dependency set, NOT the cluster-wide set of
+// mesh authorities. This is what keeps redirect-all (now the managed-pod default)
+// from exploding cap_http to every mesh Service on every node — Envoy only carries
+// routes/clusters for destinations this node actually depends on; everything else
+// rides the catch-all (ODCDS cold path / passthrough). The cold path then pulls a
+// newly-used service into scope on demand.
+func TestCaptureVhosts_DemandScoped(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+
+	// Two real mesh authorities exist cluster-wide (the mesh-Service reconciler feeds
+	// the full set, independent of any one node's dependency set).
+	c.SetCaptureAuthorities(map[string]string{
+		"default/in-scope":  "in-scope.default.svc.cluster.local",
+		"default/off-scope": "off-scope.default.svc.cluster.local",
+	})
+	// A local pod declares only in-scope as an upstream, so only it enters this
+	// node's dependency set.
+	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "default/in-scope"), "example.org"))
+
+	vhosts := c.captureVhosts()
+	require.NotNil(t, findVHost(vhosts, "in-scope.default.svc.cluster.local"),
+		"in-scope authority must build a cap_http vhost")
+	assert.Nil(t, findVHost(vhosts, "off-scope.default.svc.cluster.local"),
+		"off-scope authority must be excluded from cap_http (demand-scoped), even though it is a known mesh authority")
+
+	// Cold path: once off-scope is observed via ODCDS it joins the dependency set,
+	// so capture scope follows demand and its vhost now builds.
+	require.True(t, c.ObserveDependency(ctx, "default/off-scope"))
+	vhosts = c.captureVhosts()
+	assert.NotNil(t, findVHost(vhosts, "off-scope.default.svc.cluster.local"),
+		"observed (ODCDS) authority must now build a cap_http vhost — scope follows demand")
 }
 
 // TestCaptureKnownTargets_StableAcrossGAMMAChurn is the regression guard for the
