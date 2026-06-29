@@ -11,6 +11,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	previoushostsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -281,6 +282,23 @@ type GammaRoute struct {
 	// URLRewrite, when non-nil, rewrites the request URL (host and/or path) before
 	// forwarding. Applied on top of the normal RouteAction (Backends still used).
 	URLRewrite *GammaURLRewrite
+	// ExtensionFilters are proxy-extension escape-hatch filters (proposal 025)
+	// attached to this route via an HTTPRoute/GRPCRoute `ExtensionRef` → HTTPFilter
+	// CRD. Each is emitted into the route's typed_per_filter_config (enabling +
+	// configuring an allow-listed Envoy HTTP filter that aether adds to the HCM chain
+	// default-disabled). Empty for the common case.
+	ExtensionFilters []ExtensionFilter
+}
+
+// ExtensionFilter is one proxy-extension escape-hatch filter (proposal 025): a named
+// Envoy HTTP filter configured opaquely via an HTTPFilter CRD. Name is the Envoy
+// filter name (allow-listed — the proxy build must compile it in); Config is the
+// opaque per-route typed_config (validated by the admission webhook, M2). aether adds
+// the filter to the HCM chain default-disabled; the route's typed_per_filter_config
+// (Config) re-enables + configures it for that route.
+type ExtensionFilter struct {
+	Name   string
+	Config *anypb.Any
 }
 
 // GammaRedirect describes a RequestRedirect filter: it replaces the route action
@@ -415,6 +433,7 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 				RequestHeadersToRemove:  reqRemove,
 				ResponseHeadersToAdd:    respAdd,
 				ResponseHeadersToRemove: respRemove,
+				TypedPerFilterConfig:    extensionPerFilterConfig(rule.ExtensionFilters),
 			}
 			if rule.Redirect != nil {
 				r.Action = gammaRedirectAction(rule.Redirect)
