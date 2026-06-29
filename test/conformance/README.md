@@ -64,10 +64,13 @@ the aether-specific adaptations the talos baseline runs applied by hand:
 
 - `aether.io/managed: "true"` on the `gateway-conformance-mesh` namespace (mesh injection),
 - **per-version ServiceAccounts** (`echo-v1`, `echo-v2`) on the echo Deployments —
-  aether's mesh identity is the ServiceAccount, so the two versions need distinct ones,
-- `capture.aether.io/redirect-all: "true"` pod annotation so real Service ports are
-  captured (the framework drives requests by `kubectl exec` into the echo pods, and
-  redirect-all routes those real ports through the mesh).
+  aether's mesh identity is the ServiceAccount, so the two versions need distinct ones.
+
+The managed-namespace label is enough to capture the echo pods' real Service ports:
+redirect-all is the chart default (`agent.captureRedirectAllDefault`, soak-validated),
+so namespace injection labels the pods managed and they get redirect-all with **no
+per-pod annotation** (the framework drives requests by `kubectl exec` into the echo
+pods, and redirect-all routes those real ports through the mesh).
 
 The Go test embeds this file (`//go:embed mesh/manifests.yaml`) and passes it as the
 suite's `ManifestFS` for the MESH run, overriding the suite's embedded base.

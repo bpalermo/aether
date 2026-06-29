@@ -21,8 +21,6 @@ spec:
       version: v1
   template:
     metadata:
-      annotations:
-        capture.aether.io/redirect-all: "true"
       labels:
         app: echo
         version: v1
@@ -81,8 +79,6 @@ spec:
       version: v2
   template:
     metadata:
-      annotations:
-        capture.aether.io/redirect-all: "true"
       labels:
         app: echo
         version: v2
@@ -174,8 +170,6 @@ spec:
       version: v1
   template:
     metadata:
-      annotations:
-        capture.aether.io/redirect-all: "true"
       labels:
         app: echo
         version: v1

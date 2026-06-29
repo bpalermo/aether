@@ -335,12 +335,15 @@ jobs:
       # Install aether with the MESH path on and SPIRE off. spire.enabled=false flips
       # the agent's cleartext-mesh mode (no SVID/SDS → cleartext inbound listener,
       # already-cleartext outbound). agent.gamma=true turns on the GAMMA reconciler
-      # (HTTPRoute parentRef=Service → cap_http route tables). agent.captureRedirectAll
-      # =true adds the ORIGINAL_DST passthrough so redirect-all'd pods (the overlay
-      # annotates the echo pods) capture their real Service ClusterIP:port — the route
-      # target's real port (proposal 023 M2). transparentCapture / generateMeshServices
-      # / namespaceInjection / injectPodNdots are chart defaults (on). The edge is not
-      # needed east-west, so leave it off.
+      # (HTTPRoute parentRef=Service → cap_http route tables). redirect-all is now the
+      # chart DEFAULT (agent.captureRedirectAllDefault=true, soak-validated on talos
+      # 2026-06-29), so the mesh path captures each managed pod's real Service
+      # ClusterIP:port with NO per-pod annotation — the overlay's managed-namespace
+      # label is enough (namespace injection labels the echo pods managed → default
+      # redirect-all). This exercises the real default config, not the old per-pod
+      # opt-in. transparentCapture / generateMeshServices / namespaceInjection /
+      # injectPodNdots are chart defaults (on). The edge is not needed east-west, so
+      # leave it off.
       - name: Install aether (mesh, no SPIRE)
         run: |
           sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
@@ -350,7 +353,6 @@ jobs:
             --set namespace.create=false \
             --set spire.enabled=false \
             --set agent.gamma=true \
-            --set agent.captureRedirectAll=true \
             $(img agent agent) \
             $(img cniInstall cni-install) \
             $(img registrar registrar) \
