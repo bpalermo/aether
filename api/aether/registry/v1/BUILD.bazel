@@ -6,12 +6,15 @@ load("//bazel/lint:linters.bzl", "buf_test")
 proto_library(
     name = "registryv1_proto",
     srcs = [
+        "config.proto",
         "endpoint.proto",
         "service.proto",
     ],
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_pquerna_protoc_gen_dynamo//proto/dynamo/v1:v1_proto",
+        "@protobuf//:any_proto",
+        "@protobuf//:duration_proto",
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
     ],
 )
