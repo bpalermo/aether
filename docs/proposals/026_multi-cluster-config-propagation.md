@@ -1,6 +1,11 @@
 # Proposal: Multi-cluster config propagation
 
-**Status:** Design — 2026-06-29 (options for review)
+**Status:** Accepted — 2026-06-29. **Decision: Option E (control cluster — centralized config
+authority)**, implemented on Option C's export/import channel (the hub is the sole exporter; spokes
+import read-only, no cross-cluster K8s credentials); Option D (producer-waypoint) for class-1
+*enforcement*; Option A (GitOps) for class-2 consumer-local config; Option B rejected. Run the
+control cluster as a pure-management cluster (no mesh workloads). This decides the authority
+topology; the export schema + materializer are the implementation follow-up.
 **Relates:** proposal 006 (multi-region etcd federation — the registry bus), proposal 019
 (multicluster node-waypoint — the producer-side enforcement option), proposal 018 (Gateway
 API/GAMMA — the config that needs to propagate), proposal 023 (route-by-Service), proposal 015
@@ -137,11 +142,15 @@ services, it has no producer-authority of its own, so it is purely a config dist
   config compromise); centralizes the config RBAC surface. Does **not** centralize the *registry*
   (see Tensions — the "no authoritative cluster" directive is about endpoints, a different plane).
 
-**Recommendation (tentative): one import mechanism (C), deployment-selectable authority topology
-(C *or* E), D for enforcement, A for class-2.**
-- **Mechanism:** build **C**'s export/import channel once. **E reuses it verbatim** (hub = sole
-  exporter), so federated-producer vs central-hub is a *deployment choice over the same plumbing*,
-  not a fork: independent / multi-tenant clusters → **C**; a central platform team → **E**.
+**Decision (2026-06-29): Option E — control cluster (centralized config authority), on C's
+mechanism; D for enforcement; A for class-2; B rejected.**
+- **Authority topology = E (control cluster).** One cluster is the single source of truth for
+  class-1 config — no drift by construction, trivial single-writer conflict model, manage routing
+  from one place. Run it as a **pure-management cluster** (no mesh workloads). The federated-producer
+  variant (C) is *not* the chosen topology, but its export/import channel IS the mechanism E is
+  built on (the hub is simply the sole authorized exporter) — so the channel is built once and the
+  topology is a policy over it (who may export), leaving the door open to federated authority later
+  without re-plumbing.
 - **Class-1 enforcement** (must hold for all callers) → **D** (producer waypoint): no propagation,
   no drift, independent of the authority topology.
 - **Class-1 config evaluated consumer-side** (e.g. client routing that should match mesh-wide) →
