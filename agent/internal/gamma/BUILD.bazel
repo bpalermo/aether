@@ -7,11 +7,11 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/gatewaystatus",
-        "//agent/internal/referencegrant",
         "//agent/internal/xds/proxy",
         "//api/aether/config/v1:config",
         "//common/apis/config/v1:config",
         "//common/log",
+        "//common/referencegrant",
         "//common/serviceref",
         "@io_k8s_apimachinery//pkg/api/meta",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
