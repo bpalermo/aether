@@ -1,10 +1,12 @@
 # Proposal: Proxy-extension escape hatch for Gateway API / GAMMA
 
-**Status:** Design — 2026-06-29 (Option C recommended; revised after review — validation is
-in-process proto-validate, not an Envoy binary in the webhook). The route-rule `ExtensionRef`
-form (caller-side, cluster-local) is unblocked; the Service-`targetRef` (policy-attachment) form
-is **blocked on proposal 026** (multi-cluster config propagation) — a service-global escape-hatch
-policy cannot be consistent across clusters until 026's class-1 propagation/enforcement lands.
+**Status:** Accepted — 2026-06-29 (**Option C**: ExtensionRef → typed CRD, opaque body, fail-closed
+**in-process proto-validate** — no Envoy binary in the webhook). Implementation tracked as
+milestones M1–M4 (below). The route-rule `ExtensionRef` form (caller-side, cluster-local) is
+unblocked and is v1 (M1–M2); the Service-`targetRef` (policy-attachment) form is **blocked on
+proposal 026** (multi-cluster config propagation, Accepted — Option E) — a service-global
+escape-hatch policy cannot be consistent across clusters until 026's C/E channel or D-enforcement
+lands, so it is deferred to M3+.
 **Relates:** proposal 026 (multi-cluster config propagation — gates the Service-targetRef form),
 proposal 018 (Gateway API/GAMMA), proposal 017 (VirtualHost CRD — the edge escape-hatch
 precedent), proposal 015 (MeshConfig CRD — the policy-attachment precedent), proposal 011 / #396
@@ -230,17 +232,30 @@ reaches the chain at all.
 - e2e: a meshed route with an `ExtensionRef` HTTPFilter applies the Envoy filter (assert the
   effect, e.g. the dynamic metadata / mapped header) on both the edge and the GAMMA capture path.
 
-## Sequencing
+## Milestones
 
-1. `HTTPFilter` CRD + `spec.filter` allow-list + `GammaRoute.ExtensionFilters` plumbing: add the
-   allow-listed filter to the HCM chain default-disabled, enable+configure it per-route via
-   `typed_per_filter_config` (aether-ordered insertion — NOT arbitrary CRD placement). This is the
-   step that actually delivers `header_to_metadata`.
-2. The validating webhook: in-process proto-validate (`@type` resolve + PGV `ValidateAll`) as the
-   fail-closed floor; route `ResolvedRefs` status on reject.
-3. CRD-specified *arbitrary* `http_filters` ordering (admin-owned, MeshConfig-gated) + the optional
-   `envoy --mode validate` deeper CI gate.
-4. Promote popular filters to typed fields (Option B) opportunistically.
+- **M1 — route-scope ExtensionRef (the v1 escape hatch).** `HTTPFilter` CRD (`config.aether.io/v1`)
+  + `spec.filter` allow-list (filters the aether proxy build compiles in) + `GammaRoute.Extension­Filters`
+  plumbing: add the allow-listed filter to the HCM chain default-disabled and enable+configure it
+  per-route via `typed_per_filter_config` (aether-ordered insertion — NOT arbitrary CRD placement).
+  The HTTPRoute/GRPCRoute rule's `filters: [{type: ExtensionRef, …}]` resolves to it. **Exit:** a
+  meshed/edge route with an `ExtensionRef` HTTPFilter applies the Envoy filter (e.g.
+  `header_to_metadata`), asserted by effect; demand-scoped + GAMMA-capture paths both work.
+- **M2 — fail-closed validation (the safety floor).** Validating webhook on the CRD: resolve the
+  opaque `@type` against the linked `go-control-plane` protos, unmarshal, run PGV `ValidateAll()`
+  in-process (no Envoy binary); reject unknown-type / malformed / constraint-violating / non-allow-
+  listed payloads and set the route `ResolvedRefs` condition. Builder skips (not poisons) a bad
+  filter. Optional deeper `envoy --mode validate` stays a CI/build gate. **Exit:** a malformed
+  payload is rejected at apply; a valid one admits; `//test/envoy_validate` accepts the rendered
+  snapshot.
+- **M3 — Service-`targetRef` (policy attachment), multi-cluster-aware.** GAMMA object-wide
+  attachment to a Service; **gated on proposal 026** — a service-global filter is a class-1 payload
+  that rides 026's C/E config channel (export the filter with the service) or D (waypoint
+  enforcement). **Exit:** a Service-attached HTTPFilter applies to the service's callers consistently
+  (within a cluster now; across clusters once 026 lands).
+- **M4 — opportunistic typed promotion + chain-ordering hardening.** Promote popular filters to
+  first-class typed fields (Option B) over time; admin-owned (MeshConfig-gated) arbitrary
+  `http_filters` ordering for the rare case aether's default insertion order is wrong.
 
 Independent of the MESH-HTTP route-selection debugging — this is a new surface, not a fix to the
 existing typed path.
