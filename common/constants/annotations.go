@@ -36,6 +36,20 @@ const (
 	// the operator's escape hatch once redirect-all is the managed-pod default.
 	AnnotationCaptureExcludeOutboundPorts = annotationAetherCapturePrefix + "exclude-outbound-ports"
 
+	// AnnotationCaptureExcludeOutboundIPRanges carves outbound traffic to specific
+	// destination IP ranges OUT of transparent capture (proposal 022, M2-default,
+	// Istio parity with traffic.sidecar.istio.io/excludeOutboundIPRanges). The value
+	// is a comma-separated list of IPv4 CIDRs (e.g. "10.0.0.0/8,192.168.1.5/32"; a
+	// bare address is treated as /32); the CNI emits an nft RETURN matching the
+	// destination range, ahead of the redirect rule, so connections to those ranges
+	// bypass the mesh entirely (an external dependency, a metadata endpoint, a peer
+	// CIDR). The match is protocol-agnostic (destination-based), so it carves out
+	// both the TCP and UDP capture rules. Applies to both the scoped and redirect-all
+	// capture paths. Invalid/empty/non-IPv4 entries are ignored. Independent of the
+	// redirect mode — the operator's escape hatch once redirect-all is the
+	// managed-pod default.
+	AnnotationCaptureExcludeOutboundIPRanges = annotationAetherCapturePrefix + "exclude-outbound-ip-ranges"
+
 	// AnnotationConfigUpstreams is the pod annotation declaring the upstream
 	// services the pod calls, as a comma-separated list of service names
 	// (e.g. "svc-payments,svc-ledger"). The agent unions the annotations of

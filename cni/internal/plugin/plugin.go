@@ -21,6 +21,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,9 +109,10 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// connections to these dports bypass the mesh via an nft RETURN ahead of the
 	// redirect, in whichever capture path is active.
 	excludePorts := podExcludedOutboundPorts(netConf)
+	excludeRanges := podExcludedOutboundIPRanges(netConf)
 
 	if netConf.TransparentCaptureEnabled {
-		if err := installCaptureRedirect(args.Netns, excludePorts, p.logger); err != nil {
+		if err := installCaptureRedirect(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
 			p.logger.Warn("failed to install transparent-capture redirect; continuing without capture",
 				zap.String("netns", args.Netns), zap.Error(err))
 		}
@@ -128,7 +130,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// CaptureRedirectAllEnabled netconf flag is retained as an optional node-wide
 	// override (off by default).
 	if netConf.CaptureRedirectAllEnabled || podWantsRedirectAll(netConf) {
-		if err := installCaptureRedirectAll(args.Netns, excludePorts, p.logger); err != nil {
+		if err := installCaptureRedirectAll(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
 			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
 				zap.String("netns", args.Netns), zap.Error(err))
 		}
@@ -661,4 +663,49 @@ func podExcludedOutboundPorts(conf config.AetherConf) []uint16 {
 		ports = append(ports, p)
 	}
 	return ports
+}
+
+// podExcludedOutboundIPRanges parses the capture.aether.io/exclude-outbound-ip-ranges
+// annotation (proposal 022, M2-default; Istio parity) into a deduplicated list of
+// IPv4 destination prefixes to carve OUT of capture. The value is comma-separated
+// CIDRs (e.g. "10.0.0.0/8, 192.168.1.5/32"); a bare address is treated as a /32.
+// Blanks, unparseable entries, and non-IPv4 prefixes (the capture table is IPv4) are
+// skipped so a malformed annotation degrades to "exclude what parses" rather than
+// failing the pod's networking. Each prefix is normalised to its network address so
+// the nft mask/cmp matches. Returns nil when unset.
+func podExcludedOutboundIPRanges(conf config.AetherConf) []netip.Prefix {
+	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+		return nil
+	}
+	raw := (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureExcludeOutboundIPRanges]
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[netip.Prefix]struct{})
+	var ranges []netip.Prefix
+	for _, f := range strings.Split(raw, ",") {
+		s := strings.TrimSpace(f)
+		if s == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			// Accept a bare IPv4 address as a /32.
+			if addr, aerr := netip.ParseAddr(s); aerr == nil {
+				p = netip.PrefixFrom(addr, addr.BitLen())
+			} else {
+				continue
+			}
+		}
+		if !p.Addr().Is4() {
+			continue
+		}
+		p = p.Masked()
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		ranges = append(ranges, p)
+	}
+	return ranges
 }

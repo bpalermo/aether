@@ -3,6 +3,8 @@ package plugin
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
+	"net/netip"
 
 	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/google/nftables"
@@ -31,8 +33,8 @@ const captureRedirectAllTableName = "aether_capture_all"
 // It enters the netns by setns on a locked OS thread (matching netnsDialContext): the
 // netlink socket nftables opens then lives in the pod netns. A failed restore leaves
 // the thread locked so the Go runtime destroys it rather than reusing a poisoned one.
-func installCaptureRedirect(netnsPath string, excludePorts []uint16, logger *zap.Logger) error {
-	return withPodNetns(netnsPath, func() error { return programCaptureRedirect(excludePorts, logger) })
+func installCaptureRedirect(netnsPath string, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
+	return withPodNetns(netnsPath, func() error { return programCaptureRedirect(excludePorts, excludeRanges, logger) })
 }
 
 // programCaptureRedirect adds the nat/output REDIRECT rules in the CURRENT netns:
@@ -50,7 +52,7 @@ func installCaptureRedirect(netnsPath string, excludePorts []uint16, logger *zap
 // dropped until the agent creates the listener, which is correct behaviour
 // (UDPRoute without --l4-routes = no listener = datagrams discarded rather than
 // sent to an unexpected destination).
-func programCaptureRedirect(excludePorts []uint16, logger *zap.Logger) error {
+func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
 	meshPort := uint16(commonconstants.ProxyOutboundPort)
 	capturePort := uint16(commonconstants.ProxyCapturePort)
 
@@ -67,10 +69,14 @@ func programCaptureRedirect(excludePorts []uint16, logger *zap.Logger) error {
 		Hooknum:  nftables.ChainHookOutput,
 		Priority: nftables.ChainPriorityNATDest,
 	})
-	// Excluded ports (proposal 022 M2-default): accept (RETURN) ahead of the
-	// redirect so connections to these dports bypass capture entirely.
+	// Excluded ports / IP ranges (proposal 022 M2-default): accept (RETURN) ahead of
+	// the redirect so connections to these dports / destination ranges bypass capture
+	// entirely. Ranges are destination-based, so they carve out both TCP and UDP.
 	for _, port := range excludePorts {
 		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludePortAcceptExprs(port)})
+	}
+	for _, r := range excludeRanges {
+		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludeIPRangeAcceptExprs(r)})
 	}
 	// TCP: outbound TCP to ClusterIP:meshPort → capturePort (Phase 3a).
 	c.AddRule(&nftables.Rule{
@@ -162,8 +168,8 @@ func beUint16(v uint16) []byte {
 // CaptureRedirectAllEnabled is true AND TransparentCaptureEnabled is false, only
 // the broad rule is installed. When both are true, both tables exist and the
 // redirect-all subsumes the scoped rule (all traffic is already captured).
-func installCaptureRedirectAll(netnsPath string, excludePorts []uint16, logger *zap.Logger) error {
-	return withPodNetns(netnsPath, func() error { return programCaptureRedirectAll(excludePorts, logger) })
+func installCaptureRedirectAll(netnsPath string, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
+	return withPodNetns(netnsPath, func() error { return programCaptureRedirectAll(excludePorts, excludeRanges, logger) })
 }
 
 // programCaptureRedirectAll adds the redirect-all nat/output rule in the CURRENT
@@ -177,7 +183,7 @@ func installCaptureRedirectAll(netnsPath string, excludePorts []uint16, logger *
 // it in a separate higher-priority "conntrack" chain to avoid coupling to
 // rule position, but for a single-table approach both rules go in "output" with
 // the conntrack rule first (lower rule index wins in nft).
-func programCaptureRedirectAll(excludePorts []uint16, logger *zap.Logger) error {
+func programCaptureRedirectAll(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
 	capturePort := uint16(commonconstants.ProxyCapturePort)
 
 	c, err := nftables.New()
@@ -206,11 +212,15 @@ func programCaptureRedirectAll(excludePorts []uint16, logger *zap.Logger) error 
 		Exprs: passthroughMarkAcceptExprs(commonconstants.CapturePassthroughFwMark),
 	})
 
-	// Rule 0b: excluded ports (proposal 022 M2-default) — accept ahead of the broad
-	// redirect so connections to these dports bypass the mesh. This is where
-	// exclusions matter most: redirect-all otherwise captures every port.
+	// Rule 0b: excluded ports / IP ranges (proposal 022 M2-default) — accept ahead of
+	// the broad redirect so connections to these dports / destination ranges bypass
+	// the mesh. This is where exclusions matter most: redirect-all otherwise captures
+	// every port. Ranges are destination-based (no L4 proto match).
 	for _, port := range excludePorts {
 		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludePortAcceptExprs(port)})
+	}
+	for _, r := range excludeRanges {
+		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludeIPRangeAcceptExprs(r)})
 	}
 
 	// Rule 1: skip established/related connections (conntrack).
@@ -312,6 +322,30 @@ func excludePortAcceptExprs(port uint16) []expr.Any {
 		// tcp dport == port
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: beUint16(port)},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// excludeIPRangeAcceptExprs builds the rule:
+//
+//	ip daddr & <netmask> == <network> · accept
+//
+// Placed ahead of the redirect, it carves an outbound destination IP range OUT of
+// capture (proposal 022 M2-default, the exclude-outbound-ip-ranges annotation):
+// connections to any address in the prefix bypass the mesh and reach their real
+// destination directly. Unlike excludePortAcceptExprs it matches no L4 protocol —
+// the carve-out is destination-based, so it applies to both the TCP and UDP
+// capture rules. The prefix is IPv4 (the capture table is TableFamilyIPv4).
+func excludeIPRangeAcceptExprs(prefix netip.Prefix) []expr.Any {
+	network := prefix.Masked().Addr().As4()
+	mask := net.CIDRMask(prefix.Bits(), 32)
+	return []expr.Any{
+		// ip daddr (IPv4 dest = offset 16, len 4)
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
+		// reg1 &= netmask
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: mask, Xor: []byte{0x00, 0x00, 0x00, 0x00}},
+		// reg1 == network -> accept
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: network[:]},
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 }
