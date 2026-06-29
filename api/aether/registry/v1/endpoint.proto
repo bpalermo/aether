@@ -1,9 +1,12 @@
-syntax = "proto3";
+edition = "2023";
 
 package aether.registry.v1;
 
 import "buf/validate/validate.proto";
 
+// Preserve proto3 implicit field presence so the generated Go/C++ API is
+// unchanged by the edition migration (scalars stay value types, not pointers).
+option features.field_presence = IMPLICIT;
 option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
 
 message ServiceEndpoint {
@@ -46,7 +49,7 @@ message ServiceEndpoint {
     // 4 was node_ip (the node InternalIP, used as the HBONE tunnel target). The
     // plain mTLS transport routes to pod IPs directly, so it is no longer needed.
     reserved 4;
-    reserved "node_ip";
+    reserved node_ip;
   }
 
   KubernetesMetadata kubernetes_metadata = 8;
