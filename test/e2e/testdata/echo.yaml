@@ -11,6 +11,15 @@ metadata:
     app: echo
 spec:
   replicas: 1
+  # Surge a new Ready pod before terminating the old one (maxUnavailable: 0) so a
+  # single-replica rollout never leaves the Service with zero ready endpoints — the
+  # source of the ~6-54 transient 503s seen on echo during the redirect-all soak
+  # (2026-06-29). The mesh drains the terminating pod via its deletionTimestamp watch.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: echo
@@ -21,6 +30,11 @@ spec:
         aether.io/managed: "true"
     spec:
       serviceAccountName: echo
+      # Hold the pod briefly after deletion is requested so endpoint deregistration
+      # (mesh EDS DRAINING) + in-flight requests settle before SIGTERM. Native sleep
+      # preStop (k8s >=1.29) — the distroless echo-basic image has no shell. Pairs
+      # with the surge strategy above for hitless single-replica rollouts.
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsUser: 65534
         runAsGroup: 65534
@@ -42,6 +56,10 @@ spec:
                   fieldPath: metadata.namespace
           ports:
             - containerPort: 8080
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           resources:
             requests:
               cpu: 10m
