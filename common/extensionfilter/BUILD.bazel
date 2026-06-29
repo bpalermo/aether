@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "extensionfilter",
+    srcs = ["extensionfilter.go"],
+    importpath = "github.com/bpalermo/aether/common/extensionfilter",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
+        "@org_golang_google_protobuf//proto",
+    ],
+)
+
+go_test(
+    name = "extensionfilter_test",
+    srcs = ["extensionfilter_test.go"],
+    embed = [":extensionfilter"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//types/known/anypb",
+    ],
+)

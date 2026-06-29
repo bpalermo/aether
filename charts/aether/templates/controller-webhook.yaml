@@ -80,6 +80,14 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["meshconfigs"]
         scope: "Cluster"
+      # HTTPFilter (proposal 025): fail-closed in-process proto-validate of the opaque
+      # escape-hatch typedConfig. failurePolicy: Ignore (above) keeps a down webhook
+      # from wedging writes; the agent reconciler skips an unresolvable/invalid filter.
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httpfilters"]
+        scope: "Namespaced"
       - apiGroups: ["gateway.networking.k8s.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
