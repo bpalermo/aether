@@ -41,3 +41,21 @@ func RequireNamespaceQualifiedKeys(t testing.TB, services map[string][]*registry
 		}
 	}
 }
+
+// RequireProtocolDisjoint asserts the second cross-backend invariant: a service
+// serves exactly ONE protocol, so the HTTP and TCP ListAllEndpoints maps must not
+// share a service key. The agent's LoadClustersFromRegistry relies on this — it
+// builds a service's HTTP cluster + GAMMA cap_http vhost from the HTTP listing,
+// then OVERWRITES the same map key with a vhost-less tcp:true entry from the TCP
+// listing (cluster.go: "HTTP or TCP, never both"). A backend that returns a service
+// under both protocols (the kubernetes backend before #430, which ignored the
+// protocol arg) makes every such service collapse to TCP-only — its cluster + vhost
+// vanish. Call it with both protocols' ListAllEndpoints output.
+func RequireProtocolDisjoint(t testing.TB, httpServices, tcpServices map[string][]*registryv1.ServiceEndpoint) {
+	t.Helper()
+	for key := range tcpServices {
+		if _, both := httpServices[key]; both {
+			t.Errorf("service %q appears under BOTH HTTP and TCP — a backend must honor the protocol arg (a service is HTTP xor TCP)", key)
+		}
+	}
+}

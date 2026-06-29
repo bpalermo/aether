@@ -925,6 +925,9 @@ func TestKubernetesRegistry_TCPProtocolReturnsEmpty(t *testing.T) {
 	require.NotNil(t, tcpAll)
 	require.Empty(t, tcpAll)
 
+	// Shared cross-backend contract: a service serves HTTP xor TCP, never both.
+	registrytest.RequireProtocolDisjoint(t, httpAll, tcpAll)
+
 	// Single-service TCP read is empty as well.
 	tcpOne, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_TCP)
 	require.NoError(t, err)
