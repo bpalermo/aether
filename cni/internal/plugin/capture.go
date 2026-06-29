@@ -19,6 +19,19 @@ const captureTableName = "aether_capture"
 // captureRedirectAllTableName is the nft table for the redirect-all mode (spike/M2a).
 const captureRedirectAllTableName = "aether_capture_all"
 
+// builtinRedirectAllExcludedRanges are destination ranges always carved out of the
+// broad redirect-all capture (proposal 022 M2-default), in addition to the /8
+// loopback mask baked into redirectAllTCPExprs:
+//   - 169.254.0.0/16 link-local — the cloud instance metadata service
+//     (169.254.169.254) and other link-local endpoints must be reached directly.
+//   - 224.0.0.0/4 multicast — never a unicast mesh destination.
+//
+// These do not apply to the scoped rule, which only captures ClusterIP:18081.
+var builtinRedirectAllExcludedRanges = []netip.Prefix{
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+}
+
 // installCaptureRedirect programs, inside the pod's network namespace, an nftables
 // REDIRECT of outbound TCP destined for a mesh ClusterIP:<meshPort> to the pod-local
 // transparent-capture listener on <capturePort> (proposal 018, Phase 3a).
@@ -220,6 +233,17 @@ func programCaptureRedirectAll(excludePorts []uint16, excludeRanges []netip.Pref
 		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludePortAcceptExprs(port)})
 	}
 	for _, r := range excludeRanges {
+		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludeIPRangeAcceptExprs(r)})
+	}
+
+	// Rule 0c: built-in special-range exclusions (proposal 022 M2-default). The
+	// scoped rule only ever captured ClusterIP:18081, so these never mattered; the
+	// broad redirect-all captures EVERY non-loopback TCP dest, which the /8 loopback
+	// mask alone does not carve out. Link-local (169.254.0.0/16) carries the cloud
+	// instance metadata service (169.254.169.254) and must reach it directly, not via
+	// an Envoy passthrough hop; multicast (224.0.0.0/4) is never a unicast mesh
+	// destination. Always excluded, independent of the per-pod annotations.
+	for _, r := range builtinRedirectAllExcludedRanges {
 		c.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: excludeIPRangeAcceptExprs(r)})
 	}
 
