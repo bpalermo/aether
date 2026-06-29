@@ -14,6 +14,7 @@ package etcd
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -450,6 +451,79 @@ func (r *EtcdRegistry) ListExports(ctx context.Context) ([]export.ServiceExport,
 
 	r.log.DebugContext(ctx, "listed service exports", "count", len(exports))
 	return exports, nil
+}
+
+// configMarker delimits the config-projection segment within a key, after the origin
+// (region/cluster) prefix: <ownPrefix>/config/<service> = marshaled
+// ServiceConfigProjection. The service ("<ns>/<svc>" route-target key) is base64url-
+// encoded so its embedded "/" does not split the etcd key path.
+const configMarker = "/config/"
+
+// configKey builds the key for one of THIS instance's own config projections.
+func (r *EtcdRegistry) configKey(service string) string {
+	return r.ownPrefix + configMarker + base64.RawURLEncoding.EncodeToString([]byte(service))
+}
+
+// SetConfig records this cluster's projected GAMMA config for a service under its own
+// authoritative partition (proposal 026). origin_cluster is stamped to this instance's
+// cluster so the stored value matches the key path. Satisfies registry.ConfigExporter.
+func (r *EtcdRegistry) SetConfig(ctx context.Context, projection *registryv1.ServiceConfigProjection) error {
+	if projection == nil || projection.GetService() == "" {
+		return fmt.Errorf("config projection requires a service")
+	}
+	projection.OriginCluster = r.config.Cluster
+	data, err := proto.Marshal(projection)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config projection for %s: %w", projection.GetService(), err)
+	}
+	key := r.configKey(projection.GetService())
+	if _, err := r.client.Put(ctx, key, string(data)); err != nil {
+		r.log.ErrorContext(ctx, "failed to set config projection", "error", err, "service", projection.GetService(), "key", key)
+		return fmt.Errorf("failed to set config for service %s: %w", projection.GetService(), err)
+	}
+	r.log.InfoContext(ctx, "config projection set", "service", projection.GetService(), "version", projection.GetVersion())
+	return nil
+}
+
+// UnsetConfig removes the local cluster's config projection for the named service.
+// Idempotent. Satisfies registry.ConfigExporter.
+func (r *EtcdRegistry) UnsetConfig(ctx context.Context, service string) error {
+	key := r.configKey(service)
+	if _, err := r.client.Delete(ctx, key); err != nil {
+		r.log.ErrorContext(ctx, "failed to unset config projection", "error", err, "service", service, "key", key)
+		return fmt.Errorf("failed to unset config for service %s: %w", service, err)
+	}
+	r.log.InfoContext(ctx, "config projection unset", "service", service)
+	return nil
+}
+
+// ListConfig returns every config projection across all origins (clusterset-wide). It
+// ranges the whole root and unmarshals each /config/ value, setting origin_cluster
+// authoritatively from the key path (defending against a forged origin in the value).
+// Satisfies registry.ConfigExporter.
+func (r *EtcdRegistry) ListConfig(ctx context.Context) ([]*registryv1.ServiceConfigProjection, error) {
+	resp, err := r.client.Get(ctx, r.keyPrefix, clientv3.WithPrefix())
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to list config projections", "error", err)
+		return nil, fmt.Errorf("failed to list config projections: %w", err)
+	}
+	projections := make([]*registryv1.ServiceConfigProjection, 0)
+	for _, kv := range resp.Kvs {
+		key := string(kv.Key)
+		if !strings.Contains(key, configMarker) {
+			continue
+		}
+		p := &registryv1.ServiceConfigProjection{}
+		if err := proto.Unmarshal(kv.Value, p); err != nil {
+			r.log.WarnContext(ctx, "skipping unparseable config projection", "key", key, "error", err)
+			continue
+		}
+		// The key path is the authority for the origin, not the stored value.
+		p.OriginCluster = extractCluster(key)
+		projections = append(projections, p)
+	}
+	r.log.DebugContext(ctx, "listed config projections", "count", len(projections))
+	return projections, nil
 }
 
 // extractCluster pulls the origin cluster name from a full key path. Keys are
