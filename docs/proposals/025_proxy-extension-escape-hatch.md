@@ -1,10 +1,11 @@
 # Proposal: Proxy-extension escape hatch for Gateway API / GAMMA
 
-**Status:** Design — 2026-06-28 (options for review)
+**Status:** Design — 2026-06-29 (Option C recommended; revised after review — validation is
+in-process proto-validate, not an Envoy binary in the webhook)
 **Relates:** proposal 018 (Gateway API/GAMMA), proposal 017 (VirtualHost CRD — the edge
 escape-hatch precedent), proposal 015 (MeshConfig CRD — the policy-attachment precedent),
-proposal 011 / #396 (`envoy --mode validate` offline gate — the safety property this leans
-on), proposal 023 (route-by-Service). [[project_mesh_config_crd]], [[project_gateway_api_gamma]],
+proposal 011 / #396 (`envoy --mode validate` offline gate — the optional deeper CI gate),
+proposal 023 (route-by-Service). [[project_mesh_config_crd]], [[project_gateway_api_gamma]],
 [[project_edge_proxy_plan]].
 
 ## Summary
@@ -20,10 +21,14 @@ proxy features aether hasn't (or won't) promote to a first-class typed field —
 the data plane or hand-writing bootstrap.
 
 The decision to make is **which of three shapes** to adopt (see [Options](#options)). All three
-ride aether's existing strengths: the `config.aether.io` CRD family (MeshConfig, VirtualHost)
-and the **offline `envoy --mode validate` gate**, which lets aether validate an opaque
-extension *before* it reaches a proxy — turning the classic "one bad EnvoyFilter wedges the
-fleet" footgun into a fail-closed admission check.
+ride aether's existing strengths: the `config.aether.io` CRD family (MeshConfig, VirtualHost) and
+a **fail-closed validation floor**. The floor is **in-process, no Envoy binary**: the admission
+webhook resolves the opaque `@type` against the Envoy protos aether already links
+(`go-control-plane`) and runs their protoc-gen-validate `ValidateAll()` — the same
+`(validate.rules)` Envoy enforces at config load — so a bad payload is rejected at CRD apply,
+turning the classic "one bad EnvoyFilter wedges the fleet" footgun into a fail-closed admission
+check. The heavier offline `envoy --mode validate` gate (#396) stays as an *optional* deeper CI /
+build check, not a runtime webhook dependency.
 
 ## Motivation
 
@@ -94,15 +99,22 @@ translated by aether.
 The `ExtensionRef`/`targetRef` mechanism (portable Gateway API) points at a
 `config.aether.io/HTTPFilter` CRD that carries an **opaque `typedConfig` (`Any`)**, but aether
 **(a)** restricts the *placement* to known-safe seams (a route's `typed_per_filter_config`, or a
-small allow-list of HCM `http_filters` aether knows how to order), and **(b)** runs the
-generated config through `envoy --mode validate` at admission (a validating webhook on the CRD)
-and again at snapshot build — rejecting anything that NACKs *before* it reaches a live proxy.
+small allow-list of HCM `http_filters` aether knows how to order), and **(b)** validates the
+opaque body **fail-closed at admission, in-process, with no Envoy binary** (see Design →
+*Validate*): a validating webhook resolves the `@type`, unmarshals
+into the concrete Envoy message, and runs its protoc-gen-validate (PGV) `ValidateAll()` —
+rejecting anything malformed, unknown-typed, or constraint-violating *before* it reaches a live
+proxy. The deeper `envoy --mode validate` stays an *optional* CI / snapshot-build gate, not a
+runtime webhook dependency.
 
 - **+** Full power (any `typed_config`) with a real safety floor; smallest delta from what aether
-  already generates; uses the validate-gate aether already owns; degrades to Option B over time
-  (promote the popular ones to typed fields).
-- **−** Still Envoy-version-coupled for the opaque body (mitigated, not removed, by the pin +
-  the gate); ordering of arbitrary `http_filters` needs an allow-list, not free placement.
+  already generates; the admission floor uses protos aether **already links** (no new dep, no
+  Envoy binary in the controller); degrades to Option B over time (promote the popular ones to
+  typed fields).
+- **−** Still Envoy-version-coupled for the opaque body (mitigated, not removed, by pinning
+  `go-control-plane` + the proxy build); proto-validate proves *valid config for a known type*,
+  not *the filter is compiled into aether's proxy build* — closed by an explicit filter allow-list
+  (below); ordering of arbitrary `http_filters` needs an allow-list, not free placement.
 
 **Recommendation: Option C.** It's the only one that is *both* an actual escape hatch and
 fail-closed, and it's the natural extension of aether's CRD + validate-gate posture.
@@ -116,46 +128,107 @@ fail-closed, and it's the natural extension of aether's CRD + validate-gate post
   config.aether.io, kind: HTTPFilter, name: …}}]` (per-route), and/or `targetRefs` to a Service
   (GAMMA object-wide). The GAMMA reconciler resolves the ref(s) and attaches them to the
   `GammaRoute`.
-- **Plumb:** `GammaRoute` gains `ExtensionFilters []ExtensionFilter` (placement + `*anypb.Any`).
-  `BuildOutboundServiceVirtualHost` / the route builder emit them into `Route.typed_per_filter_config`
-  (route scope) or merge into the HCM `http_filters` (chain scope, allow-listed ordering) — the
-  SAME path that already emits HeaderMutation/Redirect, so it works identically on the edge and
-  the GAMMA capture path.
-- **Validate (the safety floor):** a validating webhook (the aether-controller, which already
-  hosts `/validate`) runs `envoy --mode validate` over a synthetic listener carrying the payload
-  and rejects the CRD on NACK; the snapshot builder re-checks and skips a bad filter rather than
-  poisoning the whole snapshot (fail-open at runtime, fail-closed at admission).
+- **Plumb:** `GammaRoute` gains `ExtensionFilters []ExtensionFilter` (filter name + placement +
+  `*anypb.Any`). The route builder emits the per-route body into `Route.typed_per_filter_config`
+  AND ensures the named filter is present in the HCM `http_filters` (default-disabled), because
+  **Envoy `typed_per_filter_config` only *overrides* a filter already in the chain — it cannot
+  *add* one** (see [Scope](#scope-route-vs-chain)). This is the SAME emission path that already
+  produces HeaderMutation/Redirect, so it works identically on the edge and the GAMMA capture path.
+- **Validate (the safety floor) — in-process, no Envoy binary:** a validating webhook (the
+  aether-controller, which already hosts `/validate`) (1) resolves the payload's `@type` against
+  the linked `go-control-plane/envoy` proto registry and unmarshals it into the concrete Envoy
+  message — rejecting unknown/unsupported types and malformed bytes; (2) runs that message's
+  **protoc-gen-validate `ValidateAll()`** — the SAME `(validate.rules)` constraints Envoy enforces
+  at config load (required/range/regex/oneof) — rejecting constraint violations. Both use protos
+  aether already imports (no new dependency, no version-matched Envoy binary in the controller).
+  The snapshot builder re-checks and skips a bad filter rather than poisoning the whole snapshot
+  (fail-open at runtime, fail-closed at admission). `envoy --mode validate` (`//test/envoy_validate`)
+  remains an OPTIONAL deeper gate in CI / the snapshot-build path — where the proxy image already
+  exists — for the imperative C++ checks PGV can't express; it is NOT a runtime webhook dependency.
+- **Filter allow-list:** `spec.filter` must be in an aether-maintained allow-list of HTTP filters
+  the aether proxy build (proposals 010/011) actually compiles in. Proto-validate proves the
+  *config* is valid for a known type; the allow-list proves the *filter exists in the proxy* (a
+  PGV-valid payload for a non-compiled filter would otherwise NACK at runtime). The allow-list
+  doubles as the security surface — see [Tensions](#tensions--non-goals).
+
+### Scope: route vs chain
+
+A subtlety that shapes the model and the sequencing: **`typed_per_filter_config` can only
+*override* an HTTP filter that is already present in the HCM `http_filters` chain — it cannot
+*add* one.** So a "route-scope only" hatch cannot, by itself, deliver a *new* filter like
+`header_to_metadata` (the motivating example); it could only re-configure filters aether already
+installs. The model is therefore: aether **adds** the allow-listed filter to the HCM chain
+**default-disabled** (via `disabled: true` / a per-route `FilterConfig{ disabled }` default), and
+the route's `ExtensionRef` both **enables and configures** it through `typed_per_filter_config`.
+
+This means the genuinely useful capability (introducing a new filter) inherently touches the HCM
+chain, so the chain-insertion allow-list (ordering) is part of step 1, not a deferred step 3 —
+chain *insertion* (allow-listed, aether-ordered) is in scope from the start; what stays deferred /
+admin-gated is letting a CRD specify *arbitrary* `http_filters` placement. Route-scope vs
+chain-scope is thus about *who controls ordering* (aether vs the CRD), not whether the filter
+reaches the chain at all.
 
 ## Tensions / non-goals
 
-- **Envoy-version coupling.** An opaque `typed_config` can break when `ENVOY_VERSION` bumps. The
-  validate-gate catches it at the next build/admission, but a stored CRD can silently age. Pin
-  the version (proposal 009/010) and re-validate stored HTTPFilters on proxy upgrade.
+- **Envoy-version coupling.** An opaque `typed_config` can break when the proxy/`go-control-plane`
+  version bumps. The coupling now rides the `go-control-plane/envoy` pin aether *already* carries
+  (and which must track the proxy's xDS API regardless) — not a separate Envoy binary in the
+  controller. But a *stored* CRD can silently age across an upgrade. Mitigate: a controller
+  reconcile re-runs proto-validate over stored HTTPFilters on startup / version change and surfaces
+  staleness explicitly — an `Accepted=False` status condition + an event/metric — so a now-invalid
+  filter is visible, not silently dropped (the runtime fail-open would otherwise just make the
+  effect vanish). Pin the version (proposal 009/010).
+- **Validate fidelity.** Proto-validate (`@type` resolve + PGV `ValidateAll`) reproduces Envoy's
+  *message-level* checks, not its imperative C++ config-load checks (some filters validate further
+  in code). The optional `envoy --mode validate` CI/build gate covers those; admission catches
+  *malformed*, not *misguided* (a payload can be valid yet semantically wrong).
+- **Filter must be in the proxy build.** A PGV-valid payload for a filter the aether proxy doesn't
+  compile in would NACK at runtime — bounded by the `spec.filter` allow-list (see Design). Keep the
+  allow-list in lockstep with the proxy build's compiled extensions (proposals 010/011).
 - **Not arbitrary bootstrap.** This is route/chain HTTP-filter config, not listener/cluster/
   bootstrap surgery. No `xds`-level patches (Istio EnvoyFilter's most dangerous mode). Keep it to
   `http_filters` + `typed_per_filter_config`.
 - **Ordering.** Arbitrary `http_filters` placement can break the chain (e.g. a filter after the
   router). Allow-list the insertion points; never let a CRD reorder the router/mTLS/health seams.
-- **Security.** An escape hatch is privileged. RBAC on the CRD; consider gating chain-scope behind
-  a cluster-admin-owned MeshConfig flag while route-scope `typed_per_filter_config` (which can't
-  reorder the chain) is the default operators get.
+- **Security.** An escape hatch is privileged. RBAC on the CRD. Note the useful capability
+  (introducing a new filter) requires chain insertion (see Scope), so it cannot be gated purely
+  "route-scope for everyone, chain-scope for admins"; gate instead on *who controls placement* —
+  aether-ordered insertion of an allow-listed filter is the default operators get; CRD-specified
+  *arbitrary* `http_filters` ordering is the admin-owned (MeshConfig-flagged) surface.
+- **Route status.** An `ExtensionRef` to a missing / non-allow-listed / proto-invalid HTTPFilter
+  must surface on the route's `ResolvedRefs` condition (Gateway API contract), not just fail
+  silently.
+- **CRD schema.** `spec.typedConfig` is necessarily `x-kubernetes-preserve-unknown-fields` (the API
+  server can't structurally validate an `Any`); the webhook's proto-validate is therefore the
+  *only* schema enforcement — another reason the admission floor must be fail-closed.
+- **GRPCRoute parity.** The same `ExtensionRef` path applies to GRPCRoute filters (aether supports
+  GRPCRoute, #289); plumb both, not HTTPRoute only.
 - **Conformance.** ExtensionRef is an *implementation-specific* extension; it does not affect
   GATEWAY-HTTP/MESH-HTTP conformance (those test the typed filters). This is purely additive.
 
 ## Verification
 
-- Unit: an HTTPFilter with a `header_to_metadata` `typedConfig` → the route emits the matching
-  `typed_per_filter_config`; offline `//test/envoy_validate` accepts it; a malformed payload is
-  rejected by the webhook and skipped by the builder.
+- Unit (webhook): an HTTPFilter with a `header_to_metadata` `typedConfig` proto-validates
+  (`@type` resolves + PGV `ValidateAll` passes) → admitted; a malformed payload, an unknown
+  `@type`, a non-allow-listed `spec.filter`, and a PGV-constraint violation are each rejected by
+  the webhook — all in-process, no Envoy binary.
+- Unit (builder): the admitted filter is added to the HCM chain default-disabled and the route
+  emits the matching `typed_per_filter_config`; the builder skips (not poisons) a bad filter.
+- CI gate (optional deeper): `//test/envoy_validate` accepts the rendered snapshot carrying the
+  filter (catches the imperative C++ checks PGV can't).
 - e2e: a meshed route with an `ExtensionRef` HTTPFilter applies the Envoy filter (assert the
   effect, e.g. the dynamic metadata / mapped header) on both the edge and the GAMMA capture path.
 
 ## Sequencing
 
-1. `HTTPFilter` CRD + `GammaRoute.ExtensionFilters` plumbing into the route builder (route scope
-   only first — `typed_per_filter_config`, which can't reorder the chain).
-2. The validating webhook running `envoy --mode validate` on the payload (the fail-closed floor).
-3. Chain-scope `http_filters` with an allow-listed insertion set (gated, admin-owned).
+1. `HTTPFilter` CRD + `spec.filter` allow-list + `GammaRoute.ExtensionFilters` plumbing: add the
+   allow-listed filter to the HCM chain default-disabled, enable+configure it per-route via
+   `typed_per_filter_config` (aether-ordered insertion — NOT arbitrary CRD placement). This is the
+   step that actually delivers `header_to_metadata`.
+2. The validating webhook: in-process proto-validate (`@type` resolve + PGV `ValidateAll`) as the
+   fail-closed floor; route `ResolvedRefs` status on reject.
+3. CRD-specified *arbitrary* `http_filters` ordering (admin-owned, MeshConfig-gated) + the optional
+   `envoy --mode validate` deeper CI gate.
 4. Promote popular filters to typed fields (Option B) opportunistically.
 
 Independent of the MESH-HTTP route-selection debugging — this is a new surface, not a fix to the
