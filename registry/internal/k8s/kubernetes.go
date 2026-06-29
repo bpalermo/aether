@@ -74,8 +74,24 @@ func (r *KubernetesRegistry) UnregisterEndpoints(_ context.Context, _ string, _ 
 
 // ListEndpoints returns all endpoints for a service by listing managed pods whose ServiceAccount
 // matches the given service name. Node topology labels are used for locality information.
-func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, _ registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
+//
+// The Kubernetes registry derives endpoints from managed pods, every one of which is a
+// mesh-inbound (HTTP/h2 over :15008) endpoint by construction — it has no notion of a
+// per-pod TCP-only service. A TCP query must therefore return NOTHING, not the same
+// HTTP endpoint set: the agent's LoadClustersFromRegistry builds a service's HTTP
+// cluster (with its outbound/cap_http vhost) from the HTTP listing, then in a second
+// pass OVERWRITES the same map key with a vhost-less tcp:true entry from the TCP
+// listing ("a service is HTTP or TCP, never both" — true for etcd/ddb, which key by
+// protocol). Returning the pods for TCP too violated that invariant: every mesh
+// service collapsed to a TCP-only entry, its CDS cluster + GAMMA cap_http vhost
+// vanished, and captured requests routing to it 503'd (no_healthy_upstream). Treat
+// HTTP/UNSPECIFIED as the served protocol; TCP yields no endpoints.
+func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing endpoints", "service", service)
+
+	if protocol == registryv1.Service_PROTOCOL_TCP {
+		return nil, nil
+	}
 
 	pods, err := r.listManagedPods(ctx)
 	if err != nil {
@@ -114,8 +130,17 @@ func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, 
 
 // ListAllEndpoints returns all endpoints for all services, grouped by service name (ServiceAccount).
 // It lists all managed pods, resolves node localities, and converts each pod to a ServiceEndpoint.
-func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+//
+// Every managed-pod endpoint is a mesh-inbound HTTP/h2 endpoint (see ListEndpoints).
+// A TCP query returns an empty map so the agent's TCP cluster pass does not clobber
+// the HTTP cluster/vhost entries built from the HTTP listing (HTTP/UNSPECIFIED is the
+// served protocol).
+func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing all endpoints")
+
+	if protocol == registryv1.Service_PROTOCOL_TCP {
+		return map[string][]*registryv1.ServiceEndpoint{}, nil
+	}
 
 	pods, err := r.listManagedPods(ctx)
 	if err != nil {
