@@ -60,6 +60,33 @@ func outboundRetryPolicy() *routev3.RetryPolicy {
 // name translation anywhere.
 const onDemandClusterHeader = ":authority"
 
+// KnownTargetRoute pins a known in-scope mesh service's non-mesh dial spellings
+// (its cluster.local short names and FQDN, optionally with a port) to the
+// service's data-plane cluster. The redirect-all capture catch-all emits one
+// such route per in-scope mesh authority BEFORE the passthrough fallthrough so a
+// captured request to a service the mesh KNOWS ABOUT can never be shadowed by the
+// ORIGINAL_DST passthrough — even during the brief window where the service's
+// dedicated cap_http vhost is being rebuilt (a GAMMA HTTPRoute add/delete clears
+// and re-populates serviceRoutes between two reconciles; an in-flight captured
+// request landing in that window used to miss the dedicated vhost and fall to the
+// passthrough → kube-proxy → GAMMA features silently dropped). Because the
+// catch-all routes are derived from the STABLE mesh-authority set
+// (captureAuthorities ∩ dependency set, independent of HTTPRoute lifecycle), the
+// request still reaches the correct backend cluster (mTLS, in-mesh) rather than
+// leaking to kube-proxy. The dedicated vhost remains the precedence path when
+// present (it carries the GAMMA filters); this is the safety net that fails into
+// the mesh, never out of it.
+type KnownTargetRoute struct {
+	// AuthorityRegex is an RE2 pattern over all of the service's non-mesh dial
+	// spellings (bare name, <name>.<ns>, <name>.<ns>.svc, cluster.local FQDN) with
+	// an optional ":port" suffix. Port-agnostic by construction so it matches a
+	// dial on any real Service port without the control plane needing to track it.
+	AuthorityRegex string
+	// Cluster is the service's data-plane cluster (<svc>.<meshDomain>) the matched
+	// authority routes to.
+	Cluster string
+}
+
 // buildOnDemandCatchAllVirtualHost builds the lowest-priority outbound virtual
 // host (domain "*"). With the authority port retained (strip_any_host_port
 // off, for FQDN:port routing), a scoped catch-all "*.<meshDomain>" can't match
@@ -70,7 +97,11 @@ const onDemandClusterHeader = ":authority"
 // 404s immediately. This keeps instant foreign-404 determinism (spike-verified,
 // Envoy 1.38) while supporting FQDN:port (proposal 005). Nonexistent in-domain
 // services/ports fail when the ODCDS timeout expires.
-func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool) *routev3.VirtualHost {
+//
+// knownTargets is consulted only in redirect-all (passthrough) mode: each pins a
+// known in-scope service's non-mesh authority spellings to its cluster so the
+// passthrough never shadows a service the mesh knows about (see KnownTargetRoute).
+func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, knownTargets ...KnownTargetRoute) *routev3.VirtualHost {
 	// 020 Part 1: mesh authorities are <svc>.<ns>.<meshDomain> (two labels before the
 	// mesh domain), with an optional :port. Cold/off-node services that miss the
 	// scoped vhost fall here and resolve via ODCDS (ClusterHeader=:authority).
@@ -103,51 +134,91 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool) *rout
 			},
 		}
 	}
-	return &routev3.VirtualHost{
-		Name:    "on_demand_catch_all",
-		Domains: []string{"*"},
-		Routes: []*routev3.Route{
-			// Egress liveness: a local-reply 200 on MeshLivePath, answered without
-			// leaving the proxy (no upstream, no app), for the synthetic mesh
-			// availability prober (proposal 013). First so it wins for this exact
-			// path regardless of authority; the prober uses a reserved non-service
-			// authority so it lands on this catch-all vhost. A 200 proves this
-			// node's egress listener is serving + config loaded; a connection error
-			// proves it is not — the signal aether_stats (proxy-emitted) is
-			// structurally blind to during hot restarts.
-			{
-				Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Path{Path: MeshLivePath}},
-				Action: &routev3.Route_DirectResponse{
-					DirectResponse: &routev3.DirectResponseAction{Status: 200},
-				},
+	routes := []*routev3.Route{
+		// Egress liveness: a local-reply 200 on MeshLivePath, answered without
+		// leaving the proxy (no upstream, no app), for the synthetic mesh
+		// availability prober (proposal 013). First so it wins for this exact
+		// path regardless of authority; the prober uses a reserved non-service
+		// authority so it lands on this catch-all vhost. A 200 proves this
+		// node's egress listener is serving + config loaded; a connection error
+		// proves it is not — the signal aether_stats (proxy-emitted) is
+		// structurally blind to during hot restarts.
+		{
+			Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Path{Path: MeshLivePath}},
+			Action: &routev3.Route_DirectResponse{
+				DirectResponse: &routev3.DirectResponseAction{Status: 200},
 			},
-			{
-				Match: &routev3.RouteMatch{
-					PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
-					Headers: []*routev3.HeaderMatcher{
-						{
-							Name: ":authority",
-							HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
-								StringMatch: &matcherv3.StringMatcher{
-									MatchPattern: &matcherv3.StringMatcher_SafeRegex{
-										SafeRegex: &matcherv3.RegexMatcher{Regex: meshAuthorityRegex},
-									},
+		},
+		{
+			Match: &routev3.RouteMatch{
+				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
+				Headers: []*routev3.HeaderMatcher{
+					{
+						Name: ":authority",
+						HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
+							StringMatch: &matcherv3.StringMatcher{
+								MatchPattern: &matcherv3.StringMatcher_SafeRegex{
+									SafeRegex: &matcherv3.RegexMatcher{Regex: meshAuthorityRegex},
 								},
 							},
 						},
 					},
 				},
-				Action: &routev3.Route_Route{
-					Route: &routev3.RouteAction{
-						ClusterSpecifier: &routev3.RouteAction_ClusterHeader{
-							ClusterHeader: onDemandClusterHeader,
+			},
+			Action: &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_ClusterHeader{
+						ClusterHeader: onDemandClusterHeader,
+					},
+					RetryPolicy: outboundRetryPolicy(),
+				},
+			},
+		},
+	}
+	// Known-target safety net (redirect-all only): a captured request whose
+	// authority is a known in-scope mesh service — under any of its non-mesh
+	// cluster.local spellings, on any port — routes to that service's cluster
+	// rather than falling to the passthrough. This holds even while the service's
+	// dedicated cap_http vhost is being rebuilt across a GAMMA HTTPRoute add/delete
+	// (the dedicated vhost, when present, wins on host-match precedence and carries
+	// the GAMMA filters; this catch-all entry is the floor that keeps a known
+	// target in the mesh instead of leaking to kube-proxy). Disjoint authorities,
+	// so route order among them is irrelevant; all precede the passthrough. Only
+	// meaningful in redirect-all mode — without a passthrough there is nothing to
+	// shadow and the catch-all keeps its hard 404.
+	for _, kt := range knownTargets {
+		if !passthrough || kt.AuthorityRegex == "" || kt.Cluster == "" {
+			continue
+		}
+		routes = append(routes, &routev3.Route{
+			Match: &routev3.RouteMatch{
+				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
+				Headers: []*routev3.HeaderMatcher{
+					{
+						Name: ":authority",
+						HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
+							StringMatch: &matcherv3.StringMatcher{
+								MatchPattern: &matcherv3.StringMatcher_SafeRegex{
+									SafeRegex: &matcherv3.RegexMatcher{Regex: kt.AuthorityRegex},
+								},
+							},
 						},
-						RetryPolicy: outboundRetryPolicy(),
 					},
 				},
 			},
-			fallthrough_,
-		},
+			Action: &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: kt.Cluster},
+					RetryPolicy:      outboundRetryPolicy(),
+				},
+			},
+		})
+	}
+	routes = append(routes, fallthrough_)
+	return &routev3.VirtualHost{
+		Name:    "on_demand_catch_all",
+		Domains: []string{"*"},
+		Routes:  routes,
 	}
 }
 

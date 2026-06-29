@@ -130,7 +130,12 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// carries the on-demand catch-all) so the listeners' RDS resolves even with no
 		// in-scope authorities yet, and cold/off-node services recover via ODCDS.
 		if c.captureEnabled {
-			routes = append(routes, proxy.BuildCaptureRouteConfiguration(c.captureVhosts(), c.meshDomain, c.captureRedirectAll))
+			// captureKnownTargets pins every in-scope mesh authority to its cluster on
+			// the redirect-all catch-all (no-op when redirect-all is off), so a captured
+			// request to a known service never leaks to the ORIGINAL_DST passthrough
+			// while its dedicated cap_http vhost is mid-rebuild across a GAMMA churn.
+			routes = append(routes, proxy.BuildCaptureRouteConfiguration(
+				c.captureVhosts(), c.meshDomain, c.captureRedirectAll, c.captureKnownTargets()...))
 		}
 		if len(routes) > 0 {
 			resources[resourcev3.RouteType] = routes
