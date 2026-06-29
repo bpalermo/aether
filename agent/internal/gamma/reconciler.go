@@ -21,6 +21,7 @@ import (
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,6 +55,12 @@ type Reconciler struct {
 	// MeshDomain resolves a backend Service to its data-plane cluster name.
 	MeshDomain string
 	Log        *slog.Logger
+
+	// httpFilterEnabled is set in SetupWithManager when the HTTPFilter CRD (proposal
+	// 025) is present. When false, the reconciler neither watches nor lists HTTPFilters
+	// (the escape hatch is inert) — so a missing/not-yet-installed CRD degrades
+	// gracefully instead of crashing the manager on a failed informer sync.
+	httpFilterEnabled bool
 }
 
 // SetupWithManager registers the reconciler to watch HTTPRoutes and GRPCRoutes. Both
@@ -64,18 +71,36 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	enqueueAll := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{{}}
 	})
-	return ctrl.NewControllerManagedBy(mgr).
+
+	// HTTPFilter (config.aether.io, proposal 025) is an OPTIONAL CRD: gate its watch +
+	// list on the CRD actually being present. Watching a type whose CRD is absent makes
+	// the cache fail to sync and HARD-CRASHES the manager (the upgrade-ordering crashloop
+	// when crds is installed after/with the agent). Degrade instead: skip the escape
+	// hatch until the CRD exists and the agent restarts.
+	gvk := configapisv1.GroupVersion.WithKind(configapisv1.HTTPFilterKind)
+	if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+		if meta.IsNoMatchError(err) {
+			r.Log.Warn("HTTPFilter CRD not present; proxy-extension escape hatch (025) disabled until the CRD is installed and the agent restarts")
+		} else {
+			return fmt.Errorf("checking HTTPFilter CRD availability: %w", err)
+		}
+	} else {
+		r.httpFilterEnabled = true
+	}
+
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.GRPCRoute{}, enqueueAll).
 		// ReferenceGrant (v1beta1, the served storage version): a change to any grant
 		// can flip a cross-namespace backendRef between permitted and RefNotPermitted,
 		// so re-project + re-status on every grant change. Cluster-wide cache (post-#323).
-		Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll).
-		// HTTPFilter (config.aether.io, proposal 025): a route's ExtensionRef points at
-		// one; a change to its opaque config must re-project the routes that reference it.
-		Watches(&configapisv1.HTTPFilter{}, enqueueAll).
-		Named("gamma").
-		Complete(r)
+		Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll)
+	if r.httpFilterEnabled {
+		// A change to a referenced HTTPFilter's opaque config must re-project the routes
+		// that reference it.
+		b = b.Watches(&configapisv1.HTTPFilter{}, enqueueAll)
+	}
+	return b.Named("gamma").Complete(r)
 }
 
 // Reconcile re-lists every HTTPRoute and GRPCRoute, keeps those attached to a Service,
@@ -98,15 +123,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 
 	// HTTPFilters (config.aether.io, proposal 025) referenced by route ExtensionRefs,
 	// indexed by "<ns>/<name>". ExtensionRef is same-namespace (a LocalObjectReference),
-	// so no ReferenceGrant applies.
-	httpFilterList := &configapisv1.HTTPFilterList{}
-	if err := r.List(ctx, httpFilterList); err != nil {
-		return reconcile.Result{}, err
-	}
-	httpFilters := make(map[string]*configapisv1.HTTPFilter, len(httpFilterList.Items))
-	for i := range httpFilterList.Items {
-		hf := &httpFilterList.Items[i]
-		httpFilters[hf.Namespace+"/"+hf.Name] = hf
+	// so no ReferenceGrant applies. Only listed when the CRD is present (gated in
+	// SetupWithManager); otherwise the escape hatch is inert and the map stays empty.
+	httpFilters := map[string]*configapisv1.HTTPFilter{}
+	if r.httpFilterEnabled {
+		httpFilterList := &configapisv1.HTTPFilterList{}
+		if err := r.List(ctx, httpFilterList); err != nil {
+			return reconcile.Result{}, err
+		}
+		for i := range httpFilterList.Items {
+			hf := &httpFilterList.Items[i]
+			httpFilters[hf.Namespace+"/"+hf.Name] = hf
+		}
 	}
 
 	routes := map[string][]proxy.GammaRoute{}
