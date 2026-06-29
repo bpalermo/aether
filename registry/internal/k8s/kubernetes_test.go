@@ -894,6 +894,47 @@ func TestListAllEndpoints_SameSANamespaceIsolation(t *testing.T) {
 	assert.Equal(t, "10.0.0.1", epsA[0].GetIp())
 }
 
+// TestKubernetesRegistry_TCPProtocolReturnsEmpty is the regression guard for the
+// MESH-HTTP RequestHeaderModifier/MeshFrontend 503 bug: the Kubernetes registry
+// derives every endpoint from a managed pod's mesh-inbound (HTTP/h2) listener and
+// has no per-pod TCP service. Returning the same pods for a PROTOCOL_TCP query made
+// the agent's LoadClustersFromRegistry overwrite each service's HTTP cluster+vhost
+// with a vhost-less tcp:true entry, so the CDS cluster and GAMMA cap_http vhost
+// disappeared and captured requests 503'd. A TCP query must yield no endpoints;
+// HTTP and UNSPECIFIED return the managed-pod endpoints.
+func TestKubernetesRegistry_TCPProtocolReturnsEmpty(t *testing.T) {
+	r := newTestRegistry("c",
+		managedPod("echo-a", "team-a", "echo-v1", "10.0.0.1", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+
+	// HTTP sees the managed pod.
+	httpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, httpAll, 1)
+
+	// UNSPECIFIED is treated as the served (HTTP) protocol too.
+	unspecAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_UNSPECIFIED)
+	require.NoError(t, err)
+	require.Len(t, unspecAll, 1)
+
+	// TCP returns an empty (non-nil) map so the agent's TCP cluster pass does not
+	// clobber the HTTP cluster/vhost entries.
+	tcpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_TCP)
+	require.NoError(t, err)
+	require.NotNil(t, tcpAll)
+	require.Empty(t, tcpAll)
+
+	// Single-service TCP read is empty as well.
+	tcpOne, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_TCP)
+	require.NoError(t, err)
+	require.Empty(t, tcpOne)
+
+	httpOne, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, httpOne, 1)
+}
+
 // ─── Annotation parsing helpers (unit-level) ─────────────────────────────────
 
 func TestGetPortFromAnnotations(t *testing.T) {
