@@ -118,18 +118,17 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
-	// SPIKE/EXPERIMENTAL (proposal 022, M2a): redirect ALL outbound non-local TCP
-	// into the capture listener; non-mesh egress passes through via ORIGINAL_DST.
+	// Redirect-all capture (proposal 022): redirect ALL outbound non-local TCP into
+	// the capture listener; non-mesh egress passes through via ORIGINAL_DST.
 	// Best-effort: failure leaves the scoped-redirect (or no capture) in place.
 	// Requires the agent --capture-redirect-all flag on the xDS side so the capture
 	// listener carries the passthrough fallback filter chain.
 	//
-	// Per-pod opt-in for safe scoping: redirect-all is applied for a pod ONLY when
-	// it carries the capture.aether.io/redirect-all="true" annotation (so a single
-	// pod can be tested without affecting other workloads on the node). The global
-	// CaptureRedirectAllEnabled netconf flag is retained as an optional node-wide
-	// override (off by default).
-	if netConf.CaptureRedirectAllEnabled || podWantsRedirectAll(netConf) {
+	// podRedirectAll resolves precedence: an explicit per-pod annotation (opt-in
+	// "true" / opt-out "false") wins, otherwise the node default applies
+	// (CaptureRedirectAllDefault — the M2-default flip for managed pods — or the
+	// legacy node-wide CaptureRedirectAllEnabled). All default false.
+	if podRedirectAll(netConf) {
 		if err := installCaptureRedirectAll(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
 			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
 				zap.String("netns", args.Netns), zap.Error(err))
@@ -620,17 +619,37 @@ func ignorableNamespace(namespace string) bool {
 	return constants.IsIgnoredNamespace(namespace)
 }
 
-// podWantsRedirectAll reports whether the pod opted into redirect-all transparent
-// capture (proposal 022, M2a) via the capture.aether.io/redirect-all="true"
-// annotation. Pod annotations reach the CNI plugin through the runtime config
-// (io.kubernetes.cri.pod-annotations), populated by containerd when the aether
-// CNI conf declares that capability. The per-pod opt-in keeps the spike safe to
-// roll out node-wide while only redirecting the explicitly annotated pods.
-func podWantsRedirectAll(conf config.AetherConf) bool {
-	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+// podRedirectAll decides whether the pod gets the broad redirect-all capture
+// (proposal 022). Precedence, highest first:
+//
+//   - capture.aether.io/redirect-all="true"  → force ON (explicit opt-in; lets a
+//     single pod be tested while the node default is off).
+//   - capture.aether.io/redirect-all="false" → force OFF (explicit opt-out; carves
+//     an infra/hostNetwork/prober pod out of the managed-pod default).
+//   - otherwise → the node default: CaptureRedirectAllDefault (the M2-default flip,
+//     redirect-all for managed pods) OR the legacy node-wide CaptureRedirectAllEnabled.
+//
+// Pod annotations reach the CNI plugin through the runtime config
+// (io.kubernetes.cri.pod-annotations), populated by containerd when the aether CNI
+// conf declares that capability.
+func podRedirectAll(conf config.AetherConf) bool {
+	switch podRedirectAllAnnotation(conf) {
+	case "true":
+		return true
+	case "false":
 		return false
 	}
-	return (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureRedirectAll] == "true"
+	return conf.CaptureRedirectAllDefault || conf.CaptureRedirectAllEnabled
+}
+
+// podRedirectAllAnnotation returns the raw capture.aether.io/redirect-all
+// annotation value ("" when unset), so podRedirectAll can distinguish an explicit
+// opt-out ("false") from "unset" (fall through to the node default).
+func podRedirectAllAnnotation(conf config.AetherConf) string {
+	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+		return ""
+	}
+	return (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureRedirectAll]
 }
 
 // podExcludedOutboundPorts parses the capture.aether.io/exclude-outbound-ports
@@ -639,7 +658,7 @@ func podWantsRedirectAll(conf config.AetherConf) bool {
 // (e.g. "5432, 9000"); blanks and out-of-range/non-numeric entries are skipped so
 // a malformed annotation degrades to "exclude what parses" rather than failing the
 // pod's networking. Reaches the CNI via the same pod-annotations runtime config as
-// podWantsRedirectAll. Returns nil when unset.
+// podRedirectAll. Returns nil when unset.
 func podExcludedOutboundPorts(conf config.AetherConf) []uint16 {
 	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
 		return nil

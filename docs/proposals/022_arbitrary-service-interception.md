@@ -172,12 +172,27 @@ The mark is unique to the proxy's passthrough — no UID collision, app-UID-agno
    redirect-all capture paths. Malformed/non-IPv4 entries degrade to "exclude what parses".
 2. **Passthrough-loop verification spike** — confirm whether the redirect-all `original_dst`
    passthrough upstream socket egresses from the pod netns (and thus self-matches the
-   redirect). The gate for the default flip.
-3. **SO_MARK self-exclusion** (agent xDS `socket_options` + CNI `meta mark RETURN`) — only if
-   (2) shows a loop. Makes the default flip safe.
+   redirect). The gate for the default flip. ✅ **GATE CLEARED** — the loop failure mode is
+   prevented regardless of outcome (see step 3, SO_MARK, already wired both sides), and the
+   offline envoy-validate (`capture_bootstrap.json`, `withPassthrough=true`) accepts the
+   SO_MARK'd passthrough bootstrap. talos M2a (rev122) showed egress intact under redirect-all
+   (github:443=200, apiserver:443 TLS ok, mesh echo=200) — no observable loop. Final on-cluster
+   confirmation rides on the step-4 talos validation (where the flag is actually enabled).
+3. **SO_MARK self-exclusion** (agent xDS `socket_options` + CNI `meta mark RETURN`). ✅ **DONE** —
+   `NewPassthroughOriginalDstCluster` stamps `CapturePassthroughFwMark` (SO_MARK, STATE_PREBIND)
+   on the passthrough cluster's upstream sockets; `programCaptureRedirectAll` RETURNs that mark
+   ahead of the redirect. Defensive (harmless if the passthrough egresses proxy-side); unit-tested
+   both sides + covered by envoy-validate.
 4. **Flip redirect-all to default-on for managed pods** behind a chart value (default off
-   until validated on talos), annotation as opt-out. Validate egress volume on the
-   node-shared proxy + the non-mesh cleartext catch-all passthrough (the #288 failure mode).
+   until validated on talos), annotation as opt-out. ✅ **IMPLEMENTED (default off)** —
+   `agent.captureRedirectAllDefault` (chart, default false) → cni-install
+   `--capture-redirect-all-default` → netconf `capture_redirect_all_default` → the CNI
+   redirect-alls every non-system pod UNLESS `capture.aether.io/redirect-all="false"`; the
+   chart value also enables the agent `--capture-redirect-all` (Envoy passthrough chain).
+   Precedence resolved in `podRedirectAll` (annotation true/false overrides node default).
+   **REMAINING: enable on talos and validate** egress volume on the node-shared proxy + the
+   non-mesh cleartext catch-all passthrough (the #288 failure mode) before flipping the chart
+   default on.
 
 This is the big architectural item; the CNI redirect change is the riskiest blast radius
 (every meshed pod's egress), which is why the default flip is last and gated on the spike.

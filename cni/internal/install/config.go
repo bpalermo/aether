@@ -30,6 +30,11 @@ type InstallerConfig struct {
 	// so the CNI plugin installs the per-pod capture redirect (proposal 018, Phase
 	// 3a). Off by default.
 	TransparentCaptureEnabled bool
+	// CaptureRedirectAllDefault writes capture_redirect_all_default into the netconf
+	// so the CNI plugin makes redirect-all the default for managed pods (proposal
+	// 022, M2-default Step 4), opt-out via the capture.aether.io/redirect-all="false"
+	// annotation. Off by default; pairs with the agent --capture-redirect-all flag.
+	CaptureRedirectAllDefault bool
 	// MeshDNSEnabled writes mesh_dns_enabled into the netconf so the CNI plugin
 	// installs the per-pod :53 DNAT (proposal 018, mesh-global FQDN). Off by default.
 	MeshDNSEnabled bool

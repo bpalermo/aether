@@ -45,6 +45,9 @@ spec:
             {{- end }}
             {{- if .Values.agent.transparentCapture }}
             - "--transparent-capture"
+            {{- if .Values.agent.captureRedirectAllDefault }}
+            - "--capture-redirect-all-default"
+            {{- end }}
             {{- end }}
             {{- if .Values.agent.meshDns }}
             - "--mesh-dns"
@@ -86,7 +89,7 @@ spec:
             {{- end }}
             {{- if .Values.agent.transparentCapture }}
             - "--transparent-capture"
-            {{- if .Values.agent.captureRedirectAll }}
+            {{- if or .Values.agent.captureRedirectAll .Values.agent.captureRedirectAllDefault }}
             - "--capture-redirect-all"
             {{- end }}
             {{- end }}
