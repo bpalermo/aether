@@ -2,7 +2,9 @@ package cache
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/bpalermo/aether/common/serviceref"
 
@@ -465,6 +467,113 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc]))
 	}
 	return vhosts
+}
+
+// captureKnownTargets builds the redirect-all catch-all's known-target safety net
+// (proposal 022 hardening): one route-target per in-scope mesh authority, pinning
+// all of that authority's non-mesh cluster.local dial spellings (on any port) to
+// its mesh cluster. The catch-all consults these BEFORE the ORIGINAL_DST
+// passthrough, so a captured request to a service the mesh knows about can never
+// leak to kube-proxy — including the window where the service's dedicated cap_http
+// vhost is mid-rebuild across a GAMMA HTTPRoute add/delete (serviceRoutes churns,
+// but captureAuthorities — fed by the generated mesh Services, independent of
+// HTTPRoute lifecycle — does not).
+//
+// Returns nil unless redirect-all capture is on (without a passthrough cluster
+// there is nothing to shadow, and the catch-all keeps its hard 404).
+//
+// Gating: the safety net is keyed on the STABLE known-mesh-service signals —
+// every captureAuthorities entry (a generated mesh Service exists ⇒ the service
+// is real and meshed; this map is fed by the mesh-Service reconciler and is
+// untouched by HTTPRoute churn) plus every current GAMMA route target. It is
+// deliberately NOT gated on the demand-scoped dependency set: a route target's
+// dependency-set membership comes from its (churning) GAMMA rule, so gating on
+// deps would re-introduce the very race this fixes — the entry would vanish the
+// instant the route is deleted. Routing a known service's captured traffic to its
+// mesh cluster fails CLOSED into the mesh (a brief 503 if the demand-scoped cluster
+// is momentarily absent — which the conformance harness cleanly retries) rather
+// than OPEN to kube-proxy (a silent 200 that drops the GAMMA feature and resets the
+// consecutive-success counter). The regex is built once per service over its
+// short-name spellings with an optional ":port" suffix, so it matches a dial on the
+// real Service port without the control plane tracking it.
+func (c *SnapshotCache) captureKnownTargets() []proxy.KnownTargetRoute {
+	if !c.captureEnabled || !c.captureRedirectAll {
+		return nil
+	}
+	gammaRoutes := c.serviceRoutesSnapshot()
+
+	c.captureMu.RLock()
+	defer c.captureMu.RUnlock()
+
+	seen := make(map[string]struct{}, len(c.captureAuthorities)+len(gammaRoutes))
+	targets := make([]proxy.KnownTargetRoute, 0, len(c.captureAuthorities)+len(gammaRoutes))
+	add := func(svc, fqdn string) {
+		if _, ok := seen[svc]; ok {
+			return
+		}
+		ref, ok := serviceref.ParseKey(svc)
+		if !ok {
+			return
+		}
+		seen[svc] = struct{}{}
+		targets = append(targets, proxy.KnownTargetRoute{
+			AuthorityRegex: knownTargetAuthorityRegex(ref.Name, ref.Namespace, fqdn),
+			Cluster:        proxy.ServiceClusterName(svc, c.meshDomain),
+		})
+	}
+	// Every SA-backed mesh authority (covers plain services AND the MeshFrontend
+	// shape where a Service is its own GAMMA backend). Stable across HTTPRoute churn.
+	for svc, fqdn := range c.captureAuthorities {
+		add(svc, fqdn)
+	}
+	// Route-only GAMMA targets (no SA-backed mesh Service of their own — the
+	// versioned-fanout shape): derive the cluster.local authority from the
+	// namespace-qualified key. Present only while the route is, but the dedicated
+	// vhost is too, so there is no extra window to cover here.
+	for svc := range gammaRoutes {
+		if _, ok := c.captureAuthorities[svc]; ok {
+			continue
+		}
+		ref, ok := serviceref.ParseKey(svc)
+		if !ok {
+			continue
+		}
+		add(svc, ref.ClusterLocalFQDN())
+	}
+	return targets
+}
+
+// knownTargetAuthorityRegex builds the RE2 :authority pattern covering all of a
+// service's non-mesh dial spellings with an optional ":port" suffix: the bare
+// same-namespace name, <name>.<ns>, <name>.<ns>.svc, and the cluster.local FQDN.
+// The mesh spelling (<svc>.<meshDomain>) is intentionally omitted — the catch-all
+// already routes mesh-shaped authorities via the ODCDS regex. The bare name is
+// always included here (unlike routeTargetDomains' bareNameCount guard) because a
+// safe_regex header match cannot collide the way duplicate vhost domains NACK; a
+// bare name shared across namespaces simply means both services' regexes match it,
+// and either resolves to a real in-scope cluster (never the passthrough), which is
+// strictly better than the kube-proxy leak. Port-agnostic so any real Service port
+// matches.
+func knownTargetAuthorityRegex(name, namespace, fqdn string) string {
+	spellings := []string{
+		name,
+		name + "." + namespace,
+		name + "." + namespace + ".svc",
+		fqdn,
+	}
+	quoted := make([]string, 0, len(spellings))
+	seen := make(map[string]struct{}, len(spellings))
+	for _, s := range spellings {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		quoted = append(quoted, regexp.QuoteMeta(s))
+	}
+	return "^(" + strings.Join(quoted, "|") + ")(:[0-9]+)?$"
 }
 
 // routeTargetDomains builds the cap_http host-match domains for a GAMMA route

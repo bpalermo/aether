@@ -293,9 +293,14 @@ func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
 // reachability is preserved (the passthrough_original_dst cluster is only emitted in
 // this mode). With scoped capture (redirectAll false) the catch-all keeps its hard
 // 404: only mesh VIPs are captured, so a non-mesh authority is genuinely foreign.
-func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string, redirectAll bool) *routev3.RouteConfiguration {
+// knownTargets pins each known in-scope mesh authority's non-mesh dial spellings
+// to its cluster on the redirect-all catch-all, so a captured request to a known
+// service never leaks to the ORIGINAL_DST passthrough (kube-proxy) while its
+// dedicated cap_http vhost is mid-rebuild. Ignored when redirectAll is false (no
+// passthrough to shadow a target).
+func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string, redirectAll bool, knownTargets ...KnownTargetRoute) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name:         CaptureHTTPRouteName,
-		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll)),
+		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll, knownTargets...)),
 	}
 }

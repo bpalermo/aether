@@ -250,7 +250,15 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 		fmt.Sprintf("%s:%d", targetMesh, realPort),
 	}
 	vhost := proxy.BuildOutboundServiceVirtualHost(targetMesh, domains, rules)
-	routeCfg := proxy.BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vhost}, meshDomain, true)
+	// Known-target safety net (the RDS-reload-race fix): the redirect-all catch-all
+	// pins the route target's non-mesh dial spellings (any port) to its mesh cluster
+	// so a captured request never leaks to the passthrough while this vhost rebuilds.
+	// Validating it here proves Envoy ACCEPTS the extra :authority safe_regex route.
+	knownTargets := []proxy.KnownTargetRoute{{
+		AuthorityRegex: `^(echo|echo\.team-a|echo\.team-a\.svc|echo\.team-a\.svc\.cluster\.local)(:[0-9]+)?$`,
+		Cluster:        targetMesh,
+	}}
+	routeCfg := proxy.BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vhost}, meshDomain, true, knownTargets...)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: "cap_http_validate",

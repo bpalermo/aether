@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -162,6 +163,118 @@ func TestCaptureVhosts_RouteTargetNoPort(t *testing.T) {
 	for _, d := range vh.GetDomains() {
 		assert.NotContains(t, d, ":0", "no spurious :0 domain when the parentRef omits a port")
 	}
+}
+
+// matchesAuthority reports whether any known-target route's authority regex matches
+// the given dialed authority and, if so, the cluster it pins to.
+func matchesAuthority(targets []proxy.KnownTargetRoute, authority string) (string, bool) {
+	for _, kt := range targets {
+		if regexp.MustCompile(kt.AuthorityRegex).MatchString(authority) {
+			return kt.Cluster, true
+		}
+	}
+	return "", false
+}
+
+// TestCaptureKnownTargets_StableAcrossGAMMAChurn is the regression guard for the
+// MESH-HTTP RDS-reload convergence race. The known-target safety net is derived
+// from captureAuthorities (fed by the generated mesh Services, INDEPENDENT of
+// HTTPRoute lifecycle), so an in-scope mesh authority remains pinned to its cluster
+// even after its GAMMA rules are cleared (the delete half of a suite's apply/delete
+// churn). A captured request to that authority therefore never falls to the
+// ORIGINAL_DST passthrough → kube-proxy while the dedicated vhost is mid-rebuild.
+func TestCaptureKnownTargets_StableAcrossGAMMAChurn(t *testing.T) {
+	c := newTestCache("node-1")
+	c.SetCaptureEnabled(true)
+	c.SetCaptureRedirectAll(true)
+
+	const (
+		svc     = "gateway-conformance-mesh/echo-v2"
+		cluster = "echo-v2.gateway-conformance-mesh.aether.internal"
+	)
+	// The mesh-Service reconciler projects the SA-backed authority. This is stable
+	// across HTTPRoute churn.
+	c.SetCaptureAuthorities(map[string]string{
+		svc: "echo-v2.gateway-conformance-mesh.svc.cluster.local",
+	})
+	// A GAMMA rule is applied (the route exists).
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		svc: {{Backends: []proxy.GammaBackend{{Service: svc, Cluster: cluster, Weight: 1}}}},
+	})
+
+	dialSpellings := []string{
+		"echo-v2",
+		"echo-v2:80",
+		"echo-v2.gateway-conformance-mesh",
+		"echo-v2.gateway-conformance-mesh.svc",
+		"echo-v2.gateway-conformance-mesh.svc.cluster.local",
+		"echo-v2.gateway-conformance-mesh.svc.cluster.local:8080",
+	}
+
+	// With the route applied, every spelling pins to the cluster.
+	withRules := c.captureKnownTargets()
+	for _, a := range dialSpellings {
+		got, ok := matchesAuthority(withRules, a)
+		require.Truef(t, ok, "with rules: %q must be a known target", a)
+		assert.Equalf(t, cluster, got, "with rules: %q -> %s", a, cluster)
+	}
+
+	// Now SIMULATE THE CHURN: the suite deletes the HTTPRoute, the gamma reconciler
+	// reconciles with the route gone -> serviceRoutes for echo-v2 is cleared. The
+	// dedicated cap_http vhost vanishes (this is the race window). The mesh Service
+	// is untouched, so captureAuthorities still carries echo-v2.
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{})
+
+	// The dedicated vhost is indeed gone (proving the window is real)...
+	assert.Nil(t, findVHost(c.captureVhosts(), "echo-v2"),
+		"the dedicated cap_http vhost is absent while rules are cleared (the race window)")
+
+	// ...but the known-target safety net STILL pins every spelling to the cluster,
+	// so a captured request reaches the backend in-mesh, never the passthrough.
+	afterChurn := c.captureKnownTargets()
+	for _, a := range dialSpellings {
+		got, ok := matchesAuthority(afterChurn, a)
+		require.Truef(t, ok, "after churn: %q must remain a known target (no passthrough leak)", a)
+		assert.Equalf(t, cluster, got, "after churn: %q -> %s", a, cluster)
+	}
+}
+
+// TestCaptureKnownTargets_RouteOnlyTarget covers the versioned-fanout shape: a GAMMA
+// route TARGET with no SA-backed mesh Service of its own (only in serviceRoutes).
+// Its cluster.local authority is derived from the namespace-qualified key and it is
+// pinned to its mesh cluster so the passthrough never shadows it.
+func TestCaptureKnownTargets_RouteOnlyTarget(t *testing.T) {
+	c := newTestCache("node-1")
+	c.SetCaptureEnabled(true)
+	c.SetCaptureRedirectAll(true)
+
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "echo-v1.team-a.aether.internal", Weight: 1}}}},
+	})
+
+	targets := c.captureKnownTargets()
+	cluster, ok := matchesAuthority(targets, "echo.team-a.svc.cluster.local:8080")
+	require.True(t, ok, "route-only target must be pinned")
+	assert.Equal(t, "echo.team-a.aether.internal", cluster)
+	cluster, ok = matchesAuthority(targets, "echo")
+	require.True(t, ok, "bare same-namespace dial must be pinned")
+	assert.Equal(t, "echo.team-a.aether.internal", cluster)
+}
+
+// TestCaptureKnownTargets_DisabledWithoutRedirectAll: with scoped capture (no
+// redirect-all) there is no passthrough cluster to shadow a target, so the
+// known-target set is empty and the catch-all keeps its hard 404.
+func TestCaptureKnownTargets_DisabledWithoutRedirectAll(t *testing.T) {
+	c := newTestCache("node-1")
+	c.SetCaptureEnabled(true)
+	// redirect-all NOT enabled.
+	c.SetCaptureAuthorities(map[string]string{
+		"team-a/echo": "echo.team-a.svc.cluster.local",
+	})
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo", Cluster: "echo.team-a.aether.internal", Weight: 1}}}},
+	})
+	assert.Nil(t, c.captureKnownTargets(), "no passthrough -> no known-target safety net")
 }
 
 func domainsOf(vhosts []*routev3.VirtualHost) []string {

@@ -1,12 +1,119 @@
 package proxy
 
 import (
+	"regexp"
 	"testing"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// resolveCatchAll mimics Envoy's first-match route selection over the catch-all
+// vhost for a given :authority and path: it walks the routes in order and returns
+// the cluster of the first whose path prefix and (if present) :authority safe_regex
+// header matcher both match. A direct_response (404/200) route returns "" for the
+// cluster and its status. This lets a unit test assert "a known target never
+// resolves to the passthrough cluster" without standing up Envoy.
+func resolveCatchAll(vh *routev3.VirtualHost, authority, path string) (cluster string, directStatus uint32) {
+	for _, rt := range vh.GetRoutes() {
+		m := rt.GetMatch()
+		switch {
+		case m.GetPath() != "":
+			if m.GetPath() != path {
+				continue
+			}
+		case m.GetPrefix() != "":
+			if len(path) < len(m.GetPrefix()) || path[:len(m.GetPrefix())] != m.GetPrefix() {
+				continue
+			}
+		}
+		ok := true
+		for _, h := range m.GetHeaders() {
+			if h.GetName() != ":authority" {
+				continue
+			}
+			re := h.GetStringMatch().GetSafeRegex().GetRegex()
+			if re == "" || !regexp.MustCompile(re).MatchString(authority) {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		if dr := rt.GetDirectResponse(); dr != nil {
+			return "", dr.GetStatus()
+		}
+		if ch := rt.GetRoute().GetClusterHeader(); ch != "" {
+			// cluster_header(:authority) resolves to the authority itself.
+			return authority, 0
+		}
+		return rt.GetRoute().GetCluster(), 0
+	}
+	return "", 0
+}
+
+// TestCatchAll_KnownTargetNeverShadowedByPassthrough is the regression guard for the
+// MESH-HTTP RDS-reload convergence race: a captured request whose :authority is a
+// known in-scope mesh service must resolve to that service's cluster — under EVERY
+// dial spelling and on ANY port — never to the ORIGINAL_DST passthrough (which
+// leaks to kube-proxy and silently drops the GAMMA features). The known-target
+// routes are derived from the STABLE mesh-authority set, so this holds even while
+// the service's dedicated cap_http vhost is absent mid-rebuild.
+func TestCatchAll_KnownTargetNeverShadowedByPassthrough(t *testing.T) {
+	// echo-v2 in gateway-conformance-mesh, all spellings, optional port.
+	known := KnownTargetRoute{
+		AuthorityRegex: "^(echo-v2|echo-v2\\.gateway-conformance-mesh|echo-v2\\.gateway-conformance-mesh\\.svc|echo-v2\\.gateway-conformance-mesh\\.svc\\.cluster\\.local)(:[0-9]+)?$",
+		Cluster:        "echo-v2.gateway-conformance-mesh.aether.internal",
+	}
+	vh := buildOnDemandCatchAllVirtualHost("aether.internal", true, known)
+
+	// Every spelling a client might dial, with and without a real Service port.
+	for _, authority := range []string{
+		"echo-v2",
+		"echo-v2:80",
+		"echo-v2.gateway-conformance-mesh",
+		"echo-v2.gateway-conformance-mesh:80",
+		"echo-v2.gateway-conformance-mesh.svc",
+		"echo-v2.gateway-conformance-mesh.svc.cluster.local",
+		"echo-v2.gateway-conformance-mesh.svc.cluster.local:8080",
+	} {
+		cluster, _ := resolveCatchAll(vh, authority, "/set")
+		assert.Equalf(t, known.Cluster, cluster,
+			"known target %q must route to its cluster, not the passthrough", authority)
+		assert.NotEqualf(t, PassthroughClusterName, cluster,
+			"known target %q must never resolve to the passthrough", authority)
+	}
+
+	// A genuinely foreign authority still falls to the passthrough (redirect-all).
+	cluster, _ := resolveCatchAll(vh, "example.com", "/")
+	assert.Equal(t, PassthroughClusterName, cluster,
+		"a non-mesh, unknown authority still passes through (plain egress)")
+
+	// A mesh-shaped authority still resolves via ODCDS cluster_header(:authority).
+	cluster, _ = resolveCatchAll(vh, "other.team-a.aether.internal", "/")
+	assert.Equal(t, "other.team-a.aether.internal", cluster,
+		"a mesh-shaped authority still resolves via ODCDS, not the passthrough")
+}
+
+// TestCatchAll_KnownTargetsOnlyInRedirectAll: without redirect-all there is no
+// passthrough to shadow, so known-target routes must NOT be emitted (the catch-all
+// keeps its hard-404 fallthrough and the minimal mesh-authority/liveness routes).
+func TestCatchAll_KnownTargetsOnlyInRedirectAll(t *testing.T) {
+	known := KnownTargetRoute{AuthorityRegex: "^echo$", Cluster: "echo.ns.aether.internal"}
+
+	withPT := buildOnDemandCatchAllVirtualHost("aether.internal", true, known)
+	require.Len(t, withPT.GetRoutes(), 4, "liveness + mesh-regex + 1 known-target + passthrough")
+	assert.Equal(t, PassthroughClusterName,
+		withPT.GetRoutes()[len(withPT.GetRoutes())-1].GetRoute().GetCluster())
+
+	// redirectAll=false: knownTargets are ignored and the fallthrough is a 404.
+	noPT := buildOnDemandCatchAllVirtualHost("aether.internal", false, known)
+	require.Len(t, noPT.GetRoutes(), 3, "liveness + mesh-regex + 404 (no known-target, no passthrough)")
+	assert.Equal(t, uint32(404),
+		noPT.GetRoutes()[len(noPT.GetRoutes())-1].GetDirectResponse().GetStatus())
+}
 
 func TestBuildOutboundRouteConfiguration(t *testing.T) {
 	tests := []struct {
