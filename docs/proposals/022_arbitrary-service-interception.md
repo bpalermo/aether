@@ -96,7 +96,15 @@ on 020 Part 1: the mesh Service becomes the real Service, captured by its Cluste
 
 - **Data-plane scope creep.** Capturing all in-mesh ports means the proxy sees far more
   traffic. Mitigate with **demand-scoping** (proposal 004): only capture/serve
-  destinations in the node's dependency set.
+  destinations in the node's dependency set. ✅ **ALREADY IN PLACE** — `captureVhosts`
+  filters every cap_http vhost (and the TCP/UDP floor clusters) through
+  `DependencySet()`, so the served set is bounded to the node's deps even though the
+  redirect-all listener sees all egress; off-scope mesh dests ride the catch-all
+  (ODCDS cold path pulls a newly-used service into scope on demand, TTL-expired out).
+  Invariant locked by `TestCaptureVhosts_DemandScoped`. **M4 remaining = soak +
+  re-run MESH conformance with redirect-all as the managed-pod DEFAULT** (the harness
+  no longer needs the per-pod redirect-all annotation patch, since namespace injection
+  → managed pods → redirect-all default).
 - **Non-mesh egress** must pass through cleanly (redirect-all, option ii) — an
   on-demand/passthrough path; the ODCDS catch-all is the starting point.
 - **Coexistence** with the `<svc>.<meshDomain>` / `:18081` path: keep it working (it's the
