@@ -14,15 +14,18 @@ const (
 	// behaviour (what the CNI intercepts for the pod).
 	annotationAetherCapturePrefix = "capture." + annotationAetherPrefix
 
-	// AnnotationCaptureRedirectAll opts a single pod into the redirect-all
-	// transparent-capture mode (proposal 022, M2a spike): the CNI installs the
-	// broad nft rule that sends ALL outbound non-local TCP into the pod-local
-	// capture listener, where non-mesh egress is forwarded in plaintext via the
-	// Envoy passthrough_original_dst cluster. Per-pod opt-in (value "true") so a
-	// node-wide rollout can be tested on one annotated pod without affecting
-	// other workloads. REQUIRES the agent --capture-redirect-all flag so the
-	// capture listener carries the passthrough fallback filter chain. Absent or
-	// any value other than "true" leaves the pod on the scoped :18081 redirect.
+	// AnnotationCaptureRedirectAll controls per-pod redirect-all transparent-capture
+	// (proposal 022): the CNI installs the broad nft rule that sends ALL outbound
+	// non-local TCP into the pod-local capture listener, where non-mesh egress is
+	// forwarded in plaintext via the Envoy passthrough_original_dst cluster. The
+	// annotation overrides the node default both ways:
+	//   - "true"  → force ON (opt-in; test redirect-all on one pod while the node
+	//     default is off).
+	//   - "false" → force OFF (opt-out; carve an infra/hostNetwork/prober pod out of
+	//     the managed-pod default, agent.captureRedirectAllDefault).
+	// Absent (or any other value) falls through to the node default. REQUIRES the
+	// agent --capture-redirect-all flag so the capture listener carries the
+	// passthrough fallback filter chain.
 	AnnotationCaptureRedirectAll = annotationAetherCapturePrefix + "redirect-all"
 
 	// AnnotationCaptureExcludeOutboundPorts carves specific outbound TCP

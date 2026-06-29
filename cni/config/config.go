@@ -88,6 +88,19 @@ type AetherConf struct {
 	//     or remains DNAT'd to the mesh-DNS resolver if MeshDNSEnabled=true
 	CaptureRedirectAllEnabled bool `json:"capture_redirect_all_enabled"`
 
+	// CaptureRedirectAllDefault makes redirect-all the DEFAULT for managed pods
+	// (proposal 022, M2-default Step 4 — the "flip"). When true, every non-ignored
+	// pod on the node gets the broad redirect-all capture UNLESS it carries the
+	// capture.aether.io/redirect-all="false" opt-out annotation. This is the
+	// Istio-style "capture what the app sends" posture, with zero per-pod config.
+	//
+	// Distinct from CaptureRedirectAllEnabled (the legacy node-wide spike override,
+	// which has no opt-out): the per-pod opt-out only applies to the default path.
+	// REQUIRES the agent --capture-redirect-all flag (the Envoy passthrough filter
+	// chain + ORIGINAL_DST cluster) — the chart enables both together. Default false
+	// until validated on talos.
+	CaptureRedirectAllDefault bool `json:"capture_redirect_all_default"`
+
 	// MeshDNSEnabled installs, inside each pod's netns, an nft DNAT of outbound DNS
 	// (UDP+TCP :53, non-loopback) -> the node agent's resolver at HostIP:18054
 	// (proposal 018, mesh-global FQDN). Off by default; pairs with the agent's

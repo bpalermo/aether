@@ -170,49 +170,44 @@ func TestRedirectAllTCPExprs(t *testing.T) {
 	require.IsType(t, &expr.Redir{}, exprs[6])
 }
 
-// TestPodWantsRedirectAll verifies that the per-pod redirect-all opt-in is driven
-// strictly by the capture.aether.io/redirect-all="true" annotation reaching the
-// plugin via the runtime config. This is the safety gate: without the annotation a
-// pod stays on the scoped redirect even when the spike build is rolled out.
-func TestPodWantsRedirectAll(t *testing.T) {
+// TestPodRedirectAll verifies the redirect-all decision precedence (proposal 022):
+// an explicit per-pod annotation ("true"=force on / "false"=force off) overrides
+// the node default; otherwise CaptureRedirectAllDefault (the M2-default flip) or the
+// legacy node-wide CaptureRedirectAllEnabled applies. This is the safety gate that
+// keeps infra/opt-out pods off redirect-all even when the node default is on.
+func TestPodRedirectAll(t *testing.T) {
 	annoTrue := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "true"}
 	annoFalse := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "false"}
 	annoOther := map[string]string{"some.other/annotation": "true"}
+	withAnno := func(m map[string]string) config.AetherConf {
+		return config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &m}}
+	}
 
 	tests := []struct {
 		name string
 		conf config.AetherConf
 		want bool
 	}{
+		{name: "annotation true forces on (default off)", conf: withAnno(annoTrue), want: true},
 		{
-			name: "annotation true opts in",
-			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoTrue}},
-			want: true,
-		},
-		{
-			name: "annotation false does not opt in",
-			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoFalse}},
+			name: "annotation false forces off even with default on",
+			conf: config.AetherConf{CaptureRedirectAllDefault: true, RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoFalse}},
 			want: false,
 		},
 		{
-			name: "unrelated annotation does not opt in",
-			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoOther}},
+			name: "annotation false forces off even with node-wide override",
+			conf: config.AetherConf{CaptureRedirectAllEnabled: true, RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoFalse}},
 			want: false,
 		},
-		{
-			name: "nil pod annotations does not opt in",
-			conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{}},
-			want: false,
-		},
-		{
-			name: "nil runtime config does not opt in",
-			conf: config.AetherConf{},
-			want: false,
-		},
+		{name: "no annotation, default on -> on", conf: config.AetherConf{CaptureRedirectAllDefault: true}, want: true},
+		{name: "no annotation, node-wide override on -> on", conf: config.AetherConf{CaptureRedirectAllEnabled: true}, want: true},
+		{name: "unrelated annotation, default off -> off", conf: withAnno(annoOther), want: false},
+		{name: "nil pod annotations, default off -> off", conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{}}, want: false},
+		{name: "nil runtime config, default off -> off", conf: config.AetherConf{}, want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, podWantsRedirectAll(tc.conf))
+			assert.Equal(t, tc.want, podRedirectAll(tc.conf))
 		})
 	}
 }

@@ -52,6 +52,7 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig.AgentCNIPath = constants.DefaultCNISocketPath
 	pluginConfig.OTLPEndpoint = cfg.OTLPEndpoint
 	pluginConfig.TransparentCaptureEnabled = cfg.TransparentCaptureEnabled
+	pluginConfig.CaptureRedirectAllDefault = cfg.CaptureRedirectAllDefault
 	pluginConfig.MeshDNSEnabled = cfg.MeshDNSEnabled
 	pluginConfig.HostIP = cfg.HostIP
 	// Declare the pod-annotations capability so containerd populates

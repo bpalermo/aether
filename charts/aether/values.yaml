@@ -110,12 +110,25 @@ agent:
   # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.
   # Default ON (validated hitless under churn); adds the services-read RBAC.
   transparentCapture: true
-  # SPIKE (proposal 022 M2a): redirect-ALL outbound TCP into the capture listener
-  # with an ORIGINAL_DST passthrough for non-mesh destinations, so GAMMA routing
-  # can apply to real Services on real ports. Requires --transparent-capture. This
-  # only adds the (dormant) passthrough filter chain; a pod is redirect-all'd ONLY
-  # when it carries the capture.aether.io/redirect-all="true" annotation. Default OFF.
+  # Redirect-ALL outbound TCP into the capture listener with an ORIGINAL_DST
+  # passthrough for non-mesh destinations, so GAMMA routing can apply to real
+  # Services on real ports (proposal 022). Requires --transparent-capture. This
+  # only adds the (dormant) passthrough filter chain on the Envoy side; a pod is
+  # redirect-all'd ONLY when it carries the capture.aether.io/redirect-all="true"
+  # annotation (per-pod opt-in). For node-wide default-on, use
+  # captureRedirectAllDefault below instead. Default OFF.
   captureRedirectAll: false
+  # M2-default flip (proposal 022, Step 4): make redirect-all the DEFAULT for
+  # managed pods (Istio-style "capture what the app sends", zero per-pod config).
+  # Every non-system pod on the node is redirect-all'd UNLESS it carries the
+  # capture.aether.io/redirect-all="false" opt-out annotation (use it for infra /
+  # hostNetwork / prober pods). Implies the Envoy passthrough filter chain, so it
+  # enables the agent --capture-redirect-all flag too (no need to also set
+  # captureRedirectAll). Requires --transparent-capture. Default OFF until
+  # validated on talos — the CNI redirect change is the riskiest blast radius
+  # (every meshed pod's egress). Carve out destinations with
+  # capture.aether.io/exclude-outbound-ports / -ip-ranges.
+  captureRedirectAllDefault: false
   # Mesh DNS (proposal 018, mesh-global FQDN): the node agent runs an in-process
   # resolver answering <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
   # (namespace-free, globally routable) and forwarding the rest to meshDnsUpstream;
