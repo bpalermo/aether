@@ -304,6 +304,20 @@ func TestExcludeIPRangeAcceptExprs(t *testing.T) {
 	assert.Equal(t, expr.VerdictAccept, exprs[3].(*expr.Verdict).Kind)
 }
 
+// TestBuiltinRedirectAllExcludedRanges verifies the always-on redirect-all carve-outs
+// cover IPv4 link-local (the cloud metadata service) and multicast (proposal 022),
+// which the /8 loopback mask in redirectAllTCPExprs does not exclude.
+func TestBuiltinRedirectAllExcludedRanges(t *testing.T) {
+	got := make(map[netip.Prefix]bool)
+	for _, r := range builtinRedirectAllExcludedRanges {
+		got[r] = true
+	}
+	assert.True(t, got[netip.MustParsePrefix("169.254.0.0/16")], "link-local must be excluded (IMDS 169.254.169.254)")
+	assert.True(t, got[netip.MustParsePrefix("224.0.0.0/4")], "multicast must be excluded")
+	// Sanity: the metadata IP falls inside the excluded link-local prefix.
+	assert.True(t, netip.MustParsePrefix("169.254.0.0/16").Contains(netip.MustParseAddr("169.254.169.254")))
+}
+
 // TestPassthroughMarkAcceptExprs verifies the self-exclusion rule matches the
 // proxy's fwmark (little-endian u32) and accepts, so SO_MARK'd passthrough egress
 // bypasses the redirect (proposal 022 M2-default).

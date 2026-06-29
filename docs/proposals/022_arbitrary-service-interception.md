@@ -196,3 +196,18 @@ The mark is unique to the proxy's passthrough — no UID collision, app-UID-agno
 
 This is the big architectural item; the CNI redirect change is the riskiest blast radius
 (every meshed pod's egress), which is why the default flip is last and gated on the spike.
+
+### Residual redirect-all correctness gaps
+
+The broad redirect captures every non-loopback TCP dest, so special ranges the scoped
+`:18081` rule never touched now need handling:
+
+- **Link-local `169.254.0.0/16` + multicast `224.0.0.0/4`.** ✅ **DONE** — always excluded
+  (`builtinRedirectAllExcludedRanges`) so the cloud instance-metadata service
+  (169.254.169.254) is reached directly, not via an Envoy passthrough hop.
+- **IPv6.** OPEN — the capture nft table is `TableFamilyIPv4` only, so IPv6 outbound is not
+  captured at all (bypasses the mesh, reaches its dest directly). Not a breakage, but IPv6
+  mesh traffic is unmeshed until an IPv6 table + listener path is added.
+- **UDP.** OPEN — redirect-all redirects only TCP; UDP egress is uncaptured in redirect-all
+  mode (the scoped rule does redirect UDP to :18081 when `--l4-routes`). No DTLS, so UDP
+  mesh remains plaintext/forwarded; revisit with the L4 floor.
