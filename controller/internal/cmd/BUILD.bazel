@@ -13,6 +13,7 @@ go_library(
         "//common/manager",
         "//common/spire",
         "//controller/internal/gatewayapi",
+        "//controller/internal/httpfilter",
         "//controller/internal/meshconfig",
         "//controller/internal/podmutate",
         "//controller/internal/webhook",
