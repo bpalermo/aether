@@ -16,6 +16,7 @@ import (
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/serviceref"
 	"github.com/bpalermo/aether/common/telemetry"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
@@ -539,7 +540,7 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			r.readyOnce.Do(func() { close(r.ready) })
 		}
 
-		r.applyEvent(event)
+		r.applyEvent(ctx, event)
 
 		if event.GetVersion() != "" {
 			lastVersion = event.GetVersion()
@@ -549,13 +550,26 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 }
 
 // applyEvent updates the local cache based on an endpoint event.
-func (r *RegistrarRegistry) applyEvent(event *registrarv1.WatchEndpointsResponse) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+func (r *RegistrarRegistry) applyEvent(ctx context.Context, event *registrarv1.WatchEndpointsResponse) {
 	svcName := event.GetServiceName()
 	protocol := event.GetProtocol()
 	ep := event.GetEndpoint()
+
+	// Ingress validation: a mutating event must carry a namespace-qualified
+	// "<ns>/<sa>" key (proposal 020). A bare/malformed key means a backend keying
+	// bug (e.g. the kubernetes backend before #427); drop it with a metric +
+	// rate-aware warn rather than caching a key every downstream consumer would
+	// silently skip. SNAPSHOT_COMPLETE is a marker with no service name.
+	if event.GetType() != registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE {
+		if _, ok := serviceref.ParseKey(svcName); !ok {
+			r.metrics.malformedKey(ctx)
+			r.log.WarnContext(ctx, "dropping endpoint event with a non-namespace-qualified service key (backend keying bug)", "service", svcName)
+			return
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	switch event.GetType() {
 	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT:

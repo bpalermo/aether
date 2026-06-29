@@ -18,9 +18,10 @@ const meterName = "aether/registry-registrar"
 // query: compare against aether.registrar.snapshot.version — a persistent gap
 // means this agent is consuming a stale endpoint view.
 type clientMetrics struct {
-	reconnects  metric.Int64Counter
-	watchErrors metric.Int64Counter
-	lastVersion metric.Int64Gauge
+	reconnects    metric.Int64Counter
+	watchErrors   metric.Int64Counter
+	lastVersion   metric.Int64Gauge
+	malformedKeys metric.Int64Counter
 }
 
 // newClientMetrics registers the watch-stream instruments on the given meter.
@@ -40,6 +41,10 @@ func newClientMetrics(meter metric.Meter) (*clientMetrics, error) {
 		metric.WithDescription("Last registrar snapshot version applied by this agent (compare with aether.registrar.snapshot.version for skew)")); err != nil {
 		return nil, fmt.Errorf("last version: %w", err)
 	}
+	if m.malformedKeys, err = meter.Int64Counter("aether.agent.registry.malformed_keys",
+		metric.WithDescription("Streamed endpoint events dropped because the service key was not a namespace-qualified <ns>/<sa> (a backend keying bug; otherwise 0)")); err != nil {
+		return nil, fmt.Errorf("malformed keys: %w", err)
+	}
 
 	return m, nil
 }
@@ -56,6 +61,13 @@ func (m *clientMetrics) streamFailed(ctx context.Context) {
 		return
 	}
 	m.watchErrors.Add(ctx, 1)
+}
+
+func (m *clientMetrics) malformedKey(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.malformedKeys.Add(ctx, 1)
 }
 
 func (m *clientMetrics) versionApplied(ctx context.Context, version string) {
