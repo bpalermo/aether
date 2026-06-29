@@ -1,0 +1,107 @@
+edition = "2023";
+
+package aether.registry.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+
+// Preserve proto3 implicit field presence so the generated Go API is unchanged by
+// the edition migration (scalars stay value types, not pointers).
+option features.field_presence = IMPLICIT;
+option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
+
+// ServiceConfigProjection is the cross-cluster wire form of one service's projected
+// GAMMA config (proposal 026, multi-cluster config propagation — Option E/C). The
+// authoritative (exporting) cluster's GAMMA reconciler projects an HTTPRoute/GRPCRoute
+// attached to a Service into the RECONCILED GammaRoute form and writes this record to
+// the shared registry, origin-stamped + versioned; consuming clusters import it
+// read-only and materialize the routes WITHOUT re-running the reconciler or holding
+// cross-cluster Kubernetes credentials. The in-memory proxy.GammaRoute is the source;
+// config.go converts to/from this proto. See docs/proposals/026.
+message ServiceConfigProjection {
+  // service is the route-target key "<ns>/<svc>" the projection applies to.
+  string service = 1;
+  // origin_cluster is the authoritative exporting cluster (the conflict-resolution +
+  // import-authorization key — a consumer rejects a projection from a non-authority).
+  string origin_cluster = 2;
+  // version is the exporter's monotonic version for this service's projection
+  // (last-writer-by-origin; consumers ignore an older version than they hold).
+  string version = 3;
+  // routes is the projected, specificity-independent GAMMA rule set (the consumer
+  // sorts/builds vhosts exactly as the local path does).
+  repeated GammaRoute routes = 4;
+}
+
+// GammaRoute mirrors the in-memory proxy.GammaRoute: one HTTPRoute/GRPCRoute rule
+// projected to data-plane vocabulary. Backends are already resolved to data-plane
+// cluster names by the exporting reconciler.
+message GammaRoute {
+  repeated GammaMatch matches = 1;
+  repeated GammaBackend backends = 2;
+  google.protobuf.Duration timeout = 3;
+  GammaHeaderMutation header_mutation = 4;
+  GammaRedirect redirect = 5;
+  GammaUrlRewrite url_rewrite = 6;
+  repeated ExtensionFilter extension_filters = 7;
+}
+
+// GammaMatch is one match: a path (prefix OR exact OR regex) and ANDed header matches.
+message GammaMatch {
+  string prefix = 1;
+  string exact = 2;
+  string regex = 3;
+  repeated GammaHeaderMatch headers = 4;
+}
+
+message GammaHeaderMatch {
+  string name = 1;
+  string value = 2;
+}
+
+// GammaBackend is one weighted backend: the resolved data-plane cluster + the bare
+// service key (for the consumer's dependency set).
+message GammaBackend {
+  string service = 1;
+  string cluster = 2;
+  uint32 weight = 3;
+}
+
+message GammaHeaderKv {
+  string name = 1;
+  string value = 2;
+}
+
+// GammaHeaderMutation carries the RequestHeaderModifier/ResponseHeaderModifier fields.
+message GammaHeaderMutation {
+  repeated GammaHeaderKv set_request = 1;
+  repeated GammaHeaderKv add_request = 2;
+  repeated string remove_request = 3;
+  repeated GammaHeaderKv set_response = 4;
+  repeated GammaHeaderKv add_response = 5;
+  repeated string remove_response = 6;
+}
+
+// GammaRedirect describes a RequestRedirect filter (no backend cluster).
+message GammaRedirect {
+  string scheme = 1;
+  string hostname = 2;
+  uint32 port = 3;
+  int32 status_code = 4;
+  string path_type = 5;
+  string path_value = 6;
+  uint32 listener_port = 7;
+}
+
+// GammaUrlRewrite describes a URLRewrite filter (host and/or path).
+message GammaUrlRewrite {
+  string hostname = 1;
+  string path_type = 2;
+  string path_value = 3;
+}
+
+// ExtensionFilter is a proxy-extension escape-hatch filter (proposal 025) carried with
+// the projection: the Envoy filter name + its opaque per-route typed_config.
+message ExtensionFilter {
+  string name = 1;
+  google.protobuf.Any config = 2;
+}
