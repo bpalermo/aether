@@ -2,6 +2,7 @@ edition = "2023";
 
 package aether.registrar.v1;
 
+import "api/aether/registry/v1/config.proto";
 import "api/aether/registry/v1/endpoint.proto";
 import "api/aether/registry/v1/service.proto";
 
@@ -22,6 +23,13 @@ service RegistrarService {
 
   // ListAllEndpoints returns all endpoints from the registrar's snapshot.
   rpc ListAllEndpoints(ListAllEndpointsRequest) returns (ListAllEndpointsResponse);
+
+  // ListAllConfig returns the clusterset-wide config projections (multi-cluster
+  // config propagation, proposal 026 Option E/C). Agents do NOT read the registry
+  // directly; the spoke registrar surfaces imported projections through this pull.
+  // A push stream (WatchConfig) is a later optimization; the pull is correct and
+  // eventually-consistent (AP), matching the import posture.
+  rpc ListAllConfig(ListAllConfigRequest) returns (ListAllConfigResponse);
 }
 
 message RegisterEndpointRequest {
@@ -101,4 +109,12 @@ message ListAllEndpointsResponse {
 
 message ServiceEndpoints {
   repeated aether.registry.v1.ServiceEndpoint endpoints = 1;
+}
+
+message ListAllConfigRequest {}
+
+message ListAllConfigResponse {
+  // projections is the clusterset-wide set of service config projections, one per
+  // (service, origin cluster). origin_cluster is set authoritatively by the registry.
+  repeated aether.registry.v1.ServiceConfigProjection projections = 1;
 }

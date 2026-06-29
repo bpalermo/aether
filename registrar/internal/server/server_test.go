@@ -8,6 +8,7 @@ import (
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/bpalermo/aether/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -203,4 +204,47 @@ func TestWatchEndpointsFilteredSnapshot(t *testing.T) {
 	// No filter: full snapshot (both services) + catalog + marker.
 	sent = run(&registrarv1.WatchEndpointsRequest{})
 	require.Len(t, sent, 5)
+}
+
+// fakeConfigRegistry embeds the (nil) registry.Registry interface to satisfy the type
+// and implements registry.ConfigExporter; only ListConfig is exercised here.
+type fakeConfigRegistry struct {
+	registry.Registry
+	projections []*registryv1.ServiceConfigProjection
+}
+
+func (f *fakeConfigRegistry) SetConfig(context.Context, *registryv1.ServiceConfigProjection) error {
+	return nil
+}
+func (f *fakeConfigRegistry) UnsetConfig(context.Context, string) error { return nil }
+func (f *fakeConfigRegistry) ListConfig(context.Context) ([]*registryv1.ServiceConfigProjection, error) {
+	return f.projections, nil
+}
+
+// TestListAllConfig verifies the registrar surfaces config projections from a
+// ConfigExporter backend (proposal 026) and degrades to empty when the backend has no
+// cross-cluster config plane.
+func TestListAllConfig(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no config plane -> empty", func(t *testing.T) {
+		snap := NewSnapshot()
+		s := NewRegistrarServer(nil, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", slog.New(slog.DiscardHandler), nil)
+		resp, err := s.ListAllConfig(ctx, &registrarv1.ListAllConfigRequest{})
+		require.NoError(t, err)
+		assert.Empty(t, resp.GetProjections())
+	})
+
+	t.Run("ConfigExporter backend -> projections", func(t *testing.T) {
+		reg := &fakeConfigRegistry{projections: []*registryv1.ServiceConfigProjection{
+			{Service: "team-a/echo", OriginCluster: "cluster-a", Version: "v3"},
+		}}
+		snap := NewSnapshot()
+		s := NewRegistrarServer(reg, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", slog.New(slog.DiscardHandler), nil)
+		resp, err := s.ListAllConfig(ctx, &registrarv1.ListAllConfigRequest{})
+		require.NoError(t, err)
+		require.Len(t, resp.GetProjections(), 1)
+		assert.Equal(t, "team-a/echo", resp.GetProjections()[0].GetService())
+		assert.Equal(t, "cluster-a", resp.GetProjections()[0].GetOriginCluster())
+	})
 }
