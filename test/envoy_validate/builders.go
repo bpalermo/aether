@@ -23,10 +23,12 @@ import (
 
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
@@ -157,6 +159,7 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 		false, // emitStatsPod
 		[]proxy.CaptureTCPService{tcpSvc},
 		true, // withPassthrough
+		nil,  // extensionFilters (escape hatch exercised in the route-target bootstrap)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("GenerateCaptureListener: %w", err)
@@ -207,10 +210,29 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 	//   - /redirect -> RequestRedirect (host + 301, NO backend cluster)
 	//   - /headers -> echo-v1 with a request header set+add+remove + response mutation
 	//   - / (default) -> 70/30 WEIGHTED split across echo-v1/echo-v2
+	// Escape-hatch (proposal 025): a header_mutation ExtensionFilter on /v2. Its
+	// per-route config is a HeaderMutationPerRoute (note: header_mutation's per-route
+	// type differs from its HCM filter config type) appending a response header.
+	// Proving Envoy ACCEPTS both the default-disabled HCM entry (below) AND this
+	// per-route override is exactly what the M2 webhook approximates in-process.
+	headerMutationPerRoute := mustAny(&header_mutationv3.HeaderMutationPerRoute{
+		Mutations: &header_mutationv3.Mutations{
+			ResponseMutations: []*mutation_rulesv3.HeaderMutation{{
+				Action: &mutation_rulesv3.HeaderMutation_Append{Append: &corev3.HeaderValueOption{
+					Header:       &corev3.HeaderValue{Key: "x-aether-escape-hatch", Value: "applied"},
+					AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+				}},
+			}},
+		},
+	})
 	rules := []proxy.GammaRoute{
 		{
 			Matches:  []proxy.GammaMatch{{Prefix: "/v2"}},
 			Backends: []proxy.GammaBackend{{Service: "team-a/echo-v2", Cluster: v2Cluster, Weight: 1}},
+			ExtensionFilters: []proxy.ExtensionFilter{{
+				Name:   "envoy.filters.http.header_mutation",
+				Config: headerMutationPerRoute,
+			}},
 		},
 		{
 			// RequestRedirect: replaces the route action with a RedirectAction and
@@ -265,12 +287,18 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{
 			RouteConfig: routeCfg,
 		},
-		HttpFilters: []*http_connection_managerv3.HttpFilter{{
-			Name: "envoy.filters.http.router",
-			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{
-				TypedConfig: mustAny(&routerv3.Router{}),
+		HttpFilters: append(
+			// Escape-hatch (025): the union of allow-listed filters the routes reference,
+			// default-disabled — header_mutation here. typed_per_filter_config (the per-
+			// route override above) can only enable a filter already in the chain.
+			proxy.CollectExtensionFilters(rules),
+			&http_connection_managerv3.HttpFilter{
+				Name: "envoy.filters.http.router",
+				ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{
+					TypedConfig: mustAny(&routerv3.Router{}),
+				},
 			},
-		}},
+		),
 	}
 	listener := &listenerv3.Listener{
 		Name: "cap_http_validate",

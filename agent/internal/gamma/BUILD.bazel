@@ -9,6 +9,8 @@ go_library(
         "//agent/internal/gatewaystatus",
         "//agent/internal/referencegrant",
         "//agent/internal/xds/proxy",
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
         "//common/log",
         "//common/serviceref",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
@@ -29,6 +31,9 @@ go_test(
     deps = [
         "//agent/internal/gatewaystatus",
         "//agent/internal/xds/proxy",
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",
@@ -41,5 +46,6 @@ go_test(
         "@io_k8s_sigs_controller_runtime//pkg/reconcile",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",
+        "@org_golang_google_protobuf//types/known/anypb",
     ],
 )

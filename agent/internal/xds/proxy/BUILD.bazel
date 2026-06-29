@@ -49,6 +49,7 @@ go_library(
         "@com_github_envoyproxy_go_control_plane_envoy//config/trace/v3:trace",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/access_loggers/open_telemetry/v3:open_telemetry",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/common/set_filter_state/v3:set_filter_state",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/health_check/v3:health_check",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/on_demand/v3:on_demand",

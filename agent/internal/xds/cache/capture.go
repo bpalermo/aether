@@ -71,7 +71,18 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	}
 	c.captureMu.RUnlock()
 
-	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll)
+	// Escape-hatch extension filters (proposal 025): the HCM must carry every
+	// allow-listed filter any in-scope route references, default-disabled, so the
+	// route's typed_per_filter_config can re-enable it (per-route config only
+	// overrides a chain filter, never adds one). Union over all GammaRoutes; disabled
+	// entries are inert, so the (broader-than-per-pod) union is harmless.
+	var allRules []proxy.GammaRoute
+	for _, rules := range c.serviceRoutesSnapshot() {
+		allRules = append(allRules, rules...)
+	}
+	extensionFilters := proxy.CollectExtensionFilters(allRules)
+
+	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
 		return nil, err
 	}

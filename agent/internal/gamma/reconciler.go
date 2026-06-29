@@ -17,6 +17,8 @@ import (
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"google.golang.org/protobuf/types/known/durationpb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +71,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// can flip a cross-namespace backendRef between permitted and RefNotPermitted,
 		// so re-project + re-status on every grant change. Cluster-wide cache (post-#323).
 		Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll).
+		// HTTPFilter (config.aether.io, proposal 025): a route's ExtensionRef points at
+		// one; a change to its opaque config must re-project the routes that reference it.
+		Watches(&configapisv1.HTTPFilter{}, enqueueAll).
 		Named("gamma").
 		Complete(r)
 }
@@ -91,6 +96,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	grants := grantList.Items
 
+	// HTTPFilters (config.aether.io, proposal 025) referenced by route ExtensionRefs,
+	// indexed by "<ns>/<name>". ExtensionRef is same-namespace (a LocalObjectReference),
+	// so no ReferenceGrant applies.
+	httpFilterList := &configapisv1.HTTPFilterList{}
+	if err := r.List(ctx, httpFilterList); err != nil {
+		return reconcile.Result{}, err
+	}
+	httpFilters := make(map[string]*configapisv1.HTTPFilter, len(httpFilterList.Items))
+	for i := range httpFilterList.Items {
+		hf := &httpFilterList.Items[i]
+		httpFilters[hf.Namespace+"/"+hf.Name] = hf
+	}
+
 	routes := map[string][]proxy.GammaRoute{}
 	// routeTargetPorts: the real Service port(s) each route target is addressed on
 	// (proposal 023 M2), accumulated from the parentRef ports. A target may be
@@ -110,7 +128,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		for _, p := range serviceParents(hr.Spec.ParentRefs, hr.Namespace) {
 			collectPort(p.Key, p.Port)
 			for _, rule := range hr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants))
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters))
 			}
 		}
 	}
@@ -119,7 +137,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		for _, p := range serviceParents(gr.Spec.ParentRefs, gr.Namespace) {
 			collectPort(p.Key, p.Port)
 			for _, rule := range gr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants))
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters))
 			}
 		}
 	}
@@ -324,7 +342,7 @@ func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []s
 	return parents
 }
 
-func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.GammaRoute {
+func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter) proxy.GammaRoute {
 	gr := proxy.GammaRoute{}
 	if rule.Timeouts != nil && rule.Timeouts.Request != nil {
 		// HTTPRoute timeouts are GEP-2257 duration strings (a subset of Go's).
@@ -376,7 +394,40 @@ func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespac
 	gr.HeaderMutation = buildHTTPHeaderMutation(rule.Filters)
 	gr.Redirect = buildHTTPRedirect(rule.Filters)
 	gr.URLRewrite = buildHTTPURLRewrite(rule.Filters)
+	for _, f := range rule.Filters {
+		if f.Type == gatewayv1.HTTPRouteFilterExtensionRef {
+			if ef, ok := resolveExtensionFilter(f.ExtensionRef, routeNamespace, httpFilters); ok {
+				gr.ExtensionFilters = append(gr.ExtensionFilters, ef)
+			}
+		}
+	}
 	return gr
+}
+
+// resolveExtensionFilter resolves a route's ExtensionRef filter (proposal 025) to an
+// allow-listed proxy ExtensionFilter, or (zero, false) when it does not reference an
+// in-namespace, allow-listed, ROUTE-scope HTTPFilter with a typed_config. ExtensionRef
+// is a same-namespace LocalObjectReference (no namespace field), so no ReferenceGrant
+// applies. CHAIN scope is deferred (admin-owned, a later milestone). Invalid/dangling
+// refs are skipped here; M2 (the webhook) makes them a clean ResolvedRefs=False reject.
+func resolveExtensionFilter(ref *gatewayv1.LocalObjectReference, routeNamespace string, httpFilters map[string]*configapisv1.HTTPFilter) (proxy.ExtensionFilter, bool) {
+	if ref == nil ||
+		string(ref.Group) != configapisv1.GroupVersion.Group ||
+		string(ref.Kind) != configapisv1.HTTPFilterKind {
+		return proxy.ExtensionFilter{}, false
+	}
+	hf, ok := httpFilters[routeNamespace+"/"+string(ref.Name)]
+	if !ok || hf.Spec == nil {
+		return proxy.ExtensionFilter{}, false
+	}
+	if hf.Spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+		return proxy.ExtensionFilter{}, false // chain scope deferred to a later milestone
+	}
+	name := hf.Spec.GetFilter()
+	if !proxy.ExtensionFilterAllowed(name) || hf.Spec.GetTypedConfig() == nil {
+		return proxy.ExtensionFilter{}, false
+	}
+	return proxy.ExtensionFilter{Name: name, Config: hf.Spec.GetTypedConfig()}, true
 }
 
 // buildHTTPHeaderMutation merges all RequestHeaderModifier and
@@ -546,7 +597,7 @@ func buildGRPCHeaderMutation(filters []gatewayv1.GRPCRouteFilter) *proxy.GammaHe
 // method match becomes a path match (service+method = exact /svc/method; service-only
 // = prefix /svc/), and gRPC header matches map to request-header matches. GRPCRoute
 // has no per-rule timeout. The backends are identical (weighted Service refs).
-func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.GammaRoute {
+func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter) proxy.GammaRoute {
 	gr := proxy.GammaRoute{}
 	for _, b := range rule.BackendRefs {
 		if b.Group != nil && string(*b.Group) != "" {
@@ -616,5 +667,12 @@ func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, route
 		gr.Matches = append(gr.Matches, gm)
 	}
 	gr.HeaderMutation = buildGRPCHeaderMutation(rule.Filters)
+	for _, f := range rule.Filters {
+		if f.Type == gatewayv1.GRPCRouteFilterExtensionRef {
+			if ef, ok := resolveExtensionFilter(f.ExtensionRef, routeNamespace, httpFilters); ok {
+				gr.ExtensionFilters = append(gr.ExtensionFilters, ef)
+			}
+		}
+	}
 	return gr
 }
