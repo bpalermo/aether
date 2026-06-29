@@ -21,9 +21,11 @@
 //   - TestAetherMeshHTTP: the east-west GAMMA profile. Runs in CI (kind, no SPIRE)
 //     via the `mesh-http` job, SOFT (continue-on-error) while the score is driven up.
 //     Uses the committed mesh overlay (mesh/manifests.yaml) which adds the
-//     aether.io/managed namespace label, per-version ServiceAccounts, and the
-//     capture.aether.io/redirect-all annotation. With SPIRE off the mesh hop is
-//     cleartext (the inbound listener degrades to a no-mTLS HCM chain).
+//     aether.io/managed namespace label and per-version ServiceAccounts. Capture is
+//     the chart DEFAULT (agent.captureRedirectAllDefault), so the managed-namespace
+//     label alone meshes the echo pods (namespace injection → managed → redirect-all)
+//     — no per-pod annotation needed. With SPIRE off the mesh hop is cleartext (the
+//     inbound listener degrades to a no-mTLS HCM chain).
 //
 // Both tests require a live cluster reachable via the ambient kubeconfig and are
 // SKIPPED unless AETHER_CONFORMANCE=1.
@@ -61,10 +63,12 @@ import (
 )
 
 // meshManifests is aether's overlay of the suite's base mesh manifests: the
-// aether.io/managed=true namespace label, per-version ServiceAccounts for the
-// echo Deployments (aether identity = ServiceAccount), and the
-// capture.aether.io/redirect-all=true pod annotation (so real Service ports are
-// captured). Vanilla upstream manifests would not exercise aether's mesh path.
+// aether.io/managed=true namespace label and per-version ServiceAccounts for the
+// echo Deployments (aether identity = ServiceAccount). The managed-namespace label
+// is enough to mesh the echo pods and capture their real Service ports — redirect-all
+// is the chart default (agent.captureRedirectAllDefault), so namespace injection
+// labels the pods managed and they get redirect-all with no per-pod annotation.
+// Vanilla upstream manifests would not exercise aether's mesh path.
 //
 // It deliberately contains ONLY mesh/manifests.yaml — the base mesh apply the
 // suite does once in Setup. The per-test manifests (tests/mesh/*.yaml, applied by
@@ -77,7 +81,7 @@ var meshManifests embed.FS
 
 // overlayFS composes the aether mesh overlay over the upstream gateway-api manifest
 // embed: a read for overridePath ("mesh/manifests.yaml") is served from the aether
-// overlay (its managed-namespace label / per-version SAs / redirect-all annotation),
+// overlay (its managed-namespace label / per-version SAs),
 // and every OTHER path (the per-test tests/mesh/*.yaml the conformance tests apply,
 // plus base/*) falls through to the upstream embed.
 //
@@ -322,9 +326,10 @@ var meshNamespaces = []string{
 }
 
 // TestAetherMeshHTTP runs the MESH-HTTP (east-west GAMMA) conformance profile
-// against the committed mesh overlay (the aether.io/managed namespace label,
-// per-version ServiceAccounts, and the capture.aether.io/redirect-all annotation —
-// see mesh/manifests.yaml). It exercises the mesh data path: the CNI captures the
+// against the committed mesh overlay (the aether.io/managed namespace label and
+// per-version ServiceAccounts; redirect-all is the chart default so the managed
+// label alone meshes the echo pods — see mesh/manifests.yaml). It exercises the
+// mesh data path: the CNI captures the
 // echo client's egress, the agent routes it via the cap_http GAMMA tables to the
 // per-version backends. With SPIRE off the mesh hop is CLEARTEXT (the inbound
 // listener degrades to a no-mTLS HCM chain, symmetric with the cleartext outbound

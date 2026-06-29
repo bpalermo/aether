@@ -124,11 +124,13 @@ agent:
   # capture.aether.io/redirect-all="false" opt-out annotation (use it for infra /
   # hostNetwork / prober pods). Implies the Envoy passthrough filter chain, so it
   # enables the agent --capture-redirect-all flag too (no need to also set
-  # captureRedirectAll). Requires --transparent-capture. Default OFF until
-  # validated on talos — the CNI redirect change is the riskiest blast radius
-  # (every meshed pod's egress). Carve out destinations with
-  # capture.aether.io/exclude-outbound-ports / -ip-ranges.
-  captureRedirectAllDefault: false
+  # captureRedirectAll). Requires --transparent-capture. Carve out destinations
+  # with capture.aether.io/exclude-outbound-ports / -ip-ranges (link-local +
+  # multicast are always excluded). Default ON — validated HITLESS on talos
+  # (2026-06-29 churn soak: external prober 100%, k6 0.012%, egress intact, stable
+  # RSS through 6 proxy + 14 service rolls). This is the riskiest blast radius
+  # (every meshed pod's egress); set false to revert to per-pod opt-in.
+  captureRedirectAllDefault: true
   # Mesh DNS (proposal 018, mesh-global FQDN): the node agent runs an in-process
   # resolver answering <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
   # (namespace-free, globally routable) and forwarding the rest to meshDnsUpstream;
