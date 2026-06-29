@@ -111,20 +111,61 @@ waypoint** near the service, so it applies to every caller regardless of cluster
   enforceable producer-side (caller-side routing/telemetry inherently isn't); a shift from the
   pure consumer-side capture model.
 
-**Recommendation (tentative): D for enforcement + C for the rest, A as the baseline.**
+### Option E — Control cluster (centralized config authority)
+A designated **control cluster** is the single source of truth for class-1 config; everything else
+imports it read-only. This is the *centralized* end of the **authority axis** whose *federated*
+end is Option C — it is **not a new mechanism**: the hub is simply the sole *exporter* on Option
+C's export/import channel, so spokes import read-only with **no cross-cluster Kubernetes
+credentials** (avoid the "hub writes into every spoke's API server" model — credential sprawl +
+huge blast radius). Best run as a **pure management cluster** (no mesh workloads): owning no
+services, it has no producer-authority of its own, so it is purely a config distribution point.
+
+|  | **C — federated producer-authority** | **E — control cluster (centralized)** |
+|---|---|---|
+| Who writes config | each cluster, for its own services | one hub, for everything |
+| Conflict resolution | producer wins (per service) | trivial — one writer |
+| Drift | eventual; possible between exports | **none by construction** (single SoT) |
+| Availability | no SPOF | hub down → config frozen fleet-wide (spokes serve last-known, AP) |
+| Authority vs ownership | aligned (owner = author) | decoupled (mitigated by a pure-mgmt hub) |
+| Ops fit | independent / multi-tenant clusters | single central-ops fleet |
+
+- **+** Single source of truth → **no drift by construction**; GitOps to *one* place + mesh-native
+  fan-out; trivial single-writer conflict model; manage a service's routing from one place
+  regardless of where its pods run.
+- **−** Config **SPOF / blast radius** — hub down or partitioned freezes config changes fleet-wide
+  (mitigated: spokes serve last-known, AP); a high-value security target (compromise = mesh-wide
+  config compromise); centralizes the config RBAC surface. Does **not** centralize the *registry*
+  (see Tensions — the "no authoritative cluster" directive is about endpoints, a different plane).
+
+**Recommendation (tentative): one import mechanism (C), deployment-selectable authority topology
+(C *or* E), D for enforcement, A for class-2.**
+- **Mechanism:** build **C**'s export/import channel once. **E reuses it verbatim** (hub = sole
+  exporter), so federated-producer vs central-hub is a *deployment choice over the same plumbing*,
+  not a fork: independent / multi-tenant clusters → **C**; a central platform team → **E**.
 - **Class-1 enforcement** (must hold for all callers) → **D** (producer waypoint): no propagation,
-  no drift.
-- **Class-1 config that must be evaluated consumer-side** (e.g. client routing that should match
-  mesh-wide) → **C** (MCS-coupled export, producer-authoritative, eventual-consistent).
+  no drift, independent of the authority topology.
+- **Class-1 config evaluated consumer-side** (e.g. client routing that should match mesh-wide) →
+  the C/E channel.
 - **Class-2 consumer-local** → **A** (GitOps / local CRDs; deliberately not propagated).
 - **Reject B** as the primary mechanism (don't make the registrar a config bus).
 
 ## Tensions / non-goals
 
-- **Authority & conflict.** No registrar is authoritative for the *registry*, but config needs an
-  owner: the **exporting (producer) cluster** is authoritative for an exported service's config
-  (matches ServiceExport ownership). A consumer never writes back. Two clusters exporting the same
-  ClusterSet service is the existing MCS conflict case — reuse its resolution, don't invent a new one.
+- **Authority & conflict.** Config needs an owner. Two topologies (see Options C/E): **federated**
+  — the **exporting (producer) cluster** is authoritative for its own exported service's config
+  (matches ServiceExport ownership; two clusters exporting the same ClusterSet service is the
+  existing MCS conflict case — reuse its resolution); or **centralized** — a **control cluster** is
+  the sole authority (one writer, no conflict). Either way a consumer never writes back. The
+  topology is a deployment choice over one mechanism, not a fork.
+- **This does NOT centralize the registry.** The standing directive "registrar per cluster, none
+  authoritative" is about the **registry** plane (a cluster owns its own pods' endpoints) — it
+  stays per-cluster under every option here, including the Option E control cluster, which is a
+  **config** authority only. A pure-management control cluster owns no services and no endpoints.
+- **Control-cluster availability (Option E).** A hub is a config SPOF: while it is down or
+  partitioned, no config *changes* propagate. Spokes must serve last-known config (AP) so the data
+  plane never hard-fails on a hub outage — the same posture as a partitioned registry consumer.
+  The hub is also a high-value target (config-compromise blast radius is fleet-wide); gate it with
+  strong RBAC and the cross-trust-domain auth below.
 - **Trust.** Config crossing clusters crosses trust domains (SPIFFE federation, trust-domain =
   mesh-domain per cluster). Imported config must be authenticated to its origin cluster, same as
   the registry bus already requires for endpoints.
@@ -145,7 +186,8 @@ waypoint** near the service, so it applies to every caller regardless of cluster
 escape-hatch policy cannot be consistent multi-cluster without C or D. Until then, 025 is scoped to
 **caller-side route `ExtensionRef`** (consumer-cluster-local, class-2, GitOps-replicated) — which
 needs nothing from this proposal. When this lands, the escape hatch's Service-scoped form becomes a
-class-1 payload that rides C (export the filter with the service) or D (enforce it at the waypoint).
+class-1 payload that rides the C/E config channel (export the filter with the service, under either
+authority topology) or D (enforce it at the waypoint).
 
 ## Verification
 
@@ -158,13 +200,18 @@ class-1 payload that rides C (export the filter with the service) or D (enforce 
 
 ## Sequencing
 
-1. **Taxonomy + decision:** ratify class-1 vs class-2 and the C+D+A split. (This doc.)
+1. **Taxonomy + decision:** ratify class-1 vs class-2 and the "one mechanism (C), selectable
+   authority topology (C/E), D for enforcement, A for class-2" split. (This doc.)
 2. **C — MCS-coupled config export (read path first):** export an exported Service's attached GAMMA
-   config into the registry (producer-stamped); consumer materializer applies it read-only. Start
-   with HTTPRoute/GRPCRoute; MeshConfig/VirtualHost/HTTPFilter follow the same channel.
-3. **D — producer waypoint enforcement:** as proposal 019 lands, route class-1 *enforcement* policy
+   config into the registry (origin-stamped); consumer materializer applies it read-only. Start
+   with HTTPRoute/GRPCRoute; MeshConfig/VirtualHost/HTTPFilter follow the same channel. This is the
+   one mechanism both authority topologies use.
+3. **E — control-cluster topology (config only):** the same export path with the hub as sole
+   exporter; a deployment flag picks federated-producer vs central-hub authority. No new
+   data-plane code — purely *who is allowed to export*. (A pure-management hub runs no workloads.)
+4. **D — producer waypoint enforcement:** as proposal 019 lands, route class-1 *enforcement* policy
    to the waypoint so it needs no per-consumer copy.
-4. **Drift visibility for class-2/GitOps:** a status/metric surfacing per-cluster config divergence
+5. **Drift visibility for class-2/GitOps:** a status/metric surfacing per-cluster config divergence
    for a ClusterSet service, so operator-owned replication drift is at least observable.
 
 Independent of the in-flight data-plane work; this is the cross-cluster control-plane story the
