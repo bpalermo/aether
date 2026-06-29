@@ -18,7 +18,7 @@ import (
 
 func TestGenerateCaptureListener(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil, false)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil, false, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "capture_p1", l.GetName())
@@ -45,7 +45,7 @@ func TestGenerateCaptureListener(t *testing.T) {
 }
 
 func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
-	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, 15001, "aether.internal", false, nil, false)
+	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, 15001, "aether.internal", false, nil, false, nil)
 	assert.Error(t, err)
 }
 
@@ -57,7 +57,7 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10"},
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20"},
 	}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, false)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
 	// 2 TCP floor chains + 1 HCM catch-all.
@@ -103,7 +103,7 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip"},  // bad IP
 		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30"}, // valid
 	}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, false)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
 	// Only the valid service should produce a chain; 1 TCP + 1 HCM.
@@ -115,7 +115,7 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 // an extra named chain (DefaultFilterChain is separate from filter_chains).
 func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil, true)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, nil, true, nil)
 	require.NoError(t, err)
 
 	// Named filter_chains: only the HCM chain (no TCP services).
@@ -149,7 +149,7 @@ func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	tcpSvcs := []CaptureTCPService{
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10"},
 	}
-	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, true)
+	l, err := GenerateCaptureListener(pod, 15001, "aether.internal", false, tcpSvcs, true, nil)
 	require.NoError(t, err)
 
 	// Named chains: 1 TCP floor + 1 HCM.

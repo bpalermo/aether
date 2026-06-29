@@ -53,12 +53,12 @@ func TestCollectExtensionFilters_UnionDedupAllowlist(t *testing.T) {
 		}},
 		{}, // no extension filters
 	}
-	got := collectExtensionFilters(rules)
+	got := CollectExtensionFilters(rules)
 	require.Len(t, got, 1, "deduped to the single allow-listed filter")
 	assert.Equal(t, h2mFilter, got[0].GetName())
 	assert.True(t, got[0].GetDisabled())
 
-	assert.Nil(t, collectExtensionFilters([]GammaRoute{{}, {}}), "no extension filters → nil (no chain additions)")
+	assert.Nil(t, CollectExtensionFilters([]GammaRoute{{}, {}}), "no extension filters → nil (no chain additions)")
 }
 
 // TestExtensionPerFilterConfig verifies per-route emission: allow-listed + non-nil only,

@@ -76,7 +76,7 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // ORIGINAL_DST cluster, forwarding the original destination in plain TCP.
 //
 // Default off (no listener is generated unless transparent capture is on).
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool) (*listenerv3.Listener, error) {
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -107,7 +107,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 			chains = append(chains, tc)
 		}
 	}
-	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod, withPassthrough))
+	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
 
 	l := &listenerv3.Listener{
 		Name: CaptureListenerName(cniPod),
@@ -213,7 +213,7 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService) *listenerv3.FilterCh
 // application_protocol does NOT work — a TLS ClientHello's ALPN (h2/http/1.1) looks
 // like HTTP. In scoped (non-redirect-all) mode the chain stays a catch-all: only
 // mesh ClusterIPs are captured (all cleartext) and there is no passthrough fallback.
-func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, scopeToCleartext bool) *listenerv3.FilterChain {
+func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
 
 	prefix := []*http_connection_managerv3.HttpFilter{
@@ -222,6 +222,11 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitSt
 		onDemandHttpFilter(),
 		outboundStatsFilter(cniPod, meshDomain, emitStatsPod),
 	}
+	// Escape-hatch extension filters (proposal 025): the union of allow-listed filters
+	// referenced by this listener's routes, default-disabled. Each referencing route
+	// re-enables + configures its filter via typed_per_filter_config (which can only
+	// override a filter already in the chain). Inert when none.
+	prefix = append(prefix, extensionFilters...)
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{

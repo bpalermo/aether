@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"github.com/bpalermo/aether/agent/internal/xds/config"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"google.golang.org/protobuf/proto"
@@ -19,6 +20,11 @@ import (
 // header_to_metadata is already compiled in (subsetHeadersHttpFilter uses it).
 var allowedExtensionFilters = map[string]func() proto.Message{
 	"envoy.filters.http.header_to_metadata": func() proto.Message { return &header_to_metadatav3.Config{} },
+	// header_mutation: add/remove request+response headers, configurable per-route via
+	// typed_per_filter_config (HeaderMutationPerRoute) — the canonical escape-hatch demo
+	// (its effect is a directly-observable header). Compiled into the proxy build
+	// (proxy/bazel/extension_config/extensions_build_config.bzl).
+	"envoy.filters.http.header_mutation": func() proto.Message { return &header_mutationv3.HeaderMutation{} },
 }
 
 // ExtensionFilterAllowed reports whether name is an allow-listed escape-hatch filter
@@ -44,11 +50,11 @@ func extensionHTTPFilter(name string, defaultConfig *anypb.Any) *http_connection
 	}
 }
 
-// collectExtensionFilters returns the default-disabled HCM http_filter entries for the
+// CollectExtensionFilters returns the default-disabled HCM http_filter entries for the
 // union of allow-listed extension filters referenced by the given rules (deduped,
 // stable order). Returns nil when none — the common case adds nothing to the chain.
 // Non-allow-listed names are skipped (the webhook rejects them at admission).
-func collectExtensionFilters(rules []GammaRoute) []*http_connection_managerv3.HttpFilter {
+func CollectExtensionFilters(rules []GammaRoute) []*http_connection_managerv3.HttpFilter {
 	var (
 		seen map[string]struct{}
 		out  []*http_connection_managerv3.HttpFilter
