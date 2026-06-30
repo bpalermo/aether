@@ -7,10 +7,12 @@ import (
 	"log/slog"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	"github.com/bpalermo/aether/common/spire"
+	"github.com/bpalermo/aether/registrar/internal/configexport"
 	"github.com/bpalermo/aether/registrar/internal/mcs"
 	"github.com/bpalermo/aether/registrar/internal/server"
 	"github.com/bpalermo/aether/registrar/internal/services"
@@ -21,9 +23,10 @@ import (
 	"google.golang.org/grpc/credentials"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
-
 	ctrl "sigs.k8s.io/controller-runtime"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
+	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
 
 const (
@@ -63,6 +66,7 @@ func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
+	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", constants.DefaultMeshDomain, "DNS-style mesh domain (proposal 026 config export resolves backend clusters <svc>.<mesh-domain>)")
 	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006). MUST be unique per regional etcd cluster: one region = one etcd. Pointing two etcds at the same region splits the registry; pointing two regions at one etcd collides their writes.")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
@@ -117,6 +121,18 @@ func runRegistrar(ctx context.Context) (retErr error) {
 		}
 		if err := mcsv1alpha1.AddToScheme(scheme); err != nil {
 			return fmt.Errorf("register MCS-API scheme: %w", err)
+		}
+		// Cross-cluster config export (proposal 026) projects exported services'
+		// HTTPRoute/GRPCRoute config, so the scheme also needs Gateway API + the
+		// HTTPFilter CRD group.
+		if err := gatewayv1.Install(scheme); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+		}
+		if err := gatewayv1beta1.Install(scheme); err != nil {
+			return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+		}
+		if err := configapisv1.AddToScheme(scheme); err != nil {
+			return fmt.Errorf("register config.aether.io scheme: %w", err)
 		}
 		bootstrapOpts = append(bootstrapOpts, func(o *ctrl.Options) { o.Scheme = scheme })
 	}
@@ -203,6 +219,23 @@ func runRegistrar(ctx context.Context) (retErr error) {
 			return fmt.Errorf("failed to add MCS ServiceImport generator: %w", err)
 		}
 		l.InfoContext(ctx, "MCS-API phase 1 enabled (ServiceExport->registry, registry->ServiceImport+clusterset VIP)")
+
+		// Cross-cluster config export (proposal 026 EM1c): project exported services'
+		// GAMMA config and write it to the registry for peers to import. Rides the same
+		// ConfigExporter plane as MCS (etcd); leader-elected via the manager.
+		if configExporter, ok := reg.(registry.ConfigExporter); ok {
+			ctl := &configexport.Controller{
+				Client:     m.GetClient(),
+				Exporter:   configExporter,
+				MeshDomain: cfg.MeshDomain,
+				Cluster:    cfg.ClusterName,
+				Log:        l,
+			}
+			if err = ctl.SetupWithManager(m); err != nil {
+				return fmt.Errorf("failed to set up config-export controller: %w", err)
+			}
+			l.InfoContext(ctx, "cross-cluster config export enabled (proposal 026)")
+		}
 	}
 
 	var grpcOpts []grpc.ServerOption

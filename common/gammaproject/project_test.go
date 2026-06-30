@@ -12,6 +12,21 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
+// TestServiceParents verifies Service parentRefs → route-target keys + ports (kind/group
+// filtering, namespace inheritance, port pass-through).
+func TestServiceParents(t *testing.T) {
+	refs := []gatewayv1.ParentReference{
+		{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-1", Port: ptr(gatewayv1.PortNumber(8080))},
+		{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-2"}, // no port → 0
+		{Kind: ptr(gatewayv1.Kind("Gateway")), Name: "edge"},  // ignored (not Service)
+		{Name: "no-kind"}, // ignored (no kind)
+	}
+	assert.Equal(t, []ServiceParent{
+		{Key: "team-a/svc-1", Port: 8080},
+		{Key: "team-a/svc-2", Port: 0},
+	}, ServiceParents(refs, "team-a"))
+}
+
 // TestProjectHTTPRule covers the shared projector's proto output: backends resolved to
 // <ns>/<svc> keys + cluster names, path/header matches, header mutation, redirect, and
 // an allow-listed ExtensionRef → ExtensionFilter.

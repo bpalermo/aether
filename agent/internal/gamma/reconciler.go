@@ -152,7 +152,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
-		for _, p := range serviceParents(hr.Spec.ParentRefs, hr.Namespace) {
+		for _, p := range gammaproject.ServiceParents(hr.Spec.ParentRefs, hr.Namespace) {
 			collectPort(p.Key, p.Port)
 			for _, rule := range hr.Spec.Rules {
 				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters))
@@ -161,7 +161,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
-		for _, p := range serviceParents(gr.Spec.ParentRefs, gr.Namespace) {
+		for _, p := range gammaproject.ServiceParents(gr.Spec.ParentRefs, gr.Namespace) {
 			collectPort(p.Key, p.Port)
 			for _, rule := range gr.Spec.Rules {
 				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters))
@@ -329,44 +329,6 @@ func grpcBackendRefs(rules []gatewayv1.GRPCRouteRule) []gatewayv1.BackendObjectR
 		}
 	}
 	return refs
-}
-
-// serviceParent is a resolved Service parentRef: its namespace-qualified "<ns>/<svc>"
-// route-target key plus the real Service port the route attaches on (0 when the
-// parentRef omits a port). Port feeds the route target's cap_http vhost domains so a
-// client dialing the target's REAL port host-matches (proposal 023 M2).
-type serviceParent struct {
-	Key  string
-	Port uint32
-}
-
-// serviceParents returns the Service parentRefs these refs attach to (kind=Service,
-// core group), as namespace-qualified "<ns>/<svc>" keys plus the attached port (020
-// Part 1, 023 M2). A parentRef without an explicit namespace inherits the route's
-// namespace (Gateway API default). Shared by HTTPRoute and GRPCRoute.
-func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []serviceParent {
-	var parents []serviceParent
-	for _, p := range refs {
-		if p.Group != nil && string(*p.Group) != "" {
-			continue
-		}
-		if p.Kind == nil || string(*p.Kind) != "Service" {
-			continue
-		}
-		ns := routeNamespace
-		if p.Namespace != nil && string(*p.Namespace) != "" {
-			ns = string(*p.Namespace)
-		}
-		var port uint32
-		if p.Port != nil {
-			port = uint32(*p.Port)
-		}
-		parents = append(parents, serviceParent{
-			Key:  serviceref.New(ns, string(p.Name)).Key(),
-			Port: port,
-		})
-	}
-	return parents
 }
 
 // buildGammaRoute projects an HTTPRoute rule via the shared gammaproject projector and

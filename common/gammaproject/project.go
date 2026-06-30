@@ -22,6 +22,38 @@ import (
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
+// ServiceParent is one Service a route attaches to (parentRef kind=Service): the
+// route-target "<ns>/<svc>" key and the parentRef port (0 = unset).
+type ServiceParent struct {
+	Key  string
+	Port uint32
+}
+
+// ServiceParents returns the Service parentRefs a route attaches to (kind=Service,
+// core group), as route-target keys + ports. Shared by the agent reconciler and the
+// registrar export controller so both agree on what a route targets.
+func ServiceParents(refs []gatewayv1.ParentReference, routeNamespace string) []ServiceParent {
+	var parents []ServiceParent
+	for _, p := range refs {
+		if p.Group != nil && string(*p.Group) != "" {
+			continue
+		}
+		if p.Kind == nil || string(*p.Kind) != "Service" {
+			continue
+		}
+		ns := routeNamespace
+		if p.Namespace != nil && string(*p.Namespace) != "" {
+			ns = string(*p.Namespace)
+		}
+		var port uint32
+		if p.Port != nil {
+			port = uint32(*p.Port)
+		}
+		parents = append(parents, ServiceParent{Key: serviceref.New(ns, string(p.Name)).Key(), Port: port})
+	}
+	return parents
+}
+
 // ProjectHTTPRule projects one HTTPRoute rule into a GammaRoute proto. Backends are
 // resolved to namespace-qualified "<ns>/<svc>" keys + data-plane cluster names
 // (<svc>.<meshDomain>); ungranted cross-namespace backends are dropped. httpFilters

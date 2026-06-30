@@ -26,6 +26,11 @@ type RegistrarConfig struct {
 	// this registrar's authoritative cluster partition (proposal 006).
 	ClusterName string
 
+	// MeshDomain is the DNS-style domain mesh authorities live under
+	// (constants.DefaultMeshDomain). Used by the cross-cluster config export
+	// controller (proposal 026) to resolve backend cluster names <svc>.<meshDomain>.
+	MeshDomain string
+
 	// Region is this registrar's region — the etcd backend's authoritative
 	// partition root (proposal 006). Shared by every registrar on the same
 	// regional etcd; empty falls back to the etcd backend's default.
