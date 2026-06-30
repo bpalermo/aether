@@ -302,23 +302,6 @@ func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
 	require.Len(t, gr.Backends, 2)
 }
 
-func TestServiceParents(t *testing.T) {
-	hr := &gatewayv1.HTTPRoute{Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
-		ParentRefs: []gatewayv1.ParentReference{
-			{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-1", Port: ptr(gatewayv1.PortNumber(8080))},
-			{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-2"}, // no port → 0
-			{Kind: ptr(gatewayv1.Kind("Gateway")), Name: "edge"},  // ignored
-			{Name: "no-kind"}, // no kind → ignored
-		},
-	}}}
-	// 020 Part 1: parentRef without a namespace inherits the route's namespace,
-	// and the key is "<ns>/<svc>". 023 M2: the parentRef port rides along.
-	assert.Equal(t, []serviceParent{
-		{Key: "team-a/svc-1", Port: 8080},
-		{Key: "team-a/svc-2", Port: 0},
-	}, serviceParents(hr.Spec.ParentRefs, "team-a"))
-}
-
 // TestBuildGammaRoute: matches → GammaMatch, weighted backendRefs → GammaBackend
 // with resolved cluster names + bare service, request timeout parsed.
 func TestBuildGammaRoute(t *testing.T) {

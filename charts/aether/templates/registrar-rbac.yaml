@@ -35,6 +35,15 @@ rules:
   - apiGroups: ["multicluster.x-k8s.io"]
     resources: ["serviceimports/status"]
     verbs: ["get", "update", "patch"]
+  # Cross-cluster config export (proposal 026): the leader registrar projects the
+  # GAMMA config of exported services and writes it to the registry. Read-only watch of
+  # the route config + ReferenceGrants + HTTPFilters (the escape-hatch CRD).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes", "referencegrants"]
+    verbs: ["list", "get", "watch"]
+  - apiGroups: ["config.aether.io"]
+    resources: ["httpfilters"]
+    verbs: ["list", "get", "watch"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
