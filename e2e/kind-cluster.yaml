@@ -1,0 +1,21 @@
+# Base kind config for the local multi-cluster aether e2e (e2e/multicluster_config.sh).
+# A single control-plane node keeps each cluster light (one agent pod) — two clusters
+# are inotify-heavy, so fewer nodes helps. The script substitutes per-cluster networking
+# (POD_SUBNET / SVC_SUBNET / CLUSTER_NAME) so the two clusters never overlap pod/service
+# CIDRs — cross-cluster endpoints share one registry, and colliding IPs there would be a
+# silent correctness bug. Override the placeholders with `sed`/`envsubst` (the script
+# does this) before `kind create cluster --config`.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: CLUSTER_NAME
+networking:
+  # Distinct, non-overlapping CIDRs per cluster (the script picks them).
+  podSubnet: POD_SUBNET
+  serviceSubnet: SVC_SUBNET
+nodes:
+  - role: control-plane
+    # Labels a fake zone so aether's locality-aware routing has something to read in a
+    # multi-cluster topology; harmless when unused.
+    labels:
+      topology.kubernetes.io/region: local
+      topology.kubernetes.io/zone: CLUSTER_NAME
