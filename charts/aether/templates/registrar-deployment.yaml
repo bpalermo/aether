@@ -57,6 +57,9 @@ spec:
             {{- if .Values.registrar.enableMCS }}
             - "--enable-mcs"
             {{- end }}
+            {{- if .Values.controlCluster }}
+            - "--control-cluster={{ .Values.controlCluster }}"
+            {{- end }}
             - "--spire-enabled={{ .Values.spire.enabled }}"
             {{- if .Values.spire.enabled }}
             {{- with .Values.spire.trustDomain }}

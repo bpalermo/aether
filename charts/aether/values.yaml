@@ -31,6 +31,13 @@ namespace:
 # Cluster name passed to the agent and registrar (`--cluster-name`).
 clusterName: talos-main
 
+# Cross-cluster config authority (proposal 026 EM3, Option E). When set to a cluster
+# name, ONLY that cluster's registrar exports GAMMA config and every cluster imports
+# config ONLY from that origin (single source of truth, no drift). Empty = federated
+# (every cluster may export; consumers trust any peer origin, highest-version wins).
+# Passed to both the agent and registrar (`--control-cluster`).
+controlCluster: ""
+
 # Enable verbose logging on all components (`--debug`).
 debug: true
 

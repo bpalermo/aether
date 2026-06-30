@@ -87,6 +87,9 @@ spec:
             {{- if .Values.agent.importConfig }}
             - "--import-config"
             {{- end }}
+            {{- if .Values.controlCluster }}
+            - "--control-cluster={{ .Values.controlCluster }}"
+            {{- end }}
             {{- if .Values.agent.l4Routes }}
             - "--l4-routes"
             {{- end }}

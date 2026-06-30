@@ -26,7 +26,7 @@ func (s *fakeSink) SetImportedServiceRoutes(r map[string][]proxy.GammaRoute) { s
 
 func newImporter(t *testing.T, imp *fakeImporter, sink *fakeSink, own string) *Importer {
 	t.Helper()
-	return NewImporter(imp, sink, own, 0, slog.New(slog.DiscardHandler))
+	return NewImporter(imp, sink, own, "", 0, slog.New(slog.DiscardHandler)) // "" = federated
 }
 
 func proj(svc, origin, version, prefix string) *registryv1.ServiceConfigProjection {
@@ -52,6 +52,23 @@ func TestImporter_Materialize_SkipsOwnAndPicksHighestVersion(t *testing.T) {
 	require.Contains(t, sink.routes, "team-a/echo")
 	assert.Equal(t, "/new", sink.routes["team-a/echo"][0].Matches[0].Prefix, "highest version wins; own export skipped")
 	require.Contains(t, sink.routes, "team-b/svc")
+}
+
+// TestImporter_Materialize_ControlClusterAuthority verifies EM3: with a control cluster
+// designated, only its origin is trusted — other peers' projections are ignored even if
+// higher-version.
+func TestImporter_Materialize_ControlClusterAuthority(t *testing.T) {
+	imp := &fakeImporter{projections: []*registryv1.ServiceConfigProjection{
+		proj("team-a/echo", "hub", "v1", "/hub"),     // control cluster → trusted
+		proj("team-a/echo", "rogue", "v9", "/rogue"), // higher version but NOT the hub → ignored
+		proj("team-b/svc", "rogue", "v5", "/rogue"),  // untrusted origin → dropped entirely
+	}}
+	sink := &fakeSink{}
+	NewImporter(imp, sink, "self", "hub", 0, slog.New(slog.DiscardHandler)).poll(context.Background())
+
+	require.Len(t, sink.routes, 1)
+	assert.Equal(t, "/hub", sink.routes["team-a/echo"][0].Matches[0].Prefix, "only the control cluster's config is trusted")
+	assert.NotContains(t, sink.routes, "team-b/svc", "a non-hub origin is ignored entirely")
 }
 
 // TestImporter_Poll_KeepsLastKnownOnError verifies a fetch error does not clobber the

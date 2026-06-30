@@ -67,6 +67,7 @@ func init() {
 
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
 	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", constants.DefaultMeshDomain, "DNS-style mesh domain (proposal 026 config export resolves backend clusters <svc>.<mesh-domain>)")
+	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, the config-export controller runs only on this cluster; empty = federated (every cluster may export)")
 	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006). MUST be unique per regional etcd cluster: one region = one etcd. Pointing two etcds at the same region splits the registry; pointing two regions at one etcd collides their writes.")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
@@ -223,7 +224,16 @@ func runRegistrar(ctx context.Context) (retErr error) {
 		// Cross-cluster config export (proposal 026 EM1c): project exported services'
 		// GAMMA config and write it to the registry for peers to import. Rides the same
 		// ConfigExporter plane as MCS (etcd); leader-elected via the manager.
-		if configExporter, ok := reg.(registry.ConfigExporter); ok {
+		//
+		// EM3 authority (Option E): when a control cluster is designated, only IT exports
+		// config (single writer = no drift); spokes skip the export controller. Empty =
+		// federated (every cluster may export). Endpoint export (MCS, above) is unaffected.
+		exportAuthorized := cfg.ControlCluster == "" || cfg.ControlCluster == cfg.ClusterName
+		configExporter, isConfigExporter := reg.(registry.ConfigExporter)
+		if isConfigExporter && !exportAuthorized {
+			l.InfoContext(ctx, "cross-cluster config export disabled on this spoke (control-cluster authority)", "controlCluster", cfg.ControlCluster)
+		}
+		if isConfigExporter && exportAuthorized {
 			ctl := &configexport.Controller{
 				Client:     m.GetClient(),
 				Exporter:   configExporter,

@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "configimport",
-    srcs = ["importer.go"],
+    srcs = [
+        "importer.go",
+        "metrics.go",
+    ],
     importpath = "github.com/bpalermo/aether/agent/internal/configimport",
     visibility = ["//agent:__subpackages__"],
     deps = [
@@ -10,6 +13,8 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/log",
         "//registry",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel_metric//:metric",
     ],
 )
 

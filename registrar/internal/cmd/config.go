@@ -31,6 +31,13 @@ type RegistrarConfig struct {
 	// controller (proposal 026) to resolve backend cluster names <svc>.<meshDomain>.
 	MeshDomain string
 
+	// ControlCluster, when set, names the single authorized config-exporting cluster
+	// (proposal 026 EM3, Option E control-cluster authority). The config-export
+	// controller runs ONLY when this is empty (federated) or equals ClusterName (this
+	// IS the hub); spokes in control-cluster mode do not export. Endpoint export (MCS)
+	// is unaffected — it stays per-cluster.
+	ControlCluster string
+
 	// Region is this registrar's region — the etcd backend's authoritative
 	// partition root (proposal 006). Shared by every registrar on the same
 	// regional etcd; empty falls back to the etcd backend's default.
