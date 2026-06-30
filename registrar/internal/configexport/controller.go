@@ -40,6 +40,7 @@ type Controller struct {
 	Log     *slog.Logger
 
 	httpFilterEnabled bool
+	metrics           *metrics
 }
 
 // SetupWithManager registers the controller. It watches HTTPRoutes/GRPCRoutes (the
@@ -47,6 +48,7 @@ type Controller struct {
 // resolution); the optional HTTPFilter watch is gated on the CRD being present.
 func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	c.Log = commonlog.Named(c.Log, "config-export-controller")
+	c.metrics = newMetrics()
 	enqueueAll := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{{}}
 	})
@@ -141,6 +143,7 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			continue
 		}
 		if err := c.Exporter.SetConfig(ctx, &registryv1.ServiceConfigProjection{Service: svc, Version: version, Routes: routes}); err != nil {
+			c.metrics.writeError(ctx)
 			c.Log.ErrorContext(ctx, "failed to export config projection", "service", svc, "error", err)
 			return reconcile.Result{}, err
 		}
@@ -152,11 +155,13 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			continue
 		}
 		if err := c.Exporter.UnsetConfig(ctx, svc); err != nil {
+			c.metrics.writeError(ctx)
 			c.Log.ErrorContext(ctx, "failed to unexport config projection", "service", svc, "error", err)
 			return reconcile.Result{}, err
 		}
 		c.Log.InfoContext(ctx, "unexported config projection", "service", svc)
 	}
+	c.metrics.observe(ctx, len(desired))
 	return reconcile.Result{}, nil
 }
 
