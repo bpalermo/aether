@@ -29,7 +29,7 @@ func FromConfigProjection(p *registryv1.ServiceConfigProjection) []GammaRoute {
 	}
 	rules := make([]GammaRoute, 0, len(p.GetRoutes()))
 	for _, r := range p.GetRoutes() {
-		rules = append(rules, gammaRouteFromProto(r))
+		rules = append(rules, GammaRouteFromProto(r))
 	}
 	return rules
 }
@@ -65,7 +65,10 @@ func gammaRouteToProto(r GammaRoute) *registryv1.GammaRoute {
 	return out
 }
 
-func gammaRouteFromProto(r *registryv1.GammaRoute) GammaRoute {
+// GammaRouteFromProto converts a registryv1.GammaRoute proto (produced by the shared
+// gammaproject projector, locally or imported from a peer) into the agent's in-memory
+// GammaRoute the cache consumes.
+func GammaRouteFromProto(r *registryv1.GammaRoute) GammaRoute {
 	out := GammaRoute{Timeout: r.GetTimeout()}
 	for _, m := range r.GetMatches() {
 		gm := GammaMatch{Prefix: m.GetPrefix(), Exact: m.GetExact(), Regex: m.GetRegex()}

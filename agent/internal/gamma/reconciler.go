@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"time"
 
 	"github.com/bpalermo/aether/common/serviceref"
 
@@ -18,9 +17,9 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	"github.com/bpalermo/aether/common/gammaproject"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/referencegrant"
-	"google.golang.org/protobuf/types/known/durationpb"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -370,337 +369,28 @@ func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []s
 	return parents
 }
 
+// buildGammaRoute projects an HTTPRoute rule via the shared gammaproject projector and
+// converts it to the agent's in-memory GammaRoute. The projector is shared with the
+// registrar's cross-cluster export controller (proposal 026 EM1c) so a cluster's local
+// routing and the config it exports for peers never drift.
 func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter) proxy.GammaRoute {
-	gr := proxy.GammaRoute{}
-	if rule.Timeouts != nil && rule.Timeouts.Request != nil {
-		// HTTPRoute timeouts are GEP-2257 duration strings (a subset of Go's).
-		if d, err := time.ParseDuration(string(*rule.Timeouts.Request)); err == nil && d > 0 {
-			gr.Timeout = durationpb.New(d)
-		}
-	}
-	for _, b := range rule.BackendRefs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		name := string(b.Name)
-		// Drop ungranted cross-namespace backends (RefNotPermitted): they are removed
-		// from the data plane, but the rest of the route still applies.
-		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
-			continue
-		}
-		weight := uint32(1)
-		if b.Weight != nil {
-			weight = uint32(*b.Weight)
-		}
-		// 020 Part 1: the backend's data-plane cluster and dependency-set key are
-		// namespace-qualified "<ns>/<svc>". A canary/split to a different backend
-		// service therefore resolves the right registry cluster.
-		key := backendServiceKey(b.Namespace, routeNamespace, name)
-		gr.Backends = append(gr.Backends, proxy.GammaBackend{
-			Service: key,
-			Cluster: proxy.ServiceClusterName(key, r.MeshDomain),
-			Weight:  weight,
-		})
-	}
-	for _, m := range rule.Matches {
-		gm := proxy.GammaMatch{}
-		if m.Path != nil && m.Path.Value != nil {
-			if m.Path.Type != nil && *m.Path.Type == gatewayv1.PathMatchExact {
-				gm.Exact = *m.Path.Value
-			} else {
-				gm.Prefix = *m.Path.Value
-			}
-		}
-		for _, h := range m.Headers {
-			gm.Headers = append(gm.Headers, proxy.GammaHeaderMatch{Name: string(h.Name), Value: h.Value})
-		}
-		gr.Matches = append(gr.Matches, gm)
-	}
-	gr.HeaderMutation = buildHTTPHeaderMutation(rule.Filters)
-	gr.Redirect = buildHTTPRedirect(rule.Filters)
-	gr.URLRewrite = buildHTTPURLRewrite(rule.Filters)
-	for _, f := range rule.Filters {
-		if f.Type == gatewayv1.HTTPRouteFilterExtensionRef {
-			if ef, ok := resolveExtensionFilter(f.ExtensionRef, routeNamespace, httpFilters); ok {
-				gr.ExtensionFilters = append(gr.ExtensionFilters, ef)
-			}
-		}
-	}
-	return gr
+	return proxy.GammaRouteFromProto(gammaproject.ProjectHTTPRule(rule, routeNamespace, routeKind, r.MeshDomain, grants, httpFilterSpecs(httpFilters)))
 }
 
-// resolveExtensionFilter resolves a route's ExtensionRef filter (proposal 025) to an
-// allow-listed proxy ExtensionFilter, or (zero, false) when it does not reference an
-// in-namespace, allow-listed, ROUTE-scope HTTPFilter with a typed_config. ExtensionRef
-// is a same-namespace LocalObjectReference (no namespace field), so no ReferenceGrant
-// applies. CHAIN scope is deferred (admin-owned, a later milestone). Invalid/dangling
-// refs are skipped here; M2 (the webhook) makes them a clean ResolvedRefs=False reject.
-func resolveExtensionFilter(ref *gatewayv1.LocalObjectReference, routeNamespace string, httpFilters map[string]*configapisv1.HTTPFilter) (proxy.ExtensionFilter, bool) {
-	if ref == nil ||
-		string(ref.Group) != configapisv1.GroupVersion.Group ||
-		string(ref.Kind) != configapisv1.HTTPFilterKind {
-		return proxy.ExtensionFilter{}, false
-	}
-	hf, ok := httpFilters[routeNamespace+"/"+string(ref.Name)]
-	if !ok || hf.Spec == nil {
-		return proxy.ExtensionFilter{}, false
-	}
-	if hf.Spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
-		return proxy.ExtensionFilter{}, false // chain scope deferred to a later milestone
-	}
-	name := hf.Spec.GetFilter()
-	if !proxy.ExtensionFilterAllowed(name) || hf.Spec.GetTypedConfig() == nil {
-		return proxy.ExtensionFilter{}, false
-	}
-	return proxy.ExtensionFilter{Name: name, Config: hf.Spec.GetTypedConfig()}, true
-}
-
-// buildHTTPHeaderMutation merges all RequestHeaderModifier and
-// ResponseHeaderModifier filters in an HTTPRoute rule's filter list into a single
-// GammaHeaderMutation. Unknown filter types (redirect, rewrite, mirror) are silently
-// skipped. Returns nil when no modifier filter is present.
-func buildHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaHeaderMutation {
-	var m *proxy.GammaHeaderMutation
-	ensure := func() {
-		if m == nil {
-			m = &proxy.GammaHeaderMutation{}
-		}
-	}
-	for _, f := range filters {
-		switch f.Type {
-		case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
-			if f.RequestHeaderModifier == nil {
-				continue
-			}
-			ensure()
-			for _, h := range f.RequestHeaderModifier.Set {
-				m.SetRequest = append(m.SetRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			for _, h := range f.RequestHeaderModifier.Add {
-				m.AddRequest = append(m.AddRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			m.RemoveRequest = append(m.RemoveRequest, f.RequestHeaderModifier.Remove...)
-		case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
-			if f.ResponseHeaderModifier == nil {
-				continue
-			}
-			ensure()
-			for _, h := range f.ResponseHeaderModifier.Set {
-				m.SetResponse = append(m.SetResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			for _, h := range f.ResponseHeaderModifier.Add {
-				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
-			// Redirect, rewrite, mirror: handled by dedicated builders below; skip here.
-		}
-	}
-	return m
-}
-
-// buildHTTPRedirect extracts the first RequestRedirect filter from an HTTPRoute
-// rule's filter list and converts it to a GammaRedirect. Returns nil when no
-// redirect filter is present. A rule with a RequestRedirect filter yields a redirect
-// route (no backend cluster) per the Gateway API spec.
-func buildHTTPRedirect(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaRedirect {
-	for _, f := range filters {
-		if f.Type != gatewayv1.HTTPRouteFilterRequestRedirect || f.RequestRedirect == nil {
-			continue
-		}
-		rd := f.RequestRedirect
-		r := &proxy.GammaRedirect{}
-		if rd.Scheme != nil {
-			r.Scheme = *rd.Scheme
-		}
-		if rd.Hostname != nil {
-			r.Hostname = string(*rd.Hostname)
-		}
-		if rd.Port != nil {
-			r.Port = uint32(*rd.Port)
-		}
-		if rd.StatusCode != nil {
-			r.StatusCode = *rd.StatusCode
-		}
-		if rd.Path != nil {
-			switch rd.Path.Type {
-			case gatewayv1.FullPathHTTPPathModifier:
-				if rd.Path.ReplaceFullPath != nil {
-					r.PathType = "ReplaceFullPath"
-					r.PathValue = *rd.Path.ReplaceFullPath
-				}
-			case gatewayv1.PrefixMatchHTTPPathModifier:
-				if rd.Path.ReplacePrefixMatch != nil {
-					r.PathType = "ReplacePrefixMatch"
-					r.PathValue = *rd.Path.ReplacePrefixMatch
-				}
-			}
-		}
-		return r
-	}
-	return nil
-}
-
-// buildHTTPURLRewrite extracts the first URLRewrite filter from an HTTPRoute
-// rule's filter list and converts it to a GammaURLRewrite. Returns nil when no
-// URLRewrite filter is present. URLRewrite is applied on the RouteAction (the
-// request still proxies to the backend).
-func buildHTTPURLRewrite(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaURLRewrite {
-	for _, f := range filters {
-		if f.Type != gatewayv1.HTTPRouteFilterURLRewrite || f.URLRewrite == nil {
-			continue
-		}
-		rw := f.URLRewrite
-		r := &proxy.GammaURLRewrite{}
-		if rw.Hostname != nil {
-			r.Hostname = string(*rw.Hostname)
-		}
-		if rw.Path != nil {
-			switch rw.Path.Type {
-			case gatewayv1.FullPathHTTPPathModifier:
-				if rw.Path.ReplaceFullPath != nil {
-					r.PathType = "ReplaceFullPath"
-					r.PathValue = *rw.Path.ReplaceFullPath
-				}
-			case gatewayv1.PrefixMatchHTTPPathModifier:
-				if rw.Path.ReplacePrefixMatch != nil {
-					r.PathType = "ReplacePrefixMatch"
-					r.PathValue = *rw.Path.ReplacePrefixMatch
-				}
-			}
-		}
-		return r
-	}
-	return nil
-}
-
-// buildGRPCHeaderMutation merges all RequestHeaderModifier and
-// ResponseHeaderModifier filters in a GRPCRoute rule's filter list into a single
-// GammaHeaderMutation. The filter shape is identical to the HTTP variant
-// (HTTPHeaderFilter is shared); unknown types are silently skipped.
-// Returns nil when no modifier filter is present.
-func buildGRPCHeaderMutation(filters []gatewayv1.GRPCRouteFilter) *proxy.GammaHeaderMutation {
-	var m *proxy.GammaHeaderMutation
-	ensure := func() {
-		if m == nil {
-			m = &proxy.GammaHeaderMutation{}
-		}
-	}
-	for _, f := range filters {
-		switch f.Type {
-		case gatewayv1.GRPCRouteFilterRequestHeaderModifier:
-			if f.RequestHeaderModifier == nil {
-				continue
-			}
-			ensure()
-			for _, h := range f.RequestHeaderModifier.Set {
-				m.SetRequest = append(m.SetRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			for _, h := range f.RequestHeaderModifier.Add {
-				m.AddRequest = append(m.AddRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			m.RemoveRequest = append(m.RemoveRequest, f.RequestHeaderModifier.Remove...)
-		case gatewayv1.GRPCRouteFilterResponseHeaderModifier:
-			if f.ResponseHeaderModifier == nil {
-				continue
-			}
-			ensure()
-			for _, h := range f.ResponseHeaderModifier.Set {
-				m.SetResponse = append(m.SetResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			for _, h := range f.ResponseHeaderModifier.Add {
-				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
-			// Mirror and extension filter types are future items; skip silently.
-		}
-	}
-	return m
-}
-
-// buildGammaRouteFromGRPC translates a GRPCRouteRule into the same GammaRoute
-// vocabulary the HTTP path uses: gRPC rides HTTP/2 as POST /<service>/<method>, so a
-// method match becomes a path match (service+method = exact /svc/method; service-only
-// = prefix /svc/), and gRPC header matches map to request-header matches. GRPCRoute
-// has no per-rule timeout. The backends are identical (weighted Service refs).
+// buildGammaRouteFromGRPC projects a GRPCRoute rule via the shared projector.
 func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter) proxy.GammaRoute {
-	gr := proxy.GammaRoute{}
-	for _, b := range rule.BackendRefs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		name := string(b.Name)
-		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
-			continue
-		}
-		weight := uint32(1)
-		if b.Weight != nil {
-			weight = uint32(*b.Weight)
-		}
-		// 020 Part 1: the backend's data-plane cluster and dependency-set key are
-		// namespace-qualified "<ns>/<svc>". A canary/split to a different backend
-		// service therefore resolves the right registry cluster.
-		key := backendServiceKey(b.Namespace, routeNamespace, name)
-		gr.Backends = append(gr.Backends, proxy.GammaBackend{
-			Service: key,
-			Cluster: proxy.ServiceClusterName(key, r.MeshDomain),
-			Weight:  weight,
-		})
+	return proxy.GammaRouteFromProto(gammaproject.ProjectGRPCRule(rule, routeNamespace, routeKind, r.MeshDomain, grants, httpFilterSpecs(httpFilters)))
+}
+
+// httpFilterSpecs extracts each K8s HTTPFilter's proto spec for the shared projector
+// (which is K8s-type-agnostic). Returns nil when there are none.
+func httpFilterSpecs(in map[string]*configapisv1.HTTPFilter) map[string]*configprotov1.HTTPFilterSpec {
+	if len(in) == 0 {
+		return nil
 	}
-	for _, m := range rule.Matches {
-		gm := proxy.GammaMatch{}
-		if m.Method != nil {
-			svc, method := "", ""
-			if m.Method.Service != nil {
-				svc = *m.Method.Service
-			}
-			if m.Method.Method != nil {
-				method = *m.Method.Method
-			}
-			matchType := gatewayv1.GRPCMethodMatchExact
-			if m.Method.Type != nil {
-				matchType = *m.Method.Type
-			}
-			switch matchType {
-			case gatewayv1.GRPCMethodMatchExact:
-				// svc+method = exact /svc/method; svc-only = prefix /svc/.
-				if svc != "" && method != "" {
-					gm.Exact = fmt.Sprintf("/%s/%s", svc, method)
-				} else if svc != "" {
-					gm.Prefix = fmt.Sprintf("/%s/", svc)
-				}
-			case gatewayv1.GRPCMethodMatchRegularExpression:
-				// Build a /<serviceRegex>/<methodRegex> safe_regex path. When a
-				// component is unset, use ".*" to match any value in that segment,
-				// mirroring the Exact service-only → prefix semantics.
-				svcPart := svc
-				if svcPart == "" {
-					svcPart = "[^/]+"
-				}
-				methodPart := method
-				if methodPart == "" {
-					methodPart = "[^/]+"
-				}
-				gm.Regex = fmt.Sprintf("/%s/%s", svcPart, methodPart)
-			}
-		}
-		for _, h := range m.Headers {
-			gm.Headers = append(gm.Headers, proxy.GammaHeaderMatch{Name: string(h.Name), Value: h.Value})
-		}
-		gr.Matches = append(gr.Matches, gm)
+	out := make(map[string]*configprotov1.HTTPFilterSpec, len(in))
+	for k, hf := range in {
+		out[k] = hf.Spec
 	}
-	gr.HeaderMutation = buildGRPCHeaderMutation(rule.Filters)
-	for _, f := range rule.Filters {
-		if f.Type == gatewayv1.GRPCRouteFilterExtensionRef {
-			if ef, ok := resolveExtensionFilter(f.ExtensionRef, routeNamespace, httpFilters); ok {
-				gr.ExtensionFilters = append(gr.ExtensionFilters, ef)
-			}
-		}
-	}
-	return gr
+	return out
 }
