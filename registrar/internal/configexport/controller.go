@@ -107,8 +107,9 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			if _, ok := exported[p.Key]; !ok {
 				continue
 			}
+			svcFilters := gammaproject.ServiceFilters(p.Key, httpFilters) // M3 targetRef-attached
 			for _, rule := range hr.Spec.Rules {
-				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectHTTPRule(rule, hr.Namespace, "HTTPRoute", c.MeshDomain, grantList.Items, httpFilters))
+				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectHTTPRule(rule, hr.Namespace, "HTTPRoute", c.MeshDomain, grantList.Items, httpFilters, svcFilters))
 			}
 		}
 	}
@@ -118,8 +119,9 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			if _, ok := exported[p.Key]; !ok {
 				continue
 			}
+			svcFilters := gammaproject.ServiceFilters(p.Key, httpFilters) // M3 targetRef-attached
 			for _, rule := range gr.Spec.Rules {
-				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectGRPCRule(rule, gr.Namespace, "GRPCRoute", c.MeshDomain, grantList.Items, httpFilters))
+				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectGRPCRule(rule, gr.Namespace, "GRPCRoute", c.MeshDomain, grantList.Items, httpFilters, svcFilters))
 			}
 		}
 	}

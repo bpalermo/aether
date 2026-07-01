@@ -59,7 +59,7 @@ func TestProjectHTTPRule(t *testing.T) {
 		},
 	}
 
-	gr := ProjectHTTPRule(rule, "team-a", "HTTPRoute", "aether.internal", nil, httpFilters)
+	gr := ProjectHTTPRule(rule, "team-a", "HTTPRoute", "aether.internal", nil, httpFilters, nil)
 
 	require.Len(t, gr.GetBackends(), 1)
 	assert.Equal(t, "team-a/echo-v2", gr.GetBackends()[0].GetService())
@@ -77,6 +77,39 @@ func TestProjectHTTPRule(t *testing.T) {
 
 	require.Len(t, gr.GetExtensionFilters(), 1)
 	assert.Equal(t, "envoy.filters.http.header_mutation", gr.GetExtensionFilters()[0].GetName())
+}
+
+// TestServiceFilters covers M3 policy attachment: an HTTPFilter with a targetRef to a
+// Service resolves for that service (same-namespace, allow-listed), and does not leak
+// to other services or namespaces.
+func TestServiceFilters(t *testing.T) {
+	cfg, err := anypb.New(&configprotov1.HTTPFilterSpec{})
+	require.NoError(t, err)
+	withTarget := func(filter, svc string) *configprotov1.HTTPFilterSpec {
+		return configprotov1.HTTPFilterSpec_builder{
+			Filter: filter, TypedConfig: cfg,
+			TargetRefs: []*configprotov1.PolicyTargetRef{
+				configprotov1.PolicyTargetRef_builder{Kind: "Service", Name: svc}.Build(),
+			},
+		}.Build()
+	}
+	httpFilters := map[string]*configprotov1.HTTPFilterSpec{
+		"team-a/h2m": withTarget("envoy.filters.http.header_mutation", "echo"),     // attaches to team-a/echo
+		"team-a/h2t": withTarget("envoy.filters.http.header_to_metadata", "other"), // different svc
+		"team-b/dup": withTarget("envoy.filters.http.header_mutation", "echo"),     // different ns, same svc name
+		"team-a/lua": withTarget("envoy.filters.http.lua", "echo"),                 // targets echo but NOT allow-listed
+	}
+
+	got := ServiceFilters("team-a/echo", httpFilters)
+	require.Len(t, got, 1, "only the same-namespace, allow-listed filter targeting echo applies")
+	assert.Equal(t, "envoy.filters.http.header_mutation", got[0].GetName())
+
+	assert.Empty(t, ServiceFilters("team-a/none", httpFilters), "a service with no targeting filter gets none")
+
+	// The resolved service filters attach to every projected route of the service.
+	route := ProjectHTTPRule(gatewayv1.HTTPRouteRule{}, "team-a", "HTTPRoute", "aether.internal", nil, nil, got)
+	require.Len(t, route.GetExtensionFilters(), 1)
+	assert.Equal(t, "envoy.filters.http.header_mutation", route.GetExtensionFilters()[0].GetName())
 }
 
 // TestProjectHTTPRule_RedirectAndExtensionRefSkips covers a RequestRedirect → no
@@ -98,7 +131,7 @@ func TestProjectHTTPRule_RedirectAndExtensionRefSkips(t *testing.T) {
 			}},
 		},
 	}
-	gr := ProjectHTTPRule(rule, "ns", "HTTPRoute", "aether.internal", nil, httpFilters)
+	gr := ProjectHTTPRule(rule, "ns", "HTTPRoute", "aether.internal", nil, httpFilters, nil)
 	require.NotNil(t, gr.GetRedirect())
 	assert.Equal(t, "example.org", gr.GetRedirect().GetHostname())
 	assert.Equal(t, int32(301), gr.GetRedirect().GetStatusCode())

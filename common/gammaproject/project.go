@@ -9,6 +9,7 @@ package gammaproject
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
@@ -58,8 +59,10 @@ func ServiceParents(refs []gatewayv1.ParentReference, routeNamespace string) []S
 // resolved to namespace-qualified "<ns>/<svc>" keys + data-plane cluster names
 // (<svc>.<meshDomain>); ungranted cross-namespace backends are dropped. httpFilters
 // resolves a route's ExtensionRef escape-hatch filters (proposal 025), keyed by
-// "<ns>/<name>"; nil/empty when none.
-func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec) *registryv1.GammaRoute {
+// "<ns>/<name>"; nil/empty when none. serviceFilters are policy-attached (M3
+// targetRef) filters that apply to every route of the target Service (see
+// ServiceFilters); they are appended after any per-route ExtensionRef.
+func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec, serviceFilters []*registryv1.ExtensionFilter) *registryv1.GammaRoute {
 	gr := &registryv1.GammaRoute{}
 	if rule.Timeouts != nil && rule.Timeouts.Request != nil {
 		if d, err := time.ParseDuration(string(*rule.Timeouts.Request)); err == nil && d > 0 {
@@ -91,13 +94,14 @@ func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, me
 			}
 		}
 	}
+	gr.ExtensionFilters = append(gr.ExtensionFilters, serviceFilters...)
 	return gr
 }
 
 // ProjectGRPCRule projects one GRPCRoute rule. gRPC rides HTTP/2 as POST
 // /<service>/<method>, so a method match becomes a path match (svc+method = exact
 // /svc/method; svc-only = prefix /svc/; regex for RegularExpression). No per-rule timeout.
-func ProjectGRPCRule(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec) *registryv1.GammaRoute {
+func ProjectGRPCRule(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec, serviceFilters []*registryv1.ExtensionFilter) *registryv1.GammaRoute {
 	gr := &registryv1.GammaRoute{}
 	gr.Backends = projectGRPCBackends(rule.BackendRefs, routeNamespace, routeKind, meshDomain, grants)
 	for _, m := range rule.Matches {
@@ -146,6 +150,7 @@ func ProjectGRPCRule(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind, me
 			}
 		}
 	}
+	gr.ExtensionFilters = append(gr.ExtensionFilters, serviceFilters...)
 	return gr
 }
 
@@ -233,18 +238,66 @@ func resolveExtensionFilter(ref *gatewayv1.LocalObjectReference, routeNamespace 
 		string(ref.Kind) != configapisv1.HTTPFilterKind {
 		return nil, false
 	}
-	spec, ok := httpFilters[routeNamespace+"/"+string(ref.Name)]
-	if !ok || spec == nil {
+	return allowedExtensionFilter(httpFilters[routeNamespace+"/"+string(ref.Name)])
+}
+
+// allowedExtensionFilter validates an HTTPFilter spec and converts it to an
+// ExtensionFilter, or (nil,false) when it is nil, CHAIN-scoped (admin-owned, deferred),
+// not allow-listed, or missing typed_config.
+func allowedExtensionFilter(spec *configprotov1.HTTPFilterSpec) (*registryv1.ExtensionFilter, bool) {
+	if spec == nil || spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
 		return nil, false
-	}
-	if spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
-		return nil, false // chain scope deferred to a later milestone
 	}
 	name := spec.GetFilter()
 	if !extensionfilter.Allowed(name) || spec.GetTypedConfig() == nil {
 		return nil, false
 	}
 	return &registryv1.ExtensionFilter{Name: name, Config: spec.GetTypedConfig()}, true
+}
+
+// ServiceFilters resolves the HTTPFilters (proposal 025 M3) that policy-attach to the
+// Service identified by serviceKey ("<ns>/<svc>") via a targetRef, returning their
+// allow-listed ExtensionFilters. Policy attachment is same-namespace: only HTTPFilters
+// in the service's namespace whose target_refs name it (kind=Service, core group)
+// apply. Sorted by HTTPFilter key for deterministic order (stable
+// typed_per_filter_config across reconciles). These attach to EVERY route of the
+// service, additive to per-route ExtensionRefs.
+func ServiceFilters(serviceKey string, httpFilters map[string]*configprotov1.HTTPFilterSpec) []*registryv1.ExtensionFilter {
+	sref, ok := serviceref.ParseKey(serviceKey)
+	if !ok || len(httpFilters) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(httpFilters))
+	for k := range httpFilters {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []*registryv1.ExtensionFilter
+	for _, k := range keys {
+		fref, ok := serviceref.ParseKey(k)
+		if !ok || fref.Namespace != sref.Namespace { // same-namespace policy attachment
+			continue
+		}
+		if !targetsService(httpFilters[k], sref.Name) {
+			continue
+		}
+		if ef, ok := allowedExtensionFilter(httpFilters[k]); ok {
+			out = append(out, ef)
+		}
+	}
+	return out
+}
+
+func targetsService(spec *configprotov1.HTTPFilterSpec, serviceName string) bool {
+	if spec == nil {
+		return false
+	}
+	for _, t := range spec.GetTargetRefs() {
+		if (t.GetGroup() == "" || t.GetGroup() == "core") && t.GetKind() == "Service" && t.GetName() == serviceName {
+			return true
+		}
+	}
+	return false
 }
 
 func httpHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *registryv1.GammaHeaderMutation {

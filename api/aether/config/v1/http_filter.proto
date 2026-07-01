@@ -38,4 +38,20 @@ message HTTPFilterSpec {
     SCOPE_ROUTE = 1;
     SCOPE_CHAIN = 2;
   }
+
+  // target_refs attaches this filter to Gateway API objects (policy attachment,
+  // GEP-713/-2648 direct) — proposal 025 M3. The supported kind is Service (core
+  // group): the filter then applies to EVERY route targeting that Service, for all its
+  // callers (object-wide), in addition to any per-route ExtensionRef. Targets are
+  // same-namespace as this HTTPFilter. A Service-attached filter is a class-1 payload
+  // that rides proposal 026's config channel to peer clusters.
+  repeated PolicyTargetRef target_refs = 4;
+}
+
+// PolicyTargetRef is a Gateway API policy-attachment target: a namespace-local
+// group/kind/name. For M3, group = "" (core) and kind = "Service".
+message PolicyTargetRef {
+  string group = 1;
+  string kind = 2 [(buf.validate.field).string.min_len = 1];
+  string name = 3 [(buf.validate.field).string.min_len = 1];
 }
