@@ -16,6 +16,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/gammaproject"
 	commonlog "github.com/bpalermo/aether/common/log"
@@ -150,12 +151,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		portSets[key][port] = struct{}{}
 	}
+	// serviceFilters caches the M3 targetRef-attached HTTPFilters per route-target Service
+	// (they apply to every route of that service).
+	specs := httpFilterSpecs(httpFilters)
+	serviceFiltersFor := func(key string) []*registryv1.ExtensionFilter {
+		return gammaproject.ServiceFilters(key, specs)
+	}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
 		for _, p := range gammaproject.ServiceParents(hr.Spec.ParentRefs, hr.Namespace) {
 			collectPort(p.Key, p.Port)
+			svcFilters := serviceFiltersFor(p.Key)
 			for _, rule := range hr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters))
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters, svcFilters))
 			}
 		}
 	}
@@ -163,8 +171,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		gr := &grpcList.Items[i]
 		for _, p := range gammaproject.ServiceParents(gr.Spec.ParentRefs, gr.Namespace) {
 			collectPort(p.Key, p.Port)
+			svcFilters := serviceFiltersFor(p.Key)
 			for _, rule := range gr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters))
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters, svcFilters))
 			}
 		}
 	}
@@ -335,13 +344,13 @@ func grpcBackendRefs(rules []gatewayv1.GRPCRouteRule) []gatewayv1.BackendObjectR
 // converts it to the agent's in-memory GammaRoute. The projector is shared with the
 // registrar's cross-cluster export controller (proposal 026 EM1c) so a cluster's local
 // routing and the config it exports for peers never drift.
-func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter) proxy.GammaRoute {
-	return proxy.GammaRouteFromProto(gammaproject.ProjectHTTPRule(rule, routeNamespace, routeKind, r.MeshDomain, grants, httpFilterSpecs(httpFilters)))
+func (r *Reconciler) buildGammaRoute(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter, serviceFilters []*registryv1.ExtensionFilter) proxy.GammaRoute {
+	return proxy.GammaRouteFromProto(gammaproject.ProjectHTTPRule(rule, routeNamespace, routeKind, r.MeshDomain, grants, httpFilterSpecs(httpFilters), serviceFilters))
 }
 
 // buildGammaRouteFromGRPC projects a GRPCRoute rule via the shared projector.
-func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter) proxy.GammaRoute {
-	return proxy.GammaRouteFromProto(gammaproject.ProjectGRPCRule(rule, routeNamespace, routeKind, r.MeshDomain, grants, httpFilterSpecs(httpFilters)))
+func (r *Reconciler) buildGammaRouteFromGRPC(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configapisv1.HTTPFilter, serviceFilters []*registryv1.ExtensionFilter) proxy.GammaRoute {
+	return proxy.GammaRouteFromProto(gammaproject.ProjectGRPCRule(rule, routeNamespace, routeKind, r.MeshDomain, grants, httpFilterSpecs(httpFilters), serviceFilters))
 }
 
 // httpFilterSpecs extracts each K8s HTTPFilter's proto spec for the shared projector

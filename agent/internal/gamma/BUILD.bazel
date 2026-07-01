@@ -9,6 +9,7 @@ go_library(
         "//agent/internal/gatewaystatus",
         "//agent/internal/xds/proxy",
         "//api/aether/config/v1:config",
+        "//api/aether/registry/v1:registry",
         "//common/apis/config/v1:config",
         "//common/gammaproject",
         "//common/log",

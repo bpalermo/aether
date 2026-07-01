@@ -93,7 +93,7 @@ func TestBuildGammaRoute_ExtensionRef(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gr := r.buildGammaRoute(gatewayv1.HTTPRouteRule{Filters: tc.filters}, "ns", "HTTPRoute", nil, httpFilters)
+			gr := r.buildGammaRoute(gatewayv1.HTTPRouteRule{Filters: tc.filters}, "ns", "HTTPRoute", nil, httpFilters, nil)
 			require.Len(t, gr.ExtensionFilters, tc.wantLen)
 			if tc.wantLen == 1 {
 				assert.Equal(t, "envoy.filters.http.header_to_metadata", gr.ExtensionFilters[0].Name)
@@ -286,7 +286,7 @@ func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
 		},
 	}
 	// No grants: the cross-ns "remote" backend is dropped.
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 	require.Len(t, gr.Backends, 1)
 	assert.Equal(t, "ns/local", gr.Backends[0].Service)
 
@@ -298,7 +298,7 @@ func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
 			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service", Name: ptr(gatewayv1.ObjectName("remote"))}},
 		},
 	}}
-	gr = r.buildGammaRoute(rule, "ns", "HTTPRoute", grants, nil)
+	gr = r.buildGammaRoute(rule, "ns", "HTTPRoute", grants, nil, nil)
 	require.Len(t, gr.Backends, 2)
 }
 
@@ -317,7 +317,7 @@ func TestBuildGammaRoute(t *testing.T) {
 		},
 		Timeouts: &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration("5s"))},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 
 	require.Len(t, gr.Matches, 1)
 	assert.Equal(t, "/admin", gr.Matches[0].Exact)
@@ -345,7 +345,7 @@ func TestBuildGammaRouteFromGRPC(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}, Weight: w}},
 		},
 	}
-	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil)
+	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil, nil)
 	require.Len(t, gr.Matches, 2)
 	assert.Equal(t, "/foo.Bar/Baz", gr.Matches[0].Exact, "service+method -> exact path")
 	assert.Equal(t, "/foo.Bar/", gr.Matches[1].Prefix, "service-only -> prefix path")
@@ -395,7 +395,7 @@ func TestBuildGammaRouteFromGRPC_RegularExpression(t *testing.T) {
 					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc"}}},
 				},
 			}
-			gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil)
+			gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil, nil)
 			require.Len(t, gr.Matches, 1)
 			assert.Equal(t, tc.wantRegex, gr.Matches[0].Regex, "Regex field")
 			assert.Empty(t, gr.Matches[0].Exact, "Exact must be empty for regex match")
@@ -423,7 +423,7 @@ func TestBuildGammaRoute_RequestHeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	require.Len(t, gr.HeaderMutation.SetRequest, 1)
@@ -453,7 +453,7 @@ func TestBuildGammaRoute_ResponseHeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	assert.Empty(t, gr.HeaderMutation.SetRequest, "no request headers")
@@ -476,7 +476,7 @@ func TestBuildGammaRoute_UnknownFilterSkipped(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 	assert.Nil(t, gr.HeaderMutation, "redirect filter type must not produce a HeaderMutation")
 }
 
@@ -540,7 +540,7 @@ func TestBuildGammaRoute_RequestRedirect(t *testing.T) {
 					{Type: gatewayv1.HTTPRouteFilterRequestRedirect, RequestRedirect: &f},
 				},
 			}
-			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 			require.NotNil(t, gr.Redirect, "RequestRedirect filter must produce GammaRoute.Redirect")
 			assert.Nil(t, gr.URLRewrite, "RequestRedirect must not produce URLRewrite")
 			assert.Equal(t, tc.wantScheme, gr.Redirect.Scheme)
@@ -603,7 +603,7 @@ func TestBuildGammaRoute_URLRewrite(t *testing.T) {
 					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 				},
 			}
-			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 			require.NotNil(t, gr.URLRewrite, "URLRewrite filter must produce GammaRoute.URLRewrite")
 			assert.Nil(t, gr.Redirect, "URLRewrite must not produce Redirect")
 			assert.Equal(t, tc.wantHost, gr.URLRewrite.Hostname)
@@ -622,7 +622,7 @@ func TestBuildGammaRoute_NilRedirectWhenNoFilter(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 	assert.Nil(t, gr.Redirect, "no filter must produce nil Redirect")
 	assert.Nil(t, gr.URLRewrite, "no filter must produce nil URLRewrite")
 }
@@ -650,7 +650,7 @@ func TestBuildGammaRouteFromGRPC_HeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}}},
 		},
 	}
-	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil)
+	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil, nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	require.Len(t, gr.HeaderMutation.SetRequest, 1)
