@@ -44,6 +44,7 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/config"
 	commonconstants "github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
@@ -369,6 +370,15 @@ func runAgent(ctx context.Context) (retErr error) {
 		// ReferenceGrant (v1beta1) gates cross-namespace backendRefs on GAMMA routes.
 		if err = gatewayv1beta1.Install(m.GetScheme()); err != nil {
 			return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+		}
+		// HTTPFilter (config.aether.io, proposal 025): the gamma reconciler watches it
+		// for ExtensionRef/targetRef escape-hatch filters. MUST be in the scheme —
+		// without it the watch fails ("no kind is registered") and the manager
+		// crash-loops on cache sync, killing the CNI socket with it. The RESTMapper
+		// gate (#453) does not cover this: it checks the CRD on the API server, not
+		// the client scheme.
+		if err = configapisv1.AddToScheme(m.GetScheme()); err != nil {
+			return fmt.Errorf("register config.aether.io scheme: %w", err)
 		}
 		gammaReconciler := &gamma.Reconciler{
 			Client:     m.GetClient(),
