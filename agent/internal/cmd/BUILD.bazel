@@ -30,6 +30,7 @@ go_library(
         "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
         "//common/config",
         "//common/constants",
         "//common/manager",
