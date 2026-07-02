@@ -169,6 +169,19 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 		return
 	}
 
+	// Mirror the service names into dependency state (depMu): every TCP mesh
+	// service joins the node dependency set so its endpoints + tcp: cluster are
+	// always delivered alongside its (unconditional) capture floor chain — a
+	// chain without its cluster kills every connection silently, and tcp_proxy
+	// has no ODCDS cold path to recover.
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.serviceName)
+	}
+	c.depMu.Lock()
+	c.captureTCPDeps = names
+	c.depMu.Unlock()
+
 	// Per-pod capture listeners embed TCP floor chains; regenerate all of them.
 	if c.captureEnabled {
 		c.listenerMu.Lock()

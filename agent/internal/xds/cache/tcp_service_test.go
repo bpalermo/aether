@@ -119,3 +119,29 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	addr := cla.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
 	assert.Equal(t, "10.0.0.9", addr.GetAddress())
 }
+
+// TestCaptureTCPServices_JoinDependencySet verifies every TCP mesh service joins the
+// node dependency set on its own — WITHOUT any local pod declaring it as an upstream.
+// The capture listener emits a per-VIP floor chain for each TCP service
+// unconditionally, and tcp_proxy has no ODCDS cold path: if the tcp: cluster were
+// demand-gated out, the chain would match and every connection would die silently
+// (the #460 e2e trap). Chain and cluster must always ship together.
+func TestCaptureTCPServices_JoinDependencySet(t *testing.T) {
+	c := newTestCache("node-1")
+	c.SetCaptureEnabled(true)
+
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{
+		{ServiceName: "aether-test/tcp-echo", ClusterIP: "10.96.0.50"},
+		{ServiceName: "team-b/redis", ClusterIP: "10.96.0.51"},
+	})
+
+	deps := c.DependencySet()
+	assert.Contains(t, deps, "aether-test/tcp-echo", "TCP mesh service must be in scope without a declaring pod")
+	assert.Contains(t, deps, "team-b/redis")
+
+	// Removal drops them again (level-based replace).
+	c.SetCaptureTCPServices(nil)
+	deps = c.DependencySet()
+	assert.NotContains(t, deps, "aether-test/tcp-echo")
+	assert.NotContains(t, deps, "team-b/redis")
+}
