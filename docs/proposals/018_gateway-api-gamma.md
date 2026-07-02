@@ -318,15 +318,22 @@ talos-main cluster unless noted.
   `meshDns`, `injectPodNdots` (gamma stays opt-in). Validated hitless over a 6h churn
   soak (7 agent/proxy rolls + 29 service rolls, prober 100%, mesh 5xx 0).
 
-**In progress / not yet shipped:**
-- **Phase 3a TCP-over-mTLS floor**: protocol-detect (`tls_inspector`+`http_inspector`)
-  → HCM for HTTP/gRPC, `tcp_proxy`-over-mTLS for everything else, on both the capture
-  path and inbound `:15008`. Needs `appProtocol` metadata + capture broader than the
-  :18081 mesh port to be exercised.
-- **Phase 3b**: `TCPRoute`/`TLSRoute`/`UDPRoute` L4 routing (layers on the floor).
-- **VirtualHost CRD retirement**: edge migrates fully to HTTPRoute; the dup-FQDN
-  webhook generalizes to a Gateway/HTTPRoute hostname-conflict check.
-- **Multi-cluster MCS**: `ServiceExport`/`ServiceImport` + `clusterset.local`
-  materialized from the registry; cross-cluster data path is a later phase.
-- **Conformance**: `ReferenceGrant` and supported-features/Mesh-profile reporting
-  (see `docs/conformance/gateway-api-features.md`).
+**Shipped since (Phase 3 close-out — see issue #460):**
+- **Phase 3a TCP-over-mTLS floor** (#295; ALPN unified into the HTTP transport path in
+  #304): protocol-detect (`tls_inspector`+`http_inspector`) → HCM for HTTP/gRPC,
+  per-VIP `tcp_proxy`-over-mTLS chains for everything else. A workload declares
+  `endpoint.aether.io/protocol: tcp` → registry `PROTOCOL_TCP` → the registrar stamps
+  `aether.io/app-protocol: tcp` on the generated mesh Service → the agent's capture
+  reconciler emits the /32 floor chain (destination-IP match beats
+  application-protocol, so HTTP VIPs must NOT get per-IP chains). With redirect-all
+  capture (proposal 022, default-on) the floor is exercised on any port.
+- **Phase 3b L4 routes** (#296): `TCPRoute` (weighted floor chains) / `TLSRoute`
+  (SNI-routed chains) / `UDPRoute` behind `--l4-routes` (chart `agent.l4Routes`).
+  The CNI installs the UDP redirect; UDPRoute datagrams are discarded unless the
+  flag is on (no bound UDP socket).
+- **VirtualHost CRD retirement** (#292): HTTPRoute is the only edge routing API.
+- **Multi-cluster MCS** (#295 phase 1): `ServiceExport` → registry → `ServiceImport`
+  + clusterset VIP; cross-cluster *config* rides proposal 026's export/import
+  channel (feature-complete, Option E control-cluster authority).
+- **Conformance**: both profiles green and hard-gated in CI (GATEWAY-HTTP 43/0,
+  MESH-HTTP Core 8/8; see `docs/conformance/gateway-api-features.md`).
