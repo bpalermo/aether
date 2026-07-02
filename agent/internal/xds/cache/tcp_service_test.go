@@ -9,6 +9,7 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -84,6 +85,25 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	inputName := tcpCluster.GetTransportSocketMatcher().GetMatcherTree().GetInput().GetName()
 	assert.Equal(t, tcpTransportSocketFilterStateExtName, inputName,
 		"TCP floor cluster transport_socket_matcher must use envoy.matching.inputs.transport_socket_filter_state")
+
+	// SAN pinning regression (020 Part 1): every per-source transport socket must
+	// pin the peer identity with the BARE ServiceAccount name in the sa/ segment —
+	// "spiffe://<td>/ns/<endpoint-ns>/sa/echo-tcp" — NOT the namespace-qualified
+	// key ("sa/aether-test/echo-tcp"), which never matches an SVID and fails every
+	// TCP-floor handshake with fail_verify_san (observed on talos, 2026-07-02).
+	require.NotEmpty(t, tcpCluster.GetTransportSocketMatches())
+	for _, m := range tcpCluster.GetTransportSocketMatches() {
+		utc := &tlsv3.UpstreamTlsContext{}
+		require.NoError(t, m.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
+		combined := utc.GetCommonTlsContext().GetCombinedValidationContext()
+		require.NotNil(t, combined, "per-source socket pins the server identity (match %s)", m.GetName())
+		var got []string
+		for _, sm := range combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames() {
+			got = append(got, sm.GetMatcher().GetExact())
+		}
+		assert.Equal(t, []string{"spiffe://aether.internal/ns/default/sa/echo-tcp"}, got,
+			"SAN pin uses the bare SA name (match %s)", m.GetName())
+	}
 
 	// No HTTP cluster/vhost for a TCP-only service.
 	_, hasHTTP := clusters["echo-tcp.aether-test.aether.internal"]

@@ -239,9 +239,18 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 			// Service not yet in scope; skip until cluster map has it.
 			continue
 		}
+		// The peer SVID's SA segment is the BARE service name — entry.service is the
+		// namespace-qualified "<ns>/<svc>" key (020 Part 1), so parse out the bare
+		// name (mirrors the HTTP cluster SAN pinning; using the raw key pins
+		// sa/<ns>/<svc>, which never matches an SVID → fail_verify_san on every
+		// TCP-floor handshake).
+		saName := httpEntry.service
+		if ref, ok := serviceref.ParseKey(httpEntry.service); ok {
+			saName = ref.Name
+		}
 		sanURIs := make([]string, 0, len(httpEntry.sanNamespaces))
 		for _, ns := range httpEntry.sanNamespaces {
-			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, httpEntry.service))
+			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, saName))
 		}
 		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
 		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName, c.perDownstreamConnectionPool())
@@ -318,9 +327,15 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 		if !ok {
 			continue // not yet in scope; will appear when registry delivers endpoints
 		}
+		// Bare SA name for the SAN pin (entry.service is the "<ns>/<svc>" key; see the
+		// node-proxy TCP variant above).
+		saName := entry.service
+		if ref, ok := serviceref.ParseKey(entry.service); ok {
+			saName = ref.Name
+		}
 		sanURIs := make([]string, 0, len(entry.sanNamespaces))
 		for _, ns := range entry.sanNamespaces {
-			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, entry.service))
+			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, saName))
 		}
 		tcpName := proxy.TCPClusterName(svc, c.meshDomain)
 		cl := proxy.NewTCPServiceCluster(tcpName, svc, svc, false /* edge = single identity, no per-downstream pool */)
