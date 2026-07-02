@@ -197,6 +197,15 @@ type SnapshotCache struct {
 	// for a route target whose parentRefs declare no port (then only the portless +
 	// mesh :18081 spellings are emitted, as before). Guarded by depMu.
 	routeTargetPorts map[string][]uint32
+	// captureTCPDeps mirrors captureTCPServices' service names into dependency
+	// state (guarded by depMu; the entries themselves stay under captureMu).
+	// Every TCP mesh service is ALWAYS in the node dependency set: the capture
+	// listener emits a per-VIP floor chain for each one unconditionally, and
+	// tcp_proxy has no ODCDS cold path — a chain whose tcp: cluster is demand-
+	// gated out means every connection dies silently (chain matches, cluster
+	// missing). TCP mesh services are explicit, cluster-wide, and few (like
+	// GAMMA route targets), so global scope is the right trade.
+	captureTCPDeps []string
 	// tcpServiceRoutes holds the TCPRoute L4 rules (parentRef=Service, proposal 018
 	// Phase 3b), keyed by the parent service. Empty unless --l4-routes is enabled.
 	// Guarded by depMu (same lock as serviceRoutes: dependency state).

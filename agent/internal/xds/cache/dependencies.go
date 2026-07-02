@@ -143,6 +143,13 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	for svc := range c.staticDeps {
 		set[svc] = struct{}{}
 	}
+	// TCP mesh services (capture floor): always in scope — their per-VIP floor
+	// chains are emitted unconditionally on every capture listener, and a chain
+	// whose tcp: cluster is missing dead-ends every connection (no ODCDS for
+	// tcp_proxy). Explicit + cluster-wide + few, like GAMMA route targets.
+	for _, svc := range c.captureTCPDeps {
+		set[svc] = struct{}{}
+	}
 	for _, deps := range c.podDeps {
 		if deps.service != "" {
 			set[deps.service] = struct{}{}

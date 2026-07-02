@@ -126,6 +126,12 @@ func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 	// DefaultFilterChain passthrough instead of failing in the HTTP codec.
 	assert.Equal(t, "raw_buffer", l.GetFilterChains()[0].GetFilterChainMatch().GetTransportProtocol(),
 		"HCM chain must match raw_buffer so TLS egress falls through to the passthrough")
+	// ... AND detected-HTTP application protocols, so cleartext NON-HTTP (raw TCP to
+	// a non-mesh destination) also falls to the passthrough instead of being parsed
+	// as HTTP and answered with a fake 400 (#460 e2e finding).
+	assert.Equal(t, []string{"http/1.0", "http/1.1", "h2c"},
+		l.GetFilterChains()[0].GetFilterChainMatch().GetApplicationProtocols(),
+		"HCM chain must also require http_inspector-detected HTTP so raw TCP passes through")
 
 	// DefaultFilterChain must be set.
 	require.NotNil(t, l.GetDefaultFilterChain(), "DefaultFilterChain must be set when withPassthrough=true")
