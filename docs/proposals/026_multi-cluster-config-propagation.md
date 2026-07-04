@@ -225,3 +225,104 @@ authority topology) or D (enforce it at the waypoint).
 
 Independent of the in-flight data-plane work; this is the cross-cluster control-plane story the
 registry federation (006) and waypoint (019) imply but never specified for config.
+
+## Implementation plan — Option E (control cluster)
+
+Tracked as GitHub milestone **#2**. Runs in parallel with proposal 025; the C/E config channel is
+what unblocks 025's M3 (Service-`targetRef`). The hub is a **pure-management cluster**: it runs the
+GAMMA/edge reconcilers + the export side, **no agent data plane, no workloads**.
+
+**Core design choice — project the *reconciled* form, not the raw CRD.** The hub's GAMMA reconciler
+already turns HTTPRoute/GRPCRoute (+ MeshConfig/VirtualHost/HTTPFilter) into the internal
+`GammaRoute` / route-table types. Export **that** projection, keyed by service `<ns>/<svc>`, not the
+CRDs. Spokes then *materialize* a route table without re-running the reconciler, needing the CRDs,
+or holding cross-cluster K8s credentials — they consume registry records exactly like endpoints.
+
+### EM1 — config projection schema + export (hub write path)
+- A registry record per exported service's config: `key = /aether/v1/.../config/<ns>/<svc>`,
+  `value = { originCluster, version, gammaRoutes[], (later) meshConfig, virtualHost, httpFilters[] }`
+  — a proto mirroring the in-memory projection (reuse `GammaRoute`; define a `ConfigProjection`
+  message in `api/aether/registry/v1` or a sibling `config` package).
+- The hub's reconciler writes the projection on every reconcile (origin-stamped, monotonic version),
+  scoped to **exported** services (rides MCS `ServiceExport`, opt-in — never the whole catalog).
+- Reuse the registry backend's CDC: etcd Watch (proposal 006) is the channel; no new bus.
+- **Exit:** apply an HTTPRoute on the hub → a `ConfigProjection` for that service appears in the
+  shared store, versioned + origin-stamped.
+
+### EM2 — consumer materializer (spoke read path)
+- Spoke registrar/agent watches the config sub-tree (alongside the endpoint watch), **demand-scoped**
+  to the node dependency set (same filter `captureVhosts` already applies — only services this node
+  calls), and feeds imported `GammaRoute`s into the existing `SetServiceRoutes` path (a new
+  *imported* source merged with local routes in `captureVhosts`).
+- Read-only: a spoke never writes back; local class-2 config still layers on top (precedence:
+  define local-vs-imported — default imported wins for class-1, documented).
+- Partition/AP: last-known projection is retained and served if the channel is cut (no hard fail),
+  matching the endpoint posture.
+- **Exit:** a caller on a spoke routes by the hub-authored route table for an imported service; cut
+  the channel → still serves last-known.
+
+### EM3 — authority policy + trust
+- A control-plane flag selects topology: **control-cluster** (only the hub may export — Option E) vs
+  **federated** (each producer exports its own — Option C). Same channel; the flag is *who may
+  write a projection*. Enforced at the export side + validated on import (reject a projection whose
+  `originCluster` isn't the permitted authority).
+- Cross-trust-domain auth: imported projections are authenticated to their origin cluster over the
+  SPIFFE-federated channel the registry bus already requires for endpoints. RBAC locks CRD apply on
+  the hub (it is the high-value config authority).
+- **Exit:** a spoke rejects a projection from a non-authoritative origin; hub RBAC gates who can
+  author config.
+
+### EM4 — observability + class-2 drift
+- Metrics: projection export/import lag, per-service projection version skew across clusters, import
+  rejections. A `status`/metric surfacing **class-2** (GitOps-owned) divergence for a ClusterSet
+  service so operator-replicated drift is at least visible.
+- **Exit:** export→import lag and cross-cluster config skew are dashboarded; drift is observable.
+
+### Parallel track — D (enforcement, proposal 019)
+Class-1 policy that must hold for *all* callers (not just be evaluated consumer-side) is enforced at
+the producer waypoint as 019 lands — no projection needed for that class. EM1–EM4 cover the config
+that must be evaluated consumer-side; D covers the must-hold-near-the-service slice.
+
+### Sequencing notes
+EM1→EM2 is the minimum viable channel (HTTPRoute/GRPCRoute first; MeshConfig/VirtualHost/HTTPFilter
+reuse the same `ConfigProjection`). EM3 gates production multi-tenant use. EM4 before declaring it
+load-bearing. This delivers 025's M3 (the Service-`targetRef` escape-hatch form propagates as an
+`httpFilters[]` entry in the projection).
+
+## As built (2026-07-04) — EM1–EM4 shipped
+
+All milestones shipped (#448–#452, #454–#458; GH milestone #2). Deviations from the plan above,
+recorded deliberately:
+
+- **Schema/key:** `ServiceConfigProjection{service, origin_cluster, version, routes[]}` in
+  `api/aether/registry/v1` (#448); etcd key `<ownPrefix>/config/<base64url(<ns>/<svc>)>` (#449).
+  `ListConfig` stamps the origin **authoritatively from the key path** (a projection cannot claim a
+  foreign origin), which is the EM3 trust floor.
+- **Version is an export timestamp** (RFC3339Nano), not a monotonic counter — same-origin overwrites
+  the key, so the version only disambiguates cross-origin conflicts (highest wins) and doubles as
+  the EM4 lag signal.
+- **Spoke read path is PULL, not watch:** agents poll the spoke registrar's `ListAllConfig` (#450,
+  #451) — agents never read the store directly. A `WatchConfig` push is a deferred optimization.
+- **Merge precedence: LOCAL wins** over imported (not "imported wins" as sketched): a cluster's own
+  GitOps config beats the hub's for the same service, keeping local operators in control of their
+  egress; the hub authors config for services the spoke has none for. Revisit if class-1 strictness
+  is needed (that's what D/waypoint enforcement is for).
+- **Export side (EM1c):** the projection is produced by the **shared `common/gammaproject`
+  projector** (used by both the agent's GAMMA reconciler and the registrar's export controller,
+  #454–#456) — exported config and local routing cannot drift. The export controller is
+  leader-elected in the registrar (only the registrar touches the store), gated on `--enable-mcs` +
+  a `ConfigExporter` backend (etcd), scoped to `ServiceExport`ed services, and diffs its own-origin
+  records to unexport removals.
+- **EM3:** one `controlCluster` setting (chart value → `--control-cluster` on agent + registrar,
+  #458). Empty = federated (Option C posture); set = Option E (only the hub's registrar runs the
+  export controller AND importers trust only that origin — rogue higher-version projections are
+  ignored). MCS *endpoint* export stays per-cluster either way. **Parked:** etcd per-prefix
+  key-ACLs / SPIFFE-federated identities to make origin impersonation impossible on a shared store
+  (required before a real multi-tenant hub).
+- **EM4:** `aether.config.export.services/.errors`, `aether.config.import.services/.errors`, and
+  `aether.config.import.age_max` (now − oldest imported projection's export stamp = the
+  propagation-lag/skew signal). Class-2 drift visibility not built.
+- **e2e:** channel + export proven live (talos single-cluster with simulated peer origin; two-kind
+  harness `e2e/multicluster_config.sh` proves the export side cross-cluster). The spoke
+  agent-import hop on kind is gated on host `fs.inotify` limits; 025 M3 (Service-`targetRef`)
+  shipped on this channel (#459).
