@@ -76,7 +76,7 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // ORIGINAL_DST cluster, forwarding the original destination in plain TCP.
 //
 // Default off (no listener is generated unless transparent capture is on).
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool) (*listenerv3.Listener, error) {
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -107,7 +107,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 			chains = append(chains, tc)
 		}
 	}
-	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod, withPassthrough))
+	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
 
 	l := &listenerv3.Listener{
 		Name: CaptureListenerName(cniPod),
@@ -204,16 +204,24 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService) *listenerv3.FilterCh
 // stats filters and per-source mTLS egress path.
 //
 // scopeToCleartext (redirect-all / withPassthrough, proposal 022 M2a): match the
-// chain on transport_protocol="raw_buffer" so it catches ONLY cleartext traffic —
-// mesh egress is cleartext to this listener (the proxy adds mTLS upstream). TLS
-// egress (external HTTPS, kube-apiserver) is detected by tls_inspector as
-// transport_protocol="tls", does NOT match here, and falls to the DefaultFilterChain
-// ORIGINAL_DST passthrough. Without this the no-match HCM chain catches the TLS
-// stream and the handshake fails (it tries to parse TLS as HTTP). Scoping by
-// application_protocol does NOT work — a TLS ClientHello's ALPN (h2/http/1.1) looks
-// like HTTP. In scoped (non-redirect-all) mode the chain stays a catch-all: only
-// mesh ClusterIPs are captured (all cleartext) and there is no passthrough fallback.
-func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, scopeToCleartext bool) *listenerv3.FilterChain {
+// chain on transport_protocol="raw_buffer" AND the http_inspector-detected HTTP
+// application protocols, so it catches ONLY cleartext HTTP —
+//   - TLS egress (external HTTPS, kube-apiserver): tls_inspector marks it
+//     transport_protocol="tls" → no match → DefaultFilterChain ORIGINAL_DST
+//     passthrough. (Matching application_protocol ALONE would not exclude TLS —
+//     a TLS ClientHello's ALPN h2/http/1.1 looks like HTTP — hence the combined
+//     match; on a raw_buffer stream the application protocol comes from
+//     http_inspector, not ALPN.)
+//   - Cleartext NON-HTTP (raw TCP to a non-mesh destination): http_inspector
+//     detects no HTTP → no match → passthrough to the original destination.
+//     Without the application_protocols constraint this chain swallowed such
+//     streams and answered a fake "HTTP/1.1 400 Bad Request" (#460 e2e finding).
+//     Raw TCP to a TCP MESH service is unaffected: its per-VIP floor chain
+//     matches on destination IP, which beats any protocol match.
+//
+// In scoped (non-redirect-all) mode the chain stays a catch-all: only mesh
+// ClusterIPs are captured (all cleartext HTTP) and there is no passthrough fallback.
+func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
 
 	prefix := []*http_connection_managerv3.HttpFilter{
@@ -222,6 +230,11 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitSt
 		onDemandHttpFilter(),
 		outboundStatsFilter(cniPod, meshDomain, emitStatsPod),
 	}
+	// Escape-hatch extension filters (proposal 025): the union of allow-listed filters
+	// referenced by this listener's routes, default-disabled. Each referencing route
+	// re-enables + configures its filter via typed_per_filter_config (which can only
+	// override a filter already in the chain). Inert when none.
+	prefix = append(prefix, extensionFilters...)
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
@@ -239,9 +252,13 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitSt
 		},
 	}
 	if scopeToCleartext {
-		// raw_buffer = cleartext (tls_inspector marks TLS streams "tls"). TLS egress
-		// then misses this chain and falls to the passthrough DefaultFilterChain.
-		fc.FilterChainMatch = &listenerv3.FilterChainMatch{TransportProtocol: "raw_buffer"}
+		// raw_buffer = cleartext (tls_inspector marks TLS "tls") + detected HTTP
+		// (http_inspector). TLS egress AND cleartext non-HTTP both miss this chain
+		// and fall to the passthrough DefaultFilterChain (see the func comment).
+		fc.FilterChainMatch = &listenerv3.FilterChainMatch{
+			TransportProtocol:    "raw_buffer",
+			ApplicationProtocols: []string{"http/1.0", "http/1.1", "h2c"},
+		}
 	}
 	return fc
 }

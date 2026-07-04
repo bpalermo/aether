@@ -29,6 +29,7 @@ func AddToScheme(s *runtime.Scheme) error {
 
 func addKnownTypes(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion, &MeshConfig{}, &MeshConfigList{})
+	s.AddKnownTypes(GroupVersion, &HTTPFilter{}, &HTTPFilterList{})
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
 }

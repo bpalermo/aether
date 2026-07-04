@@ -17,9 +17,9 @@ import (
 	"log/slog"
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
-	"github.com/bpalermo/aether/agent/internal/referencegrant"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	commonlog "github.com/bpalermo/aether/common/log"
+	"github.com/bpalermo/aether/common/referencegrant"
 	"github.com/bpalermo/aether/common/serviceref"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"

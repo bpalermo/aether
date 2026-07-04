@@ -372,6 +372,19 @@ func (r *RegistrarRegistry) ListAllEndpointsAuthoritative(ctx context.Context, p
 	return r.listAllEndpointsFromServer(ctx, protocol)
 }
 
+// ListConfig fetches the clusterset-wide config projections via the registrar's
+// ListAllConfig RPC (proposal 026). It satisfies registry.ConfigImporter: the agent
+// imports cross-cluster GAMMA config through the registrar, never reading the store
+// directly. An empty result (e.g. a backend with no cross-cluster config plane) is
+// not an error.
+func (r *RegistrarRegistry) ListConfig(ctx context.Context) ([]*registryv1.ServiceConfigProjection, error) {
+	resp, err := r.client.ListAllConfig(ctx, &registrarv1.ListAllConfigRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list config projections from registrar: %w", err)
+	}
+	return resp.GetProjections(), nil
+}
+
 func (r *RegistrarRegistry) listEndpointsFromServer(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	resp, err := r.client.ListAllEndpoints(ctx, &registrarv1.ListAllEndpointsRequest{
 		Protocol: protocol,

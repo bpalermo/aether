@@ -21,6 +21,11 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes/status", "grpcroutes/status"]
     verbs: ["get", "update", "patch"]
+  # HTTPFilter (proposal 025): the escape-hatch CRD a route ExtensionRef points at;
+  # the GAMMA reconciler lists/watches it to attach the filter to the route.
+  - apiGroups: ["config.aether.io"]
+    resources: ["httpfilters"]
+    verbs: ["list", "get", "watch"]
   {{- end }}
   {{- if .Values.agent.l4Routes }}
   # L4 route types (proposal 018, Phase 3b): watch TCPRoutes/TLSRoutes/UDPRoutes

@@ -298,3 +298,23 @@ func (s *RegistrarServer) ListAllEndpoints(ctx context.Context, req *registrarv1
 		Version:  version,
 	}, nil
 }
+
+// ListAllConfig returns the clusterset-wide config projections (proposal 026,
+// multi-cluster config propagation). Agents pull this from the spoke registrar rather
+// than reading the registry directly (the standing directive: agents don't talk to the
+// store). When the backend has no cross-cluster config plane (kubernetes/dynamodb), the
+// registry does not implement ConfigExporter and this returns an empty set — config
+// stays cluster-local, which is the correct degenerate behaviour.
+func (s *RegistrarServer) ListAllConfig(ctx context.Context, _ *registrarv1.ListAllConfigRequest) (*registrarv1.ListAllConfigResponse, error) {
+	exporter, ok := s.registry.(registry.ConfigExporter)
+	if !ok {
+		return &registrarv1.ListAllConfigResponse{}, nil
+	}
+	projections, err := exporter.ListConfig(ctx)
+	if err != nil {
+		s.log.ErrorContext(ctx, "ListAllConfig failed", "error", err)
+		return nil, status.Error(codes.Internal, "failed to list config projections")
+	}
+	s.log.DebugContext(ctx, "ListAllConfig", "count", len(projections))
+	return &registrarv1.ListAllConfigResponse{Projections: projections}, nil
+}

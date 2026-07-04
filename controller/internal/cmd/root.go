@@ -25,6 +25,7 @@ import (
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/controller/internal/gatewayapi"
+	"github.com/bpalermo/aether/controller/internal/httpfilter"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
 	"github.com/bpalermo/aether/controller/internal/podmutate"
 	cwebhook "github.com/bpalermo/aether/controller/internal/webhook"
@@ -164,6 +165,7 @@ func runController(ctx context.Context) (retErr error) {
 	// list (uncached, correct regardless of the manager cache scope).
 	cwebhook.NewHandler(l, map[string]admission.Handler{
 		crdv1.MeshConfigKind:     &meshconfig.Validator{Log: l},
+		crdv1.HTTPFilterKind:     &httpfilter.Validator{Log: l},
 		gatewayapi.HTTPRouteKind: &gatewayapi.Validator{Reader: m.GetAPIReader(), Log: l},
 	}).SetupWithManager(m)
 

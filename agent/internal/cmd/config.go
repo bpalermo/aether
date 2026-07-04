@@ -88,6 +88,17 @@ type AgentConfig struct {
 	// 018, Phase 2). Default off — a no-op until enabled.
 	Gamma bool
 
+	// ImportConfig enables cross-cluster config import (proposal 026): the agent polls
+	// the registrar for GAMMA config projections peer clusters exported and materializes
+	// the imported routes into the cache (merged with local; local wins). Default off;
+	// no-op when the registry backend has no cross-cluster config plane (etcd only).
+	ImportConfig bool
+
+	// ControlCluster, when set, names the single authorized config-exporting cluster
+	// (proposal 026 EM3, Option E): the importer then trusts ONLY config originating
+	// there and ignores all other origins. Empty = federated (trust any peer origin).
+	ControlCluster string
+
 	// L4Routes enables L4 route types (TCPRoute/TLSRoute/UDPRoute parentRef=Service,
 	// proposal 018, Phase 3b): the agent watches these route types and projects
 	// weighted TCP floor chains and SNI-routed TLS chains onto the capture listener.

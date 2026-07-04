@@ -143,6 +143,13 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	for svc := range c.staticDeps {
 		set[svc] = struct{}{}
 	}
+	// TCP mesh services (capture floor): always in scope — their per-VIP floor
+	// chains are emitted unconditionally on every capture listener, and a chain
+	// whose tcp: cluster is missing dead-ends every connection (no ODCDS for
+	// tcp_proxy). Explicit + cluster-wide + few, like GAMMA route targets.
+	for _, svc := range c.captureTCPDeps {
+		set[svc] = struct{}{}
+	}
 	for _, deps := range c.podDeps {
 		if deps.service != "" {
 			set[deps.service] = struct{}{}
@@ -164,13 +171,16 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	// pods of its own (the versioned-fanout shape: an "echo" target routed to
 	// echo-v1/echo-v2). Its backendRefs are unioned in by routeBackendsLocked below.
 	// GAMMA routes are explicit, cluster-wide config (few), so global scope is fine.
-	for svc := range c.serviceRoutes {
+	// Imported (peer-cluster) routes are in scope too (proposal 026): a route target
+	// whose config arrives cross-cluster still needs its cap_http vhost + backends.
+	eff := c.effectiveServiceRoutesLocked()
+	for svc := range eff {
 		set[svc] = struct{}{}
 	}
 	// GAMMA (proposal 018 Phase 2): a depended-on service's L7 rule backends must
 	// also be resolvable, so union them in (their EDS clusters then generate).
 	// L4 routes (proposal 018 Phase 3b): same principle for TCP/TLS/UDP backends.
-	hasL7 := len(c.serviceRoutes) > 0
+	hasL7 := len(eff) > 0
 	hasL4 := len(c.tcpServiceRoutes) > 0 || len(c.tlsServiceRoutes) > 0 || len(c.udpServiceRoutes) > 0
 	if hasL7 || hasL4 {
 		base := make([]string, 0, len(set))
@@ -179,7 +189,7 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 		}
 		for _, svc := range base {
 			if hasL7 {
-				c.routeBackendsLocked(svc, set)
+				routeBackendsFrom(eff, svc, set)
 			}
 			if hasL4 {
 				c.l4RouteBackendsLocked(svc, set)

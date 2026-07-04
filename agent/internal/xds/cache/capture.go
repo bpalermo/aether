@@ -71,7 +71,18 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	}
 	c.captureMu.RUnlock()
 
-	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll)
+	// Escape-hatch extension filters (proposal 025): the HCM must carry every
+	// allow-listed filter any in-scope route references, default-disabled, so the
+	// route's typed_per_filter_config can re-enable it (per-route config only
+	// overrides a chain filter, never adds one). Union over all GammaRoutes; disabled
+	// entries are inert, so the (broader-than-per-pod) union is harmless.
+	var allRules []proxy.GammaRoute
+	for _, rules := range c.serviceRoutesSnapshot() {
+		allRules = append(allRules, rules...)
+	}
+	extensionFilters := proxy.CollectExtensionFilters(allRules)
+
+	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +169,19 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 		return
 	}
 
+	// Mirror the service names into dependency state (depMu): every TCP mesh
+	// service joins the node dependency set so its endpoints + tcp: cluster are
+	// always delivered alongside its (unconditional) capture floor chain — a
+	// chain without its cluster kills every connection silently, and tcp_proxy
+	// has no ODCDS cold path to recover.
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.serviceName)
+	}
+	c.depMu.Lock()
+	c.captureTCPDeps = names
+	c.depMu.Unlock()
+
 	// Per-pod capture listeners embed TCP floor chains; regenerate all of them.
 	if c.captureEnabled {
 		c.listenerMu.Lock()
@@ -228,9 +252,18 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 			// Service not yet in scope; skip until cluster map has it.
 			continue
 		}
+		// The peer SVID's SA segment is the BARE service name — entry.service is the
+		// namespace-qualified "<ns>/<svc>" key (020 Part 1), so parse out the bare
+		// name (mirrors the HTTP cluster SAN pinning; using the raw key pins
+		// sa/<ns>/<svc>, which never matches an SVID → fail_verify_san on every
+		// TCP-floor handshake).
+		saName := httpEntry.service
+		if ref, ok := serviceref.ParseKey(httpEntry.service); ok {
+			saName = ref.Name
+		}
 		sanURIs := make([]string, 0, len(httpEntry.sanNamespaces))
 		for _, ns := range httpEntry.sanNamespaces {
-			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, httpEntry.service))
+			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, saName))
 		}
 		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
 		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName, c.perDownstreamConnectionPool())
@@ -307,9 +340,15 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 		if !ok {
 			continue // not yet in scope; will appear when registry delivers endpoints
 		}
+		// Bare SA name for the SAN pin (entry.service is the "<ns>/<svc>" key; see the
+		// node-proxy TCP variant above).
+		saName := entry.service
+		if ref, ok := serviceref.ParseKey(entry.service); ok {
+			saName = ref.Name
+		}
 		sanURIs := make([]string, 0, len(entry.sanNamespaces))
 		for _, ns := range entry.sanNamespaces {
-			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, entry.service))
+			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, saName))
 		}
 		tcpName := proxy.TCPClusterName(svc, c.meshDomain)
 		cl := proxy.NewTCPServiceCluster(tcpName, svc, svc, false /* edge = single identity, no per-downstream pool */)

@@ -123,3 +123,34 @@ type ServiceExporter interface {
 type AuthoritativeLister interface {
 	ListAllEndpointsAuthoritative(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error)
 }
+
+// ConfigExporter is an optional capability for cross-cluster Registry backends:
+// multi-cluster CONFIG propagation (proposal 026, Option E/C). It rides the same
+// origin-partitioned plane as ServiceExporter — the authoritative (exporting) cluster
+// writes a service's projected GAMMA config under THIS instance's own partition
+// (writes), while ListConfig ranges every origin (reads), so each cluster sees the
+// clusterset-wide config view and can materialize imported routes read-only. Backends
+// without a cross-cluster plane (kubernetes, dynamodb) do not implement it; the
+// config export/import controllers no-op when it is absent.
+type ConfigExporter interface {
+	// SetConfig records this cluster's projected config for a service under its own
+	// authoritative partition. Idempotent (last-writer per origin); the stored
+	// projection's origin_cluster is stamped to this instance's cluster.
+	SetConfig(ctx context.Context, projection *registryv1.ServiceConfigProjection) error
+	// UnsetConfig removes this cluster's projection for the named service ("<ns>/<svc>"
+	// route-target key). Idempotent.
+	UnsetConfig(ctx context.Context, service string) error
+	// ListConfig returns every projection across all origins (the clusterset-wide
+	// config view). Each projection's origin_cluster is set authoritatively from its
+	// key path (not the stored value), so a forged origin cannot impersonate a peer.
+	// The same service may appear once per exporting cluster.
+	ListConfig(ctx context.Context) ([]*registryv1.ServiceConfigProjection, error)
+}
+
+// ConfigImporter is the read-only consumer half of cross-cluster config propagation
+// (proposal 026): the agent's registry (the registrar client) lists imported config
+// projections via the registrar's ListAllConfig RPC — agents never read the store
+// directly. ConfigExporter (the store-backed half) also satisfies it.
+type ConfigImporter interface {
+	ListConfig(ctx context.Context) ([]*registryv1.ServiceConfigProjection, error)
+}

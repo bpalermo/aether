@@ -7,8 +7,12 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/anypb"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +26,82 @@ import (
 )
 
 func ptr[T any](v T) *T { return &v }
+
+// TestReconcile_HTTPFilterGate verifies the CRD-availability gate (the upgrade
+// crashloop hardening): when httpFilterEnabled is false (CRD absent), Reconcile must
+// NOT list HTTPFilters — so it succeeds even with no HTTPFilter type registered;
+// when true, it lists (and here errors, proving the list is actually gated).
+func TestReconcile_HTTPFilterGate(t *testing.T) {
+	ctx := context.Background()
+	// Scheme deliberately WITHOUT config.aether.io registered (simulates the CRD absent).
+	s := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(s))
+	require.NoError(t, gatewayv1.Install(s))
+	require.NoError(t, gatewayv1beta1.Install(s))
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+	mk := func(enabled bool) *Reconciler {
+		return &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "aether.internal", Log: slog.New(slog.DiscardHandler), httpFilterEnabled: enabled}
+	}
+
+	_, err := mk(false).Reconcile(ctx, reconcile.Request{})
+	require.NoError(t, err, "disabled: must skip the HTTPFilter list → no crash when the CRD is absent")
+
+	_, err = mk(true).Reconcile(ctx, reconcile.Request{})
+	require.Error(t, err, "enabled: lists HTTPFilter (here against a scheme without it → error, proving the gate)")
+}
+
+// TestBuildGammaRoute_ExtensionRef verifies an HTTPRoute ExtensionRef → allow-listed,
+// in-namespace HTTPFilter resolves to a GammaRoute.ExtensionFilter (proposal 025 M1),
+// and that dangling / non-allow-listed / wrong-group refs are skipped.
+func TestBuildGammaRoute_ExtensionRef(t *testing.T) {
+	cfg, err := anypb.New(&header_to_metadatav3.Config{})
+	require.NoError(t, err)
+	httpFilters := map[string]*configapisv1.HTTPFilter{
+		"ns/h2m": {Spec: configprotov1.HTTPFilterSpec_builder{
+			Filter: "envoy.filters.http.header_to_metadata", TypedConfig: cfg,
+		}.Build()},
+		"ns/lua": {Spec: configprotov1.HTTPFilterSpec_builder{
+			Filter: "envoy.filters.http.lua", TypedConfig: cfg, // not allow-listed
+		}.Build()},
+		"ns/chain": {Spec: configprotov1.HTTPFilterSpec_builder{
+			Filter: "envoy.filters.http.header_to_metadata", TypedConfig: cfg,
+			Scope: configprotov1.HTTPFilterSpec_SCOPE_CHAIN, // deferred → skipped
+		}.Build()},
+	}
+	extRef := func(name string) gatewayv1.HTTPRouteFilter {
+		return gatewayv1.HTTPRouteFilter{
+			Type: gatewayv1.HTTPRouteFilterExtensionRef,
+			ExtensionRef: &gatewayv1.LocalObjectReference{
+				Group: gatewayv1.Group(configapisv1.GroupVersion.Group),
+				Kind:  gatewayv1.Kind(configapisv1.HTTPFilterKind),
+				Name:  gatewayv1.ObjectName(name),
+			},
+		}
+	}
+	r := &Reconciler{MeshDomain: "aether.internal"}
+
+	tests := []struct {
+		name    string
+		filters []gatewayv1.HTTPRouteFilter
+		wantLen int
+	}{
+		{"resolves allow-listed", []gatewayv1.HTTPRouteFilter{extRef("h2m")}, 1},
+		{"skips non-allow-listed", []gatewayv1.HTTPRouteFilter{extRef("lua")}, 0},
+		{"skips chain scope", []gatewayv1.HTTPRouteFilter{extRef("chain")}, 0},
+		{"skips dangling ref", []gatewayv1.HTTPRouteFilter{extRef("missing")}, 0},
+		{"no filters", nil, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gr := r.buildGammaRoute(gatewayv1.HTTPRouteRule{Filters: tc.filters}, "ns", "HTTPRoute", nil, httpFilters, nil)
+			require.Len(t, gr.ExtensionFilters, tc.wantLen)
+			if tc.wantLen == 1 {
+				assert.Equal(t, "envoy.filters.http.header_to_metadata", gr.ExtensionFilters[0].Name)
+				assert.NotNil(t, gr.ExtensionFilters[0].Config)
+			}
+		})
+	}
+}
 
 type fakeSink struct {
 	routes map[string][]proxy.GammaRoute
@@ -37,6 +117,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, clientgoscheme.AddToScheme(s))
 	require.NoError(t, gatewayv1.Install(s))
 	require.NoError(t, gatewayv1beta1.Install(s))
+	require.NoError(t, configapisv1.AddToScheme(s))
 	return s
 }
 
@@ -205,7 +286,7 @@ func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
 		},
 	}
 	// No grants: the cross-ns "remote" backend is dropped.
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 	require.Len(t, gr.Backends, 1)
 	assert.Equal(t, "ns/local", gr.Backends[0].Service)
 
@@ -217,25 +298,8 @@ func TestBuildGammaRoute_DropsUngrantedCrossNamespaceBackend(t *testing.T) {
 			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service", Name: ptr(gatewayv1.ObjectName("remote"))}},
 		},
 	}}
-	gr = r.buildGammaRoute(rule, "ns", "HTTPRoute", grants)
+	gr = r.buildGammaRoute(rule, "ns", "HTTPRoute", grants, nil, nil)
 	require.Len(t, gr.Backends, 2)
-}
-
-func TestServiceParents(t *testing.T) {
-	hr := &gatewayv1.HTTPRoute{Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
-		ParentRefs: []gatewayv1.ParentReference{
-			{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-1", Port: ptr(gatewayv1.PortNumber(8080))},
-			{Kind: ptr(gatewayv1.Kind("Service")), Name: "svc-2"}, // no port → 0
-			{Kind: ptr(gatewayv1.Kind("Gateway")), Name: "edge"},  // ignored
-			{Name: "no-kind"}, // no kind → ignored
-		},
-	}}}
-	// 020 Part 1: parentRef without a namespace inherits the route's namespace,
-	// and the key is "<ns>/<svc>". 023 M2: the parentRef port rides along.
-	assert.Equal(t, []serviceParent{
-		{Key: "team-a/svc-1", Port: 8080},
-		{Key: "team-a/svc-2", Port: 0},
-	}, serviceParents(hr.Spec.ParentRefs, "team-a"))
 }
 
 // TestBuildGammaRoute: matches → GammaMatch, weighted backendRefs → GammaBackend
@@ -253,7 +317,7 @@ func TestBuildGammaRoute(t *testing.T) {
 		},
 		Timeouts: &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration("5s"))},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 
 	require.Len(t, gr.Matches, 1)
 	assert.Equal(t, "/admin", gr.Matches[0].Exact)
@@ -281,7 +345,7 @@ func TestBuildGammaRouteFromGRPC(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}, Weight: w}},
 		},
 	}
-	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil)
+	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil, nil)
 	require.Len(t, gr.Matches, 2)
 	assert.Equal(t, "/foo.Bar/Baz", gr.Matches[0].Exact, "service+method -> exact path")
 	assert.Equal(t, "/foo.Bar/", gr.Matches[1].Prefix, "service-only -> prefix path")
@@ -331,7 +395,7 @@ func TestBuildGammaRouteFromGRPC_RegularExpression(t *testing.T) {
 					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc"}}},
 				},
 			}
-			gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil)
+			gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil, nil)
 			require.Len(t, gr.Matches, 1)
 			assert.Equal(t, tc.wantRegex, gr.Matches[0].Regex, "Regex field")
 			assert.Empty(t, gr.Matches[0].Exact, "Exact must be empty for regex match")
@@ -359,7 +423,7 @@ func TestBuildGammaRoute_RequestHeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	require.Len(t, gr.HeaderMutation.SetRequest, 1)
@@ -389,7 +453,7 @@ func TestBuildGammaRoute_ResponseHeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	assert.Empty(t, gr.HeaderMutation.SetRequest, "no request headers")
@@ -412,7 +476,7 @@ func TestBuildGammaRoute_UnknownFilterSkipped(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 	assert.Nil(t, gr.HeaderMutation, "redirect filter type must not produce a HeaderMutation")
 }
 
@@ -476,7 +540,7 @@ func TestBuildGammaRoute_RequestRedirect(t *testing.T) {
 					{Type: gatewayv1.HTTPRouteFilterRequestRedirect, RequestRedirect: &f},
 				},
 			}
-			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 			require.NotNil(t, gr.Redirect, "RequestRedirect filter must produce GammaRoute.Redirect")
 			assert.Nil(t, gr.URLRewrite, "RequestRedirect must not produce URLRewrite")
 			assert.Equal(t, tc.wantScheme, gr.Redirect.Scheme)
@@ -539,7 +603,7 @@ func TestBuildGammaRoute_URLRewrite(t *testing.T) {
 					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 				},
 			}
-			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+			gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 			require.NotNil(t, gr.URLRewrite, "URLRewrite filter must produce GammaRoute.URLRewrite")
 			assert.Nil(t, gr.Redirect, "URLRewrite must not produce Redirect")
 			assert.Equal(t, tc.wantHost, gr.URLRewrite.Hostname)
@@ -558,7 +622,7 @@ func TestBuildGammaRoute_NilRedirectWhenNoFilter(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-1"}}},
 		},
 	}
-	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil)
+	gr := r.buildGammaRoute(rule, "ns", "HTTPRoute", nil, nil, nil)
 	assert.Nil(t, gr.Redirect, "no filter must produce nil Redirect")
 	assert.Nil(t, gr.URLRewrite, "no filter must produce nil URLRewrite")
 }
@@ -586,7 +650,7 @@ func TestBuildGammaRouteFromGRPC_HeaderModifier(t *testing.T) {
 			{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-2"}}},
 		},
 	}
-	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil)
+	gr := r.buildGammaRouteFromGRPC(rule, "ns", "GRPCRoute", nil, nil, nil)
 
 	require.NotNil(t, gr.HeaderMutation)
 	require.Len(t, gr.HeaderMutation.SetRequest, 1)

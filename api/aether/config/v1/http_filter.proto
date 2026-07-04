@@ -1,0 +1,57 @@
+edition = "2024";
+
+package aether.config.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/any.proto";
+
+option features.field_presence = IMPLICIT;
+option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+
+// HTTPFilterSpec is the `.spec` of the HTTPFilter custom resource — the
+// proxy-extension escape hatch (proposal 025). An HTTPRoute/GRPCRoute rule references
+// it through a standard Gateway API `ExtensionRef` filter; aether attaches the named
+// Envoy HTTP filter to the route's typed_per_filter_config (and adds it to the HCM
+// chain default-disabled). The body is opaque Envoy config, validated fail-closed by
+// the aether-controller admission webhook (in-process proto-validate: @type resolve +
+// protoc-gen-validate), NOT by the CRD's OpenAPI schema. See docs/proposals/025.
+message HTTPFilterSpec {
+  // filter is the Envoy HTTP filter name (e.g. "envoy.filters.http.header_to_metadata").
+  // It MUST be in aether's allow-list of filters the proxy build compiles in; the
+  // webhook rejects others.
+  string filter = 1 [(buf.validate.field).string.min_len = 1];
+
+  // typed_config is the opaque Envoy filter config (the filter's `typed_config` Any).
+  // Carried verbatim into the route's typed_per_filter_config. The `@type` must
+  // resolve to a known Envoy message and pass its protoc-gen-validate constraints —
+  // enforced by the webhook, not here.
+  google.protobuf.Any typed_config = 2;
+
+  // scope selects where the filter applies. ROUTE (default, incl. UNSPECIFIED) emits
+  // the config into the referencing route's typed_per_filter_config — the v1 escape
+  // hatch. CHAIN (arbitrary HCM http_filters placement) is admin-owned and deferred
+  // to a later milestone; the webhook rejects it until then.
+  Scope scope = 3 [(buf.validate.field).enum.defined_only = true];
+
+  enum Scope {
+    SCOPE_UNSPECIFIED = 0;
+    SCOPE_ROUTE = 1;
+    SCOPE_CHAIN = 2;
+  }
+
+  // target_refs attaches this filter to Gateway API objects (policy attachment,
+  // GEP-713/-2648 direct) — proposal 025 M3. The supported kind is Service (core
+  // group): the filter then applies to EVERY route targeting that Service, for all its
+  // callers (object-wide), in addition to any per-route ExtensionRef. Targets are
+  // same-namespace as this HTTPFilter. A Service-attached filter is a class-1 payload
+  // that rides proposal 026's config channel to peer clusters.
+  repeated PolicyTargetRef target_refs = 4;
+}
+
+// PolicyTargetRef is a Gateway API policy-attachment target: a namespace-local
+// group/kind/name. For M3, group = "" (core) and kind = "Service".
+message PolicyTargetRef {
+  string group = 1;
+  string kind = 2 [(buf.validate.field).string.min_len = 1];
+  string name = 3 [(buf.validate.field).string.min_len = 1];
+}

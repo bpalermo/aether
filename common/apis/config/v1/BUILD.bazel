@@ -1,8 +1,11 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "config",
     srcs = [
+        "httpfilter_deepcopy.go",
+        "httpfilter_jsonshim.go",
+        "httpfilter_types.go",
         "meshconfig_deepcopy.go",
         "meshconfig_jsonshim.go",
         "meshconfig_types.go",
@@ -16,5 +19,18 @@ go_library(
         "@io_k8s_apimachinery//pkg/runtime/schema",
         "@org_golang_google_protobuf//encoding/protojson",
         "@org_golang_google_protobuf//proto",
+    ],
+)
+
+go_test(
+    name = "config_test",
+    srcs = ["httpfilter_test.go"],
+    embed = [":config"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//types/known/anypb",
     ],
 )
