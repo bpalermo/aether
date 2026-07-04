@@ -288,3 +288,41 @@ EM1→EM2 is the minimum viable channel (HTTPRoute/GRPCRoute first; MeshConfig/V
 reuse the same `ConfigProjection`). EM3 gates production multi-tenant use. EM4 before declaring it
 load-bearing. This delivers 025's M3 (the Service-`targetRef` escape-hatch form propagates as an
 `httpFilters[]` entry in the projection).
+
+## As built (2026-07-04) — EM1–EM4 shipped
+
+All milestones shipped (#448–#452, #454–#458; GH milestone #2). Deviations from the plan above,
+recorded deliberately:
+
+- **Schema/key:** `ServiceConfigProjection{service, origin_cluster, version, routes[]}` in
+  `api/aether/registry/v1` (#448); etcd key `<ownPrefix>/config/<base64url(<ns>/<svc>)>` (#449).
+  `ListConfig` stamps the origin **authoritatively from the key path** (a projection cannot claim a
+  foreign origin), which is the EM3 trust floor.
+- **Version is an export timestamp** (RFC3339Nano), not a monotonic counter — same-origin overwrites
+  the key, so the version only disambiguates cross-origin conflicts (highest wins) and doubles as
+  the EM4 lag signal.
+- **Spoke read path is PULL, not watch:** agents poll the spoke registrar's `ListAllConfig` (#450,
+  #451) — agents never read the store directly. A `WatchConfig` push is a deferred optimization.
+- **Merge precedence: LOCAL wins** over imported (not "imported wins" as sketched): a cluster's own
+  GitOps config beats the hub's for the same service, keeping local operators in control of their
+  egress; the hub authors config for services the spoke has none for. Revisit if class-1 strictness
+  is needed (that's what D/waypoint enforcement is for).
+- **Export side (EM1c):** the projection is produced by the **shared `common/gammaproject`
+  projector** (used by both the agent's GAMMA reconciler and the registrar's export controller,
+  #454–#456) — exported config and local routing cannot drift. The export controller is
+  leader-elected in the registrar (only the registrar touches the store), gated on `--enable-mcs` +
+  a `ConfigExporter` backend (etcd), scoped to `ServiceExport`ed services, and diffs its own-origin
+  records to unexport removals.
+- **EM3:** one `controlCluster` setting (chart value → `--control-cluster` on agent + registrar,
+  #458). Empty = federated (Option C posture); set = Option E (only the hub's registrar runs the
+  export controller AND importers trust only that origin — rogue higher-version projections are
+  ignored). MCS *endpoint* export stays per-cluster either way. **Parked:** etcd per-prefix
+  key-ACLs / SPIFFE-federated identities to make origin impersonation impossible on a shared store
+  (required before a real multi-tenant hub).
+- **EM4:** `aether.config.export.services/.errors`, `aether.config.import.services/.errors`, and
+  `aether.config.import.age_max` (now − oldest imported projection's export stamp = the
+  propagation-lag/skew signal). Class-2 drift visibility not built.
+- **e2e:** channel + export proven live (talos single-cluster with simulated peer origin; two-kind
+  harness `e2e/multicluster_config.sh` proves the export side cross-cluster). The spoke
+  agent-import hop on kind is gated on host `fs.inotify` limits; 025 M3 (Service-`targetRef`)
+  shipped on this channel (#459).
