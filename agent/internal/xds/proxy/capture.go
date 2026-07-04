@@ -3,6 +3,9 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"time"
+
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -129,12 +132,24 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 		// http_inspector detects HTTP/1 vs HTTP/2; tls_inspector detects TLS on the
 		// captured stream for future downstreams that speak TLS at the app layer.
 		// use_original_dst keeps the recovered destination on the connection.
-		ListenerFilters:               buildCaptureListenerFilters(),
-		UseOriginalDst:                wrapperspb.Bool(true),
-		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		StatPrefix:                    fmt.Sprintf("capture_%s", cniPod.GetName()),
-		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
-		FilterChains:                  chains,
+		ListenerFilters: buildCaptureListenerFilters(),
+		// The inspectors stall INCONCLUSIVE first writes: a raw-TCP client whose first
+		// chunk is <6 bytes (e.g. a 4-byte "p9\r\n") — or a server-first protocol that
+		// writes nothing (MySQL-style greeting) — never satisfies http_inspector, so
+		// chain selection never runs and Envoy's default 15s listener_filters_timeout
+		// CLOSES the conn (continue_on defaults false). Cap the wait at 1s and CONTINUE:
+		// matching proceeds with whatever was sniffed — a TCP-service destination still
+		// wins on the /32 destination-IP tier (dest IP outranks every protocol tier), so
+		// short-first-write and server-first TCP work with at most +1s connect latency.
+		// Real HTTP/TLS clients send their preface immediately and never hit the timeout.
+		// Found via the tcp-echo probes: payloads p1..p99 (<6B) failed, p100+ worked.
+		ListenerFiltersTimeout:           durationpb.New(time.Second),
+		ContinueOnListenerFiltersTimeout: true,
+		UseOriginalDst:                   wrapperspb.Bool(true),
+		PerConnectionBufferLimitBytes:    wrapperspb.UInt32(perConnectionBufferLimitBytes),
+		StatPrefix:                       fmt.Sprintf("capture_%s", cniPod.GetName()),
+		TrafficDirection:                 corev3.TrafficDirection_OUTBOUND,
+		FilterChains:                     chains,
 	}
 
 	// SPIKE/M2a passthrough: the DefaultFilterChain is Envoy's true "no named chain

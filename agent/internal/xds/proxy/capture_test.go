@@ -28,6 +28,14 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, "/var/run/netns/p1", sa.GetNetworkNamespaceFilepath())
 	assert.True(t, l.GetUseOriginalDst().GetValue(), "use_original_dst set")
 
+	// Inspector stall guard: inconclusive first writes (<6B raw TCP, server-first
+	// protocols) must CONTINUE to chain matching after 1s instead of being closed at
+	// Envoy's 15s default (found via tcp-echo probes: p1..p99 failed, p100+ worked).
+	assert.Equal(t, int64(1), l.GetListenerFiltersTimeout().GetSeconds(),
+		"listener_filters_timeout must be capped at 1s")
+	assert.True(t, l.GetContinueOnListenerFiltersTimeout(),
+		"inconclusive sniffs must continue to chain matching, not close")
+
 	// listener filters: original_dst, http_inspector, tls_inspector.
 	require.Len(t, l.GetListenerFilters(), 3)
 	assert.Equal(t, listenerFilterOriginalDstName, l.GetListenerFilters()[0].GetName())
