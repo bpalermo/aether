@@ -223,7 +223,7 @@ proxy:
     # Built-in OPA preset (opt-in): runs the OPA envoy plugin with the policy below.
     opa:
       enabled: false
-      image: openpolicyagent/opa:1.9.0-envoy
+      image: openpolicyagent/opa:1.18.2-envoy-static
       # Rego policy mounted via ConfigMap; must define the decision the plugin
       # queries (envoy/authz/allow by default). Required when opa.enabled.
       policy: ""
