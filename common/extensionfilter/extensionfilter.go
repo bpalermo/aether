@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	"google.golang.org/protobuf/proto"
@@ -28,7 +29,15 @@ import (
 var allowed = map[string]func() proto.Message{
 	"envoy.filters.http.header_to_metadata": func() proto.Message { return &header_to_metadatav3.Config{} },
 	"envoy.filters.http.header_mutation":    func() proto.Message { return &header_mutationv3.HeaderMutation{} },
+	// ext_authz (proposal 027): allow-listed for typed_per_filter_config emission,
+	// but with NO default chain config — its chain entry is the SYSTEM-owned authz
+	// sidecar entry (full transport, disabled), never a per-reference union entry.
+	// A nil builder means CollectExtensionFilters skips it.
+	ExtAuthzFilterName: nil,
 }
+
+// ExtAuthzFilterName is the external-authorization filter (proposal 027).
+const ExtAuthzFilterName = "envoy.filters.http.ext_authz"
 
 // Allowed reports whether name is a supported escape-hatch filter.
 func Allowed(name string) bool {
@@ -40,7 +49,7 @@ func Allowed(name string) bool {
 // (the neutral config carried on its default-disabled HCM entry), or (nil, false).
 func DefaultConfig(name string) (proto.Message, bool) {
 	b, ok := allowed[name]
-	if !ok {
+	if !ok || b == nil {
 		return nil, false
 	}
 	return b(), true
@@ -73,17 +82,35 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 	if spec == nil {
 		return errors.New("spec is required")
 	}
-	typed := spec.GetHeaderToMetadata() != nil
-	opaque := spec.GetFilter() != "" || spec.GetTypedConfig() != nil
-	if typed && opaque {
-		return errors.New("set exactly one authoring form: headerToMetadata (typed) OR filter+typedConfig (opaque), not both")
+	forms := 0
+	if spec.GetHeaderToMetadata() != nil {
+		forms++
 	}
-	if !typed && !opaque {
-		return errors.New("spec must set an authoring form: headerToMetadata (typed) or filter+typedConfig (opaque)")
+	if spec.GetExtAuthz() != nil {
+		forms++
+	}
+	opaque := spec.GetFilter() != "" || spec.GetTypedConfig() != nil
+	if opaque {
+		forms++
+	}
+	if forms != 1 {
+		return errors.New("set exactly one authoring form: headerToMetadata, extAuthz, or filter+typedConfig (opaque)")
+	}
+	typed := !opaque
+	if spec.GetFilter() == ExtAuthzFilterName {
+		return errors.New("ext_authz must use the typed extAuthz form (the transport is system-owned; opaque payloads could name arbitrary clusters)")
 	}
 	if spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
 		if !targetsAService(spec) {
 			return errors.New("spec.scope CHAIN (service-wide always-on) requires a targetRef of kind Service")
+		}
+	}
+	if spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_INBOUND {
+		if !targetsAService(spec) {
+			return errors.New("spec.scope INBOUND (destination-side enforcement) requires a targetRef of kind Service")
+		}
+		if spec.GetExtAuthz() == nil {
+			return errors.New("spec.scope INBOUND supports only the extAuthz form (v1)")
 		}
 	}
 	if typed {
@@ -91,6 +118,9 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 			if r.GetHeader() == "" || r.GetMetadataKey() == "" {
 				return fmt.Errorf("headerToMetadata.rules[%d]: header and metadataKey are required", i)
 			}
+		}
+		if ea := spec.GetExtAuthz(); ea != nil && ea.GetDisabled() && len(ea.GetContextExtensions()) > 0 {
+			return errors.New("extAuthz: disabled and contextExtensions are mutually exclusive")
 		}
 		return nil
 	}
@@ -136,6 +166,24 @@ func targetsAService(spec *configprotov1.HTTPFilterSpec) bool {
 // verbatim. Assumes ValidateSpec passed; callers on unvalidated input must check the
 // error.
 func Render(spec *configprotov1.HTTPFilterSpec) (string, *anypb.Any, error) {
+	if ea := spec.GetExtAuthz(); ea != nil {
+		var cfg *ext_authzv3.ExtAuthzPerRoute
+		if ea.GetDisabled() {
+			cfg = &ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_Disabled{Disabled: true}}
+		} else {
+			cfg = &ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{
+				CheckSettings: &ext_authzv3.CheckSettings{
+					ContextExtensions:           ea.GetContextExtensions(),
+					DisableRequestBodyBuffering: ea.GetDisableRequestBodyBuffering(),
+				},
+			}}
+		}
+		a, err := anypb.New(cfg)
+		if err != nil {
+			return "", nil, fmt.Errorf("render extAuthz: %w", err)
+		}
+		return ExtAuthzFilterName, a, nil
+	}
 	if h2m := spec.GetHeaderToMetadata(); h2m != nil {
 		cfg := &header_to_metadatav3.Config{}
 		for _, r := range h2m.GetRules() {

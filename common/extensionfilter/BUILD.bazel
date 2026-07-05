@@ -7,6 +7,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//api/aether/config/v1:config",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/ext_authz/v3:ext_authz",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
         "@org_golang_google_protobuf//proto",
@@ -20,6 +21,7 @@ go_test(
     embed = [":extensionfilter"],
     deps = [
         "//api/aether/config/v1:config",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/ext_authz/v3:ext_authz",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
         "@com_github_stretchr_testify//assert",

@@ -44,7 +44,7 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org", "example.org", false, false, nil)
+			inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org", "example.org", false, false, nil, nil)
 
 			if tt.expectedError {
 				require.Error(t, err)
@@ -166,7 +166,7 @@ func TestPerConnectionBufferLimits(t *testing.T) {
 		Name:             "buf-pod",
 		NetworkNamespace: "/var/run/netns/buf",
 	}
-	inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(pod, "aether.internal", "aether.internal", false, false, nil)
+	inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(pod, "aether.internal", "aether.internal", false, false, nil, nil)
 	require.NotEmpty(t, appClusters)
 	appCluster := appClusters[0]
 	require.NoError(t, err)

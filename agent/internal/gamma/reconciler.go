@@ -40,6 +40,10 @@ type RouteSink interface {
 	// from a CHAIN-scope HTTPFilter with a same-namespace Service targetRef. Enabled
 	// at the service's capture vhost.
 	SetServiceChainFilters(filters map[string]proxy.ExtensionFilter)
+	// SetServiceInboundFilters receives the destination-side (INBOUND scope, 027 M3)
+	// filters, keyed by "<ns>/<svc>": enabled on the target service's own pods'
+	// inbound listeners. At most one per service.
+	SetServiceInboundFilters(filters map[string]proxy.ExtensionFilter)
 	// SetRouteTargetPorts receives the real Service port(s) of each route target
 	// (proposal 023 M2), keyed by the same "<ns>/<svc>" route-target key as
 	// SetServiceRoutes. Sourced from the HTTPRoute/GRPCRoute parentRef port; lets the
@@ -163,10 +167,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	serviceFiltersFor := func(key string) []*registryv1.ExtensionFilter {
 		return gammaproject.ServiceFilters(key, specs)
 	}
-	// Service-wide always-on filters (M4 CHAIN scope): resolve per targeted service.
+	// Service-wide always-on filters (M4 CHAIN scope) + destination-side INBOUND
+	// filters (027 M3): resolve per targeted service.
 	chainFilters := map[string]proxy.ExtensionFilter{}
+	inboundFilters := map[string]proxy.ExtensionFilter{}
 	for key, spec := range specs {
-		if spec.GetScope() != configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+		scope := spec.GetScope()
+		if scope != configprotov1.HTTPFilterSpec_SCOPE_CHAIN && scope != configprotov1.HTTPFilterSpec_SCOPE_INBOUND {
 			continue
 		}
 		ns, _, _ := strings.Cut(key, "/")
@@ -176,8 +183,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			}
 			svcKey := ns + "/" + t.GetName()
 			// Deterministic pick delegated to the shared projector (name-sorted).
-			if ef := gammaproject.ServiceChainFilter(svcKey, specs); ef != nil {
-				chainFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
+			if scope == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+				if ef := gammaproject.ServiceChainFilter(svcKey, specs); ef != nil {
+					chainFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
+				}
+			} else {
+				if ef := gammaproject.ServiceInboundFilter(svcKey, specs); ef != nil {
+					inboundFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
+				}
 			}
 		}
 	}
@@ -214,6 +227,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 
 	r.Sink.SetServiceRoutes(routes)
 	r.Sink.SetServiceChainFilters(chainFilters)
+	r.Sink.SetServiceInboundFilters(inboundFilters)
 	r.Sink.SetRouteTargetPorts(routeTargetPorts)
 	r.Log.DebugContext(ctx, "projected gamma service routes",
 		"httpRoutes", len(httpList.Items), "grpcRoutes", len(grpcList.Items), "services", len(routes))

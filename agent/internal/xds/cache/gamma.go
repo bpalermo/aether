@@ -1,7 +1,11 @@
 package cache
 
 import (
+	"context"
+
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/serviceref"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -64,7 +68,42 @@ func (c *SnapshotCache) serviceRoutesSnapshot() map[string][]proxy.GammaRoute {
 	eff := c.effectiveServiceRoutesLocked()
 	out := make(map[string][]proxy.GammaRoute, len(eff))
 	for k, v := range eff {
-		out[k] = v
+		out[k] = c.stripUnavailableExtensions(v)
+	}
+	return out
+}
+
+// stripUnavailableExtensions drops extension filters whose chain entry is not
+// present on this node — today only ext_authz when the authz sidecar is disabled
+// (proposal 027): a typed_per_filter_config naming an absent chain filter rejects
+// the whole route config, so a stray policy must degrade to a no-op, not a NACK.
+func (c *SnapshotCache) stripUnavailableExtensions(rules []proxy.GammaRoute) []proxy.GammaRoute {
+	if c.authzSidecar {
+		return rules
+	}
+	needsStrip := false
+	for _, r := range rules {
+		for _, ef := range r.ExtensionFilters {
+			if ef.Name == proxy.ExtAuthzFilterName {
+				needsStrip = true
+			}
+		}
+	}
+	if !needsStrip {
+		return rules
+	}
+	out := make([]proxy.GammaRoute, len(rules))
+	copy(out, rules)
+	for i := range out {
+		var kept []proxy.ExtensionFilter
+		for _, ef := range out[i].ExtensionFilters {
+			if ef.Name == proxy.ExtAuthzFilterName {
+				c.log.Warn("dropping extAuthz filter: the authz sidecar is not enabled on this cluster (proxy.authzSidecar.enabled)", "filter", ef.Name)
+				continue
+			}
+			kept = append(kept, ef)
+		}
+		out[i].ExtensionFilters = kept
 	}
 	return out
 }
@@ -308,6 +347,14 @@ func (c *SnapshotCache) serviceChainFiltersSnapshot() map[string]proxy.Extension
 	for k, v := range c.serviceChainFilters { // local overrides imported
 		out[k] = v
 	}
+	if !c.authzSidecar {
+		for k, v := range out {
+			if v.Name == proxy.ExtAuthzFilterName {
+				c.log.Warn("dropping extAuthz service filter: the authz sidecar is not enabled on this cluster", "service", k)
+				delete(out, k)
+			}
+		}
+	}
 	return out
 }
 
@@ -354,9 +401,55 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
+		newInbound, err := proxy.NewInboundListener(entry.cniPod, c.trustDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(entry.cniPod))
+		if err != nil {
+			c.log.Error("failed to regenerate inbound listener on extension-union change",
+				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			continue
+		}
 		entry.capture = newCapture
 		entry.outbound = newOutbound
+		entry.inbound = newInbound
 		c.listeners[netns] = entry
 	}
 	c.listenerMu.Unlock()
+	// Push the rebuilt listeners immediately (the dependency signal ALSO triggers a
+	// registry reload, but that path only runs when the refresher is up — and prompt
+	// convergence beats waiting a debounce for a pure listener change).
+	if err := c.generateListenerSnapshot(context.Background()); err != nil {
+		c.log.Error("failed to regenerate snapshot after extension-union change", "error", err)
+	}
+}
+
+// SetServiceInboundFilters replaces the destination-side (INBOUND scope, 027 M3)
+// filters, keyed by "<ns>/<svc>". Enabled on the target service's own pods'
+// inbound listeners; requires the authz sidecar (dropped with a warning otherwise).
+func (c *SnapshotCache) SetServiceInboundFilters(filters map[string]proxy.ExtensionFilter) {
+	c.depMu.Lock()
+	changed := !equalServiceChainFilters(c.serviceInboundFilters, filters)
+	c.serviceInboundFilters = filters
+	c.depMu.Unlock()
+	if changed {
+		c.log.Info("service inbound filters updated", "count", len(filters))
+		c.regenerateAllHTTPListeners()
+		c.signalDependencyChange()
+	}
+}
+
+// inboundFilterForPod returns the INBOUND-scope filter for the pod's own service,
+// nil when none (or when the authz sidecar is disabled — a TPFC naming an absent
+// chain filter rejects the listener).
+func (c *SnapshotCache) inboundFilterForPod(cniPod *cniv1.CNIPod) *proxy.ExtensionFilter {
+	key := serviceref.New(cniPod.GetNamespace(), cniPod.GetServiceAccount()).Key()
+	c.depMu.RLock()
+	ef, ok := c.serviceInboundFilters[key]
+	c.depMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	if ef.Name == proxy.ExtAuthzFilterName && !c.authzSidecar {
+		c.log.Warn("dropping INBOUND extAuthz filter: the authz sidecar is not enabled on this cluster", "service", key)
+		return nil
+	}
+	return &ef
 }
