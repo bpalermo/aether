@@ -4,8 +4,12 @@ import (
 	"testing"
 	"time"
 
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	set_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/set_metadata/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,4 +34,32 @@ func TestAuthzSidecarHTTPFilter(t *testing.T) {
 	cfg2 := &ext_authzv3.ExtAuthz{}
 	require.NoError(t, fo.GetTypedConfig().UnmarshalTo(cfg2))
 	assert.True(t, cfg2.GetFailureModeAllow())
+}
+
+// TestSourceMetadataHTTPFilter: per-pod identity in aether.source + the strip helper.
+func TestSourceMetadataHTTPFilter(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "client-1", Namespace: "team-a", ServiceAccount: "client"}
+	f := SourceMetadataHTTPFilter(pod, "aether.internal")
+	require.Equal(t, "envoy.filters.http.set_metadata", f.GetName())
+	cfg := &set_metadatav3.Config{}
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(cfg))
+	require.Len(t, cfg.GetMetadata(), 1)
+	md := cfg.GetMetadata()[0]
+	assert.Equal(t, SourceMetadataNamespace, md.GetMetadataNamespace())
+	v := md.GetValue().GetFields()
+	assert.Equal(t, "spiffe://aether.internal/ns/team-a/sa/client", v["spiffeId"].GetStringValue())
+	assert.Equal(t, "client", v["serviceAccount"].GetStringValue())
+
+	// The system ext_authz entry forwards the namespace.
+	ea := AuthzSidecarHTTPFilter(time.Second, false)
+	eacfg := &ext_authzv3.ExtAuthz{}
+	require.NoError(t, ea.GetTypedConfig().UnmarshalTo(eacfg))
+	assert.Contains(t, eacfg.GetMetadataContextNamespaces(), SourceMetadataNamespace)
+
+	// WithoutSourceMetadata strips it (the inbound form).
+	union := []*http_connection_managerv3.HttpFilter{f, ea}
+	assert.True(t, HasExtAuthz(union))
+	stripped := WithoutSourceMetadata(union)
+	require.Len(t, stripped, 1)
+	assert.Equal(t, ExtAuthzFilterName, stripped[0].GetName())
 }

@@ -78,7 +78,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	// route's typed_per_filter_config can re-enable it (per-route config only
 	// overrides a chain filter, never adds one). Union over all GammaRoutes; disabled
 	// entries are inert, so the (broader-than-per-pod) union is harmless.
-	extensionFilters := c.extensionHTTPFilters()
+	extensionFilters := c.podExtensionHTTPFilters(cniPod)
 
 	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
@@ -732,4 +732,18 @@ func (c *SnapshotCache) SetAuthzSidecar(timeout time.Duration, failureModeAllow 
 	c.authzSidecar = true
 	c.authzTimeout = timeout
 	c.authzFailureModeAllow = failureModeAllow
+}
+
+// podExtensionHTTPFilters returns the extension union for one pod's EGRESS chains:
+// the shared union plus, when the authz sidecar is enabled, a per-pod set_metadata
+// entry (PREPENDED — it must run before ext_authz) carrying the calling workload's
+// identity in aether.source. Egress-only: the inbound chains take the shared union
+// (caller identity there is the verified XFCC, and stamping the destination pod as
+// "source" would mislead policies).
+func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod) []*http_connection_managerv3.HttpFilter {
+	union := c.extensionHTTPFilters()
+	if c.authzSidecar && proxy.HasExtAuthz(union) {
+		union = append([]*http_connection_managerv3.HttpFilter{proxy.SourceMetadataHTTPFilter(cniPod, c.trustDomain)}, union...)
+	}
+	return union
 }
