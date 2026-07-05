@@ -29,7 +29,6 @@ go_library(
 go_test(
     name = "gamma_test",
     srcs = ["reconciler_test.go"],
-    data = glob(["testdata/**"]),
     embed = [":gamma"],
     deps = [
         "//agent/internal/gatewaystatus",
