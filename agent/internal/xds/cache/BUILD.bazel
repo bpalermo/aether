@@ -87,6 +87,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/ext_authz/v3:ext_authz",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/rbac/v3:rbac",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
         "@com_github_stretchr_testify//assert",

@@ -12,6 +12,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
+	rbac_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/rbac/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,4 +182,46 @@ func TestInboundFilter_Seam(t *testing.T) {
 		b, _ := protojson.Marshal(res.(*listenerv3.Listener))
 		assert.NotContains(t, string(b), "ext_authz", "sidecar off: filter must be dropped, not emitted")
 	}
+}
+
+// TestInboundFilter_RBAC_NoSidecar (RBAC M2 regression): an INBOUND rbac filter must
+// bring its OWN chain entry into the inbound HCM — rbac needs no sidecar, so nothing
+// else puts envoy.filters.http.rbac into the union. Without the entry the TPFC
+// references an absent filter and Envoy rejects the listener (the #470 class again:
+// found live on talos — ENFORCE never took effect, rogue stayed 200).
+func TestInboundFilter_RBAC_NoSidecar(t *testing.T) {
+	c := newTestCache("node-1")
+	// NO SetAuthzSidecar: rbac must stand alone.
+	ctx := context.Background()
+	pod := &cniv1.CNIPod{
+		Name: "echo-1", Namespace: "aether-test", ServiceAccount: "echo",
+		NetworkNamespace: "/var/run/netns/cni-rbac",
+	}
+	require.NoError(t, c.AddPod(ctx, pod, "aether.internal"))
+	cfg, err := anypb.New(&rbac_filterv3.RBACPerRoute{})
+	require.NoError(t, err)
+	c.SetServiceInboundFilters(map[string]proxy.ExtensionFilter{
+		"aether-test/echo": {Name: "envoy.filters.http.rbac", Config: cfg},
+	})
+
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	entry, tpfc := false, false
+	for name, res := range snap.GetResources(resourcev3.ListenerType) {
+		if !strings.HasPrefix(name, "inbound_") {
+			continue
+		}
+		b, _ := protojson.Marshal(res.(*listenerv3.Listener))
+		js := string(b)
+		if strings.Contains(js, `"typedPerFilterConfig":{"envoy.filters.http.rbac"`) {
+			tpfc = true
+		}
+		// The chain entry is an httpFilters element {"name":"envoy.filters.http.rbac"
+		// — distinct from the TPFC map KEY, which is never preceded by "name":.
+		if strings.Contains(js, `"name":"envoy.filters.http.rbac"`) {
+			entry = true
+		}
+	}
+	require.True(t, tpfc, "inbound route vhost must carry the rbac TPFC")
+	require.True(t, entry, "inbound HCM must ALSO carry the rbac chain entry (TPFC alone = Envoy rejects the listener)")
 }
