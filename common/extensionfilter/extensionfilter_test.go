@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	"github.com/stretchr/testify/assert"
@@ -112,4 +113,46 @@ func TestRender(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "envoy.filters.http.header_mutation", name2)
 	assert.Same(t, a, cfg2)
+}
+
+// TestExtAuthzForm (027 M2): typed-only authoring, render both modes, opaque rejected.
+func TestExtAuthzForm(t *testing.T) {
+	withEA := func(ctx map[string]string, disabled bool) *configprotov1.HTTPFilterSpec {
+		sp := &configprotov1.HTTPFilterSpec{}
+		sp.SetExtAuthz(configprotov1.ExtAuthzRoute_builder{
+			ContextExtensions: ctx, Disabled: disabled,
+		}.Build())
+		return sp
+	}
+	// Valid: enable with context extensions.
+	require.NoError(t, ValidateSpec(withEA(map[string]string{"policy": "x"}, false)))
+	// Valid: per-route exemption.
+	require.NoError(t, ValidateSpec(withEA(nil, true)))
+	// Invalid: disabled + context extensions.
+	require.ErrorContains(t, ValidateSpec(withEA(map[string]string{"p": "x"}, true)), "mutually exclusive")
+	// Invalid: opaque ext_authz.
+	op := &configprotov1.HTTPFilterSpec{}
+	op.SetFilter(ExtAuthzFilterName)
+	a, _ := anypb.New(&header_to_metadatav3.Config{})
+	op.SetTypedConfig(a)
+	require.ErrorContains(t, ValidateSpec(op), "typed extAuthz form")
+
+	// Render: check_settings mode.
+	name, cfg, err := Render(withEA(map[string]string{"policy": "x"}, false))
+	require.NoError(t, err)
+	assert.Equal(t, ExtAuthzFilterName, name)
+	msg, err := cfg.UnmarshalNew()
+	require.NoError(t, err)
+	pr := msg.(*ext_authzv3.ExtAuthzPerRoute)
+	assert.Equal(t, "x", pr.GetCheckSettings().GetContextExtensions()["policy"])
+	// Render: disabled mode.
+	_, cfg2, err := Render(withEA(nil, true))
+	require.NoError(t, err)
+	msg2, _ := cfg2.UnmarshalNew()
+	assert.True(t, msg2.(*ext_authzv3.ExtAuthzPerRoute).GetDisabled())
+
+	// The union never emits a chain entry for ext_authz (system entry owns the chain).
+	_, ok := DefaultConfig(ExtAuthzFilterName)
+	assert.False(t, ok, "ext_authz must have no default chain config")
+	assert.True(t, Allowed(ExtAuthzFilterName), "but TPFC emission is allowed")
 }

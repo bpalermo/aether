@@ -43,6 +43,13 @@ message HTTPFilterSpec {
     SCOPE_UNSPECIFIED = 0;
     SCOPE_ROUTE = 1;
     SCOPE_CHAIN = 2;
+    // INBOUND (proposal 027 M3): destination-side enforcement — the filter is
+    // enabled on the TARGET service's own pods' INBOUND listeners, where the
+    // caller's verified SPIFFE identity (XFCC) is available. Requires a Service
+    // targetRef and (v1) the extAuthz form. NOT propagated cross-cluster: the
+    // enforcement point is co-located with the service's pods, so the owning
+    // cluster's config is authoritative by construction.
+    SCOPE_INBOUND = 3;
   }
 
   // target_refs attaches this filter to Gateway API objects (policy attachment,
@@ -53,11 +60,32 @@ message HTTPFilterSpec {
   // that rides proposal 026's config channel to peer clusters.
   repeated PolicyTargetRef target_refs = 4;
 
+  // ext_authz opts this route/service into the node-local authorization sidecar
+  // (proposal 027). TYPED-ONLY: the transport (target/timeout/failure mode) is
+  // system-owned on the chain entry — this form carries only what
+  // ExtAuthzPerRoute can: per-route policy parameters and toggles. Requires the
+  // sidecar to be enabled on the cluster (proxy.authzSidecar.enabled); the agent
+  // drops it otherwise (logged) so a stray policy cannot NACK the proxy.
+  ExtAuthzRoute ext_authz = 6;
+
   // header_to_metadata is the TYPED form of envoy.filters.http.header_to_metadata
   // (proposal 025 M4 typed promotion): the one allow-listed filter Gateway API cannot
   // express (it powers subset routing). Mutually exclusive with filter/typed_config —
   // set exactly one authoring form; aether renders the Envoy proto internally.
   HeaderToMetadata header_to_metadata = 5;
+}
+
+// ExtAuthzRoute is the per-route external-authorization form (renders to Envoy's
+// ExtAuthzPerRoute). Attaching it ENABLES the (otherwise disabled) system ext_authz
+// filter for the targeted route/service.
+message ExtAuthzRoute {
+  // context_extensions are passed to the authz service with every check for the
+  // targeted routes — the per-route policy parameters (e.g. {"policy": "payments-rw"}).
+  map<string, string> context_extensions = 1;
+  // disable_request_body_buffering skips sending the request body to the authz service.
+  bool disable_request_body_buffering = 2;
+  // disabled exempts the targeted route from a broader (service-wide) authz filter.
+  bool disabled = 3;
 }
 
 // HeaderToMetadata promotes the common header_to_metadata use to typed config: each

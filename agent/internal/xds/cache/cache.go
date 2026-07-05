@@ -205,6 +205,11 @@ type SnapshotCache struct {
 	// importedServiceChainFilters is the peer-cluster-imported variant (026);
 	// local wins on collision. Guarded by depMu.
 	importedServiceChainFilters map[string]proxy.ExtensionFilter
+	// serviceInboundFilters holds the destination-side (INBOUND scope, 027 M3)
+	// filters keyed by "<ns>/<svc>": enabled on the target service's own pods'
+	// inbound listeners. NOT imported cross-cluster (enforcement is co-located
+	// with the pods). Guarded by depMu.
+	serviceInboundFilters map[string]proxy.ExtensionFilter
 	// authzSidecar enables the disabled ext_authz HCM entry for the node-local
 	// authorization sidecar (proposal 027). Boot-time (SetAuthzSidecar), so no
 	// locking/regeneration concerns.

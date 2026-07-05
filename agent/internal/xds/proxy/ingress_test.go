@@ -25,7 +25,7 @@ func TestNewInboundListener(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	l, err := NewInboundListener(pod, "example.org", false, false)
+	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, InboundListenerName(pod), l.GetName())
 
@@ -92,7 +92,7 @@ func TestNewInboundListenerCleartext(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	l, err := NewInboundListener(pod, "example.org", false, true)
+	l, err := NewInboundListener(pod, "example.org", false, true, nil, nil)
 	require.NoError(t, err)
 
 	// No tls_inspector: there is no TLS to inspect in cleartext mode.
@@ -117,10 +117,10 @@ func TestNewInboundListenerCleartext(t *testing.T) {
 }
 
 func TestNewInboundListener_Errors(t *testing.T) {
-	_, err := NewInboundListener(nil, "example.org", false, false)
+	_, err := NewInboundListener(nil, "example.org", false, false, nil, nil)
 	require.Error(t, err)
 
-	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false, false)
+	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false, false, nil, nil)
 	require.Error(t, err)
 }
 
@@ -163,7 +163,7 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 		Annotations:      map[string]string{constants.AnnotationEndpointPorts: "8080,9090"},
 	}
-	l, err := NewInboundListener(pod, "example.org", false, false)
+	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
 	require.NoError(t, err)
 
 	bySNI := map[string]*listenerv3.FilterChain{}
@@ -207,7 +207,7 @@ func TestInboundChainStatsFilter(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-a",
 		Ips:              []string{"10.0.0.1"},
 	}
-	l, err := NewInboundListener(pod, "aether.internal", false, false)
+	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, l.GetFilterChains())
 
@@ -244,7 +244,7 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-tcp",
 		Ips:              []string{"10.0.0.5"},
 	}
-	l, err := NewInboundListener(pod, "aether.internal", false, false)
+	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil)
 	require.NoError(t, err)
 
 	// Find the TCP floor chain: the default chain (no match), named in_tcp_<pod>.

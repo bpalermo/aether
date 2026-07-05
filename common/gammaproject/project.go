@@ -245,8 +245,10 @@ func resolveExtensionFilter(ref *gatewayv1.LocalObjectReference, routeNamespace 
 // ExtensionFilter, or (nil,false) when it is nil, CHAIN-scoped (admin-owned, deferred),
 // not allow-listed, or missing typed_config.
 func allowedExtensionFilter(spec *configprotov1.HTTPFilterSpec) (*registryv1.ExtensionFilter, bool) {
-	if spec == nil || spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
-		return nil, false // CHAIN is vhost-level (ServiceChainFilter), never per-route
+	if spec == nil ||
+		spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN || // vhost-level (ServiceChainFilter)
+		spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_INBOUND { // destination-side (ServiceInboundFilter)
+		return nil, false
 	}
 	return renderedExtensionFilter(spec)
 }
@@ -270,6 +272,18 @@ func renderedExtensionFilter(spec *configprotov1.HTTPFilterSpec) (*registryv1.Ex
 // ALL of the service's traffic; a per-route ExtensionRef overrides it (Envoy
 // most-specific-wins).
 func ServiceChainFilter(serviceKey string, httpFilters map[string]*configprotov1.HTTPFilterSpec) *registryv1.ExtensionFilter {
+	return serviceScopedFilter(serviceKey, httpFilters, configprotov1.HTTPFilterSpec_SCOPE_CHAIN)
+}
+
+// ServiceInboundFilter resolves the destination-side (INBOUND scope, proposal 027 M3)
+// filter for serviceKey: enabled on the service's own pods' inbound listeners. Same
+// one-per-service + deterministic tie-break rules as ServiceChainFilter. NOT
+// propagated cross-cluster (enforcement is co-located with the pods).
+func ServiceInboundFilter(serviceKey string, httpFilters map[string]*configprotov1.HTTPFilterSpec) *registryv1.ExtensionFilter {
+	return serviceScopedFilter(serviceKey, httpFilters, configprotov1.HTTPFilterSpec_SCOPE_INBOUND)
+}
+
+func serviceScopedFilter(serviceKey string, httpFilters map[string]*configprotov1.HTTPFilterSpec, scope configprotov1.HTTPFilterSpec_Scope) *registryv1.ExtensionFilter {
 	sref, ok := serviceref.ParseKey(serviceKey)
 	if !ok || len(httpFilters) == 0 {
 		return nil
@@ -281,7 +295,7 @@ func ServiceChainFilter(serviceKey string, httpFilters map[string]*configprotov1
 	sort.Strings(keys)
 	for _, k := range keys {
 		spec := httpFilters[k]
-		if spec == nil || spec.GetScope() != configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+		if spec == nil || spec.GetScope() != scope {
 			continue
 		}
 		fref, ok := serviceref.ParseKey(k)

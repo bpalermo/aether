@@ -10,6 +10,7 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
@@ -118,4 +119,66 @@ func TestExtensionHTTPFilters_AuthzSidecar(t *testing.T) {
 	require.Len(t, fs, 1)
 	assert.Equal(t, "envoy.filters.http.ext_authz", fs[0].GetName())
 	assert.True(t, fs[0].GetDisabled())
+}
+
+// TestInboundFilter_Seam (027 M3): an INBOUND-scope filter for the pod's own service
+// lands on the pod's inbound listener — chain entry (via the authz-sidecar union) +
+// route-vhost TPFC — through the full snapshot path; with the sidecar disabled it is
+// dropped entirely (no TPFC referencing an absent chain filter = no NACK).
+func TestInboundFilter_Seam(t *testing.T) {
+	mk := func(sidecar bool) (*SnapshotCache, error) {
+		c := newTestCache("node-1")
+		if sidecar {
+			c.SetAuthzSidecar(200_000_000, false)
+		}
+		ctx := context.Background()
+		pod := &cniv1.CNIPod{
+			Name: "echo-1", Namespace: "aether-test", ServiceAccount: "echo",
+			NetworkNamespace: "/var/run/netns/cni-in",
+		}
+		if err := c.AddPod(ctx, pod, "aether.internal"); err != nil {
+			return nil, err
+		}
+		cfg, err := anypb.New(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{
+			CheckSettings: &ext_authzv3.CheckSettings{ContextExtensions: map[string]string{"policy": "x"}},
+		}})
+		if err != nil {
+			return nil, err
+		}
+		c.SetServiceInboundFilters(map[string]proxy.ExtensionFilter{
+			"aether-test/echo": {Name: "envoy.filters.http.ext_authz", Config: cfg},
+		})
+		return c, nil
+	}
+
+	// Sidecar ON: inbound listener carries the ext_authz chain entry + the TPFC.
+	c, err := mk(true)
+	require.NoError(t, err)
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	entryCount, tpfcCount := 0, 0
+	for name, res := range snap.GetResources(resourcev3.ListenerType) {
+		if !strings.HasPrefix(name, "inbound_") {
+			continue
+		}
+		b, _ := protojson.Marshal(res.(*listenerv3.Listener))
+		js := string(b)
+		entryCount += strings.Count(js, `"envoy.filters.http.ext_authz"`)
+		tpfcCount += strings.Count(js, "typedPerFilterConfig")
+	}
+	assert.Greater(t, entryCount, 0, "inbound HCM must carry the ext_authz chain entry")
+	assert.Greater(t, tpfcCount, 0, "inbound route vhost must carry the TPFC")
+
+	// Sidecar OFF: the filter is dropped — no ext_authz anywhere on the inbound.
+	c2, err := mk(false)
+	require.NoError(t, err)
+	snap2, err := c2.GetSnapshot("node-1")
+	require.NoError(t, err)
+	for name, res := range snap2.GetResources(resourcev3.ListenerType) {
+		if !strings.HasPrefix(name, "inbound_") {
+			continue
+		}
+		b, _ := protojson.Marshal(res.(*listenerv3.Listener))
+		assert.NotContains(t, string(b), "ext_authz", "sidecar off: filter must be dropped, not emitted")
+	}
 }

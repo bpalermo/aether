@@ -113,7 +113,7 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
 	authzEntry := proxy.AuthzSidecarHTTPFilter(200*time.Millisecond, false)
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, []*http_connection_managerv3.HttpFilter{authzEntry})
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, []*http_connection_managerv3.HttpFilter{authzEntry}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod: %w", err)
 	}
@@ -149,7 +149,7 @@ func authzSidecarCluster() *clusterv3.Cluster {
 func buildNodeCleartextBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, true, nil)
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, true, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod (cleartext): %w", err)
 	}
