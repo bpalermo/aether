@@ -12,6 +12,11 @@ rules:
   - apiGroups: ["config.aether.io"]
     resources: ["meshconfigs/status"]
     verbs: ["get", "update", "patch"]
+  # List HTTPFilters for the one-CHAIN-filter-per-service validating webhook
+  # (proposal 025 M4).
+  - apiGroups: ["config.aether.io"]
+    resources: ["httpfilters"]
+    verbs: ["get", "list"]
   # List HTTPRoutes cluster-wide for the hostname-conflict validating webhook
   # (proposal 018).
   - apiGroups: ["gateway.networking.k8s.io"]

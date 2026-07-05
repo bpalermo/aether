@@ -104,12 +104,16 @@ func TestBuildGammaRoute_ExtensionRef(t *testing.T) {
 }
 
 type fakeSink struct {
-	routes map[string][]proxy.GammaRoute
-	ports  map[string][]uint32
+	routes       map[string][]proxy.GammaRoute
+	ports        map[string][]uint32
+	chainFilters map[string]proxy.ExtensionFilter
 }
 
 func (f *fakeSink) SetServiceRoutes(r map[string][]proxy.GammaRoute) { f.routes = r }
 func (f *fakeSink) SetRouteTargetPorts(p map[string][]uint32)        { f.ports = p }
+func (f *fakeSink) SetServiceChainFilters(c map[string]proxy.ExtensionFilter) {
+	f.chainFilters = c
+}
 
 func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()

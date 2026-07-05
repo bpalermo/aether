@@ -27,10 +27,16 @@ message HTTPFilterSpec {
   // enforced by the webhook, not here.
   google.protobuf.Any typed_config = 2;
 
-  // scope selects where the filter applies. ROUTE (default, incl. UNSPECIFIED) emits
-  // the config into the referencing route's typed_per_filter_config — the v1 escape
-  // hatch. CHAIN (arbitrary HCM http_filters placement) is admin-owned and deferred
-  // to a later milestone; the webhook rejects it until then.
+  // scope selects where the filter applies (proposal 025 M4 semantics):
+  //   - ROUTE (default, incl. UNSPECIFIED): default-disabled in the HCM chain,
+  //     enabled per route via ExtensionRef / targetRef typed_per_filter_config.
+  //   - CHAIN: service-wide ALWAYS-ON — requires target_refs naming a Service; the
+  //     filter is enabled at the service's capture vhost (vhost-level
+  //     typed_per_filter_config), applying to ALL of that service's traffic. At most
+  //     ONE chain-scope filter per service (webhook-enforced; the projector
+  //     tie-breaks deterministically). Position in the chain is aether-owned (the
+  //     extension anchor); a per-route ExtensionRef overrides it (Envoy
+  //     most-specific-wins).
   Scope scope = 3 [(buf.validate.field).enum.defined_only = true];
 
   enum Scope {
@@ -46,6 +52,27 @@ message HTTPFilterSpec {
   // same-namespace as this HTTPFilter. A Service-attached filter is a class-1 payload
   // that rides proposal 026's config channel to peer clusters.
   repeated PolicyTargetRef target_refs = 4;
+
+  // header_to_metadata is the TYPED form of envoy.filters.http.header_to_metadata
+  // (proposal 025 M4 typed promotion): the one allow-listed filter Gateway API cannot
+  // express (it powers subset routing). Mutually exclusive with filter/typed_config —
+  // set exactly one authoring form; aether renders the Envoy proto internally.
+  HeaderToMetadata header_to_metadata = 5;
+}
+
+// HeaderToMetadata promotes the common header_to_metadata use to typed config: each
+// rule copies a request header's value into dynamic metadata when present.
+message HeaderToMetadata {
+  repeated Rule rules = 1 [(buf.validate.field).repeated.min_items = 1];
+
+  message Rule {
+    // header is the request header to read.
+    string header = 1 [(buf.validate.field).string.min_len = 1];
+    // metadata_key is the key written under the metadata namespace.
+    string metadata_key = 2 [(buf.validate.field).string.min_len = 1];
+    // metadata_namespace defaults to "envoy.lb" (the subset-routing namespace).
+    string metadata_namespace = 3;
+  }
 }
 
 // PolicyTargetRef is a Gateway API policy-attachment target: a namespace-local

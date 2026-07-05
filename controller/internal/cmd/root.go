@@ -165,7 +165,7 @@ func runController(ctx context.Context) (retErr error) {
 	// list (uncached, correct regardless of the manager cache scope).
 	cwebhook.NewHandler(l, map[string]admission.Handler{
 		crdv1.MeshConfigKind:     &meshconfig.Validator{Log: l},
-		crdv1.HTTPFilterKind:     &httpfilter.Validator{Log: l},
+		crdv1.HTTPFilterKind:     &httpfilter.Validator{Reader: m.GetAPIReader(), Log: l},
 		gatewayapi.HTTPRouteKind: &gatewayapi.Validator{Reader: m.GetAPIReader(), Log: l},
 	}).SetupWithManager(m)
 

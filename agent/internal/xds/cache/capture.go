@@ -80,7 +80,12 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	for _, rules := range c.serviceRoutesSnapshot() {
 		allRules = append(allRules, rules...)
 	}
-	extensionFilters := proxy.CollectExtensionFilters(allRules)
+	chainFilters := c.serviceChainFiltersSnapshot()
+	chainExtras := make([]proxy.ExtensionFilter, 0, len(chainFilters))
+	for _, ef := range chainFilters {
+		chainExtras = append(chainExtras, ef)
+	}
+	extensionFilters := proxy.CollectExtensionFilters(allRules, chainExtras...)
 
 	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
@@ -423,6 +428,8 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	// default client path (mesh-DNS), so the same L7 vocabulary the outbound listener
 	// applies must apply here; no rules = passthrough to the service cluster.
 	gammaRoutes := c.serviceRoutesSnapshot()
+	// Service-wide always-on extension filters (025 M4 CHAIN scope), vhost-enabled.
+	chainFilters := c.serviceChainFiltersSnapshot()
 	// Real Service port(s) of each route target (proposal 023 M2): a client dials the
 	// route target on its REAL port (e.g. echo:8080), and Envoy includes the port in
 	// vhost host-matching — so the vhost must carry a "<fqdn>:<realPort>" domain, not
@@ -481,7 +488,9 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 				mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
 			}
 		}
-		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules))
+		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules)
+		applyChainFilter(vh, chainFilters, svc)
+		vhosts = append(vhosts, vh)
 	}
 	// Service-based routing (proposal 023): a GAMMA route TARGET with no SA-backed
 	// mesh Service of its own (the versioned-fanout shape — an "echo" target routed
@@ -503,7 +512,9 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		fqdn := ref.ClusterLocalFQDN()
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
 		domains := c.routeTargetDomains(svc, fqdn, mesh, bareNameCount, routeTargetPorts[svc])
-		vhosts = append(vhosts, proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc]))
+		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc])
+		applyChainFilter(vh, chainFilters, svc)
+		vhosts = append(vhosts, vh)
 	}
 	return vhosts
 }
@@ -687,4 +698,12 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 		}
 	}
 	return true
+}
+
+// applyChainFilter enables svc's service-wide extension filter (025 M4 CHAIN scope)
+// on its capture vhost, when one is configured.
+func applyChainFilter(vh *routev3.VirtualHost, filters map[string]proxy.ExtensionFilter, svc string) {
+	if ef, ok := filters[svc]; ok {
+		proxy.ApplyServiceChainFilter(vh, &ef)
+	}
 }
