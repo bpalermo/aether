@@ -14,6 +14,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
 
@@ -76,16 +77,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	// route's typed_per_filter_config can re-enable it (per-route config only
 	// overrides a chain filter, never adds one). Union over all GammaRoutes; disabled
 	// entries are inert, so the (broader-than-per-pod) union is harmless.
-	var allRules []proxy.GammaRoute
-	for _, rules := range c.serviceRoutesSnapshot() {
-		allRules = append(allRules, rules...)
-	}
-	chainFilters := c.serviceChainFiltersSnapshot()
-	chainExtras := make([]proxy.ExtensionFilter, 0, len(chainFilters))
-	for _, ef := range chainFilters {
-		chainExtras = append(chainExtras, ef)
-	}
-	extensionFilters := proxy.CollectExtensionFilters(allRules, chainExtras...)
+	extensionFilters := c.extensionHTTPFilters()
 
 	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
@@ -706,4 +698,22 @@ func applyChainFilter(vh *routev3.VirtualHost, filters map[string]proxy.Extensio
 	if ef, ok := filters[svc]; ok {
 		proxy.ApplyServiceChainFilter(vh, &ef)
 	}
+}
+
+// extensionHTTPFilters returns the default-disabled HCM entries for the union of
+// escape-hatch filters in scope (route-referenced + service-wide chain filters, 025).
+// Shared by the capture AND outbound HTTP listener builds: typed_per_filter_config —
+// per-route or vhost-level — can only re-enable a filter already in the chain, and
+// both route tables carry GAMMA/chain config, so both HCMs need the union.
+func (c *SnapshotCache) extensionHTTPFilters() []*http_connection_managerv3.HttpFilter {
+	var allRules []proxy.GammaRoute
+	for _, rules := range c.serviceRoutesSnapshot() {
+		allRules = append(allRules, rules...)
+	}
+	chainFilters := c.serviceChainFiltersSnapshot()
+	chainExtras := make([]proxy.ExtensionFilter, 0, len(chainFilters))
+	for _, ef := range chainFilters {
+		chainExtras = append(chainExtras, ef)
+	}
+	return proxy.CollectExtensionFilters(allRules, chainExtras...)
 }

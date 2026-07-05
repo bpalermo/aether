@@ -200,6 +200,9 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// GAMMA L7 rules per service (empty unless --gamma), snapshotted once before
 	// the cluster lock so the per-service outbound vhost can be enriched.
 	gammaRoutes := c.serviceRoutesSnapshot()
+	// Service-wide chain filters (025 M4): enabled at each service's OUTBOUND vhost
+	// too — the outbound route table serves the same GAMMA/chain config as cap_http.
+	chainFilters := c.serviceChainFiltersSnapshot()
 	localRegion, localZone := c.nodeLocality()
 
 	// RPC-fill (cold path): a dependency missing from the watch-fed listing —
@@ -367,7 +370,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
 			loadAssignment: defaultCla,
 			endpoints:      defaultEpMap,
-			vhost:          proxy.BuildOutboundServiceVirtualHost(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName]),
+			vhost:          outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName], chainFilters, serviceName),
 			sanNamespaces:  sanNamespaces,
 			service:        serviceName,
 			sni:            strconv.Itoa(int(defaultPort)),
@@ -383,7 +386,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 				cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
 				loadAssignment: pcla,
 				endpoints:      b.epMap,
-				vhost:          proxy.BuildOutboundClusterVirtualHost(portName, []string{portName}),
+				vhost:          outboundPortVhostWithChainFilter(portName, chainFilters, serviceName),
 				sanNamespaces:  sanNamespaces,
 				service:        serviceName,
 				sni:            strconv.Itoa(int(port)),
@@ -527,4 +530,25 @@ func (c *SnapshotCache) retentionGrace() time.Duration {
 // listeners or secrets.
 func (c *SnapshotCache) generateClusterSnapshot(ctx context.Context) error {
 	return c.generateSnapshot(ctx)
+}
+
+// outboundVhostWithChainFilter builds a service's outbound vhost and enables its
+// service-wide chain filter (025 M4) at the vhost — parity with the capture route
+// table: both tables serve the same GAMMA/chain config.
+func outboundVhostWithChainFilter(fqdn string, domains []string, rules []proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, serviceName string) *routev3.VirtualHost {
+	vh := proxy.BuildOutboundServiceVirtualHost(fqdn, domains, rules)
+	if ef, ok := chainFilters[serviceName]; ok {
+		proxy.ApplyServiceChainFilter(vh, &ef)
+	}
+	return vh
+}
+
+// outboundPortVhostWithChainFilter is the per-advertised-port variant (the chain
+// filter is service-wide: every port spelling carries it).
+func outboundPortVhostWithChainFilter(portName string, chainFilters map[string]proxy.ExtensionFilter, serviceName string) *routev3.VirtualHost {
+	vh := proxy.BuildOutboundClusterVirtualHost(portName, []string{portName})
+	if ef, ok := chainFilters[serviceName]; ok {
+		proxy.ApplyServiceChainFilter(vh, &ef)
+	}
+	return vh
 }

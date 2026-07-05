@@ -16,6 +16,9 @@ func (c *SnapshotCache) SetServiceRoutes(routes map[string][]proxy.GammaRoute) {
 	c.serviceRoutes = routes
 	c.depMu.Unlock()
 	if changed {
+		// Route-referenced extension filters live default-disabled in the per-pod
+		// HTTP listeners' HCM chains; rule changes can change that union.
+		c.regenerateAllHTTPListeners()
 		c.signalDependencyChange()
 	}
 }
@@ -31,6 +34,7 @@ func (c *SnapshotCache) SetImportedServiceRoutes(routes map[string][]proxy.Gamma
 	c.importedServiceRoutes = routes
 	c.depMu.Unlock()
 	if changed {
+		c.regenerateAllHTTPListeners()
 		c.signalDependencyChange()
 	}
 }
@@ -270,6 +274,7 @@ func (c *SnapshotCache) SetServiceChainFilters(filters map[string]proxy.Extensio
 		// INFO on change: the in-vivo debugging signal for "the filter never
 		// applied" (2026-07-05: one agent silently held an empty map until restart).
 		c.log.Info("service chain filters updated", "count", len(filters))
+		c.regenerateAllHTTPListeners()
 		c.signalDependencyChange()
 	}
 }
@@ -283,6 +288,7 @@ func (c *SnapshotCache) SetImportedServiceChainFilters(filters map[string]proxy.
 	c.depMu.Unlock()
 	if changed {
 		c.log.Info("imported service chain filters updated", "count", len(filters))
+		c.regenerateAllHTTPListeners()
 		c.signalDependencyChange()
 	}
 }
@@ -321,4 +327,36 @@ func equalServiceChainFilters(a, b map[string]proxy.ExtensionFilter) bool {
 // equalAny compares two Any configs by proto semantics (nil-safe).
 func equalAny(a, b *anypb.Any) bool {
 	return proto.Equal(a, b)
+}
+
+// regenerateAllHTTPListeners rebuilds every per-pod outbound + capture HTTP listener
+// in place. Called when the escape-hatch extension-filter UNION may have changed
+// (GAMMA rules or service chain filters, local or imported): the default-disabled
+// HCM entries are embedded in the listeners, and typed_per_filter_config can only
+// re-enable a filter already present in the chain — a stale chain silently disables
+// the feature (2026-07-05 talos finding: the outbound HCM never carried the union).
+func (c *SnapshotCache) regenerateAllHTTPListeners() {
+	extensionFilters := c.extensionHTTPFilters()
+	c.listenerMu.Lock()
+	for netns, entry := range c.listeners {
+		if entry.cniPod == nil {
+			continue
+		}
+		newCapture, err := c.generateCaptureListener(entry.cniPod)
+		if err != nil {
+			c.log.Error("failed to regenerate capture listener on extension-union change",
+				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			continue
+		}
+		newOutbound, err := proxy.GenerateOutboundHTTPListener(entry.cniPod, c.meshDomain, c.emitStatsPod, extensionFilters)
+		if err != nil {
+			c.log.Error("failed to regenerate outbound listener on extension-union change",
+				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			continue
+		}
+		entry.capture = newCapture
+		entry.outbound = newOutbound
+		c.listeners[netns] = entry
+	}
+	c.listenerMu.Unlock()
 }
