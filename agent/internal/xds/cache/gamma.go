@@ -267,6 +267,9 @@ func (c *SnapshotCache) SetServiceChainFilters(filters map[string]proxy.Extensio
 	c.serviceChainFilters = filters
 	c.depMu.Unlock()
 	if changed {
+		// INFO on change: the in-vivo debugging signal for "the filter never
+		// applied" (2026-07-05: one agent silently held an empty map until restart).
+		c.log.Info("service chain filters updated", "count", len(filters))
 		c.signalDependencyChange()
 	}
 }
@@ -279,6 +282,7 @@ func (c *SnapshotCache) SetImportedServiceChainFilters(filters map[string]proxy.
 	c.importedServiceChainFilters = filters
 	c.depMu.Unlock()
 	if changed {
+		c.log.Info("imported service chain filters updated", "count", len(filters))
 		c.signalDependencyChange()
 	}
 }

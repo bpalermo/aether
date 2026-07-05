@@ -662,3 +662,29 @@ func TestBuildGammaRouteFromGRPC_HeaderModifier(t *testing.T) {
 	require.Len(t, gr.HeaderMutation.RemoveResponse, 1)
 	assert.Equal(t, "x-grpc-debug", gr.HeaderMutation.RemoveResponse[0])
 }
+
+// TestReconcile_ServiceChainFilterPush (M4 seam test): a CHAIN-scope HTTPFilter with
+// a Service targetRef must reach the sink as a service chain filter through a full
+// Reconcile.
+func TestReconcile_ServiceChainFilterPush(t *testing.T) {
+	cfg, err := anypb.New(&header_to_metadatav3.Config{})
+	require.NoError(t, err)
+	hf := &configapisv1.HTTPFilter{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo-chain", Namespace: "aether-test"},
+		Spec: configprotov1.HTTPFilterSpec_builder{
+			Filter: "envoy.filters.http.header_mutation", TypedConfig: cfg,
+			Scope: configprotov1.HTTPFilterSpec_SCOPE_CHAIN,
+			TargetRefs: []*configprotov1.PolicyTargetRef{
+				configprotov1.PolicyTargetRef_builder{Kind: "Service", Name: "echo"}.Build(),
+			},
+		}.Build(),
+	}
+	s := newScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(hf).Build()
+	sink := &fakeSink{}
+	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "aether.internal", Log: slog.New(slog.DiscardHandler), httpFilterEnabled: true}
+	_, err = r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+	require.Contains(t, sink.chainFilters, "aether-test/echo", "the CHAIN filter must be pushed keyed by <ns>/<svc>")
+	assert.Equal(t, "envoy.filters.http.header_mutation", sink.chainFilters["aether-test/echo"].Name)
+}

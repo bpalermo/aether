@@ -55,6 +55,7 @@ go_test(
     srcs = [
         "cache_test.go",
         "capture_test.go",
+        "chain_seam_test.go",
         "cluster_alias_test.go",
         "cluster_test.go",
         "dependencies_test.go",
@@ -83,12 +84,14 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+        "@org_golang_google_protobuf//types/known/anypb",
         "@org_uber_go_atomic//:atomic",
     ],
 )

@@ -150,6 +150,18 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	for _, svc := range c.captureTCPDeps {
 		set[svc] = struct{}{}
 	}
+	// Services with a service-wide chain filter (025 M4): always in scope — the
+	// filter is enabled at the service's capture vhost, and vhost emission is
+	// dependency-gated. Without this, a chain-filtered service with NO GAMMA routes
+	// and no declaring pod never gets its dedicated vhost, so the filter silently
+	// never applies (requests fall to the ODCDS catch-all vhost, which carries no
+	// typed_per_filter_config). Explicit + few, like GAMMA route targets.
+	for svc := range c.serviceChainFilters {
+		set[svc] = struct{}{}
+	}
+	for svc := range c.importedServiceChainFilters {
+		set[svc] = struct{}{}
+	}
 	for _, deps := range c.podDeps {
 		if deps.service != "" {
 			set[deps.service] = struct{}{}
