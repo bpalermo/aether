@@ -7,6 +7,7 @@ import (
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
+	rbac_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/rbac/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -155,4 +156,67 @@ func TestExtAuthzForm(t *testing.T) {
 	_, ok := DefaultConfig(ExtAuthzFilterName)
 	assert.False(t, ok, "ext_authz must have no default chain config")
 	assert.True(t, Allowed(ExtAuthzFilterName), "but TPFC emission is allowed")
+}
+
+// TestRBACForm (RBAC M1): validate matrix + render enforce-vs-audit + namespace sugar.
+func TestRBACForm(t *testing.T) {
+	mk := func(mode configprotov1.RBACRoute_Mode) *configprotov1.HTTPFilterSpec {
+		sp := &configprotov1.HTTPFilterSpec{}
+		sp.SetRbac(configprotov1.RBACRoute_builder{
+			Mode: mode,
+			Policies: []*configprotov1.RBACRoute_Policy{
+				configprotov1.RBACRoute_Policy_builder{
+					Name: "callers",
+					Principals: []*configprotov1.RBACRoute_Principal{
+						configprotov1.RBACRoute_Principal_builder{SpiffeId: "spiffe://aether.internal/ns/aether-test/sa/client"}.Build(),
+						configprotov1.RBACRoute_Principal_builder{Namespace: "team-a"}.Build(),
+					},
+					Permissions: []*configprotov1.RBACRoute_Permission{
+						configprotov1.RBACRoute_Permission_builder{PathPrefix: "/admin"}.Build(),
+					},
+				}.Build(),
+			},
+		}.Build())
+		return sp
+	}
+	require.NoError(t, ValidateSpec(mk(configprotov1.RBACRoute_MODE_ENFORCE)))
+
+	// Invalid: principal with both/neither fields.
+	bad := &configprotov1.HTTPFilterSpec{}
+	bad.SetRbac(configprotov1.RBACRoute_builder{Policies: []*configprotov1.RBACRoute_Policy{
+		configprotov1.RBACRoute_Policy_builder{Name: "x", Principals: []*configprotov1.RBACRoute_Principal{
+			configprotov1.RBACRoute_Principal_builder{}.Build(),
+		}}.Build(),
+	}}.Build())
+	require.ErrorContains(t, ValidateSpec(bad), "exactly one of spiffeId or namespace")
+
+	// ENFORCE renders rules-only.
+	name, cfg, err := Render(mk(configprotov1.RBACRoute_MODE_ENFORCE))
+	require.NoError(t, err)
+	assert.Equal(t, RBACFilterName, name)
+	msg, err := cfg.UnmarshalNew()
+	require.NoError(t, err)
+	per := msg.(*rbac_filterv3.RBACPerRoute)
+	require.NotNil(t, per.GetRbac().GetRules())
+	assert.Nil(t, per.GetRbac().GetShadowRules(), "enforce must not set shadow rules")
+	pol := per.GetRbac().GetRules().GetPolicies()["callers"]
+	require.NotNil(t, pol)
+	assert.Equal(t, "spiffe://aether.internal/ns/aether-test/sa/client",
+		pol.GetPrincipals()[0].GetAuthenticated().GetPrincipalName().GetExact())
+	assert.Contains(t, pol.GetPrincipals()[1].GetAuthenticated().GetPrincipalName().GetSafeRegex().GetRegex(),
+		"/ns/team-a/sa/", "namespace sugar renders the SPIFFE prefix regex")
+
+	// AUDIT renders shadow-only + the audit stat prefix.
+	_, cfg2, err := Render(mk(configprotov1.RBACRoute_MODE_AUDIT))
+	require.NoError(t, err)
+	msg2, _ := cfg2.UnmarshalNew()
+	per2 := msg2.(*rbac_filterv3.RBACPerRoute)
+	assert.Nil(t, per2.GetRbac().GetRules(), "audit must not enforce")
+	require.NotNil(t, per2.GetRbac().GetShadowRules())
+	assert.Equal(t, "aether_audit_", per2.GetRbac().GetShadowRulesStatPrefix())
+
+	// Chain default = empty no-op RBAC (unlike ext_authz which has none).
+	dc, ok := DefaultConfig(RBACFilterName)
+	require.True(t, ok)
+	assert.Nil(t, dc.(*rbac_filterv3.RBAC).GetRules())
 }

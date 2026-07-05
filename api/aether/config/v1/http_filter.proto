@@ -68,6 +68,14 @@ message HTTPFilterSpec {
   // drops it otherwise (logged) so a stray policy cannot NACK the proxy.
   ExtAuthzRoute ext_authz = 6;
 
+  // rbac is the TYPED form of envoy.filters.http.rbac: LOCAL authorization —
+  // in-process allow/deny by verified peer identity (SPIFFE SAN on the inbound
+  // path; the aether.source metadata on egress) and path/method, with NO sidecar,
+  // no per-request RPC, and no failure mode (policy is config). mode AUDIT
+  // evaluates + counts (rbac.shadow_denied stats) without enforcing — dry-run a
+  // policy on live traffic, then flip to ENFORCE (identical rules by construction).
+  RBACRoute rbac = 7;
+
   // header_to_metadata is the TYPED form of envoy.filters.http.header_to_metadata
   // (proposal 025 M4 typed promotion): the one allow-listed filter Gateway API cannot
   // express (it powers subset routing). Mutually exclusive with filter/typed_config —
@@ -86,6 +94,53 @@ message ExtAuthzRoute {
   bool disable_request_body_buffering = 2;
   // disabled exempts the targeted route from a broader (service-wide) authz filter.
   bool disabled = 3;
+}
+
+// RBACRoute is the typed local-authorization form (renders to Envoy's RBACPerRoute).
+message RBACRoute {
+  // mode: ENFORCE (default, incl. UNSPECIFIED) applies the policies; AUDIT
+  // evaluates them as shadow rules — counted, never enforced.
+  Mode mode = 1 [(buf.validate.field).enum.defined_only = true];
+  // action: ALLOW (default, incl. UNSPECIFIED) = only matching requests pass;
+  // DENY = matching requests are rejected, everything else passes.
+  Action action = 2 [(buf.validate.field).enum.defined_only = true];
+  repeated Policy policies = 3 [(buf.validate.field).repeated.min_items = 1];
+
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_ENFORCE = 1;
+    MODE_AUDIT = 2;
+  }
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_ALLOW = 1;
+    ACTION_DENY = 2;
+  }
+
+  message Policy {
+    string name = 1 [(buf.validate.field).string.min_len = 1];
+    // principals: WHO. At least one must match (OR). Empty is rejected — an
+    // any-principal policy should be explicit at the route level, not implicit.
+    repeated Principal principals = 2 [(buf.validate.field).repeated.min_items = 1];
+    // permissions: WHAT. At least one must match (OR); empty = any request.
+    repeated Permission permissions = 3;
+  }
+
+  // Principal matches the calling workload. Exactly one field.
+  message Principal {
+    // spiffe_id is an exact verified-peer SPIFFE ID (inbound mTLS SAN).
+    string spiffe_id = 1;
+    // namespace is aether sugar: any workload in the namespace — renders to a
+    // principal regex ^spiffe://[^/]+/ns/<namespace>/sa/.+ (trust-domain agnostic).
+    string namespace = 2;
+  }
+
+  // Permission matches the request. Exactly one field.
+  message Permission {
+    string path_prefix = 1;
+    // method is an HTTP method (GET, POST, ...).
+    string method = 2;
+  }
 }
 
 // HeaderToMetadata promotes the common header_to_metadata use to typed config: each

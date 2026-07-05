@@ -22,6 +22,9 @@ import (
 	"fmt"
 	"time"
 
+	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"github.com/bpalermo/aether/common/extensionfilter"
+
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
@@ -252,6 +255,12 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 			ExtensionFilters: []proxy.ExtensionFilter{{
 				Name:   "envoy.filters.http.header_mutation",
 				Config: headerMutationPerRoute,
+			}, {
+				// rbac (local authz): the real renderer's RBACPerRoute — audit-mode
+				// shadow rules with the namespace-sugar regex principal — accepted
+				// by stock Envoy alongside its empty default-disabled chain entry.
+				Name:   extensionfilter.RBACFilterName,
+				Config: rbacPerRoute(),
 			}},
 		},
 		{
@@ -607,4 +616,25 @@ func mustAny(m proto.Message) *anypb.Any {
 		panic(fmt.Sprintf("mustAny: %v", err))
 	}
 	return a
+}
+
+// rbacPerRoute renders a representative typed rbac form through the REAL renderer.
+func rbacPerRoute() *anypb.Any {
+	sp := &configprotov1.HTTPFilterSpec{}
+	sp.SetRbac(configprotov1.RBACRoute_builder{
+		Mode: configprotov1.RBACRoute_MODE_AUDIT,
+		Policies: []*configprotov1.RBACRoute_Policy{
+			configprotov1.RBACRoute_Policy_builder{
+				Name: "audit-callers",
+				Principals: []*configprotov1.RBACRoute_Principal{
+					configprotov1.RBACRoute_Principal_builder{Namespace: "team-a"}.Build(),
+				},
+			}.Build(),
+		},
+	}.Build())
+	_, cfg, err := extensionfilter.Render(sp)
+	if err != nil {
+		panic(err)
+	}
+	return cfg
 }
