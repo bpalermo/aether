@@ -21,6 +21,8 @@ go_library(
         "//agent/internal/xds/config",
         "//agent/internal/xds/proxy",
         "//api/aether/cni/v1:cni",
+        "//api/aether/config/v1:config",
+        "//common/extensionfilter",
         "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
         "@com_github_envoyproxy_go_control_plane_envoy//config/common/mutation_rules/v3:mutation_rules",

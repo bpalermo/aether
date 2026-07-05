@@ -10,11 +10,16 @@ package extensionfilter
 import (
 	"errors"
 	"fmt"
+	"regexp"
 
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	rbac_configv3 "github.com/envoyproxy/go-control-plane/envoy/config/rbac/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
+	rbac_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/rbac/v3"
+	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -34,7 +39,14 @@ var allowed = map[string]func() proto.Message{
 	// sidecar entry (full transport, disabled), never a per-reference union entry.
 	// A nil builder means CollectExtensionFilters skips it.
 	ExtAuthzFilterName: nil,
+	// rbac (local authorization): the chain entry is an EMPTY config (no rules =
+	// no-op); RBACPerRoute carries complete rules per route/vhost — no system
+	// half needed, unlike ext_authz.
+	RBACFilterName: func() proto.Message { return &rbac_filterv3.RBAC{} },
 }
+
+// RBACFilterName is the local-authorization filter (RBAC).
+const RBACFilterName = "envoy.filters.http.rbac"
 
 // ExtAuthzFilterName is the external-authorization filter (proposal 027).
 const ExtAuthzFilterName = "envoy.filters.http.ext_authz"
@@ -89,12 +101,15 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 	if spec.GetExtAuthz() != nil {
 		forms++
 	}
+	if spec.GetRbac() != nil {
+		forms++
+	}
 	opaque := spec.GetFilter() != "" || spec.GetTypedConfig() != nil
 	if opaque {
 		forms++
 	}
 	if forms != 1 {
-		return errors.New("set exactly one authoring form: headerToMetadata, extAuthz, or filter+typedConfig (opaque)")
+		return errors.New("set exactly one authoring form: headerToMetadata, extAuthz, rbac, or filter+typedConfig (opaque)")
 	}
 	typed := !opaque
 	if spec.GetFilter() == ExtAuthzFilterName {
@@ -109,8 +124,8 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 		if !targetsAService(spec) {
 			return errors.New("spec.scope INBOUND (destination-side enforcement) requires a targetRef of kind Service")
 		}
-		if spec.GetExtAuthz() == nil {
-			return errors.New("spec.scope INBOUND supports only the extAuthz form (v1)")
+		if spec.GetExtAuthz() == nil && spec.GetRbac() == nil {
+			return errors.New("spec.scope INBOUND supports the extAuthz and rbac forms (v1)")
 		}
 	}
 	if typed {
@@ -121,6 +136,29 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 		}
 		if ea := spec.GetExtAuthz(); ea != nil && ea.GetDisabled() && len(ea.GetContextExtensions()) > 0 {
 			return errors.New("extAuthz: disabled and contextExtensions are mutually exclusive")
+		}
+		if rb := spec.GetRbac(); rb != nil {
+			if len(rb.GetPolicies()) == 0 {
+				return errors.New("rbac: at least one policy is required")
+			}
+			for i, pol := range rb.GetPolicies() {
+				if pol.GetName() == "" {
+					return fmt.Errorf("rbac.policies[%d]: name is required", i)
+				}
+				if len(pol.GetPrincipals()) == 0 {
+					return fmt.Errorf("rbac.policies[%d]: at least one principal is required", i)
+				}
+				for j, pr := range pol.GetPrincipals() {
+					if (pr.GetSpiffeId() == "") == (pr.GetNamespace() == "") {
+						return fmt.Errorf("rbac.policies[%d].principals[%d]: exactly one of spiffeId or namespace", i, j)
+					}
+				}
+				for j, pm := range pol.GetPermissions() {
+					if (pm.GetPathPrefix() == "") == (pm.GetMethod() == "") {
+						return fmt.Errorf("rbac.policies[%d].permissions[%d]: exactly one of pathPrefix or method", i, j)
+					}
+				}
+			}
 		}
 		return nil
 	}
@@ -166,6 +204,23 @@ func targetsAService(spec *configprotov1.HTTPFilterSpec) bool {
 // verbatim. Assumes ValidateSpec passed; callers on unvalidated input must check the
 // error.
 func Render(spec *configprotov1.HTTPFilterSpec) (string, *anypb.Any, error) {
+	if rb := spec.GetRbac(); rb != nil {
+		rules := renderRBACRules(rb)
+		per := &rbac_filterv3.RBACPerRoute{Rbac: &rbac_filterv3.RBAC{}}
+		if rb.GetMode() == configprotov1.RBACRoute_MODE_AUDIT {
+			// AUDIT: shadow rules only — evaluated + counted (rbac.shadow_*
+			// stats under the aether_audit_ prefix), never enforced.
+			per.Rbac.ShadowRules = rules
+			per.Rbac.ShadowRulesStatPrefix = "aether_audit_"
+		} else {
+			per.Rbac.Rules = rules
+		}
+		a, err := anypb.New(per)
+		if err != nil {
+			return "", nil, fmt.Errorf("render rbac: %w", err)
+		}
+		return RBACFilterName, a, nil
+	}
 	if ea := spec.GetExtAuthz(); ea != nil {
 		var cfg *ext_authzv3.ExtAuthzPerRoute
 		if ea.GetDisabled() {
@@ -207,4 +262,60 @@ func Render(spec *configprotov1.HTTPFilterSpec) (string, *anypb.Any, error) {
 		return HeaderToMetadataFilterName, a, nil
 	}
 	return spec.GetFilter(), spec.GetTypedConfig(), nil
+}
+
+// renderRBACRules builds the config.rbac.v3.RBAC rule set from the typed form.
+func renderRBACRules(rb *configprotov1.RBACRoute) *rbac_configv3.RBAC {
+	action := rbac_configv3.RBAC_ALLOW
+	if rb.GetAction() == configprotov1.RBACRoute_ACTION_DENY {
+		action = rbac_configv3.RBAC_DENY
+	}
+	policies := make(map[string]*rbac_configv3.Policy, len(rb.GetPolicies()))
+	for _, pol := range rb.GetPolicies() {
+		p := &rbac_configv3.Policy{}
+		for _, pr := range pol.GetPrincipals() {
+			p.Principals = append(p.Principals, renderPrincipal(pr))
+		}
+		if len(pol.GetPermissions()) == 0 {
+			p.Permissions = []*rbac_configv3.Permission{{Rule: &rbac_configv3.Permission_Any{Any: true}}}
+		}
+		for _, pm := range pol.GetPermissions() {
+			p.Permissions = append(p.Permissions, renderPermission(pm))
+		}
+		policies[pol.GetName()] = p
+	}
+	return &rbac_configv3.RBAC{Action: action, Policies: policies}
+}
+
+func renderPrincipal(pr *configprotov1.RBACRoute_Principal) *rbac_configv3.Principal {
+	if ns := pr.GetNamespace(); ns != "" {
+		// Namespace sugar: any workload in the namespace, trust-domain agnostic.
+		return &rbac_configv3.Principal{Identifier: &rbac_configv3.Principal_Authenticated_{
+			Authenticated: &rbac_configv3.Principal_Authenticated{
+				PrincipalName: &matcherv3.StringMatcher{MatchPattern: &matcherv3.StringMatcher_SafeRegex{
+					SafeRegex: &matcherv3.RegexMatcher{Regex: "^spiffe://[^/]+/ns/" + regexp.QuoteMeta(ns) + "/sa/.+"},
+				}},
+			},
+		}}
+	}
+	return &rbac_configv3.Principal{Identifier: &rbac_configv3.Principal_Authenticated_{
+		Authenticated: &rbac_configv3.Principal_Authenticated{
+			PrincipalName: &matcherv3.StringMatcher{MatchPattern: &matcherv3.StringMatcher_Exact{Exact: pr.GetSpiffeId()}},
+		},
+	}}
+}
+
+func renderPermission(pm *configprotov1.RBACRoute_Permission) *rbac_configv3.Permission {
+	if m := pm.GetMethod(); m != "" {
+		return &rbac_configv3.Permission{Rule: &rbac_configv3.Permission_Header{
+			Header: &routev3.HeaderMatcher{Name: ":method", HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{MatchPattern: &matcherv3.StringMatcher_Exact{Exact: m}},
+			}},
+		}}
+	}
+	return &rbac_configv3.Permission{Rule: &rbac_configv3.Permission_UrlPath{
+		UrlPath: &matcherv3.PathMatcher{Rule: &matcherv3.PathMatcher_Path{
+			Path: &matcherv3.StringMatcher{MatchPattern: &matcherv3.StringMatcher_Prefix{Prefix: pm.GetPathPrefix()}},
+		}},
+	}}
 }
