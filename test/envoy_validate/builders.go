@@ -20,6 +20,7 @@ package envoy_validate
 
 import (
 	"fmt"
+	"time"
 
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -104,11 +105,15 @@ func EdgeBootstrapJSON() ([]byte, error) {
 	return marshalBootstrap(bs)
 }
 
-// buildNodeBootstrap builds the core node-proxy bootstrap config.
+// buildNodeBootstrap builds the core node-proxy bootstrap config. The outbound
+// listener carries the node-local authz-sidecar ext_authz entry (proposal 027,
+// disabled — the real transport config, validated by stock Envoy) alongside a
+// static authz_sidecar UDS cluster mirroring the chart's bootstrap cluster.
 func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, nil)
+	authzEntry := proxy.AuthzSidecarHTTPFilter(200*time.Millisecond, false)
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, []*http_connection_managerv3.HttpFilter{authzEntry})
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod: %w", err)
 	}
@@ -116,11 +121,26 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	passthrough := proxy.NewPassthroughOriginalDstCluster()
 	svcCluster := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
 
-	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster}
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, authzSidecarCluster()}
 	staticClusters = append(staticClusters, appClusters...)
 	staticClusters = append(staticClusters, healthCluster)
 
 	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound}), nil
+}
+
+// authzSidecarCluster mirrors the chart's static UDS cluster for the authz sidecar.
+func authzSidecarCluster() *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:                 proxy.AuthzSidecarClusterName,
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
+		ConnectTimeout:       durationpb.New(time.Second),
+		LoadAssignment:       pipeEndpoint(proxy.AuthzSidecarClusterName, "/run/aether/authz/authz.sock"),
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				config.Http2ProtocolOptions(),
+			),
+		},
+	}
 }
 
 // buildNodeCleartextBootstrap builds the node-proxy bootstrap with SPIRE off: the

@@ -2,6 +2,8 @@
 package cmd
 
 import (
+	"time"
+
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -93,6 +95,16 @@ type AgentConfig struct {
 	// the imported routes into the cache (merged with local; local wins). Default off;
 	// no-op when the registry backend has no cross-cluster config plane (etcd only).
 	ImportConfig bool
+
+	// AuthzSidecar enables the node-local external-authorization sidecar entry
+	// (proposal 027): a disabled ext_authz HCM filter targeting the chart's static
+	// authz_sidecar UDS cluster; HTTPFilter (extAuthz) opts routes in.
+	AuthzSidecar bool
+	// AuthzSidecarTimeout is the per-check gRPC timeout.
+	AuthzSidecarTimeout time.Duration
+	// AuthzSidecarFailureModeAllow selects fail-open (true) vs fail-closed (false,
+	// requests on opted-in routes are denied when the sidecar is unreachable).
+	AuthzSidecarFailureModeAllow bool
 
 	// ControlCluster, when set, names the single authorized config-exporting cluster
 	// (proposal 026 EM3, Option E): the importer then trusts ONLY config originating

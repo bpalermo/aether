@@ -205,6 +205,12 @@ type SnapshotCache struct {
 	// importedServiceChainFilters is the peer-cluster-imported variant (026);
 	// local wins on collision. Guarded by depMu.
 	importedServiceChainFilters map[string]proxy.ExtensionFilter
+	// authzSidecar enables the disabled ext_authz HCM entry for the node-local
+	// authorization sidecar (proposal 027). Boot-time (SetAuthzSidecar), so no
+	// locking/regeneration concerns.
+	authzSidecar          bool
+	authzTimeout          time.Duration
+	authzFailureModeAllow bool
 	// captureTCPDeps mirrors captureTCPServices' service names into dependency
 	// state (guarded by depMu; the entries themselves stay under captureMu).
 	// Every TCP mesh service is ALWAYS in the node dependency set: the capture

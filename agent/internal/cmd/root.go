@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/capture"
@@ -123,6 +124,9 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.RemoveStartupTaint, "remove-startup-taint", cfg.RemoveStartupTaint, "Remove the aether.io/agent-not-ready node taint once the CNI server is serving (needs nodes patch RBAC)")
 	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", false, "Enable GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2)")
 	rootCmd.Flags().BoolVar(&cfg.ImportConfig, "import-config", false, "Enable cross-cluster config import: poll the registrar for GAMMA config projections peer clusters exported and materialize them into the node proxy's routes (proposal 026). No-op unless the registry backend has a cross-cluster config plane (etcd)")
+	rootCmd.Flags().BoolVar(&cfg.AuthzSidecar, "authz-sidecar", false, "Enable the node-local external-authorization sidecar entry (proposal 027): a disabled ext_authz HCM filter targeting the static authz_sidecar UDS cluster; HTTPFilter (extAuthz) opts routes in")
+	rootCmd.Flags().DurationVar(&cfg.AuthzSidecarTimeout, "authz-sidecar-timeout", 200*time.Millisecond, "Per-check gRPC timeout for the authz sidecar")
+	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
 	rootCmd.Flags().BoolVar(&cfg.L4Routes, "l4-routes", false, "Enable L4 route types (TCPRoute/TLSRoute/UDPRoute) parented to a Service: weighted TCP floor chains and SNI-routed TLS chains on the capture listener (proposal 018, Phase 3b). NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.")
 	rootCmd.Flags().BoolVar(&cfg.TransparentCapture, "transparent-capture", false, "Enable transparent capture: per-pod capture listeners + cap_http route table from the generated mesh Services (proposal 018, Phase 3a)")
@@ -396,6 +400,9 @@ func runAgent(ctx context.Context) (retErr error) {
 	// into the cache (merged with local routes; local wins). Default off
 	// (--import-config). No-op when the registry backend has no cross-cluster config
 	// plane (kubernetes/dynamodb don't implement registry.ConfigImporter).
+	if cfg.AuthzSidecar {
+		snapshotCache.SetAuthzSidecar(cfg.AuthzSidecarTimeout, cfg.AuthzSidecarFailureModeAllow)
+	}
 	if cfg.ImportConfig {
 		if imp, ok := reg.(registry.ConfigImporter); ok {
 			importer := configimport.NewImporter(imp, snapshotCache, cfg.ClusterName, cfg.ControlCluster, 0, l)

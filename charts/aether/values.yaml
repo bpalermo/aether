@@ -213,6 +213,30 @@ proxy:
       memory: 512Mi
     limits:
       memory: 512Mi
+  # External authorization sidecar (proposal 027): an authz gRPC service co-located
+  # in this DaemonSet pod, reached over a Unix socket. When enabled, the proxy
+  # bootstrap gains a static `authz_sidecar` cluster and the agent emits a
+  # DISABLED ext_authz entry on the HTTP filter chains — zero effect until an
+  # HTTPFilter (extAuthz) opts a route/service in.
+  authzSidecar:
+    enabled: false
+    # Built-in OPA preset (opt-in): runs the OPA envoy plugin with the policy below.
+    opa:
+      enabled: false
+      image: openpolicyagent/opa:1.9.0-envoy
+      # Rego policy mounted via ConfigMap; must define the decision the plugin
+      # queries (envoy/authz/allow by default). Required when opa.enabled.
+      policy: ""
+    # Bring-your-own authz container (used when opa.enabled is false). Must serve
+    # envoy.service.auth.v3.Authorization on unix:///run/aether/authz/authz.sock.
+    image:
+      repository: ""
+      tag: ""
+      args: []
+    # Check timeout and the REQUIRED failure mode: DENY (fail-closed, requests 403
+    # when the sidecar is unreachable) or ALLOW (fail-open).
+    timeout: 200ms
+    failureMode: DENY
   # Envoy overload manager graceful-degradation ladder; engages before the OOM
   # kill. Keep maxHeapSizeBytes at ~75% of resources.limits.memory.
   overload:
