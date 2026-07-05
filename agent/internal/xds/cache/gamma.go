@@ -383,12 +383,12 @@ func equalAny(a, b *anypb.Any) bool {
 // re-enable a filter already present in the chain — a stale chain silently disables
 // the feature (2026-07-05 talos finding: the outbound HCM never carried the union).
 func (c *SnapshotCache) regenerateAllHTTPListeners() {
-	extensionFilters := c.extensionHTTPFilters()
 	c.listenerMu.Lock()
 	for netns, entry := range c.listeners {
 		if entry.cniPod == nil {
 			continue
 		}
+		extensionFilters := c.podExtensionHTTPFilters(entry.cniPod)
 		newCapture, err := c.generateCaptureListener(entry.cniPod)
 		if err != nil {
 			c.log.Error("failed to regenerate capture listener on extension-union change",
@@ -401,7 +401,7 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
-		newInbound, err := proxy.NewInboundListener(entry.cniPod, c.trustDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(entry.cniPod))
+		newInbound, err := proxy.NewInboundListener(entry.cniPod, c.trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(entry.cniPod))
 		if err != nil {
 			c.log.Error("failed to regenerate inbound listener on extension-union change",
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)

@@ -47,7 +47,10 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 // transport socket — symmetric with the cleartext outbound clusters — so the mesh
 // data path is routable without SPIRE.
 func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
-	inbound, err = NewInboundListener(cniPod, trustDomain, emitStatsPod, cleartext, extensionFilters, inboundFilter)
+	// Inbound never carries the egress source-metadata entry: the caller identity
+	// on the inbound path is the verified XFCC, and stamping the destination pod
+	// into aether.source would mislead authz policies.
+	inbound, err = NewInboundListener(cniPod, trustDomain, emitStatsPod, cleartext, WithoutSourceMetadata(extensionFilters), inboundFilter)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
