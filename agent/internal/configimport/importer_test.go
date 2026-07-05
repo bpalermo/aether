@@ -20,9 +20,15 @@ func (f *fakeImporter) ListConfig(context.Context) ([]*registryv1.ServiceConfigP
 	return f.projections, f.err
 }
 
-type fakeSink struct{ routes map[string][]proxy.GammaRoute }
+type fakeSink struct {
+	routes  map[string][]proxy.GammaRoute
+	filters map[string]proxy.ExtensionFilter
+}
 
 func (s *fakeSink) SetImportedServiceRoutes(r map[string][]proxy.GammaRoute) { s.routes = r }
+func (s *fakeSink) SetImportedServiceChainFilters(f map[string]proxy.ExtensionFilter) {
+	s.filters = f
+}
 
 func newImporter(t *testing.T, imp *fakeImporter, sink *fakeSink, own string) *Importer {
 	t.Helper()

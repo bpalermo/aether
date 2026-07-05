@@ -44,7 +44,17 @@ func TestValidateSpec(t *testing.T) {
 		{"nil spec", nil, "spec is required"},
 		{"empty filter", spec("", configprotov1.HTTPFilterSpec_SCOPE_ROUTE, h2mCfg), "spec.filter is required"},
 		{"not allow-listed", spec("envoy.filters.http.lua", configprotov1.HTTPFilterSpec_SCOPE_ROUTE, h2mCfg), "not a supported extension filter"},
-		{"chain scope", spec("envoy.filters.http.header_mutation", configprotov1.HTTPFilterSpec_SCOPE_CHAIN, validPerRoute), "CHAIN is not yet supported"},
+		{"chain scope without targetRef", spec("envoy.filters.http.header_mutation", configprotov1.HTTPFilterSpec_SCOPE_CHAIN, validPerRoute), "CHAIN (service-wide always-on) requires a targetRef"},
+		{"chain scope with Service targetRef", withTarget(spec("envoy.filters.http.header_mutation", configprotov1.HTTPFilterSpec_SCOPE_CHAIN, validPerRoute), "echo"), ""},
+		{"both authoring forms", withTyped(spec("envoy.filters.http.header_mutation", configprotov1.HTTPFilterSpec_SCOPE_ROUTE, validPerRoute)), "exactly one authoring form"},
+		{"typed form valid", withTyped(&configprotov1.HTTPFilterSpec{}), ""},
+		{"typed form empty rule", func() *configprotov1.HTTPFilterSpec {
+			sp := &configprotov1.HTTPFilterSpec{}
+			sp.SetHeaderToMetadata(configprotov1.HeaderToMetadata_builder{Rules: []*configprotov1.HeaderToMetadata_Rule{
+				configprotov1.HeaderToMetadata_Rule_builder{Header: "x"}.Build(),
+			}}.Build())
+			return sp
+		}(), "header and metadataKey are required"},
 		{"nil typedConfig", spec("envoy.filters.http.header_mutation", configprotov1.HTTPFilterSpec_SCOPE_ROUTE, nil), "spec.typedConfig is required"},
 		{"unknown @type", spec("envoy.filters.http.header_mutation", configprotov1.HTTPFilterSpec_SCOPE_ROUTE, &anypb.Any{TypeUrl: "type.googleapis.com/does.not.Exist"}), "unknown or malformed"},
 	}
@@ -59,4 +69,47 @@ func TestValidateSpec(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+// withTarget adds a Service targetRef to a spec (builder helpers for the M4 cases).
+func withTarget(sp *configprotov1.HTTPFilterSpec, svc string) *configprotov1.HTTPFilterSpec {
+	sp.SetTargetRefs([]*configprotov1.PolicyTargetRef{
+		configprotov1.PolicyTargetRef_builder{Kind: "Service", Name: svc}.Build(),
+	})
+	return sp
+}
+
+// withTyped sets the typed headerToMetadata authoring form.
+func withTyped(sp *configprotov1.HTTPFilterSpec) *configprotov1.HTTPFilterSpec {
+	sp.SetHeaderToMetadata(configprotov1.HeaderToMetadata_builder{Rules: []*configprotov1.HeaderToMetadata_Rule{
+		configprotov1.HeaderToMetadata_Rule_builder{Header: "x-canary", MetadataKey: "canary"}.Build(),
+	}}.Build())
+	return sp
+}
+
+// TestRender covers the typed→Envoy render and the opaque passthrough.
+func TestRender(t *testing.T) {
+	// Typed form renders to header_to_metadata with envoy.lb default namespace.
+	sp := withTyped(&configprotov1.HTTPFilterSpec{})
+	name, cfg, err := Render(sp)
+	require.NoError(t, err)
+	assert.Equal(t, HeaderToMetadataFilterName, name)
+	msg, err := cfg.UnmarshalNew()
+	require.NoError(t, err)
+	h2m, ok := msg.(*header_to_metadatav3.Config)
+	require.True(t, ok)
+	require.Len(t, h2m.GetRequestRules(), 1)
+	assert.Equal(t, "x-canary", h2m.GetRequestRules()[0].GetHeader())
+	assert.Equal(t, "canary", h2m.GetRequestRules()[0].GetOnHeaderPresent().GetKey())
+	assert.Equal(t, "envoy.lb", h2m.GetRequestRules()[0].GetOnHeaderPresent().GetMetadataNamespace())
+
+	// Opaque passthrough.
+	op := &configprotov1.HTTPFilterSpec{}
+	op.SetFilter("envoy.filters.http.header_mutation")
+	a, _ := anypb.New(&header_to_metadatav3.Config{})
+	op.SetTypedConfig(a)
+	name2, cfg2, err := Render(op)
+	require.NoError(t, err)
+	assert.Equal(t, "envoy.filters.http.header_mutation", name2)
+	assert.Same(t, a, cfg2)
 }

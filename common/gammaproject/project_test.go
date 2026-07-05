@@ -137,3 +137,55 @@ func TestProjectHTTPRule_RedirectAndExtensionRefSkips(t *testing.T) {
 	assert.Equal(t, int32(301), gr.GetRedirect().GetStatusCode())
 	assert.Empty(t, gr.GetExtensionFilters(), "non-allow-listed ExtensionRef is skipped")
 }
+
+// TestServiceChainFilter covers M4 CHAIN scope: a CHAIN-scope HTTPFilter with a
+// Service targetRef resolves as the service-wide filter; ROUTE-scope filters and
+// other namespaces/services don't; ServiceFilters (route-level) skips CHAIN specs.
+func TestServiceChainFilter(t *testing.T) {
+	cfg, err := anypb.New(&configprotov1.HTTPFilterSpec{})
+	require.NoError(t, err)
+	chain := func(filter, svc string) *configprotov1.HTTPFilterSpec {
+		return configprotov1.HTTPFilterSpec_builder{
+			Filter: filter, TypedConfig: cfg,
+			Scope: configprotov1.HTTPFilterSpec_SCOPE_CHAIN,
+			TargetRefs: []*configprotov1.PolicyTargetRef{
+				configprotov1.PolicyTargetRef_builder{Kind: "Service", Name: svc}.Build(),
+			},
+		}.Build()
+	}
+	httpFilters := map[string]*configprotov1.HTTPFilterSpec{
+		"team-a/chain-hm": chain("envoy.filters.http.header_mutation", "echo"),
+		"team-b/other-ns": chain("envoy.filters.http.header_mutation", "echo"), // wrong ns
+	}
+
+	got := ServiceChainFilter("team-a/echo", httpFilters)
+	require.NotNil(t, got)
+	assert.Equal(t, "envoy.filters.http.header_mutation", got.GetName())
+	assert.Nil(t, ServiceChainFilter("team-a/none", httpFilters))
+
+	// ServiceFilters (route-level, M3) must SKIP chain-scope specs.
+	assert.Empty(t, ServiceFilters("team-a/echo", httpFilters), "CHAIN specs are vhost-level, never per-route")
+
+	// Deterministic tie-break: two chain filters (webhook-enforced not to happen) →
+	// key order picks team-a/aaa.
+	httpFilters["team-a/aaa"] = chain("envoy.filters.http.header_to_metadata", "echo")
+	tie := ServiceChainFilter("team-a/echo", httpFilters)
+	require.NotNil(t, tie)
+	assert.Equal(t, "envoy.filters.http.header_to_metadata", tie.GetName())
+
+	// Typed authoring form renders through the shared Render path.
+	typedSpec := configprotov1.HTTPFilterSpec_builder{
+		Scope: configprotov1.HTTPFilterSpec_SCOPE_CHAIN,
+		TargetRefs: []*configprotov1.PolicyTargetRef{
+			configprotov1.PolicyTargetRef_builder{Kind: "Service", Name: "typed"}.Build(),
+		},
+		HeaderToMetadata: configprotov1.HeaderToMetadata_builder{Rules: []*configprotov1.HeaderToMetadata_Rule{
+			configprotov1.HeaderToMetadata_Rule_builder{Header: "x-canary", MetadataKey: "canary"}.Build(),
+		}}.Build(),
+	}.Build()
+	httpFilters["team-a/typed"] = typedSpec
+	tf := ServiceChainFilter("team-a/typed", httpFilters)
+	require.NotNil(t, tf)
+	assert.Equal(t, "envoy.filters.http.header_to_metadata", tf.GetName())
+	assert.NotNil(t, tf.GetConfig())
+}

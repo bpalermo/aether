@@ -246,13 +246,56 @@ func resolveExtensionFilter(ref *gatewayv1.LocalObjectReference, routeNamespace 
 // not allow-listed, or missing typed_config.
 func allowedExtensionFilter(spec *configprotov1.HTTPFilterSpec) (*registryv1.ExtensionFilter, bool) {
 	if spec == nil || spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+		return nil, false // CHAIN is vhost-level (ServiceChainFilter), never per-route
+	}
+	return renderedExtensionFilter(spec)
+}
+
+// renderedExtensionFilter resolves a spec's authoring form (typed headerToMetadata or
+// opaque filter+typedConfig — proposal 025 M4) to an allow-listed ExtensionFilter.
+func renderedExtensionFilter(spec *configprotov1.HTTPFilterSpec) (*registryv1.ExtensionFilter, bool) {
+	name, cfg, err := extensionfilter.Render(spec)
+	if err != nil || !extensionfilter.Allowed(name) || cfg == nil {
 		return nil, false
 	}
-	name := spec.GetFilter()
-	if !extensionfilter.Allowed(name) || spec.GetTypedConfig() == nil {
-		return nil, false
+	return &registryv1.ExtensionFilter{Name: name, Config: cfg}, true
+}
+
+// ServiceChainFilter resolves the service-wide ALWAYS-ON extension filter for
+// serviceKey ("<ns>/<svc>") — proposal 025 M4 CHAIN scope: an HTTPFilter with
+// scope CHAIN and a same-namespace targetRef naming the Service. At most one per
+// service (webhook-enforced); ties are broken deterministically by HTTPFilter key
+// order as belt-and-braces. Returns nil when none. The filter is enabled at the
+// service's capture vhost (vhost-level typed_per_filter_config), so it applies to
+// ALL of the service's traffic; a per-route ExtensionRef overrides it (Envoy
+// most-specific-wins).
+func ServiceChainFilter(serviceKey string, httpFilters map[string]*configprotov1.HTTPFilterSpec) *registryv1.ExtensionFilter {
+	sref, ok := serviceref.ParseKey(serviceKey)
+	if !ok || len(httpFilters) == 0 {
+		return nil
 	}
-	return &registryv1.ExtensionFilter{Name: name, Config: spec.GetTypedConfig()}, true
+	keys := make([]string, 0, len(httpFilters))
+	for k := range httpFilters {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		spec := httpFilters[k]
+		if spec == nil || spec.GetScope() != configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+			continue
+		}
+		fref, ok := serviceref.ParseKey(k)
+		if !ok || fref.Namespace != sref.Namespace { // same-namespace policy attachment
+			continue
+		}
+		if !targetsService(spec, sref.Name) {
+			continue
+		}
+		if ef, ok := renderedExtensionFilter(spec); ok {
+			return ef
+		}
+	}
+	return nil
 }
 
 // ServiceFilters resolves the HTTPFilters (proposal 025 M3) that policy-attach to the

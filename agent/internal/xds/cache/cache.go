@@ -197,6 +197,14 @@ type SnapshotCache struct {
 	// for a route target whose parentRefs declare no port (then only the portless +
 	// mesh :18081 spellings are emitted, as before). Guarded by depMu.
 	routeTargetPorts map[string][]uint32
+	// serviceChainFilters holds the service-wide ALWAYS-ON extension filter per
+	// route-target service (proposal 025 M4 CHAIN scope), fed by the gamma
+	// reconciler; at most one per service (webhook-enforced). Enabled at the
+	// service's capture vhost. Guarded by depMu.
+	serviceChainFilters map[string]proxy.ExtensionFilter
+	// importedServiceChainFilters is the peer-cluster-imported variant (026);
+	// local wins on collision. Guarded by depMu.
+	importedServiceChainFilters map[string]proxy.ExtensionFilter
 	// captureTCPDeps mirrors captureTCPServices' service names into dependency
 	// state (guarded by depMu; the entries themselves stay under captureMu).
 	// Every TCP mesh service is ALWAYS in the node dependency set: the capture

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 
 	"github.com/bpalermo/aether/common/serviceref"
 
@@ -34,6 +35,11 @@ import (
 // RouteSink receives the projected per-service GAMMA rules (the snapshot cache).
 type RouteSink interface {
 	SetServiceRoutes(routes map[string][]proxy.GammaRoute)
+	// SetServiceChainFilters receives the service-wide ALWAYS-ON extension filters
+	// (proposal 025 M4 CHAIN scope), keyed by "<ns>/<svc>": at most one per service,
+	// from a CHAIN-scope HTTPFilter with a same-namespace Service targetRef. Enabled
+	// at the service's capture vhost.
+	SetServiceChainFilters(filters map[string]proxy.ExtensionFilter)
 	// SetRouteTargetPorts receives the real Service port(s) of each route target
 	// (proposal 023 M2), keyed by the same "<ns>/<svc>" route-target key as
 	// SetServiceRoutes. Sourced from the HTTPRoute/GRPCRoute parentRef port; lets the
@@ -157,6 +163,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	serviceFiltersFor := func(key string) []*registryv1.ExtensionFilter {
 		return gammaproject.ServiceFilters(key, specs)
 	}
+	// Service-wide always-on filters (M4 CHAIN scope): resolve per targeted service.
+	chainFilters := map[string]proxy.ExtensionFilter{}
+	for key, spec := range specs {
+		if spec.GetScope() != configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+			continue
+		}
+		ns, _, _ := strings.Cut(key, "/")
+		for _, t := range spec.GetTargetRefs() {
+			if (t.GetGroup() != "" && t.GetGroup() != "core") || t.GetKind() != "Service" {
+				continue
+			}
+			svcKey := ns + "/" + t.GetName()
+			// Deterministic pick delegated to the shared projector (name-sorted).
+			if ef := gammaproject.ServiceChainFilter(svcKey, specs); ef != nil {
+				chainFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
+			}
+		}
+	}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
 		for _, p := range gammaproject.ServiceParents(hr.Spec.ParentRefs, hr.Namespace) {
@@ -189,6 +213,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 
 	r.Sink.SetServiceRoutes(routes)
+	r.Sink.SetServiceChainFilters(chainFilters)
 	r.Sink.SetRouteTargetPorts(routeTargetPorts)
 	r.Log.DebugContext(ctx, "projected gamma service routes",
 		"httpRoutes", len(httpList.Items), "grpcRoutes", len(grpcList.Items), "services", len(routes))

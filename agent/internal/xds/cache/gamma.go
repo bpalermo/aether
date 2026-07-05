@@ -2,6 +2,8 @@ package cache
 
 import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // SetServiceRoutes replaces the GAMMA east-west L7 rules (HTTPRoute parentRef=
@@ -253,4 +255,66 @@ func timeoutNanos(r proxy.GammaRoute) int64 {
 		return 0
 	}
 	return r.Timeout.AsDuration().Nanoseconds()
+}
+
+// SetServiceChainFilters replaces the service-wide ALWAYS-ON extension filters
+// (proposal 025 M4 CHAIN scope), keyed by "<ns>/<svc>". Fed by the gamma reconciler
+// from CHAIN-scope HTTPFilters with a Service targetRef; at most one per service.
+// Enabled at each service's capture vhost (vhost-level typed_per_filter_config).
+func (c *SnapshotCache) SetServiceChainFilters(filters map[string]proxy.ExtensionFilter) {
+	c.depMu.Lock()
+	changed := !equalServiceChainFilters(c.serviceChainFilters, filters)
+	c.serviceChainFilters = filters
+	c.depMu.Unlock()
+	if changed {
+		c.signalDependencyChange()
+	}
+}
+
+// SetImportedServiceChainFilters replaces the peer-cluster-imported service chain
+// filters (proposal 026). Local wins on a per-service collision, like routes.
+func (c *SnapshotCache) SetImportedServiceChainFilters(filters map[string]proxy.ExtensionFilter) {
+	c.depMu.Lock()
+	changed := !equalServiceChainFilters(c.importedServiceChainFilters, filters)
+	c.importedServiceChainFilters = filters
+	c.depMu.Unlock()
+	if changed {
+		c.signalDependencyChange()
+	}
+}
+
+// serviceChainFiltersSnapshot returns the effective (local ∪ imported, local wins)
+// per-service chain filters for a snapshot rebuild.
+func (c *SnapshotCache) serviceChainFiltersSnapshot() map[string]proxy.ExtensionFilter {
+	c.depMu.RLock()
+	defer c.depMu.RUnlock()
+	if len(c.serviceChainFilters) == 0 && len(c.importedServiceChainFilters) == 0 {
+		return nil
+	}
+	out := make(map[string]proxy.ExtensionFilter, len(c.serviceChainFilters)+len(c.importedServiceChainFilters))
+	for k, v := range c.importedServiceChainFilters {
+		out[k] = v
+	}
+	for k, v := range c.serviceChainFilters { // local overrides imported
+		out[k] = v
+	}
+	return out
+}
+
+func equalServiceChainFilters(a, b map[string]proxy.ExtensionFilter) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || av.Name != bv.Name || !equalAny(av.Config, bv.Config) {
+			return false
+		}
+	}
+	return true
+}
+
+// equalAny compares two Any configs by proto semantics (nil-safe).
+func equalAny(a, b *anypb.Any) bool {
+	return proto.Equal(a, b)
 }

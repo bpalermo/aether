@@ -4,9 +4,12 @@ import (
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 const h2mFilter = "envoy.filters.http.header_to_metadata"
@@ -88,4 +91,37 @@ func TestBuildOutboundServiceVirtualHost_EmitsExtensionConfig(t *testing.T) {
 	// First route is the rule's; the trailing catch-all carries no per-filter config.
 	assert.Same(t, cfg, vh.GetRoutes()[0].GetTypedPerFilterConfig()[h2mFilter])
 	assert.Nil(t, vh.GetRoutes()[len(vh.GetRoutes())-1].GetTypedPerFilterConfig(), "catch-all has no extension config")
+}
+
+// TestApplyServiceChainFilter covers the vhost-level enablement (025 M4 CHAIN):
+// the filter lands in vhost typed_per_filter_config; nil/non-allow-listed are no-ops.
+func TestApplyServiceChainFilter(t *testing.T) {
+	cfg, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{})
+	require.NoError(t, err)
+
+	vh := &routev3.VirtualHost{Name: "svc"}
+	ApplyServiceChainFilter(vh, &ExtensionFilter{Name: "envoy.filters.http.header_mutation", Config: cfg})
+	require.Contains(t, vh.GetTypedPerFilterConfig(), "envoy.filters.http.header_mutation")
+
+	// Non-allow-listed → no-op.
+	vh2 := &routev3.VirtualHost{Name: "svc2"}
+	ApplyServiceChainFilter(vh2, &ExtensionFilter{Name: "envoy.filters.http.lua", Config: cfg})
+	assert.Empty(t, vh2.GetTypedPerFilterConfig())
+	// Nil filter → no-op.
+	ApplyServiceChainFilter(vh2, nil)
+	assert.Empty(t, vh2.GetTypedPerFilterConfig())
+}
+
+// TestCollectExtensionFilters_Extra covers the chain-filter union: extras (not
+// referenced by any rule) still get their default-disabled HCM entries, deduped
+// against rule-referenced filters.
+func TestCollectExtensionFilters_Extra(t *testing.T) {
+	cfg, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{})
+	require.NoError(t, err)
+	rules := []GammaRoute{{ExtensionFilters: []ExtensionFilter{{Name: "envoy.filters.http.header_mutation", Config: cfg}}}}
+	out := CollectExtensionFilters(rules,
+		ExtensionFilter{Name: "envoy.filters.http.header_mutation", Config: cfg},    // dup of rule's
+		ExtensionFilter{Name: "envoy.filters.http.header_to_metadata", Config: cfg}, // new
+	)
+	require.Len(t, out, 2, "dedup across rules+extras; both allow-listed filters present")
 }

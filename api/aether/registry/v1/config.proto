@@ -30,6 +30,10 @@ message ServiceConfigProjection {
   // routes is the projected, specificity-independent GAMMA rule set (the consumer
   // sorts/builds vhosts exactly as the local path does).
   repeated GammaRoute routes = 4;
+  // service_filter is the service-wide always-on extension filter (proposal 025 M4
+  // CHAIN scope): at most one per service, enabled at the service's capture vhost
+  // (vhost-level typed_per_filter_config). Rides the 026 channel like routes.
+  ExtensionFilter service_filter = 5;
 }
 
 // GammaRoute mirrors the in-memory proxy.GammaRoute: one HTTPRoute/GRPCRoute rule

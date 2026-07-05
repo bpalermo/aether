@@ -20,6 +20,9 @@ import (
 // Sink receives the materialized imported routes (the xDS SnapshotCache).
 type Sink interface {
 	SetImportedServiceRoutes(routes map[string][]proxy.GammaRoute)
+	// SetImportedServiceChainFilters receives the imported service-wide always-on
+	// extension filters (025 M4 CHAIN scope over the 026 channel); local wins.
+	SetImportedServiceChainFilters(filters map[string]proxy.ExtensionFilter)
 }
 
 // Importer polls the registrar for cross-cluster config projections and materializes
@@ -82,8 +85,9 @@ func (i *Importer) poll(ctx context.Context) {
 		i.log.WarnContext(ctx, "config import fetch failed; keeping last-known imported routes", "error", err)
 		return
 	}
-	routes, oldest := i.materialize(projections)
+	routes, chainFilters, oldest := i.materialize(projections)
 	i.sink.SetImportedServiceRoutes(routes)
+	i.sink.SetImportedServiceChainFilters(chainFilters)
 	// EM4: surface propagation lag — the age of the OLDEST imported projection. Negative
 	// when nothing carried a parseable export timestamp.
 	age := -1.0
@@ -98,10 +102,11 @@ func (i *Importer) poll(ctx context.Context) {
 // higher-version projection wins (deterministic, last-writer-by-version). It also
 // returns the oldest materialized projection's export time (zero when none parseable)
 // for the EM4 propagation-lag metric.
-func (i *Importer) materialize(projections []*registryv1.ServiceConfigProjection) (map[string][]proxy.GammaRoute, time.Time) {
+func (i *Importer) materialize(projections []*registryv1.ServiceConfigProjection) (map[string][]proxy.GammaRoute, map[string]proxy.ExtensionFilter, time.Time) {
 	type chosen struct {
 		version string
 		routes  []proxy.GammaRoute
+		filter  *registryv1.ExtensionFilter
 	}
 	picked := make(map[string]chosen, len(projections))
 	for _, p := range projections {
@@ -119,15 +124,22 @@ func (i *Importer) materialize(projections []*registryv1.ServiceConfigProjection
 		if cur, ok := picked[svc]; ok && cur.version >= p.GetVersion() {
 			continue
 		}
-		picked[svc] = chosen{version: p.GetVersion(), routes: proxy.FromConfigProjection(p)}
+		picked[svc] = chosen{version: p.GetVersion(), routes: proxy.FromConfigProjection(p), filter: p.GetServiceFilter()}
 	}
 	if len(picked) == 0 {
-		return nil, time.Time{}
+		return nil, nil, time.Time{}
 	}
 	out := make(map[string][]proxy.GammaRoute, len(picked))
+	var chainFilters map[string]proxy.ExtensionFilter
 	var oldest time.Time
 	for svc, c := range picked {
 		out[svc] = c.routes
+		if c.filter != nil {
+			if chainFilters == nil {
+				chainFilters = map[string]proxy.ExtensionFilter{}
+			}
+			chainFilters[svc] = proxy.ExtensionFilter{Name: c.filter.GetName(), Config: c.filter.GetConfig()}
+		}
 		// version is the exporter's RFC3339Nano timestamp (proposal 026 EM1c); track the
 		// oldest for the propagation-lag metric. Unparseable (e.g. a test stamp) → ignored.
 		if ts, err := time.Parse(time.RFC3339Nano, c.version); err == nil {
@@ -136,5 +148,5 @@ func (i *Importer) materialize(projections []*registryv1.ServiceConfigProjection
 			}
 		}
 	}
-	return out, oldest
+	return out, chainFilters, oldest
 }

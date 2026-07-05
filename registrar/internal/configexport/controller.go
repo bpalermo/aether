@@ -99,8 +99,10 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	httpFilters := c.httpFilterSpecs(ctx)
 
-	// Desired: per EXPORTED route-target, the projected GAMMA routes.
+	// Desired: per EXPORTED route-target, the projected GAMMA routes (+ the
+	// service-wide chain filter, 025 M4 — resolved after the route loops).
 	desired := map[string][]*registryv1.GammaRoute{}
+	desiredFilter := map[string]*registryv1.ExtensionFilter{}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
 		for _, p := range gammaproject.ServiceParents(hr.Spec.ParentRefs, hr.Namespace) {
@@ -126,6 +128,17 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 	}
 
+	// Service-wide chain filters (025 M4): for every exported service — including one
+	// with a chain filter but NO routes (the filter alone is exportable config).
+	for svc := range exported {
+		if ef := gammaproject.ServiceChainFilter(svc, httpFilters); ef != nil {
+			desiredFilter[svc] = ef
+			if _, ok := desired[svc]; !ok {
+				desired[svc] = nil // filter-only projection
+			}
+		}
+	}
+
 	// Current state this cluster authored (origin == self), to diff against.
 	current, err := c.Exporter.ListConfig(ctx)
 	if err != nil {
@@ -141,10 +154,10 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	version := time.Now().UTC().Format(time.RFC3339Nano)
 	for svc, routes := range desired {
 		// Skip when unchanged — avoid churning importers with a fresh version every reconcile.
-		if existing, ok := own[svc]; ok && routesEqual(existing.GetRoutes(), routes) {
+		if existing, ok := own[svc]; ok && routesEqual(existing.GetRoutes(), routes) && proto.Equal(existing.GetServiceFilter(), desiredFilter[svc]) {
 			continue
 		}
-		if err := c.Exporter.SetConfig(ctx, &registryv1.ServiceConfigProjection{Service: svc, Version: version, Routes: routes}); err != nil {
+		if err := c.Exporter.SetConfig(ctx, &registryv1.ServiceConfigProjection{Service: svc, Version: version, Routes: routes, ServiceFilter: desiredFilter[svc]}); err != nil {
 			c.metrics.writeError(ctx)
 			c.Log.ErrorContext(ctx, "failed to export config projection", "service", svc, "error", err)
 			return reconcile.Result{}, err
