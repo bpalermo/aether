@@ -716,6 +716,15 @@ func (c *SnapshotCache) extensionHTTPFilters() []*http_connection_managerv3.Http
 	for _, ef := range chainFilters {
 		chainExtras = append(chainExtras, ef)
 	}
+	// INBOUND-scope filters need their default-disabled chain entry too — rbac
+	// brings no system entry (unlike ext_authz's sidecar entry), so without this
+	// the inbound TPFC references an absent filter and Envoy rejects the listener
+	// (found live: an INBOUND rbac ENFORCE silently never took effect).
+	c.depMu.RLock()
+	for _, ef := range c.serviceInboundFilters {
+		chainExtras = append(chainExtras, ef)
+	}
+	c.depMu.RUnlock()
 	union := proxy.CollectExtensionFilters(allRules, chainExtras...)
 	// Node-local authz sidecar (proposal 027): the disabled ext_authz entry carries
 	// the full transport (the per-route type cannot); routes opt in via TPFC.
