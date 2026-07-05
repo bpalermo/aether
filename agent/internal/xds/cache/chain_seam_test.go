@@ -107,3 +107,15 @@ func TestOutboundVhost_ServiceChainFilter(t *testing.T) {
 	}
 	assert.True(t, foundChainEntry, "outbound HCM must carry the default-disabled extension entry")
 }
+
+// TestExtensionHTTPFilters_AuthzSidecar (027 M1): when the sidecar is enabled the
+// union carries the disabled ext_authz entry on top of any rule/chain filters.
+func TestExtensionHTTPFilters_AuthzSidecar(t *testing.T) {
+	c := newTestCache("node-1")
+	assert.Empty(t, c.extensionHTTPFilters(), "no entries by default")
+	c.SetAuthzSidecar(200*1000*1000, false) // 200ms
+	fs := c.extensionHTTPFilters()
+	require.Len(t, fs, 1)
+	assert.Equal(t, "envoy.filters.http.ext_authz", fs[0].GetName())
+	assert.True(t, fs[0].GetDisabled())
+}

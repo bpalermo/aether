@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bpalermo/aether/common/serviceref"
 
@@ -715,5 +716,20 @@ func (c *SnapshotCache) extensionHTTPFilters() []*http_connection_managerv3.Http
 	for _, ef := range chainFilters {
 		chainExtras = append(chainExtras, ef)
 	}
-	return proxy.CollectExtensionFilters(allRules, chainExtras...)
+	union := proxy.CollectExtensionFilters(allRules, chainExtras...)
+	// Node-local authz sidecar (proposal 027): the disabled ext_authz entry carries
+	// the full transport (the per-route type cannot); routes opt in via TPFC.
+	// Boot-time config — set before any listener generates.
+	if c.authzSidecar {
+		union = append(union, proxy.AuthzSidecarHTTPFilter(c.authzTimeout, c.authzFailureModeAllow))
+	}
+	return union
+}
+
+// SetAuthzSidecar configures the node-local authz sidecar ext_authz entry
+// (proposal 027). Called once at startup, before listener generation.
+func (c *SnapshotCache) SetAuthzSidecar(timeout time.Duration, failureModeAllow bool) {
+	c.authzSidecar = true
+	c.authzTimeout = timeout
+	c.authzFailureModeAllow = failureModeAllow
 }

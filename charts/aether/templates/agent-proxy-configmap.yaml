@@ -280,6 +280,27 @@ data:
 
     static_resources:
       clusters:
+{{- if .Values.proxy.authzSidecar.enabled }}
+      # External authorization sidecar (proposal 027): static UDS cluster — always
+      # present/warm, no demand-scoping. The agent emits a DISABLED ext_authz HCM
+      # entry targeting this cluster; HTTPFilter (extAuthz) opts routes in.
+      - name: authz_sidecar
+        type: STATIC
+        connect_timeout: 1s
+        load_assignment:
+          cluster_name: authz_sidecar
+          endpoints:
+            - lb_endpoints:
+                - endpoint:
+                    address:
+                      pipe:
+                        path: /run/aether/authz/authz.sock
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
+{{- end }}
       - name: agent_xds
         type: STATIC
         load_assignment:

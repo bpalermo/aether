@@ -203,6 +203,46 @@ spec:
               mountPath: /dev/shm
             - name: ready-marker
               mountPath: /var/run/aether-proxy
+            {{- if .Values.proxy.authzSidecar.enabled }}
+            - name: authz-socket
+              mountPath: /run/aether/authz
+            {{- end }}
+        {{- if .Values.proxy.authzSidecar.enabled }}
+        # External authorization sidecar (proposal 027): serves
+        # envoy.service.auth.v3.Authorization on the shared Unix socket. The proxy's
+        # bootstrap carries a static `authz_sidecar` cluster pointing at it.
+        - name: authz
+          {{- if .Values.proxy.authzSidecar.opa.enabled }}
+          image: {{ .Values.proxy.authzSidecar.opa.image | quote }}
+          args:
+            - "run"
+            - "--server"
+            - "--disable-telemetry"
+            - "--addr=127.0.0.1:8181"
+            - "--set=plugins.envoy_ext_authz_grpc.addr=unix:///run/aether/authz/authz.sock"
+            - "--set=decision_logs.console=true"
+            - "/policy/policy.rego"
+          volumeMounts:
+            - name: authz-socket
+              mountPath: /run/aether/authz
+            - name: opa-policy
+              mountPath: /policy
+              readOnly: true
+          {{- else }}
+          image: "{{ .Values.proxy.authzSidecar.image.repository }}:{{ .Values.proxy.authzSidecar.image.tag }}"
+          {{- with .Values.proxy.authzSidecar.image.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: authz-socket
+              mountPath: /run/aether/authz
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+        {{- end }}
       volumes:
         - name: supervisor-bin
           emptyDir: {}
@@ -216,6 +256,15 @@ spec:
         # Pod-local readiness marker (not shared across pods).
         - name: ready-marker
           emptyDir: {}
+        {{- if .Values.proxy.authzSidecar.enabled }}
+        - name: authz-socket
+          emptyDir: {}
+        {{- if .Values.proxy.authzSidecar.opa.enabled }}
+        - name: opa-policy
+          configMap:
+            name: {{ include "aether.fullname" . }}-opa-policy
+        {{- end }}
+        {{- end }}
         - name: proxy-config
           configMap:
             name: {{ include "aether.proxy.configMapName" . }}

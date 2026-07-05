@@ -90,6 +90,13 @@ spec:
             {{- if .Values.controlCluster }}
             - "--control-cluster={{ .Values.controlCluster }}"
             {{- end }}
+            {{- if .Values.proxy.authzSidecar.enabled }}
+            - "--authz-sidecar"
+            - "--authz-sidecar-timeout={{ .Values.proxy.authzSidecar.timeout }}"
+            {{- if eq .Values.proxy.authzSidecar.failureMode "ALLOW" }}
+            - "--authz-sidecar-failure-mode-allow"
+            {{- end }}
+            {{- end }}
             {{- if .Values.agent.l4Routes }}
             - "--l4-routes"
             {{- end }}
