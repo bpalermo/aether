@@ -1,12 +1,20 @@
 package cache
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
@@ -39,4 +47,63 @@ func TestCaptureVhosts_ServiceChainFilter(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "the chain filter must be enabled at the service vhost (typed_per_filter_config)")
+}
+
+// TestOutboundVhost_ServiceChainFilter (M4 outbound parity): the chain filter must be
+// enabled at the service's OUTBOUND vhost too — the outbound route table serves the
+// same GAMMA/chain config as cap_http (2026-07-05 talos finding: requests riding the
+// outbound listener missed the filter; only capture vhosts were decorated).
+func TestOutboundVhost_ServiceChainFilter(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+	pod := &cniv1.CNIPod{
+		Name: "client-1", Namespace: "aether-test", ServiceAccount: "client",
+		NetworkNamespace: "/var/run/netns/cni-x",
+	}
+	require.NoError(t, c.AddPod(ctx, pod, "aether.internal"))
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+
+	cfg, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{})
+	require.NoError(t, err)
+	c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{
+		"aether-test/echo": {Name: "envoy.filters.http.header_mutation", Config: cfg},
+	})
+
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"aether-test/echo": {makeEndpoint("10.0.0.9", "cluster-1", "node-2", 8080)}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	// The outbound route table's echo vhost must carry the vhost-level TPFC.
+	found := false
+	for _, res := range snap.GetResources(resourcev3.RouteType) {
+		rc, ok := res.(*routev3.RouteConfiguration)
+		if !ok {
+			continue
+		}
+		for _, vh := range rc.GetVirtualHosts() {
+			if _, ok := vh.GetTypedPerFilterConfig()["envoy.filters.http.header_mutation"]; ok {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "outbound vhost must carry the service chain filter TPFC")
+	// And the OUTBOUND listener HCM must carry the default-disabled chain entry
+	// (TPFC can only override a filter present in the chain).
+	foundChainEntry := false
+	for name, res := range snap.GetResources(resourcev3.ListenerType) {
+		if !strings.HasPrefix(name, "outbound_http_") {
+			continue
+		}
+		l := res.(*listenerv3.Listener)
+		b, _ := protojson.Marshal(l)
+		if strings.Contains(string(b), "envoy.filters.http.header_mutation") {
+			foundChainEntry = true
+		}
+	}
+	assert.True(t, foundChainEntry, "outbound HCM must carry the default-disabled extension entry")
 }

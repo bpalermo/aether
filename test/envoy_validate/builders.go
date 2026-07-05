@@ -108,7 +108,7 @@ func EdgeBootstrapJSON() ([]byte, error) {
 func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false)
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod: %w", err)
 	}
@@ -129,7 +129,7 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 func buildNodeCleartextBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, true)
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, true, nil)
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod (cleartext): %w", err)
 	}

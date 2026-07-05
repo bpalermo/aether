@@ -8,6 +8,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -45,13 +46,13 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 // cleartext (SPIRE off) builds the inbound listener without a downstream mTLS
 // transport socket — symmetric with the cleartext outbound clusters — so the mesh
 // data path is routable without SPIRE.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
 	inbound, err = NewInboundListener(cniPod, trustDomain, emitStatsPod, cleartext)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 
-	outbound, err = generateOutboundHTTPListener(cniPod, meshDomain, emitStatsPod)
+	outbound, err = GenerateOutboundHTTPListener(cniPod, meshDomain, emitStatsPod, extensionFilters)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -88,7 +89,7 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetServiceAccount())
 }
 
-func generateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool) (*listenerv3.Listener, error) {
+func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -117,7 +118,7 @@ func generateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, emitS
 		StatPrefix:       fmt.Sprintf("out_http_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultOutboundHTTPFilterChain(cniPod, meshDomain, emitStatsPod),
+			buildDefaultOutboundHTTPFilterChain(cniPod, meshDomain, emitStatsPod, extensionFilters),
 		},
 	}, nil
 }

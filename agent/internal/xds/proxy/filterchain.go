@@ -19,7 +19,7 @@ import (
 // before the router so it observes the final route/cluster. The chart mounts the
 // module .so on the proxy unconditionally; Envoy rejects the listener if the
 // referenced dynamic module is absent.
-func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool) *listenerv3.FilterChain {
+func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("outbound_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
 
 	// strip_any_host_port stays OFF: the authority port is a first-class routing
@@ -43,6 +43,10 @@ func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string
 		onDemandHttpFilter(),
 		outboundStatsFilter(cniPod, meshDomain, emitStatsPod),
 	}
+	// Escape-hatch extension filters (025): default-disabled; a route's or vhost's
+	// typed_per_filter_config re-enables + configures them. Same union the capture
+	// HCM carries — the outbound route table serves the same GAMMA/chain config.
+	prefix = append(prefix, extensionFilters...)
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
