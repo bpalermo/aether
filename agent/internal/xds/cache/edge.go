@@ -1113,13 +1113,17 @@ func (c *SnapshotCache) SetEdgeGeoip(gc proxy.GeoipConfig, xffTrustedHops uint32
 	c.edgeXffTrustedHops = xffTrustedHops
 }
 
-// edgeGeoFilters returns [strip] or [strip, geoip] for the edge routing chains.
-// The strip is emitted whenever the edge runs AT ALL — a geoip-less edge must not
-// launder client-supplied x-geo-* into the mesh either.
+// edgeGeoFilters returns [strip] or [strip, geoip, route-cache-clear] for the edge
+// routing chains. The strip is emitted whenever the edge runs AT ALL — a geoip-less
+// edge must not launder client-supplied x-geo-* into the mesh either.
 func (c *SnapshotCache) edgeGeoFilters() []*http_connection_managerv3.HttpFilter {
 	out := []*http_connection_managerv3.HttpFilter{proxy.GeoStripHTTPFilter()}
 	if c.edgeGeo != nil && c.edgeGeo.CityDBPath != "" {
 		out = append(out, proxy.GeoipHTTPFilter(*c.edgeGeo))
+		// Re-route on the geoip-set headers: the HCM cached the route before the
+		// filter chain, so an HTTPRoute header match on x-geo-* needs the cache
+		// cleared after geoip (proposal 028).
+		out = append(out, proxy.GeoRouteCacheClearHTTPFilter())
 	}
 	return out
 }

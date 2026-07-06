@@ -6,6 +6,7 @@ import (
 	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	geoip_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/geoip/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
+	luav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	geoip_maxmindv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/geoip_providers/maxmind/v3"
 	"github.com/stretchr/testify/assert"
@@ -74,4 +75,38 @@ func TestBuildEdgeGatewayHTTPListener_Geo(t *testing.T) {
 	assert.Equal(t, geoStripFilterName, names[1], "strip immediately after readiness")
 	assert.Equal(t, geoipFilterName, names[2], "geoip after the strip")
 	assert.Equal(t, uint32(1), hcm.GetXffNumTrustedHops())
+}
+
+// TestGeoRouteCacheClearHTTPFilter (028): a lua filter with clearRouteCache, real
+// newlines in the source (not literal backslash-n).
+func TestGeoRouteCacheClearHTTPFilter(t *testing.T) {
+	f := GeoRouteCacheClearHTTPFilter()
+	assert.Equal(t, geoRouteCacheClearFilterName, f.GetName())
+	cfg := &luav3.Lua{}
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(cfg))
+	src := cfg.GetDefaultSourceCode().GetInlineString()
+	assert.Contains(t, src, "clearRouteCache()")
+	assert.Contains(t, src, "\n", "lua source must contain real newlines")
+	assert.NotContains(t, src, "\\n", "must not embed literal backslash-n")
+}
+
+// TestEdgeGeoFilters_Order asserts strip → geoip → route-cache-clear on the edge
+// HTTP listener (via the real builder).
+func TestBuildEdgeGatewayHTTPListener_GeoOrder(t *testing.T) {
+	geo := []*http_connection_managerv3.HttpFilter{
+		GeoStripHTTPFilter(),
+		GeoipHTTPFilter(GeoipConfig{CityDBPath: "/db", Headers: []string{"country"}}),
+		GeoRouteCacheClearHTTPFilter(),
+	}
+	l := BuildEdgeGatewayHTTPListener("ns", "gw", 18150, false, geo, 0)
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	names := []string{}
+	for _, f := range hcm.GetHttpFilters() {
+		names = append(names, f.GetName())
+	}
+	// readiness, strip, geoip, route-cache-clear, ..., router
+	assert.Equal(t, geoStripFilterName, names[1])
+	assert.Equal(t, geoipFilterName, names[2])
+	assert.Equal(t, geoRouteCacheClearFilterName, names[3])
 }
