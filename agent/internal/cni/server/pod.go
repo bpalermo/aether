@@ -67,8 +67,12 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, err
 	}
 	if ignorable {
+		// RESULT_IGNORED (not SUCCESS): tells the CNI plugin this pod is not
+		// mesh-managed so it installs NO capture/redirect. The plugin cannot see
+		// the aether.io/managed label (CRI passes annotations, not labels); the
+		// agent fetched it here via the API, so the agent is the single authority.
 		log.DebugContext(ctx, "ignoring pod")
-		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS}, nil
+		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_IGNORED}, nil
 	}
 
 	// Store in the local storage. Whether this container was already known

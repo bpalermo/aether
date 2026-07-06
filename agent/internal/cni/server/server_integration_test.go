@@ -151,7 +151,7 @@ func TestIntegration_ServerStartsAndAcceptsGRPCConnections(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_IGNORED, resp.GetResult())
 
 	cancel()
 	waitForServerShutdown(t, errCh)
@@ -241,7 +241,7 @@ func TestIntegration_AddPodIgnorableNamespace(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_IGNORED, resp.GetResult())
 
 	// Storage and registry should not have been called for an ignorable pod.
 	assert.False(t, addCalled, "storage should not be called for ignorable pod")

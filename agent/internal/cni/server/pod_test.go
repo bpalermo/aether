@@ -306,7 +306,7 @@ func TestAddPod(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "pod in kube-system is ignored and returns success",
+			name: "pod in kube-system is ignored (RESULT_IGNORED)",
 			setupK8s: func() client.Client {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -328,7 +328,7 @@ func TestAddPod(t *testing.T) {
 					Ips:              []string{"10.0.0.1"},
 				},
 			},
-			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS},
+			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_IGNORED},
 			wantErr: false,
 		},
 		{

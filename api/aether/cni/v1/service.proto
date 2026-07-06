@@ -24,6 +24,11 @@ message AddPodResponse {
     RESULT_UNSPECIFIED = 0;
     RESULT_SUCCESS = 1;
     RESULT_ERROR = 2;
+    // RESULT_IGNORED: the pod is not mesh-managed (aether.io/managed != "true",
+    // a system namespace, or no IPs) — the agent stored no config and the CNI
+    // plugin must install NO capture/redirect (the label is only visible to the
+    // agent, which fetches it from the API; the CNI cannot see labels via CRI).
+    RESULT_IGNORED = 3;
   }
 
   Result result = 1;
@@ -51,6 +56,11 @@ message RemovePodResponse {
     RESULT_UNSPECIFIED = 0;
     RESULT_SUCCESS = 1;
     RESULT_ERROR = 2;
+    // RESULT_IGNORED: the pod is not mesh-managed (aether.io/managed != "true",
+    // a system namespace, or no IPs) — the agent stored no config and the CNI
+    // plugin must install NO capture/redirect (the label is only visible to the
+    // agent, which fetches it from the API; the CNI cannot see labels via CRI).
+    RESULT_IGNORED = 3;
   }
 
   Result result = 1;
