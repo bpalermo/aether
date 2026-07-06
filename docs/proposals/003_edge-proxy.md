@@ -1,7 +1,9 @@
 # Proposal: Edge Proxy (North-South Ingress Gateway)
 
 **Status:** Implemented — PRs #236 (control plane), #237 (EdgeRoute CRD), #238
-(chart), #239 (downstream TLS)
+(chart), #239 (downstream TLS). NOTE: the `EdgeRoute` CRD described here was later
+retired; the edge now routes via the Gateway API (`Gateway`/`HTTPRoute`) — see
+proposals 017 and 018.
 **Author:** Bruno Palermo
 **Date:** 2026-06-19
 

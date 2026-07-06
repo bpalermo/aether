@@ -1,6 +1,6 @@
 # Proposal: Arbitrary-Service interception (the genuine GAMMA / Mesh data plane)
 
-**Status:** Design — 2026-06-25
+**Status:** Implemented — arbitrary-service interception (redirect-all) shipped and is the default for managed pods (`agent.captureRedirectAllDefault=true`), soak-validated hitless on talos. (2026-06-25 design.)
 **Relates:** proposal 018 (Gateway API/GAMMA — the Phase 3 "interception model" this
 details), proposal 020 (namespace-aware services + the mesh-Service model this builds on),
 proposal 004 (demand-scoped distribution — the scope-limiter), proposal 005 (multi-port);

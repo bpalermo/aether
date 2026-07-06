@@ -1,6 +1,6 @@
 # Proposal: Multi-Port Routing per Pod
 
-**Status:** Draft — design validated by spike (Envoy 1.38.0/BoringSSL, 2026-06-13)
+**Status:** Implemented — multi-port routing shipped (`endpoint.aether.io/ports`, per-port EDS, SNI demux); design validated by spike (Envoy 1.38.0/BoringSSL, 2026-06-13).
 **Author:** Bruno Palermo
 **Date:** 2026-06-13
 

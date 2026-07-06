@@ -1,6 +1,6 @@
 # Proposal: Gateway API for aether — north-south + GAMMA east-west
 
-**Status:** Design — 2026-06-22
+**Status:** Implemented — Phases 1–2 (edge `HTTPRoute` + GAMMA east-west) and Phase 3a (HTTP transparent capture) shipped and default-on. Phase 3b (L4 `TCPRoute`/`TLSRoute`/`UDPRoute`) is behind `agent.l4Routes`; the remaining TCP-floor/`VirtualHost`-retirement items are tracked as follow-ups. (2026-06-22 design.)
 **Relates:** proposal 017 (VirtualHost — the north-south CRD this subsumes),
 proposal 003 (edge proxy), proposal 004 (demand-scoped distribution),
 proposal 005 (multi-port), proposal 006 (origin-partitioned registry — the

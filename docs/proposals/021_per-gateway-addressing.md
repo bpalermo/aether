@@ -1,6 +1,6 @@
 # Proposal: Per-Gateway addressing for the edge
 
-**Status:** Design — 2026-06-25
+**Status:** Implemented — per-Gateway addressing (Phase 2) shipped and is the default (`edge.perGatewayAddressing=true`). (2026-06-25 design.)
 **Relates:** proposal 018 (Gateway API/GAMMA — north-south edge), proposal 003 (edge
 proxy); the conformance baseline (`docs/conformance/baseline-2026-06-25*.md`) that
 surfaced this, and #323 (namespace-agnostic edge) which exposed it; [[project_edge_proxy_plan]],

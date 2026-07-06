@@ -1,6 +1,6 @@
 # Proposal: Gateway API conformance in CI
 
-**Status:** Design — 2026-06-28
+**Status:** Implemented — Gateway API conformance runs in CI and is a hard gate (GATEWAY-HTTP + MESH-HTTP Core). (2026-06-28 design.)
 **Relates:** proposal 018 (Gateway API / GAMMA — the API this certifies), proposal
 022 (arbitrary-service interception — the blocker for MESH-HTTP), proposal 003
 (edge proxy — the north-south data plane GATEWAY-HTTP exercises);
