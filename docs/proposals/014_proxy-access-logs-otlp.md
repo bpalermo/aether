@@ -1,6 +1,6 @@
 # Proposal: proxy access logs to VictoriaLogs over OTLP
 
-**Status:** Design — 2026-06-17
+**Status:** Implemented — proxy access logs over OTLP shipped and validated (2026-06-17 design).
 **Relates:** proposal 007 (telemetry filter), proposal 013 (prober);
 [[project_observability_otel]]
 

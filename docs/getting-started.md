@@ -91,7 +91,7 @@ can be upgraded independently), then the system chart.
 # Pick the published version (chart version == git commit of the release).
 VERSION=0.x.0-<commit>
 
-# 1) CRDs (MeshConfig, EdgeRoute) — install/upgrade first.
+# 1) CRDs (MeshConfig, HTTPFilter) — install/upgrade first.
 helm upgrade --install aether-crds \
   oci://ghcr.io/bpalermo/aether/charts/crds \
   --version "$VERSION"
@@ -135,7 +135,7 @@ Set once at the top of the `aether` chart's values; every component inherits it.
 | `clusterName` | `talos-main` | Cluster name in registry keys (registrars are per-cluster; names need not be unique across clusters). |
 | `meshDomain` | `aether.internal` | The authority suffix services are addressed under (`<svc>.<meshDomain>`). Also defaults the SPIRE trust domain. |
 | `spire.enabled` | `true` | Mesh-wide mTLS switch. |
-| `spire.trustDomain` | `""` (→ mesh domain) | SPIFFE trust domain. |
+| `spire.trustDomain` | `""` (→ `ROOTCA` sentinel) | SPIFFE trust domain authorized for the registrar's mTLS peers. |
 | `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket. |
 | `spire.adminSocket.*` | see values | SPIRE agent admin/Delegated-Identity socket the agent uses to mint proxy SVIDs. |
 | `registrar.registryBackend` | `kubernetes` | `kubernetes` \| `dynamodb` \| `etcd`. |
@@ -251,7 +251,7 @@ Your service is now addressable mesh-wide as `my-svc.aether.internal`.
 | Annotation | Default | Meaning |
 |---|---|---|
 | `endpoint.aether.io/port` | `8080` | Application port the mesh routes to. |
-| `endpoint.aether.io/weight` | `1` | Load-balancing weight. |
+| `endpoint.aether.io/weight` | `1024` | Load-balancing weight. |
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness). |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds` = agent vets the endpoint and publishes health over EDS (clients get pre-warmed endpoints); `active` = every client proxy probes the endpoint itself. |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata, usable as routing subsets (§9). |
@@ -379,9 +379,14 @@ labels express no preference.
 <a name="edge"></a>
 ## 10. North-south ingress (the edge gateway)
 
-The optional **edge** is an unprivileged Deployment running Envoy + an
-`agent edge` sidecar. It dials mesh pods **directly** over mTLS (the node
-DaemonSet is not in its path) and routes external traffic by `EdgeRoute` CRs.
+The optional **edge** is an unprivileged Deployment (its own `aether-ingress`
+namespace by default) running Envoy + an `agent edge` sidecar. It dials mesh pods
+**directly** over mTLS (the node DaemonSet is not in its path) and routes external
+traffic via the **Gateway API** (proposal 018): the edge serves the `HTTPRoute`s
+attached to `Gateway`s of its `GatewayClass` (`gateway.aether.io/edge`
+controller). The retired `EdgeRoute` / `VirtualHost` CRDs are gone — Gateway API
+is the edge's only routing API. Requires the standard Gateway API CRDs installed
+in the cluster.
 
 Enable it:
 
@@ -392,27 +397,40 @@ helm upgrade --install aether oci://ghcr.io/bpalermo/aether/charts/aether \
   # ... plus your other values
 ```
 
-Expose a service:
+The chart renders the `GatewayClass` and — by default (`edge.gateway.create=true`)
+— a `Gateway` of that class. Expose a service by attaching an `HTTPRoute` to it
+(the chart can manage routes declaratively via `edge.gateway.httpRoutes`, or apply
+your own):
 
 ```yaml
-apiVersion: config.aether.io/v1
-kind: EdgeRoute
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: api
-  namespace: aether-system          # the namespace the edge watches
+  namespace: aether-ingress          # the namespace the edge watches
 spec:
-  hosts: [api.example.com]           # external Host/SNI (required, ≥1)
-  service: svc-1                     # the mesh service to route to
-  port: 8080                         # optional; omit for the default port
+  parentRefs:
+    - name: aether-edge              # the chart-managed Gateway
+  hostnames: ["api.example.com"]     # external Host/SNI
+  rules:
+    - backendRefs:
+        - name: svc-1                # the mesh service to route to
+          port: 8080
 ```
 
-- The edge routes **only** by explicit external host. The internal FQDN
-  (`<svc>.<meshDomain>`) is deliberately **not** routable from the edge — a route
-  with no `hosts` exposes nothing.
+- The edge routes **only** by explicit external hostname on the attached routes.
+  The internal mesh FQDN (`<svc>.<meshDomain>`) is deliberately **not** routable
+  from the edge.
 - **TLS:** set `edge.tls.enabled=true` and reference a `kubernetes.io/tls` Secret
-  per route via `spec.tls.secretName`. The edge agent serves the cert to Envoy
-  over SDS (SNI-selected, hot rotation, no pod roll) and 301-redirects HTTP→HTTPS.
-  Aether does **not** issue certs — bring your own (cert-manager, `kubectl`, …).
+  per Gateway listener (`spec.listeners[].tls.certificateRefs`, or the chart's
+  `edge.gateway.tlsSecretName`). The edge agent serves the cert to Envoy over SDS
+  (SNI-selected, hot rotation, no pod roll) and 301-redirects HTTP→HTTPS. Aether
+  does **not** issue certs — bring your own (cert-manager, `kubectl`, …).
+- **Addressing:** per-Gateway addressing is on by default
+  (`edge.perGatewayAddressing=true`, proposal 021) — each `Gateway` gets its own
+  LoadBalancer Service and external IP; pin one with `edge.gateway.address`.
+- **GeoIP:** set `edge.geoip.enabled=true` with a MaxMind mmdb Secret to emit
+  `x-geo-*` request headers (proposal 028).
 - The edge gets its own SVID straight from SPIRE; with `spire.enabled` the chart
   can create its `ClusterSPIFFEID` (`edge.spire.clusterSpiffeID`).
 
@@ -460,7 +478,7 @@ otel:
 kubectl -n aether-system logs ds/aether-agent           # control plane + CNI
 kubectl -n aether-system logs ds/aether-proxy           # the Envoy data plane
 kubectl get meshconfig default -o yaml                  # effective proxy observability
-kubectl get edgeroutes -A                               # north-south routes
+kubectl get httproutes -A                               # north-south + GAMMA routes
 ```
 
 ---

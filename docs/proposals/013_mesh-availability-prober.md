@@ -1,7 +1,8 @@
 # Proposal: synthetic mesh-availability prober
 
-**Status:** Design — 2026-06-17 (amended 2026-06-17: probe a proxy local-reply
-liveness endpoint, not a real service)
+**Status:** Implemented — the mesh-availability prober shipped (`charts/prober`).
+(Originally 2026-06-17; amended: probe a proxy local-reply liveness endpoint, not a
+real service.)
 **Relates:** proposal 007 (telemetry filter), proposal 004 (demand-scoped distribution)
 **Motivated by:** 1h distributed churn soak (2026-06-17)
 

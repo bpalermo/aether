@@ -1,6 +1,6 @@
 # Proposal: VirtualHost CRD — L7 path-based edge routing (supersedes EdgeRoute)
 
-**Status:** Design — 2026-06-21
+**Status:** Implemented, then superseded — the `VirtualHost` CRD shipped, but edge L7 routing has since migrated to the Gateway API (`HTTPRoute`) and the `VirtualHost` CRD was retired. See proposal 018. (2026-06-21 design.)
 **Relates:** proposal 003 (edge proxy — the EdgeRoute this replaces), proposal 015
 (MeshConfig / the controller webhook this extends), proposal 005 (multi-port);
 [[project_edge_proxy_plan]].

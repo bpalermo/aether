@@ -1,6 +1,6 @@
 # Proposal: aether system config (umbrella globals) + proxy MeshConfig CRD
 
-**Status:** Design — 2026-06-18
+**Status:** Implemented — the aether system config + `MeshConfig` CRD shipped (later made namespaced with an `aether-system` fallback). Live proxy reload remains future work. (2026-06-18 design.)
 **Relates:** every telemetry/security proposal that added a flag (007, 012, 013,
 014); [[project_observability_otel]], [[project_telemetry_edge_filter]]
 

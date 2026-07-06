@@ -1,6 +1,6 @@
 # Proposal: Source↔Destination Telemetry via a Rust Dynamic Module
 
-**Status:** Draft — Phase-1 module validated end-to-end on stock distroless Envoy 1.38.0 (2026-06-13)
+**Status:** Implemented — the `aether_stats` source→destination metrics filter shipped and is default-on (later re-based as a native C++ Envoy extension; see proposals 011/012). Phase-1 module validated end-to-end on stock distroless Envoy 1.38.0 (2026-06-13).
 **Author:** Bruno Palermo
 **Date:** 2026-06-13
 
