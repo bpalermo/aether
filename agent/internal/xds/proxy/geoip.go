@@ -5,6 +5,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	geoip_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/geoip/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
+	luav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	geoip_commonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/geoip_providers/common/v3"
 	geoip_maxmindv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/geoip_providers/maxmind/v3"
@@ -88,4 +89,27 @@ func GeoipHTTPFilter(gc GeoipConfig) *http_connection_managerv3.HttpFilter {
 		cfg.XffConfig = &geoip_filterv3.Geoip_XffConfig{XffNumTrustedHops: gc.XffNumTrustedHops}
 	}
 	return httpFilter(geoipFilterName, cfg)
+}
+
+// geoRouteCacheClearFilterName names the tiny lua filter that re-routes on the
+// geoip-set headers.
+const geoRouteCacheClearFilterName = "envoy.filters.http.lua.geo_route_cache_clear"
+
+// GeoRouteCacheClearHTTPFilter clears Envoy's cached route AFTER geoip runs, so an
+// HTTPRoute header match can route on the x-geo-* headers (proposal 028). Necessary
+// because the HCM caches the route at decodeHeaders — before the filter chain — and
+// the stock geoip filter sets its headers via an async lookup without clearing the
+// cache, so the router would otherwise use the pre-geoip route. Emitted right after
+// geoip on the edge routing chains. Inert when no route matches on a geo header
+// (clearRouteCache just recomputes the same route). Lua is compiled into the proxy
+// build; this is the documented "modify a routing header then re-route" pattern.
+func GeoRouteCacheClearHTTPFilter() *http_connection_managerv3.HttpFilter {
+	cfg := &luav3.Lua{
+		DefaultSourceCode: &corev3.DataSource{
+			Specifier: &corev3.DataSource_InlineString{
+				InlineString: "function envoy_on_request(handle)\n  handle:clearRouteCache()\nend\n",
+			},
+		},
+	}
+	return httpFilter(geoRouteCacheClearFilterName, cfg)
 }

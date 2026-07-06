@@ -374,6 +374,9 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 			Headers:           []string{"country", "city"},
 			XffNumTrustedHops: 1,
 		}),
+		// Route-cache-clear (lua) so geo header-routing works — validate its lua
+		// compiles in stock Envoy alongside geoip (proposal 028).
+		proxy.GeoRouteCacheClearHTTPFilter(),
 	}
 	edgeHTTP := proxy.BuildEdgeGatewayHTTPListener("edge-ns", "edge-gw", 18150, false, geo, 1)
 
