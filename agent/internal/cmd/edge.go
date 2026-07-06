@@ -56,6 +56,9 @@ func init() {
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeReadinessPort, "edge-readiness-port", cfg.EdgeReadinessPort, "Port the dedicated always-bound readiness listener binds; the readiness probe targets it (independent of the public listeners)")
 	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves")
+	edgeCmd.Flags().StringVar(&cfg.GeoipCityDB, "geoip-city-db", "", "Path to a MaxMind city-type mmdb (proposal 028). When set, the edge emits x-geo-* headers on routed requests; the reserved x-geo-* namespace is stripped from client requests regardless")
+	edgeCmd.Flags().StringSliceVar(&cfg.GeoipHeaders, "geoip-headers", []string{"country"}, "Which geo headers to emit: country, city")
+	edgeCmd.Flags().Uint32Var(&cfg.XffNumTrustedHops, "xff-num-trusted-hops", 0, "Trusted proxies in front of the edge (topology fact): feeds BOTH the HCM client-address resolution and the geoip filter's XFF config")
 	edgeCmd.Flags().StringVar(&cfg.EdgeServiceName, "edge-service-name", "", "Name of the edge's own LoadBalancer Service (in the edge namespace); its assigned LB address is published as every class-aether Gateway's status.addresses. Empty disables address publication")
 	edgeCmd.Flags().BoolVar(&cfg.EdgePerGatewayAddressing, "edge-per-gateway-addressing", true, "Enable proposal 021 Phase 2: create a per-Gateway LoadBalancer Service + internal-port demux so each Gateway gets its own external IP (default: true). Set false to fall back to Phase 1 (shared IP)")
 }
@@ -200,6 +203,11 @@ func runEdge(ctx context.Context) (retErr error) {
 	snapshotCache := cache.NewSnapshotCache(cfg.ProxyServiceNodeID, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
+	snapshotCache.SetEdgeGeoip(proxy.GeoipConfig{
+		CityDBPath:        cfg.GeoipCityDB,
+		Headers:           cfg.GeoipHeaders,
+		XffNumTrustedHops: cfg.XffNumTrustedHops,
+	}, cfg.XffNumTrustedHops)
 	snapshotCache.SetEdgeMode(cfg.EdgeHTTPPort)
 	snapshotCache.SetEdgeReadinessPort(cfg.EdgeReadinessPort)
 	if cfg.EdgeTLS {

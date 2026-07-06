@@ -82,6 +82,13 @@ spec:
             {{- if ne .Values.edge.gatewayClassName "aether" }}
             - "--gateway-class={{ .Values.edge.gatewayClassName }}"
             {{- end }}
+            {{- if .Values.edge.xffNumTrustedHops }}
+            - "--xff-num-trusted-hops={{ .Values.edge.xffNumTrustedHops }}"
+            {{- end }}
+            {{- if .Values.edge.geoip.enabled }}
+            - "--geoip-city-db=/etc/aether/geoip/{{ .Values.edge.geoip.database.fileName }}"
+            - "--geoip-headers={{ join "," .Values.edge.geoip.headers }}"
+            {{- end }}
             # Publish this edge's LoadBalancer address as every class-aether
             # Gateway's status.addresses. Phase 2: per-Gateway LB Services; Phase 1:
             # shared edge Service IP.
@@ -265,6 +272,13 @@ spec:
             - name: edge-config
               mountPath: /etc/envoy
               readOnly: true
+            {{- if .Values.edge.geoip.enabled }}
+            # MaxMind database (proposal 028): Envoy's geoip provider opens it at
+            # listener load.
+            - name: geoip-db
+              mountPath: /etc/aether/geoip
+              readOnly: true
+            {{- end }}
             {{- if .Values.spire.enabled }}
             - name: workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
@@ -276,6 +290,11 @@ spec:
         # Pod-local: the agent serves xDS on /run/aether/xds.sock, Envoy dials it.
         - name: xds-sock
           emptyDir: {}
+        {{- if .Values.edge.geoip.enabled }}
+        - name: geoip-db
+          secret:
+            secretName: {{ required "edge.geoip.database.secretName is required when edge.geoip.enabled" .Values.edge.geoip.database.secretName }}
+        {{- end }}
         - name: registry-dir
           emptyDir: {}
         # Projected from the MeshConfig CR by the aether-controller (release-derived

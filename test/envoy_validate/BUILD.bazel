@@ -60,7 +60,7 @@ go_test(
     name = "envoy_validate_test",
     size = "medium",
     srcs = ["validate_test.go"],
-    data = [":envoy_bin"],
+    data = [":envoy_bin"] + glob(["testdata/**"]),
     embed = [":envoy_validate"],
     tags = [
         "envoy-validate",

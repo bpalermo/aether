@@ -96,6 +96,15 @@ type AgentConfig struct {
 	// no-op when the registry backend has no cross-cluster config plane (etcd only).
 	ImportConfig bool
 
+	// GeoipCityDB is the MaxMind city-type mmdb path for the edge geoip filter
+	// (proposal 028); empty = geoip off (the x-geo-* strip still applies).
+	GeoipCityDB string
+	// GeoipHeaders selects which x-geo-* headers the edge emits.
+	GeoipHeaders []string
+	// XffNumTrustedHops is the edge topology fact (proxies in front): feeds both
+	// the HCM and the geoip filter's XFF config.
+	XffNumTrustedHops uint32
+
 	// AuthzSidecar enables the node-local external-authorization sidecar entry
 	// (proposal 027): a disabled ext_authz HCM filter targeting the chart's static
 	// authz_sidecar UDS cluster; HTTPFilter (extAuthz) opts routes in.
