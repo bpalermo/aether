@@ -101,6 +101,24 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
+	// Register with the agent FIRST (before any capture install). The agent fetches
+	// the pod's aether.io/managed LABEL from the API and is the single authority on
+	// whether the pod is mesh-managed — the CNI plugin cannot see labels (CRI passes
+	// annotations, not labels). A RESULT_IGNORED response means "not managed": install
+	// NO capture, or a managed=false pod in a non-ignored namespace would have its
+	// egress redirected to a capture port with no listener → blackholed control plane
+	// (the edge outage, fixed structurally here rather than per-pod annotation).
+	ignored, err := p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
+	if err != nil {
+		return err
+	}
+	if ignored {
+		p.logger.Info("agent reports pod not mesh-managed; skipping capture install",
+			zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
+			zap.String("pod", string(k8sArgs.K8S_POD_NAME)))
+		return types.PrintResult(prevResult, netConf.CNIVersion)
+	}
+
 	// Transparent capture (proposal 018, Phase 3a): redirect outbound ClusterIP:18081
 	// to the pod-local capture listener. Best-effort — a failure leaves the explicit
 	// fast-lane working, so it must not fail the pod's networking. Uses the runtime
@@ -145,7 +163,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
-	return p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
+	return types.PrintResult(prevResult, netConf.CNIVersion)
 }
 
 // CmdCheck handles the CNI Check operation for plugin health verification.
@@ -362,13 +380,13 @@ func (p *AetherPlugin) resolvePID(netns, criSocket, containerID string) *wrapper
 }
 
 // sendAddPod sends the pod to the agent and returns the previous result on success.
-func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, pod *cniv1.CNIPod, prevResult *current.Result) (retErr error) {
+func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, pod *cniv1.CNIPod, prevResult *current.Result) (ignored bool, retErr error) {
 	ctx, span := startPodSpan(ctx, "cni.add_pod", pod.GetName(), pod.GetNamespace(), pod.GetContainerId())
 	defer func() { commontelemetry.EndSpan(span, retErr) }()
 
 	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
 	if err != nil {
-		return fmt.Errorf("failed to create CNI client: %w", err)
+		return false, fmt.Errorf("failed to create CNI client: %w", err)
 	}
 	defer func() {
 		if cerr := client.Close(); cerr != nil {
@@ -378,11 +396,15 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 
 	res, err := client.AddPod(ctx, pod)
 	if err != nil {
-		return fmt.Errorf("failed to add pod to agent: %w", err)
+		return false, fmt.Errorf("failed to add pod to agent: %w", err)
 	}
 
+	// RESULT_IGNORED: the pod is not mesh-managed — caller skips capture install.
+	if res.Result == cniv1.AddPodResponse_RESULT_IGNORED {
+		return true, nil
+	}
 	if res.Result != cniv1.AddPodResponse_RESULT_SUCCESS {
-		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
+		return false, fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
 
 	// Data-plane proof, before pod start completes: probe the outbound capture
@@ -401,7 +423,9 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 		}
 	}
 
-	return types.PrintResult(prevResult, conf.CNIVersion)
+	// Managed pod registered + serving: NOT ignored. CmdAdd installs capture next
+	// and prints the CNI result.
+	return false, nil
 }
 
 // delProbeNetns resolves the netns path to probe during DEL: the pinned path
