@@ -266,7 +266,7 @@ func TestEdgeGatewayRouteNameUnique(t *testing.T) {
 // and the host-port NOT stripped on the HCM (matching is port-agnostic via the
 // route config's ignore_port_in_host_matching).
 func TestBuildEdgeGatewayHTTPListener(t *testing.T) {
-	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18150, false)
+	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18150, false, nil, 0)
 	assert.Equal(t, "edge_gw_ns-a_my-gw_18150", l.GetName())
 	assert.Equal(t, uint32(18150), l.GetAddress().GetSocketAddress().GetPortValue())
 	assert.Equal(t, corev3.TrafficDirection_INBOUND, l.GetTrafficDirection())
@@ -290,7 +290,7 @@ func TestBuildEdgeGatewayHTTPListener(t *testing.T) {
 // and does NOT strip the host-port (so the 301 Location preserves the client's
 // original authority).
 func TestBuildEdgeGatewayHTTPListener_Redirect(t *testing.T) {
-	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18151, true)
+	l := BuildEdgeGatewayHTTPListener("ns-a", "my-gw", 18151, true, nil, 0)
 	assert.Equal(t, "edge_gw_ns-a_my-gw_18151", l.GetName())
 	assert.Equal(t, uint32(18151), l.GetAddress().GetSocketAddress().GetPortValue())
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
@@ -312,7 +312,7 @@ func TestBuildEdgeGatewayHTTPListener_Redirect(t *testing.T) {
 // terminates TLS, uses the per-Gateway route config, has the unique name, and
 // does NOT strip the host-port (matching is port-agnostic via the route config).
 func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
-	l := BuildEdgeGatewayHTTPSListener("ns-b", "secure-gw", 18160, []string{"kubernetes/my-cert"})
+	l := BuildEdgeGatewayHTTPSListener("ns-b", "secure-gw", 18160, []string{"kubernetes/my-cert"}, nil, 0)
 	assert.Equal(t, "edge_gw_ns-b_secure-gw_18160", l.GetName())
 	assert.Equal(t, uint32(18160), l.GetAddress().GetSocketAddress().GetPortValue())
 
@@ -350,7 +350,7 @@ func TestBuildEdgeGatewayHTTPSListener(t *testing.T) {
 // vhost while the backend still observes the original ":1234".
 func TestBuildEdgeGatewayHTTPListener_MultiListenerHostPort(t *testing.T) {
 	// Build the per-Gateway HTTP listener (one per (ns, gw, internal-port) tuple).
-	l := BuildEdgeGatewayHTTPListener("gateway-conformance-infra", "httproute-hostname-intersection", 18100, false)
+	l := BuildEdgeGatewayHTTPListener("gateway-conformance-infra", "httproute-hostname-intersection", 18100, false, nil, 0)
 
 	// 1. HCM must NOT strip the port (preserve it on the upstream-forwarded authority).
 	hcm := &http_connection_managerv3.HttpConnectionManager{}

@@ -358,14 +358,28 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 	), nil
 }
 
-// buildEdgeBootstrap builds the edge (north-south ingress) proxy bootstrap.
+// buildEdgeBootstrap builds the edge (north-south ingress) proxy bootstrap. The
+// edge HTTP listener carries the geo pipeline (proposal 028): the reserved x-geo-*
+// strip + the geoip filter with the MaxMind provider over the REAL MaxMind test
+// database (testdata/GeoIP2-City-Test.mmdb) — the provider opens the file at config
+// load, so stock Envoy validates the whole shape end-to-end.
 func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	edgeSvc := newEdgeServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
 	spire := newSpireAgentCluster()
 
+	geo := []*http_connection_managerv3.HttpFilter{
+		proxy.GeoStripHTTPFilter(),
+		proxy.GeoipHTTPFilter(proxy.GeoipConfig{
+			CityDBPath:        "testdata/GeoIP2-City-Test.mmdb",
+			Headers:           []string{"country", "city"},
+			XffNumTrustedHops: 1,
+		}),
+	}
+	edgeHTTP := proxy.BuildEdgeGatewayHTTPListener("edge-ns", "edge-gw", 18150, false, geo, 1)
+
 	return newBootstrap(
 		[]*clusterv3.Cluster{xdsCluster(), spire, edgeSvc},
-		nil,
+		[]*listenerv3.Listener{edgeHTTP},
 	), nil
 }
 

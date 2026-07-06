@@ -9,6 +9,7 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -306,9 +307,9 @@ func (c *SnapshotCache) edgeGatewayListeners() []types.Resource {
 	for _, gw := range gws {
 		for _, ln := range gw.Listeners {
 			if len(ln.TLSSecretNames) > 0 {
-				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames))
+				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), c.edgeXffTrustedHops))
 			} else {
-				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect))
+				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), c.edgeXffTrustedHops))
 			}
 		}
 	}
@@ -1102,4 +1103,23 @@ func equalEdgeGatewayListeners(a, b []EdgeGatewayListenerEntry) bool {
 		}
 	}
 	return true
+}
+
+// SetEdgeGeoip configures the edge geo pipeline (proposal 028): the reserved
+// x-geo-* strip always (spoof protection), plus the geoip filter when a database
+// is configured. Boot-time, before listener generation.
+func (c *SnapshotCache) SetEdgeGeoip(gc proxy.GeoipConfig, xffTrustedHops uint32) {
+	c.edgeGeo = &gc
+	c.edgeXffTrustedHops = xffTrustedHops
+}
+
+// edgeGeoFilters returns [strip] or [strip, geoip] for the edge routing chains.
+// The strip is emitted whenever the edge runs AT ALL — a geoip-less edge must not
+// launder client-supplied x-geo-* into the mesh either.
+func (c *SnapshotCache) edgeGeoFilters() []*http_connection_managerv3.HttpFilter {
+	out := []*http_connection_managerv3.HttpFilter{proxy.GeoStripHTTPFilter()}
+	if c.edgeGeo != nil && c.edgeGeo.CityDBPath != "" {
+		out = append(out, proxy.GeoipHTTPFilter(*c.edgeGeo))
+	}
+	return out
 }

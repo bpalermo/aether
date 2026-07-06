@@ -210,6 +210,10 @@ type SnapshotCache struct {
 	// inbound listeners. NOT imported cross-cluster (enforcement is co-located
 	// with the pods). Guarded by depMu.
 	serviceInboundFilters map[string]proxy.ExtensionFilter
+	// edgeGeo configures the edge geoip filter (proposal 028); nil = no geoip
+	// (the x-geo-* strip is emitted regardless on edge chains). Boot-time.
+	edgeGeo            *proxy.GeoipConfig
+	edgeXffTrustedHops uint32
 	// authzSidecar enables the disabled ext_authz HCM entry for the node-local
 	// authorization sidecar (proposal 027). Boot-time (SetAuthzSidecar), so no
 	// locking/regeneration concerns.

@@ -253,6 +253,21 @@ proxy:
 # Disabled by default.
 edge:
   enabled: false
+  # Trusted proxies in front of the edge (topology fact, proposal 028): feeds BOTH
+  # the HCM's client-address resolution and the geoip filter's XFF config.
+  xffNumTrustedHops: 0
+  # GeoIP at the edge (proposal 028): emit x-geo-* request headers from a MaxMind
+  # database. The reserved x-geo-* namespace is ALWAYS stripped from client
+  # requests at the edge (the Envoy filter passes spoofed values through on a
+  # lookup miss — aether does not). Databases are bring-your-own (licensing).
+  geoip:
+    enabled: false
+    # Which headers to emit: country, city (both served by a city-type mmdb).
+    headers: [country]
+    database:
+      # Secret containing the mmdb; mounted read-only. Key = the file name below.
+      secretName: ""
+      fileName: GeoLite2-City.mmdb
   # The edge is an ingress gateway, not a mesh workload, so it runs in its own
   # namespace, isolated from the control plane. namespaceCreate lets the chart
   # create it (with baseline PSA); set false if you manage the namespace yourself.
