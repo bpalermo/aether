@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strconv"
 
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	"github.com/bpalermo/aether/common/serviceref"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -13,6 +14,7 @@ import (
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // routeSpecificity returns a composite sort key for a Route per Gateway API
@@ -307,9 +309,9 @@ func (c *SnapshotCache) edgeGatewayListeners() []types.Resource {
 	for _, gw := range gws {
 		for _, ln := range gw.Listeners {
 			if len(ln.TLSSecretNames) > 0 {
-				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), c.edgeXffTrustedHops))
+				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), c.edgeConfigSpec()))
 			} else {
-				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), c.edgeXffTrustedHops))
+				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), c.edgeConfigSpec()))
 			}
 		}
 	}
@@ -1111,6 +1113,18 @@ func equalEdgeGatewayListeners(a, b []EdgeGatewayListenerEntry) bool {
 func (c *SnapshotCache) SetEdgeGeoip(gc proxy.GeoipConfig, xffTrustedHops uint32) {
 	c.edgeGeo = &gc
 	c.edgeXffTrustedHops = xffTrustedHops
+}
+
+// edgeConfigSpec returns the effective EdgeConfigSpec applied to the edge listeners
+// (proposal 029). M1: derived from the existing chart-driven values (xff hops); the
+// GatewayClass/Gateway parametersRef resolution (proto.Merge) lands in M2. Unset
+// fields fall to the compiled best-practice defaults in ApplyEdgeHardening.
+func (c *SnapshotCache) edgeConfigSpec() *configv1.EdgeConfigSpec {
+	b := configv1.EdgeConfigSpec_builder{}
+	if c.edgeXffTrustedHops > 0 {
+		b.XffNumTrustedHops = wrapperspb.UInt32(c.edgeXffTrustedHops)
+	}
+	return b.Build()
 }
 
 // edgeGeoFilters returns [strip] or [strip, geoip, route-cache-clear] for the edge

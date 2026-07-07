@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -108,7 +109,7 @@ type EdgeGatewayListener struct {
 // redirect listener. Listener name and RDS route config name are unique per
 // Gateway (proposal 021 Phase 2). When httpRedirect is true, the listener emits
 // a 301 redirect to HTTPS (no RDS reference); otherwise it serves routes via RDS.
-func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort uint32, httpRedirect bool, geoFilters []*http_connection_managerv3.HttpFilter, xffTrustedHops uint32) *listenerv3.Listener {
+func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort uint32, httpRedirect bool, geoFilters []*http_connection_managerv3.HttpFilter, edgeCfg *configv1.EdgeConfigSpec) *listenerv3.Listener {
 	name := EdgeGatewayListenerName(namespace, gatewayName, internalPort)
 	if httpRedirect {
 		// Redirect listener: inline route config (no RDS), no separate route config
@@ -119,6 +120,9 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 		// client's original authority.
 		hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", buildEdgeRedirectRouteConfig())
 		hcm.GetRouteConfig().Name = name // unique inline config name avoids any residual collision
+		// The redirect listener is edge-facing too: apply the same hardening
+		// (use_remote_address, header-underscore rejection, timeouts, h2 caps).
+		ApplyEdgeHardening(hcm, nil, edgeCfg)
 		filterChain := &listenerv3.FilterChain{
 			Name:    name,
 			Filters: []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
@@ -142,7 +146,9 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 	// with the geoip filter's XffConfig (one topology fact, two consumers).
 	prefix := append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, geoFilters...)
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
-	hcm.XffNumTrustedHops = xffTrustedHops
+	// Envoy edge best-practices from the effective EdgeConfig (proposal 029):
+	// use_remote_address, header-underscore rejection, downstream h2 caps, timeouts.
+	ApplyEdgeHardening(hcm, nil, edgeCfg)
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			RouteConfigName: routeName,
@@ -159,13 +165,15 @@ func BuildEdgeGatewayHTTPListener(namespace, gatewayName string, internalPort ui
 // BuildEdgeGatewayHTTPSListener builds a per-Gateway TLS-terminating HTTPS listener.
 // It terminates downstream TLS using the named SDS cert(s) and routes via the
 // per-Gateway RDS route config. The listener name is unique per (Gateway, port).
-func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort uint32, tlsSecretNames []string, geoFilters []*http_connection_managerv3.HttpFilter, xffTrustedHops uint32) *listenerv3.Listener {
+func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort uint32, tlsSecretNames []string, geoFilters []*http_connection_managerv3.HttpFilter, edgeCfg *configv1.EdgeConfigSpec) *listenerv3.Listener {
 	name := EdgeGatewayListenerName(namespace, gatewayName, internalPort)
 	routeName := EdgeGatewayRouteName(namespace, gatewayName)
 	hcm := buildHTTPConnectionManager(name, ReporterSource, "", "", nil)
 	prefix := append([]*http_connection_managerv3.HttpFilter{readinessHttpFilter()}, geoFilters...)
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
-	hcm.XffNumTrustedHops = xffTrustedHops
+	// Envoy edge best-practices from the effective EdgeConfig (proposal 029):
+	// use_remote_address, header-underscore rejection, downstream h2 caps, timeouts.
+	ApplyEdgeHardening(hcm, nil, edgeCfg)
 	// Port-agnostic hostname matching is handled by the route config's
 	// ignore_port_in_host_matching, NOT strip_any_host_port — see
 	// BuildEdgeGatewayHTTPListener. HTTPS clients connecting on a non-standard port

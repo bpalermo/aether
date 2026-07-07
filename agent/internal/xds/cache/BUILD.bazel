@@ -25,6 +25,7 @@ go_library(
         "//agent/internal/xds/proxy",
         "//agent/storage",
         "//api/aether/cni/v1:cni",
+        "//api/aether/config/v1:config",
         "//api/aether/registry/v1:registry",
         "//common/constants",
         "//common/log",
@@ -47,6 +48,7 @@ go_library(
         "@org_golang_google_protobuf//proto",
         "@org_golang_google_protobuf//types/known/anypb",
         "@org_golang_google_protobuf//types/known/durationpb",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
         "@org_uber_go_atomic//:atomic",
     ],
 )

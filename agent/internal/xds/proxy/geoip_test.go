@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	geoip_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/geoip/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
@@ -11,6 +12,7 @@ import (
 	geoip_maxmindv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/geoip_providers/maxmind/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // TestGeoStripHTTPFilter (028): the strip removes EVERY reserved x-geo-* header —
@@ -64,7 +66,7 @@ func TestBuildEdgeGatewayHTTPListener_Geo(t *testing.T) {
 		GeoStripHTTPFilter(),
 		GeoipHTTPFilter(GeoipConfig{CityDBPath: "/db", Headers: []string{"country"}, XffNumTrustedHops: 1}),
 	}
-	l := BuildEdgeGatewayHTTPListener("ns", "gw", 18150, false, filters, 1)
+	l := BuildEdgeGatewayHTTPListener("ns", "gw", 18150, false, filters, configv1.EdgeConfigSpec_builder{XffNumTrustedHops: wrapperspb.UInt32(1)}.Build())
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 	require.GreaterOrEqual(t, len(hcm.GetHttpFilters()), 4)
@@ -98,7 +100,7 @@ func TestBuildEdgeGatewayHTTPListener_GeoOrder(t *testing.T) {
 		GeoipHTTPFilter(GeoipConfig{CityDBPath: "/db", Headers: []string{"country"}}),
 		GeoRouteCacheClearHTTPFilter(),
 	}
-	l := BuildEdgeGatewayHTTPListener("ns", "gw", 18150, false, geo, 0)
+	l := BuildEdgeGatewayHTTPListener("ns", "gw", 18150, false, geo, nil)
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 	names := []string{}

@@ -8,6 +8,7 @@ go_library(
         "capture.go",
         "cluster.go",
         "edge.go",
+        "edgeconfig.go",
         "egress.go",
         "endpoint.go",
         "extension_filter.go",
@@ -37,6 +38,7 @@ go_library(
     deps = [
         "//agent/internal/xds/config",
         "//api/aether/cni/v1:cni",
+        "//api/aether/config/v1:config",
         "//api/aether/registry/v1:registry",
         "//common/constants",
         "//common/extensionfilter",
@@ -93,6 +95,7 @@ go_test(
         "authz_test.go",
         "capture_test.go",
         "edge_test.go",
+        "edgeconfig_test.go",
         "egress_test.go",
         "endpoint_test.go",
         "extension_filter_test.go",
@@ -120,6 +123,7 @@ go_test(
     deps = [
         "//agent/internal/xds/config",
         "//api/aether/cni/v1:cni",
+        "//api/aether/config/v1:config",
         "//api/aether/registry/v1:registry",
         "//common/constants",
         "@com_github_cncf_xds_go//xds/type/v3:type",
@@ -154,5 +158,6 @@ go_test(
         "@org_golang_google_protobuf//types/known/anypb",
         "@org_golang_google_protobuf//types/known/durationpb",
         "@org_golang_google_protobuf//types/known/structpb",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
     ],
 )

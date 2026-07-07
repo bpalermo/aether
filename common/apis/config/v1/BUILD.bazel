@@ -3,6 +3,9 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "config",
     srcs = [
+        "edgeconfig_deepcopy.go",
+        "edgeconfig_jsonshim.go",
+        "edgeconfig_types.go",
         "httpfilter_deepcopy.go",
         "httpfilter_jsonshim.go",
         "httpfilter_types.go",

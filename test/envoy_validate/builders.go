@@ -378,7 +378,15 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 		// compiles in stock Envoy alongside geoip (proposal 028).
 		proxy.GeoRouteCacheClearHTTPFilter(),
 	}
-	edgeHTTP := proxy.BuildEdgeGatewayHTTPListener("edge-ns", "edge-gw", 18150, false, geo, 1)
+	// Full edge hardening (proposal 029): validate use_remote_address, header-underscore
+	// rejection, downstream h2 caps and timeouts are accepted by stock Envoy.
+	edgeCfg := configprotov1.EdgeConfigSpec_builder{
+		UseRemoteAddress:             wrapperspb.Bool(true),
+		XffNumTrustedHops:            wrapperspb.UInt32(1),
+		HeadersWithUnderscoresAction: configprotov1.EdgeConfigSpec_REJECT_REQUEST.Enum(),
+		RequestTimeout:               durationpb.New(300 * time.Second),
+	}.Build()
+	edgeHTTP := proxy.BuildEdgeGatewayHTTPListener("edge-ns", "edge-gw", 18150, false, geo, edgeCfg)
 
 	return newBootstrap(
 		[]*clusterv3.Cluster{xdsCluster(), spire, edgeSvc},
