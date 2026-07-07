@@ -97,9 +97,13 @@ func edgeQuicDownstreamTransport(sdsSecretNames []string) *corev3.TransportSocke
 		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
 			TlsCertificateSdsSecretConfigs: certs,
 			TlsParams: &transport_sockets_v3.TlsParameters{
+				// QUIC mandates TLS 1.3 at the crypto layer regardless of this floor.
 				TlsMinimumProtocolVersion: transport_sockets_v3.TlsParameters_TLSv1_2,
 			},
-			AlpnProtocols: []string{"h2", "http/1.1"},
+			// QUIC carries HTTP/3 ONLY: the ALPN must offer "h3", not the TCP ALPNs.
+			// With "h2"/"http/1.1" here a h3 client's handshake is rejected with TLS
+			// alert 120 no_application_protocol (found in the 029 M4 e2e).
+			AlpnProtocols: []string{"h3"},
 		},
 	}
 	return &corev3.TransportSocket{

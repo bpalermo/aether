@@ -9,6 +9,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	quicv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -52,6 +53,12 @@ func TestBuildEdgeGatewayHTTP3Listener_Structure(t *testing.T) {
 	ts := fc.GetTransportSocket()
 	require.NotNil(t, ts)
 	assert.Equal(t, "envoy.transport_sockets.quic", ts.GetName(), "transport socket must be the QUIC extension")
+
+	// QUIC ALPN must be exactly ["h3"] — TCP ALPNs (h2/http-1.1) make a h3 client's
+	// handshake fail with TLS alert 120 no_application_protocol (029 M4 e2e bug).
+	var quic quicv3.QuicDownstreamTransport
+	require.NoError(t, proto.Unmarshal(ts.GetTypedConfig().GetValue(), &quic))
+	assert.Equal(t, []string{"h3"}, quic.GetDownstreamTlsContext().GetCommonTlsContext().GetAlpnProtocols())
 
 	// HCM in the filter chain uses HTTP3 codec.
 	require.Len(t, fc.GetFilters(), 1)
