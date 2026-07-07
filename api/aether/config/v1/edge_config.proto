@@ -1,0 +1,59 @@
+edition = "2024";
+
+package aether.config.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/wrappers.proto";
+
+option features.field_presence = EXPLICIT;
+option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+
+// EdgeConfigSpec is the `.spec` of the EdgeConfig custom resource (proposal 029):
+// Envoy edge-hardening + HTTP/3 settings for a set of edge Gateways, resolved via the
+// native Gateway API parametersRef chain (GatewayClass default + Gateway
+// infrastructure override, proto.Merge). Every field is OPTIONAL with a best-practice
+// compiled default — an empty EdgeConfig still hardens the edge. EXPLICIT presence so
+// proto.Merge distinguishes "unset (inherit)" from an explicit zero.
+message EdgeConfigSpec {
+  // use_remote_address: the edge trusts the immediate downstream connection address as
+  // the client and manages XFF from it (correct for an internet-facing edge; forgeable
+  // XFF otherwise). Default true.
+  google.protobuf.BoolValue use_remote_address = 1;
+  // xff_num_trusted_hops: additional trusted proxy hops in front of the edge; feeds the
+  // HCM and the geoip filter. Default 0.
+  google.protobuf.UInt32Value xff_num_trusted_hops = 2;
+  // headers_with_underscores_action: how to treat request headers with underscores
+  // (header-smuggling defense). Default REJECT_REQUEST.
+  HeadersWithUnderscoresAction headers_with_underscores_action = 3 [(buf.validate.field).enum.defined_only = true];
+  // http2: downstream HTTP/2 resource caps (malicious-client protection).
+  Http2Options http2 = 4;
+  // stream_idle_timeout: bound on an idle stream (slowloris). Default 300s.
+  google.protobuf.Duration stream_idle_timeout = 5;
+  // request_timeout: bound on the whole request. Default 300s; zero disables.
+  google.protobuf.Duration request_timeout = 6;
+  // idle_timeout: downstream connection idle timeout. Default 3600s.
+  google.protobuf.Duration idle_timeout = 7;
+  // per_connection_buffer_limit_bytes: listener + edge-cluster buffer cap. Default 32768.
+  google.protobuf.UInt32Value per_connection_buffer_limit_bytes = 8;
+  // http3: QUIC/HTTP3 UDP listener on the HTTPS port (proposal 029 M3).
+  Http3Options http3 = 9;
+
+  enum HeadersWithUnderscoresAction {
+    HEADERS_WITH_UNDERSCORES_ACTION_UNSPECIFIED = 0;
+    ALLOW = 1;
+    REJECT_REQUEST = 2;
+    DROP_HEADER = 3;
+  }
+}
+
+message Http2Options {
+  google.protobuf.UInt32Value max_concurrent_streams = 1; // default 100
+  google.protobuf.UInt32Value initial_stream_window_size = 2; // default 65536 (64 KiB)
+  google.protobuf.UInt32Value initial_connection_window_size = 3; // default 1048576 (1 MiB)
+}
+
+message Http3Options {
+  // enabled adds the QUIC UDP listener on the HTTPS port + alt-svc advertisement.
+  google.protobuf.BoolValue enabled = 1;
+}
