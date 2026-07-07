@@ -276,7 +276,7 @@ func TestBuildEdgeGatewayEntries_AssignByAttachment(t *testing.T) {
 		},
 	}
 
-	entries := buildEdgeGatewayEntries(gws, allVhosts, allocs, nil)
+	entries := buildEdgeGatewayEntries(gws, allVhosts, allocs, nil, nil)
 	require.Len(t, entries, 2)
 
 	byName := map[string]cache.EdgeGatewayEntry{}

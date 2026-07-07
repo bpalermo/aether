@@ -35,6 +35,11 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["referencegrants"]
     verbs: ["get", "list", "watch"]
+  # EdgeConfig (proposal 029): resolve the per-Gateway effective edge config via the
+  # GatewayClass/Gateway parametersRef chain. Read-only, cluster-wide.
+  - apiGroups: ["config.aether.io"]
+    resources: ["edgeconfigs"]
+    verbs: ["get", "list", "watch"]
   # Resolve backendRef Services cluster-wide for the ResolvedRefs condition.
   - apiGroups: [""]
     resources: ["services"]

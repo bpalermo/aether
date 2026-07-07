@@ -4,6 +4,7 @@ go_library(
     name = "gatewayapi",
     srcs = [
         "attachment.go",
+        "edgeconfig_resolve.go",
         "features.go",
         "reconciler.go",
         "service.go",
@@ -18,6 +19,7 @@ go_library(
         "//agent/internal/xds/cache",
         "//agent/internal/xds/proxy",
         "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
         "//common/constants",
         "//common/log",
         "//common/referencegrant",
@@ -38,6 +40,7 @@ go_library(
         "@io_k8s_sigs_gateway_api//apis/v1alpha2",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",
         "@io_k8s_sigs_gateway_api//pkg/features",
+        "@org_golang_google_protobuf//proto",
         "@org_golang_google_protobuf//types/known/durationpb",
     ],
 )
@@ -46,6 +49,7 @@ go_test(
     name = "gatewayapi_test",
     srcs = [
         "edge_cases_test.go",
+        "edgeconfig_resolve_test.go",
         "reconciler_test.go",
         "service_test.go",
         "status_test.go",
@@ -57,6 +61,8 @@ go_test(
         "//agent/internal/gatewaystatus",
         "//agent/internal/xds/cache",
         "//agent/internal/xds/proxy",
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",
@@ -76,5 +82,6 @@ go_test(
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1alpha2",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
     ],
 )

@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "edgeconfig",
+    srcs = ["webhook.go"],
+    importpath = "github.com/bpalermo/aether/controller/internal/edgeconfig",
+    visibility = ["//controller:__subpackages__"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
+        "@build_buf_go_protovalidate//:protovalidate",
+        "@io_k8s_sigs_controller_runtime//pkg/webhook/admission",
+    ],
+)

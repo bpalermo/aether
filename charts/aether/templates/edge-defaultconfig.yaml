@@ -1,0 +1,28 @@
+{{- if .Values.edge.enabled }}
+# The fleet-default EdgeConfig (proposal 029): the GatewayClass's parametersRef points
+# here, so every edge Gateway inherits these Envoy edge best-practices unless it
+# overrides them via spec.infrastructure.parametersRef → its own EdgeConfig. Fields left
+# unset here fall to the agent's compiled best-practice defaults; the values below are
+# the recommended edge settings, surfaced for discoverability/tuning.
+apiVersion: config.aether.io/v1
+kind: EdgeConfig
+metadata:
+  name: {{ include "aether.edge.defaultConfigName" . }}
+  namespace: {{ include "aether.edge.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+spec:
+  useRemoteAddress: {{ .Values.edge.config.useRemoteAddress }}
+  xffNumTrustedHops: {{ .Values.edge.xffNumTrustedHops }}
+  headersWithUnderscoresAction: {{ .Values.edge.config.headersWithUnderscoresAction }}
+  streamIdleTimeout: {{ .Values.edge.config.streamIdleTimeout }}
+  requestTimeout: {{ .Values.edge.config.requestTimeout }}
+  idleTimeout: {{ .Values.edge.config.idleTimeout }}
+  perConnectionBufferLimitBytes: {{ .Values.edge.config.perConnectionBufferLimitBytes }}
+  http2:
+    maxConcurrentStreams: {{ .Values.edge.config.http2.maxConcurrentStreams }}
+    initialStreamWindowSize: {{ .Values.edge.config.http2.initialStreamWindowSize }}
+    initialConnectionWindowSize: {{ .Values.edge.config.http2.initialConnectionWindowSize }}
+  http3:
+    enabled: {{ .Values.edge.config.http3.enabled }}
+{{- end }}

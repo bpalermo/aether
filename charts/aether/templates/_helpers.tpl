@@ -169,3 +169,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
+
+{{/* Name of the chart-shipped fleet-default EdgeConfig (proposal 029). */}}
+{{- define "aether.edge.defaultConfigName" -}}
+{{- default "aether-edge-defaults" .Values.edge.config.name -}}
+{{- end -}}

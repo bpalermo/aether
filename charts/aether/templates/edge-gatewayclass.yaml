@@ -10,4 +10,11 @@ metadata:
     {{- include "aether.edge.labels" . | nindent 4 }}
 spec:
   controllerName: gateway.aether.io/edge
+  # Fleet-default edge config (proposal 029): every Gateway of this class inherits it,
+  # overridable per-Gateway via spec.infrastructure.parametersRef.
+  parametersRef:
+    group: config.aether.io
+    kind: EdgeConfig
+    name: {{ include "aether.edge.defaultConfigName" . }}
+    namespace: {{ include "aether.edge.namespace" . }}
 {{- end }}

@@ -13,6 +13,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	xdsServer "github.com/bpalermo/aether/agent/internal/xds/server"
+	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/manager"
 	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/spf13/cobra"
@@ -151,6 +152,11 @@ func runEdge(ctx context.Context) (retErr error) {
 	// cross-namespace backendRefs.
 	if err := gatewayv1beta1.Install(scheme); err != nil {
 		return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+	}
+	// EdgeConfig / MeshConfig / HTTPFilter (config.aether.io) — the edge resolves
+	// per-Gateway EdgeConfig via the parametersRef chain (proposal 029).
+	if err := configapisv1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register config.aether.io scheme: %w", err)
 	}
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) {

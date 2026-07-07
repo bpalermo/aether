@@ -256,6 +256,23 @@ edge:
   # Trusted proxies in front of the edge (topology fact, proposal 028): feeds BOTH
   # the HCM's client-address resolution and the geoip filter's XFF config.
   xffNumTrustedHops: 0
+  # Edge best-practices config (proposal 029) — the fleet-default EdgeConfig the
+  # GatewayClass parametersRef points at. Override per-Gateway with your own EdgeConfig
+  # via Gateway.spec.infrastructure.parametersRef. Values are the Envoy edge defaults.
+  config:
+    name: ""                                # default "aether-edge-defaults"
+    useRemoteAddress: true                  # edge trusts the connection source, not XFF
+    headersWithUnderscoresAction: REJECT_REQUEST
+    streamIdleTimeout: 300s
+    requestTimeout: 300s                    # 0s disables
+    idleTimeout: 3600s
+    perConnectionBufferLimitBytes: 32768    # 32 KiB
+    http2:
+      maxConcurrentStreams: 100
+      initialStreamWindowSize: 65536        # 64 KiB
+      initialConnectionWindowSize: 1048576  # 1 MiB
+    http3:
+      enabled: false                        # QUIC/HTTP3 UDP listener on the HTTPS port (M3)
   # GeoIP at the edge (proposal 028): emit x-geo-* request headers from a MaxMind
   # database. The reserved x-geo-* namespace is ALWAYS stripped from client
   # requests at the edge (the Envoy filter passes spoofed values through on a

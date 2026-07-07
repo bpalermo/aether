@@ -12,6 +12,7 @@ go_library(
         "//common/apis/config/v1:config",
         "//common/manager",
         "//common/spire",
+        "//controller/internal/edgeconfig",
         "//controller/internal/gatewayapi",
         "//controller/internal/httpfilter",
         "//controller/internal/meshconfig",

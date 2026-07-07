@@ -88,6 +88,12 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["httpfilters"]
         scope: "Namespaced"
+      # EdgeConfig: proto-validate the edge-hardening/HTTP3 spec (proposal 029).
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["edgeconfigs"]
+        scope: "Namespaced"
       - apiGroups: ["gateway.networking.k8s.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]

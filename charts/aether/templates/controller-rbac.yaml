@@ -17,6 +17,10 @@ rules:
   - apiGroups: ["config.aether.io"]
     resources: ["httpfilters"]
     verbs: ["get", "list"]
+  # EdgeConfig validating webhook (proposal 029).
+  - apiGroups: ["config.aether.io"]
+    resources: ["edgeconfigs"]
+    verbs: ["get", "list"]
   # List HTTPRoutes cluster-wide for the hostname-conflict validating webhook
   # (proposal 018).
   - apiGroups: ["gateway.networking.k8s.io"]
