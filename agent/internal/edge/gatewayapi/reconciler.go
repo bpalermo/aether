@@ -19,6 +19,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	constants "github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/referencegrant"
@@ -140,6 +141,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// GatewayClass: a spec change must re-publish status (observedGeneration
 		// bump). We reconcile any GatewayClass bearing our controllerName.
 		Watches(&gatewayv1.GatewayClass{}, resync).
+		Watches(&configapisv1.EdgeConfig{}, resync).
 		Watches(&gatewayv1.Gateway{}, resync).
 		Watches(&gatewayv1alpha2.TCPRoute{}, resync).
 		Watches(&gatewayv1.TLSRoute{}, resync).
@@ -345,7 +347,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 				r.Log.WarnContext(ctx, "per-Gateway Service reconcile error", "error", svcErr.Error())
 			}
 			perGWAssignedIPs = ips
-			entries := buildEdgeGatewayEntries(ourGateways, vhosts, allocations, gatewayHTTPRedirect)
+			edgeConfigs := make(map[gatewayKey]*configv1.EdgeConfigSpec, len(ourGateways))
+			for i := range ourGateways {
+				gw := &ourGateways[i]
+				edgeConfigs[gatewayKey{Namespace: gw.Namespace, Name: gw.Name}] = r.resolveEdgeConfig(ctx, gw)
+			}
+			entries := buildEdgeGatewayEntries(ourGateways, vhosts, allocations, gatewayHTTPRedirect, edgeConfigs)
 			r.Sink.SetEdgeGateways(entries)
 			r.Log.DebugContext(ctx, "projected per-Gateway entries",
 				"gateways", len(entries), "ourGateways", len(ourGateways),

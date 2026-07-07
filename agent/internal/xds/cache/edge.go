@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/serviceref"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -128,6 +129,11 @@ type EdgeGatewayEntry struct {
 	Listeners []EdgeGatewayListenerEntry
 	// VirtualHosts are the HTTPRoute virtual hosts attached to this Gateway.
 	VirtualHosts []VirtualHost
+	// EdgeConfig is the effective edge-hardening/HTTP3 config for THIS Gateway
+	// (proposal 029): GatewayClass.parametersRef default ⊕ Gateway
+	// infrastructure.parametersRef override, resolved by the reconciler. Nil = the
+	// compiled best-practice defaults (ApplyEdgeHardening handles nil).
+	EdgeConfig *configv1.EdgeConfigSpec
 }
 
 // VirtualHost is the cache's projection of an HTTPRoute (and the legacy
@@ -309,9 +315,9 @@ func (c *SnapshotCache) edgeGatewayListeners() []types.Resource {
 	for _, gw := range gws {
 		for _, ln := range gw.Listeners {
 			if len(ln.TLSSecretNames) > 0 {
-				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), c.edgeConfigSpec()))
+				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), c.effectiveEdgeConfig(gw)))
 			} else {
-				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), c.edgeConfigSpec()))
+				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), c.effectiveEdgeConfig(gw)))
 			}
 		}
 	}
@@ -1119,12 +1125,16 @@ func (c *SnapshotCache) SetEdgeGeoip(gc proxy.GeoipConfig, xffTrustedHops uint32
 // (proposal 029). M1: derived from the existing chart-driven values (xff hops); the
 // GatewayClass/Gateway parametersRef resolution (proto.Merge) lands in M2. Unset
 // fields fall to the compiled best-practice defaults in ApplyEdgeHardening.
-func (c *SnapshotCache) edgeConfigSpec() *configv1.EdgeConfigSpec {
-	b := configv1.EdgeConfigSpec_builder{}
+func (c *SnapshotCache) effectiveEdgeConfig(gw EdgeGatewayEntry) *configv1.EdgeConfigSpec {
+	// Base: the chart-derived xff hops (legacy edge.xffNumTrustedHops), so the
+	// existing knob keeps working until callers migrate to EdgeConfig CRs.
+	base := configv1.EdgeConfigSpec_builder{}.Build()
 	if c.edgeXffTrustedHops > 0 {
-		b.XffNumTrustedHops = wrapperspb.UInt32(c.edgeXffTrustedHops)
+		base.SetXffNumTrustedHops(wrapperspb.UInt32(c.edgeXffTrustedHops))
 	}
-	return b.Build()
+	// Per-Gateway resolved config (proposal 029 M2) wins field-by-field (explicit
+	// false/zero included — see MergeEdgeConfigSpec).
+	return configapisv1.MergeEdgeConfigSpec(base, gw.EdgeConfig)
 }
 
 // edgeGeoFilters returns [strip] or [strip, geoip, route-cache-clear] for the edge

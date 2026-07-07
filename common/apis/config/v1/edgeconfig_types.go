@@ -2,6 +2,7 @@ package v1
 
 import (
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -34,4 +35,25 @@ type EdgeConfigList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []EdgeConfig `json:"items"`
+}
+
+// MergeEdgeConfigSpec returns base with every POPULATED field of override replacing
+// base's (proposal 029 default ⊕ override). Unlike proto.Merge — which recurses into
+// wrapper messages so a BoolValue{false} override cannot beat a BoolValue{true} base —
+// this replaces whole top-level fields the override sets, so "override wins per field"
+// holds for explicit false/zero overrides. Fields unset in override (nil, given the
+// spec's EXPLICIT presence) are left as base's. base may be nil.
+func MergeEdgeConfigSpec(base, override *configv1.EdgeConfigSpec) *configv1.EdgeConfigSpec {
+	if override == nil {
+		return base
+	}
+	if base == nil {
+		base = &configv1.EdgeConfigSpec{}
+	}
+	bm := base.ProtoReflect()
+	override.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		bm.Set(fd, v)
+		return true
+	})
+	return base
 }
