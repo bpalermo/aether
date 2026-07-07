@@ -371,6 +371,7 @@ func TestBuildEdgeGatewayHTTPListener_MultiListenerHostPort(t *testing.T) {
 		"gateway-conformance-infra",
 		"httproute-hostname-intersection",
 		[]*routev3.VirtualHost{specificVH, wildcardIOVH, wildcardAnotherVH},
+		0,
 	)
 
 	// Route config must ignore the port for host matching (the layer that lets
@@ -397,7 +398,7 @@ func TestBuildEdgeGatewayHTTPListener_MultiListenerHostPort(t *testing.T) {
 // correct name, provided vhosts, catch-all 404.
 func TestBuildEdgeGatewayRouteConfiguration(t *testing.T) {
 	vh := BuildEdgeVirtualHost("api.example.com", []string{"api.example.com"}, []*routev3.Route{})
-	rc := BuildEdgeGatewayRouteConfiguration("ns-a", "gw1", []*routev3.VirtualHost{vh})
+	rc := BuildEdgeGatewayRouteConfiguration("ns-a", "gw1", []*routev3.VirtualHost{vh}, 0)
 
 	assert.Equal(t, "edge_rt_ns-a_gw1", rc.GetName())
 	assert.True(t, rc.GetIgnorePortInHostMatching(),
@@ -419,7 +420,7 @@ func TestBuildEdgeRouteConfigurationSingleWildcard(t *testing.T) {
 	hosted := BuildEdgeVirtualHost("api.example.com", []string{"api.example.com"}, []*routev3.Route{starRoute})
 
 	for _, rc := range []*routev3.RouteConfiguration{
-		BuildEdgeGatewayRouteConfiguration("ns-a", "gw1", []*routev3.VirtualHost{hosted, star}),
+		BuildEdgeGatewayRouteConfiguration("ns-a", "gw1", []*routev3.VirtualHost{hosted, star}, 0),
 		BuildEdgeRouteConfiguration([]*routev3.VirtualHost{hosted, star}),
 	} {
 		wildcards := 0

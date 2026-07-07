@@ -199,8 +199,12 @@ func BuildEdgeGatewayHTTPSListener(namespace, gatewayName string, internalPort u
 // BuildEdgeGatewayRouteConfiguration builds the per-Gateway route table from the
 // given virtual hosts. It has a catch-all 404 (no ODCDS — the edge serves only
 // explicitly routed services). The route config name is unique per Gateway.
-func BuildEdgeGatewayRouteConfiguration(namespace, gatewayName string, vhosts []*routev3.VirtualHost) *routev3.RouteConfiguration {
-	return &routev3.RouteConfiguration{
+//
+// http3ExternalPort, when non-zero, adds a response-level alt-svc header
+// ("h3=":<port>"; ma=86400") so HTTP/1.1 and H2 clients upgrade to HTTP/3.
+// Pass 0 when HTTP/3 is not enabled for this Gateway.
+func BuildEdgeGatewayRouteConfiguration(namespace, gatewayName string, vhosts []*routev3.VirtualHost, http3ExternalPort uint32) *routev3.RouteConfiguration {
+	rc := &routev3.RouteConfiguration{
 		Name:         EdgeGatewayRouteName(namespace, gatewayName),
 		VirtualHosts: appendEdgeCatchAll404(vhosts),
 		// Gateway API hostname matching is port-agnostic: Host: very.specific.com:1234
@@ -212,6 +216,15 @@ func BuildEdgeGatewayRouteConfiguration(namespace, gatewayName string, vhosts []
 		// request and broke that assertion.
 		IgnorePortInHostMatching: true,
 	}
+	if http3ExternalPort != 0 {
+		rc.ResponseHeadersToAdd = []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:   "alt-svc",
+				Value: fmt.Sprintf(`h3=":%d"; ma=86400`, http3ExternalPort),
+			},
+		}}
+	}
+	return rc
 }
 
 // appendEdgeCatchAll404 ensures the route table has exactly ONE wildcard "*" vhost

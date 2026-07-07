@@ -306,6 +306,8 @@ func (c *SnapshotCache) SetEdgeGateways(gateways []EdgeGatewayEntry) {
 // All names are UNIQUE (edge_gw_<ns>_<gwname>_<internalPort>) — no two listeners
 // can share a name regardless of how many Gateways are configured (regression guard
 // for #332 where shared name "edge_http" dropped the :443 listener).
+// When HTTP/3 is enabled on a Gateway (EdgeConfig.http3.enabled=true), the HTTPS
+// listener is accompanied by a UDP/QUIC listener on the same InternalPort.
 func (c *SnapshotCache) edgeGatewayListeners() []types.Resource {
 	c.edgeMu.RLock()
 	gws := slices.Clone(c.edgeGateways)
@@ -313,11 +315,17 @@ func (c *SnapshotCache) edgeGatewayListeners() []types.Resource {
 
 	var out []types.Resource
 	for _, gw := range gws {
+		edgeCfg := c.effectiveEdgeConfig(gw)
 		for _, ln := range gw.Listeners {
 			if len(ln.TLSSecretNames) > 0 {
-				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), c.effectiveEdgeConfig(gw)))
+				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), edgeCfg))
+				if edgeCfg.GetHttp3().GetEnabled().GetValue() {
+					if h3ln := proxy.BuildEdgeGatewayHTTP3Listener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), edgeCfg); h3ln != nil {
+						out = append(out, h3ln)
+					}
+				}
 			} else {
-				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), c.effectiveEdgeConfig(gw)))
+				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), edgeCfg))
 			}
 		}
 	}
@@ -346,11 +354,28 @@ func (c *SnapshotCache) edgeGatewayRouteConfigs() []types.Resource {
 		// one; the redirect route cannot be simultaneously correct for two different ports
 		// on a shared route config, so we favour the first declared port.
 		listenerPort := gatewayExternalHTTPPort(gw.Listeners)
+		edgeCfg := c.effectiveEdgeConfig(gw)
 		vhosts := c.gatewayVhostsLocked(gw.VirtualHosts, listenerPort)
-		rc := proxy.BuildEdgeGatewayRouteConfiguration(gw.Namespace, gw.Name, vhosts)
+		h3Port := gatewayH3ExternalPort(gw.Listeners, edgeCfg)
+		rc := proxy.BuildEdgeGatewayRouteConfiguration(gw.Namespace, gw.Name, vhosts, h3Port)
 		out = append(out, rc)
 	}
 	return out
+}
+
+// gatewayH3ExternalPort returns the external port of the first TLS listener when HTTP/3 is
+// enabled for this Gateway, or 0 when HTTP/3 is disabled or no TLS listener is present.
+// Used to populate the alt-svc advertisement in the per-Gateway route config.
+func gatewayH3ExternalPort(listeners []EdgeGatewayListenerEntry, cfg *configv1.EdgeConfigSpec) uint32 {
+	if !cfg.GetHttp3().GetEnabled().GetValue() {
+		return 0
+	}
+	for _, ln := range listeners {
+		if len(ln.TLSSecretNames) > 0 {
+			return ln.ExternalPort
+		}
+	}
+	return 0
 }
 
 // gatewayExternalHTTPPort returns the external port of the first non-redirect,

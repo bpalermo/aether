@@ -363,6 +363,13 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 // strip + the geoip filter with the MaxMind provider over the REAL MaxMind test
 // database (testdata/GeoIP2-City-Test.mmdb) — the provider opens the file at config
 // load, so stock Envoy validates the whole shape end-to-end.
+//
+// Three listeners are exercised:
+//
+//  1. HTTP (plain): geo pipeline + RDS (ADS).
+//  2. HTTPS (TLS): SDS-backed cert + geo + RDS. Validates the DownstreamTlsContext shape.
+//  3. H3 (QUIC/UDP, proposal 029 M3): envoy.transport_sockets.quic + HTTP3 codec + RDS.
+//     Stock Envoy 1.38.0 compiles in QUIC, so this validates the full QUIC listener shape.
 func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	edgeSvc := newEdgeServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
 	spire := newSpireAgentCluster()
@@ -380,17 +387,33 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	}
 	// Full edge hardening (proposal 029): validate use_remote_address, header-underscore
 	// rejection, downstream h2 caps and timeouts are accepted by stock Envoy.
+	// http3.enabled is set so the route config gets the alt-svc header, exercising M3.
 	edgeCfg := configprotov1.EdgeConfigSpec_builder{
 		UseRemoteAddress:             wrapperspb.Bool(true),
 		XffNumTrustedHops:            wrapperspb.UInt32(1),
 		HeadersWithUnderscoresAction: configprotov1.EdgeConfigSpec_REJECT_REQUEST.Enum(),
 		RequestTimeout:               durationpb.New(300 * time.Second),
+		Http3:                        configprotov1.Http3Options_builder{Enabled: wrapperspb.Bool(true)}.Build(),
 	}.Build()
-	edgeHTTP := proxy.BuildEdgeGatewayHTTPListener("edge-ns", "edge-gw", 18150, false, geo, edgeCfg)
+
+	const (
+		edgeGWNamespace = "edge-ns"
+		edgeGWName      = "edge-gw"
+		edgeHTTPPort    = uint32(18150)
+		edgeHTTPSPort   = uint32(18443)
+		// SDS cert name — ADS-served; validate mode accepts the reference without a live SDS server.
+		edgeTLSCertName = "spiffe://aether.internal/edge-test-cert"
+		// External HTTPS port for alt-svc advertisement.
+		externalHTTPSPort = uint32(443)
+	)
+
+	edgeHTTP := proxy.BuildEdgeGatewayHTTPListener(edgeGWNamespace, edgeGWName, edgeHTTPPort, false, geo, edgeCfg)
+	edgeHTTPS := proxy.BuildEdgeGatewayHTTPSListener(edgeGWNamespace, edgeGWName, edgeHTTPSPort, []string{edgeTLSCertName}, geo, edgeCfg)
+	edgeH3 := proxy.BuildEdgeGatewayHTTP3Listener(edgeGWNamespace, edgeGWName, edgeHTTPSPort, []string{edgeTLSCertName}, geo, edgeCfg)
 
 	return newBootstrap(
 		[]*clusterv3.Cluster{xdsCluster(), spire, edgeSvc},
-		[]*listenerv3.Listener{edgeHTTP},
+		[]*listenerv3.Listener{edgeHTTP, edgeHTTPS, edgeH3},
 	), nil
 }
 

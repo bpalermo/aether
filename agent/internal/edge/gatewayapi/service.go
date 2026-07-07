@@ -191,6 +191,10 @@ func listenerCert(ln gatewayv1.Listener, hostCerts map[string]string) string {
 // whose Gateway no longer exists. Returns a map from gatewayKey → the Service's
 // assigned IP (from status.loadBalancer.ingress), used for status.addresses.
 //
+// When a Gateway has HTTP/3 enabled (EdgeConfigSpec.http3.enabled=true) AND the
+// listener uses TLS, the Service also exposes the same external port as UDP so
+// the cloud/MetalLB LB passes QUIC datagrams through to the edge pod.
+//
 // The production Gateway (whichever has spec.addresses set, or the one matching
 // the existing shared edge Service) pins its IP via the MetalLB annotation. All
 // other Gateways get auto-assigned IPs from the MetalLB pool.
@@ -198,6 +202,7 @@ func (r *Reconciler) reconcileGatewayServices(
 	ctx context.Context,
 	ourGateways []gatewayv1.Gateway,
 	allocations map[gatewayKey][]gatewayListenerAllocation,
+	edgeConfigs map[gatewayKey]*configv1.EdgeConfigSpec,
 ) (map[gatewayKey]string, error) {
 	assignedIPs := make(map[gatewayKey]string, len(ourGateways))
 	currentGWKeys := make(map[string]struct{}, len(ourGateways))
@@ -231,6 +236,7 @@ func (r *Reconciler) reconcileGatewayServices(
 		// but we dedup here as a defensive backstop so any caller — present or future —
 		// that passes multiple allocations for the same external port still yields a
 		// single ServicePort rather than a Service the API server refuses.
+		gkCfg := edgeConfigs[gk]
 		ports := make([]corev1.ServicePort, 0, len(allocs))
 		seenPort := make(map[uint32]struct{}, len(allocs))
 		for _, a := range allocs {
@@ -245,6 +251,17 @@ func (r *Reconciler) reconcileGatewayServices(
 				TargetPort: intstr.FromInt32(int32(a.internalPort)),
 				Protocol:   corev1.ProtocolTCP,
 			})
+			// UDP port for HTTP/3: same external port, different protocol so k8s
+			// allows it alongside the TCP port. Required for LBs to pass QUIC
+			// datagrams through to the edge pod.
+			if len(a.tlsSecretNames) > 0 && gkCfg.GetHttp3().GetEnabled().GetValue() {
+				ports = append(ports, corev1.ServicePort{
+					Name:       portName + "-udp",
+					Port:       int32(a.externalPort),
+					TargetPort: intstr.FromInt32(int32(a.internalPort)),
+					Protocol:   corev1.ProtocolUDP,
+				})
+			}
 		}
 		if len(ports) == 0 {
 			// No listeners — skip creating a Service for this Gateway.

@@ -342,16 +342,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			// Fall through to Phase 1 path.
 			r.Sink.SetEdgeGateways(nil)
 		} else {
-			ips, svcErr := r.reconcileGatewayServices(ctx, ourGateways, allocations)
-			if svcErr != nil {
-				r.Log.WarnContext(ctx, "per-Gateway Service reconcile error", "error", svcErr.Error())
-			}
-			perGWAssignedIPs = ips
 			edgeConfigs := make(map[gatewayKey]*configv1.EdgeConfigSpec, len(ourGateways))
 			for i := range ourGateways {
 				gw := &ourGateways[i]
 				edgeConfigs[gatewayKey{Namespace: gw.Namespace, Name: gw.Name}] = r.resolveEdgeConfig(ctx, gw)
 			}
+			ips, svcErr := r.reconcileGatewayServices(ctx, ourGateways, allocations, edgeConfigs)
+			if svcErr != nil {
+				r.Log.WarnContext(ctx, "per-Gateway Service reconcile error", "error", svcErr.Error())
+			}
+			perGWAssignedIPs = ips
 			entries := buildEdgeGatewayEntries(ourGateways, vhosts, allocations, gatewayHTTPRedirect, edgeConfigs)
 			r.Sink.SetEdgeGateways(entries)
 			r.Log.DebugContext(ctx, "projected per-Gateway entries",

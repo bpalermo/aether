@@ -412,7 +412,7 @@ func TestReconcileGatewayServices_MultiListenerSamePort(t *testing.T) {
 		Log:             slog.New(slog.DiscardHandler),
 	}
 
-	_, err = r.reconcileGatewayServices(context.Background(), gws, allocs)
+	_, err = r.reconcileGatewayServices(context.Background(), gws, allocs, nil)
 	require.NoError(t, err)
 
 	svcName := gatewayServiceName("aether-edge", gw.Namespace, gw.Name)
@@ -467,7 +467,7 @@ func TestReconcileGatewayServices_DedupBackstop(t *testing.T) {
 		Log:             slog.New(slog.DiscardHandler),
 	}
 
-	_, err := r.reconcileGatewayServices(context.Background(), []gatewayv1.Gateway{gw}, allocs)
+	_, err := r.reconcileGatewayServices(context.Background(), []gatewayv1.Gateway{gw}, allocs, nil)
 	require.NoError(t, err)
 
 	svcName := gatewayServiceName("aether-edge", gw.Namespace, gw.Name)
