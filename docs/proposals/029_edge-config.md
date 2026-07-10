@@ -31,7 +31,7 @@ proto.Merge).
 ```yaml
 useRemoteAddress: true                  # edge trusts the connection source, manages XFF
 xffNumTrustedHops: 0                     # additional trusted proxies in front
-headersWithUnderscoresAction: REJECT_REQUEST
+headersWithUnderscoresAction: HEADERS_WITH_UNDERSCORES_ACTION_REJECT_REQUEST
 http2:
   maxConcurrentStreams: 100
   initialStreamWindowSize: 65536         # 64 KiB

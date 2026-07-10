@@ -266,7 +266,8 @@ edge:
   config:
     name: ""                                # default "aether-edge-defaults"
     useRemoteAddress: true                  # edge trusts the connection source, not XFF
-    headersWithUnderscoresAction: REJECT_REQUEST
+    # Canonical enum names (buf ENUM_VALUE_PREFIX): HEADERS_WITH_UNDERSCORES_ACTION_{ALLOW,REJECT_REQUEST,DROP_HEADER}.
+    headersWithUnderscoresAction: HEADERS_WITH_UNDERSCORES_ACTION_REJECT_REQUEST
     streamIdleTimeout: 300s
     requestTimeout: 300s                    # 0s disables
     idleTimeout: 3600s

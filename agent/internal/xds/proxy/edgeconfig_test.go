@@ -32,7 +32,7 @@ func TestApplyEdgeHardening_Overrides(t *testing.T) {
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	spec := configv1.EdgeConfigSpec_builder{
 		UseRemoteAddress:             wrapperspb.Bool(false),
-		HeadersWithUnderscoresAction: configv1.EdgeConfigSpec_ALLOW.Enum(),
+		HeadersWithUnderscoresAction: configv1.EdgeConfigSpec_HEADERS_WITH_UNDERSCORES_ACTION_ALLOW.Enum(),
 		RequestTimeout:               durationpb.New(0),
 		Http2:                        configv1.Http2Options_builder{MaxConcurrentStreams: wrapperspb.UInt32(50)}.Build(),
 	}.Build()
