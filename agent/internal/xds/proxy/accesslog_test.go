@@ -63,8 +63,11 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 		"authority", "upstream_host", "upstream_cluster", "upstream_local_address",
 		"downstream_local_address", "downstream_remote_address", "requested_server_name",
 		"route_name", "traceparent", "source_netns",
+		"rbac_shadow_result", "rbac_shadow_policy",
 	} {
 		assert.Contains(t, attrs, key, "missing access-log attribute %q", key)
 	}
 	assert.Equal(t, "%REQ(TRACEPARENT)%", attrs["traceparent"])
+	// RBAC AUDIT visibility surfaces the filter's shadow dynamic metadata (proposal 025).
+	assert.Equal(t, "%DYNAMIC_METADATA(envoy.filters.http.rbac:shadow_engine_result)%", attrs["rbac_shadow_result"])
 }
