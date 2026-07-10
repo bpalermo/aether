@@ -5,8 +5,8 @@ Bazel-built Helm charts for Aether, using
 
 | Chart | Path | Deploys |
 | --- | --- | --- |
-| `crds` | [`charts/crds`](./crds) | Aether CustomResourceDefinitions (`MeshConfig`, `HTTPFilter`). Install **first**; standalone so CRDs can be upgraded independently. |
-| `aether` | [`charts/aether`](./aether) | The whole system: agent DaemonSet (xDS + CNI install) + per-node Envoy proxy, registrar Deployment, and the controller (validating webhooks for `MeshConfig`/`HTTPFilter`/`HTTPRoute`, a pod-mutating webhook, and the `MeshConfig`→ConfigMap reconciler). Owns the `aether-system` namespace and RBAC. |
+| `crds` | [`charts/crds`](./crds) | Aether CustomResourceDefinitions (`MeshConfig`, `HTTPFilter`, `EdgeConfig`). Install **first**; standalone so CRDs can be upgraded independently. |
+| `aether` | [`charts/aether`](./aether) | The whole system: agent DaemonSet (xDS + CNI install) + per-node Envoy proxy, registrar Deployment, and the controller (validating webhooks for `MeshConfig`/`HTTPFilter`/`EdgeConfig`/`HTTPRoute`, a pod-mutating webhook, and the `MeshConfig`→ConfigMap reconciler). Owns the `aether-system` namespace and RBAC. |
 | `prober` | [`charts/prober`](./prober) | External mesh-availability prober (proposal 013). |
 
 Agent, registrar and controller deploy together as one system from the single

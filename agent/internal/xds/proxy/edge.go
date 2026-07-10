@@ -735,7 +735,7 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 }
 
 // BuildEdgeVirtualHost builds one edge virtual host: the given external domains
-// with an ordered list of routes (first match wins, per VirtualHost CR order).
+// with an ordered list of routes (first match wins, in HTTPRoute rule order).
 func BuildEdgeVirtualHost(name string, domains []string, routes []*routev3.Route) *routev3.VirtualHost {
 	return &routev3.VirtualHost{
 		Name:    name,

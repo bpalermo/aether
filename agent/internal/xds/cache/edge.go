@@ -136,9 +136,11 @@ type EdgeGatewayEntry struct {
 	EdgeConfig *configv1.EdgeConfigSpec
 }
 
-// VirtualHost is the cache's projection of an HTTPRoute (and the legacy
-// VirtualHost CR): a set of external hosts carrying an ordered list of
-// path-matched routes to backend services, optionally served under a downstream
+// VirtualHost is the cache's projection of a Gateway API HTTPRoute into edge
+// Envoy virtual hosts. (The VirtualHost CRD, proposal 017, was retired and
+// subsumed by HTTPRoute per proposal 018 — this Go type keeps the name but is no
+// longer backed by any CRD.) It is a set of external hosts carrying an ordered
+// list of path-matched routes to backend services, optionally served under a downstream
 // cert. Empty Routes makes it inert. Empty Hosts is NOT inert — per Gateway API a
 // hostname-less route matches every host on its listener, so it is served via the
 // edge's catch-all "*" vhost (see buildEdgeVhostsLocked).
