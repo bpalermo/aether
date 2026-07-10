@@ -391,7 +391,7 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	edgeCfg := configprotov1.EdgeConfigSpec_builder{
 		UseRemoteAddress:             wrapperspb.Bool(true),
 		XffNumTrustedHops:            wrapperspb.UInt32(1),
-		HeadersWithUnderscoresAction: configprotov1.EdgeConfigSpec_REJECT_REQUEST.Enum(),
+		HeadersWithUnderscoresAction: configprotov1.EdgeConfigSpec_HEADERS_WITH_UNDERSCORES_ACTION_REJECT_REQUEST.Enum(),
 		RequestTimeout:               durationpb.New(300 * time.Second),
 		Http3:                        configprotov1.Http3Options_builder{Enabled: wrapperspb.Bool(true)}.Build(),
 	}.Build()

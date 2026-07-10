@@ -24,7 +24,7 @@ message EdgeConfigSpec {
   // HCM and the geoip filter. Default 0.
   google.protobuf.UInt32Value xff_num_trusted_hops = 2;
   // headers_with_underscores_action: how to treat request headers with underscores
-  // (header-smuggling defense). Default REJECT_REQUEST.
+  // (header-smuggling defense). Default HEADERS_WITH_UNDERSCORES_ACTION_REJECT_REQUEST.
   HeadersWithUnderscoresAction headers_with_underscores_action = 3 [(buf.validate.field).enum.defined_only = true];
   // http2: downstream HTTP/2 resource caps (malicious-client protection).
   Http2Options http2 = 4;
@@ -41,9 +41,9 @@ message EdgeConfigSpec {
 
   enum HeadersWithUnderscoresAction {
     HEADERS_WITH_UNDERSCORES_ACTION_UNSPECIFIED = 0;
-    ALLOW = 1;
-    REJECT_REQUEST = 2;
-    DROP_HEADER = 3;
+    HEADERS_WITH_UNDERSCORES_ACTION_ALLOW = 1;
+    HEADERS_WITH_UNDERSCORES_ACTION_REJECT_REQUEST = 2;
+    HEADERS_WITH_UNDERSCORES_ACTION_DROP_HEADER = 3;
   }
 }
 

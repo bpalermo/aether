@@ -57,9 +57,9 @@ func ApplyEdgeHardening(hcm *http_connection_managerv3.HttpConnectionManager, l 
 
 func underscoresAction(spec *configv1.EdgeConfigSpec) corev3.HttpProtocolOptions_HeadersWithUnderscoresAction {
 	switch spec.GetHeadersWithUnderscoresAction() {
-	case configv1.EdgeConfigSpec_ALLOW:
+	case configv1.EdgeConfigSpec_HEADERS_WITH_UNDERSCORES_ACTION_ALLOW:
 		return corev3.HttpProtocolOptions_ALLOW
-	case configv1.EdgeConfigSpec_DROP_HEADER:
+	case configv1.EdgeConfigSpec_HEADERS_WITH_UNDERSCORES_ACTION_DROP_HEADER:
 		return corev3.HttpProtocolOptions_DROP_HEADER
 	default: // UNSPECIFIED or REJECT_REQUEST → the best-practice default
 		return corev3.HttpProtocolOptions_REJECT_REQUEST
