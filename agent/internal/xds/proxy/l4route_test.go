@@ -88,6 +88,46 @@ func TestBuildCaptureTCPRouteFilterChain_WeightedBackends(t *testing.T) {
 	assert.Equal(t, uint32(20), wc.Clusters[1].Weight)
 }
 
+// TestBuildCaptureTCPRouteFilterChain_ZeroWeightDrain verifies an explicit
+// weight:0 backend is DRAINED (omitted), not normalized to 1 — the single
+// remaining backend collapses to the TcpProxy_Cluster form and gets 100% traffic.
+// (029/Phase-3b M4 e2e bug: 0→1 made drain == equal-weight.)
+func TestBuildCaptureTCPRouteFilterChain_ZeroWeightDrain(t *testing.T) {
+	svc := CaptureTCPService{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.0.0.20"}
+	rules := []L4ServiceRoute{
+		{Backends: []L4Backend{
+			{Service: "svc-b-v1", Cluster: "tcp:svc-b-v1.aether.internal", Weight: 0}, // drained
+			{Service: "svc-b-v2", Cluster: "tcp:svc-b-v2.aether.internal", Weight: 1},
+		}},
+	}
+	chain := BuildCaptureTCPRouteFilterChain(svc, rules)
+	require.NotNil(t, chain)
+	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	// Only the non-drained backend survives → single-cluster form, no weighted set.
+	assert.Nil(t, tcp.GetWeightedClusters(), "drained backend must not appear in weighted_clusters")
+	assert.Equal(t, "tcp:svc-b-v2.aether.internal", tcp.GetCluster())
+}
+
+// TestBuildCaptureTCPRouteFilterChain_AllDrained: every backend weight 0 → no
+// valid cluster → the chain falls back to the passthrough floor (never a
+// normalized-to-1 accidental route).
+func TestBuildCaptureTCPRouteFilterChain_AllDrained(t *testing.T) {
+	svc := CaptureTCPService{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.0.0.20"}
+	rules := []L4ServiceRoute{
+		{Backends: []L4Backend{
+			{Service: "svc-b-v1", Cluster: "tcp:svc-b-v1.aether.internal", Weight: 0},
+			{Service: "svc-b-v2", Cluster: "tcp:svc-b-v2.aether.internal", Weight: 0},
+		}},
+	}
+	chain := BuildCaptureTCPRouteFilterChain(svc, rules)
+	// buildWeightedTCPProxy returns nil for an empty set → BuildCaptureTCPRouteFilterChain
+	// falls back to the passthrough floor chain (still a valid chain, not the routed one).
+	require.NotNil(t, chain)
+	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	assert.Nil(t, tcp.GetWeightedClusters())
+	assert.Equal(t, "tcp:svc-b.aether.internal", tcp.GetCluster(), "all-drained falls back to the floor cluster")
+}
+
 // TestBuildCaptureTCPRouteFilterChain_DuplicateClustersWeightMerged verifies
 // that duplicate clusters across rules have their weights summed.
 func TestBuildCaptureTCPRouteFilterChain_DuplicateClustersWeightMerged(t *testing.T) {
@@ -211,14 +251,19 @@ func TestGenerateUDPCaptureListener_WithRoutes(t *testing.T) {
 	assert.Equal(t, "envoy.filters.udp_listener.udp_proxy", l.ListenerFilters[0].Name)
 }
 
-// TestL4RulesToWeightedClusters_DefaultWeight verifies weight=0 becomes 1.
-func TestL4RulesToWeightedClusters_DefaultWeight(t *testing.T) {
+// TestL4RulesToWeightedClusters_ZeroWeightDrained verifies weight=0 = drained (omitted).
+func TestL4RulesToWeightedClusters_ZeroWeightDrained(t *testing.T) {
+	// weight 0 = explicit drain: the backend is OMITTED from the weighted set (the
+	// reconciler already turned an UNSET weight into 1, so a 0 reaching here is a
+	// deliberate drain). Previously 0 was normalized to 1, making drain impossible.
 	rules := []L4ServiceRoute{
 		{Backends: []L4Backend{
 			{Cluster: "tcp:svc-g.aether.internal", Weight: 0},
+			{Cluster: "tcp:svc-h.aether.internal", Weight: 5},
 		}},
 	}
 	clusters := l4RulesToWeightedClusters(rules)
-	require.Len(t, clusters, 1)
-	assert.Equal(t, uint32(1), clusters[0].Weight, "weight 0 should be treated as 1")
+	require.Len(t, clusters, 1, "drained backend must be omitted")
+	assert.Equal(t, "tcp:svc-h.aether.internal", clusters[0].Name)
+	assert.Equal(t, uint32(5), clusters[0].Weight)
 }
