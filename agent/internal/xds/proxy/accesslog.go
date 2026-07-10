@@ -113,6 +113,15 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			kv("route_name", "%ROUTE_NAME%"),
 			kv("traceparent", "%REQ(TRACEPARENT)%"),
 			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
+			// RBAC AUDIT shadow decision — populated when the INBOUND listener carries an
+			// AUDIT-mode RBAC filter (scope INBOUND, proposal 026 M4). Envoy prepends the
+			// shadow_rules_stat_prefix ("aether_audit_") to both the stat counter names AND
+			// the dynamic-metadata field names (rbac_filter.cc evaluateShadowEngine →
+			// shadowEngineResultField / shadowEffectivePolicyIdField). The DYNAMIC_METADATA
+			// substitution must therefore use the same prefix; bare "shadow_engine_result"
+			// always returns "-". Returns "-" on requests where RBAC shadow is not active.
+			kv("rbac_shadow_result", "%DYNAMIC_METADATA(envoy.filters.http.rbac:aether_audit_shadow_engine_result)%"),
+			kv("rbac_shadow_policy", "%DYNAMIC_METADATA(envoy.filters.http.rbac:aether_audit_shadow_effective_policy_id)%"),
 		}},
 	}
 
