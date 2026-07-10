@@ -9,7 +9,7 @@ description: |
   docs/proposals/015_mesh-config.md.
 type: application
 # Stamped at package time when built with `--stamp` (see other charts).
-version: "0.68.2-{GIT_COMMIT}"
+version: "0.69.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether
