@@ -113,13 +113,6 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			kv("route_name", "%ROUTE_NAME%"),
 			kv("traceparent", "%REQ(TRACEPARENT)%"),
 			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
-			// RBAC AUDIT-mode visibility (proposal 025): the local-authz filter writes
-			// its shadow decision to dynamic metadata on every request it evaluates in
-			// AUDIT mode. Surfacing it per-request in the access log is the reliable way
-			// to observe "what ENFORCE would block" — the per-route rbac.shadow_* stats
-			// are fleet-collapsed and hard to attribute. "-" for non-audited requests.
-			kv("rbac_shadow_result", "%DYNAMIC_METADATA(envoy.filters.http.rbac:shadow_engine_result)%"),
-			kv("rbac_shadow_policy", "%DYNAMIC_METADATA(envoy.filters.http.rbac:shadow_effective_policy_id)%"),
 		}},
 	}
 
