@@ -58,7 +58,9 @@ type L4Backend struct {
 	// Cluster is the resolved data-plane TCP cluster name
 	// ("tcp:<svc>.<ns>.<meshDomain>").
 	Cluster string
-	// Weight is the load-balancing weight (1 when unset).
+	// Weight is the load-balancing weight. The reconciler defaults an UNSET
+	// backendRef weight to 1; an explicit 0 means DRAIN (no traffic) and is omitted
+	// from the weighted-cluster set, per Gateway API.
 	Weight uint32
 }
 
@@ -283,14 +285,17 @@ func l4RulesToWeightedClusters(rules []L4ServiceRoute) []*tcp_proxyv3.TcpProxy_W
 			if b.Cluster == "" {
 				continue
 			}
+			// weight 0 is an EXPLICIT drain (Gateway API): the backend receives no
+			// traffic, so it must be omitted from the weighted set — not normalized
+			// to 1. The reconciler already defaulted an UNSET weight to 1, so a 0 here
+			// is always intentional. (A previous 0→1 made drain == equal-weight.)
+			if b.Weight == 0 {
+				continue
+			}
 			if _, seen := weightByCluster[b.Cluster]; !seen {
 				order = append(order, b.Cluster)
 			}
-			w := b.Weight
-			if w == 0 {
-				w = 1
-			}
-			weightByCluster[b.Cluster] += w
+			weightByCluster[b.Cluster] += b.Weight
 		}
 	}
 	return weightsToClusterWeights(order, weightByCluster)
@@ -305,14 +310,15 @@ func l4BackendsToWeightedClusters(backends []L4Backend) []*tcp_proxyv3.TcpProxy_
 		if b.Cluster == "" {
 			continue
 		}
+		// weight 0 = explicit drain (see l4RulesToWeightedClusters): omit, don't
+		// normalize to 1.
+		if b.Weight == 0 {
+			continue
+		}
 		if _, seen := weightByCluster[b.Cluster]; !seen {
 			order = append(order, b.Cluster)
 		}
-		w := b.Weight
-		if w == 0 {
-			w = 1
-		}
-		weightByCluster[b.Cluster] += w
+		weightByCluster[b.Cluster] += b.Weight
 	}
 	return weightsToClusterWeights(order, weightByCluster)
 }
