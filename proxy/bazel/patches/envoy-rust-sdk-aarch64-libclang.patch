@@ -1,6 +1,6 @@
---- a/source/extensions/dynamic_modules/sdk/rust/BUILD	2026-06-16 16:34:27.031825568 -0300
-+++ b/source/extensions/dynamic_modules/sdk/rust/BUILD	2026-06-16 16:35:10.375941989 -0300
-@@ -26,7 +26,20 @@
+--- a/source/extensions/dynamic_modules/sdk/rust/BUILD
++++ b/source/extensions/dynamic_modules/sdk/rust/BUILD
+@@ -27,7 +27,20 @@
                  "-isystem %s/include/aarch64-unknown-linux-gnu/c++/v1/" % LLVM_PATH,
              ]),
          },
@@ -10,8 +10,8 @@
 +        "@platforms//cpu:aarch64": {
 +            "LIBCLANG_PATH": "$(location @llvm_toolchain_aarch64_llvm//:lib/libclang.so)",
 +            "BINDGEN_EXTRA_CLANG_ARGS": " ".join([
-+                "-resource-dir $${pwd}/external/llvm_toolchain_aarch64_llvm/lib/clang/18",
-+                "-isystem $${pwd}/external/llvm_toolchain_aarch64_llvm/lib_legacy/clang/18/include",
++                "-resource-dir $${pwd}/external/llvm_toolchain_aarch64_llvm/lib/clang/" + LLVM_MAJOR,
++                "-isystem $${pwd}/external/llvm_toolchain_aarch64_llvm/lib_legacy/clang/" + LLVM_MAJOR + "/include",
 +                "-isystem $${pwd}/external/llvm_toolchain_aarch64_llvm/include/aarch64-unknown-linux-gnu/c++/v1/",
 +                "-isystem $${pwd}/external/sysroot_linux_arm64/usr/include",
 +                "-isystem $${pwd}/external/sysroot_linux_arm64/usr/include/aarch64-linux-gnu",
@@ -21,8 +21,8 @@
 +        "@platforms//cpu:x86_64": {
              "LIBCLANG_PATH": "$(location @llvm_toolchain_llvm//:lib/libclang.so)",
              "BINDGEN_EXTRA_CLANG_ARGS": " ".join([
-                 "-resource-dir $${pwd}/external/llvm_toolchain_llvm/lib/clang/18",
-@@ -46,7 +59,14 @@
+                 "-resource-dir $${pwd}/external/llvm_toolchain_llvm/lib/clang/" + LLVM_MAJOR,
+@@ -47,7 +60,14 @@
          "//source/extensions/dynamic_modules/abi:abi.h",
      ] + select({
          "@envoy_repo//:use_local_llvm": [],
