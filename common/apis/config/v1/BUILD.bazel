@@ -28,7 +28,10 @@ go_library(
 
 go_test(
     name = "config_test",
-    srcs = ["httpfilter_test.go"],
+    srcs = [
+        "edgeconfig_test.go",
+        "httpfilter_test.go",
+    ],
     embed = [":config"],
     deps = [
         "//api/aether/config/v1:config",
