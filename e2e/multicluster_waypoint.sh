@@ -271,7 +271,7 @@ verify() {
 	# The data-path assertion.
 	local code
 	code="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" exec deploy/client -c curl -- \
-		curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://echo.$TEST_NS.$MESH_DOMAIN:8080/" 2>/dev/null || echo 000)"
+		curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://echo.$TEST_NS.$MESH_DOMAIN:18081/" 2>/dev/null || echo 000)"
 	if [ "$code" = "200" ]; then
 		ok "cross-cluster call succeeded (HTTP $code) — waypoint data path works"
 	else
