@@ -178,6 +178,7 @@ install_aether() {
 		helm --kube-context "kind-$c" upgrade --install aether-crds "$charts/crds" -n "$NS" --create-namespace --wait --timeout 2m >/dev/null
 		# shellcheck disable=SC2046
 		helm --kube-context "kind-$c" upgrade --install aether "$charts/aether" -n "$NS" --create-namespace \
+			--set namespace.create=false \
 			--set "clusterName=cluster-$c" \
 			--set "meshDomain=$MESH_DOMAIN" \
 			--set spire.enabled=true \
