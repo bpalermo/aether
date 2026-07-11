@@ -105,7 +105,8 @@ type Replicator struct {
 	ResyncBackoff   time.Duration
 	LeaseTTLSeconds int64
 
-	log *slog.Logger
+	log     *slog.Logger
+	metrics *metrics
 }
 
 // NeedLeaderElection makes the replicator run only on the elected leader
@@ -117,6 +118,7 @@ func (r *Replicator) NeedLeaderElection() bool { return true }
 // own backoff without stalling the others.
 func (r *Replicator) Start(ctx context.Context) error {
 	r.log = commonlog.Named(r.Log, "replicator")
+	r.metrics = newMetrics()
 	if r.DialTimeout == 0 {
 		r.DialTimeout = defaultDialTimeout
 	}
@@ -146,7 +148,9 @@ func (r *Replicator) runPeer(ctx context.Context, log *slog.Logger, p Peer) {
 	for {
 		if err := r.mirrorPeer(ctx, log, p); err != nil && ctx.Err() == nil {
 			log.ErrorContext(ctx, "peer mirror failed; will redial and resync", "error", err)
+			r.metrics.mirrorError(ctx, p.Region)
 		}
+		r.metrics.setConnected(ctx, p.Region, false)
 		select {
 		case <-ctx.Done():
 			return
@@ -187,6 +191,7 @@ func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) e
 	}()
 
 	for {
+		syncStart := time.Now()
 		rev, err := r.syncFull(connCtx, peerCli, lease.id)
 		if err != nil {
 			if ctx.Err() == nil && connCtx.Err() != nil {
@@ -194,8 +199,10 @@ func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) e
 			}
 			return fmt.Errorf("full sync: %w", err)
 		}
+		r.metrics.resync(ctx, p.Region, time.Since(syncStart))
+		r.metrics.setConnected(ctx, p.Region, true)
 		log.InfoContext(ctx, "peer mirror synced; watching", "revision", rev, "leaseID", lease.id)
-		err = r.watchMirror(connCtx, peerCli, lease.id, rev+1)
+		err = r.watchMirror(connCtx, peerCli, p.Region, lease.id, rev+1)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -262,7 +269,7 @@ func (r *Replicator) syncFull(ctx context.Context, peerCli *clientv3.Client, lea
 // watchMirror replays local watch events verbatim into the peer, starting at
 // startRev; puts attach the origin-heartbeat lease. Returns when the watch or
 // a peer write fails; the caller decides between compaction-resync and redial.
-func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, leaseID clientv3.LeaseID, startRev int64) error {
+func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, region string, leaseID clientv3.LeaseID, startRev int64) error {
 	wch := r.Source.Client().Watch(clientv3.WithRequireLeader(ctx), r.Source.OwnPrefix(),
 		clientv3.WithPrefix(), clientv3.WithRev(startRev))
 	for resp := range wch {
@@ -276,10 +283,12 @@ func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, 
 				if _, err := peerCli.Put(ctx, key, string(ev.Kv.Value), clientv3.WithLease(leaseID)); err != nil {
 					return fmt.Errorf("mirror put: %w", err)
 				}
+				r.metrics.event(ctx, region, "put")
 			case clientv3.EventTypeDelete:
 				if _, err := peerCli.Delete(ctx, key); err != nil {
 					return fmt.Errorf("mirror delete: %w", err)
 				}
+				r.metrics.event(ctx, region, "delete")
 			}
 		}
 	}

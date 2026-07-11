@@ -49,6 +49,9 @@ spec:
             {{- if eq .Values.registrar.registryBackend "etcd" }}
             - "--etcd-endpoints={{ join "," .Values.registrar.etcd.endpoints }}"
             - "--region={{ .Values.registrar.region }}"
+            {{- range .Values.registrar.peerEtcd }}
+            - "--peer-etcd={{ . }}"
+            {{- end }}
             {{- end }}
             - "--grpc-address=:{{ .Values.registrar.service.targetPort }}"
             {{- if .Values.registrar.generateMeshServices }}

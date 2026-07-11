@@ -4,6 +4,7 @@ go_library(
     name = "replicator",
     srcs = [
         "lease.go",
+        "metrics.go",
         "replicator.go",
     ],
     importpath = "github.com/bpalermo/aether/registrar/internal/replicator",
@@ -12,6 +13,9 @@ go_library(
         "//common/log",
         "@io_etcd_go_etcd_api_v3//v3rpc/rpctypes",
         "@io_etcd_go_etcd_client_v3//:client",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_metric//:metric",
     ],
 )
 
