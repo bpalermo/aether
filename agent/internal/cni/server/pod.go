@@ -90,7 +90,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		// keep storage/xDS for drain, but never (re-)register the endpoint.
 		log.DebugContext(ctx, "pod is terminating; skipping endpoint registration")
 	} else {
-		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cniPod)
+		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cniPod)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to build endpoint: %v", err)
 		}

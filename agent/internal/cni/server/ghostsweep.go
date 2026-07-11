@@ -307,7 +307,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		if _, ok := registered[ip]; ok {
 			continue
 		}
-		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, pod)
+		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, pod)
 		if err != nil {
 			s.log.DebugContext(ctx, "ghost sweep: failed to build endpoint for missing pod", "pod", pod.GetName(), "error", err)
 			continue

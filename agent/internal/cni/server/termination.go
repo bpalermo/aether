@@ -120,7 +120,7 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	// DRAINING hosts from new selections but lets established connections
 	// finish through the grace period — less connection-pool churn than
 	// outright removal. CNI DEL performs the final removal.
-	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cur)
+	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cur)
 	if err != nil {
 		log.ErrorContext(ctx, "termination: failed to build endpoint", "error", err)
 		return

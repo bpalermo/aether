@@ -184,3 +184,87 @@ Per-pod targeting remains available via `<pod-token>` when a route needs it.
 - **Egress audit.** Unlike a central gateway, the per-node waypoint has no single
   cross-cluster egress point; identity (SPIRE) is the boundary, not a chokepoint — same
   trade-off 018 notes for flat network.
+
+## Implementation plan (2026-07-11)
+
+Grounded in the current data-plane code and an Envoy-source spike. Design decisions:
+**shared trust domain first** (federation deferred); **service-level remote targeting**
+(the node re-LBs locally — works because identity is pinned per-ServiceAccount).
+
+### Resolved mechanism: per-endpoint SNI in one cluster (spike outcome)
+
+The hard question was how to make a service cluster's SNI differ per endpoint — local
+endpoints need `SNI = <port>` (the existing multi-port demux), remote/waypoint endpoints
+need a structured SNI that survives the extra node hop — **without losing per-source
+client-cert selection** (the source pod presents its own SVID; the destination logs the
+real caller). Envoy source (`transport_socket_match_impl.cc`, `TransportSocketMatchingData`)
+confirms the unified `Cluster.transport_socket_matcher` sees the **chosen endpoint's
+metadata** (`envoy.matching.inputs.endpoint_metadata`, already compiled into the aether
+proxy — `extensions_build_config.bzl`) *alongside* the filter-state input we use today.
+
+So the split-horizon lives in **one** service cluster:
+
+- EDS holds local endpoints (`pod_ip:15008`) and remote endpoints (`node_ip:<tunnel-port>`
+  with `LbEndpoint.metadata{envoy.lb: {waypoint: "true"}}`).
+- The transport-socket matcher becomes a **two-level tree**: branch first on the endpoint
+  `waypoint` label → {local socket, waypoint socket}, then on the source netns → the
+  source pod's cert. The two sockets differ **only** in SNI (cert / SAN-pin / ALPN are
+  identical — mTLS still terminates end-to-end at the destination *pod*, never the node).
+- Local endpoints keep `SNI = <port>`; waypoint endpoints get `SNI = <port>.<svc>.<ns>.<meshDomain>`.
+- Local-vs-remote preference reuses `EndpointPriority`, extended with a **same-cluster-first
+  tier** so the local cluster wins even when the remote cluster shares the locality
+  (today priority is locality-only).
+
+*(Fallback if the two-level matcher ever misbehaves: an `envoy.clusters.aggregate` cluster
+over a local + a waypoint sub-cluster, each with a uniform SNI and the existing per-source
+matcher — confirmed viable, but more moving parts.)*
+
+### Structured SNI + the destination double-demux
+
+One wire SNI must satisfy two demuxes and L4 passthrough cannot rewrite it:
+
+- **SNI = `<port>.<svc>.<ns>.<meshDomain>`.**
+- The **host-netns tunnel listener** (`node_ip:<tunnel-port>`, `tls_inspector → tcp_proxy`,
+  reusing the 018 Phase 3b / edge TLSRoute-passthrough primitive) matches per local service
+  on `server_names: ["*.<svc>.<ns>.<meshDomain>"]` → forwards to that service's **local**
+  pods at `:15008`. NB Envoy's leftmost `*` is a **suffix** match, not single-label; this is
+  safe because aether owns the SNI and each service has a unique `.<svc>.<ns>.<meshDomain>`
+  suffix.
+- The **pod inbound** per-port chains add the **exact** server name
+  `<port>.<svc>.<ns>.<meshDomain>` alongside the existing bare `<port>`, so the forwarded
+  (un-rewritten) SNI still selects the right loopback port (exact > wildcard precedence).
+
+### Phased PRs
+
+1. **Registry `node_ip`** *(this PR)* — re-add `node_ip` to
+   `ServiceEndpoint.KubernetesMetadata` at **field 5** (field 4, the old HBONE target,
+   stays reserved — do not reuse the number). Populate from the node's `InternalIP` on
+   every registration path: the CNI server (`queryNodeMetadata` → all
+   `NewServiceEndpointFromCNIPod` call sites) and the Kubernetes backend
+   (`podToEndpoint`). Empty when unknown / for non-Kubernetes backends.
+2. **Split-horizon EDS** — in the snapshot build, key on `endpoint.cluster_name != ownCluster`:
+   local → `pod_ip:15008` (unchanged); remote → `node_ip:<tunnel-port>` + `waypoint`
+   metadata. Add the waypoint transport socket + the two-level matcher; extend
+   `EndpointPriority` with the same-cluster tier. Gate behind `--east-west-waypoint`
+   (default off). Golden-snapshot tests.
+3. **Host tunnel listener + pod-inbound server-name** — the `node_ip:<tunnel-port>`
+   passthrough listener with per-exported-service `*.<svc>.<ns>.<meshDomain>` chains →
+   `ew_ingress_<svc>_<ns>` (local pods at `:15008`, raw passthrough), plus the exact
+   structured server-name on the pod-inbound per-port chains.
+4. **MCS/VIP + demand-scope** — fold the split-horizon behind the clusterset VIP; scope
+   waypoint clusters to the node's dependency set (proposal 004).
+5. **E2E** — extend the 026 two-kind harness with **non-routable pod CIDRs but routable
+   node IPs**: assert A→svc-B lands on B's node proxy → a B pod, B's XFCC = the source
+   SPIFFE ID, mTLS end-to-end (B pod cert); intra-cluster unchanged (no waypoint stats);
+   kill a B node → EDS drops + re-LB.
+
+### Prerequisites / open
+
+- **Cross-cluster endpoint visibility** (MCS `ServiceImport` and/or the 006 replicator,
+  currently deferred) must deliver remote endpoints — carrying `node_ip` + `cluster_name` —
+  into the consumer's registry view before Phase 2 has anything to rewrite.
+- **Shared trust domain** across clusters (one upstream CA) so the source validates the
+  destination pod's SVID; SPIRE federation is a later proposal.
+- Re-verify the matcher-input `type_url`s at the pinned Envoy rev before committing Phase 2
+  config (framework + filter-state input already ship on 1.38.x; `endpoint_metadata` input
+  confirmed compiled).
