@@ -260,9 +260,23 @@ One wire SNI must satisfy two demuxes and L4 passthrough cannot rewrite it:
 
 ### Prerequisites / open
 
-- **Cross-cluster endpoint visibility** (MCS `ServiceImport` and/or the 006 replicator,
-  currently deferred) must deliver remote endpoints — carrying `node_ip` + `cluster_name` —
-  into the consumer's registry view before Phase 2 has anything to rewrite.
+- **Cross-cluster endpoint visibility — RESOLVED for shared-etcd (Phase 0b, 2026-07-11).**
+  The etcd registry reads the whole `/aether/v1/regions` root (`clientv3.WithPrefix()`), so
+  in a **shared-etcd multi-cluster** deployment every cluster's `ListAllEndpoints` already
+  returns *all* clusters' endpoints, each stamped with `cluster_name`, and `node_ip` (field
+  5) round-trips through whole-proto marshaling (unit-tested by
+  `TestEtcdRegistry_ListEndpointsCrossOrigin`). **Phase 2 is therefore unblocked for the
+  primary 019 topology** (several clusters, routable node IPs, non-routable pod IPs, one
+  shared etcd control plane). Two clarifications from the trace:
+  - **MCS delivers no endpoints.** The MCS path (proposal 026 wiring) is config-plane only —
+    a `ServiceExport` mark becomes a `ServiceImport` + clusterset VIP; `import_generator`
+    itself notes "endpoints stay in the registry; the proxy resolves cross-cluster endpoints
+    via registry EDS at dial time (a later phase)." It is **not** an endpoint-delivery
+    mechanism and is not a dependency here.
+  - **Multi-*region* still waits on the 006 replicator.** With disjoint per-region etcds,
+    a region-A cluster cannot see region-B endpoints until 006's (deferred) replicator
+    mirrors subtrees across regions. That is a separate axis from multi-cluster-on-one-etcd;
+    Phase 2 ships **shared-etcd-first**, and multi-region is gated on 006 Phase 2.
 - **Shared trust domain** across clusters (one upstream CA) so the source validates the
   destination pod's SVID; SPIRE federation is a later proposal.
 - Re-verify the matcher-input `type_url`s at the pinned Envoy rev before committing Phase 2
