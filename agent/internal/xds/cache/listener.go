@@ -198,6 +198,12 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 		}
 	}
 	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probeClusters))
+	// East/west waypoint (proposal 019): one host-netns tunnel listener that
+	// SNI-forwards cross-cluster mTLS to the services this node hosts. nil unless
+	// --east-west-waypoint is set and the node hosts mesh pods.
+	if tunnel := c.waypointTunnelListenerLocked(); tunnel != nil {
+		resources = append(resources, tunnel)
+	}
 	return resources
 }
 

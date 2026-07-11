@@ -127,12 +127,17 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	// waypoint metadata -> source netns) + the endpoint_metadata matcher input,
 	// so `envoy --mode validate` proves the config is accepted by a real Envoy.
 	waypointCluster := newWaypointServiceCluster("waypoint-echo."+meshDomain, trustDomain, "default", "echo")
+	// Proposal 019 Phase 3b dest side: the host-netns tunnel listener (wildcard
+	// SNI -> tcp_proxy passthrough) and its STATIC ew_ingress cluster.
+	ewIngress := proxy.BuildWaypointIngressCluster("echo."+meshDomain, []string{"10.244.1.5"})
+	tunnel := proxy.BuildWaypointTunnelListener(proxy.DefaultEastWestTunnelPort,
+		[]*listenerv3.FilterChain{proxy.BuildWaypointTunnelChain("echo." + meshDomain)})
 
-	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, waypointCluster, authzSidecarCluster()}
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, waypointCluster, ewIngress, authzSidecarCluster()}
 	staticClusters = append(staticClusters, appClusters...)
 	staticClusters = append(staticClusters, healthCluster)
 
-	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound}), nil
+	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound, tunnel}), nil
 }
 
 // newWaypointServiceCluster is newServiceCluster with the proposal 019 waypoint

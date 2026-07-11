@@ -121,6 +121,16 @@ agent:
   # NOTE: UDPRoute is CONTROL-PLANE ONLY (plaintext floor, no DTLS) — a UDPRoute is
   # accepted and generates listeners but the data path is unvalidated.
   l4Routes: true
+  # East/west waypoint (proposal 019): when true, cross-cluster endpoints (a
+  # different cluster_name than this one) are dialed at their node's routable IP +
+  # eastWestTunnelPort instead of their pod IP, and this node's host-network proxy
+  # SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct
+  # pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared
+  # SPIRE trust domain across clusters. Default off.
+  eastWestWaypoint: false
+  # eastWestTunnelPort is the host-netns port the node proxy binds for cross-cluster
+  # waypoint traffic (only with eastWestWaypoint). Must match across the clusterset.
+  eastWestTunnelPort: 15009
   # Transparent capture (proposal 018, Phase 3a): per-pod capture listeners + the
   # cap_http route table built from the generated mesh Services. Pairs with
   # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.

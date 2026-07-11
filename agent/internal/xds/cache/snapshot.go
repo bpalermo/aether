@@ -58,6 +58,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// clusters carry their endpoints inline, so they need no EDS resources.
 	clusters = append(clusters, c.appClusters()...)
 
+	// East/west waypoint ingress clusters (proposal 019 Phase 3b): STATIC clusters
+	// of this node's local pods per hosted service, that the tunnel listener
+	// forwards cross-cluster connections to. Empty unless --east-west-waypoint.
+	clusters = append(clusters, c.ewIngressClusters()...)
+
 	// TCP floor clusters (proposal 018, Phase 3a): one per non-HTTP service in the
 	// capture TCP set. These are separate EDS clusters using ALPN "aether-tcp" that
 	// share endpoints with the corresponding HTTP clusters. Only emitted when capture

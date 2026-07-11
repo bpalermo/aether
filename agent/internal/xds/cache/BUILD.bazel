@@ -15,6 +15,7 @@ go_library(
         "secret.go",
         "snapshot.go",
         "version.go",
+        "waypoint.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/xds/cache",
     visibility = ["//agent:__subpackages__"],
@@ -72,6 +73,7 @@ go_test(
         "snapshot_test.go",
         "tcp_service_test.go",
         "version_test.go",
+        "waypoint_test.go",
     ],
     embed = [":cache"],
     deps = [

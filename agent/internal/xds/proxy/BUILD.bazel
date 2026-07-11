@@ -30,6 +30,7 @@ go_library(
         "transportsocket.go",
         "transportsocketmatch.go",
         "upstreams.go",
+        "waypoint.go",
     ],
     importpath = "github.com/bpalermo/aether/agent/internal/xds/proxy",
     visibility = [
@@ -121,6 +122,7 @@ go_test(
         "transportsocket_test.go",
         "transportsocketmatch_test.go",
         "upstreams_test.go",
+        "waypoint_test.go",
     ],
     embed = [":proxy"],
     deps = [
