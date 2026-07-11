@@ -115,9 +115,9 @@ install_spire() {
 	helm --kube-context "$ctx" repo add spiffe https://spiffe.github.io/helm-charts-hardened/ >/dev/null 2>&1 || true
 	helm --kube-context "$ctx" repo update >/dev/null 2>&1 || true
 	kubectl --context "$ctx" create ns spire-mgmt >/dev/null 2>&1 || true
-	kubectl --context "$ctx" create ns spire-server >/dev/null 2>&1 || true
 	# The shared upstream CA (same bytes in both clusters) is the root of trust.
-	kubectl --context "$ctx" -n spire-server create secret generic upstream-ca \
+	# Must live in the namespace the spire-server runs in (spire-mgmt).
+	kubectl --context "$ctx" -n spire-mgmt create secret generic upstream-ca \
 		--from-file=tls.crt="$REPO_ROOT/e2e/certs/ca.crt" \
 		--from-file=tls.key="$REPO_ROOT/e2e/certs/ca.key" \
 		--from-file=bundle.crt="$REPO_ROOT/e2e/certs/ca.crt" >/dev/null 2>&1 || true
@@ -127,10 +127,11 @@ install_spire() {
 		-n spire-mgmt --version "$SPIRE_CHART_VERSION" \
 		--set global.spire.trustDomain="$TRUST_DOMAIN" \
 		--set global.spire.clusterName="cluster-$1" \
+		--set "spiffe-oidc-discovery-provider.enabled=false" \
 		--set "spire-server.upstreamAuthority.disk.enabled=true" \
 		--set "spire-server.upstreamAuthority.disk.secret.create=false" \
 		--set "spire-server.upstreamAuthority.disk.secret.name=upstream-ca" \
-		--set "spire-server.upstreamAuthority.disk.secret.namespace=spire-server" \
+		--set "spire-server.upstreamAuthority.disk.secret.namespace=spire-mgmt" \
 		--set "spire-agent.authorizedDelegates[0]=spiffe://$TRUST_DOMAIN/ns/$NS/sa/aether-agent" \
 		--wait --timeout 6m >/dev/null || die "SPIRE install failed on '$1'"
 	# A ClusterSPIFFEID so every mesh pod gets spiffe://<td>/ns/<ns>/sa/<sa>.
