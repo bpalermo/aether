@@ -60,6 +60,13 @@ raise_inotify() {
 }
 
 build_images() {
+	# CI builds the images itself (bazel image_load via RBE) and sets
+	# WAYPOINT_SKIP_BUILD=1 so this step is a no-op — the images are already in the
+	# local docker daemon under ghcr.io/bpalermo/aether/<img>:latest.
+	if [ "${WAYPOINT_SKIP_BUILD:-0}" = "1" ]; then
+		ok "skipping image build (WAYPOINT_SKIP_BUILD=1; images pre-built)"
+		return
+	fi
 	log "building + loading aether images"
 	make -C "$REPO_ROOT" load-all >/dev/null 2>&1 || die "image build (make load-all) failed"
 }
