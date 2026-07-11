@@ -84,7 +84,7 @@ jobs:
           cp scripts/ci-impacted-targets.sh "$RUNNER_TEMP/impacted.sh"
           bash "$RUNNER_TEMP/impacted.sh"
       - name: Upload impacted target lists
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: impacted-targets
           path: ${{ runner.temp }}/bazel-diff-out/impacted_*.txt
@@ -118,7 +118,7 @@ jobs:
         with:
           bazelisk-cache: true
       - name: Download impacted target lists
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: impacted-targets
           path: ${{ runner.temp }}/impacted
@@ -149,7 +149,7 @@ jobs:
         with:
           bazelisk-cache: true
       - name: Download impacted target lists
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: impacted-targets
           path: ${{ runner.temp }}/impacted
@@ -204,7 +204,7 @@ jobs:
           fi
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs
           path: /tmp/e2e-logs
