@@ -268,3 +268,29 @@ One wire SNI must satisfy two demuxes and L4 passthrough cannot rewrite it:
 - Re-verify the matcher-input `type_url`s at the pinned Envoy rev before committing Phase 2
   config (framework + filter-state input already ship on 1.38.x; `endpoint_metadata` input
   confirmed compiled).
+
+### Deferred possibility: a uniform-waypoint mode (noted, not planned)
+
+The Phase-2 gate is a boolean (`--east-west-waypoint`, default off) that routes **only
+cross-cluster** endpoints through the waypoint; intra-cluster stays direct pod-to-pod. It
+is worth recording that the same mechanism could be widened to route **all cross-node**
+traffic through the dest-node waypoint, e.g. by turning the gate into a mode —
+`off | cross-cluster | always`. In Design A that is a one-line change to the split-horizon
+predicate (`endpoint.cluster != own` becomes `endpoint.cluster != own || (mode==always &&
+endpoint.node != myNode)`) — same clusters, same matcher, same tests; `always` merely widens
+which endpoints get rewritten. Same-node traffic is a local forward regardless, so even
+`always` is not a single uniform path — it just moves the direct/waypoint boundary from
+"same-cluster" to "same-node."
+
+This is **explicitly out of the phased plan** and carries no commitment. It would only be
+justified for a deployment whose CNI can't route pod IPs even intra-cluster, or that wants a
+uniform per-node policy-enforcement point — and aether already enforces authz/RBAC/telemetry
+at the **pod inbound**, so that motivation is weak today. The extra hop is pure overhead on a
+routable intra-cluster network, which is why direct pod-to-pod is and remains the default
+(the deliberate outcome of [[project_transport_migration]]).
+
+Note also that this "uniform addressing" idea is distinct from **node-to-node multiplexing**
+(HBONE-style: the node terminates and re-originates, streams share a node↔node H2 tunnel,
+O(nodes²) connections). Multiplexing would reverse the transport migration, reintroduce
+head-of-line blocking, and put the node proxy in the identity/plaintext path — a separate,
+larger question that must not ride on this proposal.
