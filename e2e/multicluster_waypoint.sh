@@ -40,6 +40,7 @@ TUNNEL_PORT="15009"
 GWAPI_VERSION="v1.5.1"
 SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.28.4}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.5.0}"
+SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
 IMAGES=(agent cni-install registrar controller)
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
@@ -133,14 +134,18 @@ install_spire() {
 		--set "spire-server.upstreamAuthority.disk.secret.name=upstream-ca" \
 		--set "spire-server.upstreamAuthority.disk.secret.namespace=spire-mgmt" \
 		--set "spire-agent.authorizedDelegates[0]=spiffe://$TRUST_DOMAIN/ns/$NS/sa/aether-agent" \
+		--set "spire-agent.sockets.admin.enabled=true" \
+		--set "spire-agent.sockets.admin.mountOnHost=true" \
 		--wait --timeout 6m >/dev/null || die "SPIRE install failed on '$1'"
-	# A ClusterSPIFFEID so every mesh pod gets spiffe://<td>/ns/<ns>/sa/<sa>.
+	# A ClusterSPIFFEID so every mesh pod gets spiffe://<td>/ns/<ns>/sa/<sa>. The
+	# className must match the spire-controller-manager class ($SPIRE_CLASS).
 	kubectl --context "$ctx" apply -f - >/dev/null <<YAML
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
 metadata:
   name: aether-workloads
 spec:
+  className: $SPIRE_CLASS
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
   podSelector:
     matchLabels:
@@ -177,6 +182,8 @@ install_aether() {
 			--set "meshDomain=$MESH_DOMAIN" \
 			--set spire.enabled=true \
 			--set spire.trustDomain="$TRUST_DOMAIN" \
+			--set controller.webhook.spire=false \
+			--set edge.enabled=false \
 			--set agent.gamma=true \
 			--set agent.meshDns=true \
 			--set agent.transparentCapture=true \
