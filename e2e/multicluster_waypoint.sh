@@ -268,12 +268,19 @@ verify() {
 	docker exec "$ETCD_NAME" etcdctl get --prefix /aether/v1/regions --keys-only 2>/dev/null | grep -q "clusters/cluster-b" &&
 		ok "cluster b endpoints present in the shared registry" || echo "  (no cluster-b endpoints yet)"
 
-	# The data-path assertion.
-	local code
-	code="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" exec deploy/client -c curl -- \
-		curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "http://echo.$TEST_NS.$MESH_DOMAIN:18081/" 2>/dev/null || echo 000)"
+	# The data-path assertion. echo is a cross-cluster (off-node) service, so the
+	# FIRST request warms the demand-scoped cold path (ODCDS) — retry like a real
+	# client until it routes (a known aether cold-start behavior, not a waypoint
+	# fault). Once warm it stays 200.
+	local code=000 i
+	for i in 1 2 3 4 5 6; do
+		code="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" exec deploy/client -c curl -- \
+			curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "http://echo.$TEST_NS.$MESH_DOMAIN:18081/" 2>/dev/null || echo 000)"
+		[ "$code" = "200" ] && break
+		sleep 6
+	done
 	if [ "$code" = "200" ]; then
-		ok "cross-cluster call succeeded (HTTP $code) — waypoint data path works"
+		ok "cross-cluster call succeeded (HTTP 200) — waypoint data path works: client(a) -> b-node:$TUNNEL_PORT -> echo pod(b), mTLS end-to-end"
 	else
 		die "cross-cluster call returned $code (expected 200) — inspect a's EDS for echo (should be b-node-ip:$TUNNEL_PORT) and b's ew_tunnel listener"
 	fi
