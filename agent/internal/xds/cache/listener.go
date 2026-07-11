@@ -10,6 +10,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"github.com/bpalermo/aether/common/serviceref"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -27,6 +28,31 @@ var netnsExists = func(path string) bool {
 // given pod and adds them to the cache keyed by the pod's network namespace, then
 // regenerates the listener snapshot. Returns an error if listener generation or
 // snapshot generation fails.
+// applyWaypointInboundServerNames makes the pod's SNI-matched (secondary-port)
+// inbound chains ALSO match the structured waypoint SNI
+// <port>.<svc>.<ns>.<meshDomain>, so a cross-cluster connection forwarded
+// (un-rewritten) by a node tunnel demuxes to the right served port. The primary
+// port needs no change — it is caught by the no-SNI h2 chain. No-op when the
+// waypoint is disabled, so inbound config is byte-identical for everyone else.
+// (proposal 019 Phase 3, dest side.)
+func (c *SnapshotCache) applyWaypointInboundServerNames(inbound *listenerv3.Listener, cniPod *cniv1.CNIPod) {
+	if !c.waypointEnabled || inbound == nil {
+		return
+	}
+	fqdn := proxy.ServiceClusterName(serviceref.New(cniPod.GetNamespace(), cniPod.GetServiceAccount()).Key(), c.meshDomain)
+	for _, fc := range inbound.GetFilterChains() {
+		m := fc.GetFilterChainMatch()
+		if m == nil || len(m.GetServerNames()) == 0 {
+			continue
+		}
+		structured := make([]string, 0, len(m.GetServerNames()))
+		for _, sn := range m.GetServerNames() {
+			structured = append(structured, sn+"."+fqdn)
+		}
+		m.ServerNames = append(m.GetServerNames(), structured...)
+	}
+}
+
 func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
 	netns := cniPod.GetNetworkNamespace()
 	c.log.DebugContext(ctx, "adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
@@ -35,6 +61,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	if err != nil {
 		return err
 	}
+	c.applyWaypointInboundServerNames(inbound, cniPod)
 	capture, err := c.generateCaptureListener(cniPod)
 	if err != nil {
 		return err
@@ -283,6 +310,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			errs = append(errs, listenerErr)
 			continue
 		}
+		c.applyWaypointInboundServerNames(inbound, pod)
 		capture, captureErr := c.generateCaptureListener(pod)
 		if captureErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate capture listener for pod", "error", captureErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())

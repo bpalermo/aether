@@ -407,6 +407,7 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
+		c.applyWaypointInboundServerNames(newInbound, entry.cniPod)
 		entry.capture = newCapture
 		entry.outbound = newOutbound
 		entry.inbound = newInbound
