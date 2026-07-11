@@ -485,6 +485,14 @@ registrar:
   # etcd client endpoints (used when registryBackend == etcd).
   etcd:
     endpoints: []
+  # Peer regions' etcd endpoints for cross-region replication (proposal 006
+  # Phase 2), one entry per peer region: "<region>=<endpoint>[,<endpoint>...]".
+  # The leader registrar mirrors this region's own registry subtree verbatim
+  # into each peer's etcd under an origin-heartbeat lease: if this region dies,
+  # its mirror expires on the peers (TTL ~30s) — whole-region failover cleanup.
+  # Requires registryBackend=etcd and a non-default region (one region = one
+  # etcd). Empty = no replication.
+  peerEtcd: []
   # AWS config for the dynamodb registry backend (IRSA web-identity, no static
   # keys; issue #257). roleArn annotates the registrar ServiceAccount with
   # eks.amazonaws.com/role-arn so the pod-identity webhook injects AWS_ROLE_ARN +
