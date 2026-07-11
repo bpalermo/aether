@@ -44,7 +44,24 @@ const (
 	// transportSocketNameActionName is the matcher action extension that selects
 	// a named transport socket.
 	transportSocketNameActionName = "envoy.matching.action.transport_socket.name"
+	// endpointMetadataInputName reads the CHOSEN upstream endpoint's metadata in
+	// the transport-socket-matcher context (Envoy TransportSocketMatchingData,
+	// after LB selection). Used to branch on the waypoint tag stamped on
+	// cross-cluster endpoints (proposal 019) so a single cluster can present a
+	// different SNI per endpoint while still selecting the source pod's cert.
+	endpointMetadataInputName = "envoy.matching.inputs.endpoint_metadata"
+	// waypointSocketSuffix distinguishes the waypoint transport socket (structured
+	// SNI) from the local one (port SNI) for the same source identity within one
+	// cluster's transport_socket_matches.
+	waypointSocketSuffix = "|waypoint"
 )
+
+// waypointSocketName is the transport_socket_matches name for the waypoint
+// (structured-SNI) variant of a source identity's socket.
+func waypointSocketName(id string) string { return id + waypointSocketSuffix }
+
+// identitySocketName is the local (port-SNI) variant — the bare identity.
+func identitySocketName(id string) string { return id }
 
 // UpstreamTransportSocketMatches returns one transport socket match per unique
 // SPIFFE ID among the local workloads. Each match presents that workload's
@@ -62,6 +79,14 @@ const (
 // unmodified` + `initial fetch timed out` every push, and unbounded proxy
 // memory growth under long-lived downstream connections).
 func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string, sni string) []*clusterv3.Cluster_TransportSocketMatch {
+	return upstreamTransportSocketMatchesNamed(spiffeIDs, validationContextName, sanURIs, sni, identitySocketName)
+}
+
+// upstreamTransportSocketMatchesNamed builds one transport socket match per
+// unique SPIFFE ID, named by name(id) and presenting UpstreamTransportSocket
+// with the given sni. name lets a cluster carry two variants of each source
+// identity's socket (local + waypoint) that differ only in SNI.
+func upstreamTransportSocketMatchesNamed(spiffeIDs []string, validationContextName string, sanURIs []string, sni string, name func(string) string) []*clusterv3.Cluster_TransportSocketMatch {
 	unique := make([]string, 0, len(spiffeIDs))
 	seen := make(map[string]struct{}, len(spiffeIDs))
 	for _, id := range spiffeIDs {
@@ -79,7 +104,7 @@ func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName st
 	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
 	for _, id := range unique {
 		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
-			Name:            id,
+			Name:            name(id),
 			Match:           &structpb.Struct{},
 			TransportSocket: UpstreamTransportSocket(id, validationContextName, sanURIs, sni),
 		})
@@ -101,12 +126,19 @@ func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName st
 // permanent on nodes with zero managed pods (e2e 2026-06-10). Callers fall
 // back to a plain transport socket.
 func UpstreamTransportSocketMatcher(netnsToSpiffeID map[string]string) *matcherv3.Matcher {
+	return upstreamTransportSocketMatcherNamed(netnsToSpiffeID, identitySocketName)
+}
+
+// upstreamTransportSocketMatcherNamed is UpstreamTransportSocketMatcher with the
+// selected socket name derived via name(id) — so the same netns→identity map can
+// drive the local or the waypoint socket variant.
+func upstreamTransportSocketMatcherNamed(netnsToSpiffeID map[string]string, name func(string) string) *matcherv3.Matcher {
 	m := make(map[string]*matcherv3.Matcher_OnMatch, len(netnsToSpiffeID))
 	for netns, id := range netnsToSpiffeID {
 		if netns == "" || id == "" {
 			continue
 		}
-		m[netns] = transportSocketNameOnMatch(id)
+		m[netns] = transportSocketNameOnMatch(name(id))
 	}
 	if len(m) == 0 {
 		return nil
@@ -125,6 +157,53 @@ func UpstreamTransportSocketMatcher(netnsToSpiffeID map[string]string) *matcherv
 					},
 				},
 			},
+		},
+	}
+}
+
+// WaypointTransportSocketMatcher builds the two-level transport-socket matcher
+// (proposal 019 Design A): branch first on the chosen endpoint's envoy.lb
+// "waypoint" metadata, then on the source pod's netns. A waypoint-tagged
+// (cross-cluster) endpoint selects the source's WAYPOINT socket (structured SNI);
+// every other endpoint selects the source's LOCAL socket (port SNI). Both
+// sub-trees fall back to the node identity's respective socket when no local pod
+// matches the source netns. Returns nil when there are no local workloads (the
+// caller then uses a plain single transport socket, as without waypoint).
+func WaypointTransportSocketMatcher(netnsToSpiffeID map[string]string, nodeSpiffeID string) *matcherv3.Matcher {
+	local := upstreamTransportSocketMatcherNamed(netnsToSpiffeID, identitySocketName)
+	if local == nil {
+		return nil
+	}
+	waypoint := upstreamTransportSocketMatcherNamed(netnsToSpiffeID, waypointSocketName)
+	local.OnNoMatch = transportSocketNameOnMatch(identitySocketName(nodeSpiffeID))
+	waypoint.OnNoMatch = transportSocketNameOnMatch(waypointSocketName(nodeSpiffeID))
+
+	return &matcherv3.Matcher{
+		MatcherType: &matcherv3.Matcher_MatcherTree_{
+			MatcherTree: &matcherv3.Matcher_MatcherTree{
+				Input: &xdscorev3.TypedExtensionConfig{
+					Name: endpointMetadataInputName,
+					TypedConfig: config.TypedConfig(&tsinputsv3.EndpointMetadataInput{
+						Filter: envoyFilterMetadataSubsetNamespace,
+						Path: []*tsinputsv3.EndpointMetadataInput_PathSegment{{
+							Segment: &tsinputsv3.EndpointMetadataInput_PathSegment_Key{Key: subsetWaypointKey},
+						}},
+					}),
+				},
+				TreeType: &matcherv3.Matcher_MatcherTree_ExactMatchMap{
+					ExactMatchMap: &matcherv3.Matcher_MatcherTree_MatchMap{
+						Map: map[string]*matcherv3.Matcher_OnMatch{
+							subsetWaypointValue: {
+								OnMatch: &matcherv3.Matcher_OnMatch_Matcher{Matcher: waypoint},
+							},
+						},
+					},
+				},
+			},
+		},
+		// Any endpoint without the waypoint tag: the local (port-SNI) sub-tree.
+		OnNoMatch: &matcherv3.Matcher_OnMatch{
+			OnMatch: &matcherv3.Matcher_OnMatch_Matcher{Matcher: local},
 		},
 	}
 }
