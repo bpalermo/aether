@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "replicator",
-    srcs = ["replicator.go"],
+    srcs = [
+        "lease.go",
+        "replicator.go",
+    ],
     importpath = "github.com/bpalermo/aether/registrar/internal/replicator",
     visibility = ["//registrar:__subpackages__"],
     deps = [

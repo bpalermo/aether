@@ -9,9 +9,13 @@
 // re-mirrors keys this region wrote into it. Peer registrars see the mirrored
 // keys as read-only foreign endpoints (EDS priority 2, proposal 004 locality).
 //
-// Phase 2a is the mirror loop only: mirrored writes carry no lease yet, so a
-// dead origin's keys persist on peers until it returns. The origin-heartbeat
-// lease (whole-region failover) is Phase 2b.
+// Every mirrored key is attached to a per-peer origin-heartbeat lease (Phase
+// 2b) that only this replicator's KeepAlive refreshes: if the origin region
+// dies, the lease lapses and the peer drops the whole mirrored subtree
+// together — whole-region failover cleanup without any peer judging the
+// origin dead. Clean shutdown deliberately does NOT revoke the lease (that
+// would wipe the mirror on every leader handoff); the next leader re-syncs
+// under a fresh lease well inside the TTL. See lease.go.
 package replicator
 
 import (
@@ -95,9 +99,11 @@ type Replicator struct {
 	Log    *slog.Logger
 
 	// DialTimeout bounds each peer dial; ResyncBackoff spaces mirror-loop
-	// restarts after an error. Zero values take the defaults.
-	DialTimeout   time.Duration
-	ResyncBackoff time.Duration
+	// restarts after an error; LeaseTTLSeconds is the origin-heartbeat lease
+	// TTL on each peer (Phase 2b). Zero values take the defaults.
+	DialTimeout     time.Duration
+	ResyncBackoff   time.Duration
+	LeaseTTLSeconds int64
 
 	log *slog.Logger
 }
@@ -116,6 +122,9 @@ func (r *Replicator) Start(ctx context.Context) error {
 	}
 	if r.ResyncBackoff == 0 {
 		r.ResyncBackoff = defaultResyncBackoff
+	}
+	if r.LeaseTTLSeconds == 0 {
+		r.LeaseTTLSeconds = DefaultLeaseTTLSeconds
 	}
 	r.log.InfoContext(ctx, "starting cross-region replication",
 		"ownPrefix", r.Source.OwnPrefix(), "peers", len(r.Peers))
@@ -146,8 +155,9 @@ func (r *Replicator) runPeer(ctx context.Context, log *slog.Logger, p Peer) {
 	}
 }
 
-// mirrorPeer dials the peer and runs sync→watch cycles until the context ends
-// or an error forces a redial.
+// mirrorPeer dials the peer and runs sync→watch cycles under one
+// origin-heartbeat lease until the context ends or an error forces a redial
+// (which re-grants the lease and resyncs).
 func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) error {
 	peerCli, err := clientv3.New(clientv3.Config{
 		Endpoints:   p.Endpoints,
@@ -159,15 +169,38 @@ func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) e
 	}
 	defer func() { _ = peerCli.Close() }()
 
+	lease, err := startLease(ctx, peerCli, r.LeaseTTLSeconds)
+	if err != nil {
+		return fmt.Errorf("origin-heartbeat lease on peer %s: %w", p.Region, err)
+	}
+	// A lost keepalive means the lease (and with it the whole mirrored
+	// subtree) may expire on the peer: cancel the connection so the outer
+	// loop re-grants and resyncs rather than mirroring onto a dead lease.
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-lease.done:
+			cancel()
+		case <-connCtx.Done():
+		}
+	}()
+
 	for {
-		rev, err := r.syncFull(ctx, peerCli)
+		rev, err := r.syncFull(connCtx, peerCli, lease.id)
 		if err != nil {
+			if ctx.Err() == nil && connCtx.Err() != nil {
+				return errors.New("origin-heartbeat lease keepalive lost")
+			}
 			return fmt.Errorf("full sync: %w", err)
 		}
-		log.InfoContext(ctx, "peer mirror synced; watching", "revision", rev)
-		err = r.watchMirror(ctx, peerCli, rev+1)
+		log.InfoContext(ctx, "peer mirror synced; watching", "revision", rev, "leaseID", lease.id)
+		err = r.watchMirror(connCtx, peerCli, lease.id, rev+1)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if connCtx.Err() != nil {
+			return errors.New("origin-heartbeat lease keepalive lost")
 		}
 		// A compacted start revision just means the watch fell behind: re-range
 		// and resume. Anything else (peer write failure, watch stream error)
@@ -186,7 +219,11 @@ func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) e
 // Reconciling against the peer's existing copy rather than blind re-putting
 // makes restarts resume-safe: deletes that happened while the replicator was
 // down still converge.
-func (r *Replicator) syncFull(ctx context.Context, peerCli *clientv3.Client) (int64, error) {
+//
+// Convergence requires value AND lease equality: a value-equal key attached
+// to a previous incarnation's lease must be re-put to re-attach it to the
+// live lease, or it would silently expire with the old one.
+func (r *Replicator) syncFull(ctx context.Context, peerCli *clientv3.Client, leaseID clientv3.LeaseID) (int64, error) {
 	prefix := r.Source.OwnPrefix()
 	localResp, err := r.Source.Client().Get(ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
@@ -210,12 +247,12 @@ func (r *Replicator) syncFull(ctx context.Context, peerCli *clientv3.Client) (in
 			}
 			continue
 		}
-		if bytes.Equal(kv.Value, want) {
+		if bytes.Equal(kv.Value, want) && kv.Lease == int64(leaseID) {
 			delete(local, key) // already converged; skip the put below
 		}
 	}
 	for key, value := range local {
-		if _, err = peerCli.Put(ctx, key, string(value)); err != nil {
+		if _, err = peerCli.Put(ctx, key, string(value), clientv3.WithLease(leaseID)); err != nil {
 			return 0, fmt.Errorf("put peer key: %w", err)
 		}
 	}
@@ -223,9 +260,9 @@ func (r *Replicator) syncFull(ctx context.Context, peerCli *clientv3.Client) (in
 }
 
 // watchMirror replays local watch events verbatim into the peer, starting at
-// startRev. Returns when the watch or a peer write fails; the caller decides
-// between compaction-resync and redial.
-func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, startRev int64) error {
+// startRev; puts attach the origin-heartbeat lease. Returns when the watch or
+// a peer write fails; the caller decides between compaction-resync and redial.
+func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, leaseID clientv3.LeaseID, startRev int64) error {
 	wch := r.Source.Client().Watch(clientv3.WithRequireLeader(ctx), r.Source.OwnPrefix(),
 		clientv3.WithPrefix(), clientv3.WithRev(startRev))
 	for resp := range wch {
@@ -236,7 +273,7 @@ func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, 
 			key := string(ev.Kv.Key)
 			switch ev.Type {
 			case clientv3.EventTypePut:
-				if _, err := peerCli.Put(ctx, key, string(ev.Kv.Value)); err != nil {
+				if _, err := peerCli.Put(ctx, key, string(ev.Kv.Value), clientv3.WithLease(leaseID)); err != nil {
 					return fmt.Errorf("mirror put: %w", err)
 				}
 			case clientv3.EventTypeDelete:

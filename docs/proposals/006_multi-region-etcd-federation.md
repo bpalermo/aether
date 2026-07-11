@@ -206,9 +206,23 @@ read-only foreign endpoints (EDS priority 2, locality failover — proposal 004)
 
 Nothing in the etcd registry uses a lease today (all `Put`s are bare). The
 replicator adds, **per peer etcd**: `Lease.Grant(TTL)` + a `KeepAlive` goroutine +
-`clientv3.WithLease(id)` on every mirrored `Put` + `Lease.Revoke` on clean
-shutdown. TTL ~30s, keepalive ~TTL/3. The lease lives on the peer; the origin's
-replicator holds the keepalive, so origin liveness == mirror liveness.
+`clientv3.WithLease(id)` on every mirrored `Put`. TTL ~30s, keepalive ~TTL/3. The
+lease lives on the peer; the origin's replicator holds the keepalive, so origin
+liveness == mirror liveness.
+
+Two corrections discovered in implementation (P2b):
+
+- **No `Lease.Revoke` on clean shutdown** (the original sketch had one).
+  Revoking deletes every attached key immediately, so it would wipe the
+  region's mirror off peers on every registrar roll / leader handoff. Instead
+  shutdown just stops the keepalive: the successor re-syncs under a fresh
+  lease well inside the TTL (its puts re-attach the keys), and the old lease
+  expires holding nothing. Only a region that stays down lets the TTL lapse
+  with keys attached — which is exactly the failover semantics.
+- **Sync convergence must compare the lease, not just the value.** A
+  value-equal peer key still attached to a previous incarnation's lease must
+  be re-put to re-attach it, or it silently expires with the old lease after
+  a handoff.
 
 ### Phasing (each a reviewable PR; inert until `--peer-etcd` is set)
 
@@ -222,8 +236,9 @@ replicator holds the keepalive, so origin liveness == mirror liveness.
    leader-elected shape; needs direct access to the `EtcdRegistry`'s `clientv3`
    (add an accessor rather than downcasting). Unit-tested against an embedded etcd.
 2. **P2b — origin-heartbeat lease + failover.** Per-peer `Lease.Grant`/`KeepAlive`/
-   `WithLease`/`Revoke`; the mirror Puts attach the lease. This is the failover
-   mechanism. Test: kill the keepalive → peer keys expire.
+   `WithLease`; the mirror Puts attach the lease (no revoke on shutdown — see
+   above). This is the failover mechanism. Tests: kill the keepalive → peer keys
+   expire; leader handoff → mirror never drops.
 3. **P2c — hardening + metrics.** Replication lag, per-peer error/keepalive-health
    counters; compaction-resync robustness; chart values (`registrar.peerEtcd`).
 4. **P3 — multi-region e2e** (proposal 006 Phase 3). Extend a kind harness to
