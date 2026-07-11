@@ -421,16 +421,38 @@ func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[strin
 // would select the first entry for every endpoint.
 // sanURIs (the service's expected server SPIFFE IDs) pin the upstream peer
 // identity on every emitted socket; empty disables pinning (bundle-only).
-func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni string) {
-	matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
+// InjectUpstreamMTLS wires the cluster's per-source upstream mTLS. sni is the
+// local (intra-cluster) SNI — the destination port. When waypointSNI is
+// non-empty (proposal 019 waypoint enabled), the cluster additionally carries a
+// waypoint socket per source identity presenting waypointSNI (the structured
+// <port>.<svc>.<ns>.<meshDomain>), selected by the two-level matcher for
+// endpoints tagged waypoint=true; every other endpoint uses the local socket.
+func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni, waypointSNI string) {
+	allIDs := append(spiffeIDs, nodeSpiffeID)
+
+	if waypointSNI == "" {
+		matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
+		if matcher == nil {
+			cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
+			return
+		}
+		matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
+		cluster.TransportSocketMatcher = matcher
+		cluster.TransportSocketMatches = UpstreamTransportSocketMatches(allIDs, validationContextName, sanURIs, sni)
+		return
+	}
+
+	matcher := WaypointTransportSocketMatcher(netnsToSpiffeID, nodeSpiffeID)
 	if matcher == nil {
+		// No local workloads: nothing originates traffic, so a single plain
+		// socket suffices (mirrors the no-workload path above).
 		cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
 		return
 	}
-	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
-
 	cluster.TransportSocketMatcher = matcher
-	cluster.TransportSocketMatches = UpstreamTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs, sni)
+	local := upstreamTransportSocketMatchesNamed(allIDs, validationContextName, sanURIs, sni, identitySocketName)
+	waypoint := upstreamTransportSocketMatchesNamed(allIDs, validationContextName, sanURIs, waypointSNI, waypointSocketName)
+	cluster.TransportSocketMatches = append(local, waypoint...)
 }
 
 // remoteClusterPriorityBand is added to a remote-cluster endpoint's locality

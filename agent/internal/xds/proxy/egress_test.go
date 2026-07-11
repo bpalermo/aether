@@ -62,7 +62,7 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
 	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "")
+	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "8080", "")
 
 	// Per-source mTLS: a match per workload identity + the node identity, and
 	// on-no-match presents the node identity.
@@ -74,6 +74,36 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	require.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch(), "on-no-match present")
 	assert.GreaterOrEqual(t, len(c.GetTransportSocketMatcher().GetMatcherTree().GetExactMatchMap().GetMap()), 1,
 		"exact_match_map must never be empty (proto validation rejects it)")
+}
+
+// TestInjectUpstreamMTLS_Waypoint pins the two-level matcher (proposal 019
+// Design A): each source identity carries a local (port-SNI) AND a waypoint
+// (structured-SNI) socket, and the matcher branches on the endpoint waypoint
+// metadata before the source netns.
+func TestInjectUpstreamMTLS_Waypoint(t *testing.T) {
+	netnsToID := map[string]string{"/ns/a": "spiffe://example.org/ns/test/sa/pod-a"}
+	ids := []string{"spiffe://example.org/ns/test/sa/pod-a"}
+	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
+
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
+	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "8080", "8080.svc-a.aether.internal")
+
+	names := map[string]bool{}
+	for _, m := range c.GetTransportSocketMatches() {
+		names[m.GetName()] = true
+	}
+	// Both variants for the pod and the node.
+	assert.True(t, names[ids[0]], "local socket for the pod")
+	assert.True(t, names[waypointSocketName(ids[0])], "waypoint socket for the pod")
+	assert.True(t, names[node] && names[waypointSocketName(node)], "both node variants")
+
+	// Level 1 branches on endpoint metadata; the "true" leaf is a nested matcher
+	// (the waypoint sub-tree), and on-no-match is the local sub-tree.
+	tree := c.GetTransportSocketMatcher().GetMatcherTree()
+	assert.Equal(t, endpointMetadataInputName, tree.GetInput().GetName())
+	require.Contains(t, tree.GetExactMatchMap().GetMap(), subsetWaypointValue)
+	assert.NotNil(t, tree.GetExactMatchMap().GetMap()[subsetWaypointValue].GetMatcher(), "waypoint leaf is a sub-matcher")
+	assert.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch().GetMatcher(), "default is the local sub-matcher")
 }
 
 // TestInjectUpstreamMTLS_NoLocalWorkloads: an empty netns→SPIFFE-ID map must
@@ -93,7 +123,7 @@ func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org", nil, "")
+			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org", nil, "8080", "")
 
 			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
 			assert.Empty(t, c.GetTransportSocketMatches(), "no legacy matches without the matcher")

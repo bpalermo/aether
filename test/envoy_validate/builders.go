@@ -123,12 +123,46 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 
 	passthrough := proxy.NewPassthroughOriginalDstCluster()
 	svcCluster := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
+	// Exercises the proposal 019 two-level transport-socket matcher (endpoint
+	// waypoint metadata -> source netns) + the endpoint_metadata matcher input,
+	// so `envoy --mode validate` proves the config is accepted by a real Envoy.
+	waypointCluster := newWaypointServiceCluster("waypoint-echo."+meshDomain, trustDomain, "default", "echo")
 
-	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, authzSidecarCluster()}
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, waypointCluster, authzSidecarCluster()}
 	staticClusters = append(staticClusters, appClusters...)
 	staticClusters = append(staticClusters, healthCluster)
 
 	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound}), nil
+}
+
+// newWaypointServiceCluster is newServiceCluster with the proposal 019 waypoint
+// wiring: the two-level transport-socket matcher (waypoint metadata -> netns) and
+// both the local (port-SNI) and waypoint (structured-SNI) socket sets, injected
+// via the same InjectUpstreamMTLS the agent uses.
+func newWaypointServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
+	nodeID := fmt.Sprintf("spiffe://%s/node/test-node", td)
+	validationCtxName := fmt.Sprintf("spiffe://%s", td)
+	sanURI := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, svcName)
+	netnsToID := map[string]string{"/var/run/netns/cni-test": sanURI}
+
+	c := &clusterv3.Cluster{
+		Name:           clusterName,
+		ConnectTimeout: durationpb.New(5e9),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_EDS,
+		},
+		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			EdsConfig: config.XDSConfigSourceADS(),
+		},
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				config.Http2ProtocolOptions(),
+			),
+		},
+	}
+	proxy.InjectUpstreamMTLS(c, netnsToID, []string{sanURI}, nodeID, validationCtxName, []string{sanURI}, "8080", "8080."+clusterName)
+	return c
 }
 
 // authzSidecarCluster mirrors the chart's static UDS cluster for the authz sidecar.

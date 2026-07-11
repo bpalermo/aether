@@ -138,7 +138,15 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 				// spire_agent SDS cluster (SPIRE directly, no bridge).
 				cl.TransportSocket = proxy.EdgeUpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, entry.sni)
 			} else {
-				proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, entry.sni)
+				// Waypoint (proposal 019): remote endpoints are dialed at the node
+				// tunnel and demux by a structured SNI <port>.<svc>.<ns>.<meshDomain>
+				// (entry.sni is the port). The two-level matcher presents it only for
+				// waypoint-tagged endpoints. Empty when the feature is off.
+				waypointSNI := ""
+				if c.waypointEnabled {
+					waypointSNI = entry.sni + "." + proxy.ServiceClusterName(entry.service, c.meshDomain)
+				}
+				proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, entry.sni, waypointSNI)
 			}
 			cluster = cl
 		}
