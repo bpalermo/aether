@@ -65,6 +65,12 @@ const (
 	// HTTP; it is never exposed via a Service.
 	DefaultEdgeReadinessPort = 15021
 
+	// DefaultEastWestTunnelPort is the host-netns port the node proxy listens on
+	// for cross-cluster east/west waypoint traffic, and the port cross-cluster
+	// endpoints are dialed at (proposal 019). Sits just above the inbound mesh
+	// port (15008); host-network, so the proxy binds the node address directly.
+	DefaultEastWestTunnelPort = 15009
+
 	// defaultEdgeAddress binds the edge listener on all interfaces (it fronts
 	// external traffic, unlike the node proxy's loopback-only outbound listener).
 	defaultEdgeAddress = "0.0.0.0"

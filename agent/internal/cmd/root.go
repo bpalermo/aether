@@ -131,6 +131,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.L4Routes, "l4-routes", false, "Enable L4 route types (TCPRoute/TLSRoute/UDPRoute) parented to a Service: weighted TCP floor chains and SNI-routed TLS chains on the capture listener (proposal 018, Phase 3b). NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.")
 	rootCmd.Flags().BoolVar(&cfg.TransparentCapture, "transparent-capture", false, "Enable transparent capture: per-pod capture listeners + cap_http route table from the generated mesh Services (proposal 018, Phase 3a)")
 	rootCmd.Flags().BoolVar(&cfg.CaptureRedirectAll, "capture-redirect-all", false, "Add the dormant ORIGINAL_DST passthrough DefaultFilterChain to capture listeners (proposal 022 M2a spike). Harmless unless a pod is redirect-all'd via the capture.aether.io/redirect-all annotation; only then does non-mesh egress reach the passthrough.")
+	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + --east-west-tunnel-port instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
+	rootCmd.Flags().Uint32Var(&cfg.EastWestTunnelPort, "east-west-tunnel-port", cfg.EastWestTunnelPort, "Host-netns port for cross-cluster east/west waypoint traffic (only with --east-west-waypoint)")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
 	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
 }
@@ -285,6 +287,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	snapshotCache.SetSpireEnabled(cfg.SpireEnabled)
 	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
 	snapshotCache.SetCaptureRedirectAll(cfg.CaptureRedirectAll)
+	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, cfg.EastWestTunnelPort)
 	if cfg.MeshDNS {
 		// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
 		// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The CNI DNATs

@@ -113,7 +113,7 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
 		Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY,
 	}
 
-	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "")
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "", WaypointRewrite{})
 	require.Len(t, lle.GetLbEndpoints(), 1)
 	endpoint := lle.GetLbEndpoints()[0].GetEndpoint()
 
@@ -138,7 +138,7 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
 		Ip:              "10.0.0.5",
 		HealthCheckMode: registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS,
 	}
-	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "")
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "", WaypointRewrite{})
 	assert.True(t, lle.GetLbEndpoints()[0].GetEndpoint().GetHealthCheckConfig().GetDisableActiveHealthCheck(),
 		"EDS-mode endpoints opt out of active health checking and rely on EDS health")
 }
@@ -227,14 +227,14 @@ func TestEndpointPriority(t *testing.T) {
 		return &registryv1.ServiceEndpoint{Locality: &registryv1.ServiceEndpoint_Locality{Region: region, Zone: zone}}
 	}
 	// Agent without locality: no preference anywhere.
-	assert.Equal(t, uint32(0), EndpointPriority("", "", ep("r1", "z1")))
+	assert.Equal(t, uint32(0), EndpointPriority("", "", ep("r1", "z1"), WaypointRewrite{}))
 	// Same zone -> 0, same region -> 1, elsewhere/unknown -> 2.
-	assert.Equal(t, uint32(0), EndpointPriority("r1", "z1", ep("r1", "z1")))
-	assert.Equal(t, uint32(1), EndpointPriority("r1", "z1", ep("r1", "z2")))
-	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("r2", "z1")))
-	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("", "")))
+	assert.Equal(t, uint32(0), EndpointPriority("r1", "z1", ep("r1", "z1"), WaypointRewrite{}))
+	assert.Equal(t, uint32(1), EndpointPriority("r1", "z1", ep("r1", "z2"), WaypointRewrite{}))
+	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("r2", "z1"), WaypointRewrite{}))
+	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("", ""), WaypointRewrite{}))
 	// Agent with region but no zone: whole region is local.
-	assert.Equal(t, uint32(0), EndpointPriority("r1", "", ep("r1", "z9")))
+	assert.Equal(t, uint32(0), EndpointPriority("r1", "", ep("r1", "z9"), WaypointRewrite{}))
 }
 
 // TestServiceLocalityLbEndpoint_Priority verifies the EDS endpoint carries
@@ -244,10 +244,61 @@ func TestServiceLocalityLbEndpoint_Priority(t *testing.T) {
 		Ip:       "10.0.0.5",
 		Locality: &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z2"},
 	}
-	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z1")
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z1", WaypointRewrite{})
 	assert.Equal(t, uint32(1), lle.GetPriority(), "same region, different zone")
-	lle = ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z2")
+	lle = ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z2", WaypointRewrite{})
 	assert.Equal(t, uint32(0), lle.GetPriority(), "same zone")
+}
+
+// TestServiceLocalityLbEndpoint_Waypoint pins the split-horizon EDS rewrite
+// (proposal 019): a remote-cluster endpoint with a node IP is dialed at
+// node_ip:tunnelPort with waypoint metadata and a remote priority band; local
+// endpoints and the disabled default are dialed at pod_ip:15008 untouched.
+func TestServiceLocalityLbEndpoint_Waypoint(t *testing.T) {
+	remote := func() *registryv1.ServiceEndpoint {
+		return &registryv1.ServiceEndpoint{
+			Ip:          "10.244.9.9",
+			ClusterName: "cluster-b",
+			Locality:    &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z1"},
+			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
+				Namespace: "default", PodName: "svc-b-1", NodeName: "node-b", NodeIp: "192.168.0.42",
+			},
+		}
+	}
+	wp := WaypointRewrite{Enabled: true, TunnelPort: 15009, LocalCluster: "cluster-a"}
+
+	// Remote endpoint via waypoint: node IP + tunnel port, waypoint metadata,
+	// remote priority band (locality 0 + band 3).
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(remote(), "r1", "z1", wp)
+	sa := lle.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "192.168.0.42", sa.GetAddress(), "dial the node, not the pod")
+	assert.Equal(t, uint32(15009), sa.GetPortValue(), "dial the tunnel port")
+	lb := lle.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
+	assert.Equal(t, "true", lb[subsetWaypointKey].GetStringValue(), "tagged for the waypoint transport socket")
+	assert.Equal(t, uint32(remoteClusterPriorityBand), lle.GetPriority(), "remote cluster is a failover band")
+
+	// Disabled (default): the same remote endpoint stays pod-direct, no tag.
+	off := ServiceLocalityLbEndpointFromRegistryEndpoint(remote(), "r1", "z1", WaypointRewrite{})
+	offSA := off.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "10.244.9.9", offSA.GetAddress())
+	assert.Equal(t, uint32(defaultInboundPort), offSA.GetPortValue())
+	assert.NotContains(t, off.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields(), subsetWaypointKey)
+
+	// Local-cluster endpoint stays pod-direct even with waypoint on.
+	local := remote()
+	local.ClusterName = "cluster-a"
+	loc := ServiceLocalityLbEndpointFromRegistryEndpoint(local, "r1", "z1", wp)
+	assert.Equal(t, "10.244.9.9", loc.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress())
+	assert.Equal(t, uint32(0), loc.GetPriority(), "local cluster keeps its locality priority")
+
+	// Remote endpoint WITHOUT a node IP falls back to pod-direct (can't waypoint),
+	// but is still deprioritized as a remote cluster.
+	noIP := remote()
+	noIP.KubernetesMetadata.NodeIp = ""
+	fb := ServiceLocalityLbEndpointFromRegistryEndpoint(noIP, "r1", "z1", wp)
+	assert.Equal(t, "10.244.9.9", fb.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress(), "no node IP -> pod fallback")
+	assert.Equal(t, uint32(remoteClusterPriorityBand), fb.GetPriority(), "still a remote cluster")
+	assert.NotContains(t, fb.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields(), subsetWaypointKey, "not tagged when it can't use the waypoint")
 }
 
 // TestSubsetKeyCombos pins multi-key combination generation: power set in

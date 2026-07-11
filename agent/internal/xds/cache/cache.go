@@ -83,6 +83,13 @@ type SnapshotCache struct {
 	// runtime.
 	meshDomain string
 
+	// waypointEnabled turns on the split-horizon east/west waypoint rewrite
+	// (proposal 019): a cross-cluster endpoint is dialed at its node's routable
+	// IP + waypointTunnelPort instead of its (possibly non-routable) pod IP.
+	// Off by default; set once before the manager starts (SetWaypointConfig).
+	waypointEnabled    bool
+	waypointTunnelPort uint32
+
 	// emitStatsPod enables per-pod labels (source_pod/destination_pod) on the
 	// aether_stats request counter. Off by default to bound cardinality; set
 	// once before the manager starts (SetEmitStatsPod) and read without locking
@@ -443,6 +450,15 @@ func (c *SnapshotCache) SetMeshDomain(domain string) {
 // MeshDomain returns the configured mesh domain.
 func (c *SnapshotCache) MeshDomain() string {
 	return c.meshDomain
+}
+
+// SetWaypointConfig enables the split-horizon east/west waypoint rewrite
+// (proposal 019) and sets the node tunnel port dialed for cross-cluster
+// endpoints. Off by default; must be called before the manager starts (read
+// without locking on every cluster build).
+func (c *SnapshotCache) SetWaypointConfig(enabled bool, tunnelPort uint32) {
+	c.waypointEnabled = enabled
+	c.waypointTunnelPort = tunnelPort
 }
 
 // SetEmitStatsPod enables per-pod labels on the aether_stats request counter
