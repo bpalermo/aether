@@ -47,6 +47,7 @@ type CNIServer struct {
 	trustDomain string
 	nodeRegion  string
 	nodeZone    string
+	nodeIP      string
 
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
@@ -137,20 +138,21 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 // It retrieves the region and zone labels from the node object.
 func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.log.DebugContext(ctx, "querying node metadata")
-	region, zone, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
+	region, zone, nodeIP, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
 	if err != nil {
 		return err
 	}
 
 	s.nodeRegion = region
 	s.nodeZone = zone
+	s.nodeIP = nodeIP
 
 	// Locality-aware failover: the xDS cache assigns EDS priorities relative
 	// to this node's locality (signals a scoped reload — the initial
 	// snapshot may predate this).
 	s.snapshotCache.SetNodeLocality(region, zone)
 
-	s.log.DebugContext(ctx, "node metadata queried successfully", "region", region, "zone", zone)
+	s.log.DebugContext(ctx, "node metadata queried successfully", "region", region, "zone", zone, "nodeIP", nodeIP)
 
 	// Delegated liveness: reflect each local pod's app health (from the proxy's
 	// active health check) into the registry so it is marked unhealthy in every
@@ -175,13 +177,23 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 }
 
 // queryNodeMetadata retrieves the topology.kubernetes.io/region and
-// topology.kubernetes.io/zone labels from a Kubernetes node (empty if absent).
-func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone string, err error) {
+// topology.kubernetes.io/zone labels plus the node's InternalIP from a
+// Kubernetes node (each empty if absent). The InternalIP is the routable dial
+// target advertised on this node's endpoints for cross-cluster consumers whose
+// pod network is not routable (proposal 019 per-node east/west waypoint).
+func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone, nodeIP string, err error) {
 	node := &corev1.Node{}
 	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {
-		return "", "", fmt.Errorf("failed to get node: %w", err)
+		return "", "", "", fmt.Errorf("failed to get node: %w", err)
+	}
+
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			nodeIP = addr.Address
+			break
+		}
 	}
 
 	return node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
-		node.Labels[constants.AnnotationKubernetesNodeTopologyZone], nil
+		node.Labels[constants.AnnotationKubernetesNodeTopologyZone], nodeIP, nil
 }

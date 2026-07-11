@@ -17,7 +17,7 @@ import (
 // The service protocol comes from the endpoint.aether.io/protocol annotation
 // (default HTTP; "tcp" registers a non-HTTP TCP-over-mTLS service). Container
 // and Kubernetes metadata are included along with node locality information.
-func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
+func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, nodeIP string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
 	protocol, err := getProtocolFromAnnotations(cniPod.GetAnnotations())
 	if err != nil {
 		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
@@ -59,6 +59,7 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 			Namespace: cniPod.GetNamespace(),
 			PodName:   cniPod.GetName(),
 			NodeName:  nodeName,
+			NodeIp:    nodeIP,
 		},
 		Locality: &registryv1.ServiceEndpoint_Locality{
 			Region: nodeRegion,

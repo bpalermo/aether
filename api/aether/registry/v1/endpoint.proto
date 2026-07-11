@@ -46,10 +46,18 @@ message ServiceEndpoint {
     string namespace = 1 [(buf.validate.field).string.min_len = 1];
     string pod_name = 2 [(buf.validate.field).string.min_len = 1];
     string node_name = 3 [(buf.validate.field).string.min_len = 1];
-    // 4 was node_ip (the node InternalIP, used as the HBONE tunnel target). The
-    // plain mTLS transport routes to pod IPs directly, so it is no longer needed.
+    // 4 was the original node_ip (the node InternalIP used as the HBONE tunnel
+    // target), removed with the plain-mTLS migration when the transport began
+    // routing to pod IPs directly. The field NUMBER stays reserved so it is never
+    // reused on the wire; node_ip is re-added below at field 5.
     reserved 4;
-    reserved node_ip;
+    // node_ip is the node's routable InternalIP. It is the dial target for a
+    // cross-cluster endpoint whose pod IP is not routable across clusters: the
+    // consuming cluster's proxy dials node_ip:<tunnel-port> and that node's
+    // host-network proxy SNI-forwards to the local pod (proposal 019, per-node
+    // east/west waypoint). Empty when unknown (e.g. non-Kubernetes backends) or
+    // for same-cluster endpoints, which are dialed at the pod IP directly.
+    string node_ip = 5;
   }
 
   KubernetesMetadata kubernetes_metadata = 8;

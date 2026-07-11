@@ -182,6 +182,7 @@ func (r *KubernetesRegistry) ListAllEndpoints(ctx context.Context, protocol regi
 type locality struct {
 	region string
 	zone   string
+	nodeIP string
 }
 
 // listManagedPods lists all running pods with the aether.io/managed=true label that have a PodIP.
@@ -225,10 +226,17 @@ func (r *KubernetesRegistry) buildNodeLocalities(ctx context.Context, pods []cor
 			r.log.ErrorContext(ctx, "failed to get node for locality", "error", err, "node", nodeName)
 			return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
 		}
-		localities[nodeName] = locality{
+		loc := locality{
 			region: node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
 			zone:   node.Labels[constants.AnnotationKubernetesNodeTopologyZone],
 		}
+		for _, addr := range node.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP {
+				loc.nodeIP = addr.Address
+				break
+			}
+		}
+		localities[nodeName] = loc
 	}
 
 	return localities, nil
@@ -256,6 +264,7 @@ func (r *KubernetesRegistry) podToEndpoint(pod *corev1.Pod, nodeLocalities map[s
 			Namespace: pod.Namespace,
 			PodName:   pod.Name,
 			NodeName:  pod.Spec.NodeName,
+			NodeIp:    nodeLocalities[pod.Spec.NodeName].nodeIP,
 		},
 		// This backend derives endpoints from the API server rather than receiving
 		// agent registrations, so health comes from the pod's readiness condition
