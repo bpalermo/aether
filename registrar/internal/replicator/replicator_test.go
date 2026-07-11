@@ -130,13 +130,14 @@ func newClient(t *testing.T, endpoint string) *clientv3.Client {
 
 // startReplicator runs a replicator for ownPrefix→peer and returns a stop
 // function that cancels it and waits for Start to return.
-func startReplicator(t *testing.T, localCli *clientv3.Client, ownPrefix string) (stop func()) {
+func startReplicator(t *testing.T, localCli *clientv3.Client, ownPrefix string, leaseTTLSeconds int64) (stop func()) {
 	t.Helper()
 	r := &replicator.Replicator{
-		Source:        &testSource{client: localCli, prefix: ownPrefix},
-		Peers:         []replicator.Peer{{Region: "region-b", Endpoints: []string{peerEndpoint}}},
-		Log:           slog.New(slog.DiscardHandler),
-		ResyncBackoff: 100 * time.Millisecond,
+		Source:          &testSource{client: localCli, prefix: ownPrefix},
+		Peers:           []replicator.Peer{{Region: "region-b", Endpoints: []string{peerEndpoint}}},
+		Log:             slog.New(slog.DiscardHandler),
+		ResyncBackoff:   100 * time.Millisecond,
+		LeaseTTLSeconds: leaseTTLSeconds,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -190,7 +191,7 @@ func TestReplicator_MirrorsOwnPartition(t *testing.T) {
 	_, err = peerCli.Put(ctx, ownPrefix+"/stale", "gone-local")
 	require.NoError(t, err)
 
-	startReplicator(t, localCli, ownPrefix)
+	startReplicator(t, localCli, ownPrefix, 0)
 
 	// Initial sync: own keys arrive, the stale peer key is pruned.
 	require.Eventually(t, func() bool {
@@ -231,7 +232,7 @@ func TestReplicator_ResumesAfterRestart(t *testing.T) {
 	_, err = localCli.Put(ctx, ownPrefix+"/k2", "v2")
 	require.NoError(t, err)
 
-	stop := startReplicator(t, localCli, ownPrefix)
+	stop := startReplicator(t, localCli, ownPrefix, 0)
 	require.Eventually(t, func() bool {
 		return peerValue(t, peerCli, ownPrefix+"/k1") == "v1" &&
 			peerValue(t, peerCli, ownPrefix+"/k2") == "v2"
@@ -245,9 +246,67 @@ func TestReplicator_ResumesAfterRestart(t *testing.T) {
 	_, err = localCli.Put(ctx, ownPrefix+"/k3", "v3")
 	require.NoError(t, err)
 
-	startReplicator(t, localCli, ownPrefix)
+	startReplicator(t, localCli, ownPrefix, 0)
 	require.Eventually(t, func() bool {
 		return peerValue(t, peerCli, ownPrefix+"/k1") == "" &&
 			peerValue(t, peerCli, ownPrefix+"/k3") == "v3"
 	}, 15*time.Second, 50*time.Millisecond, "resync after restart did not converge")
+}
+
+func TestReplicator_LeaseExpiresOnOriginDeath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+	ctx := context.Background()
+	localCli := newClient(t, localEndpoint)
+	peerCli := newClient(t, peerEndpoint)
+
+	ownPrefix := root(t) + "/regions/region-a/clusters/c1"
+	_, err := localCli.Put(ctx, ownPrefix+"/k1", "v1")
+	require.NoError(t, err)
+
+	stop := startReplicator(t, localCli, ownPrefix, 3)
+	require.Eventually(t, func() bool {
+		return peerValue(t, peerCli, ownPrefix+"/k1") == "v1"
+	}, 15*time.Second, 50*time.Millisecond, "initial sync did not converge")
+
+	// Origin dies (keepalive stops, no revoke): the mirrored key must expire
+	// with the lease TTL — whole-region failover cleanup on the peer.
+	stop()
+	assert.Equal(t, "v1", peerValue(t, peerCli, ownPrefix+"/k1"), "mirror must not vanish at shutdown (no revoke)")
+	require.Eventually(t, func() bool {
+		return peerValue(t, peerCli, ownPrefix+"/k1") == ""
+	}, 20*time.Second, 100*time.Millisecond, "mirrored key did not expire after origin death")
+}
+
+func TestReplicator_LeaseHandoffKeepsMirrorAlive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+	ctx := context.Background()
+	localCli := newClient(t, localEndpoint)
+	peerCli := newClient(t, peerEndpoint)
+
+	ownPrefix := root(t) + "/regions/region-a/clusters/c1"
+	_, err := localCli.Put(ctx, ownPrefix+"/k1", "v1")
+	require.NoError(t, err)
+
+	stop := startReplicator(t, localCli, ownPrefix, 10)
+	require.Eventually(t, func() bool {
+		return peerValue(t, peerCli, ownPrefix+"/k1") == "v1"
+	}, 15*time.Second, 50*time.Millisecond, "initial sync did not converge")
+
+	// Leader handoff: the successor re-puts the (value-unchanged) key under
+	// its fresh lease. If the sync skipped it on value equality alone, it
+	// would stay on the predecessor's lease and expire below.
+	stop()
+	startReplicator(t, localCli, ownPrefix, 10)
+
+	// Watch through the predecessor's TTL expiry (plus slack): the mirrored
+	// key must never disappear across the handoff.
+	deadline := time.Now().Add(14 * time.Second)
+	for time.Now().Before(deadline) {
+		require.Equal(t, "v1", peerValue(t, peerCli, ownPrefix+"/k1"), "mirror dropped during leader handoff")
+		time.Sleep(200 * time.Millisecond)
+	}
 }
