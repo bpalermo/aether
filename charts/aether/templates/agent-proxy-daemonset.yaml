@@ -218,7 +218,13 @@ spec:
             - "run"
             - "--server"
             - "--disable-telemetry"
-            - "--addr=127.0.0.1:8181"
+            # Bind OPA's diagnostic API to a per-pod UDS, NOT a host TCP port. The
+            # proxy DS is hostNetwork=true, so 127.0.0.1:8181 would be host-wide and
+            # collide between the old and surged-in new pod during every rollout
+            # (maxSurge=1) — a deterministic 2-3 restart bind race. The authz-socket
+            # emptyDir is per-pod, so this socket is unique per pod. Envoy reaches OPA
+            # only over the ext_authz gRPC UDS below; nothing consumes 8181.
+            - "--addr=unix:///run/aether/authz/opa-api.sock"
             - "--set=plugins.envoy_ext_authz_grpc.addr=unix:///run/aether/authz/authz.sock"
             - "--set=decision_logs.console=true"
             - "/policy/policy.rego"
