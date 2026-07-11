@@ -231,7 +231,7 @@ jobs:
 
       - name: Upload conformance report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gateway-http-conformance-report
           path: ${{ runner.temp }}/gateway-http-report.yaml
@@ -259,7 +259,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure() || steps.conformance.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: conformance-logs
           path: /tmp/conformance-logs
@@ -406,7 +406,7 @@ jobs:
 
       - name: Upload conformance report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mesh-http-conformance-report
           path: ${{ runner.temp }}/mesh-http-report.yaml
@@ -430,7 +430,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mesh-conformance-logs
           path: /tmp/mesh-conformance-logs
