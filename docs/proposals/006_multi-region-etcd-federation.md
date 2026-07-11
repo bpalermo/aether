@@ -174,3 +174,71 @@ Phase 1, while single-region, means no live multi-region data is ever re-keyed.
   tombstone so peers converge faster than lease TTL.
 - Whether the **registrar** hosts the replicator as a mode or it's a separate
   Deployment (Phase 2 HA discussion).
+
+## Phase 2 implementation plan (2026-07-11)
+
+Grounded in the current code. Open questions resolved: **registrar-hosted** (a
+leader-elected runnable — it already has the etcd client, leader election, and the
+manager loop; a stray daemon buys nothing); **explicit `--region`** stays the
+identity (already shipped); **tombstones yes** — replicated deletes mirror as
+deletes for fast convergence, with the origin lease as the whole-region backstop.
+
+### Design
+
+Each region's replicator mirrors its **own** authoritative subtree verbatim into
+every **peer** region's etcd, under a lease held on the peer that this region's
+replicator keeps alive:
+
+```
+region A replicator:  watch LOCAL etcd /aether/v1/regions/A/  ──▶  Put/Delete
+                      verbatim into etcd(B), etcd(C) under a per-peer lease
+                      A keeps alive. A dies → the lease on B/C lapses → all of
+                      A's mirrored keys expire there together (origin-heartbeat
+                      failover, no peer judging A dead).
+```
+
+No loops: B's replicator watches only `/regions/B/` (its own), never the
+`/regions/A/` keys A mirrored in — partitions are disjoint (the origin-first key).
+B's registrar watches the whole `/regions/` root, so it sees A's mirror as
+read-only foreign endpoints (EDS priority 2, locality failover — proposal 004).
+
+### The one real new primitive: the origin-heartbeat lease
+
+Nothing in the etcd registry uses a lease today (all `Put`s are bare). The
+replicator adds, **per peer etcd**: `Lease.Grant(TTL)` + a `KeepAlive` goroutine +
+`clientv3.WithLease(id)` on every mirrored `Put` + `Lease.Revoke` on clean
+shutdown. TTL ~30s, keepalive ~TTL/3. The lease lives on the peer; the origin's
+replicator holds the keepalive, so origin liveness == mirror liveness.
+
+### Phasing (each a reviewable PR; inert until `--peer-etcd` is set)
+
+1. **P2a — config + peer clients + the mirror loop (no lease).** Add
+   `--peer-etcd <region>=<ep,ep>` (repeatable) to `registrar/internal/cmd`; a new
+   `registrar/internal/replicator/` leader-elected runnable that dials each peer's
+   `clientv3`, does an initial range-sync of the local `/regions/<self>/` subtree
+   to each peer, then a **resume-safe watch** (track the revision; re-range on
+   compaction) mirroring Put→Put and Delete→Delete verbatim. Gated on
+   `registryBackend==etcd && len(peers)>0`. Reuses the config-export controller's
+   leader-elected shape; needs direct access to the `EtcdRegistry`'s `clientv3`
+   (add an accessor rather than downcasting). Unit-tested against an embedded etcd.
+2. **P2b — origin-heartbeat lease + failover.** Per-peer `Lease.Grant`/`KeepAlive`/
+   `WithLease`/`Revoke`; the mirror Puts attach the lease. This is the failover
+   mechanism. Test: kill the keepalive → peer keys expire.
+3. **P2c — hardening + metrics.** Replication lag, per-peer error/keepalive-health
+   counters; compaction-resync robustness; chart values (`registrar.peerEtcd`).
+4. **P3 — multi-region e2e** (proposal 006 Phase 3). Extend a kind harness to
+   TWO regions (two etcds + a replicator each), assert cross-region endpoint
+   visibility, then kill region A and assert its mirror expires in B (lease lapse)
+   and B's EDS drops A's endpoints. Models on the 019 two-kind harness
+   (`e2e/multicluster_waypoint.sh`) — shared-nothing, two etcds instead of one.
+
+### Touchpoints
+- `registry/internal/etcd/etcd.go` — add a `Client()` accessor so the replicator
+  reaches the `clientv3`; key builders + the `/aether/v1/regions` prefix are reused
+  verbatim.
+- `registrar/internal/cmd/{config,root}.go` — `--peer-etcd` flag → `PeerRegions`;
+  wire the runnable after registry setup, gated on backend+peers.
+- `registrar/internal/replicator/` (NEW) — `controller.go` (runnable + mirror
+  loop), `lease.go` (P2b), `metrics.go`, tests.
+- `charts/aether/values.yaml` + `registrar-deployment.yaml` — `registrar.peerEtcd`
+  (P2c).
