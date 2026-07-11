@@ -246,6 +246,9 @@ Two corrections discovered in implementation (P2b):
    visibility, then kill region A and assert its mirror expires in B (lease lapse)
    and B's EDS drops A's endpoints. Models on the 019 two-kind harness
    (`e2e/multicluster_waypoint.sh`) — shared-nothing, two etcds instead of one.
+   Landed as `e2e/multicluster_replicator.sh` (up/verify/down; verify =
+   visibility → data path over the mirror → lease-lapse failover → recovery)
+   with a nightly CI gate (`.github/workflows/replicator-e2e.yaml`).
 
 ### Touchpoints
 - `registry/internal/etcd/etcd.go` — add a `Client()` accessor so the replicator
