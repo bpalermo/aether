@@ -100,6 +100,10 @@ spec:
             {{- if .Values.agent.l4Routes }}
             - "--l4-routes"
             {{- end }}
+            {{- if .Values.agent.eastWestWaypoint }}
+            - "--east-west-waypoint"
+            - "--east-west-tunnel-port={{ .Values.agent.eastWestTunnelPort }}"
+            {{- end }}
             {{- if .Values.agent.transparentCapture }}
             - "--transparent-capture"
             {{- if or .Values.agent.captureRedirectAll .Values.agent.captureRedirectAllDefault }}
