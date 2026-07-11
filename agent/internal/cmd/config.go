@@ -142,6 +142,18 @@ type AgentConfig struct {
 	// all egress into the listener. Default off.
 	CaptureRedirectAll bool
 
+	// EastWestWaypoint enables the split-horizon east/west waypoint rewrite
+	// (proposal 019): an endpoint in another cluster is dialed at its node's
+	// routable IP + EastWestTunnelPort (the per-node waypoint) instead of its
+	// pod IP, and that node's host-network proxy SNI-forwards to the local pod.
+	// Intra-cluster traffic stays direct pod-to-pod. Default off.
+	EastWestWaypoint bool
+
+	// EastWestTunnelPort is the host-netns port the node proxy will listen on for
+	// cross-cluster waypoint traffic and the port cross-cluster endpoints are
+	// dialed at. Only meaningful with EastWestWaypoint.
+	EastWestTunnelPort uint32
+
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
 	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
 	// and forwards the rest to MeshDNSUpstream. Pairs with the CNI :53 redirect.
@@ -198,6 +210,7 @@ func NewAgentConfig() *AgentConfig {
 		MountedLocalStorageDir:   constants.DefaultHostCNIRegistryDir,
 		RegistrarAddress:         "aether-registrar.aether-system.svc:443",
 		MeshDomain:               commonconstants.DefaultMeshDomain,
+		EastWestTunnelPort:       proxy.DefaultEastWestTunnelPort,
 		SpireEnabled:             true,
 		SpireAdminSocketPath:     constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath:  constants.DefaultSpireWorkloadSocketPath,

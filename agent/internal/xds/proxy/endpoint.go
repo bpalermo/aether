@@ -18,6 +18,13 @@ const (
 	subsetPodNamespaceKey = "namespace"
 	// subsetPodNameKey is the metadata key for the pod name
 	subsetPodNameKey = "pod"
+	// subsetWaypointKey marks an endpoint reached via the per-node east/west
+	// waypoint (proposal 019). It lives in the envoy.lb metadata namespace so the
+	// cluster's transport-socket matcher (EndpointMetadataInput) can branch on it
+	// to present the structured waypoint SNI; it is never a subset selector key.
+	subsetWaypointKey = "waypoint"
+	// subsetWaypointValue is the value stamped under subsetWaypointKey.
+	subsetWaypointValue = "true"
 )
 
 // NewClusterLoadAssignment creates an empty cluster load assignment for a service.

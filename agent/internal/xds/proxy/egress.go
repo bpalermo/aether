@@ -433,6 +433,42 @@ func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]s
 	cluster.TransportSocketMatches = UpstreamTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs, sni)
 }
 
+// remoteClusterPriorityBand is added to a remote-cluster endpoint's locality
+// priority when the east/west waypoint is enabled, so the local cluster's
+// endpoints (band 0-2) are always preferred and a remote cluster (band 3-5) is
+// pure failover. Sparse priority levels are fine — Envoy treats missing ones as
+// empty and spills to the next healthy band (same as the locality tiers).
+const remoteClusterPriorityBand = 3
+
+// WaypointRewrite controls the split-horizon EDS rewrite (proposal 019). When
+// Enabled, an endpoint belonging to a cluster other than LocalCluster is dialed
+// at its node's routable IP + TunnelPort (the per-node east/west waypoint)
+// instead of its (cross-cluster, possibly non-routable) pod IP, and is tagged
+// with waypoint metadata so the cluster's transport-socket matcher can present
+// the structured SNI. When disabled (the default) every endpoint is dialed at
+// pod_ip:15008 — the flat pod-to-pod path (proposal 018 flat-network mode),
+// unchanged. LocalCluster is this agent's own cluster name.
+type WaypointRewrite struct {
+	Enabled      bool
+	TunnelPort   uint32
+	LocalCluster string
+}
+
+// remoteCluster reports whether the endpoint belongs to a cluster other than the
+// local one while waypoint mode is on (independent of whether it has a routable
+// node IP — used for priority banding, which deprioritizes every remote endpoint).
+func (w WaypointRewrite) remoteCluster(endpoint *registryv1.ServiceEndpoint) bool {
+	return w.Enabled && endpoint.GetClusterName() != w.LocalCluster
+}
+
+// viaWaypoint reports whether the endpoint must be dialed through its node's
+// waypoint: waypoint mode is on, the endpoint is in another cluster, AND it
+// advertises a routable node IP. A remote endpoint without a node IP falls back
+// to its pod IP (best effort — only works if the pod network happens to route).
+func (w WaypointRewrite) viaWaypoint(endpoint *registryv1.ServiceEndpoint) bool {
+	return w.remoteCluster(endpoint) && endpoint.GetKubernetesMetadata().GetNodeIp() != ""
+}
+
 // EndpointPriority maps an endpoint's locality distance from this node into
 // an EDS priority (locality-aware failover): same zone 0, same region 1,
 // elsewhere or unknown 2. Envoy keeps traffic at the lowest healthy priority
@@ -442,8 +478,18 @@ func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]s
 // expresses no preference (everything 0). This is deliberately NOT Envoy's
 // zone_aware_lb_config, which needs the local proxy fleet's per-zone
 // membership on every node — O(all nodes) state that demand-scoped
-// distribution (004) exists to eliminate.
-func EndpointPriority(localRegion, localZone string, endpoint *registryv1.ServiceEndpoint) uint32 {
+// distribution (004) exists to eliminate. With the waypoint enabled, a
+// remote-cluster endpoint is shifted into a higher band so the local cluster
+// is always preferred (same-cluster-first).
+func EndpointPriority(localRegion, localZone string, endpoint *registryv1.ServiceEndpoint, wp WaypointRewrite) uint32 {
+	base := localityPriority(localRegion, localZone, endpoint)
+	if wp.remoteCluster(endpoint) {
+		return base + remoteClusterPriorityBand
+	}
+	return base
+}
+
+func localityPriority(localRegion, localZone string, endpoint *registryv1.ServiceEndpoint) uint32 {
 	if localRegion == "" {
 		return 0
 	}
@@ -463,7 +509,9 @@ func EndpointPriority(localRegion, localZone string, endpoint *registryv1.Servic
 // listener, and its host metadata carries the envoy.lb subset keys for affinity.
 // The endpoint health reflects the registry's delegated-liveness status, and
 // its priority the locality distance from this node (EndpointPriority).
-func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint, localRegion, localZone string) *endpointv3.LocalityLbEndpoints {
+func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint, localRegion, localZone string, wp WaypointRewrite) *endpointv3.LocalityLbEndpoints {
+	viaWaypoint := wp.viaWaypoint(endpoint)
+
 	subsetKeys := map[string]string{
 		subsetClusterKey: endpoint.GetClusterName(),
 		subsetIPKey:      endpoint.GetIp(),
@@ -474,6 +522,13 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 	}
 	for k, v := range endpoint.GetMetadata() {
 		subsetKeys[k] = v
+	}
+	if viaWaypoint {
+		// Tag the endpoint so the cluster's transport-socket matcher selects the
+		// waypoint socket (structured SNI) for it (proposal 019 Phase 2b). Lives
+		// in the envoy.lb metadata namespace the EndpointMetadataInput reads; it
+		// is not a subset selector key, so it does not affect subset LB.
+		subsetKeys[subsetWaypointKey] = subsetWaypointValue
 	}
 
 	lb := &structpb.Struct{Fields: map[string]*structpb.Value{}}
@@ -491,16 +546,25 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 		locality = &corev3.Locality{Region: loc.GetRegion(), Zone: loc.GetZone()}
 	}
 
+	// Local: the destination pod's mesh inbound (pod_ip:15008), reached by the
+	// pod's own netns-bound inbound listener. Remote (waypoint): the destination
+	// node's routable IP + tunnel port, where that node's host-network proxy
+	// SNI-forwards to the local pod — the source's mTLS passes through unchanged.
+	dialAddr := endpoint.GetIp()
+	dialPort := uint32(defaultInboundPort)
+	if viaWaypoint {
+		dialAddr = endpoint.GetKubernetesMetadata().GetNodeIp()
+		dialPort = wp.TunnelPort
+	}
+
 	ep := &endpointv3.Endpoint{
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
 					Protocol: corev3.SocketAddress_TCP,
-					// The destination pod's mesh inbound; reached by the pod's own
-					// netns-bound inbound listener.
-					Address: endpoint.GetIp(),
+					Address:  dialAddr,
 					PortSpecifier: &corev3.SocketAddress_PortValue{
-						PortValue: defaultInboundPort,
+						PortValue: dialPort,
 					},
 				},
 			},
@@ -524,7 +588,7 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 			},
 		},
 		Locality: locality,
-		Priority: EndpointPriority(localRegion, localZone, endpoint),
+		Priority: EndpointPriority(localRegion, localZone, endpoint, wp),
 	}
 }
 

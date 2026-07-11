@@ -204,6 +204,14 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// too — the outbound route table serves the same GAMMA/chain config as cap_http.
 	chainFilters := c.serviceChainFiltersSnapshot()
 	localRegion, localZone := c.nodeLocality()
+	// Split-horizon east/west waypoint (proposal 019): remote-cluster endpoints
+	// are dialed at their node's routable IP + tunnel port. clusterName is this
+	// agent's own cluster (the local side of the split). Inert when disabled.
+	waypoint := proxy.WaypointRewrite{
+		Enabled:      c.waypointEnabled,
+		TunnelPort:   c.waypointTunnelPort,
+		LocalCluster: clusterName,
+	}
 
 	// RPC-fill (cold path): a dependency missing from the watch-fed listing —
 	// typically an ODCDS observation made milliseconds ago, whose endpoints
@@ -341,7 +349,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		buckets := make(map[uint32]*portBucket)
 
 		for _, endpoint := range endpoints {
-			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone)
+			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone, waypoint)
 			defaultCla.Endpoints = append(defaultCla.Endpoints, lbEp)
 			defaultEpMap[endpoint.GetIp()] = lbEp
 
@@ -420,7 +428,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		cla := proxy.NewClusterLoadAssignment(serviceName)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
 		for _, endpoint := range endpoints {
-			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone)
+			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone, waypoint)
 			cla.Endpoints = append(cla.Endpoints, lbEp)
 			epMap[endpoint.GetIp()] = lbEp
 		}
