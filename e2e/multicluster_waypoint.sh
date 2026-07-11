@@ -38,7 +38,8 @@ TRUST_DOMAIN="aether.internal"
 MESH_DOMAIN="aether.internal"
 TUNNEL_PORT="15009"
 GWAPI_VERSION="v1.5.1"
-SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.28.1}"
+SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.28.4}"
+SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.5.0}"
 IMAGES=(agent cni-install registrar controller)
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
@@ -121,7 +122,7 @@ install_spire() {
 		--from-file=tls.key="$REPO_ROOT/e2e/certs/ca.key" \
 		--from-file=bundle.crt="$REPO_ROOT/e2e/certs/ca.crt" >/dev/null 2>&1 || true
 	helm --kube-context "$ctx" upgrade --install spire-crds spiffe/spire-crds \
-		-n spire-mgmt --version "$SPIRE_CHART_VERSION" --wait --timeout 3m >/dev/null
+		-n spire-mgmt --version "$SPIRE_CRDS_VERSION" --wait --timeout 3m >/dev/null
 	helm --kube-context "$ctx" upgrade --install spire spiffe/spire \
 		-n spire-mgmt --version "$SPIRE_CHART_VERSION" \
 		--set global.spire.trustDomain="$TRUST_DOMAIN" \
