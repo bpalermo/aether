@@ -1,0 +1,108 @@
+# Proposal 019 — per-node east/west waypoint cross-cluster data-path e2e.
+#
+# Stands up TWO throwaway kind clusters on the shared docker network (routable node
+# IPs, non-routable cross-cluster pod CIDRs — the exact 019 condition), one shared
+# etcd, and SPIRE on both under ONE shared trust domain (shared upstream CA on
+# disk). Installs aether with --east-west-waypoint on both, deploys `echo` in
+# cluster b + `client` in cluster a, and asserts the cross-cluster call succeeds:
+#
+#   client(a) -> echo.aether-test.aether.internal:18081 -> 200 "hello-from-cluster-b"
+#
+# i.e. a's split-horizon EDS points echo at b's NODE IP + tunnel port, b's node
+# proxy SNI-forwards to the local echo pod, and mTLS is end-to-end pod<->pod across
+# the cluster line. The whole bring-up + assertion lives in the reusable harness
+# e2e/multicluster_waypoint.sh (up/verify/down); this workflow just builds the
+# images via RBE and drives the harness.
+#
+# NOT run per PR — two kind clusters + the hardened SPIRE chart on each is heavy
+# (~30-40min). workflow_dispatch (badge/debug) + a nightly schedule to catch
+# regressions in the 019 data path. Hard gate by default; set `soft` to bypass.
+#
+# See docs/proposals/019_multicluster-node-waypoint.md and issue #507.
+
+name: waypoint-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      soft:
+        description: "Don't fail the job on a waypoint e2e failure (debugging only; default is a hard gate)"
+        type: boolean
+        default: false
+  schedule:
+    # Nightly at 05:23 UTC (off the hour, and after the conformance run at 04:17).
+    - cron: "23 5 * * *"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_REGISTRY: ghcr.io/bpalermo/aether
+
+jobs:
+  waypoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+
+      # Build + load the four aether images into the local docker daemon as
+      # ghcr.io/bpalermo/aether/<img>:latest (same path as conformance). The custom
+      # aether-proxy is a published image, PULLED by kind (not built here). Retry:
+      # bazel repo fetches from GitHub releases intermittently 502.
+      - name: Build and load container images
+        run: |
+          retry() { for n in 1 2 3; do "$@" && return 0; echo "attempt $n failed; retrying in 20s"; sleep 20; done; return 1; }
+          for t in //agent/cmd/agent:image_load //cni/cmd/cni-install:image_load \
+                   //registrar/cmd/registrar:image_load //controller/cmd/controller:image_load; do
+            retry bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} "$t"
+          done
+
+      # The harness owns everything: two kind clusters + shared etcd + SPIRE (shared
+      # upstream CA) on both + aether(waypoint) + workloads. WAYPOINT_SKIP_BUILD=1
+      # because the images are already in docker (built above via RBE). Two kinds are
+      # inotify-heavy; the harness raises fs.inotify via passwordless sudo (present on
+      # GitHub runners).
+      - name: Bring up the two-cluster waypoint environment
+        env:
+          WAYPOINT_SKIP_BUILD: "1"
+        run: ./e2e/multicluster_waypoint.sh up
+
+      # The cross-cluster data-path assertion (retries the demand-scoped cold start).
+      - name: Verify cross-cluster waypoint call
+        id: verify
+        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
+        run: ./e2e/multicluster_waypoint.sh verify
+
+      - name: Collect diagnostics on failure
+        if: failure() || steps.verify.outcome == 'failure'
+        run: |
+          mkdir -p /tmp/waypoint-logs
+          for c in a b; do
+            echo "=== cluster $c: all pods ===" | tee -a /tmp/waypoint-logs/pods.txt
+            kubectl --context "kind-$c" get pods -A -o wide 2>&1 | tee -a /tmp/waypoint-logs/pods.txt || true
+            kind export logs "/tmp/waypoint-logs/$c" --name "$c" || true
+            kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=200 > "/tmp/waypoint-logs/$c-agent.log" 2>&1 || true
+            kubectl --context "kind-$c" -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 > "/tmp/waypoint-logs/$c-proxy.log" 2>&1 || true
+            kubectl --context "kind-$c" -n spire-mgmt get pods -o wide > "/tmp/waypoint-logs/$c-spire.txt" 2>&1 || true
+          done
+          echo "=== shared registry (echo endpoint / node_ip) ==="
+          docker exec aether-shared-etcd etcdctl get --prefix /aether/v1/regions --keys-only 2>&1 | tee /tmp/waypoint-logs/registry-keys.txt || true
+
+      - name: Upload diagnostics
+        if: failure() || steps.verify.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: waypoint-e2e-logs
+          path: /tmp/waypoint-logs
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: ./e2e/multicluster_waypoint.sh down || true
