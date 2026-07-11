@@ -49,6 +49,12 @@ type RegistrarConfig struct {
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
 
+	// PeerEtcd lists peer regions' etcd endpoints for cross-region replication
+	// (proposal 006 Phase 2), one entry per peer region:
+	// <region>=<endpoint>[,<endpoint>...]. Empty disables replication.
+	// Requires the etcd backend and an explicit --region.
+	PeerEtcd []string
+
 	// SyncInterval is how often the registrar polls the external registry
 	SyncInterval time.Duration
 

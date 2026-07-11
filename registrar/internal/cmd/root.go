@@ -14,6 +14,7 @@ import (
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/registrar/internal/configexport"
 	"github.com/bpalermo/aether/registrar/internal/mcs"
+	"github.com/bpalermo/aether/registrar/internal/replicator"
 	"github.com/bpalermo/aether/registrar/internal/server"
 	"github.com/bpalermo/aether/registrar/internal/services"
 	"github.com/bpalermo/aether/registry"
@@ -71,6 +72,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006). MUST be unique per regional etcd cluster: one region = one etcd. Pointing two etcds at the same region splits the registry; pointing two regions at one etcd collides their writes.")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
+	rootCmd.Flags().StringArrayVar(&cfg.PeerEtcd, "peer-etcd", nil, "Peer region etcd for cross-region replication (proposal 006), repeatable: <region>=<endpoint>[,<endpoint>...]. The leader registrar mirrors this region's own registry subtree verbatim into each peer. Requires the etcd backend and an explicit --region")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
 	rootCmd.Flags().BoolVar(&cfg.GenerateMeshServices, "generate-mesh-services", false, "Project the mesh catalog into selectorless k8s Services on the mesh port (transparent-capture VIPs, proposal 018 Phase 3a)")
 	rootCmd.Flags().BoolVar(&cfg.EnableMCS, "enable-mcs", false, "Enable Multi-Cluster Services (MCS-API) phase 1: export ServiceExports to the registry and materialize ServiceImports + clusterset VIPs (proposals 018 + 006; requires the etcd backend)")
@@ -246,6 +248,30 @@ func runRegistrar(ctx context.Context) (retErr error) {
 			}
 			l.InfoContext(ctx, "cross-cluster config export enabled (proposal 026)")
 		}
+	}
+
+	// Cross-region replication (proposal 006 Phase 2a): the leader registrar
+	// mirrors this region's own authoritative etcd subtree verbatim into each
+	// peer region's etcd. Inert unless --peer-etcd is set. Replication is
+	// etcd↔etcd by design (see docs/proposals/006), so any other backend is a
+	// hard misconfiguration, like --enable-mcs.
+	if len(cfg.PeerEtcd) > 0 {
+		src, ok := reg.(replicator.Source)
+		if !ok {
+			return fmt.Errorf("--peer-etcd requires the etcd registry backend; backend %q cannot be replicated", cfg.RegistryBackend)
+		}
+		peers, peersErr := replicator.ParsePeers(cfg.PeerEtcd, cfg.Region)
+		if peersErr != nil {
+			return fmt.Errorf("invalid --peer-etcd: %w", peersErr)
+		}
+		if err = m.Add(&replicator.Replicator{
+			Source: src,
+			Peers:  peers,
+			Log:    l,
+		}); err != nil {
+			return fmt.Errorf("failed to add cross-region replicator: %w", err)
+		}
+		l.InfoContext(ctx, "cross-region etcd replication enabled (proposal 006 Phase 2a)", "region", cfg.Region, "peers", len(peers))
 	}
 
 	var grpcOpts []grpc.ServerOption

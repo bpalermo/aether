@@ -108,6 +108,7 @@ use_repo(
     "com_github_vladimirvivien_gexe",
     "com_github_zeebo_errs",
     "in_gopkg_natefinch_lumberjack_v2",
+    "io_etcd_go_etcd_api_v3",
     "io_etcd_go_etcd_client_v3",
     "io_etcd_go_etcd_server_v3",
     "io_k8s_api",

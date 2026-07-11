@@ -156,6 +156,20 @@ func (r *EtcdRegistry) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// Client exposes the underlying etcd client for components that mirror this
+// registry's authoritative partition verbatim (the cross-region replicator,
+// proposal 006 Phase 2). Nil until Initialize succeeds.
+func (r *EtcdRegistry) Client() *clientv3.Client {
+	return r.client
+}
+
+// OwnPrefix returns this instance's authoritative partition root
+// (<keyPrefix>/<region>/clusters/<cluster>) — the subtree the cross-region
+// replicator mirrors to peer regions.
+func (r *EtcdRegistry) OwnPrefix() string {
+	return r.ownPrefix
+}
+
 // Changes returns a channel that receives a (coalesced) signal whenever any
 // key under the registry prefix changes. Consumers treat each receive as
 // "something changed, re-read the registry". Satisfies registry.ChangeNotifier.
