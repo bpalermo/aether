@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "replicator",
+    srcs = ["replicator.go"],
+    importpath = "github.com/bpalermo/aether/registrar/internal/replicator",
+    visibility = ["//registrar:__subpackages__"],
+    deps = [
+        "//common/log",
+        "@io_etcd_go_etcd_api_v3//v3rpc/rpctypes",
+        "@io_etcd_go_etcd_client_v3//:client",
+    ],
+)
+
+go_test(
+    name = "replicator_test",
+    size = "medium",
+    srcs = ["replicator_test.go"],
+    tags = [
+        "integration",
+        "no-remote-exec",  # testcontainers needs local Docker, not a remote executor
+    ],
+    deps = [
+        ":replicator",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@com_github_testcontainers_testcontainers_go_modules_etcd//:etcd",
+        "@io_etcd_go_etcd_client_v3//:client",
+    ],
+)
