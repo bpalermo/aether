@@ -11,14 +11,13 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list", "get", "watch"]
-  {{- if or .Values.registrar.generateMeshServices .Values.registrar.enableMCS }}
   # Selectorless VIP Services across namespaces: the transparent-capture VIPs
-  # (proposal 018, Phase 3a, generateMeshServices) and/or the clusterset.local
+  # (proposal 018, Phase 3a — the generator is unconditional since 031 round 2:
+  # capture and mesh DNS resolve against these VIPs) and the clusterset.local
   # VIPs the MCS ServiceImport generator materializes (enableMCS).
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list", "get", "watch", "create", "update", "patch", "delete"]
-  {{- end }}
   {{- if .Values.registrar.enableMCS }}
   # Multi-Cluster Services (MCS-API) phase 1 (proposals 018 + 006): the leader
   # registrar watches ServiceExports (and stamps their status) and materializes

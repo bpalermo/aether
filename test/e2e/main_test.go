@@ -350,7 +350,6 @@ func deployAgent(ctx context.Context, client klient.Client) error {
 							ImagePullPolicy: corev1.PullNever,
 							Args: []string{
 								"--debug=true",
-								"--proxy-id=$(NODE_NAME)",
 								"--cluster-name=aether-e2e",
 								"--node-name=$(NODE_NAME)",
 								"--registrar-address=aether-registrar.aether-system.svc:443",

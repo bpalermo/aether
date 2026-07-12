@@ -61,44 +61,26 @@ type AetherConf struct {
 	// Best-effort: a probe timeout is logged, never fails the CNI operation.
 	ReadinessProbeDisabled bool `json:"readiness_probe_disabled"`
 
-	// TransparentCaptureEnabled installs, inside each pod's netns, an nft REDIRECT
-	// of outbound TCP to a mesh ClusterIP:18081 -> the pod's local capture listener
-	// :18001 (proposal 018, Phase 3a). Off by default; pairs with the agent's
-	// --transparent-capture and the registrar's --generate-mesh-services. The
-	// loopback exclusion keeps the explicit 127.0.0.1:18081 fast-lane working.
-	TransparentCaptureEnabled bool `json:"transparent_capture_enabled"`
-
-	// CaptureRedirectAllEnabled is a SPIKE/EXPERIMENTAL flag (proposal 022, M2a).
-	// When true, replaces the scoped :18081 REDIRECT with a broad redirect of ALL
-	// outbound non-local TCP into the capture listener (:18001), which then uses
-	// Envoy's ORIGINAL_DST to recover the real destination. Unrecognised (non-mesh)
-	// destinations are forwarded in plain TCP via the passthrough cluster, leaving
-	// non-mesh egress intact.
+	// CaptureRedirectAllDefault makes redirect-all the DEFAULT for managed pods
+	// (proposal 022, M2-default Step 4 — the "flip"). When true, every non-ignored
+	// pod on the node gets the broad redirect-all capture (ALL outbound non-local
+	// TCP into the capture listener :18001; Envoy's ORIGINAL_DST recovers the real
+	// destination and non-mesh egress passes through in plain TCP) UNLESS it
+	// carries the capture.aether.io/redirect-all="false" opt-out annotation. This
+	// is the Istio-style "capture what the app sends" posture, with zero per-pod
+	// config. When false, redirect-all is per-pod opt-in via the same annotation.
 	//
-	// REQUIRES CaptureRedirectAllEnabled=true on the xDS agent side
-	// (--capture-redirect-all flag) so that the capture listener carries the
-	// passthrough fallback filter chain and the passthrough_original_dst cluster.
+	// The scoped mesh-ClusterIP:18081 capture redirect (proposal 018, Phase 3a)
+	// is UNCONDITIONAL (proposal 031) — the Envoy side always carries the capture
+	// listener and the passthrough fallback chain, so this is the single
+	// remaining node-wide capture knob.
 	//
-	// EXPERIMENTAL: default false. Do NOT enable cluster-wide in production.
-	// Exclusions installed to prevent loops and proxy self-traffic:
+	// Redirect-all exclusions installed to prevent loops and proxy self-traffic:
 	//   - loopback (127.0.0.0/8) skipped — the :18081 fast-lane is untouched
 	//   - the capture port itself (:18001 TCP) skipped — prevents re-entry
 	//   - established/related connections skipped via conntrack (RELATED,ESTABLISHED)
 	//   - DNS (:53 UDP+TCP) NOT excluded — passes through Envoy if MeshDNSEnabled=false,
 	//     or remains DNAT'd to the mesh-DNS resolver if MeshDNSEnabled=true
-	CaptureRedirectAllEnabled bool `json:"capture_redirect_all_enabled"`
-
-	// CaptureRedirectAllDefault makes redirect-all the DEFAULT for managed pods
-	// (proposal 022, M2-default Step 4 — the "flip"). When true, every non-ignored
-	// pod on the node gets the broad redirect-all capture UNLESS it carries the
-	// capture.aether.io/redirect-all="false" opt-out annotation. This is the
-	// Istio-style "capture what the app sends" posture, with zero per-pod config.
-	//
-	// Distinct from CaptureRedirectAllEnabled (the legacy node-wide spike override,
-	// which has no opt-out): the per-pod opt-out only applies to the default path.
-	// REQUIRES the agent --capture-redirect-all flag (the Envoy passthrough filter
-	// chain + ORIGINAL_DST cluster) — the chart enables both together. Default false
-	// until validated on talos.
 	CaptureRedirectAllDefault bool `json:"capture_redirect_all_default"`
 
 	// MeshDNSEnabled installs, inside each pod's netns, an nft DNAT of outbound DNS

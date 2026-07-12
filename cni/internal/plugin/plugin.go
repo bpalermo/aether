@@ -120,32 +120,30 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	}
 
 	// Transparent capture (proposal 018, Phase 3a): redirect outbound ClusterIP:18081
-	// to the pod-local capture listener. Best-effort — a failure leaves the explicit
-	// fast-lane working, so it must not fail the pod's networking. Uses the runtime
-	// netns path (the rule lives in the kernel netns, not the bind-mount pin).
+	// to the pod-local capture listener. Unconditional for managed pods (proposal
+	// 031) — the Envoy side always carries the capture listener. Best-effort — a
+	// failure leaves the explicit fast-lane working, so it must not fail the pod's
+	// networking. Uses the runtime netns path (the rule lives in the kernel netns,
+	// not the bind-mount pin).
 	// Ports the pod excludes from capture (proposal 022, M2-default; Istio parity):
 	// connections to these dports bypass the mesh via an nft RETURN ahead of the
 	// redirect, in whichever capture path is active.
 	excludePorts := podExcludedOutboundPorts(netConf)
 	excludeRanges := podExcludedOutboundIPRanges(netConf)
 
-	if netConf.TransparentCaptureEnabled {
-		if err := installCaptureRedirect(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
-			p.logger.Warn("failed to install transparent-capture redirect; continuing without capture",
-				zap.String("netns", args.Netns), zap.Error(err))
-		}
+	if err := installCaptureRedirect(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
+		p.logger.Warn("failed to install transparent-capture redirect; continuing without capture",
+			zap.String("netns", args.Netns), zap.Error(err))
 	}
 
 	// Redirect-all capture (proposal 022): redirect ALL outbound non-local TCP into
-	// the capture listener; non-mesh egress passes through via ORIGINAL_DST.
-	// Best-effort: failure leaves the scoped-redirect (or no capture) in place.
-	// Requires the agent --capture-redirect-all flag on the xDS side so the capture
-	// listener carries the passthrough fallback filter chain.
+	// the capture listener; non-mesh egress passes through via ORIGINAL_DST (the
+	// capture listener unconditionally carries the passthrough fallback chain).
+	// Best-effort: failure leaves the scoped redirect in place.
 	//
 	// podRedirectAll resolves precedence: an explicit per-pod annotation (opt-in
-	// "true" / opt-out "false") wins, otherwise the node default applies
-	// (CaptureRedirectAllDefault — the M2-default flip for managed pods — or the
-	// legacy node-wide CaptureRedirectAllEnabled). All default false.
+	// "true" / opt-out "false") wins, otherwise the node default
+	// (CaptureRedirectAllDefault — the M2-default flip for managed pods) applies.
 	if podRedirectAll(netConf) {
 		if err := installCaptureRedirectAll(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
 			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
@@ -651,7 +649,7 @@ func ignorableNamespace(namespace string) bool {
 //   - capture.aether.io/redirect-all="false" → force OFF (explicit opt-out; carves
 //     an infra/hostNetwork/prober pod out of the managed-pod default).
 //   - otherwise → the node default: CaptureRedirectAllDefault (the M2-default flip,
-//     redirect-all for managed pods) OR the legacy node-wide CaptureRedirectAllEnabled.
+//     redirect-all for managed pods).
 //
 // Pod annotations reach the CNI plugin through the runtime config
 // (io.kubernetes.cri.pod-annotations), populated by containerd when the aether CNI
@@ -663,7 +661,7 @@ func podRedirectAll(conf config.AetherConf) bool {
 	case "false":
 		return false
 	}
-	return conf.CaptureRedirectAllDefault || conf.CaptureRedirectAllEnabled
+	return conf.CaptureRedirectAllDefault
 }
 
 // podRedirectAllAnnotation returns the raw capture.aether.io/redirect-all

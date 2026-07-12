@@ -71,3 +71,40 @@ chart runs the previous image).
   opt-in still works — the annotation semantics are unchanged; only the
   machinery flag is gone).
 - The e2e harnesses and conformance flows all run the retained defaults.
+
+## Round 2 — binary-flag retirements (2026-07-12, chart 0.77.0)
+
+PR 2 cleaned the chart surface; a follow-up assessment applied the same test
+("does the non-default value produce a configuration anyone runs or tests?")
+to the remaining **binary** flags across all commands.
+
+| Flag | Verdict | Reason |
+|---|---|---|
+| agent `--proxy-id` | **retired** | Always set identical to `--node-name` (chart: both `$(NODE_NAME)`; edge: both from `POD_NAME`), while the snapshot cache was keyed by node-name and the xDS server by proxy-id — divergence was a latent bug, not a feature. `--node-name` is now the single identity; `queryNodeMetadata` fetched the Node object by proxy-id, which only worked because they were equal. |
+| agent `--remove-startup-taint` | **retired** | The chart never passed it, the nodes RBAC is unconditional, and the remover is a no-op when the taint is absent. No configuration where `false` helps. |
+| agent `--gamma` Go default | **flipped to `true`** | PR 2 flipped only the chart default; the binary default stayed `false`, contradicting the end state. The chart now passes the explicit boolean form (`--gamma={{ .Values.agent.gamma }}`) so `agent.gamma=false` still works. |
+| edge `--edge-readiness-port` | **retired (constant 18021)** | 030's "data-plane ports are constants" rationale; the edge isn't hostNetwork, so there is no conflict story. |
+| edge `--edge-per-gateway-addressing` | **retired (unconditional)** | 021 Phase 2 has been the default, conformance-hard-gated, and soak-validated since June. Phase 1 (shared `SetVirtualHosts`) remains only as the `EdgeServiceName`-empty / port-allocation-failure fallback, not as a configuration. The shared edge Service is always ClusterIP. |
+| edge `--mounted-registry-dir` | **retired (fixed pod-local path)** | Existed only to point at an always-empty dir, propped up by the `edgeStorageDir` default-detection hack. |
+| registrar `--generate-mesh-services` | **retired (unconditional)** | The `transparentCapture` argument one hop upstream: unconditional capture and default-on mesh DNS resolve against the VIPs it generates; a registrar without it silently degrades the whole capture path. Service CRUD RBAC becomes unconditional. |
+| registrar `--spire-trust-domain` | **retired (derived)** | Agent and edge resolve the trust domain from their own SVID; the registrar alone took it as a flag (default: the ROOTCA any-peer sentinel) that could silently disagree with what SPIRE issues — the exact failure class of the historical trust-domain-mismatch bug. Now derived via `TrustDomainFromSource`, tightening the pre-flag ROOTCA default to same-trust-domain peers (the mesh is one trust domain by design). |
+| cni-install `--transparent-capture` | **retired** | The direct PR 2 leftover: the agent side went unconditional but the netconf gate survived with the chart hardwiring the flag true. The netconf `transparent_capture_enabled` field and the plugin gate are gone; the scoped capture redirect is unconditional for managed pods (per-pod `capture.aether.io/*` annotations remain the opt-out). The writer-less legacy `capture_redirect_all_enabled` netconf field went with it. |
+| controller `--pod-ndots` | **replaced by `--mesh-domain`** | ndots *is* the mesh domain's label count; a separately-configured copy can drift from the domain it describes. Derived in the binary; the chart passes the domain it already knows. |
+
+Assessed and **kept**:
+
+- agent `--mesh-dns` / `--mesh-dns-upstream` (+ cni-install `--mesh-dns` /
+  `--host-ip`) — the one addressing-model flag left standing. By the
+  `transparentCapture` logic it would go, but it installs a per-pod :53 DNAT
+  to a node-local resolver, which can genuinely conflict with node-local DNS
+  caches / nonstandard DNS setups — a topology fact, kept as a kill switch
+  (like `gamma`). Recorded here so it stops looking like an oversight.
+- Everything in PR 2's keep column (`importConfig`, `eastWestWaypoint`,
+  `controlCluster`, `captureRedirectAllDefault`), the multi-cluster opt-ins
+  (`--enable-mcs`, `--peer-etcd`, `--region`, `--registry-backend`), edge
+  public ports / geoip / TLS, supervisor tuning, and the manager/telemetry
+  and socket-path plumbing.
+
+Same compatibility argument as PR 2: charts digest-pin their images, so the
+chart release and its binaries move together. `TestRetiredFlagsGone` (and its
+edge/registrar/cni/controller siblings) pin every retirement.

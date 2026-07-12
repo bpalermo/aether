@@ -7,9 +7,9 @@
 //
 // Command-line flags control the agent's initialization:
 //   - debug: Enable debug-level logging
-//   - node-name: Kubernetes node name where the agent runs (required)
+//   - node-name: Kubernetes node name where the agent runs (required); also the
+//     xDS node identity of the co-located Envoy proxy
 //   - cluster-name: Kubernetes cluster name (required)
-//   - proxy-id: xDS node identifier for the Envoy proxy instance (required)
 //   - mounted-registry-dir: Directory where pod data is stored locally
 //   - registrar-address: gRPC address of the in-cluster Registrar service
 //   - spire-enabled: Whether to enable SPIRE integration for mTLS via SDS
@@ -119,10 +119,7 @@ func init() {
 	// workloads; the edge presents a single identity served by SPIRE directly).
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
 
-	// Cold-start gate (node proxy only): remove the aether.io/agent-not-ready
-	// startup taint from this node once the CNI server is serving.
-	rootCmd.Flags().BoolVar(&cfg.RemoveStartupTaint, "remove-startup-taint", cfg.RemoveStartupTaint, "Remove the aether.io/agent-not-ready node taint once the CNI server is serving (needs nodes patch RBAC)")
-	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", false, "Enable GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2)")
+	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", true, "GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2). Default on (kill switch, proposal 031); degrades gracefully when the Gateway API CRDs are absent")
 	rootCmd.Flags().BoolVar(&cfg.ImportConfig, "import-config", false, "Enable cross-cluster config import: poll the registrar for GAMMA config projections peer clusters exported and materialize them into the node proxy's routes (proposal 026). No-op unless the registry backend has a cross-cluster config plane (etcd)")
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecar, "authz-sidecar", false, "Enable the node-local external-authorization sidecar entry (proposal 027): a disabled ext_authz HCM filter targeting the static authz_sidecar UDS cluster; HTTPFilter (extAuthz) opts routes in")
 	rootCmd.Flags().DurationVar(&cfg.AuthzSidecarTimeout, "authz-sidecar-timeout", 200*time.Millisecond, "Per-check gRPC timeout for the authz sidecar")
@@ -134,14 +131,15 @@ func init() {
 }
 
 // registerSharedFlags registers the flags common to the node agent (root) and
-// the edge subcommand: cluster/proxy identity, the registrar address, the mesh
+// the edge subcommand: cluster/node identity, the registrar address, the mesh
 // system config inherited from the umbrella chart, and the SPIRE workload
 // socket. Each command binds them onto the shared cfg; cobra runs the root's
 // PersistentPreRunE (mesh-config load + logging) for the subcommand too.
-// registerSharedFlags binds the identity/registrar/SPIRE/system flags shared by
-// the node agent and the edge. requirePodIdentity marks node-name and proxy-id
-// required (the node agent — node-name is the K8s node, not derivable); the edge
-// passes false and derives both from the POD_NAME downward-API env instead.
+// requirePodIdentity marks node-name required (the node agent — node-name is
+// the K8s node, not derivable); the edge passes false and derives it from the
+// POD_NAME downward-API env instead. node-name doubles as the xDS node ID —
+// the two were one flag pair (--proxy-id) that every caller set identically,
+// retired by proposal 031.
 func registerSharedFlags(cmd *cobra.Command, requirePodIdentity bool) {
 	// Aether system config (OTEL enable/endpoint via manager.RegisterFlags, mesh
 	// domain, SPIRE on/off) is inherited from the aether umbrella chart's globals
@@ -154,7 +152,6 @@ func registerSharedFlags(cmd *cobra.Command, requirePodIdentity bool) {
 	// Kubernetes and cluster identity (required)
 	cmd.Flags().StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name (node agent) or edge pod identity (edge); used as the xDS/watch identity (required)")
 	cmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name, used for service discovery (required)")
-	cmd.Flags().StringVar(&cfg.ProxyServiceNodeID, "proxy-id", constants.DefaultProxyID, "Unique identifier for this Envoy proxy instance in the xDS server (required)")
 
 	// Registrar configuration
 	cmd.Flags().StringVar(&cfg.RegistrarAddress, "registrar-address", cfg.RegistrarAddress, "gRPC address of the in-cluster Registrar service")
@@ -166,7 +163,6 @@ func registerSharedFlags(cmd *cobra.Command, requirePodIdentity bool) {
 	must.NoError(cmd.MarkFlagRequired("cluster-name"))
 	if requirePodIdentity {
 		must.NoError(cmd.MarkFlagRequired("node-name"))
-		must.NoError(cmd.MarkFlagRequired("proxy-id"))
 	}
 }
 
@@ -199,7 +195,7 @@ func applyMeshConfig(mc *configv1.MeshConfigSpec) {
 // for local storage to become ready before starting the manager's event loop.
 func runAgent(ctx context.Context) (retErr error) {
 	l.InfoContext(ctx, "starting aether agent",
-		"proxy-id", cfg.ProxyServiceNodeID,
+		"nodeName", cfg.NodeName,
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,
 		"metricsEnabled", cfg.MetricsEnabled,
@@ -347,15 +343,14 @@ func runAgent(ctx context.Context) (retErr error) {
 	// serving, so workload pods (which don't tolerate it) can schedule here. The
 	// operator registers the taint via the kubelet; this closes the cold-start
 	// window where a pod's CNI ADD would arrive before the agent is ready.
-	if cfg.RemoveStartupTaint {
-		if err = m.Add(&node.TaintRemover{
-			Client:     m.GetClient(),
-			NodeName:   cfg.NodeName,
-			SocketPath: cfg.CNIServerConfig.SocketPath,
-			Log:        l,
-		}); err != nil {
-			return fmt.Errorf("failed to add startup-taint remover: %w", err)
-		}
+	// Unconditional (proposal 031): a no-op when the taint isn't registered.
+	if err = m.Add(&node.TaintRemover{
+		Client:     m.GetClient(),
+		NodeName:   cfg.NodeName,
+		SocketPath: cfg.CNIServerConfig.SocketPath,
+		Log:        l,
+	}); err != nil {
+		return fmt.Errorf("failed to add startup-taint remover: %w", err)
 	}
 
 	// Rebuild the cluster/endpoint/route snapshot when the registry reports
@@ -472,7 +467,7 @@ func runAgent(ctx context.Context) (retErr error) {
 // (LDS, CDS, EDS, RDS, ADS) with resource snapshots generated from local pod storage and the registry.
 func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, trustDomain string) error {
 	// Create xDS server
-	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, trustDomain, registry, localStorage, snapshotCache, ackTracker.Callbacks(), l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.NodeName, trustDomain, registry, localStorage, snapshotCache, ackTracker.Callbacks(), l)
 	if err != nil {
 		return err
 	}
@@ -491,7 +486,6 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
 		cfg.NodeName,
-		cfg.ProxyServiceNodeID,
 		trustDomain,
 		localStorage,
 		registry,

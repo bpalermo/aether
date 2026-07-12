@@ -592,14 +592,13 @@ func TestTwoReplicasBothGetPerGatewayListeners(t *testing.T) {
 
 	makeReconciler := func(sink RouteSink) *Reconciler {
 		return &Reconciler{
-			Client:               fc,
-			APIReader:            fc,
-			Sink:                 sink,
-			Namespace:            "ns",
-			EdgeServiceName:      "aether-edge",
-			GatewayClassName:     "aether",
-			PerGatewayAddressing: true,
-			Log:                  slog.New(slog.DiscardHandler),
+			Client:           fc,
+			APIReader:        fc,
+			Sink:             sink,
+			Namespace:        "ns",
+			EdgeServiceName:  "aether-edge",
+			GatewayClassName: "aether",
+			Log:              slog.New(slog.DiscardHandler),
 		}
 	}
 

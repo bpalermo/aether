@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "cmd",
@@ -12,4 +12,11 @@ go_library(
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",
     ],
+)
+
+go_test(
+    name = "cmd_test",
+    srcs = ["root_test.go"],
+    embed = [":cmd"],
+    deps = ["@com_github_stretchr_testify//assert"],
 )

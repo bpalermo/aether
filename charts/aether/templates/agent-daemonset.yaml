@@ -43,9 +43,9 @@ spec:
             # from the agent's runtime OTLP in the MeshConfig CR.
             - "--otlp-endpoint={{ . }}"
             {{- end }}
-            # Capture is unconditional (proposal 031); redirect-all-default is the
-            # remaining node-wide capture knob (per-pod annotations override).
-            - "--transparent-capture"
+            # Capture is unconditional (proposal 031, netconf gate retired in
+            # round 2); redirect-all-default is the remaining node-wide capture
+            # knob (per-pod annotations override).
             {{- if .Values.agent.captureRedirectAllDefault }}
             - "--capture-redirect-all-default"
             {{- end }}
@@ -78,12 +78,11 @@ spec:
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            - "--proxy-id=$(NODE_NAME)"
             - "--cluster-name={{ .Values.clusterName }}"
             - "--node-name=$(NODE_NAME)"
-            {{- if .Values.agent.gamma }}
-            - "--gamma"
-            {{- end }}
+            # Explicit boolean form: the binary default is true (031 kill
+            # switch), so agent.gamma=false must be passed through.
+            - "--gamma={{ .Values.agent.gamma }}"
             {{- if .Values.agent.importConfig }}
             - "--import-config"
             {{- end }}

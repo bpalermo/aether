@@ -27,10 +27,10 @@ type AgentConfig struct {
 	// MeshConfigPath is the path to the mounted proxy MeshConfig YAML (ConfigMap).
 	MeshConfigPath string
 
-	// ProxyServiceNodeID is the xDS node ID for identifying the Envoy proxy instance
-	ProxyServiceNodeID string
-
-	// NodeName is the Kubernetes node name where the agent runs
+	// NodeName is the Kubernetes node name where the agent runs (the edge derives
+	// it from POD_NAME). It doubles as the xDS node ID of the co-located Envoy —
+	// the separate --proxy-id every caller set identically was retired (proposal
+	// 031); the snapshot cache and xDS server must agree on one identity.
 	NodeName string
 	// ClusterName is the Kubernetes cluster name
 	ClusterName string
@@ -73,21 +73,19 @@ type AgentConfig struct {
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
 
-	// RemoveStartupTaint removes the aether.io/agent-not-ready node taint once the
-	// CNI server is serving (node proxy only). Default true.
-	RemoveStartupTaint bool
-
 	// EdgeHTTPPort is the port the edge proxy's public-facing HTTP listener
 	// binds (edge subcommand only).
 	EdgeHTTPPort uint32
 
-	// RouteNamespace is the namespace the edge watches its Gateways/HTTPRoutes in
-	// (edge subcommand only); empty means the edge pod's own namespace.
+	// RouteNamespace is the edge's default namespace for Gateway TLS certificate
+	// Secrets (edge subcommand only); empty means the edge pod's own namespace.
+	// Gateway/route watching itself is cluster-wide regardless.
 	RouteNamespace string
 
 	// Gamma enables GAMMA east-west L7 routing on the node proxy: the agent watches
 	// HTTPRoutes parented to a Service and enriches the outbound routes (proposal
-	// 018, Phase 2). Default off — a no-op until enabled.
+	// 018, Phase 2). Default on since proposal 031 (kept as a kill switch); the
+	// reconciler degrades gracefully when the Gateway API CRDs are absent.
 	Gamma bool
 
 	// ImportConfig enables cross-cluster config import (proposal 026): the agent polls
@@ -157,17 +155,6 @@ type AgentConfig struct {
 	EdgeTLS bool
 	// EdgeHTTPSPort is the port the edge TLS listener binds when EdgeTLS is set.
 	EdgeHTTPSPort uint32
-
-	// EdgeReadinessPort is the port the dedicated always-bound readiness listener
-	// binds; the kubelet readiness probe targets it over plain HTTP. Independent of
-	// the public listeners so the probe survives proposal 021 Phase 2 (edge only).
-	EdgeReadinessPort uint32
-
-	// EdgePerGatewayAddressing enables proposal 021 Phase 2: a per-Gateway
-	// LoadBalancer Service + internal-port demux so each class-aether Gateway
-	// gets its own external IP. When false, falls back to Phase 1 (single shared
-	// edge LB IP for all Gateways). Default: true (edge subcommand only).
-	EdgePerGatewayAddressing bool
 }
 
 // NewAgentConfig creates a new AgentConfig with default values.
@@ -178,20 +165,16 @@ func NewAgentConfig() *AgentConfig {
 			MetricsEnabled:         true,
 			MetricsBindAddress:     ":8080",
 		},
-		MeshConfigPath:           DefaultMeshConfigPath,
-		ProxyServiceNodeID:       constants.DefaultProxyID,
-		EdgeHTTPPort:             proxy.DefaultEdgeHTTPPort,
-		EdgeHTTPSPort:            proxy.DefaultEdgeHTTPSPort,
-		EdgeReadinessPort:        proxy.DefaultEdgeReadinessPort,
-		EdgePerGatewayAddressing: true,
-		GatewayClassName:         "aether",
-		CNIServerConfig:          cniServer.NewCNIServerConfig(),
-		MountedLocalStorageDir:   constants.DefaultHostCNIRegistryDir,
-		RegistrarAddress:         "aether-registrar.aether-system.svc:443",
-		MeshDomain:               commonconstants.DefaultMeshDomain,
-		SpireEnabled:             true,
-		SpireAdminSocketPath:     constants.DefaultSpireAdminSocketPath,
-		SpireWorkloadSocketPath:  constants.DefaultSpireWorkloadSocketPath,
-		RemoveStartupTaint:       true,
+		MeshConfigPath:          DefaultMeshConfigPath,
+		EdgeHTTPPort:            proxy.DefaultEdgeHTTPPort,
+		EdgeHTTPSPort:           proxy.DefaultEdgeHTTPSPort,
+		GatewayClassName:        "aether",
+		CNIServerConfig:         cniServer.NewCNIServerConfig(),
+		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
+		MeshDomain:              commonconstants.DefaultMeshDomain,
+		SpireEnabled:            true,
+		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
+		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
 	}
 }

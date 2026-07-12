@@ -99,12 +99,7 @@ type Reconciler struct {
 	Secrets *secret.Registry
 	// MeshDomain is the mesh DNS domain used to build TCP cluster names.
 	MeshDomain string
-	// PerGatewayAddressing enables proposal 021 Phase 2: a per-Gateway LoadBalancer
-	// Service + internal-port demux so each Gateway gets its own external IP. When
-	// false (or when EdgeServiceName is empty), the reconciler falls back to Phase 1
-	// (single shared edge LB IP for all Gateways).
-	PerGatewayAddressing bool
-	Log                  *slog.Logger
+	Log        *slog.Logger
 }
 
 // SetupWithManager registers the reconciler to watch HTTPRoutes, TCPRoutes,
@@ -329,12 +324,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 	}
 
-	// Phase 2: per-Gateway LoadBalancer Services + per-Gateway listeners.
-	// When PerGatewayAddressing is enabled and EdgeServiceName is set, we manage
-	// per-Gateway Services and emit per-Gateway listeners. Otherwise fall back to
-	// Phase 1 (shared SetVirtualHosts path).
+	// Per-Gateway addressing (proposal 021 Phase 2, unconditional since 031
+	// round 2): when EdgeServiceName is set, we manage per-Gateway LoadBalancer
+	// Services and emit per-Gateway listeners. Phase 1 (shared SetVirtualHosts
+	// path) remains only as the EdgeServiceName-empty / port-allocation-failure
+	// fallback.
 	var perGWAssignedIPs map[gatewayKey]string
-	if r.PerGatewayAddressing && r.EdgeServiceName != "" && len(ourGateways) > 0 {
+	if r.EdgeServiceName != "" && len(ourGateways) > 0 {
 		allocations, allocErr := allocateGatewayListenerPorts(ourGateways, perGWHostCerts)
 		if allocErr != nil {
 			r.Log.WarnContext(ctx, "per-Gateway port allocation failed, falling back to Phase 1",
@@ -386,7 +382,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		"tcpListeners", len(tcpRoutes),
 		"tlsListeners", len(tlsRoutes),
 		"tlsCerts", len(certs),
-		"perGatewayAddressing", r.PerGatewayAddressing,
 	)
 
 	// Publish Gateway API status (the conformance on-ramp). Failures are logged,

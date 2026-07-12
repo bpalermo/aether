@@ -154,14 +154,11 @@ func beUint16(v uint16) []byte {
 
 // installCaptureRedirectAll programs, inside the pod's network namespace, an
 // nftables REDIRECT of ALL outbound non-local TCP into the capture listener
-// (:ProxyCapturePort). This is the M2a spike for proposal 022 "redirect-all +
-// ORIGINAL_DST passthrough". Non-mesh destinations are forwarded in plain TCP
-// by the Envoy passthrough_original_dst cluster; mesh destinations continue to
-// route through the per-source mTLS path as with Phase 3a.
-//
-// EXPERIMENTAL: default false. Do NOT enable cluster-wide. The Envoy capture
-// listener MUST carry the passthrough fallback filter chain (requires the agent
-// --capture-redirect-all flag) or non-mesh egress will be dropped.
+// (:ProxyCapturePort) — proposal 022 "redirect-all + ORIGINAL_DST passthrough".
+// Non-mesh destinations are forwarded in plain TCP by the Envoy
+// passthrough_original_dst cluster (the capture listener unconditionally
+// carries the passthrough fallback chain since proposal 031); mesh destinations
+// continue to route through the per-source mTLS path as with Phase 3a.
 //
 // Exclusions to prevent loops and proxy self-traffic:
 //   - loopback (127.0.0.0/8): the 127.x fast-lane and the proxy's own loopback
@@ -177,10 +174,10 @@ func beUint16(v uint16) []byte {
 //     redirect for them.
 //
 // The rule lives in a SEPARATE nft table (aether_capture_all) from the scoped
-// rule (aether_capture) so both can be installed independently. When
-// CaptureRedirectAllEnabled is true AND TransparentCaptureEnabled is false, only
-// the broad rule is installed. When both are true, both tables exist and the
-// redirect-all subsumes the scoped rule (all traffic is already captured).
+// rule (aether_capture) so both can be installed independently. The scoped rule
+// is always installed for managed pods; with redirect-all on, both tables exist
+// and the redirect-all subsumes the scoped rule (all traffic is already
+// captured).
 func installCaptureRedirectAll(netnsPath string, excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
 	return withPodNetns(netnsPath, func() error { return programCaptureRedirectAll(excludePorts, excludeRanges, logger) })
 }

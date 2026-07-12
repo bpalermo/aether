@@ -55,13 +55,9 @@ go_library(
 
 go_test(
     name = "cmd_test",
-    srcs = [
-        "config_test.go",
-        "edge_test.go",
-    ],
+    srcs = ["config_test.go"],
     embed = [":cmd"],
     deps = [
-        "//agent/constants",
         "//agent/internal/cni/server",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

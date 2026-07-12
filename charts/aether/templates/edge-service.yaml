@@ -6,18 +6,13 @@ metadata:
   namespace: {{ include "aether.edge.namespace" . }}
   labels:
     {{- include "aether.edge.labels" . | nindent 4 }}
-  {{- if not .Values.edge.perGatewayAddressing }}
-  {{- with .Values.edge.service.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-  {{- end }}
 spec:
-  # Under proposal 021 Phase 2 (perGatewayAddressing) each Gateway gets its own
-  # LoadBalancer Service (owning the external IP, e.g. edge.gateway.address); this
-  # shared Service must NOT also claim a LoadBalancer IP or it collides with the
-  # per-Gateway one, so it stays ClusterIP. In Phase 1 it is the single shared LB.
-  type: {{ if .Values.edge.perGatewayAddressing }}ClusterIP{{ else }}{{ .Values.edge.service.type }}{{ end }}
+  # Per-Gateway addressing (proposal 021 Phase 2, unconditional): each Gateway
+  # gets its own LoadBalancer Service (owning the external IP, e.g.
+  # edge.gateway.address); this shared Service must NOT also claim a
+  # LoadBalancer IP or it collides with the per-Gateway one, so it stays
+  # ClusterIP (the edge controller reads its name as the per-Gateway base name).
+  type: ClusterIP
   selector:
     {{- include "aether.edge.selectorLabels" . | nindent 4 }}
   ports:

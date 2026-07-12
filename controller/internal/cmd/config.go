@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
 )
@@ -36,11 +37,13 @@ type ControllerConfig struct {
 	// (SPIRE mode only). Empty disables that patch.
 	MutatingWebhookConfigName string
 
-	// PodNDots is the dnsConfig ndots value the pod-mutating webhook injects into
-	// managed pods (= the label count of the mesh domain; 2 for aether.internal), so
-	// mesh FQDNs resolve absolute-first and musl clients stop tripping on the
-	// cluster.local search list.
-	PodNDots string
+	// MeshDomain is the DNS-style domain mesh authorities live under. The
+	// pod-mutating webhook derives the dnsConfig ndots it injects into managed
+	// pods from it (= the domain's label count; 2 for aether.internal), so mesh
+	// FQDNs resolve absolute-first and musl clients stop tripping on the
+	// cluster.local search list. Deriving replaces the old --pod-ndots flag,
+	// which could drift from the domain it described.
+	MeshDomain string
 }
 
 // DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
@@ -58,6 +61,6 @@ func NewControllerConfig() *ControllerConfig {
 		},
 		MeshConfigMapName:       meshconfig.DefaultMeshConfigMapName,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
-		PodNDots:                "2",
+		MeshDomain:              constants.DefaultMeshDomain,
 	}
 }
