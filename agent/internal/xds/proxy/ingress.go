@@ -27,6 +27,13 @@ const (
 	// it inside the pod's network namespace, and source proxies dial the destination
 	// pod at <pod_ip>:defaultInboundPort.
 	defaultInboundPort = 15008
+	// transitionInboundPort is the NEW mesh inbound port (proposal 030: out of
+	// Istio's reserved 15000-15090 band; 15008 is Istio's HBONE number). Phase A
+	// of the dual-bind transition: the inbound listener binds BOTH ports while
+	// every dialer still dials defaultInboundPort. Phase B (next release, after
+	// the fleet fully rolls) flips the dialers here; Phase C drops the 15008
+	// bind. Do NOT dial this port anywhere until Phase B.
+	transitionInboundPort = 18008
 
 	// MeshLivePath is the liveness path answered locally by the inbound listener: a
 	// 200 proves the proxy config is loaded and the listener is serving, and (since
@@ -99,6 +106,24 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 				},
 			},
 		},
+		// Proposal 030 Phase A: also bind the new inbound port in the same netns
+		// with the same filter chains, so dialers can flip to it (Phase B) only
+		// after every pod in the fleet already accepts on it. Same-listener
+		// additional address (not a second listener) keeps stats/drain unified.
+		AdditionalAddresses: []*listenerv3.AdditionalAddress{{
+			Address: &corev3.Address{
+				Address: &corev3.Address_SocketAddress{
+					SocketAddress: &corev3.SocketAddress{
+						Protocol: corev3.SocketAddress_TCP,
+						Address:  defaultInboundAddress,
+						PortSpecifier: &corev3.SocketAddress_PortValue{
+							PortValue: transitionInboundPort,
+						},
+						NetworkNamespaceFilepath: cniPod.GetNetworkNamespace(),
+					},
+				},
+			},
+		}},
 		// Per-pod listener stats are kept deliberately (downstream_cx_* per pod
 		// is the connection-leak debugging signal — see the 2026-06-11 cx-leak).
 		// The "inbound_<pod>" shape is what the aether.pod stats_tag extracts, so
