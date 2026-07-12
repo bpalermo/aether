@@ -62,14 +62,16 @@ const (
 
 	// DefaultEdgeReadinessPort is the (unprivileged, internal) port the dedicated
 	// readiness listener binds. The kubelet readiness probe targets it over plain
-	// HTTP; it is never exposed via a Service.
-	DefaultEdgeReadinessPort = 15021
+	// HTTP; it is never exposed via a Service. In aether's 18xxx range — 15021 is
+	// Istio's health port (proposal 030).
+	DefaultEdgeReadinessPort = 18021
 
 	// DefaultEastWestTunnelPort is the host-netns port the node proxy listens on
 	// for cross-cluster east/west waypoint traffic, and the port cross-cluster
-	// endpoints are dialed at (proposal 019). Sits just above the inbound mesh
-	// port (15008); host-network, so the proxy binds the node address directly.
-	DefaultEastWestTunnelPort = 15009
+	// endpoints are dialed at (proposal 019). Host-network, so the proxy binds
+	// the node address directly. Must match across the clusterset. In aether's
+	// 18xxx range, out of Istio's reserved 15000-15090 band (proposal 030).
+	DefaultEastWestTunnelPort = 18009
 
 	// defaultEdgeAddress binds the edge listener on all interfaces (it fronts
 	// external traffic, unlike the node proxy's loopback-only outbound listener).

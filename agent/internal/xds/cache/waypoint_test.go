@@ -14,7 +14,7 @@ func waypointTestCache(t *testing.T, enabled bool) *SnapshotCache {
 	t.Helper()
 	c := newTestCache("node-1")
 	c.SetMeshDomain("aether.internal")
-	c.SetWaypointConfig(enabled, 15009)
+	c.SetWaypointConfig(enabled, 18009)
 	c.listeners = map[string]listenerEntry{
 		"/ns/a": {cniPod: &cniv1.CNIPod{Namespace: "default", ServiceAccount: "echo", Ips: []string{"10.244.2.7"}}},
 		"/ns/b": {cniPod: &cniv1.CNIPod{Namespace: "default", ServiceAccount: "echo", Ips: []string{"10.244.1.5"}}},

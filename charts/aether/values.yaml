@@ -130,7 +130,7 @@ agent:
   eastWestWaypoint: false
   # eastWestTunnelPort is the host-netns port the node proxy binds for cross-cluster
   # waypoint traffic (only with eastWestWaypoint). Must match across the clusterset.
-  eastWestTunnelPort: 15009
+  eastWestTunnelPort: 18009
   # Transparent capture (proposal 018, Phase 3a): per-pod capture listeners + the
   # cap_http route table built from the generated mesh Services. Pairs with
   # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.
@@ -324,7 +324,7 @@ edge:
   # listeners so the probe survives proposal 021 Phase 2, where those listeners move
   # to per-Gateway internal ports and nothing binds the HTTPS port. Internal only —
   # never exposed via a Service.
-  readinessPort: 15021
+  readinessPort: 18021
   # Namespace the edge watches its Gateways/HTTPRoutes in. Empty = the edge's own
   # namespace.
   routeNamespace: ""
