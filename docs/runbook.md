@@ -165,6 +165,22 @@ on `b` is unobservable. See the script header and `e2e/kind-cluster.yaml` (which
 also assigns non-overlapping pod/service CIDRs per cluster so cross-cluster
 endpoints in the shared registry never collide).
 
+### The other multi-cluster harnesses
+
+Two sibling harnesses reuse the same two-kind pattern (same `up`/`test`/
+`verify`/`down` verbs, same inotify gotcha); both run SPIRE on each cluster
+under a **shared trust domain** (shared upstream CA in `e2e/certs/`):
+
+- [`e2e/multicluster_waypoint.sh`](../e2e/multicluster_waypoint.sh) — the
+  **019 east/west waypoint data path**: two clusters + ONE shared etcd,
+  `agent.eastWestWaypoint=true`; asserts client(a) → echo(b) returns 200 over
+  the node tunnel with mTLS end-to-end (nightly CI: `waypoint-e2e.yaml`).
+- [`e2e/multicluster_replicator.sh`](../e2e/multicluster_replicator.sh) — the
+  **006 two-region replicator failover**: one etcd PER cluster,
+  `registrar.peerEtcd` cross-wired; asserts mirror visibility, the data path
+  over the mirror, lease-lapse failover when a region's registrar dies, and
+  recovery (nightly CI: `replicator-e2e.yaml`).
+
 ---
 
 ## 7. Installing on a real cluster
@@ -172,7 +188,7 @@ endpoints in the shared registry never collide).
 Aether ships **two** charts, and **install order matters**:
 
 ```
-charts/crds     — the CRDs: MeshConfig + HTTPFilter   ← install FIRST
+charts/crds     — the CRDs: MeshConfig + HTTPFilter + EdgeConfig   ← install FIRST
 charts/aether    — the whole system (agent DaemonSet + proxy + registrar + controller)
 ```
 

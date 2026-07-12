@@ -68,9 +68,11 @@ access-log/tracing policy via the MeshConfig CR.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `agent.gamma` | `false` | GAMMA east-west L7 routing (018 Phase 2): watch `HTTPRoute`s parented to a Service and enrich outbound routes. Requires the Gateway API CRDs. |
+| `agent.gamma` | `false` | GAMMA east-west L7 routing (018): watch `HTTPRoute`s **and `GRPCRoute`s** parented to a Service (plus `ReferenceGrant`s and `HTTPFilter` attachments) and apply them on **both** the explicit outbound path and the transparent-capture path. MESH-HTTP Core conformance-green. Requires the Gateway API CRDs. |
 | `agent.importConfig` | `false` | Cross-cluster config import (026): poll the registrar for peer-exported GAMMA projections and materialize them (merged with local; local wins). Pairs with `registrar.registryBackend=etcd`. |
-| `agent.l4Routes` | `false` | L4 route types (018 Phase 3b): `TCPRoute`/`TLSRoute`/`UDPRoute` parented to a Service → weighted TCP + per-SNI TLS chains on the capture listener. Requires `transparentCapture`. UDPRoute is control-plane only. |
+| `agent.l4Routes` | `true` | L4 route types (018 Phase 3b): `TCPRoute` (weighted, incl. weight-0 drain) / `TLSRoute` (SNI passthrough) / `UDPRoute` parented to a Service → weighted TCP + per-SNI TLS chains on the capture listener. Requires `transparentCapture`. UDPRoute is control-plane only (plaintext floor, no DTLS). |
+| `agent.eastWestWaypoint` | `false` | East/west waypoint (019): dial **cross-cluster** endpoints at their node's routable IP + `eastWestTunnelPort` instead of the (unroutable) pod IP; this node's host-network proxy SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared or replicated etcd) + a shared SPIRE trust domain. |
+| `agent.eastWestTunnelPort` | `18009` | Host-netns tunnel port (must match across the clusterset). |
 | `agent.transparentCapture` | `true` | Transparent capture (018 Phase 3a): per-pod capture listeners + the `cap_http` route table from generated mesh Services. Pairs with `registrar.generateMeshServices`. |
 | `agent.captureRedirectAll` | `false` | Add the dormant ORIGINAL_DST passthrough chain (022) so a pod annotated `capture.aether.io/redirect-all="true"` can redirect ALL outbound TCP. Per-pod opt-in. Requires `transparentCapture`. |
 | `agent.captureRedirectAllDefault` | `true` | Make redirect-all the DEFAULT for managed pods (022 Step 4); opt out per-pod with `capture.aether.io/redirect-all="false"`. Implies `captureRedirectAll`. Requires `transparentCapture`. Riskiest blast radius; soak-validated hitless. |
@@ -127,8 +129,9 @@ access-log/tracing policy via the MeshConfig CR.
 | `registrar.replicaCount` | `2` | Always 2 (exercises the multi-replica write-behind topology). |
 | `registrar.generateMeshServices` | `true` | Project the mesh catalog into selectorless k8s Services (transparent-capture VIPs, 018 Phase 3a) that `transparentCapture` + `meshDns` depend on. |
 | `registrar.enableMCS` | `false` | Multi-Cluster Services phase 1 (018 + 006): export `ServiceExport`s and materialize `ServiceImport`s + clusterset VIPs. Requires the etcd backend + the MCS-API CRDs. |
-| `registrar.region` | `local` | Region owning this registrar's etcd partition (006); keys are `/aether/v1/regions/<region>/clusters/<clusterName>/…`. |
+| `registrar.region` | `local` | Region owning this registrar's etcd partition (006); keys are `/aether/v1/regions/<region>/clusters/<clusterName>/…`. One region = one etcd. |
 | `registrar.etcd.endpoints` | `[]` | etcd client endpoints (etcd backend). |
+| `registrar.peerEtcd` | `[]` | Cross-region replication (006 Phase 2), one entry per peer region: `"<region>=<endpoint>[,<endpoint>...]"`. The leader registrar mirrors this region's own registry subtree verbatim into each peer's etcd under an **origin-heartbeat lease** (TTL ~30s): if this region dies, its mirror expires on the peers — whole-region failover cleanup with no peer-side GC. Requires the etcd backend + a non-default `region`. |
 | `registrar.aws.region` | `us-east-1` | AWS region for the dynamodb backend (IRSA; no static keys). |
 | `registrar.aws.roleArn` | `""` | Role ARN annotated onto the registrar ServiceAccount. Empty = no AWS access. |
 | `registrar.service.{port,targetPort}` | `443` / `8443` | gRPC service ports. |
@@ -184,15 +187,16 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 
 ## 2. CRDs (`charts/crds`)
 
-Both are `config.aether.io/v1`, **Namespaced**, structural-but-permissive
+All are `config.aether.io/v1`, **Namespaced**, structural-but-permissive
 (`x-kubernetes-preserve-unknown-fields`); authoritative validation is the
-controller's protovalidate webhook, not OpenAPI. Both carry
+controller's protovalidate webhook, not OpenAPI. All carry
 `helm.sh/resource-policy: keep`.
 
 | CRD | Kind (short) | Purpose |
 |---|---|---|
 | `meshconfigs.config.aether.io` | `MeshConfig` (`mc`) | Per-namespace proxy observability overrides (access logs, tracing, per-pod stats). A namespace inherits the control-plane namespace's `MeshConfig` field-by-field unless it sets its own (proposal 015). |
 | `httpfilters.config.aether.io` | `HTTPFilter` (`htf`) | The proxy-extension escape hatch (proposal 025): attach a supported Envoy HTTP filter (ext_authz, RBAC, header-to-metadata) at a chosen scope. |
+| `edgeconfigs.config.aether.io` | `EdgeConfig` | Edge Envoy tuning (proposal 029): best-practices hardening defaults, HTTP/3 (QUIC, ALPN `h3`), timeouts/limits. Attached natively via Gateway API `parametersRef` on the `GatewayClass` (fleet default) or per-`Gateway` (override-wins merge). |
 
 **`HTTPFilter` scopes** (`spec.scope`, plus the `target_refs` attachment):
 
@@ -228,12 +232,14 @@ Node-agent-specific:
 | `--mounted-registry-dir` | `/host/var/lib/aether/registry` | Local pod-data dir for the CNI plugin. |
 | `--spire-admin-socket` | `/tmp/spire-agent/private/admin.sock` | SPIRE admin socket for proxy SVID delegation. |
 | `--remove-startup-taint` | `true` | Remove the `aether.io/agent-not-ready` node taint once the CNI server serves. |
-| `--gamma` | `false` | Enable GAMMA east-west routing (018 Phase 2). |
+| `--gamma` | `false` | Enable GAMMA east-west routing (018): HTTPRoute + GRPCRoute parented to Services, on the outbound and capture paths. |
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--transparent-capture` | `false` | Per-pod capture listeners + `cap_http` (018 Phase 3a). |
 | `--capture-redirect-all` | `false` | Dormant ORIGINAL_DST passthrough chain (022). |
-| `--l4-routes` | `false` | L4 route types (018 Phase 3b). |
+| `--l4-routes` | `false` | L4 route types (018 Phase 3b). The chart passes it (default ON there). |
+| `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019). |
+| `--east-west-tunnel-port` | `18009` | Host-netns tunnel port (clusterset-wide). |
 | `--mesh-dns` | `false` | Per-pod mesh DNS (018). |
 | `--mesh-dns-upstream` | `[]` | Upstream resolver(s) for non-mesh queries. |
 | `--authz-sidecar` | `false` | Node-local ext_authz sidecar entry (027). |
@@ -268,10 +274,12 @@ The Envoy hot-restart supervisor (proposal 001): `--envoy-path`
 
 `--cluster-name` (required), `--mesh-domain` (`aether.internal`),
 `--control-cluster` (`""`), `--region` (`""`), `--registry-backend`
-(`kubernetes`), `--etcd-endpoints` (`[localhost:2379]`), `--sync-interval` (`5s`),
-`--generate-mesh-services` (`false`), `--enable-mcs` (`false`), `--grpc-address`
-(`:8443`), `--spire-enabled` (`true`), `--spire-workload-socket`,
-`--spire-trust-domain` (`ROOTCA` sentinel).
+(`kubernetes`), `--etcd-endpoints` (`[localhost:2379]`), `--peer-etcd`
+(repeatable, `<region>=<endpoint>[,<endpoint>...]` — cross-region replication,
+006 Phase 2; requires the etcd backend + an explicit `--region`),
+`--sync-interval` (`5s`), `--generate-mesh-services` (`false`), `--enable-mcs`
+(`false`), `--grpc-address` (`:8443`), `--spire-enabled` (`true`),
+`--spire-workload-socket`, `--spire-trust-domain` (`ROOTCA` sentinel).
 
 ### `controller`
 
