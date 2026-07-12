@@ -128,11 +128,7 @@ func init() {
 	rootCmd.Flags().DurationVar(&cfg.AuthzSidecarTimeout, "authz-sidecar-timeout", 200*time.Millisecond, "Per-check gRPC timeout for the authz sidecar")
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
-	rootCmd.Flags().BoolVar(&cfg.L4Routes, "l4-routes", false, "Enable L4 route types (TCPRoute/TLSRoute/UDPRoute) parented to a Service: weighted TCP floor chains and SNI-routed TLS chains on the capture listener (proposal 018, Phase 3b). NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.")
-	rootCmd.Flags().BoolVar(&cfg.TransparentCapture, "transparent-capture", false, "Enable transparent capture: per-pod capture listeners + cap_http route table from the generated mesh Services (proposal 018, Phase 3a)")
-	rootCmd.Flags().BoolVar(&cfg.CaptureRedirectAll, "capture-redirect-all", false, "Add the dormant ORIGINAL_DST passthrough DefaultFilterChain to capture listeners (proposal 022 M2a spike). Harmless unless a pod is redirect-all'd via the capture.aether.io/redirect-all annotation; only then does non-mesh egress reach the passthrough.")
-	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + --east-west-tunnel-port instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
-	rootCmd.Flags().Uint32Var(&cfg.EastWestTunnelPort, "east-west-tunnel-port", cfg.EastWestTunnelPort, "Host-netns port for cross-cluster east/west waypoint traffic (only with --east-west-waypoint)")
+	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
 	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
 }
@@ -285,9 +281,12 @@ func runAgent(ctx context.Context) (retErr error) {
 	// listener cleartext so the mesh hop stays routable (the outbound clusters
 	// already go cleartext without a node SVID). Production keeps mTLS.
 	snapshotCache.SetSpireEnabled(cfg.SpireEnabled)
-	snapshotCache.SetCaptureEnabled(cfg.TransparentCapture)
-	snapshotCache.SetCaptureRedirectAll(cfg.CaptureRedirectAll)
-	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, cfg.EastWestTunnelPort)
+	// Capture + the dormant redirect-all passthrough chain are unconditional
+	// (proposal 031); per-pod behavior is decided by the CNI (annotations +
+	// --capture-redirect-all-default). The tunnel port is the fixed constant.
+	snapshotCache.SetCaptureEnabled(true)
+	snapshotCache.SetCaptureRedirectAll(true)
+	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
 	if cfg.MeshDNS {
 		// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
 		// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The CNI DNATs
@@ -419,10 +418,10 @@ func runAgent(ctx context.Context) (retErr error) {
 
 	// L4 route types (proposal 018, Phase 3b): watch TCPRoutes, TLSRoutes, and
 	// UDPRoutes parented to a Service and project weighted TCP floor chains /
-	// per-SNI TLS chains onto the capture listener. Default off (--l4-routes).
-	// Requires --transparent-capture to be meaningful (routes need capture chains).
+	// per-SNI TLS chains onto the capture listener. Unconditional since proposal
+	// 031: the reconciler CRD-detects each type and degrades when absent.
 	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
-	if cfg.L4Routes {
+	{
 		if err = gatewayv1alpha2.Install(m.GetScheme()); err != nil {
 			return fmt.Errorf("register gateway.networking.k8s.io v1alpha2 scheme: %w", err)
 		}
@@ -444,11 +443,11 @@ func runAgent(ctx context.Context) (retErr error) {
 		}
 	}
 
-	// Transparent capture (Phase 3a) and/or mesh DNS (mesh-global FQDN) both read the
+	// Transparent capture (Phase 3a) and mesh DNS (mesh-global FQDN) both read the
 	// generated mesh Services: capture wants their cluster.local authorities (cap_http),
-	// mesh DNS wants their ClusterIPs (the DnsTable). One reconciler feeds both; run it
-	// if either feature is on. Default off — no Service watch otherwise.
-	if cfg.TransparentCapture || cfg.MeshDNS {
+	// mesh DNS wants their ClusterIPs (the DnsTable). One reconciler feeds both;
+	// capture is unconditional (proposal 031), so it always runs.
+	{
 		captureReconciler := &capture.Reconciler{
 			Client: m.GetClient(),
 			Sink:   snapshotCache,

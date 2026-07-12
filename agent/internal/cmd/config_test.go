@@ -79,21 +79,12 @@ func TestAgentConfig_SubConfigsAreIndependent(t *testing.T) {
 	assert.NotSame(t, cfg1.CNIServerConfig, cfg2.CNIServerConfig)
 }
 
-// TestCaptureRedirectAllFlag verifies the --capture-redirect-all flag is
-// registered on the agent root command, defaults to false, and binds to the
-// package cfg.CaptureRedirectAll field (which root.go threads into
-// SnapshotCache.SetCaptureRedirectAll). This is the agent half of the proposal
-// 022 M2a spike: without the flag the cache never adds the passthrough chain.
-func TestCaptureRedirectAllFlag(t *testing.T) {
+// TestRetiredFlagsGone pins proposal 031: the retired feature flags must NOT
+// come back — capture, the dormant redirect-all passthrough chain, and L4
+// routing are unconditional, and the tunnel port is a constant.
+func TestRetiredFlagsGone(t *testing.T) {
 	cmd := GetCommand()
-
-	f := cmd.Flags().Lookup("capture-redirect-all")
-	require.NotNil(t, f, "expected --capture-redirect-all flag to be registered")
-	assert.Equal(t, "false", f.DefValue, "flag must default to false")
-
-	// Restore the package global the flag is bound to after the test mutates it.
-	t.Cleanup(func() { cfg.CaptureRedirectAll = false })
-
-	require.NoError(t, cmd.Flags().Set("capture-redirect-all", "true"))
-	assert.True(t, cfg.CaptureRedirectAll, "setting the flag must drive cfg.CaptureRedirectAll")
+	for _, name := range []string{"transparent-capture", "capture-redirect-all", "l4-routes", "east-west-tunnel-port"} {
+		assert.Nil(t, cmd.Flags().Lookup(name), "flag --%s was retired by proposal 031 and must not be re-registered", name)
+	}
 }

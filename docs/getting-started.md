@@ -415,9 +415,10 @@ labels express no preference.
 ## 10. Shape traffic with Gateway API (GAMMA)
 
 East-west traffic management uses the **standard Gateway API route types
-parented to a Service** (the GAMMA pattern) — no custom routing CRDs. Enable
-it with `agent.gamma=true` (requires the Gateway API CRDs); L4 route types are
-on by default (`agent.l4Routes`).
+parented to a Service** (the GAMMA pattern) — no custom routing CRDs. It is
+**on by default** (`agent.gamma`, a kill switch): the agent detects the
+Gateway API CRDs and simply warns when they are absent. L4 route types are
+likewise always on, gated only on their CRDs being installed.
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
@@ -443,7 +444,8 @@ the explicit listener (so callers need no changes):
   green.
 - **`GRPCRoute`** — method-based routing (`<svc>/<method>` matched as a path).
 - **`TCPRoute`** — weighted L4 splits across backends; an explicit `weight: 0`
-  drains a backend.
+  drains a backend. (TCPRoute/UDPRoute need the Gateway API *experimental*
+  channel CRDs.)
 - **`TLSRoute`** — SNI-based passthrough routing.
 - (`UDPRoute` is accepted but control-plane-only for now.)
 - **Cross-namespace backends** need a standard `ReferenceGrant`.
@@ -533,7 +535,7 @@ shared upstream CA) so identities verify across the cluster line.
 |---|---|---|
 | **Endpoints (MCS)** | `ServiceExport` publishes a service to the clusterset; every cluster materializes a `ServiceImport` + clusterset VIP and sees the remote endpoints. | `registrar.enableMCS=true` (+ the MCS-API CRDs) |
 | **Config (026)** | Exported services' GAMMA routes (`HTTPRoute`/`GRPCRoute`, incl. `HTTPFilter` chain scope) propagate to peer clusters and merge into their proxies (local config wins). | exporter: `registrar.enableMCS=true`; importer: `agent.importConfig=true`. Optionally pin one authoritative exporter with `controlCluster=<name>` |
-| **Data path (019)** | When pod IPs aren't routable across clusters (the usual case), cross-cluster endpoints are dialed at their **node's** routable IP on the east/west tunnel port (`18009`); the destination node's proxy SNI-forwards to the local pod. mTLS stays end-to-end pod↔pod. Intra-cluster traffic is unaffected. | `agent.eastWestWaypoint=true` on all clusters (tunnel port must match clusterset-wide) |
+| **Data path (019)** | When pod IPs aren't routable across clusters (the usual case), cross-cluster endpoints are dialed at their **node's** routable IP on the fixed east/west tunnel port (`18009`); the destination node's proxy SNI-forwards to the local pod. mTLS stays end-to-end pod↔pod. Intra-cluster traffic is unaffected. | `agent.eastWestWaypoint=true` on all clusters (the tunnel port is the fixed constant `18009`) |
 | **Multi-region (006)** | One etcd per region (`registrar.region`); each region's registrar mirrors its own registry subtree into peer regions' etcds under an **origin-heartbeat lease** — a dead region's mirror expires everywhere at the lease TTL (~30s), and locality keeps foreign endpoints on the failover path (EDS priority 2). | `registrar.region=<region>` + `registrar.peerEtcd=["<peer>=<endpoints>"]` per direction |
 
 Minimal two-cluster recipe (shared regional etcd, cross-cluster service
