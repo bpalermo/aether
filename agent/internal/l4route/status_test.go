@@ -57,7 +57,7 @@ func TestReconcile_TCPRouteStatus(t *testing.T) {
 		WithObjects(tr, svc).
 		WithStatusSubresource(&gatewayv1alpha2.TCPRoute{}).
 		Build()
-	r := &Reconciler{Client: c, Sink: fakeSink{}, MeshDomain: "mesh", Log: slog.Default()}
+	r := &Reconciler{Client: c, Sink: fakeSink{}, MeshDomain: "mesh", Log: slog.Default(), tcpEnabled: true, tlsEnabled: true, udpEnabled: true, referenceGrantEnabled: true}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)

@@ -18,11 +18,13 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"github.com/bpalermo/aether/common/crdcheck"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/referencegrant"
 	"github.com/bpalermo/aether/common/serviceref"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -54,6 +56,15 @@ type Reconciler struct {
 	Sink       L4RouteSink
 	MeshDomain string
 	Log        *slog.Logger
+
+	// Per-type CRD gates (proposal 031): TCPRoute/UDPRoute are v1alpha2
+	// (Gateway API experimental channel) and TLSRoute promotion lags the core
+	// types, so any of them can be absent on a standard-channel cluster.
+	// Watching or listing a type whose CRD is absent wedges the manager /
+	// errors every reconcile; SetupWithManager sets these from the RESTMapper
+	// and the reconciler degrades per type with a warning. ReferenceGrant is
+	// gated the same way.
+	tcpEnabled, tlsEnabled, udpEnabled, referenceGrantEnabled bool
 }
 
 // SetupWithManager registers the reconciler to watch TCPRoutes, TLSRoutes, and
@@ -64,37 +75,88 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	enqueueAll := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{{}}
 	})
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&gatewayv1alpha2.TCPRoute{}).
-		Watches(&gatewayv1.TLSRoute{}, enqueueAll).
-		Watches(&gatewayv1alpha2.UDPRoute{}, enqueueAll).
-		// ReferenceGrant (v1beta1): a grant change can flip a cross-namespace backendRef
-		// between permitted and RefNotPermitted, so re-project + re-status on any change.
-		Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll).
-		Named("l4route").
-		Complete(r)
+
+	// Gate each route type on its CRD being served (proposal 031); see the
+	// struct comment. All three absent = nothing to do — skip entirely.
+	mapper := mgr.GetRESTMapper()
+	var err error
+	if r.tcpEnabled, err = crdcheck.Present(mapper, gatewayv1alpha2.SchemeGroupVersion.WithKind("TCPRoute")); err != nil {
+		return err
+	}
+	if r.tlsEnabled, err = crdcheck.Present(mapper, gatewayv1.SchemeGroupVersion.WithKind("TLSRoute")); err != nil {
+		return err
+	}
+	if r.udpEnabled, err = crdcheck.Present(mapper, gatewayv1alpha2.SchemeGroupVersion.WithKind("UDPRoute")); err != nil {
+		return err
+	}
+	if !r.tcpEnabled && !r.tlsEnabled && !r.udpEnabled {
+		r.Log.Warn("no L4 Gateway API CRDs (TCPRoute/TLSRoute/UDPRoute) present; L4 routing disabled until they are installed and the agent restarts")
+		return nil
+	}
+	if !r.tcpEnabled || !r.tlsEnabled || !r.udpEnabled {
+		r.Log.Warn("some L4 Gateway API CRDs absent; the corresponding route types are disabled until installed and the agent restarts",
+			"tcpRoute", r.tcpEnabled, "tlsRoute", r.tlsEnabled, "udpRoute", r.udpEnabled)
+	}
+	if r.referenceGrantEnabled, err = crdcheck.Present(mapper, gatewayv1beta1.SchemeGroupVersion.WithKind("ReferenceGrant")); err != nil {
+		return err
+	} else if !r.referenceGrantEnabled {
+		r.Log.Warn("ReferenceGrant CRD not present; cross-namespace L4 backendRefs stay RefNotPermitted until it is installed and the agent restarts")
+	}
+
+	// For() needs a present primary type; the rest join as Watches.
+	watches := []struct {
+		enabled bool
+		obj     client.Object
+	}{
+		{r.tcpEnabled, &gatewayv1alpha2.TCPRoute{}},
+		{r.tlsEnabled, &gatewayv1.TLSRoute{}},
+		{r.udpEnabled, &gatewayv1alpha2.UDPRoute{}},
+		{r.referenceGrantEnabled, &gatewayv1beta1.ReferenceGrant{}},
+	}
+	var b *builder.Builder
+	for _, w := range watches {
+		if !w.enabled {
+			continue
+		}
+		if b == nil {
+			b = ctrl.NewControllerManagedBy(mgr).For(w.obj)
+			continue
+		}
+		b = b.Watches(w.obj, enqueueAll)
+	}
+	return b.Named("l4route").Complete(r)
 }
 
 // Reconcile re-lists every TCPRoute, TLSRoute, and UDPRoute, keeps those
 // attached to a Service (parentRef kind=Service, empty group), and replaces
 // the sink's per-service rule sets.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
+	// Every List is CRD-gated (proposal 031): listing a kind whose CRD is
+	// absent errors every reconcile, so disabled types keep empty lists.
 	tcpList := &gatewayv1alpha2.TCPRouteList{}
-	if err := r.List(ctx, tcpList); err != nil {
-		return reconcile.Result{}, err
+	if r.tcpEnabled {
+		if err := r.List(ctx, tcpList); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	tlsList := &gatewayv1.TLSRouteList{}
-	if err := r.List(ctx, tlsList); err != nil {
-		return reconcile.Result{}, err
+	if r.tlsEnabled {
+		if err := r.List(ctx, tlsList); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	udpList := &gatewayv1alpha2.UDPRouteList{}
-	if err := r.List(ctx, udpList); err != nil {
-		return reconcile.Result{}, err
+	if r.udpEnabled {
+		if err := r.List(ctx, udpList); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
 	grantList := &gatewayv1beta1.ReferenceGrantList{}
-	if err := r.List(ctx, grantList); err != nil {
-		return reconcile.Result{}, err
+	if r.referenceGrantEnabled {
+		if err := r.List(ctx, grantList); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	grants := grantList.Items
 
