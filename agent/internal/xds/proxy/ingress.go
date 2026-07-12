@@ -25,15 +25,15 @@ const (
 	defaultInboundAddress = "0.0.0.0"
 	// defaultInboundPort is the mesh inbound port. The per-pod inbound listener binds
 	// it inside the pod's network namespace, and source proxies dial the destination
-	// pod at <pod_ip>:defaultInboundPort.
-	defaultInboundPort = 15008
-	// transitionInboundPort is the NEW mesh inbound port (proposal 030: out of
-	// Istio's reserved 15000-15090 band; 15008 is Istio's HBONE number). Phase A
-	// of the dual-bind transition: the inbound listener binds BOTH ports while
-	// every dialer still dials defaultInboundPort. Phase B (next release, after
-	// the fleet fully rolls) flips the dialers here; Phase C drops the 15008
-	// bind. Do NOT dial this port anywhere until Phase B.
-	transitionInboundPort = 18008
+	// pod at <pod_ip>:defaultInboundPort. In aether's 18xxx range, out of Istio's
+	// reserved 15000-15090 band — 15008 is Istio's HBONE number (proposal 030,
+	// Phase B: dialers flipped here after the whole fleet dual-bound in Phase A).
+	defaultInboundPort = 18008
+	// legacyInboundPort is the pre-030 inbound port, still bound (additional
+	// address) so proxies one release behind — still dialing 15008 — keep
+	// working through the Phase B roll. Phase C (next release, after the fleet
+	// fully rolls) drops this bind.
+	legacyInboundPort = 15008
 
 	// MeshLivePath is the liveness path answered locally by the inbound listener: a
 	// 200 proves the proxy config is loaded and the listener is serving, and (since
@@ -106,9 +106,9 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 				},
 			},
 		},
-		// Proposal 030 Phase A: also bind the new inbound port in the same netns
-		// with the same filter chains, so dialers can flip to it (Phase B) only
-		// after every pod in the fleet already accepts on it. Same-listener
+		// Proposal 030 Phase B: the legacy port stays bound (same netns, same
+		// filter chains) so one-release-stale dialers still connect; Phase C
+		// drops it after this release fully rolls. Same-listener
 		// additional address (not a second listener) keeps stats/drain unified.
 		AdditionalAddresses: []*listenerv3.AdditionalAddress{{
 			Address: &corev3.Address{
@@ -117,7 +117,7 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 						Protocol: corev3.SocketAddress_TCP,
 						Address:  defaultInboundAddress,
 						PortSpecifier: &corev3.SocketAddress_PortValue{
-							PortValue: transitionInboundPort,
+							PortValue: legacyInboundPort,
 						},
 						NetworkNamespaceFilepath: cniPod.GetNetworkNamespace(),
 					},
