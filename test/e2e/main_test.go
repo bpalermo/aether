@@ -173,6 +173,15 @@ func createRBAC(ctx context.Context, client klient.Client) error {
 				Resources: []string{"nodes"},
 				Verbs:     []string{"list", "get", "watch"},
 			},
+			{
+				// The agent's capture reconciler watches the generated mesh
+				// Services and the registrar's mesh-Service generator writes
+				// them — both unconditional since proposal 031 (matching the
+				// chart's agent read + registrar CRUD grants).
+				APIGroups: []string{""},
+				Resources: []string{"services"},
+				Verbs:     []string{"list", "get", "watch", "create", "update", "patch", "delete"},
+			},
 		},
 	}
 	if err := client.Resources().Create(ctx, cr); err != nil {
