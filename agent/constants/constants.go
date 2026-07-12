@@ -4,17 +4,12 @@ package constants
 import "github.com/bpalermo/aether/common/constants"
 
 const (
-	// DefaultProxyID is the default xDS node ID for the Envoy proxy
-	DefaultProxyID = "proxy"
-
 	// DefaultHostCNIRegistryDir is the default directory for storing CNI registry data on the host
 	DefaultHostCNIRegistryDir = "/host" + constants.CNIDefaultRegistryPath
 
 	// DefaultEdgeRegistryDir is the edge's pod-local (always-empty) registry dir.
-	// The edge has no host CNI mount, but the shared --mounted-registry-dir flag
-	// defaults to the node hostPath (DefaultHostCNIRegistryDir) via the root
-	// command, so runEdge resolves to this pod-local path unless explicitly
-	// overridden — otherwise the edge would read a path that doesn't exist.
+	// The edge has no host CNI mount, so runEdge points its empty local store
+	// here (the node hostPath doesn't exist in the edge pod).
 	DefaultEdgeRegistryDir = constants.CNIDefaultRegistryPath
 
 	// DefaultXdsSocketPath is the default Unix domain socket path for the xDS server

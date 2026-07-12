@@ -42,7 +42,6 @@ type CNIServer struct {
 	log *slog.Logger
 
 	clusterName string
-	proxyID     string
 	nodeName    string
 	trustDomain string
 	nodeRegion  string
@@ -91,7 +90,7 @@ var _ xds.ServerCallback = (*CNIServer)(nil)
 // NewCNIServer creates a new CNI gRPC server.
 // The server listens on a Unix domain socket and registers the CNI service with
 // protovalidate middleware for request validation.
-func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDomain string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, log *slog.Logger, k8sClient client.Client, informers ctrlcache.Informers, cfg *CNIServerConfig) (*CNIServer, error) {
+func NewCNIServer(clusterName string, nodeName string, trustDomain string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, log *slog.Logger, k8sClient client.Client, informers ctrlcache.Informers, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
@@ -115,7 +114,6 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 		metrics:             metrics,
 		clusterName:         clusterName,
 		nodeName:            nodeName,
-		proxyID:             proxyID,
 		trustDomain:         trustDomain,
 		storage:             localStorage,
 		registry:            registry,
@@ -138,7 +136,7 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 // It retrieves the region and zone labels from the node object.
 func (s *CNIServer) PreListen(ctx context.Context) error {
 	s.log.DebugContext(ctx, "querying node metadata")
-	region, zone, nodeIP, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
+	region, zone, nodeIP, err := queryNodeMetadata(ctx, s.nodeName, s.k8sClient)
 	if err != nil {
 		return err
 	}
@@ -181,9 +179,9 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 // Kubernetes node (each empty if absent). The InternalIP is the routable dial
 // target advertised on this node's endpoints for cross-cluster consumers whose
 // pod network is not routable (proposal 019 per-node east/west waypoint).
-func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone, nodeIP string, err error) {
+func queryNodeMetadata(ctx context.Context, nodeName string, client client.Client) (region, zone, nodeIP string, err error) {
 	node := &corev1.Node{}
-	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {
+	if err := client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
 		return "", "", "", fmt.Errorf("failed to get node: %w", err)
 	}
 

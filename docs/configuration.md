@@ -52,7 +52,6 @@ access-log/tracing policy via the MeshConfig CR.
 |---|---|---|
 | `spire.enabled` | `true` | Mesh-wide mTLS switch (agent, registrar, controller webhook cert). |
 | `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket (the `csi.spiffe.io` mount). |
-| `spire.trustDomain` | `""` | SPIFFE trust domain for the registrar's mTLS peers. Empty = `ROOTCA` sentinel. |
 | `spire.adminSocket.hostPath` | `/run/spire/agent/sockets/csi.spiffe.io/admin` | SPIRE agent admin (Delegated Identity) socket the agent uses to mint proxy SVIDs. |
 | `spire.adminSocket.mountPath` | `/run/spire/admin-sockets` | Where the admin socket is mounted. |
 | `spire.adminSocket.socketName` | `admin.sock` | Admin socket filename. |
@@ -123,7 +122,6 @@ access-log/tracing policy via the MeshConfig CR.
 |---|---|---|
 | `registrar.registryBackend` | `kubernetes` | Backend (`--registry-backend`): `kubernetes`, `dynamodb`, or `etcd`. |
 | `registrar.replicaCount` | `2` | Always 2 (exercises the multi-replica write-behind topology). |
-| `registrar.generateMeshServices` | `true` | Project the mesh catalog into selectorless k8s Services (transparent-capture VIPs, 018 Phase 3a) that transparent capture + `meshDns` depend on. |
 | `registrar.enableMCS` | `false` | Multi-Cluster Services phase 1 (018 + 006): export `ServiceExport`s and materialize `ServiceImport`s + clusterset VIPs. Requires the etcd backend + the MCS-API CRDs. |
 | `registrar.region` | `local` | Region owning this registrar's etcd partition (006); keys are `/aether/v1/regions/<region>/clusters/<clusterName>/…`. One region = one etcd. |
 | `registrar.etcd.endpoints` | `[]` | etcd client endpoints (etcd backend). |
@@ -162,14 +160,12 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.gateway.address` | `""` | Pin the Gateway's LoadBalancer IP (021 Phase 2, via MetalLB). Empty = auto-assign. |
 | `edge.gateway.hostname` | `""` | Constrain the chart-managed Gateway's listeners (e.g. `"*.example.com"`). |
 | `edge.gateway.httpRoutes` | `[]` | Declaratively managed `HTTPRoute`s parented to the chart Gateway (the supported replacement for hand-applied manifests). |
-| `edge.perGatewayAddressing` | `true` | 021 Phase 2: one LoadBalancer Service + distinct internal port per Gateway (each gets its own IP). `false` = Phase 1 (single shared IP). |
 | `edge.tls.enabled` | `false` | Downstream TLS: HTTPS listener (certs per Gateway listener via SDS) + HTTP→HTTPS redirect. The edge→pod hop stays mTLS. |
 | `edge.geoip.enabled` | `false` | Emit `x-geo-*` request headers from a MaxMind DB (028). The `x-geo-*` namespace is always stripped from client requests. |
 | `edge.geoip.headers` | `[country]` | Which headers to emit: `country`, `city`. |
 | `edge.geoip.database.secretName` / `fileName` | `""` / `GeoLite2-City.mmdb` | The bring-your-own mmdb Secret + key. |
 | `edge.xffNumTrustedHops` | `0` | Trusted proxies in front of the edge (feeds HCM client-address + geoip XFF). |
 | `edge.httpPort` / `httpsPort` | `80` / `443` | Public listener ports (privileged ports via `NET_BIND_SERVICE`; pod stays unprivileged). |
-| `edge.readinessPort` | `18021` | Dedicated always-bound readiness listener (kubelet probe target; never exposed). |
 | `edge.routeNamespace` | `""` | Namespace the edge watches Gateways/HTTPRoutes in. Empty = its own namespace. |
 | `edge.service.{type,port,httpsPort,annotations,extraPorts}` | `LoadBalancer` / `80` / `443` / `{}` / `[]` | The edge's Service; `extraPorts` exposes TCP/TLS listener ports. |
 | `edge.drain.preStopSeconds` | `10` | preStop sleep holding off SIGTERM during drain (matches `proxy.hotRestart.drainTime`). 0 disables. |
@@ -217,7 +213,8 @@ above.)
 
 Identity/registrar/SPIRE: `--mesh-config` (`/etc/aether/mesh-config.yaml`),
 `--mesh-domain` (`aether.internal`), `--spire-enabled` (`true`), `--node-name`
-(required), `--cluster-name` (required), `--proxy-id` (`proxy`, required),
+(required; doubles as the xDS node identity — the old `--proxy-id` was retired),
+`--cluster-name` (required),
 `--registrar-address` (`aether-registrar.aether-system.svc:443`),
 `--spire-workload-socket`.
 
@@ -227,8 +224,7 @@ Node-agent-specific:
 |---|---|---|
 | `--mounted-registry-dir` | `/host/var/lib/aether/registry` | Local pod-data dir for the CNI plugin. |
 | `--spire-admin-socket` | `/tmp/spire-agent/private/admin.sock` | SPIRE admin socket for proxy SVID delegation. |
-| `--remove-startup-taint` | `true` | Remove the `aether.io/agent-not-ready` node taint once the CNI server serves. |
-| `--gamma` | `false` | GAMMA east-west routing (018); the chart passes it (default ON there). CRD-detected. |
+| `--gamma` | `true` | GAMMA east-west routing (018); default-on kill switch (031). CRD-detected. |
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |
@@ -240,18 +236,20 @@ Node-agent-specific:
 
 > The chart's booleans (`agent.gamma`, `agent.meshDns`,
 > `agent.captureRedirectAllDefault`, …) map to these flags. Transparent
-> capture, the redirect-all passthrough chain, and L4 route types are
-> unconditional since proposal 031 (no flags).
+> capture, the redirect-all passthrough chain, L4 route types, and the
+> startup-taint removal are unconditional since proposal 031 (no flags).
 
 ### `agent edge` (subcommand)
 
-Inherits the manager + identity flags (but `--node-name`/`--proxy-id` are relaxed,
-derived from `POD_NAME`). Adds: `--edge-http-port` (`80`), `--edge-https-port`
-(`443`), `--edge-readiness-port` (`18021`), `--edge-tls` (`false`),
-`--gateway-class` (`aether`), `--route-namespace` (`""`), `--edge-service-name`
-(`""`), `--edge-per-gateway-addressing` (`true`), `--geoip-city-db` (`""`),
-`--geoip-headers` (`[country]`), `--xff-num-trusted-hops` (`0`),
-`--mounted-registry-dir` (`/var/lib/aether/registry`).
+Inherits the manager + identity flags (but `--node-name` is relaxed, derived
+from `POD_NAME`). Adds: `--edge-http-port` (`80`), `--edge-https-port`
+(`443`), `--edge-tls` (`false`), `--gateway-class` (`aether`),
+`--route-namespace` (`""` — the default namespace for Gateway TLS Secrets;
+watching is cluster-wide), `--edge-service-name` (`""`), `--geoip-city-db`
+(`""`), `--geoip-headers` (`[country]`), `--xff-num-trusted-hops` (`0`).
+The readiness listener is the fixed port 18021 (030 constant), per-Gateway
+addressing is unconditional (021 Phase 2), and the empty local store lives at
+the fixed pod-local path.
 
 ### `agent proxy-supervisor` (subcommand — standalone flag set)
 
@@ -270,22 +268,28 @@ The Envoy hot-restart supervisor (proposal 001): `--envoy-path`
 (`kubernetes`), `--etcd-endpoints` (`[localhost:2379]`), `--peer-etcd`
 (repeatable, `<region>=<endpoint>[,<endpoint>...]` — cross-region replication,
 006 Phase 2; requires the etcd backend + an explicit `--region`),
-`--sync-interval` (`5s`), `--generate-mesh-services` (`false`), `--enable-mcs`
+`--sync-interval` (`5s`), `--enable-mcs`
 (`false`), `--grpc-address` (`:8443`), `--spire-enabled` (`true`),
-`--spire-workload-socket`, `--spire-trust-domain` (`ROOTCA` sentinel).
+`--spire-workload-socket`. The mesh-Service generator is unconditional (031
+round 2), and the mTLS peer trust domain is resolved from the registrar's own
+SVID (no `--spire-trust-domain`).
 
 ### `controller`
 
 `--mesh-config-configmap` (`aether-mesh-config`), `--spire-enabled` (`false`),
 `--spire-workload-socket`, `--webhook-config-name` (`""`),
-`--mutating-webhook-config-name` (`""`), `--pod-ndots` (`2`).
+`--mutating-webhook-config-name` (`""`), `--mesh-domain` (`aether.internal` —
+the pod-mutating webhook derives its injected ndots from the domain's label
+count; the old `--pod-ndots` was retired).
 
 ### `cni-install` (init container)
 
 `--cni-bin-dir`, `--cni-bin-target-dir`, `--mounted-cni-net-dir`,
-`--otlp-endpoint`, `--transparent-capture`, `--capture-redirect-all-default`,
-`--mesh-dns`, `--host-ip`, `--debug`. (The `cni` plugin binary itself is
-configured via CNI-spec stdin, not flags.)
+`--otlp-endpoint`, `--capture-redirect-all-default`,
+`--mesh-dns`, `--host-ip`, `--debug`. The per-pod capture redirect is
+unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
+annotations opt out). (The `cni` plugin binary itself is configured via
+CNI-spec stdin, not flags.)
 
 ---
 

@@ -66,7 +66,7 @@ func startCNIServer(t *testing.T, ctx context.Context, sockPath string, stor sto
 	sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
 	cfg := &CNIServerConfig{SocketPath: sockPath}
 
-	srv, err := NewCNIServer("test-cluster", "test-node", "test-node", "example.org", stor, reg, sc, ack.NewTracker(slog.New(slog.DiscardHandler)), spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, slog.New(slog.DiscardHandler)), slog.New(slog.DiscardHandler), k8sClient, nil, cfg)
+	srv, err := NewCNIServer("test-cluster", "test-node", "example.org", stor, reg, sc, ack.NewTracker(slog.New(slog.DiscardHandler)), spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, slog.New(slog.DiscardHandler)), slog.New(slog.DiscardHandler), k8sClient, nil, cfg)
 	require.NoError(t, err)
 
 	errCh := make(chan error, 1)

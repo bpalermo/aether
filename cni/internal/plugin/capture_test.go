@@ -172,9 +172,9 @@ func TestRedirectAllTCPExprs(t *testing.T) {
 
 // TestPodRedirectAll verifies the redirect-all decision precedence (proposal 022):
 // an explicit per-pod annotation ("true"=force on / "false"=force off) overrides
-// the node default; otherwise CaptureRedirectAllDefault (the M2-default flip) or the
-// legacy node-wide CaptureRedirectAllEnabled applies. This is the safety gate that
-// keeps infra/opt-out pods off redirect-all even when the node default is on.
+// the node default; otherwise CaptureRedirectAllDefault (the M2-default flip)
+// applies. This is the safety gate that keeps infra/opt-out pods off
+// redirect-all even when the node default is on.
 func TestPodRedirectAll(t *testing.T) {
 	annoTrue := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "true"}
 	annoFalse := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "false"}
@@ -194,13 +194,7 @@ func TestPodRedirectAll(t *testing.T) {
 			conf: config.AetherConf{CaptureRedirectAllDefault: true, RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoFalse}},
 			want: false,
 		},
-		{
-			name: "annotation false forces off even with node-wide override",
-			conf: config.AetherConf{CaptureRedirectAllEnabled: true, RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &annoFalse}},
-			want: false,
-		},
 		{name: "no annotation, default on -> on", conf: config.AetherConf{CaptureRedirectAllDefault: true}, want: true},
-		{name: "no annotation, node-wide override on -> on", conf: config.AetherConf{CaptureRedirectAllEnabled: true}, want: true},
 		{name: "unrelated annotation, default off -> off", conf: withAnno(annoOther), want: false},
 		{name: "nil pod annotations, default off -> off", conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{}}, want: false},
 		{name: "nil runtime config, default off -> off", conf: config.AetherConf{}, want: false},

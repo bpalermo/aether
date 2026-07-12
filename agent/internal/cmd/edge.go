@@ -48,20 +48,15 @@ func init() {
 	manager.RegisterFlags(edgeCmd, &cfg.Config)
 	registerSharedFlags(edgeCmd, false)
 
-	// The edge has no CNI/pod storage; it points the (always-empty) local store
-	// at a pod-local emptyDir so PreListen's load is a no-op.
-	edgeCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", "/var/lib/aether/registry", "Pod-local directory for the edge's (empty) local store")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
-	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "route-namespace", "", "Namespace to watch Gateways/HTTPRoutes in (empty = the edge pod's own namespace)")
+	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "route-namespace", "", "Default namespace for Gateway TLS certificate Secrets (empty = the edge pod's own namespace). Gateway/route watching is cluster-wide regardless")
 	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per Gateway listener via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
-	edgeCmd.Flags().Uint32Var(&cfg.EdgeReadinessPort, "edge-readiness-port", cfg.EdgeReadinessPort, "Port the dedicated always-bound readiness listener binds; the readiness probe targets it (independent of the public listeners)")
 	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves")
 	edgeCmd.Flags().StringVar(&cfg.GeoipCityDB, "geoip-city-db", "", "Path to a MaxMind city-type mmdb (proposal 028). When set, the edge emits x-geo-* headers on routed requests; the reserved x-geo-* namespace is stripped from client requests regardless")
 	edgeCmd.Flags().StringSliceVar(&cfg.GeoipHeaders, "geoip-headers", []string{"country"}, "Which geo headers to emit: country, city")
 	edgeCmd.Flags().Uint32Var(&cfg.XffNumTrustedHops, "xff-num-trusted-hops", 0, "Trusted proxies in front of the edge (topology fact): feeds BOTH the HCM client-address resolution and the geoip filter's XFF config")
-	edgeCmd.Flags().StringVar(&cfg.EdgeServiceName, "edge-service-name", "", "Name of the edge's own LoadBalancer Service (in the edge namespace); its assigned LB address is published as every class-aether Gateway's status.addresses. Empty disables address publication")
-	edgeCmd.Flags().BoolVar(&cfg.EdgePerGatewayAddressing, "edge-per-gateway-addressing", true, "Enable proposal 021 Phase 2: create a per-Gateway LoadBalancer Service + internal-port demux so each Gateway gets its own external IP (default: true). Set false to fall back to Phase 1 (shared IP)")
+	edgeCmd.Flags().StringVar(&cfg.EdgeServiceName, "edge-service-name", "", "Name of the edge's own LoadBalancer Service (in the edge namespace); its assigned LB address is published as every class-aether Gateway's status.addresses. Empty disables address publication (and per-Gateway Services with it)")
 }
 
 // runEdge initializes and runs the Aether edge proxy control plane. It is a
@@ -73,26 +68,23 @@ func init() {
 // the statically exposed services so the registrar watch is scoped to exactly
 // those.
 func runEdge(ctx context.Context) (retErr error) {
-	// The edge's identity is its pod name: derive proxy-id / node-name from the
-	// POD_NAME downward-API env (set by the chart) unless explicitly overridden,
-	// so the deployment needn't wire them. node-name == proxy-id (the edge has no
-	// distinct K8s node identity).
-	if name := currentPodName(); name != "" {
-		if cfg.ProxyServiceNodeID == "" || cfg.ProxyServiceNodeID == constants.DefaultProxyID {
-			cfg.ProxyServiceNodeID = name
-		}
-		if cfg.NodeName == "" {
-			cfg.NodeName = cfg.ProxyServiceNodeID
-		}
+	// The edge's identity is its pod name: derive node-name (the xDS/watch
+	// identity — the edge has no distinct K8s node identity) from the POD_NAME
+	// downward-API env (set by the chart) unless explicitly overridden, so the
+	// deployment needn't wire it.
+	if cfg.NodeName == "" {
+		cfg.NodeName = currentPodName()
 	}
-	if cfg.ProxyServiceNodeID == "" || cfg.NodeName == "" {
-		return fmt.Errorf("edge identity unresolved: set POD_NAME (downward API) or pass --proxy-id/--node-name")
+	if cfg.NodeName == "" {
+		return fmt.Errorf("edge identity unresolved: set POD_NAME (downward API) or pass --node-name")
 	}
 
-	cfg.MountedLocalStorageDir = edgeStorageDir(cfg.MountedLocalStorageDir)
+	// The edge has no CNI/pod storage; it points the (always-empty) local store
+	// at the fixed pod-local dir so PreListen's load is a no-op.
+	cfg.MountedLocalStorageDir = constants.DefaultEdgeRegistryDir
 
 	l.InfoContext(ctx, "starting aether edge proxy control plane",
-		"proxy-id", cfg.ProxyServiceNodeID,
+		"podName", cfg.NodeName,
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,
 		"edgeHTTPPort", cfg.EdgeHTTPPort,
@@ -206,7 +198,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
-	snapshotCache := cache.NewSnapshotCache(cfg.ProxyServiceNodeID, l)
+	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
 	snapshotCache.SetEdgeGeoip(proxy.GeoipConfig{
@@ -215,7 +207,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		XffNumTrustedHops: cfg.XffNumTrustedHops,
 	}, cfg.XffNumTrustedHops)
 	snapshotCache.SetEdgeMode(cfg.EdgeHTTPPort)
-	snapshotCache.SetEdgeReadinessPort(cfg.EdgeReadinessPort)
+	snapshotCache.SetEdgeReadinessPort(proxy.DefaultEdgeReadinessPort)
 	if cfg.EdgeTLS {
 		snapshotCache.SetEdgeTLSMode(cfg.EdgeHTTPSPort)
 	}
@@ -243,7 +235,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.ProxyServiceNodeID, identityTrustDomain, reg, emptyStorage, snapshotCache, ackTracker.Callbacks(), l)
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.NodeName, identityTrustDomain, reg, emptyStorage, snapshotCache, ackTracker.Callbacks(), l)
 	if err != nil {
 		return err
 	}
@@ -251,7 +243,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add xDS server: %w", err)
 	}
 
-	refresher := xdsServer.NewRegistryRefresher(cfg.ClusterName, cfg.ProxyServiceNodeID, snapshotCache, reg, l)
+	refresher := xdsServer.NewRegistryRefresher(cfg.ClusterName, cfg.NodeName, snapshotCache, reg, l)
 	if err = m.Add(refresher); err != nil {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
@@ -265,16 +257,15 @@ func runEdge(ctx context.Context) (retErr error) {
 		secretRegistry = secret.NewRegistry(secret.NewKubernetesProvider(m.GetClient(), routeNamespace))
 	}
 	gwReconciler := &gatewayapi.Reconciler{
-		Client:               m.GetClient(),
-		APIReader:            m.GetAPIReader(),
-		Sink:                 snapshotCache,
-		Namespace:            routeNamespace,
-		EdgeServiceName:      cfg.EdgeServiceName,
-		GatewayClassName:     cfg.GatewayClassName,
-		MeshDomain:           cfg.MeshDomain,
-		Secrets:              secretRegistry,
-		PerGatewayAddressing: cfg.EdgePerGatewayAddressing,
-		Log:                  l,
+		Client:           m.GetClient(),
+		APIReader:        m.GetAPIReader(),
+		Sink:             snapshotCache,
+		Namespace:        routeNamespace,
+		EdgeServiceName:  cfg.EdgeServiceName,
+		GatewayClassName: cfg.GatewayClassName,
+		MeshDomain:       cfg.MeshDomain,
+		Secrets:          secretRegistry,
+		Log:              l,
 	}
 	if err = gwReconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up Gateway API reconciler: %w", err)
@@ -287,19 +278,6 @@ func runEdge(ctx context.Context) (retErr error) {
 
 	l.DebugContext(ctx, "starting edge manager")
 	return m.Start(ctx)
-}
-
-// edgeStorageDir resolves the edge's (always-empty) pod-local registry dir. The
-// shared --mounted-registry-dir flag is registered by BOTH the root and edge
-// commands on one cfg field; the root's hostPath default wins the init ordering,
-// so an un-overridden edge would inherit the node hostPath that doesn't exist in
-// its pod. When the value is that host default, fall back to the pod-local dir;
-// an explicit override is preserved.
-func edgeStorageDir(configured string) string {
-	if configured == constants.DefaultHostCNIRegistryDir {
-		return constants.DefaultEdgeRegistryDir
-	}
-	return configured
 }
 
 // currentPodName returns the edge pod's name from the POD_NAME downward-API env

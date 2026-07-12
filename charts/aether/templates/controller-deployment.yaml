@@ -48,11 +48,10 @@ spec:
             {{- if .Values.otel.traceExport }}
             - "--trace-export=true"
             {{- end }}
-            {{- if .Values.controller.injectPodNdots }}
-            # ndots = the mesh-domain label count, so <svc>.<meshDomain> resolves
-            # absolute-first (musl mesh-FQDN fix).
-            - "--pod-ndots={{ len (splitList "." .Values.meshDomain) }}"
-            {{- end }}
+            # The pod-mutating webhook derives its injected ndots from the mesh
+            # domain's label count (musl mesh-FQDN fix; the old --pod-ndots flag
+            # could drift from the domain).
+            - "--mesh-domain={{ .Values.meshDomain }}"
             {{- if .Values.controller.webhook.spire }}
             - "--spire-enabled=true"
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/common/manager"
-	"github.com/bpalermo/aether/common/spire"
 )
 
 const (
@@ -58,11 +57,6 @@ type RegistrarConfig struct {
 	// SyncInterval is how often the registrar polls the external registry
 	SyncInterval time.Duration
 
-	// GenerateMeshServices makes the leader registrar project the mesh catalog into
-	// selectorless k8s Services on the mesh port (transparent-capture VIP/name
-	// handles, proposal 018 Phase 3a). Default off.
-	GenerateMeshServices bool
-
 	// EnableMCS turns on Kubernetes Multi-Cluster Services (MCS-API) phase 1
 	// (proposals 018 + 006): the leader registrar watches ServiceExport objects
 	// and records exports in the origin-partitioned registry, and materializes a
@@ -75,21 +69,15 @@ type RegistrarConfig struct {
 	// GRPCAddress is the address for the registrar gRPC server
 	GRPCAddress string
 
-	// SpireEnabled controls whether the registrar uses SPIRE for mTLS
+	// SpireEnabled controls whether the registrar uses SPIRE for mTLS. The trust
+	// domain authorized for mTLS peers is resolved from the registrar's own SVID.
 	SpireEnabled bool
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
 	SpireWorkloadSocketPath string
-	// SpireTrustDomain is the SPIFFE trust domain authorized for mTLS peers
-	SpireTrustDomain string
 }
 
-const (
-	// DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
-	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
-	// DefaultSpireTrustDomain defaults to the ROOTCA sentinel, authorizing any
-	// peer that chains to the SPIRE root CA (no trust-domain restriction).
-	DefaultSpireTrustDomain = spire.RootCATrustDomain
-)
+// DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
+const DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
 
 // NewRegistrarConfig creates a RegistrarConfig with default values.
 func NewRegistrarConfig() *RegistrarConfig {
@@ -120,6 +108,5 @@ func NewRegistrarConfig() *RegistrarConfig {
 		GRPCAddress:             defaultGRPCAddress,
 		SpireEnabled:            true,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
-		SpireTrustDomain:        DefaultSpireTrustDomain,
 	}
 }

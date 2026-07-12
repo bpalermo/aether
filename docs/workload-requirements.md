@@ -69,9 +69,9 @@ also honors the standard `<service>.<namespace>.svc.cluster.local` name. A
 `:port` on the authority is stripped before routing. Anything else — bare
 names (`Host: my-svc`), foreign domains, nested labels — matches no route and
 404s immediately; only authorities under the mesh domain can reach the cold
-path. The mesh domain also defaults the SPIFFE trust domain
-(`--spire-trust-domain`), so addressing and identity share one domain unless
-explicitly split.
+path. The SPIFFE trust domain is resolved from each component's own SVID and
+matches the mesh domain by design, so addressing and identity share one
+domain.
 
 **Traffic shaping** (canary weights, header routing, timeouts, gRPC method
 routing, L4 splits/SNI) is standard Gateway API routes parented to the

@@ -87,6 +87,17 @@ func TestRegistrarConfig_ConfigurableFields(t *testing.T) {
 	assert.Equal(t, []string{"etcd-0:2379", "etcd-1:2379"}, c.EtcdEndpoints)
 }
 
+// TestRetiredFlagsGone pins the 031 round-2 retirements: the mesh-Service
+// generator is unconditional (capture + mesh DNS depend on its VIPs), and the
+// peer trust domain is resolved from the registrar's own SVID rather than
+// configured.
+func TestRetiredFlagsGone(t *testing.T) {
+	cmd := GetCommand()
+	for _, name := range []string{"generate-mesh-services", "spire-trust-domain"} {
+		assert.Nil(t, cmd.Flags().Lookup(name), "flag --%s was retired and must not be re-registered", name)
+	}
+}
+
 func TestRegistrarConfig_InstancesAreIndependent(t *testing.T) {
 	cfg1 := NewRegistrarConfig()
 	cfg2 := NewRegistrarConfig()

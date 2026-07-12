@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "cmd",
@@ -10,6 +10,7 @@ go_library(
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//common/apis/config/v1:config",
+        "//common/constants",
         "//common/manager",
         "//common/spire",
         "//controller/internal/edgeconfig",
@@ -26,4 +27,11 @@ go_library(
         "@io_k8s_sigs_controller_runtime//pkg/webhook/admission",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
     ],
+)
+
+go_test(
+    name = "cmd_test",
+    srcs = ["config_test.go"],
+    embed = [":cmd"],
+    deps = ["@com_github_stretchr_testify//assert"],
 )

@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 
 	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/manager"
@@ -77,7 +79,14 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
 	rootCmd.Flags().StringVar(&cfg.WebhookConfigName, "webhook-config-name", cfg.WebhookConfigName, "ValidatingWebhookConfiguration to patch with the SPIRE caBundle (SPIRE mode)")
 	rootCmd.Flags().StringVar(&cfg.MutatingWebhookConfigName, "mutating-webhook-config-name", cfg.MutatingWebhookConfigName, "MutatingWebhookConfiguration (pod ndots) to patch with the SPIRE caBundle (SPIRE mode); empty disables")
-	rootCmd.Flags().StringVar(&cfg.PodNDots, "pod-ndots", cfg.PodNDots, "dnsConfig ndots the pod-mutating webhook injects into managed pods (the mesh-domain label count; 2 for aether.internal)")
+	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under; the pod-mutating webhook derives the injected dnsConfig ndots from its label count (2 for aether.internal)")
+}
+
+// podNDots derives the dnsConfig ndots the pod-mutating webhook injects from
+// the mesh domain's label count, so it can never drift from the domain it
+// describes (the retired --pod-ndots flag could).
+func podNDots(meshDomain string) string {
+	return strconv.Itoa(strings.Count(meshDomain, ".") + 1)
 }
 
 func runController(ctx context.Context) (retErr error) {
@@ -175,7 +184,7 @@ func runController(ctx context.Context) (retErr error) {
 	// MutatingWebhookConfiguration, scoped to managed pods, failurePolicy=Ignore).
 	// Served on /mutate (mirrors the shared /validate endpoint); inert unless the
 	// apiserver routes pods here.
-	m.GetWebhookServer().Register("/mutate", &admission.Webhook{Handler: podmutate.NewMutator(cfg.PodNDots, l)})
+	m.GetWebhookServer().Register("/mutate", &admission.Webhook{Handler: podmutate.NewMutator(podNDots(cfg.MeshDomain), l)})
 
 	// In SPIRE mode the webhook presents an SVID, so the apiserver must trust the
 	// SPIRE CA: keep the ValidatingWebhookConfiguration caBundle in sync with the

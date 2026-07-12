@@ -15,7 +15,8 @@
 # workload pods wait for a ready agent — the chart cannot taint nodes. Examples:
 #   kubelet:  --register-with-taints=aether.io/agent-not-ready=true:NoSchedule
 #   Talos:    machine.kubelet.extraArgs."register-with-taints" (machineconfig)
-# The agent's --remove-startup-taint flag (default true) governs the removal.
+# The agent removes the taint unconditionally (needs the chart's nodes/patch
+# RBAC); removal is a no-op on nodes registered without it.
 
 # Override the chart name / fully-qualified resource name.
 nameOverride: ""
@@ -70,10 +71,11 @@ otel:
 spire:
   enabled: true
   # Workload API socket path (the csi.spiffe.io mount + socket filename), shared
-  # by agent, registrar and controller.
+  # by agent, registrar and controller. Every component resolves its trust
+  # domain (mTLS peer authorization) from its own SVID over this socket — there
+  # is no trustDomain value to configure (retired: it could silently disagree
+  # with what SPIRE actually issues).
   workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
-  # SPIFFE trust domain authorized for the registrar's mTLS peers. Empty = ROOTCA.
-  trustDomain: ""
   # SPIRE agent admin socket (Delegated Identity API) used by the agent to mint
   # proxy SVIDs. hostPath is bind-mounted at mountPath; the socket is socketName.
   adminSocket:
@@ -297,14 +299,9 @@ edge:
   # plain HTTP on httpPort.
   httpPort: 80
   httpsPort: 443
-  # Port the dedicated, always-bound readiness listener binds (the kubelet
-  # readiness probe target, plain HTTP). It is independent of the public HTTP/HTTPS
-  # listeners so the probe survives proposal 021 Phase 2, where those listeners move
-  # to per-Gateway internal ports and nothing binds the HTTPS port. Internal only —
-  # never exposed via a Service.
-  readinessPort: 18021
-  # Namespace the edge watches its Gateways/HTTPRoutes in. Empty = the edge's own
-  # namespace.
+  # Default namespace for Gateway TLS certificate Secrets. Empty = the edge's
+  # own namespace. (Gateway/route watching is cluster-wide regardless; the
+  # readiness listener is the fixed port 18021, a proposal 030 constant.)
   routeNamespace: ""
   # The edge routes exclusively via Gateway API (proposal 018): it serves the
   # HTTPRoutes attached to Gateways of this GatewayClass. Requires the Gateway API
@@ -325,7 +322,7 @@ edge:
     tlsSecretName: ""
     tlsSecretNamespace: ""
     # address pins the Gateway's spec.addresses. Under proposal 021 Phase 2
-    # (perGatewayAddressing) the edge controller requests this IP from MetalLB for
+    # (per-Gateway addressing) the edge controller requests this IP from MetalLB for
     # the Gateway's own LoadBalancer Service, so the edge keeps a stable address
     # (e.g. the IP api.palermo.dev resolves to). Empty = MetalLB auto-assigns from
     # the pool.
@@ -345,12 +342,6 @@ edge:
     # `rules` is a standard Gateway API HTTPRoute rules list (matches, backendRefs,
     # filters), passed through verbatim.
     httpRoutes: []
-  # Per-Gateway addressing (proposal 021 Phase 2): when enabled (the default),
-  # the edge controller creates one LoadBalancer Service per class-aether Gateway,
-  # MetalLB assigns each its own IP from the pool, and the edge proxy binds a
-  # distinct internal port per (Gateway, listener). Set to false to fall back to
-  # Phase 1 (single shared edge LB IP for all Gateways, no per-Gateway Services).
-  perGatewayAddressing: true
   # Downstream (external-facing) TLS. Certs are referenced per Gateway listener
   # (spec.listeners[].tls.certificateRefs, a kubernetes.io/tls Secret in the
   # watched namespace), read by the edge agent and served to Envoy over SDS
@@ -365,14 +356,14 @@ edge:
   admin:
     enabled: false
     port: 9901
+  # The shared edge Service is always ClusterIP (per-Gateway LoadBalancer
+  # Services own the external IPs — proposal 021 Phase 2, unconditional).
   service:
-    type: LoadBalancer
     port: 80
     httpsPort: 443
-    annotations: {}
-    # extraPorts declares additional TCP ports on the edge Service so the LoadBalancer
-    # exposes them. Each entry becomes a spec.ports item. Use this to expose the ports
-    # bound by Gateway TCP/TLS listeners (TCPRoute/TLSRoute parented to the edge Gateway).
+    # extraPorts declares additional TCP ports on the edge Service. Each entry
+    # becomes a spec.ports item. Use this to expose the ports bound by Gateway
+    # TCP/TLS listeners (TCPRoute/TLSRoute parented to the edge Gateway).
     # Example: [{name: postgres, port: 5432, protocol: TCP}]
     extraPorts: []
   resources:
@@ -441,11 +432,6 @@ registrar:
     targetPort: 8443
   # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
   registryBackend: kubernetes
-  # Transparent-capture VIPs (proposal 018, Phase 3a): the leader registrar projects
-  # the mesh catalog into selectorless k8s Services on the mesh port (ClusterIP +
-  # cluster.local name + annotation; no EndpointSlices). Default ON — the VIPs +
-  # mesh-DNS records that capture and meshDns depend on; adds Service CRUD RBAC.
-  generateMeshServices: true
   # Multi-Cluster Services (MCS-API) phase 1 (`--enable-mcs`; proposals 018 + 006):
   # the leader registrar exports local ServiceExports to the registry and
   # materializes a ServiceImport (ClusterSetIP) + a local clusterset.local VIP

@@ -77,7 +77,7 @@ spec:
             # cross-namespace (the binary default assumes aether-system, so pass the
             # release-namespace-correct address explicitly).
             - "--registrar-address={{ include "aether.registrar.fullname" . }}.{{ include "aether.namespace" . }}.svc:{{ .Values.registrar.service.port }}"
-            # proxy-id / node-name derive from POD_NAME (downward API, below); the
+            # node-name (the xDS identity) derives from POD_NAME (downward API, below); the
             # registry dir, ports, mesh domain, route namespace and SPIRE socket all
             # use the binary defaults — passed below only when overridden.
             {{- if ne .Values.meshDomain "aether.internal" }}
@@ -100,15 +100,9 @@ spec:
             - "--geoip-headers={{ join "," .Values.edge.geoip.headers }}"
             {{- end }}
             # Publish this edge's LoadBalancer address as every class-aether
-            # Gateway's status.addresses. Phase 2: per-Gateway LB Services; Phase 1:
-            # shared edge Service IP.
+            # Gateway's status.addresses; also the base name for the per-Gateway
+            # LoadBalancer Services (proposal 021 Phase 2, unconditional).
             - "--edge-service-name={{ include "aether.edge.fullname" . }}"
-            {{- if not .Values.edge.perGatewayAddressing }}
-            - "--edge-per-gateway-addressing=false"
-            {{- end }}
-            {{- if ne (int .Values.edge.readinessPort) 18021 }}
-            - "--edge-readiness-port={{ .Values.edge.readinessPort }}"
-            {{- end }}
             {{- if .Values.edge.tls.enabled }}
             - "--edge-tls"
             {{- if ne (int .Values.edge.httpsPort) 443 }}
@@ -236,7 +230,8 @@ spec:
               protocol: TCP
             {{- end }}
             - name: readiness
-              containerPort: {{ .Values.edge.readinessPort }}
+              # Fixed readiness port (proposal 030 constant; the flag was retired).
+              containerPort: 18021
               protocol: TCP
           readinessProbe:
             # /aether/readyz (drain-aware: 200 serving, 503 draining) is served by a

@@ -27,7 +27,7 @@ metadata:
 spec:
   gatewayClassName: {{ .Values.edge.gatewayClassName }}
   {{- with .Values.edge.gateway.address }}
-  # Pin the Gateway's address. Under perGatewayAddressing the edge controller
+  # Pin the Gateway's address. Under per-Gateway addressing the edge controller
   # requests this IP from MetalLB for the Gateway's own LoadBalancer Service.
   addresses:
     - type: IPAddress

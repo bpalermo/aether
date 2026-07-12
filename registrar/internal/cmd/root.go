@@ -74,15 +74,15 @@ func init() {
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().StringArrayVar(&cfg.PeerEtcd, "peer-etcd", nil, "Peer region etcd for cross-region replication (proposal 006), repeatable: <region>=<endpoint>[,<endpoint>...]. The leader registrar mirrors this region's own registry subtree verbatim into each peer. Requires the etcd backend and an explicit --region")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
-	rootCmd.Flags().BoolVar(&cfg.GenerateMeshServices, "generate-mesh-services", false, "Project the mesh catalog into selectorless k8s Services on the mesh port (transparent-capture VIPs, proposal 018 Phase 3a)")
 	rootCmd.Flags().BoolVar(&cfg.EnableMCS, "enable-mcs", false, "Enable Multi-Cluster Services (MCS-API) phase 1: export ServiceExports to the registry and materialize ServiceImports + clusterset VIPs (proposals 018 + 006; requires the etcd backend)")
 	rootCmd.Flags().StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "gRPC listen address")
 
 	// SPIRE on/off is aether system config (inherited from the umbrella globals);
-	// the socket path and trust domain are per-instance.
+	// the socket path is per-instance. The trust domain authorized for mTLS peers
+	// is resolved from the registrar's own SVID (like the agent and edge do), so
+	// it can never disagree with what SPIRE actually issues.
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE mTLS for the gRPC server")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
-	rootCmd.Flags().StringVar(&cfg.SpireTrustDomain, "spire-trust-domain", cfg.SpireTrustDomain, "SPIFFE trust domain authorized for mTLS peers")
 
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 }
@@ -177,18 +177,18 @@ func runRegistrar(ctx context.Context) (retErr error) {
 
 	// Transparent-capture VIPs (proposal 018, Phase 3a): the leader registrar
 	// projects the mesh catalog into selectorless k8s Services on the mesh port.
-	// Default off — adds nothing (and no Service-write RBAC) unless enabled.
-	if cfg.GenerateMeshServices {
-		gen := &services.Generator{
-			Client:   m.GetClient(),
-			Snapshot: snapshot,
-			MeshPort: int32(constants.ProxyOutboundPort),
-			Interval: cfg.SyncInterval,
-			Log:      l,
-		}
-		if err = m.Add(gen); err != nil {
-			return fmt.Errorf("failed to add mesh-Service generator: %w", err)
-		}
+	// Unconditional (031 round 2): capture and mesh DNS resolve against these
+	// VIPs, and both are on by default — a registrar without the generator
+	// silently degrades the whole capture path.
+	gen := &services.Generator{
+		Client:   m.GetClient(),
+		Snapshot: snapshot,
+		MeshPort: int32(constants.ProxyOutboundPort),
+		Interval: cfg.SyncInterval,
+		Log:      l,
+	}
+	if err = m.Add(gen); err != nil {
+		return fmt.Errorf("failed to add mesh-Service generator: %w", err)
 	}
 
 	// Multi-Cluster Services (MCS-API) phase 1 (proposals 018 + 006): the leader
@@ -281,12 +281,19 @@ func runRegistrar(ctx context.Context) (retErr error) {
 			return srcErr
 		}
 		defer func() { retErr = errors.Join(retErr, src.Close()) }()
-		tlsCfg, tlsErr := spire.ServerTLSConfig(src, cfg.SpireTrustDomain)
+		// Authorize peers in the registrar's own trust domain, resolved from its
+		// SVID (the mesh is a single trust domain by design; the old
+		// --spire-trust-domain flag could silently disagree with it).
+		trustDomain, tdErr := spire.TrustDomainFromSource(src)
+		if tdErr != nil {
+			return fmt.Errorf("failed to resolve SPIRE trust domain: %w", tdErr)
+		}
+		tlsCfg, tlsErr := spire.ServerTLSConfig(src, trustDomain)
 		if tlsErr != nil {
 			return tlsErr
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
-		l.InfoContext(ctx, "SPIRE mTLS enabled for gRPC server", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.SpireTrustDomain)
+		l.InfoContext(ctx, "SPIRE mTLS enabled for gRPC server", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", trustDomain)
 	} else {
 		l.InfoContext(ctx, "SPIRE disabled, gRPC server will use insecure transport")
 	}
