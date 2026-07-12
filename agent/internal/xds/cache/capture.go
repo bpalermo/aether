@@ -397,7 +397,7 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 		}
 		// entry.sni carries the backend's registered application port. The UDP floor
 		// has no inbound mTLS hop, so udp_proxy must reach that app port directly (not
-		// the mesh inbound :15008 the shared bare-name EDS carries) — build an inline
+		// the mesh inbound :18008 the shared bare-name EDS carries) — build an inline
 		// app-port UDP load assignment from the service's endpoints.
 		port, err := strconv.Atoi(entry.sni)
 		if err != nil || port <= 0 || port > 65535 {

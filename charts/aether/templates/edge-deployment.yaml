@@ -29,7 +29,7 @@ spec:
         # ALL its egress (apiserver, registrar, collector) to a capture port with no
         # listener → the edge control plane can't reach anything. Opt out explicitly
         # via the annotation the CNI DOES honor. (Scoped :18081 redirect is harmless:
-        # the edge dials :443/:4317 and backend :15008, never a mesh :18081.)
+        # the edge dials :443/:4317 and backend :18008, never a mesh :18081.)
         capture.aether.io/redirect-all: "false"
       labels:
         {{- include "aether.edge.labels" . | nindent 8 }}

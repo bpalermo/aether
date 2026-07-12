@@ -593,7 +593,7 @@ func (c *SnapshotCache) virtualHostVhosts() []*routev3.VirtualHost {
 // mesh-registered backend — use the existing mTLS mesh cluster path (unchanged).
 // If NOT in the registry, the backend is a plain k8s Service: return the cleartext
 // STRICT_DNS cluster name (EdgeK8sClusterName) so the edge dials the k8s Service
-// FQDN over cleartext instead of attempting a mesh mTLS connection to :15008.
+// FQDN over cleartext instead of attempting a mesh mTLS connection to :18008.
 //
 // Mesh path: Port 0 -> the default cluster (ServiceClusterName). A non-zero port ->
 // its per-port cluster if one exists; otherwise, if the port is the service's

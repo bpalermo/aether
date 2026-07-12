@@ -26,14 +26,9 @@ const (
 	// defaultInboundPort is the mesh inbound port. The per-pod inbound listener binds
 	// it inside the pod's network namespace, and source proxies dial the destination
 	// pod at <pod_ip>:defaultInboundPort. In aether's 18xxx range, out of Istio's
-	// reserved 15000-15090 band — 15008 is Istio's HBONE number (proposal 030,
-	// Phase B: dialers flipped here after the whole fleet dual-bound in Phase A).
+	// reserved 15000-15090 band — the pre-030 port was 15008, Istio's HBONE
+	// number (migrated via the proposal 030 dual-bind transition).
 	defaultInboundPort = 18008
-	// legacyInboundPort is the pre-030 inbound port, still bound (additional
-	// address) so proxies one release behind — still dialing 15008 — keep
-	// working through the Phase B roll. Phase C (next release, after the fleet
-	// fully rolls) drops this bind.
-	legacyInboundPort = 15008
 
 	// MeshLivePath is the liveness path answered locally by the inbound listener: a
 	// 200 proves the proxy config is loaded and the listener is serving, and (since
@@ -106,24 +101,6 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 				},
 			},
 		},
-		// Proposal 030 Phase B: the legacy port stays bound (same netns, same
-		// filter chains) so one-release-stale dialers still connect; Phase C
-		// drops it after this release fully rolls. Same-listener
-		// additional address (not a second listener) keeps stats/drain unified.
-		AdditionalAddresses: []*listenerv3.AdditionalAddress{{
-			Address: &corev3.Address{
-				Address: &corev3.Address_SocketAddress{
-					SocketAddress: &corev3.SocketAddress{
-						Protocol: corev3.SocketAddress_TCP,
-						Address:  defaultInboundAddress,
-						PortSpecifier: &corev3.SocketAddress_PortValue{
-							PortValue: legacyInboundPort,
-						},
-						NetworkNamespaceFilepath: cniPod.GetNetworkNamespace(),
-					},
-				},
-			},
-		}},
 		// Per-pod listener stats are kept deliberately (downstream_cx_* per pod
 		// is the connection-leak debugging signal — see the 2026-06-11 cx-leak).
 		// The "inbound_<pod>" shape is what the aether.pod stats_tag extracts, so

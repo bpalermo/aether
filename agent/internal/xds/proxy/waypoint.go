@@ -58,7 +58,7 @@ func BuildWaypointTunnelListener(tunnelPort uint32, chains []*listenerv3.FilterC
 // matches the structured waypoint SNI by suffix ("*.<fqdn>" — Envoy's leftmost
 // wildcard is a suffix match, which is safe because aether owns the SNI and each
 // service has a unique .<fqdn> suffix) and tcp_proxies the raw (still-mTLS)
-// stream to that service's local pods at :15008.
+// stream to that service's local pods at :18008.
 func BuildWaypointTunnelChain(fqdn string) *listenerv3.FilterChain {
 	name := "ew_" + fqdn
 	return &listenerv3.FilterChain{
