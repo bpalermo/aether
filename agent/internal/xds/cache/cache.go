@@ -99,7 +99,7 @@ type SnapshotCache struct {
 	// spireEnabled reports whether SPIRE-backed mTLS is on for the mesh. It is
 	// true by default (the production posture). When false (--spire-enabled=false)
 	// no SVIDs are issued and the SPIRE bridge never delivers SDS secrets, so the
-	// per-pod inbound listener (:15008) is built CLEARTEXT — without a downstream
+	// per-pod inbound listener (:18008) is built CLEARTEXT — without a downstream
 	// mTLS transport socket — to stay symmetric with the outbound clusters, which
 	// already degrade to cleartext when no node SVID is set (clustersEndpointsAndVhosts).
 	// This makes the mesh data path routable without SPIRE (e.g. the MESH-HTTP

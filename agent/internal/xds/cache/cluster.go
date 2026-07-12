@@ -302,7 +302,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			continue
 		}
 		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
-		// destination pod's mesh inbound (pod_ip:15008). The per-source mTLS transport
+		// destination pod's mesh inbound (pod_ip:18008). The per-source mTLS transport
 		// socket is injected at snapshot time (clustersEndpointsAndVhosts).
 		// Server-identity pinning: the union of the endpoints' namespaces
 		// renders the service's expected SPIFFE IDs at snapshot time.

@@ -36,7 +36,7 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 
 // GenerateListenersFromRegistryPod generates the per-pod inbound and outbound HTTP
 // listeners and the per-pod application and health-probe clusters for a pod.
-// The inbound listener (netns-bound, mTLS) accepts mesh traffic at <pod_ip>:15008
+// The inbound listener (netns-bound, mTLS) accepts mesh traffic at <pod_ip>:18008
 // and forwards it to the pod's application on loopback; the outbound listener routes
 // the pod's traffic to other services. The trustDomain names the pod's SVID and the
 // SDS validation context for the inbound listener's mTLS.

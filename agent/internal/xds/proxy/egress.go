@@ -338,7 +338,7 @@ func NewTCPServiceCluster(name, edsServiceName, altStatName string, perDownstrea
 //
 // The cluster is STATIC with an inline load assignment rather than EDS: the UDP
 // floor has no inbound mTLS hop, so udp_proxy must reach the backend's application
-// UDP port directly — not the mesh inbound :15008 that the shared bare-name EDS
+// UDP port directly — not the mesh inbound :18008 that the shared bare-name EDS
 // carries. Callers pass a load assignment from UDPLoadAssignment (app-port endpoints).
 func NewUDPServiceCluster(name, altStatName string, loadAssignment *endpointv3.ClusterLoadAssignment) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
@@ -368,7 +368,7 @@ func NewUDPServiceCluster(name, altStatName string, loadAssignment *endpointv3.C
 }
 
 // UDPLoadAssignment derives an inline UDP load assignment from a service's existing
-// (TCP-inbound, :15008) load assignment: it clones it and rewrites every endpoint to
+// (TCP-inbound, :18008) load assignment: it clones it and rewrites every endpoint to
 // the backend's application UDP port and UDP protocol. The UDP floor has no inbound
 // mTLS proxy, so udp_proxy reaches the application port directly. Returns nil if src
 // is nil.
@@ -468,7 +468,7 @@ const remoteClusterPriorityBand = 3
 // instead of its (cross-cluster, possibly non-routable) pod IP, and is tagged
 // with waypoint metadata so the cluster's transport-socket matcher can present
 // the structured SNI. When disabled (the default) every endpoint is dialed at
-// pod_ip:15008 — the flat pod-to-pod path (proposal 018 flat-network mode),
+// pod_ip:18008 — the flat pod-to-pod path (proposal 018 flat-network mode),
 // unchanged. LocalCluster is this agent's own cluster name.
 type WaypointRewrite struct {
 	Enabled      bool
@@ -568,7 +568,7 @@ func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceE
 		locality = &corev3.Locality{Region: loc.GetRegion(), Zone: loc.GetZone()}
 	}
 
-	// Local: the destination pod's mesh inbound (pod_ip:15008), reached by the
+	// Local: the destination pod's mesh inbound (pod_ip:18008), reached by the
 	// pod's own netns-bound inbound listener. Remote (waypoint): the destination
 	// node's routable IP + tunnel port, where that node's host-network proxy
 	// SNI-forwards to the local pod — the source's mTLS passes through unchanged.
