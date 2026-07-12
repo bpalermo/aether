@@ -393,7 +393,7 @@ metadata:
 
 ```bash
 # on the request (consumer)
-curl http://127.0.0.1:18081/ -H 'Host: my-svc.aether.internal' \
+curl http://127.0.0.1:18081/ -H 'Host: my-svc.my-namespace.aether.internal' \
      -H 'x-aether-subset-version: v2'
 ```
 
