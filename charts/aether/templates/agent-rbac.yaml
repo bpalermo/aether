@@ -27,9 +27,9 @@ rules:
     resources: ["httpfilters"]
     verbs: ["list", "get", "watch"]
   {{- end }}
-  {{- if .Values.agent.l4Routes }}
-  # L4 route types (proposal 018, Phase 3b): watch TCPRoutes/TLSRoutes/UDPRoutes
-  # parented to Services cluster-wide.
+  # L4 route types (proposal 018, Phase 3b — unconditional since proposal 031,
+  # CRD-detected at runtime): watch TCPRoutes/TLSRoutes/UDPRoutes parented to
+  # Services cluster-wide.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["tcproutes", "tlsroutes", "udproutes"]
     verbs: ["list", "get", "watch"]
@@ -37,23 +37,18 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["tcproutes/status", "tlsroutes/status", "udproutes/status"]
     verbs: ["get", "update", "patch"]
-  {{- end }}
-  {{- if or .Values.agent.gamma .Values.agent.l4Routes }}
   # ReferenceGrant (v1beta1): admit cross-namespace backendRefs on GAMMA/L4 routes.
   # Read-only; a grant's presence gates whether a cross-ns backend is served +
   # surfaced as ResolvedRefs (RefNotPermitted otherwise). Cluster-wide.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["referencegrants"]
     verbs: ["list", "get", "watch"]
-  {{- end }}
-  {{- if or .Values.agent.transparentCapture .Values.agent.meshDns .Values.agent.gamma .Values.agent.l4Routes }}
   # Transparent capture (Phase 3a) / mesh DNS (mesh-global FQDN): watch the generated
   # mesh Services for their cluster.local authorities + ClusterIPs. GAMMA + l4route also
   # read Services to resolve backendRefs for the ResolvedRefs status condition.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list", "get", "watch"]
-  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

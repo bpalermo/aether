@@ -145,7 +145,6 @@ install_aether() {
 			--set namespace.create=false \
 			--set "clusterName=cluster-$c" \
 			--set spire.enabled=false \
-			--set agent.gamma=true \
 			--set "agent.importConfig=$import" \
 			--set registrar.registryBackend=etcd \
 			--set registrar.enableMCS=true \

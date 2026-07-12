@@ -43,11 +43,11 @@ spec:
             # from the agent's runtime OTLP in the MeshConfig CR.
             - "--otlp-endpoint={{ . }}"
             {{- end }}
-            {{- if .Values.agent.transparentCapture }}
+            # Capture is unconditional (proposal 031); redirect-all-default is the
+            # remaining node-wide capture knob (per-pod annotations override).
             - "--transparent-capture"
             {{- if .Values.agent.captureRedirectAllDefault }}
             - "--capture-redirect-all-default"
-            {{- end }}
             {{- end }}
             {{- if .Values.agent.meshDns }}
             - "--mesh-dns"
@@ -97,18 +97,8 @@ spec:
             - "--authz-sidecar-failure-mode-allow"
             {{- end }}
             {{- end }}
-            {{- if .Values.agent.l4Routes }}
-            - "--l4-routes"
-            {{- end }}
             {{- if .Values.agent.eastWestWaypoint }}
             - "--east-west-waypoint"
-            - "--east-west-tunnel-port={{ .Values.agent.eastWestTunnelPort }}"
-            {{- end }}
-            {{- if .Values.agent.transparentCapture }}
-            - "--transparent-capture"
-            {{- if or .Values.agent.captureRedirectAll .Values.agent.captureRedirectAllDefault }}
-            - "--capture-redirect-all"
-            {{- end }}
             {{- end }}
             {{- if .Values.agent.meshDns }}
             - "--mesh-dns"

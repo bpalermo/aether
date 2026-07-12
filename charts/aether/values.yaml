@@ -102,55 +102,33 @@ meshConfig:
 
 # --------------------------------------------------------------------- agent
 agent:
-  # GAMMA east-west L7 routing (proposal 018, Phase 2): the node agent watches
-  # HTTPRoutes parented to a Service and enriches the outbound routes (canary /
-  # header / timeout). Requires the Gateway API CRDs. Default off — a no-op, and
-  # adds the cluster-wide httproutes RBAC only when enabled.
-  gamma: false
+  # GAMMA east-west L7 routing (proposal 018): the node agent watches HTTPRoutes
+  # and GRPCRoutes parented to a Service and applies them on the outbound +
+  # capture paths. Default ON since proposal 031: the reconciler CRD-detects the
+  # Gateway API types and degrades with a warning when they are absent, so this
+  # is safe without the CRDs installed. Kill switch — set false to disable the
+  # watches (and drop the cluster-wide route RBAC).
+  gamma: true
   # Cross-cluster config import (proposal 026): poll the registrar for GAMMA config
   # projections peer clusters exported and materialize them into the node proxy's
   # routes (merged with local; local wins). Default off; no-op unless the registry
   # backend has a cross-cluster config plane (etcd). Pairs with registrar.registryBackend=etcd.
   importConfig: false
-  # L4 route types (proposal 018, Phase 3b): watch TCPRoutes/TLSRoutes/UDPRoutes
-  # parented to a Service and project weighted TCP floor chains + per-SNI TLS chains
-  # onto the capture listener. Requires --transparent-capture (default on).
-  # Default ON: TCPRoute weighted routing + TLSRoute SNI passthrough are e2e-validated
-  # on talos (weighted split, weight:0 drain, SNI exclusivity). Inert when no L4 routes
-  # exist (services keep the passthrough floor chain).
-  # NOTE: UDPRoute is CONTROL-PLANE ONLY (plaintext floor, no DTLS) — a UDPRoute is
-  # accepted and generates listeners but the data path is unvalidated.
-  l4Routes: true
   # East/west waypoint (proposal 019): when true, cross-cluster endpoints (a
   # different cluster_name than this one) are dialed at their node's routable IP +
-  # eastWestTunnelPort instead of their pod IP, and this node's host-network proxy
-  # SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct
-  # pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared
-  # SPIRE trust domain across clusters. Default off.
+  # the fixed tunnel port 18009 instead of their pod IP, and this node's
+  # host-network proxy SNI-forwards inbound tunnel traffic to local pods.
+  # Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint
+  # visibility (shared etcd) and a shared SPIRE trust domain across clusters.
+  # Default off.
   eastWestWaypoint: false
-  # eastWestTunnelPort is the host-netns port the node proxy binds for cross-cluster
-  # waypoint traffic (only with eastWestWaypoint). Must match across the clusterset.
-  eastWestTunnelPort: 18009
-  # Transparent capture (proposal 018, Phase 3a): per-pod capture listeners + the
-  # cap_http route table built from the generated mesh Services. Pairs with
-  # registrar.generateMeshServices (the VIPs) and the CNI dst-18081 redirect.
-  # Default ON (validated hitless under churn); adds the services-read RBAC.
-  transparentCapture: true
-  # Redirect-ALL outbound TCP into the capture listener with an ORIGINAL_DST
-  # passthrough for non-mesh destinations, so GAMMA routing can apply to real
-  # Services on real ports (proposal 022). Requires --transparent-capture. This
-  # only adds the (dormant) passthrough filter chain on the Envoy side; a pod is
-  # redirect-all'd ONLY when it carries the capture.aether.io/redirect-all="true"
-  # annotation (per-pod opt-in). For node-wide default-on, use
-  # captureRedirectAllDefault below instead. Default OFF.
-  captureRedirectAll: false
   # M2-default flip (proposal 022, Step 4): make redirect-all the DEFAULT for
   # managed pods (Istio-style "capture what the app sends", zero per-pod config).
   # Every non-system pod on the node is redirect-all'd UNLESS it carries the
   # capture.aether.io/redirect-all="false" opt-out annotation (use it for infra /
-  # hostNetwork / prober pods). Implies the Envoy passthrough filter chain, so it
-  # enables the agent --capture-redirect-all flag too (no need to also set
-  # captureRedirectAll). Requires --transparent-capture. Carve out destinations
+  # hostNetwork / prober pods). false = per-pod OPT-IN via the same annotation
+  # set to "true" (the passthrough chain itself is always present, proposal
+  # 031). Carve out destinations
   # with capture.aether.io/exclude-outbound-ports / -ip-ranges (link-local +
   # multicast are always excluded). Default ON — validated HITLESS on talos
   # (2026-06-29 churn soak: external prober 100%, k6 0.012%, egress intact, stable

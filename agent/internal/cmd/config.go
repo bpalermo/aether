@@ -120,39 +120,18 @@ type AgentConfig struct {
 	// there and ignores all other origins. Empty = federated (trust any peer origin).
 	ControlCluster string
 
-	// L4Routes enables L4 route types (TCPRoute/TLSRoute/UDPRoute parentRef=Service,
-	// proposal 018, Phase 3b): the agent watches these route types and projects
-	// weighted TCP floor chains and SNI-routed TLS chains onto the capture listener.
-	// Requires --transparent-capture to be meaningful. Default off.
-	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
-	L4Routes bool
-
-	// TransparentCapture enables transparent capture (proposal 018, Phase 3a): the
-	// agent generates per-pod capture listeners + the cap_http route table and
-	// watches the generated mesh Services for their cluster.local authorities. Pairs
-	// with the registrar's --generate-mesh-services and the CNI dst-18081 redirect.
-	// Default off.
-	TransparentCapture bool
-
-	// CaptureRedirectAll adds the dormant ORIGINAL_DST passthrough DefaultFilterChain
-	// to capture listeners (proposal 022 M2a spike). Harmless for pods that are not
-	// redirect-all'd (only :18081 reaches their capture listener, which matches the
-	// HCM/mesh chain, so the passthrough never fires). The per-pod CNI redirect-all
-	// (gated by the capture.aether.io/redirect-all annotation) is what actually sends
-	// all egress into the listener. Default off.
-	CaptureRedirectAll bool
-
 	// EastWestWaypoint enables the split-horizon east/west waypoint rewrite
 	// (proposal 019): an endpoint in another cluster is dialed at its node's
-	// routable IP + EastWestTunnelPort (the per-node waypoint) instead of its
-	// pod IP, and that node's host-network proxy SNI-forwards to the local pod.
-	// Intra-cluster traffic stays direct pod-to-pod. Default off.
+	// routable IP + the fixed tunnel port (proxy.DefaultEastWestTunnelPort)
+	// instead of its pod IP, and that node's host-network proxy SNI-forwards to
+	// the local pod. Intra-cluster traffic stays direct pod-to-pod. Default off.
+	//
+	// NOTE (proposal 031): transparent capture, the dormant redirect-all
+	// passthrough chain, and the L4 route types are UNCONDITIONAL — their old
+	// flags encoded install-ordering fears now handled by CRD detection. The
+	// remaining capture knobs are the per-pod capture.aether.io/* annotations
+	// and the CNI's --capture-redirect-all-default.
 	EastWestWaypoint bool
-
-	// EastWestTunnelPort is the host-netns port the node proxy will listen on for
-	// cross-cluster waypoint traffic and the port cross-cluster endpoints are
-	// dialed at. Only meaningful with EastWestWaypoint.
-	EastWestTunnelPort uint32
 
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
 	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
@@ -210,7 +189,6 @@ func NewAgentConfig() *AgentConfig {
 		MountedLocalStorageDir:   constants.DefaultHostCNIRegistryDir,
 		RegistrarAddress:         "aether-registrar.aether-system.svc:443",
 		MeshDomain:               commonconstants.DefaultMeshDomain,
-		EastWestTunnelPort:       proxy.DefaultEastWestTunnelPort,
 		SpireEnabled:             true,
 		SpireAdminSocketPath:     constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath:  constants.DefaultSpireWorkloadSocketPath,

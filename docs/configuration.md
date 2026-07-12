@@ -68,14 +68,10 @@ access-log/tracing policy via the MeshConfig CR.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `agent.gamma` | `false` | GAMMA east-west L7 routing (018): watch `HTTPRoute`s **and `GRPCRoute`s** parented to a Service (plus `ReferenceGrant`s and `HTTPFilter` attachments) and apply them on **both** the explicit outbound path and the transparent-capture path. MESH-HTTP Core conformance-green. Requires the Gateway API CRDs. |
+| `agent.gamma` | `true` | GAMMA east-west L7 routing (018): watch `HTTPRoute`s **and `GRPCRoute`s** parented to a Service (plus `ReferenceGrant`s and `HTTPFilter` attachments) and apply them on **both** the explicit outbound path and the transparent-capture path. MESH-HTTP Core conformance-green. Safe without the Gateway API CRDs (CRD-detected, degrades with a warning); `false` is a kill switch. |
 | `agent.importConfig` | `false` | Cross-cluster config import (026): poll the registrar for peer-exported GAMMA projections and materialize them (merged with local; local wins). Pairs with `registrar.registryBackend=etcd`. |
-| `agent.l4Routes` | `true` | L4 route types (018 Phase 3b): `TCPRoute` (weighted, incl. weight-0 drain) / `TLSRoute` (SNI passthrough) / `UDPRoute` parented to a Service → weighted TCP + per-SNI TLS chains on the capture listener. Requires `transparentCapture`. UDPRoute is control-plane only (plaintext floor, no DTLS). |
-| `agent.eastWestWaypoint` | `false` | East/west waypoint (019): dial **cross-cluster** endpoints at their node's routable IP + `eastWestTunnelPort` instead of the (unroutable) pod IP; this node's host-network proxy SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared or replicated etcd) + a shared SPIRE trust domain. |
-| `agent.eastWestTunnelPort` | `18009` | Host-netns tunnel port (must match across the clusterset). |
-| `agent.transparentCapture` | `true` | Transparent capture (018 Phase 3a): per-pod capture listeners + the `cap_http` route table from generated mesh Services. Pairs with `registrar.generateMeshServices`. |
-| `agent.captureRedirectAll` | `false` | Add the dormant ORIGINAL_DST passthrough chain (022) so a pod annotated `capture.aether.io/redirect-all="true"` can redirect ALL outbound TCP. Per-pod opt-in. Requires `transparentCapture`. |
-| `agent.captureRedirectAllDefault` | `true` | Make redirect-all the DEFAULT for managed pods (022 Step 4); opt out per-pod with `capture.aether.io/redirect-all="false"`. Implies `captureRedirectAll`. Requires `transparentCapture`. Riskiest blast radius; soak-validated hitless. |
+| `agent.eastWestWaypoint` | `false` | East/west waypoint (019): dial **cross-cluster** endpoints at their node's routable IP + the fixed tunnel port `18009` instead of the (unroutable) pod IP; this node's host-network proxy SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared or replicated etcd) + a shared SPIRE trust domain. |
+| `agent.captureRedirectAllDefault` | `true` | Redirect-all as the DEFAULT for managed pods (022 Step 4); opt out per-pod with `capture.aether.io/redirect-all="false"`. `false` = per-pod opt-in via the same annotation set to `"true"`. (Transparent capture itself and the passthrough chain are unconditional since proposal 031.) |
 | `agent.meshDns` | `true` | Per-pod mesh DNS (018): resolve `<svc>.<meshDomain>` from generated mesh Services, forward the rest to `meshDnsUpstream`. |
 | `agent.meshDnsUpstream` | `[]` | Upstream resolver(s) for non-mesh queries. Empty = the agent's own resolv.conf (kube-dns). |
 | `agent.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image; mirror by overriding `repository` alone. |
@@ -127,7 +123,7 @@ access-log/tracing policy via the MeshConfig CR.
 |---|---|---|
 | `registrar.registryBackend` | `kubernetes` | Backend (`--registry-backend`): `kubernetes`, `dynamodb`, or `etcd`. |
 | `registrar.replicaCount` | `2` | Always 2 (exercises the multi-replica write-behind topology). |
-| `registrar.generateMeshServices` | `true` | Project the mesh catalog into selectorless k8s Services (transparent-capture VIPs, 018 Phase 3a) that `transparentCapture` + `meshDns` depend on. |
+| `registrar.generateMeshServices` | `true` | Project the mesh catalog into selectorless k8s Services (transparent-capture VIPs, 018 Phase 3a) that transparent capture + `meshDns` depend on. |
 | `registrar.enableMCS` | `false` | Multi-Cluster Services phase 1 (018 + 006): export `ServiceExport`s and materialize `ServiceImport`s + clusterset VIPs. Requires the etcd backend + the MCS-API CRDs. |
 | `registrar.region` | `local` | Region owning this registrar's etcd partition (006); keys are `/aether/v1/regions/<region>/clusters/<clusterName>/…`. One region = one etcd. |
 | `registrar.etcd.endpoints` | `[]` | etcd client endpoints (etcd backend). |
@@ -232,23 +228,20 @@ Node-agent-specific:
 | `--mounted-registry-dir` | `/host/var/lib/aether/registry` | Local pod-data dir for the CNI plugin. |
 | `--spire-admin-socket` | `/tmp/spire-agent/private/admin.sock` | SPIRE admin socket for proxy SVID delegation. |
 | `--remove-startup-taint` | `true` | Remove the `aether.io/agent-not-ready` node taint once the CNI server serves. |
-| `--gamma` | `false` | Enable GAMMA east-west routing (018): HTTPRoute + GRPCRoute parented to Services, on the outbound and capture paths. |
+| `--gamma` | `false` | GAMMA east-west routing (018); the chart passes it (default ON there). CRD-detected. |
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
-| `--transparent-capture` | `false` | Per-pod capture listeners + `cap_http` (018 Phase 3a). |
-| `--capture-redirect-all` | `false` | Dormant ORIGINAL_DST passthrough chain (022). |
-| `--l4-routes` | `false` | L4 route types (018 Phase 3b). The chart passes it (default ON there). |
-| `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019). |
-| `--east-west-tunnel-port` | `18009` | Host-netns tunnel port (clusterset-wide). |
+| `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |
 | `--mesh-dns` | `false` | Per-pod mesh DNS (018). |
 | `--mesh-dns-upstream` | `[]` | Upstream resolver(s) for non-mesh queries. |
 | `--authz-sidecar` | `false` | Node-local ext_authz sidecar entry (027). |
 | `--authz-sidecar-timeout` | `200ms` | Per-check gRPC timeout. |
 | `--authz-sidecar-failure-mode-allow` | `false` | Fail-open (default: fail-closed). |
 
-> The chart's booleans (`agent.transparentCapture`, `agent.meshDns`,
-> `agent.captureRedirectAllDefault`, …) map to these flags; the chart also
-> auto-enables `--capture-redirect-all` when `captureRedirectAllDefault=true`.
+> The chart's booleans (`agent.gamma`, `agent.meshDns`,
+> `agent.captureRedirectAllDefault`, …) map to these flags. Transparent
+> capture, the redirect-all passthrough chain, and L4 route types are
+> unconditional since proposal 031 (no flags).
 
 ### `agent edge` (subcommand)
 
