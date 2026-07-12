@@ -35,7 +35,7 @@ func TestApplyWaypointInboundServerNames(t *testing.T) {
 	// Enabled: the secondary-port chain gains "8081.payments.team-a.<meshDomain>".
 	on := newTestCache("node-1")
 	on.SetMeshDomain("aether.internal")
-	on.SetWaypointConfig(true, 15009)
+	on.SetWaypointConfig(true, 18009)
 	l := newListener()
 	on.applyWaypointInboundServerNames(l, pod)
 	assert.Empty(t, l.GetFilterChains()[0].GetFilterChainMatch().GetServerNames(), "TCP floor untouched")

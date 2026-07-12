@@ -18,15 +18,15 @@ func TestBuildWaypointTunnelChain(t *testing.T) {
 }
 
 func TestBuildWaypointTunnelListener(t *testing.T) {
-	assert.Nil(t, BuildWaypointTunnelListener(15009, nil), "no chains -> no listener")
+	assert.Nil(t, BuildWaypointTunnelListener(18009, nil), "no chains -> no listener")
 
-	ln := BuildWaypointTunnelListener(15009, []*listenerv3.FilterChain{BuildWaypointTunnelChain("echo.default.aether.internal")})
+	ln := BuildWaypointTunnelListener(18009, []*listenerv3.FilterChain{BuildWaypointTunnelChain("echo.default.aether.internal")})
 	require.NotNil(t, ln)
 	assert.Equal(t, WaypointTunnelListenerName, ln.GetName())
 	// Host netns: a plain socket address, NO network-namespace filepath.
 	sa := ln.GetAddress().GetSocketAddress()
 	assert.Equal(t, "0.0.0.0", sa.GetAddress())
-	assert.Equal(t, uint32(15009), sa.GetPortValue())
+	assert.Equal(t, uint32(18009), sa.GetPortValue())
 	assert.Empty(t, sa.GetNetworkNamespaceFilepath(), "tunnel binds the host netns")
 	require.Len(t, ln.GetListenerFilters(), 1, "tls_inspector reads the SNI")
 }

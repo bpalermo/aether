@@ -106,7 +106,7 @@ spec:
             {{- if not .Values.edge.perGatewayAddressing }}
             - "--edge-per-gateway-addressing=false"
             {{- end }}
-            {{- if ne (int .Values.edge.readinessPort) 15021 }}
+            {{- if ne (int .Values.edge.readinessPort) 18021 }}
             - "--edge-readiness-port={{ .Values.edge.readinessPort }}"
             {{- end }}
             {{- if .Values.edge.tls.enabled }}

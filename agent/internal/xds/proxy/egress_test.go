@@ -295,14 +295,14 @@ func TestServiceLocalityLbEndpoint_Waypoint(t *testing.T) {
 			},
 		}
 	}
-	wp := WaypointRewrite{Enabled: true, TunnelPort: 15009, LocalCluster: "cluster-a"}
+	wp := WaypointRewrite{Enabled: true, TunnelPort: 18009, LocalCluster: "cluster-a"}
 
 	// Remote endpoint via waypoint: node IP + tunnel port, waypoint metadata,
 	// remote priority band (locality 0 + band 3).
 	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(remote(), "r1", "z1", wp)
 	sa := lle.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
 	assert.Equal(t, "192.168.0.42", sa.GetAddress(), "dial the node, not the pod")
-	assert.Equal(t, uint32(15009), sa.GetPortValue(), "dial the tunnel port")
+	assert.Equal(t, uint32(18009), sa.GetPortValue(), "dial the tunnel port")
 	lb := lle.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
 	assert.Equal(t, "true", lb[subsetWaypointKey].GetStringValue(), "tagged for the waypoint transport socket")
 	assert.Equal(t, uint32(remoteClusterPriorityBand), lle.GetPriority(), "remote cluster is a failover band")

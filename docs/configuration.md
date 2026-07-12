@@ -170,7 +170,7 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.geoip.database.secretName` / `fileName` | `""` / `GeoLite2-City.mmdb` | The bring-your-own mmdb Secret + key. |
 | `edge.xffNumTrustedHops` | `0` | Trusted proxies in front of the edge (feeds HCM client-address + geoip XFF). |
 | `edge.httpPort` / `httpsPort` | `80` / `443` | Public listener ports (privileged ports via `NET_BIND_SERVICE`; pod stays unprivileged). |
-| `edge.readinessPort` | `15021` | Dedicated always-bound readiness listener (kubelet probe target; never exposed). |
+| `edge.readinessPort` | `18021` | Dedicated always-bound readiness listener (kubelet probe target; never exposed). |
 | `edge.routeNamespace` | `""` | Namespace the edge watches Gateways/HTTPRoutes in. Empty = its own namespace. |
 | `edge.service.{type,port,httpsPort,annotations,extraPorts}` | `LoadBalancer` / `80` / `443` / `{}` / `[]` | The edge's Service; `extraPorts` exposes TCP/TLS listener ports. |
 | `edge.drain.preStopSeconds` | `10` | preStop sleep holding off SIGTERM during drain (matches `proxy.hotRestart.drainTime`). 0 disables. |
@@ -248,7 +248,7 @@ Node-agent-specific:
 
 Inherits the manager + identity flags (but `--node-name`/`--proxy-id` are relaxed,
 derived from `POD_NAME`). Adds: `--edge-http-port` (`80`), `--edge-https-port`
-(`443`), `--edge-readiness-port` (`15021`), `--edge-tls` (`false`),
+(`443`), `--edge-readiness-port` (`18021`), `--edge-tls` (`false`),
 `--gateway-class` (`aether`), `--route-namespace` (`""`), `--edge-service-name`
 (`""`), `--edge-per-gateway-addressing` (`true`), `--geoip-city-db` (`""`),
 `--geoip-headers` (`[country]`), `--xff-num-trusted-hops` (`0`),
