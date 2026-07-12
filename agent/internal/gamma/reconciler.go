@@ -19,10 +19,10 @@ import (
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	"github.com/bpalermo/aether/common/crdcheck"
 	"github.com/bpalermo/aether/common/gammaproject"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/referencegrant"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -71,6 +71,11 @@ type Reconciler struct {
 	// (the escape hatch is inert) — so a missing/not-yet-installed CRD degrades
 	// gracefully instead of crashing the manager on a failed informer sync.
 	httpFilterEnabled bool
+	// grpcRouteEnabled / referenceGrantEnabled likewise gate the optional Gateway API
+	// types on CRD presence (proposal 031): a partial Gateway API install degrades the
+	// affected feature with a warning instead of wedging the manager.
+	grpcRouteEnabled      bool
+	referenceGrantEnabled bool
 }
 
 // SetupWithManager registers the reconciler to watch HTTPRoutes and GRPCRoutes. Both
@@ -82,29 +87,48 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return []reconcile.Request{{}}
 	})
 
-	// HTTPFilter (config.aether.io, proposal 025) is an OPTIONAL CRD: gate its watch +
-	// list on the CRD actually being present. Watching a type whose CRD is absent makes
-	// the cache fail to sync and HARD-CRASHES the manager (the upgrade-ordering crashloop
-	// when crds is installed after/with the agent). Degrade instead: skip the escape
-	// hatch until the CRD exists and the agent restarts.
-	gvk := configapisv1.GroupVersion.WithKind(configapisv1.HTTPFilterKind)
-	if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
-		if meta.IsNoMatchError(err) {
-			r.Log.Warn("HTTPFilter CRD not present; proxy-extension escape hatch (025) disabled until the CRD is installed and the agent restarts")
-		} else {
-			return fmt.Errorf("checking HTTPFilter CRD availability: %w", err)
-		}
-	} else {
-		r.httpFilterEnabled = true
+	// Gateway API + HTTPFilter are EXTERNAL CRDs: watching a type whose CRD is
+	// absent makes the cache fail to sync and HARD-CRASHES the manager (the
+	// install-ordering crashloop). Gate every type on presence (proposal 031):
+	// HTTPRoute is the floor — without it GAMMA is skipped entirely, with a
+	// warning; GRPCRoute / ReferenceGrant / HTTPFilter degrade individually.
+	// Detection is setup-time: installing a CRD later needs an agent restart.
+	mapper := mgr.GetRESTMapper()
+	httpRoutePresent, err := crdcheck.Present(mapper, gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute"))
+	if err != nil {
+		return err
+	}
+	if !httpRoutePresent {
+		r.Log.Warn("Gateway API CRDs not present; GAMMA east-west routing disabled until they are installed and the agent restarts")
+		return nil
+	}
+	if r.grpcRouteEnabled, err = crdcheck.Present(mapper, gatewayv1.SchemeGroupVersion.WithKind("GRPCRoute")); err != nil {
+		return err
+	} else if !r.grpcRouteEnabled {
+		r.Log.Warn("GRPCRoute CRD not present; gRPC method routing disabled until it is installed and the agent restarts")
+	}
+	// ReferenceGrant (v1beta1, the served storage version): a change to any grant
+	// can flip a cross-namespace backendRef between permitted and RefNotPermitted,
+	// so re-project + re-status on every grant change. Cluster-wide cache (post-#323).
+	if r.referenceGrantEnabled, err = crdcheck.Present(mapper, gatewayv1beta1.SchemeGroupVersion.WithKind("ReferenceGrant")); err != nil {
+		return err
+	} else if !r.referenceGrantEnabled {
+		r.Log.Warn("ReferenceGrant CRD not present; cross-namespace backendRefs stay RefNotPermitted until it is installed and the agent restarts")
+	}
+	if r.httpFilterEnabled, err = crdcheck.Present(mapper, configapisv1.GroupVersion.WithKind(configapisv1.HTTPFilterKind)); err != nil {
+		return err
+	} else if !r.httpFilterEnabled {
+		r.Log.Warn("HTTPFilter CRD not present; proxy-extension escape hatch (025) disabled until the CRD is installed and the agent restarts")
 	}
 
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&gatewayv1.HTTPRoute{}).
-		Watches(&gatewayv1.GRPCRoute{}, enqueueAll).
-		// ReferenceGrant (v1beta1, the served storage version): a change to any grant
-		// can flip a cross-namespace backendRef between permitted and RefNotPermitted,
-		// so re-project + re-status on every grant change. Cluster-wide cache (post-#323).
-		Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll)
+		For(&gatewayv1.HTTPRoute{})
+	if r.grpcRouteEnabled {
+		b = b.Watches(&gatewayv1.GRPCRoute{}, enqueueAll)
+	}
+	if r.referenceGrantEnabled {
+		b = b.Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll)
+	}
 	if r.httpFilterEnabled {
 		// A change to a referenced HTTPFilter's opaque config must re-project the routes
 		// that reference it.
@@ -120,14 +144,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	if err := r.List(ctx, httpList); err != nil {
 		return reconcile.Result{}, err
 	}
+	// Optional types (CRD-gated in SetupWithManager, proposal 031): listing a
+	// kind whose CRD is absent errors every reconcile, so skip when disabled.
 	grpcList := &gatewayv1.GRPCRouteList{}
-	if err := r.List(ctx, grpcList); err != nil {
-		return reconcile.Result{}, err
+	if r.grpcRouteEnabled {
+		if err := r.List(ctx, grpcList); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
 	grantList := &gatewayv1beta1.ReferenceGrantList{}
-	if err := r.List(ctx, grantList); err != nil {
-		return reconcile.Result{}, err
+	if r.referenceGrantEnabled {
+		if err := r.List(ctx, grantList); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	grants := grantList.Items
 

@@ -40,7 +40,7 @@ func TestReconcile_HTTPFilterGate(t *testing.T) {
 	require.NoError(t, gatewayv1beta1.Install(s))
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 	mk := func(enabled bool) *Reconciler {
-		return &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "aether.internal", Log: slog.New(slog.DiscardHandler), httpFilterEnabled: enabled}
+		return &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "aether.internal", Log: slog.New(slog.DiscardHandler), httpFilterEnabled: enabled, grpcRouteEnabled: true, referenceGrantEnabled: true}
 	}
 
 	_, err := mk(false).Reconcile(ctx, reconcile.Request{})
@@ -155,7 +155,7 @@ func TestReconcile_WritesAcceptedResolved(t *testing.T) {
 		WithObjects(hr, backend).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
 		Build()
-	r := &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "mesh", Log: slog.Default()}
+	r := &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "mesh", Log: slog.Default(), grpcRouteEnabled: true, referenceGrantEnabled: true}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
@@ -182,7 +182,7 @@ func TestReconcile_BackendRefsResolvedByName(t *testing.T) {
 		WithObjects(hr).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
 		Build()
-	r := &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "mesh", Log: slog.Default()}
+	r := &Reconciler{Client: c, Sink: &fakeSink{}, MeshDomain: "mesh", Log: slog.Default(), grpcRouteEnabled: true, referenceGrantEnabled: true}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestReconcile_ProjectsRouteTargetPorts(t *testing.T) {
 		WithObjects(hr).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
 		Build()
-	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "mesh", Log: slog.Default()}
+	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "mesh", Log: slog.Default(), grpcRouteEnabled: true, referenceGrantEnabled: true}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
@@ -226,7 +226,7 @@ func TestReconcile_RouteTargetNoPort(t *testing.T) {
 		WithObjects(hr).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
 		Build()
-	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "mesh", Log: slog.Default()}
+	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "mesh", Log: slog.Default(), grpcRouteEnabled: true, referenceGrantEnabled: true}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
@@ -687,7 +687,7 @@ func TestReconcile_ServiceChainFilterPush(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(hf).Build()
 	sink := &fakeSink{}
-	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "aether.internal", Log: slog.New(slog.DiscardHandler), httpFilterEnabled: true}
+	r := &Reconciler{Client: c, Sink: sink, MeshDomain: "aether.internal", Log: slog.New(slog.DiscardHandler), httpFilterEnabled: true, grpcRouteEnabled: true, referenceGrantEnabled: true}
 	_, err = r.Reconcile(context.Background(), reconcile.Request{})
 	require.NoError(t, err)
 	require.Contains(t, sink.chainFilters, "aether-test/echo", "the CHAIN filter must be pushed keyed by <ns>/<svc>")
