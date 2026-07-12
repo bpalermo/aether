@@ -50,22 +50,32 @@ spec:
 
 ## Calling other services
 
-Apps reach the mesh through the outbound listener: `http://127.0.0.1:18081`
-with the destination service's mesh FQDN in the `Host` header:
-`Host: my-svc.aether.internal`. Every hop is mTLS between workload
-identities; the callee sees the caller's SPIFFE ID in
+With transparent capture + mesh DNS (both on by default), apps dial the
+destination by name — `http://<service>.<namespace>.<meshDomain>:18081` (mesh
+DNS) or the generated Kubernetes Service
+`<service>.<namespace>.svc.cluster.local:18081` — and the CNI-programmed
+capture listener routes it. Apps that prefer zero interception assumptions
+can instead address the outbound listener explicitly: `http://127.0.0.1:18081`
+with the mesh FQDN in the `Host` header. Either way every hop is mTLS between
+workload identities; the callee sees the caller's SPIFFE ID in
 `x-forwarded-client-cert`.
 
-**Authorities are FQDN-only and deterministic.** `<service>.<mesh-domain>`
-(default domain `aether.internal`, agent `--mesh-domain` / chart
-`meshDomain`) is the single accepted form — it is simultaneously the vhost
-domain, the data-plane cluster name, and the on-demand (ODCDS) lookup key,
-declared or not. A `:port` on the authority is stripped before routing.
-Anything else — bare names (`Host: my-svc`), foreign domains, nested labels —
-matches no route and 404s immediately; only authorities under the mesh domain
-can reach the cold path. The mesh domain also defaults the SPIFFE trust
-domain (`--spire-trust-domain`), so addressing and identity share one domain
-unless explicitly split.
+**Authorities are FQDN-only, namespace-qualified, and deterministic.**
+`<service>.<namespace>.<mesh-domain>` (default domain `aether.internal`,
+agent `--mesh-domain` / chart `meshDomain`; proposal 020) is the accepted
+mesh form — it is simultaneously the vhost domain, the data-plane cluster
+name, and the on-demand (ODCDS) lookup key, declared or not. The capture path
+also honors the standard `<service>.<namespace>.svc.cluster.local` name. A
+`:port` on the authority is stripped before routing. Anything else — bare
+names (`Host: my-svc`), foreign domains, nested labels — matches no route and
+404s immediately; only authorities under the mesh domain can reach the cold
+path. The mesh domain also defaults the SPIFFE trust domain
+(`--spire-trust-domain`), so addressing and identity share one domain unless
+explicitly split.
+
+**Traffic shaping** (canary weights, header routing, timeouts, gRPC method
+routing, L4 splits/SNI) is standard Gateway API routes parented to the
+*Service* (GAMMA) — see the getting-started guide §10.
 
 ### Declaring upstreams
 
