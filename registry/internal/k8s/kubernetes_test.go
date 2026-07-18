@@ -873,7 +873,8 @@ func TestListAllEndpoints(t *testing.T) {
 // then oscillated and churned the agent's xDS snapshot (the MESH-HTTP MeshFrontend
 // flap). Matches the namespace-qualified keying of the CNI/etcd/ddb paths.
 func TestListAllEndpoints_SameSANamespaceIsolation(t *testing.T) {
-	r := newTestRegistry("c",
+	r := newTestRegistry(
+		"c",
 		managedPod("echo-a", "team-a", "echo-v1", "10.0.0.1", "node-1"),
 		managedPod("echo-b", "team-b", "echo-v1", "10.0.0.2", "node-1"),
 		topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -903,7 +904,8 @@ func TestListAllEndpoints_SameSANamespaceIsolation(t *testing.T) {
 // disappeared and captured requests 503'd. A TCP query must yield no endpoints;
 // HTTP and UNSPECIFIED return the managed-pod endpoints.
 func TestKubernetesRegistry_TCPProtocolReturnsEmpty(t *testing.T) {
-	r := newTestRegistry("c",
+	r := newTestRegistry(
+		"c",
 		managedPod("echo-a", "team-a", "echo-v1", "10.0.0.1", "node-1"),
 		topologyNode("node-1", "us-east-1", "us-east-1a"),
 	)

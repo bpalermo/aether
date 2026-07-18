@@ -71,12 +71,14 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 	// RBAC shadow metadata keys must include the "aether_audit_" prefix — Envoy
 	// prepends shadow_rules_stat_prefix to the metadata field name in
 	// evaluateShadowEngine(), so a bare "shadow_engine_result" key always returns "-".
-	assert.Equal(t,
+	assert.Equal(
+		t,
 		"%DYNAMIC_METADATA(envoy.filters.http.rbac:aether_audit_shadow_engine_result)%",
 		attrs["rbac_shadow_result"],
 		"rbac_shadow_result must use the aether_audit_-prefixed metadata key",
 	)
-	assert.Equal(t,
+	assert.Equal(
+		t,
 		"%DYNAMIC_METADATA(envoy.filters.http.rbac:aether_audit_shadow_effective_policy_id)%",
 		attrs["rbac_shadow_policy"],
 		"rbac_shadow_policy must use the aether_audit_-prefixed metadata key",

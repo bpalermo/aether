@@ -39,7 +39,8 @@ func TestMain(m *testing.M) {
 	testAWSCfg = aws.Config{
 		Region: "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider(
-			"DUMMYID", "DUMMYKEY", ""),
+			"DUMMYID", "DUMMYKEY", "",
+		),
 		BaseEndpoint: aws.String("http://" + endpoint),
 	}
 

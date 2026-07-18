@@ -82,7 +82,8 @@ func TestEffectiveSpec(t *testing.T) {
 // handles it).
 func TestEnqueueInheritors(t *testing.T) {
 	ctx := context.Background()
-	r := newReconciler(t,
+	r := newReconciler(
+		t,
 		meshCfg(fallbackNS, nil),
 		meshCfg("aether-ingress", nil),
 		meshCfg("team-a", nil),

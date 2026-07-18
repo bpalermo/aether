@@ -162,7 +162,8 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 			if c.edgeTLSEnabled {
 				// TLS listener on httpsPort, under a name DISTINCT from the :80 listener so
 				// the two never collide in the snapshot/LDS (a shared name dropped :443).
-				resources = append(resources,
+				resources = append(
+					resources,
 					proxy.BuildEdgeListener(proxy.EdgeHTTPSListenerName, c.edgeHTTPSPort, c.edgeTLSSecretNames()),
 				)
 			}

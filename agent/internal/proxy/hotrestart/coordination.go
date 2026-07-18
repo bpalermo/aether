@@ -229,14 +229,16 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 				s.metrics.wedged(wedgeHandoffTimeout)
 				s.fireWatchdog(fmt.Errorf(
 					"hot-restart handoff watchdog: epoch %d not LIVE within %s of launch (parent likely died mid-handoff)",
-					epoch, s.handoffDeadline()))
+					epoch, s.handoffDeadline(),
+				))
 				return
 			}
 			if everLive && !reachable && s.childTracked(epoch) && time.Since(unreachableSince) > s.adminUnresponsiveDeadline() {
 				s.metrics.wedged(wedgeAdminUnresponsive)
 				s.fireWatchdog(fmt.Errorf(
 					"admin watchdog: envoy admin %s unresponsive for %s with child alive at epoch %d",
-					s.cfg.AdminAddress, s.adminUnresponsiveDeadline(), epoch))
+					s.cfg.AdminAddress, s.adminUnresponsiveDeadline(), epoch,
+				))
 				return
 			}
 		}

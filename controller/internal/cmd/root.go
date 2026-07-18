@@ -90,7 +90,8 @@ func podNDots(meshDomain string) string {
 }
 
 func runController(ctx context.Context) (retErr error) {
-	l.InfoContext(ctx, "starting aether controller",
+	l.InfoContext(
+		ctx, "starting aether controller",
 		"metricsEnabled", cfg.MetricsEnabled,
 		"otelEnabled", cfg.OTelEnabled,
 		"leaderElection", cfg.LeaderElection,
@@ -202,7 +203,8 @@ func runController(ctx context.Context) (retErr error) {
 		}
 	}
 
-	l.InfoContext(ctx, "MeshConfig controller configured",
+	l.InfoContext(
+		ctx, "MeshConfig controller configured",
 		"configMapName", cfg.MeshConfigMapName,
 		"fallbackNamespace", fallbackNamespace,
 		"webhookPath", cwebhook.Path,

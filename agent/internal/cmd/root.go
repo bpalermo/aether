@@ -194,7 +194,8 @@ func applyMeshConfig(mc *configv1.MeshConfigSpec) {
 // CNI gRPC server, and optionally the SPIRE bridge as runnables. The agent then waits
 // for local storage to become ready before starting the manager's event loop.
 func runAgent(ctx context.Context) (retErr error) {
-	l.InfoContext(ctx, "starting aether agent",
+	l.InfoContext(
+		ctx, "starting aether agent",
 		"nodeName", cfg.NodeName,
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,

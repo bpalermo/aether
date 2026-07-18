@@ -380,7 +380,8 @@ func (r *Reconciler) readServiceLBIP(ctx context.Context, svcName string) string
 func (r *Reconciler) gcStaleGatewayServices(ctx context.Context, currentSvcNames map[string]struct{}) error {
 	svcList := &corev1.ServiceList{}
 	// client.HasLabels matches any Service that has the label key, regardless of value.
-	if err := r.List(ctx, svcList,
+	if err := r.List(
+		ctx, svcList,
 		client.InNamespace(r.Namespace),
 		client.HasLabels{LabelEdgeGateway},
 	); err != nil {

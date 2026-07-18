@@ -137,7 +137,8 @@ func newMeter(ctx context.Context, endpoint, version string) (metric.Meter, *sdk
 	if endpoint == "" {
 		return noop.NewMeterProvider().Meter(telemetryServiceName), nil, nil
 	}
-	res, err := resource.New(ctx,
+	res, err := resource.New(
+		ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(telemetryServiceName),
 			semconv.ServiceVersion(version),
@@ -150,7 +151,8 @@ func newMeter(ctx context.Context, endpoint, version string) (metric.Meter, *sdk
 	if err != nil {
 		return nil, nil, fmt.Errorf("create resource: %w", err)
 	}
-	exporter, err := otlpmetricgrpc.New(ctx,
+	exporter, err := otlpmetricgrpc.New(
+		ctx,
 		otlpmetricgrpc.WithEndpoint(endpoint),
 		otlpmetricgrpc.WithInsecure(),
 		otlpmetricgrpc.WithTimeout(otlpTimeout),

@@ -41,7 +41,8 @@ func SetupTracing(ctx context.Context, cfg Config) (shutdown func(context.Contex
 		if cfg.OTLPEndpoint == "" {
 			return nil, fmt.Errorf("trace export requires an OTLP endpoint")
 		}
-		exporter, expErr := otlptracegrpc.New(ctx,
+		exporter, expErr := otlptracegrpc.New(
+			ctx,
 			otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
 			otlptracegrpc.WithInsecure(),
 			otlptracegrpc.WithTimeout(otlpTraceTimeout),

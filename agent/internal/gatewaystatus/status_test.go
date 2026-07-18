@@ -22,7 +22,8 @@ func gatewayParentRef(name string) gatewayv1.ParentReference {
 // MergeRouteParentStatus on an empty list adds our owned entry with the
 // requested conditions and reports changed.
 func TestMergeRouteParentStatus_Insert(t *testing.T) {
-	parents, changed := MergeRouteParentStatus(nil, EdgeControllerName, gatewayParentRef("edge"), 3,
+	parents, changed := MergeRouteParentStatus(
+		nil, EdgeControllerName, gatewayParentRef("edge"), 3,
 		Condition{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: string(gatewayv1.RouteReasonAccepted)},
 		Condition{Type: string(gatewayv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, Reason: string(gatewayv1.RouteReasonResolvedRefs)},
 	)
@@ -38,10 +39,12 @@ func TestMergeRouteParentStatus_Insert(t *testing.T) {
 // A second merge with identical conditions is a no-op (changed=false), so the
 // reconciler skips the status update — no hot loop.
 func TestMergeRouteParentStatus_NoChange(t *testing.T) {
-	parents, _ := MergeRouteParentStatus(nil, EdgeControllerName, gatewayParentRef("edge"), 3,
+	parents, _ := MergeRouteParentStatus(
+		nil, EdgeControllerName, gatewayParentRef("edge"), 3,
 		Condition{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: string(gatewayv1.RouteReasonAccepted)},
 	)
-	parents2, changed := MergeRouteParentStatus(parents, EdgeControllerName, gatewayParentRef("edge"), 3,
+	parents2, changed := MergeRouteParentStatus(
+		parents, EdgeControllerName, gatewayParentRef("edge"), 3,
 		Condition{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: string(gatewayv1.RouteReasonAccepted)},
 	)
 	assert.False(t, changed)
@@ -57,7 +60,8 @@ func TestMergeRouteParentStatus_PreservesForeign(t *testing.T) {
 			Type: "Accepted", Status: metav1.ConditionTrue, Reason: "Accepted",
 		}},
 	}
-	parents, changed := MergeRouteParentStatus([]gatewayv1.RouteParentStatus{foreign}, EdgeControllerName, gatewayParentRef("edge"), 1,
+	parents, changed := MergeRouteParentStatus(
+		[]gatewayv1.RouteParentStatus{foreign}, EdgeControllerName, gatewayParentRef("edge"), 1,
 		Condition{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: string(gatewayv1.RouteReasonAccepted)},
 	)
 	require.True(t, changed)

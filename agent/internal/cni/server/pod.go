@@ -41,7 +41,8 @@ const tracerName = "aether/agent-cni-server"
 
 // startStepSpan starts a child span for one step of a pod lifecycle operation.
 func startStepSpan(ctx context.Context, name string, pod *cniv1.CNIPod) (context.Context, trace.Span) {
-	return otel.Tracer(tracerName).Start(ctx, name,
+	return otel.Tracer(tracerName).Start(
+		ctx, name,
 		trace.WithAttributes(
 			telemetry.AttrPodName.String(pod.GetName()),
 			telemetry.AttrPodNamespace.String(pod.GetNamespace()),

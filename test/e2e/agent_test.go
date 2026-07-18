@@ -30,7 +30,8 @@ func TestAgentDaemonSet(t *testing.T) {
 			}, wait.WithTimeout(3*time.Minute), wait.WithInterval(defaultPollInterval)); err != nil {
 				// Dump pod status on failure to aid debugging.
 				pods := &corev1.PodList{}
-				if listErr := client.Resources().List(ctx, pods,
+				if listErr := client.Resources().List(
+					ctx, pods,
 					resources.WithLabelSelector("app=aether-agent"),
 					resources.WithFieldSelector("metadata.namespace="+namespace),
 				); listErr == nil {
@@ -74,7 +75,8 @@ func TestAgentDaemonSet(t *testing.T) {
 func listAgentPods(ctx context.Context, t *testing.T, cfg *envconf.Config) *corev1.PodList {
 	t.Helper()
 	pods := &corev1.PodList{}
-	if err := cfg.Client().Resources().List(ctx, pods,
+	if err := cfg.Client().Resources().List(
+		ctx, pods,
 		resources.WithLabelSelector("app=aether-agent"),
 		resources.WithFieldSelector("metadata.namespace="+namespace),
 	); err != nil {

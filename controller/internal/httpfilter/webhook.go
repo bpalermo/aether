@@ -84,7 +84,8 @@ func (v *Validator) checkChainConflict(ctx context.Context, hf *crdv1.HTTPFilter
 			if _, clash := targets[t.GetName()]; clash {
 				resp := admission.Denied(fmt.Sprintf(
 					"service %q already has a CHAIN-scope HTTPFilter (%q); at most one service-wide filter per service",
-					t.GetName(), other.GetName()))
+					t.GetName(), other.GetName(),
+				))
 				return &resp
 			}
 		}

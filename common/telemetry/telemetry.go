@@ -41,7 +41,8 @@ type Config struct {
 // newResource builds the OTel Resource shared by the meter and tracer
 // providers so metrics and traces carry identical service identity attributes.
 func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
-	return resource.New(ctx,
+	return resource.New(
+		ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(cfg.ServiceName),
 			semconv.ServiceVersion(cfg.ServiceVersion),
@@ -77,7 +78,8 @@ func Setup(ctx context.Context, cfg Config) (shutdown func(context.Context) erro
 	}
 
 	if cfg.OTLPEndpoint != "" {
-		grpcExporter, grpcErr := otlpmetricgrpc.New(ctx,
+		grpcExporter, grpcErr := otlpmetricgrpc.New(
+			ctx,
 			otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint),
 			otlpmetricgrpc.WithInsecure(),
 			otlpmetricgrpc.WithTimeout(otlpMetricTimeout),

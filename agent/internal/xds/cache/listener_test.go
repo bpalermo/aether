@@ -120,7 +120,8 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 		{
 			name: "two pods yield four resources",
 			setupFunc: func(c *SnapshotCache) {
-				seedListeners(c,
+				seedListeners(
+					c,
 					makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
 					makeCNIPod("pod-b", "default", "/proc/200/ns/net"),
 				)
@@ -130,7 +131,8 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 		{
 			name: "three pods yield six resources",
 			setupFunc: func(c *SnapshotCache) {
-				seedListeners(c,
+				seedListeners(
+					c,
 					makeCNIPod("pod-a", "ns-a", "/proc/100/ns/net"),
 					makeCNIPod("pod-b", "ns-b", "/proc/200/ns/net"),
 					makeCNIPod("pod-c", "ns-c", "/proc/300/ns/net"),

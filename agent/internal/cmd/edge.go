@@ -83,7 +83,8 @@ func runEdge(ctx context.Context) (retErr error) {
 	// at the fixed pod-local dir so PreListen's load is a no-op.
 	cfg.MountedLocalStorageDir = constants.DefaultEdgeRegistryDir
 
-	l.InfoContext(ctx, "starting aether edge proxy control plane",
+	l.InfoContext(
+		ctx, "starting aether edge proxy control plane",
 		"podName", cfg.NodeName,
 		"debug", cfg.Debug,
 		"clusterName", cfg.ClusterName,

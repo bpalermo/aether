@@ -57,7 +57,8 @@ func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			service, protocol, ep, err := NewServiceEndpointFromCNIPod(
-				"cluster-a", "node-1", "region-1", "zone-a", "192.168.0.10", testCNIPod(tt.annotation))
+				"cluster-a", "node-1", "region-1", "zone-a", "192.168.0.10", testCNIPod(tt.annotation),
+			)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Equal(t, registryv1.Service_PROTOCOL_UNSPECIFIED, protocol)

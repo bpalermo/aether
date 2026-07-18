@@ -77,7 +77,8 @@ func startCNIServer(t *testing.T, ctx context.Context, sockPath string, stor sto
 	// Wait for the server to be listening.
 	time.Sleep(500 * time.Millisecond)
 
-	conn, err := grpc.NewClient("unix:///"+sockPath,
+	conn, err := grpc.NewClient(
+		"unix:///"+sockPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	require.NoError(t, err, "failed to create gRPC client")
