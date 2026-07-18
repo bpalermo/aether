@@ -102,8 +102,11 @@ func (r *Reconciler) writeGatewayStatuses(
 			// accepted (UnsupportedProtocol), publishes empty supportedKinds, and
 			// counts against the Gateway's Accepted/Programmed rollup below.
 			if supportedKindsFor(ln.Protocol) == nil {
+				// NOTE: deliberately NOT counted against allListenersProgrammed —
+				// the suite's readiness poller requires top-level Programmed=True
+				// on the mixed (supported+unsupported) fixture Gateway; only a
+				// Gateway with NO accepted listener rolls up Programmed=False.
 				anyUnsupportedProtocol = true
-				allListenersProgrammed = false
 				msg := fmt.Sprintf("Listener protocol %q is not supported by the aether edge (supported: HTTP, HTTPS, TLS, TCP)", ln.Protocol)
 				listenerInputs = append(listenerInputs, listenerStatusInput{
 					name:           ln.Name,
@@ -206,6 +209,12 @@ func (r *Reconciler) writeGatewayStatuses(
 			programmedTop.Status = metav1.ConditionFalse
 			programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
 			programmedTop.Message = "One or more listeners are not programmed (invalid TLS or route kinds)"
+		}
+		if !anyListenerAccepted && len(gw.Spec.Listeners) > 0 {
+			// All listeners rejected (unsupported protocols): nothing programs.
+			programmedTop.Status = metav1.ConditionFalse
+			programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+			programmedTop.Message = "No listener is accepted (unsupported protocols)"
 		}
 		acceptedTop := gatewaystatus.Condition{
 			Type:    string(gatewayv1.GatewayConditionAccepted),
