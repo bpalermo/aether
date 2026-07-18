@@ -174,12 +174,12 @@ under a **shared trust domain** (shared upstream CA in `e2e/certs/`):
 - [`e2e/multicluster_waypoint.sh`](../e2e/multicluster_waypoint.sh) — the
   **019 east/west waypoint data path**: two clusters + ONE shared etcd,
   `agent.eastWestWaypoint=true`; asserts client(a) → echo(b) returns 200 over
-  the node tunnel with mTLS end-to-end (nightly CI: `waypoint-e2e.yaml`).
+  the node tunnel with mTLS end-to-end (nightly CI: `e2e.yaml` waypoint job).
 - [`e2e/multicluster_replicator.sh`](../e2e/multicluster_replicator.sh) — the
   **006 two-region replicator failover**: one etcd PER cluster,
   `registrar.peerEtcd` cross-wired; asserts mirror visibility, the data path
   over the mirror, lease-lapse failover when a region's registrar dies, and
-  recovery (nightly CI: `replicator-e2e.yaml`).
+  recovery (nightly CI: `e2e.yaml` replicator job).
 
 ---
 
