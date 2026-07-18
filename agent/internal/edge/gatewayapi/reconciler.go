@@ -618,12 +618,17 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 		// all out) AND no redirect AND the rule actually has declared backendRefs
 		// (so it is "invalid" rather than "empty").
 		if redirect == nil {
-			if len(backends) == 0 && len(rule.BackendRefs) > 0 {
-				// All backendRefs are unresolvable (invalid kind, missing Service, or
-				// ungranted cross-namespace ref). Check via backendsResolveL4 to confirm
-				// (it reuses the same admission logic used by the status writer), then
-				// emit a fixed 500 route with the path/header match still applied.
-				resolved, _, _ := r.backendsResolveHTTP(ctx, hr.Namespace, []gatewayv1.HTTPRouteRule{rule}, grants)
+			if len(backends) == 0 {
+				// Two 500 cases (the Gateway API data-plane contract): a rule whose
+				// backendRefs are all UNRESOLVABLE (invalid kind, missing Service,
+				// ungranted cross-namespace ref), and — since gateway-api 1.6's
+				// HTTPRouteNoBackendRefs test pins it — a rule with NO backendRefs at
+				// all (omitted or empty list). Emit a fixed 500 route with the
+				// path/header match still applied.
+				resolved := false
+				if len(rule.BackendRefs) > 0 {
+					resolved, _, _ = r.backendsResolveHTTP(ctx, hr.Namespace, []gatewayv1.HTTPRouteRule{rule}, grants)
+				}
 				if !resolved {
 					mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
 					if len(rule.Matches) == 0 {

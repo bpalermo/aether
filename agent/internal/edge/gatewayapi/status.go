@@ -94,7 +94,43 @@ func (r *Reconciler) writeGatewayStatuses(
 		// conflict-retry re-Gets in writeGatewayStatus below.
 		listenerInputs := make([]listenerStatusInput, 0, len(gw.Spec.Listeners))
 		allListenersProgrammed := true
+		anyListenerAccepted := false
+		anyUnsupportedProtocol := false
 		for _, ln := range gw.Spec.Listeners {
+			// Unsupported listener protocol (gateway-api 1.6's
+			// GatewayListenerUnsupportedProtocol contract): the listener is not
+			// accepted (UnsupportedProtocol), publishes empty supportedKinds, and
+			// counts against the Gateway's Accepted/Programmed rollup below.
+			if supportedKindsFor(ln.Protocol) == nil {
+				anyUnsupportedProtocol = true
+				allListenersProgrammed = false
+				msg := fmt.Sprintf("Listener protocol %q is not supported by the aether edge (supported: HTTP, HTTPS, TLS, TCP)", ln.Protocol)
+				listenerInputs = append(listenerInputs, listenerStatusInput{
+					name:           ln.Name,
+					supportedKinds: []gatewayv1.RouteGroupKind{},
+					attached:       0,
+					accepted: gatewaystatus.Condition{
+						Type:    string(gatewayv1.ListenerConditionAccepted),
+						Status:  metav1.ConditionFalse,
+						Reason:  string(gatewayv1.ListenerReasonUnsupportedProtocol),
+						Message: msg,
+					},
+					programmed: gatewaystatus.Condition{
+						Type:    string(gatewayv1.ListenerConditionProgrammed),
+						Status:  metav1.ConditionFalse,
+						Reason:  string(gatewayv1.ListenerReasonInvalid),
+						Message: msg,
+					},
+					resolved: gatewaystatus.Condition{
+						Type:    string(gatewayv1.ListenerConditionResolvedRefs),
+						Status:  metav1.ConditionTrue,
+						Reason:  string(gatewayv1.ListenerReasonResolvedRefs),
+						Message: "No references to resolve",
+					},
+				})
+				continue
+			}
+			anyListenerAccepted = true
 			attached := r.attachedRoutesForListener(ctx, gw, ln, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys)
 
 			// ResolvedRefs: InvalidRouteKinds (allowedRoutes.kinds names an
@@ -176,6 +212,18 @@ func (r *Reconciler) writeGatewayStatuses(
 			Status:  metav1.ConditionTrue,
 			Reason:  string(gatewayv1.GatewayReasonAccepted),
 			Message: "Gateway accepted by the aether edge controller",
+		}
+		// Listener-protocol rollup (1.6 contract): no accepted listener at all →
+		// Accepted=False/ListenersNotValid; some unsupported but ≥1 accepted →
+		// Accepted stays True with reason ListenersNotValid.
+		switch {
+		case !anyListenerAccepted && len(gw.Spec.Listeners) > 0:
+			acceptedTop.Status = metav1.ConditionFalse
+			acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+			acceptedTop.Message = "No listener is accepted (unsupported protocols)"
+		case anyUnsupportedProtocol:
+			acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+			acceptedTop.Message = "Gateway accepted; some listeners are not valid (unsupported protocols)"
 		}
 		// An infrastructure.parametersRef that is present but unresolvable rejects
 		// the Gateway (Accepted=False/InvalidParameters — Gateway API spec, pinned
