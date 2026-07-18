@@ -2,7 +2,7 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 # Pinned Envoy source — the single source of truth for the custom proxy build.
 #
-# Pinned to the v1.38.3 release commit. The aether_stats extension is a
+# Pinned to the v1.39.0 release commit. The aether_stats extension is a
 # compiled-in C++ filter (//source/extensions/filters/http/aether_stats), so it
 # is built against this exact Envoy tree — there is no separate SDK to keep in
 # sync. On an Envoy bump:
@@ -12,10 +12,10 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 #      (`curl -sSL .../archive/$ENVOY_SHA.tar.gz | sha256sum`)
 #   3. Re-check .bazelversion / envoy.bazelrc against the new Envoy release.
 #
-# Envoy tag: v1.38.3
-ENVOY_SHA = "0ebfcfe5b0484b89ca85b761da9e05ce75dbda8d"
+# Envoy tag: v1.39.0
+ENVOY_SHA = "8eea3285d6bdb89f8ea34632cfe7ce1608a8f374"
 
-ENVOY_SHA256 = "71b8ea63f9acb7fe7a45a8b72da51a9e3e27584632bdb32de5addc6daa785b72"
+ENVOY_SHA256 = "aa73fb45f0e6e4fbaf5cb68a81fa898bbd2f9098fc46122962119f5c6c9b7e9f"
 
 ENVOY_ORG = "envoyproxy"
 

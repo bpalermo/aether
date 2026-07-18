@@ -23,7 +23,7 @@
              "BINDGEN_EXTRA_CLANG_ARGS": " ".join([
                  "-resource-dir $${pwd}/external/llvm_toolchain_llvm/lib/clang/" + LLVM_MAJOR,
 @@ -47,7 +60,14 @@
-         "//source/extensions/dynamic_modules/abi:abi.h",
+         ":abi/abi.h",
      ] + select({
          "@envoy_repo//:use_local_llvm": [],
 -        "@platforms//os:linux": [

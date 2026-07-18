@@ -42,6 +42,15 @@ load("@envoy//bazel:bazel_deps.bzl", "envoy_bazel_dependencies")
 
 envoy_bazel_dependencies()
 
+# Bazel 8 dropped the auto-registered legacy shell toolchain; Envoy 1.39 loads
+# sh_test/sh_binary from @rules_shell (pulled in by envoy_dependencies above)
+# but leaves toolchain registration to the root workspace.
+load("@rules_shell//shell:repositories.bzl", "rules_shell_dependencies", "rules_shell_toolchains")
+
+rules_shell_dependencies()
+
+rules_shell_toolchains()
+
 load("@envoy//bazel:repositories_extra.bzl", "envoy_dependencies_extra")
 
 envoy_dependencies_extra()
