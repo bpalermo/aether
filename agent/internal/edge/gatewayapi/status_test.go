@@ -584,7 +584,8 @@ func TestWriteGatewayStatus_RetriesOnConflict(t *testing.T) {
 					// Simulate the other replica winning the first write.
 					return apierrors.NewConflict(
 						schema.GroupResource{Group: gatewayv1.GroupName, Resource: "gateways"},
-						obj.GetName(), errors.New("the object has been modified"))
+						obj.GetName(), errors.New("the object has been modified"),
+					)
 				}
 				return cl.Status().Update(ctx, obj, opts...)
 			},

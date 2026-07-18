@@ -374,7 +374,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	r.Sink.SetVirtualHosts(vhosts)
 	r.Sink.SetEdgeTCPRoutes(tcpRoutes)
 	r.Sink.SetEdgeTLSRoutes(tlsRoutes)
-	r.Log.DebugContext(ctx, "projected gateway-api routes",
+	r.Log.DebugContext(
+		ctx, "projected gateway-api routes",
 		"httpRoutes", len(httpRoutes.Items),
 		"tcpRoutes", len(tcpRouteList.Items),
 		"tlsRoutes", len(tlsRouteList.Items),

@@ -119,7 +119,8 @@ func TestCollectExtensionFilters_Extra(t *testing.T) {
 	cfg, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{})
 	require.NoError(t, err)
 	rules := []GammaRoute{{ExtensionFilters: []ExtensionFilter{{Name: "envoy.filters.http.header_mutation", Config: cfg}}}}
-	out := CollectExtensionFilters(rules,
+	out := CollectExtensionFilters(
+		rules,
 		ExtensionFilter{Name: "envoy.filters.http.header_mutation", Config: cfg},    // dup of rule's
 		ExtensionFilter{Name: "envoy.filters.http.header_to_metadata", Config: cfg}, // new
 	)

@@ -124,7 +124,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "matching grant, to with no name (all Services)",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "HTTPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Service", nil)},
 				),
@@ -134,7 +135,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "matching grant, to scoped to the exact Service name",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "HTTPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Service", strp("backend"))},
 				),
@@ -144,7 +146,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "to scoped to a DIFFERENT Service name",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "HTTPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Service", strp("other"))},
 				),
@@ -154,7 +157,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "grant in the WRONG namespace (not the backend's)",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-c",
+				grant(
+					"ns-c",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "HTTPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Service", nil)},
 				),
@@ -164,7 +168,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "from with the WRONG route kind",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "TCPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Service", nil)},
 				),
@@ -174,7 +179,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "from with the WRONG route namespace",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "HTTPRoute", "ns-x")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Service", nil)},
 				),
@@ -184,7 +190,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "from with the WRONG group",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from("example.com", "HTTPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Service", nil)},
 				),
@@ -194,7 +201,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "to with a non-core group is not a Service target",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "HTTPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("example.com", "Service", nil)},
 				),
@@ -204,7 +212,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "to with a non-Service kind",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{from(string(grp), "HTTPRoute", "ns-a")},
 					[]gatewayv1.ReferenceGrantTo{to("", "Secret", nil)},
 				),
@@ -214,7 +223,8 @@ func TestPermitsBackend(t *testing.T) {
 		{
 			name: "one of several from/to entries matches",
 			grants: []gatewayv1beta1.ReferenceGrant{
-				grant("ns-b",
+				grant(
+					"ns-b",
 					[]gatewayv1.ReferenceGrantFrom{
 						from(string(grp), "TCPRoute", "ns-a"),
 						from(string(grp), "HTTPRoute", "ns-a"),

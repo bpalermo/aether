@@ -88,7 +88,8 @@ func init() {
 }
 
 func runRegistrar(ctx context.Context) (retErr error) {
-	l.InfoContext(ctx, "starting aether registrar",
+	l.InfoContext(
+		ctx, "starting aether registrar",
 		"clusterName", cfg.ClusterName,
 		"registryBackend", cfg.RegistryBackend,
 		// region names this registrar's etcd partition (proposal 006). Surfaced at

@@ -86,7 +86,8 @@ func (r *DynamoDBRegistry) Close() error {
 // If the endpoints map doesn't exist, it is created first.
 func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
 	ip := endpoint.GetIp()
-	r.log.DebugContext(ctx,
+	r.log.DebugContext(
+		ctx,
 		"registering endpoint",
 		"service", serviceName,
 		"protocol", protocol,
@@ -138,7 +139,8 @@ func (r *DynamoDBRegistry) RegisterEndpoint(ctx context.Context, serviceName str
 		return fmt.Errorf("failed to register endpoint for IP %s: %w", ip, err)
 	}
 
-	r.log.InfoContext(ctx,
+	r.log.InfoContext(
+		ctx,
 		"endpoint registered successfully",
 		"service", serviceName,
 		"cluster", endpoint.GetClusterName(),
@@ -155,7 +157,8 @@ func (r *DynamoDBRegistry) UnregisterEndpoint(ctx context.Context, serviceName s
 // UnregisterEndpoints removes multiple endpoints from the registry for all protocols.
 // It queries all protocol items for the service and removes the specified IPs from each.
 func (r *DynamoDBRegistry) UnregisterEndpoints(ctx context.Context, serviceName string, ips []string) error {
-	r.log.DebugContext(ctx, "unregistering endpoints",
+	r.log.DebugContext(
+		ctx, "unregistering endpoints",
 		"service", serviceName,
 		"count", len(ips),
 	)

@@ -33,7 +33,8 @@ func SetupLogs(ctx context.Context, cfg Config) (provider *sdklog.LoggerProvider
 		return nil, nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	exporter, err := otlploggrpc.New(ctx,
+	exporter, err := otlploggrpc.New(
+		ctx,
 		otlploggrpc.WithEndpoint(cfg.OTLPEndpoint),
 		otlploggrpc.WithInsecure(),
 		otlploggrpc.WithTimeout(otlpLogTimeout),

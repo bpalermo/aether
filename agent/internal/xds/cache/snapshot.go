@@ -140,7 +140,8 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 			// request to a known service never leaks to the ORIGINAL_DST passthrough
 			// while its dedicated cap_http vhost is mid-rebuild across a GAMMA churn.
 			routes = append(routes, proxy.BuildCaptureRouteConfiguration(
-				c.captureVhosts(), c.meshDomain, c.captureRedirectAll, c.captureKnownTargets()...))
+				c.captureVhosts(), c.meshDomain, c.captureRedirectAll, c.captureKnownTargets()...,
+			))
 		}
 		if len(routes) > 0 {
 			resources[resourcev3.RouteType] = routes

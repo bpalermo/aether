@@ -198,7 +198,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	r.Sink.SetTLSServiceRoutes(tlsRoutes)
 	r.Sink.SetUDPServiceRoutes(udpRoutes)
 
-	r.Log.DebugContext(ctx, "projected L4 service routes",
+	r.Log.DebugContext(
+		ctx, "projected L4 service routes",
 		"tcpRoutes", len(tcpList.Items),
 		"tlsRoutes", len(tlsList.Items),
 		"udpRoutes", len(udpList.Items),

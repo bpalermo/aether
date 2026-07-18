@@ -188,7 +188,8 @@ type locality struct {
 // listManagedPods lists all running pods with the aether.io/managed=true label that have a PodIP.
 func (r *KubernetesRegistry) listManagedPods(ctx context.Context) ([]corev1.Pod, error) {
 	var podList corev1.PodList
-	err := r.reader.List(ctx, &podList,
+	err := r.reader.List(
+		ctx, &podList,
 		client.MatchingLabels{constants.LabelAetherManaged: "true"},
 	)
 	if err != nil {

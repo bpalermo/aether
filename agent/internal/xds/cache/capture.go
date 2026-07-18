@@ -637,7 +637,8 @@ func knownTargetAuthorityRegex(name, namespace, fqdn string) string {
 func (c *SnapshotCache) routeTargetDomains(svc, fqdn, mesh string, bareNameCount map[string]int, ports []uint32) []string {
 	baseNames := []string{fqdn, mesh}
 	if ref, ok := serviceref.ParseKey(svc); ok {
-		baseNames = append(baseNames,
+		baseNames = append(
+			baseNames,
 			ref.Name+"."+ref.Namespace,        // <name>.<namespace>
 			ref.Name+"."+ref.Namespace+".svc", // <name>.<namespace>.svc
 		)

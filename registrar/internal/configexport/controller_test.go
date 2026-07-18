@@ -79,7 +79,8 @@ func newController(t *testing.T, exp *fakeExporter, objs ...client.Object) *Cont
 // config of route targets that have a ServiceExport, and ignores un-exported ones.
 func TestReconcile_ExportsOnlyExportedServices(t *testing.T) {
 	exp := &fakeExporter{store: map[string]*registryv1.ServiceConfigProjection{}}
-	c := newController(t, exp,
+	c := newController(
+		t, exp,
 		httpRouteToSvc("r-echo", "team-a", "echo"),       // exported
 		httpRouteToSvc("r-private", "team-a", "private"), // NOT exported
 		&mcsv1alpha1.ServiceExport{ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"}},

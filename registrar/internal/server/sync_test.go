@@ -25,7 +25,9 @@ func (m *mockRegistry) Close() error                       { return nil }
 func (m *mockRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, _ *registryv1.ServiceEndpoint) error {
 	return nil
 }
+
 func (m *mockRegistry) UnregisterEndpoint(_ context.Context, _ string, _ string) error { return nil }
+
 func (m *mockRegistry) UnregisterEndpoints(_ context.Context, _ string, _ []string) error {
 	return nil
 }

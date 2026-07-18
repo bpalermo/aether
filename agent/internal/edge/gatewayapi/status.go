@@ -616,7 +616,8 @@ func (r *Reconciler) writeRouteParentStatus(
 	}
 	for _, p := range parentRefs {
 		var upd bool
-		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.EdgeControllerName, p, generation,
+		parents, upd = gatewaystatus.MergeRouteParentStatus(
+			parents, gatewaystatus.EdgeControllerName, p, generation,
 			gatewaystatus.Condition{
 				Type:    string(gatewayv1.RouteConditionAccepted),
 				Status:  acceptedStatus,
