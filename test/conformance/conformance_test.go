@@ -291,9 +291,13 @@ func TestAetherGatewayHTTP(t *testing.T) {
 		// User-configurable knobs live in the embedded ConfigurableOptions since
 		// gateway-api 1.6 (yaml-configurable suite); profiles/features are slices.
 		ConfigurableOptions: suite.ConfigurableOptions{
-			GatewayClassName:           aetherGatewayClassName,
-			AllowCRDsMismatch:          true,
-			CleanupBaseResources:       cleanup(),
+			GatewayClassName:     aetherGatewayClassName,
+			AllowCRDsMismatch:    true,
+			CleanupBaseResources: cleanup(),
+			// 1.6 made per-test manifest cleanup OPT-IN; without it earlier tests'
+			// routes persist and shadow later same-match routes (wrong-backend
+			// failures + weight-distribution pollution). Always clean per test.
+			CleanupTestResources:       true,
 			EnableAllSupportedFeatures: false,
 			SupportedFeatures:          nil, // inferred from GatewayClass.status
 			ExemptFeatures:             nil,
@@ -361,10 +365,14 @@ func TestAetherMeshHTTP(t *testing.T) {
 
 	opts := suite.ConformanceOptions{
 		ConfigurableOptions: suite.ConfigurableOptions{
-			GatewayClassName:           aetherGatewayClassName,
-			MeshName:                   "aether",
-			AllowCRDsMismatch:          true,
-			CleanupBaseResources:       cleanup(),
+			GatewayClassName:     aetherGatewayClassName,
+			MeshName:             "aether",
+			AllowCRDsMismatch:    true,
+			CleanupBaseResources: cleanup(),
+			// 1.6 made per-test manifest cleanup OPT-IN; without it earlier tests'
+			// routes persist and shadow later same-match routes (wrong-backend
+			// failures + weight-distribution pollution). Always clean per test.
+			CleanupTestResources:       true,
 			EnableAllSupportedFeatures: false,
 			SupportedFeatures:          meshFeats,
 			TimeoutConfig:              aetherMeshTimeouts(),
