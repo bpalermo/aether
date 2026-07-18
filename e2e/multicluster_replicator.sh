@@ -143,10 +143,21 @@ install_spire() {
 	helm --kube-context "$ctx" repo add spiffe https://spiffe.github.io/helm-charts-hardened/ >/dev/null 2>&1 || true
 	helm --kube-context "$ctx" repo update >/dev/null 2>&1 || true
 	kubectl --context "$ctx" create ns spire-mgmt >/dev/null 2>&1 || true
+	# The shared upstream CA (same bytes in both clusters) is the root of trust.
+	# It lives in e2e/certs which is GITIGNORED — a fresh checkout (CI!) has no
+	# certs, and the old silent "|| true" secret creation let SPIRE hang forever
+	# on the missing mount (every nightly failed this way). Generate the
+	# throwaway CA on demand and fail LOUDLY if the secret can't be created.
+	if [[ ! -f "$REPO_ROOT/e2e/certs/ca.crt" || ! -f "$REPO_ROOT/e2e/certs/ca.key" ]]; then
+		log "e2e/certs missing (fresh checkout); generating throwaway CA"
+		make -C "$REPO_ROOT/e2e" generate-certs >/dev/null
+	fi
 	kubectl --context "$ctx" -n spire-mgmt create secret generic upstream-ca \
 		--from-file=tls.crt="$REPO_ROOT/e2e/certs/ca.crt" \
 		--from-file=tls.key="$REPO_ROOT/e2e/certs/ca.key" \
-		--from-file=bundle.crt="$REPO_ROOT/e2e/certs/ca.crt" >/dev/null 2>&1 || true
+		--from-file=bundle.crt="$REPO_ROOT/e2e/certs/ca.crt" \
+		--dry-run=client -o yaml | kubectl --context "$ctx" apply -f - >/dev/null ||
+		die "failed to create upstream-ca secret on '$1'"
 	helm --kube-context "$ctx" upgrade --install spire-crds spiffe/spire-crds \
 		-n spire-mgmt --version "$SPIRE_CRDS_VERSION" --wait --timeout 3m >/dev/null
 	helm --kube-context "$ctx" upgrade --install spire spiffe/spire \
