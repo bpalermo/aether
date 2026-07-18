@@ -21,7 +21,6 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -136,10 +135,6 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	if err := gatewayv1.Install(scheme); err != nil {
 		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
-	}
-	// TCPRoute/TLSRoute live in v1alpha2 (not yet promoted to v1 in gateway-api v1.5.1).
-	if err := gatewayv1alpha2.Install(scheme); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io/v1alpha2 scheme: %w", err)
 	}
 	// ReferenceGrant is served as v1beta1 (the storage version) — needed to admit
 	// cross-namespace backendRefs.

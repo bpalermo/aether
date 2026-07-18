@@ -6,9 +6,11 @@
 // TLSRoute: per-SNI filter chains (server_names match) route to weighted backends.
 // UDPRoute: UDP capture listener + udp_proxy backends, with a matching CNI UDP redirect.
 //
-// All three route types are gated behind --l4-routes (proposal 018, Phase 3b).
-// TLSRoute graduated to v1 in gateway-api v1.5.1 (and the cluster serves only v1),
-// so it is watched as v1.TLSRoute; TCPRoute/UDPRoute remain v1alpha2 (not promoted).
+// All three route types are CRD-detected (proposal 031) and watched at v1:
+// TLSRoute graduated in gateway-api v1.5, TCPRoute/UDPRoute in v1.6 (proposal
+// 032 — no v1alpha2 fallback by design; a cluster serving only the deprecated
+// v1alpha2 versions has the type disabled with a warning until its Gateway API
+// CRDs are upgraded to >= 1.6 and the agent restarts).
 package l4route
 
 import (
@@ -29,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -57,13 +58,11 @@ type Reconciler struct {
 	MeshDomain string
 	Log        *slog.Logger
 
-	// Per-type CRD gates (proposal 031): TCPRoute/UDPRoute are v1alpha2
-	// (Gateway API experimental channel) and TLSRoute promotion lags the core
-	// types, so any of them can be absent on a standard-channel cluster.
-	// Watching or listing a type whose CRD is absent wedges the manager /
-	// errors every reconcile; SetupWithManager sets these from the RESTMapper
-	// and the reconciler degrades per type with a warning. ReferenceGrant is
-	// gated the same way.
+	// Per-type CRD gates (proposal 031): any route type can be absent on a
+	// given cluster. Watching or listing a type whose CRD is absent wedges the
+	// manager / errors every reconcile; SetupWithManager sets these from the
+	// RESTMapper and the reconciler degrades per type with a warning.
+	// ReferenceGrant is gated the same way.
 	tcpEnabled, tlsEnabled, udpEnabled, referenceGrantEnabled bool
 }
 
@@ -80,13 +79,17 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// struct comment. All three absent = nothing to do — skip entirely.
 	mapper := mgr.GetRESTMapper()
 	var err error
-	if r.tcpEnabled, err = crdcheck.Present(mapper, gatewayv1alpha2.SchemeGroupVersion.WithKind("TCPRoute")); err != nil {
+	// All types at v1 only (proposal 032): TCPRoute/UDPRoute graduated in
+	// gateway-api 1.6. A cluster whose CRDs serve only the deprecated v1alpha2
+	// fails the v1 check and the type stays disabled (upgrade the CRDs to
+	// >= 1.6 and restart the agent).
+	if r.tcpEnabled, err = crdcheck.Present(mapper, gatewayv1.SchemeGroupVersion.WithKind("TCPRoute")); err != nil {
 		return err
 	}
 	if r.tlsEnabled, err = crdcheck.Present(mapper, gatewayv1.SchemeGroupVersion.WithKind("TLSRoute")); err != nil {
 		return err
 	}
-	if r.udpEnabled, err = crdcheck.Present(mapper, gatewayv1alpha2.SchemeGroupVersion.WithKind("UDPRoute")); err != nil {
+	if r.udpEnabled, err = crdcheck.Present(mapper, gatewayv1.SchemeGroupVersion.WithKind("UDPRoute")); err != nil {
 		return err
 	}
 	if !r.tcpEnabled && !r.tlsEnabled && !r.udpEnabled {
@@ -108,9 +111,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		enabled bool
 		obj     client.Object
 	}{
-		{r.tcpEnabled, &gatewayv1alpha2.TCPRoute{}},
+		{r.tcpEnabled, &gatewayv1.TCPRoute{}},
 		{r.tlsEnabled, &gatewayv1.TLSRoute{}},
-		{r.udpEnabled, &gatewayv1alpha2.UDPRoute{}},
+		{r.udpEnabled, &gatewayv1.UDPRoute{}},
 		{r.referenceGrantEnabled, &gatewayv1beta1.ReferenceGrant{}},
 	}
 	var b *builder.Builder
@@ -133,7 +136,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	// Every List is CRD-gated (proposal 031): listing a kind whose CRD is
 	// absent errors every reconcile, so disabled types keep empty lists.
-	tcpList := &gatewayv1alpha2.TCPRouteList{}
+	tcpList := &gatewayv1.TCPRouteList{}
 	if r.tcpEnabled {
 		if err := r.List(ctx, tcpList); err != nil {
 			return reconcile.Result{}, err
@@ -145,7 +148,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			return reconcile.Result{}, err
 		}
 	}
-	udpList := &gatewayv1alpha2.UDPRouteList{}
+	udpList := &gatewayv1.UDPRouteList{}
 	if r.udpEnabled {
 		if err := r.List(ctx, udpList); err != nil {
 			return reconcile.Result{}, err
@@ -330,7 +333,7 @@ func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, rou
 	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
 }
 
-func tcpBackendRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.BackendObjectReference {
+func tcpBackendRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
 	var refs []gatewayv1.BackendObjectReference
 	for _, rule := range rules {
 		for _, b := range rule.BackendRefs {
@@ -350,7 +353,7 @@ func tlsBackendRefs(rules []gatewayv1.TLSRouteRule) []gatewayv1.BackendObjectRef
 	return refs
 }
 
-func udpBackendRefs(rules []gatewayv1alpha2.UDPRouteRule) []gatewayv1.BackendObjectReference {
+func udpBackendRefs(rules []gatewayv1.UDPRouteRule) []gatewayv1.BackendObjectReference {
 	var refs []gatewayv1.BackendObjectReference
 	for _, rule := range rules {
 		for _, b := range rule.BackendRefs {
@@ -364,7 +367,7 @@ func udpBackendRefs(rules []gatewayv1alpha2.UDPRouteRule) []gatewayv1.BackendObj
 // parentRefs (kind=Service, core group — empty group string or nil group; 020
 // Part 1). A parentRef without an explicit namespace inherits the route's
 // namespace (Gateway API default).
-func serviceParents(refs []gatewayv1alpha2.ParentReference, routeNamespace string) []string {
+func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []string {
 	var svcs []string
 	for _, p := range refs {
 		if p.Group != nil && string(*p.Group) != "" {
@@ -396,7 +399,7 @@ func backendServiceKey(backendNamespace *gatewayv1.Namespace, routeNamespace, na
 
 // buildTCPRoute translates a TCPRouteRule into an L4ServiceRoute (no SNI match).
 // Backends without a valid Service name (foreign group/kind) are skipped.
-func (r *Reconciler) buildTCPRoute(rule gatewayv1alpha2.TCPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.L4ServiceRoute {
+func (r *Reconciler) buildTCPRoute(rule gatewayv1.TCPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.L4ServiceRoute {
 	return proxy.L4ServiceRoute{
 		Backends: r.buildL4Backends(rule.BackendRefs, routeNamespace, routeKind, grants),
 	}
@@ -415,13 +418,13 @@ func (r *Reconciler) buildTLSRoute(rule gatewayv1.TLSRouteRule, hostnames []stri
 // buildUDPBackends translates a UDPRouteRule into a flat backend list.
 // UDP backends resolve to "udp:<svc>.<domain>" clusters (plain EDS, no mTLS)
 // rather than the TCP "tcp:<svc>.<domain>" clusters used by TCPRoute/TLSRoute.
-func (r *Reconciler) buildUDPBackends(rule gatewayv1alpha2.UDPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
+func (r *Reconciler) buildUDPBackends(rule gatewayv1.UDPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
 	return r.buildUDPL4Backends(rule.BackendRefs, routeNamespace, routeKind, grants)
 }
 
 // buildL4Backends converts a BackendRef slice into L4Backends with resolved
 // TCP cluster names. Refs with a non-core group or non-Service kind are skipped.
-func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
+func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
 	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(key string) string {
 		// TCP clusters share the same EDS endpoints as HTTP clusters but use
 		// ALPN "aether-tcp" (see TCPClusterName). The capture TCP floor chains
@@ -434,7 +437,7 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1alpha2.BackendRef, routeNam
 // buildUDPL4Backends converts a BackendRef slice into L4Backends with resolved
 // UDP cluster names ("udp:<svc>.<domain>"). These clusters are plain EDS without
 // a transport socket — UDP traffic is not covered by mesh mTLS.
-func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
+func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
 	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(key string) string {
 		// key is the backend's namespace-qualified "<ns>/<svc>" (020 Part 1).
 		return proxy.UDPClusterName(key, r.MeshDomain)
@@ -445,7 +448,7 @@ func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1alpha2.BackendRef, route
 // the cluster name via clusterNameFn. Refs with a non-core group or non-Service
 // kind are skipped, as are ungranted cross-namespace refs (RefNotPermitted: dropped
 // from the data plane, mirroring the route's ResolvedRefs status).
-func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1alpha2.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, clusterNameFn func(key string) string) []proxy.L4Backend {
+func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, clusterNameFn func(key string) string) []proxy.L4Backend {
 	backends := make([]proxy.L4Backend, 0, len(refs))
 	for _, b := range refs {
 		if b.Group != nil && string(*b.Group) != "" {

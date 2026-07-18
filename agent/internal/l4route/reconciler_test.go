@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -33,7 +32,7 @@ func TestServiceParents(t *testing.T) {
 // TestBuildTCPRoute_SingleBackend verifies basic TCPRouteRule translation.
 func TestBuildTCPRoute_SingleBackend(t *testing.T) {
 	r := &Reconciler{MeshDomain: "aether.internal"}
-	rule := gatewayv1alpha2.TCPRouteRule{
+	rule := gatewayv1.TCPRouteRule{
 		BackendRefs: []gatewayv1.BackendRef{
 			{
 				BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-a"},
@@ -53,7 +52,7 @@ func TestBuildTCPRoute_SingleBackend(t *testing.T) {
 // TestBuildTCPRoute_WeightedBackends verifies multiple backends with weights.
 func TestBuildTCPRoute_WeightedBackends(t *testing.T) {
 	r := &Reconciler{MeshDomain: "mesh"}
-	rule := gatewayv1alpha2.TCPRouteRule{
+	rule := gatewayv1.TCPRouteRule{
 		BackendRefs: []gatewayv1.BackendRef{
 			{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-v1"}, Weight: ptr(int32(90))},
 			{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-v2"}, Weight: ptr(int32(10))},
@@ -86,7 +85,7 @@ func TestBuildTLSRoute_WithHostnames(t *testing.T) {
 // TestBuildUDPBackends verifies UDPRouteRule backend translation.
 func TestBuildUDPBackends(t *testing.T) {
 	r := &Reconciler{MeshDomain: "aether.internal"}
-	rule := gatewayv1alpha2.UDPRouteRule{
+	rule := gatewayv1.UDPRouteRule{
 		BackendRefs: []gatewayv1.BackendRef{
 			{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-c"}, Weight: ptr(int32(5))},
 		},

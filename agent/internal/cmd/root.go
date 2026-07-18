@@ -62,7 +62,6 @@ import (
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -418,10 +417,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	// 031: the reconciler CRD-detects each type and degrades when absent.
 	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
 	{
-		if err = gatewayv1alpha2.Install(m.GetScheme()); err != nil {
-			return fmt.Errorf("register gateway.networking.k8s.io v1alpha2 scheme: %w", err)
-		}
-		// v1 (TLSRoute) + v1beta1 (ReferenceGrant) types the l4 reconciler reads.
+		// v1 (all route types since gateway-api 1.6) + v1beta1 (ReferenceGrant).
 		if err = gatewayv1.Install(m.GetScheme()); err != nil {
 			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
 		}

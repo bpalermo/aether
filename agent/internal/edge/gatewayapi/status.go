@@ -13,7 +13,6 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -72,7 +71,7 @@ func (r *Reconciler) writeGatewayStatuses(
 	ctx context.Context,
 	ourGateways []gatewayv1.Gateway,
 	httpRoutes []gatewayv1.HTTPRoute,
-	tcpRoutes []gatewayv1alpha2.TCPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
@@ -177,6 +176,20 @@ func (r *Reconciler) writeGatewayStatuses(
 			Status:  metav1.ConditionTrue,
 			Reason:  string(gatewayv1.GatewayReasonAccepted),
 			Message: "Gateway accepted by the aether edge controller",
+		}
+		// An infrastructure.parametersRef that is present but unresolvable rejects
+		// the Gateway (Accepted=False/InvalidParameters — Gateway API spec, pinned
+		// by the GatewayInvalidParametersRef conformance test). The data plane
+		// stays tolerant (listeners keep serving on compiled defaults) so a
+		// briefly-dangling EdgeConfig doesn't drop live traffic; only the
+		// advertised status reflects the invalid ref.
+		if msg, invalid := r.invalidParametersRef(ctx, gw); invalid {
+			acceptedTop.Status = metav1.ConditionFalse
+			acceptedTop.Reason = string(gatewayv1.GatewayReasonInvalidParameters)
+			acceptedTop.Message = msg
+			programmedTop.Status = metav1.ConditionFalse
+			programmedTop.Reason = string(gatewayv1.GatewayReasonInvalid)
+			programmedTop.Message = msg
 		}
 
 		// status.addresses: Phase 2 uses the per-Gateway LB IP; Phase 1 uses the
@@ -340,7 +353,7 @@ func (r *Reconciler) attachedRoutesForListener(
 	gw *gatewayv1.Gateway,
 	ln gatewayv1.Listener,
 	httpRoutes []gatewayv1.HTTPRoute,
-	tcpRoutes []gatewayv1alpha2.TCPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
@@ -485,7 +498,7 @@ func (r *Reconciler) writeRouteStatuses(
 	ctx context.Context,
 	ourGateways []gatewayv1.Gateway,
 	httpRoutes []gatewayv1.HTTPRoute,
-	tcpRoutes []gatewayv1alpha2.TCPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
@@ -662,7 +675,7 @@ func (r *Reconciler) backendsResolveTLS(ctx context.Context, ns string, rules []
 	return r.backendsResolveL4(ctx, ns, "TLSRoute", refs, grants)
 }
 
-func l4BackendObjectRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.BackendObjectReference {
+func l4BackendObjectRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
 	var refs []gatewayv1.BackendObjectReference
 	for _, rule := range rules {
 		for _, b := range rule.BackendRefs {

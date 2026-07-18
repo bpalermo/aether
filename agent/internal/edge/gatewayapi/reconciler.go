@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -138,7 +137,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&gatewayv1.GatewayClass{}, resync).
 		Watches(&configapisv1.EdgeConfig{}, resync).
 		Watches(&gatewayv1.Gateway{}, resync).
-		Watches(&gatewayv1alpha2.TCPRoute{}, resync).
+		Watches(&gatewayv1.TCPRoute{}, resync).
 		Watches(&gatewayv1.TLSRoute{}, resync).
 		// ReferenceGrant (v1beta1): a grant change can flip a cross-namespace
 		// backendRef between permitted and RefNotPermitted, so re-project everything.
@@ -241,7 +240,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 
 	// --- TCPRoutes (cluster-wide) ---
-	tcpRouteList := &gatewayv1alpha2.TCPRouteList{}
+	tcpRouteList := &gatewayv1.TCPRouteList{}
 	if err := r.List(ctx, tcpRouteList); err != nil {
 		return reconcile.Result{}, err
 	}
@@ -972,7 +971,7 @@ func parentRefNamespace(ns *gatewayv1.Namespace, routeNamespace string) string {
 // the exact Gateway listener ports. A parentRef namespace defaults to the route's
 // own namespace when unset.
 func gatewayParentPorts(
-	parentRefs []gatewayv1alpha2.ParentReference,
+	parentRefs []gatewayv1.ParentReference,
 	routeNamespace string,
 	gateways map[gatewayKey]struct{},
 	protocol gatewayv1.ProtocolType,

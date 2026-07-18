@@ -45,7 +45,7 @@ permissions:
 env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
   KIND_CLUSTER: aether-conformance
-  GATEWAY_API_VERSION: v1.5.1
+  GATEWAY_API_VERSION: v1.6.1
 
 jobs:
   gateway-http:
