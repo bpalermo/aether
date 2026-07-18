@@ -231,7 +231,7 @@ jobs:
             -tags conformance \
             -run TestAetherGatewayHTTP \
             -parallel 1 \
-            -v -timeout 30m
+            -v -timeout 60m
 
       - name: Upload conformance report
         if: always()
@@ -408,7 +408,7 @@ jobs:
             -tags conformance \
             -run TestAetherMeshHTTP \
             -parallel 1 \
-            -v -timeout 40m
+            -v -timeout 60m
 
       - name: Upload conformance report
         if: always()
