@@ -8,7 +8,7 @@ Aether is a Kubernetes service mesh data plane built in Go. It runs an **agent**
 
 ## Build System
 
-The project uses **Bazel 9.0.1** (via Bazelisk) with `rules_go` and Gazelle for Go, and `rules_img` for container images. Go module is `github.com/bpalermo/aether` with Go 1.26.2.
+The project uses **Bazel 9.2.0** (via Bazelisk) with `rules_go` and Gazelle for Go, and `rules_img` for container images. Go module is `github.com/bpalermo/aether` with Go 1.26.x (see `MODULE.bazel` for the pinned SDK).
 
 ### Common Commands
 
