@@ -1,6 +1,6 @@
 # 032 — Upgrade Gateway API to v1.6.1
 
-Status: Proposed
+Status: Accepted (implemented 2026-07-18)
 
 ## Motivation
 
@@ -39,11 +39,13 @@ Go dep + `test/conformance` runner (self-replace module) + the
 v1.6.1. Talos-main CRDs upgraded out-of-band at deploy time (the
 safe-upgrade VAP fixes in 1.6 make the in-place CRD upgrade clean).
 
-**M2 — TCPRoute/UDPRoute to `v1`, with `v1alpha2` fallback.**
-`common/crdcheck` already gates per-GVK: detect `v1` first, fall back to
-`v1alpha2` (older clusters), warn on fallback. Touchpoints: l4route
-reconciler (watch + List + scheme), edge reconciler (`v1alpha2.TCPRoute`
-watch + list), RBAC unchanged (group-level). TLSRoute stays as-is.
+**M2 — TCPRoute/UDPRoute to `v1` (no fallback — user directive).**
+The dual-version fallback cost ~110 lines of collector boilerplate for a
+hypothetical old-CRD cluster; dropped. All route types watch `v1` only;
+`common/crdcheck` gates on the v1 GVK, so a cluster serving only the
+deprecated `v1alpha2` has the type disabled with a warning until its CRDs
+are upgraded to >= 1.6 and the agent restarts. Deploy ordering: upgrade
+CRDs before the chart.
 
 **M3 — conformance re-run + triage.**
 Re-run both gated profiles on kind. Expected work:

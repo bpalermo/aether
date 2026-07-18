@@ -45,7 +45,7 @@ permissions:
 env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
   KIND_CLUSTER: aether-conformance
-  GATEWAY_API_VERSION: v1.5.1
+  GATEWAY_API_VERSION: v1.6.1
 
 jobs:
   gateway-http:
@@ -224,10 +224,14 @@ jobs:
         # -tags conformance selects the dropped-in runner (the committed file carries
         # `//go:build conformance` so it stays out of the aether module build).
         run: |
+          # -parallel 1: gateway-api 1.6 marked many tests Parallel; concurrent
+          # same-match routes on the shared Gateway flap between backends until
+          # aether implements cross-route oldest-wins precedence (follow-up).
           go test . \
             -tags conformance \
             -run TestAetherGatewayHTTP \
-            -v -timeout 30m
+            -parallel 1 \
+            -v -timeout 60m
 
       - name: Upload conformance report
         if: always()
@@ -399,10 +403,12 @@ jobs:
           AETHER_CONFORMANCE: "1"
           AETHER_CONFORMANCE_REPORT: ${{ runner.temp }}/mesh-http-report.yaml
         run: |
+          # -parallel 1: see the GATEWAY-HTTP note above.
           go test . \
             -tags conformance \
             -run TestAetherMeshHTTP \
-            -v -timeout 40m
+            -parallel 1 \
+            -v -timeout 60m
 
       - name: Upload conformance report
         if: always()

@@ -2,6 +2,7 @@ package gatewayapi
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,6 +66,26 @@ func (r *Reconciler) classDefaultEdgeConfig(ctx context.Context) *configv1.EdgeC
 		ns = string(*ref.Namespace)
 	}
 	return r.getEdgeConfig(ctx, ns, ref.Name)
+}
+
+// invalidParametersRef reports whether the Gateway carries an
+// infrastructure.parametersRef that cannot resolve: an unsupported group/kind,
+// or a named EdgeConfig that doesn't exist. Per the Gateway API spec such a
+// Gateway is rejected (Accepted=False/InvalidParameters); absence of a ref is
+// fine (compiled defaults).
+func (r *Reconciler) invalidParametersRef(ctx context.Context, gw *gatewayv1.Gateway) (string, bool) {
+	inf := gw.Spec.Infrastructure
+	if inf == nil || inf.ParametersRef == nil {
+		return "", false
+	}
+	ref := inf.ParametersRef
+	if string(ref.Group) != edgeConfigGroup || string(ref.Kind) != edgeConfigKind {
+		return fmt.Sprintf("unsupported parametersRef %s/%s %q (only %s/%s is supported)", ref.Group, ref.Kind, ref.Name, edgeConfigGroup, edgeConfigKind), true
+	}
+	if r.getEdgeConfig(ctx, gw.Namespace, string(ref.Name)) == nil {
+		return fmt.Sprintf("parametersRef EdgeConfig %s/%s not found", gw.Namespace, ref.Name), true
+	}
+	return "", false
 }
 
 // getEdgeConfig fetches an EdgeConfig CR and returns its proto spec, or nil.

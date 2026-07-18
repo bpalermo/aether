@@ -43,7 +43,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -289,25 +288,33 @@ func TestAetherGatewayHTTP(t *testing.T) {
 	logGatewayFeatures(t, c)
 
 	opts := suite.ConformanceOptions{
-		Client:                     c,
-		ClientOptions:              copts,
-		Clientset:                  cs,
-		RestConfig:                 cfg,
-		GatewayClassName:           aetherGatewayClassName,
-		AllowCRDsMismatch:          true,
-		CleanupBaseResources:       cleanup(),
-		EnableAllSupportedFeatures: false,
-		SupportedFeatures:          nil, // inferred from GatewayClass.status
-		ExemptFeatures:             nil,
+		// User-configurable knobs live in the embedded ConfigurableOptions since
+		// gateway-api 1.6 (yaml-configurable suite); profiles/features are slices.
+		ConfigurableOptions: suite.ConfigurableOptions{
+			GatewayClassName:     aetherGatewayClassName,
+			AllowCRDsMismatch:    true,
+			CleanupBaseResources: cleanup(),
+			// 1.6 made per-test manifest cleanup OPT-IN; without it earlier tests'
+			// routes persist and shadow later same-match routes (wrong-backend
+			// failures + weight-distribution pollution). Always clean per test.
+			CleanupTestResources:       true,
+			EnableAllSupportedFeatures: false,
+			SupportedFeatures:          nil, // inferred from GatewayClass.status
+			ExemptFeatures:             nil,
+			TimeoutConfig:              aetherTimeouts(),
+			ConformanceProfiles:        []suite.ConformanceProfileName{suite.GatewayHTTPConformanceProfileName},
+			Implementation:             aetherImpl(),
+			ReportOutputPath:           reportPath("gateway-http-report.yaml"),
+		},
+		Client:        c,
+		ClientOptions: copts,
+		Clientset:     cs,
+		RestConfig:    cfg,
 		// NewConformanceTestSuite (unlike the RunConformance helper) does not default
 		// ManifestFS, so set the embedded base manifests explicitly — otherwise the
 		// suite applies no base resources and the conformance namespaces (e.g.
 		// gateway-conformance-web-backend) are never created.
-		ManifestFS:          []fs.FS{&gwconformance.Manifests},
-		TimeoutConfig:       aetherTimeouts(),
-		ConformanceProfiles: sets.New(suite.GatewayHTTPConformanceProfileName),
-		Implementation:      aetherImpl(),
-		ReportOutputPath:    reportPath("gateway-http-report.yaml"),
+		ManifestFS: []fs.FS{&gwconformance.Manifests},
 	}
 
 	cSuite, err := suite.NewConformanceTestSuite(opts)
@@ -349,33 +356,39 @@ func TestAetherMeshHTTP(t *testing.T) {
 	// MeshHTTPRouteRedirectHostAndStatus). The Extended HTTPRoute features aether's
 	// GAMMA reconciler also implements are advertised so their tests run rather than
 	// skip (all are valid v1.5.1 feature constants).
-	meshFeats := sets.New(
+	meshFeats := []features.FeatureName{
 		features.SupportMesh,
 		features.SupportHTTPRoute,
 		features.SupportHTTPRouteResponseHeaderModification,
 		features.SupportHTTPRouteMethodMatching,
-	)
+	}
 
 	opts := suite.ConformanceOptions{
-		Client:                     c,
-		ClientOptions:              copts,
-		Clientset:                  cs,
-		RestConfig:                 cfg,
-		GatewayClassName:           aetherGatewayClassName,
-		MeshName:                   "aether",
-		AllowCRDsMismatch:          true,
-		CleanupBaseResources:       cleanup(),
-		EnableAllSupportedFeatures: false,
-		SupportedFeatures:          meshFeats,
+		ConfigurableOptions: suite.ConfigurableOptions{
+			GatewayClassName:     aetherGatewayClassName,
+			MeshName:             "aether",
+			AllowCRDsMismatch:    true,
+			CleanupBaseResources: cleanup(),
+			// 1.6 made per-test manifest cleanup OPT-IN; without it earlier tests'
+			// routes persist and shadow later same-match routes (wrong-backend
+			// failures + weight-distribution pollution). Always clean per test.
+			CleanupTestResources:       true,
+			EnableAllSupportedFeatures: false,
+			SupportedFeatures:          meshFeats,
+			TimeoutConfig:              aetherMeshTimeouts(),
+			ConformanceProfiles:        []suite.ConformanceProfileName{suite.MeshHTTPConformanceProfileName},
+			Implementation:             aetherImpl(),
+			ReportOutputPath:           reportPath("mesh-http-report.yaml"),
+		},
+		Client:        c,
+		ClientOptions: copts,
+		Clientset:     cs,
+		RestConfig:    cfg,
 		// Use aether's mesh overlay for the base mesh manifests (mesh/manifests.yaml)
 		// while still serving the per-test tests/mesh/*.yaml manifests from the upstream
 		// embed (see meshManifestFS / overlayFS). A bare {meshManifests} would silently
 		// drop every per-test HTTPRoute manifest — the route would never apply.
-		ManifestFS:          []fs.FS{meshManifestFS()},
-		TimeoutConfig:       aetherMeshTimeouts(),
-		ConformanceProfiles: sets.New(suite.MeshHTTPConformanceProfileName),
-		Implementation:      aetherImpl(),
-		ReportOutputPath:    reportPath("mesh-http-report.yaml"),
+		ManifestFS: []fs.FS{meshManifestFS()},
 	}
 
 	cSuite, err := suite.NewConformanceTestSuite(opts)

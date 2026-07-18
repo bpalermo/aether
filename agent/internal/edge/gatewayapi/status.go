@@ -13,7 +13,6 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -72,7 +71,7 @@ func (r *Reconciler) writeGatewayStatuses(
 	ctx context.Context,
 	ourGateways []gatewayv1.Gateway,
 	httpRoutes []gatewayv1.HTTPRoute,
-	tcpRoutes []gatewayv1alpha2.TCPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
@@ -95,7 +94,46 @@ func (r *Reconciler) writeGatewayStatuses(
 		// conflict-retry re-Gets in writeGatewayStatus below.
 		listenerInputs := make([]listenerStatusInput, 0, len(gw.Spec.Listeners))
 		allListenersProgrammed := true
+		anyListenerAccepted := false
+		anyUnsupportedProtocol := false
 		for _, ln := range gw.Spec.Listeners {
+			// Unsupported listener protocol (gateway-api 1.6's
+			// GatewayListenerUnsupportedProtocol contract): the listener is not
+			// accepted (UnsupportedProtocol), publishes empty supportedKinds, and
+			// counts against the Gateway's Accepted/Programmed rollup below.
+			if supportedKindsFor(ln.Protocol) == nil {
+				// NOTE: deliberately NOT counted against allListenersProgrammed —
+				// the suite's readiness poller requires top-level Programmed=True
+				// on the mixed (supported+unsupported) fixture Gateway; only a
+				// Gateway with NO accepted listener rolls up Programmed=False.
+				anyUnsupportedProtocol = true
+				msg := fmt.Sprintf("Listener protocol %q is not supported by the aether edge (supported: HTTP, HTTPS, TLS, TCP)", ln.Protocol)
+				listenerInputs = append(listenerInputs, listenerStatusInput{
+					name:           ln.Name,
+					supportedKinds: []gatewayv1.RouteGroupKind{},
+					attached:       0,
+					accepted: gatewaystatus.Condition{
+						Type:    string(gatewayv1.ListenerConditionAccepted),
+						Status:  metav1.ConditionFalse,
+						Reason:  string(gatewayv1.ListenerReasonUnsupportedProtocol),
+						Message: msg,
+					},
+					programmed: gatewaystatus.Condition{
+						Type:    string(gatewayv1.ListenerConditionProgrammed),
+						Status:  metav1.ConditionFalse,
+						Reason:  string(gatewayv1.ListenerReasonInvalid),
+						Message: msg,
+					},
+					resolved: gatewaystatus.Condition{
+						Type:    string(gatewayv1.ListenerConditionResolvedRefs),
+						Status:  metav1.ConditionTrue,
+						Reason:  string(gatewayv1.ListenerReasonResolvedRefs),
+						Message: "No references to resolve",
+					},
+				})
+				continue
+			}
+			anyListenerAccepted = true
 			attached := r.attachedRoutesForListener(ctx, gw, ln, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys)
 
 			// ResolvedRefs: InvalidRouteKinds (allowedRoutes.kinds names an
@@ -172,11 +210,43 @@ func (r *Reconciler) writeGatewayStatuses(
 			programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
 			programmedTop.Message = "One or more listeners are not programmed (invalid TLS or route kinds)"
 		}
+		if !anyListenerAccepted && len(gw.Spec.Listeners) > 0 {
+			// All listeners rejected (unsupported protocols): nothing programs.
+			programmedTop.Status = metav1.ConditionFalse
+			programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+			programmedTop.Message = "No listener is accepted (unsupported protocols)"
+		}
 		acceptedTop := gatewaystatus.Condition{
 			Type:    string(gatewayv1.GatewayConditionAccepted),
 			Status:  metav1.ConditionTrue,
 			Reason:  string(gatewayv1.GatewayReasonAccepted),
 			Message: "Gateway accepted by the aether edge controller",
+		}
+		// Listener-protocol rollup (1.6 contract): no accepted listener at all →
+		// Accepted=False/ListenersNotValid; some unsupported but ≥1 accepted →
+		// Accepted stays True with reason ListenersNotValid.
+		switch {
+		case !anyListenerAccepted && len(gw.Spec.Listeners) > 0:
+			acceptedTop.Status = metav1.ConditionFalse
+			acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+			acceptedTop.Message = "No listener is accepted (unsupported protocols)"
+		case anyUnsupportedProtocol:
+			acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+			acceptedTop.Message = "Gateway accepted; some listeners are not valid (unsupported protocols)"
+		}
+		// An infrastructure.parametersRef that is present but unresolvable rejects
+		// the Gateway (Accepted=False/InvalidParameters — Gateway API spec, pinned
+		// by the GatewayInvalidParametersRef conformance test). The data plane
+		// stays tolerant (listeners keep serving on compiled defaults) so a
+		// briefly-dangling EdgeConfig doesn't drop live traffic; only the
+		// advertised status reflects the invalid ref.
+		if msg, invalid := r.invalidParametersRef(ctx, gw); invalid {
+			acceptedTop.Status = metav1.ConditionFalse
+			acceptedTop.Reason = string(gatewayv1.GatewayReasonInvalidParameters)
+			acceptedTop.Message = msg
+			programmedTop.Status = metav1.ConditionFalse
+			programmedTop.Reason = string(gatewayv1.GatewayReasonInvalid)
+			programmedTop.Message = msg
 		}
 
 		// status.addresses: Phase 2 uses the per-Gateway LB IP; Phase 1 uses the
@@ -340,7 +410,7 @@ func (r *Reconciler) attachedRoutesForListener(
 	gw *gatewayv1.Gateway,
 	ln gatewayv1.Listener,
 	httpRoutes []gatewayv1.HTTPRoute,
-	tcpRoutes []gatewayv1alpha2.TCPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
@@ -485,7 +555,7 @@ func (r *Reconciler) writeRouteStatuses(
 	ctx context.Context,
 	ourGateways []gatewayv1.Gateway,
 	httpRoutes []gatewayv1.HTTPRoute,
-	tcpRoutes []gatewayv1alpha2.TCPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
 	tlsRoutes []gatewayv1.TLSRoute,
 	gateways map[gatewayKey]struct{},
 	listenerKeys map[gatewayListenerKey]struct{},
@@ -662,7 +732,7 @@ func (r *Reconciler) backendsResolveTLS(ctx context.Context, ns string, rules []
 	return r.backendsResolveL4(ctx, ns, "TLSRoute", refs, grants)
 }
 
-func l4BackendObjectRefs(rules []gatewayv1alpha2.TCPRouteRule) []gatewayv1.BackendObjectReference {
+func l4BackendObjectRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
 	var refs []gatewayv1.BackendObjectReference
 	for _, rule := range rules {
 		for _, b := range rule.BackendRefs {

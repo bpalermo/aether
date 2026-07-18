@@ -198,3 +198,62 @@ kind: ServiceAccount
 metadata:
   name: echo-v1
   namespace: gateway-conformance-mesh-consumer
+---
+# gateway-api 1.6's MeshNamespacesMustBeReady (suite Setup) requires >=1 Ready
+# pod in app-backend and web-backend TOO — namespaces only the GATEWAY base
+# manifests populate. A mesh-only suite (no SupportGateway) never applies
+# those, so Setup would wait forever. Seed each with a minimal echo backend:
+# readiness-only, UNMESHED (no aether labels — no mesh test routes here).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-conformance-app-backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-ready
+  namespace: gateway-conformance-app-backend
+  labels:
+    app: echo-ready
+spec:
+  selector:
+    matchLabels:
+      app: echo-ready
+  template:
+    metadata:
+      labels:
+        app: echo-ready
+    spec:
+      containers:
+      - name: echo
+        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-conformance-web-backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-ready
+  namespace: gateway-conformance-web-backend
+  labels:
+    app: echo-ready
+spec:
+  selector:
+    matchLabels:
+      app: echo-ready
+  template:
+    metadata:
+      labels:
+        app: echo-ready
+    spec:
+      containers:
+      - name: echo
+        image: gcr.io/k8s-staging-gateway-api/echo-advanced:v20240412-v1.0.0-394-g40c666fd
+        ports:
+        - containerPort: 8080

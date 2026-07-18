@@ -25,7 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -46,7 +45,6 @@ func statusScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(s))
 	require.NoError(t, gatewayv1.Install(s))
-	require.NoError(t, gatewayv1alpha2.Install(s))
 	require.NoError(t, gatewayv1beta1.Install(s))
 	return s
 }

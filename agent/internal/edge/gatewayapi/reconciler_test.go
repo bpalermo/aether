@@ -16,7 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -264,10 +263,10 @@ func TestBuildVirtualHost_WeightedBackends(t *testing.T) {
 
 // --- L4 edge helpers ---
 
-func gatewayParentRef(name string, port int32) gatewayv1alpha2.ParentReference {
-	p := gatewayv1alpha2.ParentReference{Name: gatewayv1alpha2.ObjectName(name)}
+func gatewayParentRef(name string, port int32) gatewayv1.ParentReference {
+	p := gatewayv1.ParentReference{Name: gatewayv1.ObjectName(name)}
 	if port != 0 {
-		pp := gatewayv1alpha2.PortNumber(port)
+		pp := gatewayv1.PortNumber(port)
 		p.Port = &pp
 	}
 	return p
@@ -335,12 +334,12 @@ func TestGatewayParentPorts_WithPort(t *testing.T) {
 		{Gateway: gk, Port: 8443, Protocol: gatewayv1.TLSProtocolType}: {},
 	}
 
-	tcpRefs := []gatewayv1alpha2.ParentReference{gatewayParentRef("edge-gw", 5432)}
+	tcpRefs := []gatewayv1.ParentReference{gatewayParentRef("edge-gw", 5432)}
 	ports := gatewayParentPorts(tcpRefs, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Equal(t, []uint32{5432}, ports)
 
 	// Wrong protocol: TLS ref not matched as TCP.
-	wrongProto := []gatewayv1alpha2.ParentReference{gatewayParentRef("edge-gw", 8443)}
+	wrongProto := []gatewayv1.ParentReference{gatewayParentRef("edge-gw", 8443)}
 	tcpPorts := gatewayParentPorts(wrongProto, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Empty(t, tcpPorts)
 
@@ -360,7 +359,7 @@ func TestGatewayParentPorts_NoPort(t *testing.T) {
 		{Gateway: gk, Port: 8443, Protocol: gatewayv1.TLSProtocolType}: {},
 	}
 	// No port: should match all TCP listeners.
-	refs := []gatewayv1alpha2.ParentReference{gatewayParentRef("edge-gw", 0)}
+	refs := []gatewayv1.ParentReference{gatewayParentRef("edge-gw", 0)}
 	ports := gatewayParentPorts(refs, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Len(t, ports, 2)
 	for _, p := range ports {
@@ -374,7 +373,7 @@ func TestGatewayParentPorts_UnknownGateway(t *testing.T) {
 	keys := map[gatewayListenerKey]struct{}{
 		{Gateway: gatewayKey{Namespace: "ns", Name: "other-gw"}, Port: 5432, Protocol: gatewayv1.TCPProtocolType}: {},
 	}
-	refs := []gatewayv1alpha2.ParentReference{gatewayParentRef("other-gw", 5432)}
+	refs := []gatewayv1.ParentReference{gatewayParentRef("other-gw", 5432)}
 	ports := gatewayParentPorts(refs, "ns", gateways, gatewayv1.TCPProtocolType, keys)
 	assert.Empty(t, ports)
 }
