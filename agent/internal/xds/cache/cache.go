@@ -265,6 +265,26 @@ type SnapshotCache struct {
 	depSetTTL    time.Duration
 	depSetExpiry time.Time
 	depSetValid  bool
+	// effRoutes/effRoutesGen/effRoutesValid memoize serviceRoutesSnapshot
+	// (issue #540): the effective (local ∪ imported) GAMMA rules with
+	// unavailable extension filters stripped. Served while depGen is unchanged
+	// (every route writer bumps it; SetAuthzSidecar bumps too, since authz
+	// availability changes the strip result). Like depSet, the stored map is
+	// shared with callers and must never be mutated after it is stored. All
+	// guarded by depMu.
+	effRoutes      map[string][]proxy.GammaRoute
+	effRoutesGen   uint64
+	effRoutesValid bool
+	// routeDomains memoizes the per-route-target cap_http host-match domain
+	// lists (issue #540), keyed by the "<ns>/<svc>" route-target key. Valid
+	// while BOTH input generations are unchanged: depGen (routes +
+	// routeTargetPorts + authz flag) and captureAuthGen (captureAuthorities,
+	// the SA-backed fqdn source). Shared with callers; never mutated after
+	// store. Guarded by depMu.
+	routeDomains        map[string][]string
+	routeDomainsDepGen  uint64
+	routeDomainsAuthGen uint64
+	routeDomainsValid   bool
 	// depChanged receives a (coalesced) signal when the dependency set
 	// changes; the registry refresher rebuilds the scoped snapshot on it.
 	depChanged chan struct{}
@@ -302,6 +322,10 @@ type SnapshotCache struct {
 	// chains on the capture listener (proposal 018, Phase 3a TCP floor).
 	captureMu          sync.RWMutex
 	captureAuthorities map[string]string
+	// captureAuthGen counts content mutations of captureAuthorities (guarded by
+	// captureMu): an input generation for the routeDomains memo, which reads the
+	// SA-backed fqdns from the authority map.
+	captureAuthGen uint64
 	// captureTCPServices is the snapshot of non-HTTP mesh Services, keyed by service
 	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
 	// A nil/empty slice means all captured traffic goes through the HCM chain.

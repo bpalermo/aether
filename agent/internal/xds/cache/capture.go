@@ -137,6 +137,12 @@ func (c *SnapshotCache) SetCaptureAuthorities(authorities map[string]string) {
 	c.captureMu.Lock()
 	changed := !equalStringMaps(c.captureAuthorities, authorities)
 	c.captureAuthorities = authorities
+	if changed {
+		// Invalidate the routeDomains memo: the SA-backed fqdns feed the
+		// per-route-target domain lists (content-equal replacement leaves the
+		// memo exact, so no bump then).
+		c.captureAuthGen++
+	}
 	c.captureMu.Unlock()
 	if changed {
 		c.signalDependencyChange()
@@ -405,31 +411,13 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	deps := c.DependencySet()
 	// GAMMA (HTTPRoute/GRPCRoute) rules enrich the captured path too — capture is the
 	// default client path (mesh-DNS), so the same L7 vocabulary the outbound listener
-	// applies must apply here; no rules = passthrough to the service cluster.
-	gammaRoutes := c.serviceRoutesSnapshot()
+	// applies must apply here; no rules = passthrough to the service cluster. The
+	// per-route-target domain lists are read from the same-generation memo (issue
+	// #540); they fold in the real Service port(s) (proposal 023 M2) and the
+	// bare-name uniqueness guard.
+	gammaRoutes, routeDomains := c.serviceRoutesAndDomainsSnapshot()
 	// Service-wide always-on extension filters (025 M4 CHAIN scope), vhost-enabled.
 	chainFilters := c.serviceChainFiltersSnapshot()
-	// Real Service port(s) of each route target (proposal 023 M2): a client dials the
-	// route target on its REAL port (e.g. echo:8080), and Envoy includes the port in
-	// vhost host-matching — so the vhost must carry a "<fqdn>:<realPort>" domain, not
-	// just the mesh :18081 spelling, or the request 404s.
-	routeTargetPorts := c.routeTargetPortsSnapshot()
-
-	// Bare route-target names (the same-namespace short dial, e.g. "echo") are only
-	// unambiguous when a single namespace owns that name. If two namespaces each have
-	// an "echo" route target, emitting "echo" as a domain twice makes Envoy NACK the
-	// whole route config. Count bare names across in-scope route targets so the bare
-	// spelling is emitted only when globally unique; the namespace-qualified spellings
-	// (<name>.<ns>...) are always unambiguous and always emitted.
-	bareNameCount := make(map[string]int)
-	for svc := range gammaRoutes {
-		if _, ok := deps[svc]; !ok {
-			continue
-		}
-		if ref, ok := serviceref.ParseKey(svc); ok {
-			bareNameCount[ref.Name]++
-		}
-	}
 
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
@@ -456,7 +444,15 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		// set for authorities that actually have rules.
 		var domains []string
 		if len(rules) > 0 {
-			domains = c.routeTargetDomains(svc, fqdn, mesh, bareNameCount, routeTargetPorts[svc])
+			domains = routeDomains[svc]
+			if len(domains) == 0 {
+				// Defensive: a route target with rules always has a memo entry
+				// unless its "<ns>/<svc>" key is unparseable AND it raced past a
+				// captureAuthorities swap. ParseKey failing means the short-name
+				// spellings (and bareNameCount/ports) are unused, so this inline
+				// render matches what the memo would have built.
+				domains = routeTargetDomains(svc, fqdn, mesh, nil, nil)
+			}
 		} else {
 			// Route both the cluster.local authority and the mesh-global
 			// <svc>.<meshDomain> authority (portless + :meshPort) to the service
@@ -484,13 +480,13 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 		if _, ok := deps[svc]; !ok {
 			continue
 		}
-		ref, ok := serviceref.ParseKey(svc)
-		if !ok {
+		domains := routeDomains[svc]
+		if len(domains) == 0 {
+			// No memo entry: the "<ns>/<svc>" key is unparseable (no cluster.local
+			// authority can be derived) — skipped before the memo existed too.
 			continue
 		}
-		fqdn := ref.ClusterLocalFQDN()
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		domains := c.routeTargetDomains(svc, fqdn, mesh, bareNameCount, routeTargetPorts[svc])
 		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc])
 		applyChainFilter(vh, chainFilters, svc)
 		vhosts = append(vhosts, vh)
@@ -605,6 +601,91 @@ func knownTargetAuthorityRegex(name, namespace, fqdn string) string {
 	return "^(" + strings.Join(quoted, "|") + ")(:[0-9]+)?$"
 }
 
+// serviceRoutesAndDomainsSnapshot returns the effective stripped GAMMA rules
+// together with the per-route-target cap_http domain lists built from that SAME
+// route generation, memoized on the two input generations (issue #540): depGen
+// (routes + routeTargetPorts + the authz flag) and captureAuthGen
+// (captureAuthorities, the SA-backed fqdn source). Previously
+// routeTargetDomains rebuilt every list via fmt.Sprintf in nested loops (base
+// names × ports) on EVERY snapshot; now the snapshot path only reads the memo.
+// Both returned maps are shared across calls until the next rebuild and must be
+// treated as read-only (the depSet convention).
+func (c *SnapshotCache) serviceRoutesAndDomainsSnapshot() (map[string][]proxy.GammaRoute, map[string][]string) {
+	// Lock order: captureMu and depMu are taken strictly sequentially, never
+	// nested (matching SetCaptureTCPServices).
+	c.captureMu.RLock()
+	authGen := c.captureAuthGen
+	c.captureMu.RUnlock()
+
+	c.depMu.Lock()
+	routes := c.effectiveStrippedRoutesLocked()
+	if c.routeDomainsValid && c.routeDomainsDepGen == c.depGen && c.routeDomainsAuthGen == authGen {
+		domains := c.routeDomains
+		c.depMu.Unlock()
+		return routes, domains
+	}
+	depGen := c.depGen
+	// routeTargetPorts is replaced wholesale by SetRouteTargetPorts, never
+	// mutated in place, so the reference stays safe to read outside depMu.
+	ports := c.routeTargetPorts
+	c.depMu.Unlock()
+
+	// Same replace-not-mutate convention for captureAuthorities. Re-read the
+	// generation WITH the map so the memo tag matches the inputs actually used;
+	// if either input advances mid-build, the tag mismatch makes the next
+	// reader rebuild.
+	c.captureMu.RLock()
+	authGen = c.captureAuthGen
+	authorities := c.captureAuthorities
+	c.captureMu.RUnlock()
+
+	built := c.buildRouteTargetDomains(routes, authorities, ports)
+
+	c.depMu.Lock()
+	c.routeDomains = built
+	c.routeDomainsDepGen = depGen
+	c.routeDomainsAuthGen = authGen
+	c.routeDomainsValid = true
+	c.depMu.Unlock()
+	return routes, built
+}
+
+// buildRouteTargetDomains renders the cap_http domain list for every route
+// target in routes (the memo rebuild). The fqdn is the target's mesh authority
+// when SA-backed (captureAuthorities), else derived from its "<ns>/<svc>" key;
+// a target with an unparseable key and no authority entry gets no entry
+// (captureVhosts skips those, matching the previous inline behavior).
+//
+// bareNameCount equivalence: the previous inline computation counted bare names
+// only over route targets present in the dependency set — but every effective
+// route target is unconditionally unioned into the dependency set
+// (dependencySetLocked), so counting over all route keys is identical.
+func (c *SnapshotCache) buildRouteTargetDomains(routes map[string][]proxy.GammaRoute, authorities map[string]string, ports map[string][]uint32) map[string][]string {
+	if len(routes) == 0 {
+		return nil
+	}
+	bareNameCount := make(map[string]int, len(routes))
+	for svc := range routes {
+		if ref, ok := serviceref.ParseKey(svc); ok {
+			bareNameCount[ref.Name]++
+		}
+	}
+	out := make(map[string][]string, len(routes))
+	for svc := range routes {
+		fqdn, ok := authorities[svc]
+		if !ok {
+			ref, parsed := serviceref.ParseKey(svc)
+			if !parsed {
+				continue
+			}
+			fqdn = ref.ClusterLocalFQDN()
+		}
+		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
+		out[svc] = routeTargetDomains(svc, fqdn, mesh, bareNameCount, ports[svc])
+	}
+	return out
+}
+
 // routeTargetDomains builds the cap_http host-match domains for a GAMMA route
 // target keyed "<ns>/<name>". A captured request carries whatever authority the
 // client used to dial the target. Kubernetes search-domain resolution lets a
@@ -619,8 +700,9 @@ func knownTargetAuthorityRegex(name, namespace, fqdn string) string {
 // the captured ClusterIP:port (echo:80 / echo:8080) host-matches too. The bare
 // same-namespace name is emitted only when a single namespace owns it
 // (bareNameCount==1), since a duplicate bare domain makes Envoy NACK the route
-// config.
-func (c *SnapshotCache) routeTargetDomains(svc, fqdn, mesh string, bareNameCount map[string]int, ports []uint32) []string {
+// config. Called from the routeDomains memo rebuild (issue #540), not per
+// snapshot.
+func routeTargetDomains(svc, fqdn, mesh string, bareNameCount map[string]int, ports []uint32) []string {
 	baseNames := []string{fqdn, mesh}
 	if ref, ok := serviceref.ParseKey(svc); ok {
 		baseNames = append(
@@ -728,6 +810,12 @@ func (c *SnapshotCache) SetAuthzSidecar(timeout time.Duration, failureModeAllow 
 	c.authzSidecar = true
 	c.authzTimeout = timeout
 	c.authzFailureModeAllow = failureModeAllow
+	// Authz availability changes the extension-strip result: invalidate the
+	// effective-routes memo (boot-time in production, but never serve a memo
+	// built under the old availability).
+	c.depMu.Lock()
+	c.bumpDepGenLocked()
+	c.depMu.Unlock()
 }
 
 // podExtensionHTTPFilters returns the extension union for one pod's EGRESS chains:
