@@ -99,10 +99,11 @@ func TestReadyAgent(t *testing.T) {
 	})
 }
 
-// TestMissingAgentArmsAfterGrace: no Ready agent pod -> taint armed only after
-// the grace window elapses (first reconcile debounces).
+// TestMissingAgentArmsAfterGrace: an agent pod that exists but is not Ready (the
+// rebooted-node reality — the DaemonSet pod object persists) -> taint armed only
+// after the grace window elapses (first reconcile debounces).
 func TestMissingAgentArmsAfterGrace(t *testing.T) {
-	g, c := newGuard(t, node(nodeName, false)) // no agent pods at all
+	g, c := newGuard(t, node(nodeName, false), agentPod("a", nodeName, false))
 
 	// First observation: debounce, do NOT taint yet.
 	res := reconcileNode(t, g)
@@ -162,9 +163,9 @@ func TestIdempotentWhenAlreadyTainted(t *testing.T) {
 }
 
 // TestOtherNodeAgentIgnored: a Ready agent pod on a DIFFERENT node does not count
-// for this node.
+// for this node (which has its own not-Ready agent pod).
 func TestOtherNodeAgentIgnored(t *testing.T) {
-	g, c := newGuard(t, node(nodeName, false), agentPod("b", "node-b", true))
+	g, c := newGuard(t, node(nodeName, false), agentPod("a", nodeName, false), agentPod("b", "node-b", true))
 
 	res := reconcileNode(t, g)
 	assert.False(t, tainted(t, c), "still debouncing on first observation")
@@ -176,6 +177,26 @@ func TestOtherNodeAgentIgnored(t *testing.T) {
 
 	reconcileNode(t, g)
 	assert.True(t, tainted(t, c), "an agent on another node must not satisfy this node")
+}
+
+// TestIneligibleNodeNeverTainted: a node with NO agent pod object at all (the
+// DaemonSet does not consider it eligible — control-plane taint without a
+// toleration, cordon+drain) must never be tainted: no agent would ever remove
+// the taint there. Regression test for the guard tainting main-cp-01.
+func TestIneligibleNodeNeverTainted(t *testing.T) {
+	g, c := newGuard(t, node(nodeName, false)) // no agent pod object for this node
+
+	res := reconcileNode(t, g)
+	assert.False(t, tainted(t, c))
+	assert.Zero(t, res.RequeueAfter, "ineligible nodes are not requeued")
+
+	// Even with a long-elapsed debounce window the guard must not arm.
+	g.mu.Lock()
+	g.missingSince[nodeName] = time.Now().Add(-2 * grace)
+	g.mu.Unlock()
+
+	reconcileNode(t, g)
+	assert.False(t, tainted(t, c), "a node the agent DS does not cover must never be tainted")
 }
 
 // TestPodToNode maps agent-pod events to their node, and ignores non-agent /
