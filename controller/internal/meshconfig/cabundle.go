@@ -62,6 +62,20 @@ func (i *CABundleInjector) inject(ctx context.Context) error {
 		return err
 	}
 
+	if err := i.injectValidating(ctx, bundle); err != nil {
+		return err
+	}
+
+	// The pod-ndots MutatingWebhookConfiguration shares the same SVID, so keep its
+	// caBundle in sync too.
+	if i.MutatingWebhookConfigName == "" {
+		return nil
+	}
+	return i.injectMutating(ctx, bundle)
+}
+
+// injectValidating updates the ValidatingWebhookConfiguration's caBundle.
+func (i *CABundleInjector) injectValidating(ctx context.Context, bundle []byte) error {
 	var vwc admissionregistrationv1.ValidatingWebhookConfiguration
 	if err := i.Client.Get(ctx, types.NamespacedName{Name: i.WebhookConfigName}, &vwc); err != nil {
 		return fmt.Errorf("get ValidatingWebhookConfiguration %q: %w", i.WebhookConfigName, err)
@@ -79,12 +93,11 @@ func (i *CABundleInjector) inject(ctx context.Context) error {
 		}
 		i.Log.InfoContext(ctx, "injected SPIRE trust bundle into webhook caBundle", "webhookConfig", i.WebhookConfigName)
 	}
+	return nil
+}
 
-	// The pod-ndots MutatingWebhookConfiguration shares the same SVID, so keep its
-	// caBundle in sync too.
-	if i.MutatingWebhookConfigName == "" {
-		return nil
-	}
+// injectMutating updates the MutatingWebhookConfiguration's caBundle.
+func (i *CABundleInjector) injectMutating(ctx context.Context, bundle []byte) error {
 	var mwc admissionregistrationv1.MutatingWebhookConfiguration
 	if err := i.Client.Get(ctx, types.NamespacedName{Name: i.MutatingWebhookConfigName}, &mwc); err != nil {
 		return fmt.Errorf("get MutatingWebhookConfiguration %q: %w", i.MutatingWebhookConfigName, err)

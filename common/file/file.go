@@ -86,20 +86,14 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 
 // AtomicWriteReader writes data from a reader atomically to a file with the specified permissions.
 // It uses a temporary file and atomically renames it, marking large files as not needed for cache optimization.
-func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
+func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) (retErr error) {
 	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if Exists(tmpFile.Name()) {
-			if rmErr := os.Remove(tmpFile.Name()); rmErr != nil {
-				if err != nil {
-					err = fmt.Errorf("%s: %w", rmErr.Error(), err)
-				} else {
-					err = rmErr
-				}
-			}
+			retErr = joinErrors(os.Remove(tmpFile.Name()), retErr)
 		}
 	}()
 
@@ -108,10 +102,8 @@ func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
 	}
 
 	n, err := io.Copy(tmpFile, data)
-	if _, err := io.Copy(tmpFile, data); err != nil {
-		if closeErr := tmpFile.Close(); closeErr != nil {
-			err = fmt.Errorf("%s: %w", closeErr.Error(), err)
-		}
+	if err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
 	tryMarkLargeFileAsNotNeeded(n, tmpFile)
@@ -120,6 +112,17 @@ func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
 	}
 
 	return os.Rename(tmpFile.Name(), path)
+}
+
+// joinErrors combines two errors into one; either may be nil.
+func joinErrors(a, b error) error {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return fmt.Errorf("%s: %w", a.Error(), b)
 }
 
 // tryMarkLargeFileAsNotNeeded attempts to mark a file as not needed in the page cache.

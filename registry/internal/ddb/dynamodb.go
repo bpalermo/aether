@@ -279,30 +279,34 @@ func (r *DynamoDBRegistry) ListAllEndpoints(ctx context.Context, protocol regist
 			r.log.ErrorContext(ctx, "failed to scan endpoints", "error", err, "protocol", protocol)
 			return nil, fmt.Errorf("failed to scan endpoints: %w", err)
 		}
-
-		for _, item := range page.Items {
-			pkAttr, ok := item["PK"].(*types.AttributeValueMemberS)
-			if !ok {
-				continue
-			}
-			serviceName := strings.TrimPrefix(pkAttr.Value, "service#")
-
-			endpointsAttr, ok := item["endpoints"].(*types.AttributeValueMemberM)
-			if !ok {
-				continue
-			}
-
-			for _, epAttr := range endpointsAttr.Value {
-				var endpoint registryv1.ServiceEndpoint
-				if err := attributevalue.Unmarshal(epAttr, &endpoint); err != nil {
-					r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err)
-					continue
-				}
-				endpointsByService[serviceName] = append(endpointsByService[serviceName], &endpoint)
-			}
-		}
+		r.collectPageEndpoints(ctx, page.Items, endpointsByService)
 	}
 
 	r.log.DebugContext(ctx, "listed all endpoints", "protocol", protocol, "services", len(endpointsByService))
 	return endpointsByService, nil
+}
+
+// collectPageEndpoints appends endpoints from a scan page into endpointsByService.
+func (r *DynamoDBRegistry) collectPageEndpoints(ctx context.Context, items []map[string]types.AttributeValue, endpointsByService map[string][]*registryv1.ServiceEndpoint) {
+	for _, item := range items {
+		pkAttr, ok := item["PK"].(*types.AttributeValueMemberS)
+		if !ok {
+			continue
+		}
+		serviceName := strings.TrimPrefix(pkAttr.Value, "service#")
+
+		endpointsAttr, ok := item["endpoints"].(*types.AttributeValueMemberM)
+		if !ok {
+			continue
+		}
+
+		for _, epAttr := range endpointsAttr.Value {
+			var endpoint registryv1.ServiceEndpoint
+			if err := attributevalue.Unmarshal(epAttr, &endpoint); err != nil {
+				r.log.ErrorContext(ctx, "failed to unmarshal endpoint", "error", err)
+				continue
+			}
+			endpointsByService[serviceName] = append(endpointsByService[serviceName], &endpoint)
+		}
+	}
 }

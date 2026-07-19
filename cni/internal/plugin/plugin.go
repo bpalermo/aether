@@ -726,23 +726,10 @@ func podExcludedOutboundIPRanges(conf config.AetherConf) []netip.Prefix {
 	seen := make(map[netip.Prefix]struct{})
 	var ranges []netip.Prefix
 	for _, f := range strings.Split(raw, ",") {
-		s := strings.TrimSpace(f)
-		if s == "" {
+		p, ok := parseIPv4RangeEntry(strings.TrimSpace(f))
+		if !ok {
 			continue
 		}
-		p, err := netip.ParsePrefix(s)
-		if err != nil {
-			// Accept a bare IPv4 address as a /32.
-			if addr, aerr := netip.ParseAddr(s); aerr == nil {
-				p = netip.PrefixFrom(addr, addr.BitLen())
-			} else {
-				continue
-			}
-		}
-		if !p.Addr().Is4() {
-			continue
-		}
-		p = p.Masked()
 		if _, dup := seen[p]; dup {
 			continue
 		}
@@ -750,4 +737,26 @@ func podExcludedOutboundIPRanges(conf config.AetherConf) []netip.Prefix {
 		ranges = append(ranges, p)
 	}
 	return ranges
+}
+
+// parseIPv4RangeEntry parses one entry from the exclude-outbound-ip-ranges annotation.
+// A bare IPv4 address is treated as a /32. Returns (zero, false) when the entry is empty,
+// non-IPv4, or unparseable.
+func parseIPv4RangeEntry(s string) (netip.Prefix, bool) {
+	if s == "" {
+		return netip.Prefix{}, false
+	}
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		// Accept a bare IPv4 address as a /32.
+		addr, aerr := netip.ParseAddr(s)
+		if aerr != nil {
+			return netip.Prefix{}, false
+		}
+		p = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	if !p.Addr().Is4() {
+		return netip.Prefix{}, false
+	}
+	return p.Masked(), true
 }

@@ -111,11 +111,29 @@ func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir str
 	}
 	defer watcher.Close()
 
+	cniConfName, err = resolveConfName(ctx, cniConfName, mountedCNINetDir, watcher)
+	if err != nil {
+		return "", err
+	}
+
+	cniConfigFilepath := filepath.Join(mountedCNINetDir, cniConfName)
+
+	cniConfigFilepath, err = waitForConfigFile(ctx, cniConfigFilepath, watcher)
+	if err != nil {
+		return "", err
+	}
+
+	installLog.Info("CNI config file exists, proceeding", "filepath", cniConfigFilepath)
+	return cniConfigFilepath, nil
+}
+
+// resolveConfName waits until a CNI config filename is known, either from the provided
+// name or by discovering the first valid config file in mountedCNINetDir.
+func resolveConfName(ctx context.Context, cniConfName, mountedCNINetDir string, watcher *util.Watcher) (string, error) {
 	for len(cniConfName) == 0 {
 		cniConfNames, err := getConfigFilenames(mountedCNINetDir)
 		if err == nil || len(cniConfNames) > 0 {
-			cniConfName = cniConfNames[0]
-			break
+			return cniConfNames[0], nil
 		}
 		installLog.Error(err, "aether CNI is configured as chained plugin, but cannot find existing CNI network config")
 		installLog.Info("waiting for CNI network config file to be written in dir", "dir", mountedCNINetDir)
@@ -123,9 +141,12 @@ func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir str
 			return "", err
 		}
 	}
+	return cniConfName, nil
+}
 
-	cniConfigFilepath := filepath.Join(mountedCNINetDir, cniConfName)
-
+// waitForConfigFile waits until the given CNI config filepath exists, following
+// .conf/.conflist alternates as needed.
+func waitForConfigFile(ctx context.Context, cniConfigFilepath string, watcher *util.Watcher) (string, error) {
 	for !file.Exists(cniConfigFilepath) {
 		if strings.HasSuffix(cniConfigFilepath, ".conf") && file.Exists(cniConfigFilepath+"list") {
 			installLog.Info("file doesn't exist, but %[1]slist does; Using it as the CNI config file instead.", "filepath", cniConfigFilepath)
@@ -140,10 +161,7 @@ func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir str
 			}
 		}
 	}
-
-	installLog.Info("CNI config file exists, proceeding", "filepath", cniConfigFilepath)
-
-	return cniConfigFilepath, err
+	return cniConfigFilepath, nil
 }
 
 // getConfigFilenames follows similar semantics as kubelet
