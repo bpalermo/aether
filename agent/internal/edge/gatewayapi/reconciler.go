@@ -15,6 +15,7 @@ import (
 
 	"github.com/bpalermo/aether/common/serviceref"
 
+	"github.com/bpalermo/aether/agent/internal/edge/gatewayapi/attachment"
 	"github.com/bpalermo/aether/agent/internal/edge/secret"
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
@@ -178,7 +179,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// effective hostnames = route.Hostnames ∩ listener.Hostname; a route with no
 	// hostnames inherits the listener's; a listener with no hostname admits all
 	// route hostnames).
-	gwListenerHostnames := buildGatewayListenerHostnames(ourGateways)
+	gwListenerHostnames := attachment.BuildGatewayListenerHostnames(ourGateways)
 
 	// --- HTTPRoutes (cluster-wide) ---
 	httpRoutes := &gatewayv1.HTTPRouteList{}
@@ -206,7 +207,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	vhosts := make([]cache.VirtualHost, 0, len(httpRoutes.Items))
 	for i := range httpRoutes.Items {
 		hr := &httpRoutes.Items[i]
-		if !attachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways) {
+		if !attachment.AttachedToOurGateway(hr.Spec.ParentRefs, hr.Namespace, gateways) {
 			continue
 		}
 		vh := r.buildVirtualHost(ctx, hr, hostCerts, grants)
@@ -218,7 +219,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		// Scope the vhost to the Gateways the route actually attaches to (Phase 2
 		// assigns by attachment, not by the vhost's cert tag).
-		gwKeys := attachedGatewayKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
+		gwKeys := attachment.AttachedGatewayKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
 		vh.Gateways = gwKeys
 		// Compute effective hostnames: route.Hostnames ∩ each attached listener's
 		// hostnames. When a parentRef has a sectionName, intersect with that
@@ -227,8 +228,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		// hostnames that don't match any listener are discarded rather than leaking
 		// into the catch-all "*" vhost (where they would incorrectly match requests
 		// to unrelated hosts — the no-intersecting-hosts 500 bug).
-		hostnameLookupKeys := attachedHostnameLookupKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
-		vh.Hosts = effectiveHostnames(vh.Hosts, hostnameLookupKeys, gwListenerHostnames)
+		hostnameLookupKeys := attachment.AttachedHostnameLookupKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
+		vh.Hosts = attachment.EffectiveHostnames(vh.Hosts, hostnameLookupKeys, gwListenerHostnames)
 		// If the route declared explicit hostnames but none intersect with any
 		// attached listener, discard the vhost entirely. An empty effective-hostname
 		// set means "no listener admits this route" — it must not produce routes at
@@ -247,7 +248,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	tcpByPort := make(map[uint32][]proxy.L4Backend)
 	for i := range tcpRouteList.Items {
 		tr := &tcpRouteList.Items[i]
-		ports := gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, gatewayListeners)
+		ports := attachment.GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, gatewayListeners)
 		for _, port := range ports {
 			for _, rule := range tr.Spec.Rules {
 				tcpByPort[port] = append(tcpByPort[port], r.buildL4Backends(rule.BackendRefs, tr.Namespace, "TCPRoute", grants)...)
@@ -276,7 +277,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	tlsByPort := make(map[uint32][]proxy.L4ServiceRoute)
 	for i := range tlsRouteList.Items {
 		tr := &tlsRouteList.Items[i]
-		ports := gatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, gatewayListeners)
+		ports := attachment.GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, gatewayListeners)
 		hostnames := make([]string, 0, len(tr.Spec.Hostnames))
 		for _, h := range tr.Spec.Hostnames {
 			hostnames = append(hostnames, string(h))
@@ -393,23 +394,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	return reconcile.Result{}, nil
 }
 
-// gatewayKey identifies a Gateway by namespace+name. Since the edge now
-// reconciles cluster-wide, Gateway names alone are no longer unique (two
-// namespaces may each have a Gateway "edge"), so route attachment must match on
-// the full namespaced name.
-type gatewayKey struct {
-	Namespace string
-	Name      string
-}
-
-// gatewayListenerKey identifies a listener within a gateway by
-// namespace+name+protocol+port. Used to scope TCPRoute/TLSRoute parentRef port
-// matching.
-type gatewayListenerKey struct {
-	Gateway  gatewayKey
-	Port     uint32
-	Protocol gatewayv1.ProtocolType
-}
+// gatewayKey / gatewayListenerKey are the attachment package's Gateway and
+// Gateway-listener identity types (route→listener attachment resolution lives
+// there); aliased locally since they key most of this package's maps.
+type (
+	gatewayKey         = attachment.GatewayKey
+	gatewayListenerKey = attachment.GatewayListenerKey
+)
 
 // listenerStatusKey identifies a listener within a Gateway by namespaced Gateway
 // name + listener (section) name. Used to carry per-listener TLS-resolution
@@ -838,7 +829,7 @@ func (r *Reconciler) buildHTTPRouteBackends(ctx context.Context, refs []gatewayv
 		if name == "" {
 			continue
 		}
-		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", name, grants) {
+		if !attachment.BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", name, grants) {
 			continue
 		}
 		ns := routeNamespace
@@ -908,119 +899,6 @@ func (r *Reconciler) resolveDialPort(ctx context.Context, namespace, service str
 	return 0
 }
 
-// attachedToOurGateway reports whether the given parentRefs (belonging to a route
-// in routeNamespace) include a reference to one of our Gateways. A parentRef's
-// namespace defaults to the route's own namespace when unset (per the Gateway API
-// spec), so cross-namespace attachment is matched correctly.
-func attachedToOurGateway(parentRefs []gatewayv1.ParentReference, routeNamespace string, gateways map[gatewayKey]struct{}) bool {
-	for _, p := range parentRefs {
-		if !parentRefIsGateway(p) {
-			continue
-		}
-		key := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
-		if _, ok := gateways[key]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// attachedGatewayKeys returns the "<ns>/<name>" keys of OUR Gateways a route's
-// parentRefs attach to. Used to scope a vhost to its actual Gateways' route tables
-// (Phase 2 assignment by attachment, not by cert).
-func attachedGatewayKeys(parentRefs []gatewayv1.ParentReference, routeNamespace string, gateways map[gatewayKey]struct{}) []string {
-	seen := map[string]struct{}{}
-	var keys []string
-	for _, p := range parentRefs {
-		if !parentRefIsGateway(p) {
-			continue
-		}
-		key := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
-		if _, ok := gateways[key]; !ok {
-			continue
-		}
-		s := key.Namespace + "/" + key.Name
-		if _, dup := seen[s]; dup {
-			continue
-		}
-		seen[s] = struct{}{}
-		keys = append(keys, s)
-	}
-	return keys
-}
-
-// parentRefIsGateway reports whether a parentRef targets a Gateway (the default
-// group/kind, or explicitly the Gateway API Gateway kind).
-func parentRefIsGateway(p gatewayv1.ParentReference) bool {
-	if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
-		return false
-	}
-	if p.Kind != nil && string(*p.Kind) != "Gateway" {
-		return false
-	}
-	return true
-}
-
-// parentRefNamespace resolves a parentRef namespace, defaulting to the referring
-// route's namespace when the ref leaves it unset (Gateway API local-default rule).
-func parentRefNamespace(ns *gatewayv1.Namespace, routeNamespace string) string {
-	if ns != nil && *ns != "" {
-		return string(*ns)
-	}
-	return routeNamespace
-}
-
-// gatewayParentPorts returns the distinct ports of our Gateway listeners that
-// match the given protocol and are referenced by the given parentRefs (belonging
-// to a route in routeNamespace). Used to scope TCPRoute/TLSRoute attachments to
-// the exact Gateway listener ports. A parentRef namespace defaults to the route's
-// own namespace when unset.
-func gatewayParentPorts(
-	parentRefs []gatewayv1.ParentReference,
-	routeNamespace string,
-	gateways map[gatewayKey]struct{},
-	protocol gatewayv1.ProtocolType,
-	listenerKeys map[gatewayListenerKey]struct{},
-) []uint32 {
-	seen := map[uint32]struct{}{}
-	var ports []uint32
-	for _, p := range parentRefs {
-		if p.Group != nil && string(*p.Group) != gatewayv1.GroupName {
-			continue
-		}
-		if p.Kind != nil && string(*p.Kind) != "Gateway" {
-			continue
-		}
-		gk := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
-		if _, ok := gateways[gk]; !ok {
-			continue
-		}
-		// If a sectionName (listener name) is specified, match only that listener;
-		// otherwise match all listeners of the given protocol on this gateway.
-		if p.Port != nil {
-			port := uint32(*p.Port)
-			key := gatewayListenerKey{Gateway: gk, Port: port, Protocol: protocol}
-			if _, ok := listenerKeys[key]; ok {
-				if _, dup := seen[port]; !dup {
-					seen[port] = struct{}{}
-					ports = append(ports, port)
-				}
-			}
-			continue
-		}
-		// No port specified: include all matching-protocol listeners on this gateway.
-		for k := range listenerKeys {
-			if k.Gateway == gk && k.Protocol == protocol {
-				if _, dup := seen[k.Port]; !dup {
-					seen[k.Port] = struct{}{}
-					ports = append(ports, k.Port)
-				}
-			}
-		}
-	}
-	return ports
-}
-
 // buildL4Backends converts a BackendRef slice into L4Backends with resolved TCP
 // cluster names. Refs with a non-core group or non-Service kind are skipped, as are
 // ungranted cross-namespace refs (RefNotPermitted: dropped from the data plane).
@@ -1043,7 +921,7 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace
 		if name == "" {
 			continue
 		}
-		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
+		if !attachment.BackendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
 			continue
 		}
 		weight := uint32(1)
@@ -1051,7 +929,7 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace
 			weight = uint32(*b.Weight)
 		}
 		ns := routeNamespace
-		if bn := derefBackendNamespace(b.Namespace); bn != "" {
+		if bn := attachment.DerefBackendNamespace(b.Namespace); bn != "" {
 			ns = bn
 		}
 		key := serviceref.New(ns, name).Key()
@@ -1062,92 +940,6 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace
 		})
 	}
 	return backends
-}
-
-// firstBackendService returns the name of the first core-Service backendRef that is
-// admissible: a same-namespace ref, or a cross-namespace ref permitted by a
-// ReferenceGrant. Ungranted cross-namespace refs are skipped (RefNotPermitted →
-// dropped from the data plane), so a rule whose only backend is ungranted yields no
-// backend (and, with no redirect, no route).
-func firstBackendService(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) string {
-	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue // only core Services in Phase 1
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
-			continue
-		}
-		return string(b.Name)
-	}
-	return ""
-}
-
-// firstBackendPort returns the port of the first admissible (same-namespace or
-// granted cross-namespace) backendRef, so the port matches the backend
-// firstBackendService selects.
-func firstBackendPort(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) uint32 {
-	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
-			continue
-		}
-		if b.Port != nil {
-			return uint32(*b.Port)
-		}
-	}
-	return 0
-}
-
-// firstBackendNamespace returns the resolved namespace of the first admissible
-// (same-namespace or granted cross-namespace) backendRef. Same-namespace refs
-// default to the route's own namespace when backendRef.Namespace is unset.
-// Matches the selection logic of firstBackendService so they return data for
-// the same ref.
-func firstBackendNamespace(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) string {
-	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		if !backendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
-			continue
-		}
-		if b.Namespace != nil && string(*b.Namespace) != "" {
-			return string(*b.Namespace)
-		}
-		return routeNamespace
-	}
-	return routeNamespace
-}
-
-// derefBackendNamespace returns the backendRef namespace ("" when unset).
-func derefBackendNamespace(ns *gatewayv1.Namespace) string {
-	if ns == nil {
-		return ""
-	}
-	return string(*ns)
-}
-
-// backendPermitted reports whether a backendRef is allowed onto the data plane: a
-// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant
-// in the backend's namespace whose from matches the route and whose to allows the
-// Service. routeKind is the referring route's kind (HTTPRoute/TCPRoute/TLSRoute).
-func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
-	ns := derefBackendNamespace(backendNamespace)
-	if !referencegrant.CrossNamespace(ns, routeNamespace) {
-		return true
-	}
-	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
 }
 
 // certForHosts picks the SDS cert for a vhost: an exact hostname listener match
@@ -1307,181 +1099,6 @@ func buildEdgeHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.Gam
 	return m
 }
 
-// buildGatewayListenerHostnames extracts the listener hostnames for each Gateway
-// into a map keyed by "<namespace>/<name>". A listener with no hostname is
-// represented by an empty string "". The returned value is used to compute
-// effective route hostnames via effectiveHostnames.
-//
-// Keys: "ns/name" for the per-Gateway union (used by routes without a
-// sectionName), and "ns/name/sectionName" for per-section lookup (used when
-// a parentRef specifies a sectionName). The per-section value contains only
-// that listener's hostname so effectiveHostnames scopes the route to exactly
-// the hostnames of the listener it attached to.
-func buildGatewayListenerHostnames(gws []gatewayv1.Gateway) map[string][]string {
-	out := make(map[string][]string, len(gws))
-	for _, gw := range gws {
-		gwKey := gw.Namespace + "/" + gw.Name
-		seen := make(map[string]struct{}, len(gw.Spec.Listeners))
-		var hostnames []string
-		for _, ln := range gw.Spec.Listeners {
-			h := ""
-			if ln.Hostname != nil {
-				h = string(*ln.Hostname)
-			}
-			// Per-section key: "ns/name/sectionName" → exactly this listener's hostname.
-			sectionKey := gwKey + "/" + string(ln.Name)
-			out[sectionKey] = []string{h}
-			// Per-gateway key: union of all listener hostnames (deduplicated).
-			if _, ok := seen[h]; !ok {
-				seen[h] = struct{}{}
-				hostnames = append(hostnames, h)
-			}
-		}
-		out[gwKey] = hostnames
-	}
-	return out
-}
-
-// attachedHostnameLookupKeys returns the hostname-lookup keys for
-// effectiveHostnames. When a parentRef specifies a sectionName the key is
-// "ns/name/sectionName" so effectiveHostnames uses only that listener's
-// hostname; otherwise it uses the gateway-level "ns/name" key (union of all
-// listener hostnames). This implements Gateway API §hostname-intersection:
-// "If the listener section name and/or port is specified, Hostnames must match
-// only that listener."
-func attachedHostnameLookupKeys(parentRefs []gatewayv1.ParentReference, routeNamespace string, gateways map[gatewayKey]struct{}) []string {
-	seen := map[string]struct{}{}
-	var keys []string
-	for _, p := range parentRefs {
-		if !parentRefIsGateway(p) {
-			continue
-		}
-		gk := gatewayKey{Namespace: parentRefNamespace(p.Namespace, routeNamespace), Name: string(p.Name)}
-		if _, ok := gateways[gk]; !ok {
-			continue
-		}
-		gwKeyStr := gk.Namespace + "/" + gk.Name
-		var lookupKey string
-		if p.SectionName != nil && *p.SectionName != "" {
-			lookupKey = gwKeyStr + "/" + string(*p.SectionName)
-		} else {
-			lookupKey = gwKeyStr
-		}
-		if _, dup := seen[lookupKey]; !dup {
-			seen[lookupKey] = struct{}{}
-			keys = append(keys, lookupKey)
-		}
-	}
-	return keys
-}
-
-// effectiveHostnames computes the Gateway API effective hostname set for a route:
-//
-//	effective = ∪(over attached Gateways) of { route.Hostnames ∩ listenerHostnames(gw) }
-//
-// Gateway API intersection rules (per spec):
-//   - A listener hostname "" (no hostname) admits ALL route hostnames unchanged.
-//   - A route hostname "" (no hostnames on the route) inherits the listener's
-//     hostname(s); a listener "" × route "" = "*" (catch-all, no constraint).
-//   - exact == exact: they match; result is that exact hostname.
-//   - listener "*.example.com" ∩ route "a.example.com": route is more specific → result "a.example.com".
-//   - route "*.example.com" ∩ listener "a.example.com": listener is more specific → result "a.example.com".
-//
-// The return value replaces vh.Hosts in the reconciler so downstream code (the
-// cache's buildEdgeVhostsLocked) sees only the hosts the route ACTUALLY matches.
-// A nil/empty return means the route has no valid attachment (no listener admits
-// any of its declared hosts) and must be discarded by the caller.
-//
-// Multi-Gateway: takes the union of intersections across all attached Gateways,
-// deduplicating. This is a correct first cut (see implementation note).
-func effectiveHostnames(routeHosts []string, gwKeys []string, gwListenerHostnames map[string][]string) []string {
-	seen := make(map[string]struct{})
-	var result []string
-	add := func(h string) {
-		if _, ok := seen[h]; !ok {
-			seen[h] = struct{}{}
-			result = append(result, h)
-		}
-	}
-
-	for _, gwKey := range gwKeys {
-		lnHostnames, ok := gwListenerHostnames[gwKey]
-		if !ok {
-			// Unknown Gateway — should not happen (key was from attachedGatewayKeys).
-			continue
-		}
-		for _, lh := range lnHostnames {
-			if lh == "" {
-				// Listener has no hostname restriction: admit all route hostnames.
-				if len(routeHosts) == 0 {
-					// route "" + listener "" = "*" (true catch-all). A no-hostname
-					// listener with a no-hostname route admits ALL hosts. Return nil
-					// immediately — no specific hostname from any other listener in
-					// this key's union can narrow a catch-all back down. The caller
-					// treats nil/empty Hosts as the "*" catch-all vhost.
-					//
-					// Previously this was `continue` (add nothing and keep processing),
-					// which caused a multi-listener Gateway (e.g. one listener with no
-					// hostname + two listeners with specific hostnames) to produce a
-					// Hosts set of only the specific listener hostnames — silently
-					// dropping the catch-all listener's "admit all" contribution. A
-					// request like Host:example.org matched neither specific hostname,
-					// fell through to the 404 catch-all vhost, and returned 404 instead
-					// of the expected redirect. (HTTPRouteRedirectPortAndScheme, 443 subtests)
-					return nil
-				}
-				for _, rh := range routeHosts {
-					add(rh)
-				}
-				continue
-			}
-			// Listener has a hostname (exact or wildcard).
-			if len(routeHosts) == 0 {
-				// Route has no hostname constraint: inherits the listener's hostname.
-				add(lh)
-				continue
-			}
-			// Intersect each route hostname against this listener hostname.
-			for _, rh := range routeHosts {
-				if h, ok := hostnameIntersect(lh, rh); ok {
-					add(h)
-				}
-			}
-		}
-	}
-	return result
-}
-
 // boolPtr returns a pointer to the given bool value. Used to set
 // controller.Options.NeedLeaderElection without importing k8s.io/utils/ptr.
 func boolPtr(b bool) *bool { return &b }
-
-// hostnameIntersect returns the more-specific of two hostnames if they match,
-// and reports whether they intersect at all. The Gateway API rules are:
-//   - exact == exact → match, result = that hostname.
-//   - "*.example.com" vs "a.example.com" → match (specific wins), result = "a.example.com".
-//   - "*.example.com" vs "*.other.com" → no match.
-//   - "*.example.com" vs "*.example.com" → match, result = "*.example.com".
-//   - "" (no hostname = catch-all) matches everything — callers must handle the
-//     empty-string case before calling this function.
-func hostnameIntersect(a, b string) (string, bool) {
-	if a == b {
-		return a, true
-	}
-	// a is a wildcard, b is specific: a matches b if b ends with a[1:].
-	if strings.HasPrefix(a, "*.") && !strings.HasPrefix(b, "*.") {
-		if strings.HasSuffix(b, a[1:]) {
-			return b, true // b is more specific
-		}
-		return "", false
-	}
-	// b is a wildcard, a is specific.
-	if strings.HasPrefix(b, "*.") && !strings.HasPrefix(a, "*.") {
-		if strings.HasSuffix(a, b[1:]) {
-			return a, true // a is more specific
-		}
-		return "", false
-	}
-	// Both are exact but different, or both wildcards but different — no match.
-	return "", false
-}

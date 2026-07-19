@@ -52,6 +52,7 @@ import (
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/registry"
+	"github.com/bpalermo/aether/registry/registrarclient"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -526,7 +527,7 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 // uses mTLS with an X.509 SVID fetched over the SPIRE Workload API socket;
 // otherwise, insecure transport is used.
 func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registry.Registry, error) {
-	regCfg := registry.RegistrarConfig{
+	regCfg := registrarclient.Config{
 		Address:     cfg.RegistrarAddress,
 		ClusterName: cfg.ClusterName,
 		NodeName:    cfg.NodeName,
@@ -545,7 +546,7 @@ func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registr
 		l.InfoContext(ctx, "registrar client using insecure transport")
 	}
 
-	reg := registry.NewRegistrarRegistry(l, regCfg)
+	reg := registrarclient.New(l, regCfg)
 
 	if err := reg.Initialize(ctx); err != nil {
 		return nil, errors.Join(fmt.Errorf("failed to initialize registry: %w", err), reg.Close())

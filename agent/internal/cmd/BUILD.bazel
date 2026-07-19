@@ -37,6 +37,7 @@ go_library(
         "//common/must",
         "//common/spire",
         "//registry",
+        "//registry/registrarclient",
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/fields",

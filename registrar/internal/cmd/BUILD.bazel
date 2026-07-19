@@ -20,7 +20,7 @@ go_library(
         "//registrar/internal/server",
         "//registrar/internal/services",
         "//registry",
-        "@com_github_aws_aws_sdk_go_v2_config//:config",
+        "//registry/backend",
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_apimachinery//pkg/runtime",
         "@io_k8s_client_go//kubernetes/scheme",

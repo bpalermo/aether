@@ -40,8 +40,8 @@ const (
 
 // Source is the local authoritative store the replicator mirrors from: the
 // etcd-backed registry's client plus its own-partition root. Implemented by
-// registry.EtcdRegistry; other backends don't, which is what gates the
-// replicator to the etcd backend.
+// the etcd-backed registry (registry/internal/etcd); other backends don't,
+// which is what gates the replicator to the etcd backend.
 type Source interface {
 	Client() *clientv3.Client
 	OwnPrefix() string
