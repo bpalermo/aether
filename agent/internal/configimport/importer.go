@@ -103,12 +103,24 @@ func (i *Importer) poll(ctx context.Context) {
 // returns the oldest materialized projection's export time (zero when none parseable)
 // for the EM4 propagation-lag metric.
 func (i *Importer) materialize(projections []*registryv1.ServiceConfigProjection) (map[string][]proxy.GammaRoute, map[string]proxy.ExtensionFilter, time.Time) {
-	type chosen struct {
-		version string
-		routes  []proxy.GammaRoute
-		filter  *registryv1.ExtensionFilter
+	picked := i.selectProjections(projections)
+	if len(picked) == 0 {
+		return nil, nil, time.Time{}
 	}
-	picked := make(map[string]chosen, len(projections))
+	return i.buildRouteOutputs(picked)
+}
+
+// chosenProjection holds the winning projection for a service.
+type chosenProjection struct {
+	version string
+	routes  []proxy.GammaRoute
+	filter  *registryv1.ExtensionFilter
+}
+
+// selectProjections picks the highest-version projection per service from peer origins,
+// filtering out this cluster's own exports and (when set) non-control-cluster origins.
+func (i *Importer) selectProjections(projections []*registryv1.ServiceConfigProjection) map[string]chosenProjection {
+	picked := make(map[string]chosenProjection, len(projections))
 	for _, p := range projections {
 		if p.GetOriginCluster() == i.ownCluster {
 			continue // own export — local routes already cover it
@@ -124,11 +136,14 @@ func (i *Importer) materialize(projections []*registryv1.ServiceConfigProjection
 		if cur, ok := picked[svc]; ok && cur.version >= p.GetVersion() {
 			continue
 		}
-		picked[svc] = chosen{version: p.GetVersion(), routes: proxy.FromConfigProjection(p), filter: p.GetServiceFilter()}
+		picked[svc] = chosenProjection{version: p.GetVersion(), routes: proxy.FromConfigProjection(p), filter: p.GetServiceFilter()}
 	}
-	if len(picked) == 0 {
-		return nil, nil, time.Time{}
-	}
+	return picked
+}
+
+// buildRouteOutputs converts the winning-projection map into the routes map, chain
+// filters map, and oldest export timestamp (for the EM4 propagation-lag metric).
+func (i *Importer) buildRouteOutputs(picked map[string]chosenProjection) (map[string][]proxy.GammaRoute, map[string]proxy.ExtensionFilter, time.Time) {
 	out := make(map[string][]proxy.GammaRoute, len(picked))
 	var chainFilters map[string]proxy.ExtensionFilter
 	var oldest time.Time

@@ -190,6 +190,13 @@ func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) e
 		}
 	}()
 
+	return r.runSyncWatchLoop(ctx, connCtx, log, peerCli, p, lease)
+}
+
+// runSyncWatchLoop runs the full-sync → watch cycle until the context ends or
+// an unrecoverable error occurs. Compaction causes a resync; lease keepalive
+// loss or write errors force a redial (returned as error).
+func (r *Replicator) runSyncWatchLoop(ctx, connCtx context.Context, log *slog.Logger, peerCli *clientv3.Client, p Peer, lease *peerLease) error {
 	for {
 		syncStart := time.Now()
 		rev, err := r.syncFull(connCtx, peerCli, lease.id)
@@ -277,18 +284,8 @@ func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, 
 			return err
 		}
 		for _, ev := range resp.Events {
-			key := string(ev.Kv.Key)
-			switch ev.Type {
-			case clientv3.EventTypePut:
-				if _, err := peerCli.Put(ctx, key, string(ev.Kv.Value), clientv3.WithLease(leaseID)); err != nil {
-					return fmt.Errorf("mirror put: %w", err)
-				}
-				r.metrics.event(ctx, region, "put")
-			case clientv3.EventTypeDelete:
-				if _, err := peerCli.Delete(ctx, key); err != nil {
-					return fmt.Errorf("mirror delete: %w", err)
-				}
-				r.metrics.event(ctx, region, "delete")
+			if err := r.mirrorEvent(ctx, peerCli, region, ev, leaseID); err != nil {
+				return err
 			}
 		}
 	}
@@ -296,4 +293,22 @@ func (r *Replicator) watchMirror(ctx context.Context, peerCli *clientv3.Client, 
 		return err
 	}
 	return errors.New("local watch channel closed")
+}
+
+// mirrorEvent applies one watch event (Put or Delete) to the peer.
+func (r *Replicator) mirrorEvent(ctx context.Context, peerCli *clientv3.Client, region string, ev *clientv3.Event, leaseID clientv3.LeaseID) error {
+	key := string(ev.Kv.Key)
+	switch ev.Type {
+	case clientv3.EventTypePut:
+		if _, err := peerCli.Put(ctx, key, string(ev.Kv.Value), clientv3.WithLease(leaseID)); err != nil {
+			return fmt.Errorf("mirror put: %w", err)
+		}
+		r.metrics.event(ctx, region, "put")
+	case clientv3.EventTypeDelete:
+		if _, err := peerCli.Delete(ctx, key); err != nil {
+			return fmt.Errorf("mirror delete: %w", err)
+		}
+		r.metrics.event(ctx, region, "delete")
+	}
+	return nil
 }

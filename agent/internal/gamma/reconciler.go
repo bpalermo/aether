@@ -140,120 +140,21 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Reconcile re-lists every HTTPRoute and GRPCRoute, keeps those attached to a Service,
 // and replaces the cache's per-service rule set.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
-	httpList := &gatewayv1.HTTPRouteList{}
-	if err := r.List(ctx, httpList); err != nil {
+	httpList, grpcList, grants, err := r.listGammaResources(ctx)
+	if err != nil {
 		return reconcile.Result{}, err
 	}
-	// Optional types (CRD-gated in SetupWithManager, proposal 031): listing a
-	// kind whose CRD is absent errors every reconcile, so skip when disabled.
-	grpcList := &gatewayv1.GRPCRouteList{}
-	if r.grpcRouteEnabled {
-		if err := r.List(ctx, grpcList); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
-	grantList := &gatewayv1beta1.ReferenceGrantList{}
-	if r.referenceGrantEnabled {
-		if err := r.List(ctx, grantList); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	grants := grantList.Items
 
-	// HTTPFilters (config.aether.io, proposal 025) referenced by route ExtensionRefs,
-	// indexed by "<ns>/<name>". ExtensionRef is same-namespace (a LocalObjectReference),
-	// so no ReferenceGrant applies. Only listed when the CRD is present (gated in
-	// SetupWithManager); otherwise the escape hatch is inert and the map stays empty.
-	httpFilters := map[string]*configapisv1.HTTPFilter{}
-	if r.httpFilterEnabled {
-		httpFilterList := &configapisv1.HTTPFilterList{}
-		if err := r.List(ctx, httpFilterList); err != nil {
-			return reconcile.Result{}, err
-		}
-		for i := range httpFilterList.Items {
-			hf := &httpFilterList.Items[i]
-			httpFilters[hf.Namespace+"/"+hf.Name] = hf
-		}
+	httpFilters, err := r.listHTTPFilters(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
 	}
 
-	routes := map[string][]proxy.GammaRoute{}
-	// routeTargetPorts: the real Service port(s) each route target is addressed on
-	// (proposal 023 M2), accumulated from the parentRef ports. A target may be
-	// addressed on several ports across routes; collect the distinct set.
-	portSets := map[string]map[uint32]struct{}{}
-	collectPort := func(key string, port uint32) {
-		if port == 0 {
-			return
-		}
-		if portSets[key] == nil {
-			portSets[key] = map[uint32]struct{}{}
-		}
-		portSets[key][port] = struct{}{}
-	}
-	// serviceFilters caches the M3 targetRef-attached HTTPFilters per route-target Service
-	// (they apply to every route of that service).
 	specs := httpFilterSpecs(httpFilters)
-	serviceFiltersFor := func(key string) []*registryv1.ExtensionFilter {
-		return gammaproject.ServiceFilters(key, specs)
-	}
-	// Service-wide always-on filters (M4 CHAIN scope) + destination-side INBOUND
-	// filters (027 M3): resolve per targeted service.
-	chainFilters := map[string]proxy.ExtensionFilter{}
-	inboundFilters := map[string]proxy.ExtensionFilter{}
-	for key, spec := range specs {
-		scope := spec.GetScope()
-		if scope != configprotov1.HTTPFilterSpec_SCOPE_CHAIN && scope != configprotov1.HTTPFilterSpec_SCOPE_INBOUND {
-			continue
-		}
-		ns, _, _ := strings.Cut(key, "/")
-		for _, t := range spec.GetTargetRefs() {
-			if (t.GetGroup() != "" && t.GetGroup() != "core") || t.GetKind() != "Service" {
-				continue
-			}
-			svcKey := ns + "/" + t.GetName()
-			// Deterministic pick delegated to the shared projector (name-sorted).
-			if scope == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
-				if ef := gammaproject.ServiceChainFilter(svcKey, specs); ef != nil {
-					chainFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
-				}
-			} else {
-				if ef := gammaproject.ServiceInboundFilter(svcKey, specs); ef != nil {
-					inboundFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
-				}
-			}
-		}
-	}
-	for i := range httpList.Items {
-		hr := &httpList.Items[i]
-		for _, p := range gammaproject.ServiceParents(hr.Spec.ParentRefs, hr.Namespace) {
-			collectPort(p.Key, p.Port)
-			svcFilters := serviceFiltersFor(p.Key)
-			for _, rule := range hr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters, svcFilters))
-			}
-		}
-	}
-	for i := range grpcList.Items {
-		gr := &grpcList.Items[i]
-		for _, p := range gammaproject.ServiceParents(gr.Spec.ParentRefs, gr.Namespace) {
-			collectPort(p.Key, p.Port)
-			svcFilters := serviceFiltersFor(p.Key)
-			for _, rule := range gr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters, svcFilters))
-			}
-		}
-	}
+	chainFilters, inboundFilters := r.buildScopedFilters(specs)
 
-	routeTargetPorts := make(map[string][]uint32, len(portSets))
-	for key, set := range portSets {
-		ports := make([]uint32, 0, len(set))
-		for p := range set {
-			ports = append(ports, p)
-		}
-		slices.Sort(ports) // stable order so the cache's change-detection is deterministic
-		routeTargetPorts[key] = ports
-	}
+	routes, portSets := r.projectAllRoutes(httpList, grpcList, grants, httpFilters, specs)
+	routeTargetPorts := buildRouteTargetPorts(portSets)
 
 	r.Sink.SetServiceRoutes(routes)
 	r.Sink.SetServiceChainFilters(chainFilters)
@@ -266,6 +167,184 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// Accepted + ResolvedRefs RouteParentStatus per Service parentRef. Status write
 	// failures are logged but don't fail the reconcile (the data plane is already
 	// projected); the next reconcile retries.
+	r.writeHTTPRouteStatuses(ctx, httpList, grants)
+	r.writeGRPCRouteStatuses(ctx, grpcList, grants)
+	return reconcile.Result{}, nil
+}
+
+// listGammaResources lists HTTPRoutes, GRPCRoutes, and ReferenceGrants (all CRD-gated).
+func (r *Reconciler) listGammaResources(ctx context.Context) (*gatewayv1.HTTPRouteList, *gatewayv1.GRPCRouteList, []gatewayv1beta1.ReferenceGrant, error) {
+	httpList := &gatewayv1.HTTPRouteList{}
+	if err := r.List(ctx, httpList); err != nil {
+		return nil, nil, nil, err
+	}
+	// Optional types (CRD-gated in SetupWithManager, proposal 031): listing a
+	// kind whose CRD is absent errors every reconcile, so skip when disabled.
+	grpcList := &gatewayv1.GRPCRouteList{}
+	if r.grpcRouteEnabled {
+		if err := r.List(ctx, grpcList); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
+	grantList := &gatewayv1beta1.ReferenceGrantList{}
+	if r.referenceGrantEnabled {
+		if err := r.List(ctx, grantList); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return httpList, grpcList, grantList.Items, nil
+}
+
+// listHTTPFilters lists HTTPFilter objects indexed by "<ns>/<name>", or returns an
+// empty map when the CRD is absent. HTTPFilters (proposal 025) are gated on
+// httpFilterEnabled (set in SetupWithManager).
+func (r *Reconciler) listHTTPFilters(ctx context.Context) (map[string]*configapisv1.HTTPFilter, error) {
+	httpFilters := map[string]*configapisv1.HTTPFilter{}
+	if !r.httpFilterEnabled {
+		return httpFilters, nil
+	}
+	// HTTPFilters (config.aether.io, proposal 025) referenced by route ExtensionRefs,
+	// indexed by "<ns>/<name>". ExtensionRef is same-namespace (a LocalObjectReference),
+	// so no ReferenceGrant applies. Only listed when the CRD is present (gated in
+	// SetupWithManager); otherwise the escape hatch is inert and the map stays empty.
+	httpFilterList := &configapisv1.HTTPFilterList{}
+	if err := r.List(ctx, httpFilterList); err != nil {
+		return nil, err
+	}
+	for i := range httpFilterList.Items {
+		hf := &httpFilterList.Items[i]
+		httpFilters[hf.Namespace+"/"+hf.Name] = hf
+	}
+	return httpFilters, nil
+}
+
+// buildScopedFilters resolves per-service CHAIN and INBOUND scope extension filters
+// from the HTTPFilter specs (proposal 025 M4 / 027 M3).
+func (r *Reconciler) buildScopedFilters(specs map[string]*configprotov1.HTTPFilterSpec) (chainFilters, inboundFilters map[string]proxy.ExtensionFilter) {
+	// Service-wide always-on filters (M4 CHAIN scope) + destination-side INBOUND
+	// filters (027 M3): resolve per targeted service.
+	chainFilters = map[string]proxy.ExtensionFilter{}
+	inboundFilters = map[string]proxy.ExtensionFilter{}
+	for key, spec := range specs {
+		scope := spec.GetScope()
+		if scope != configprotov1.HTTPFilterSpec_SCOPE_CHAIN && scope != configprotov1.HTTPFilterSpec_SCOPE_INBOUND {
+			continue
+		}
+		ns, _, _ := strings.Cut(key, "/")
+		r.resolveTargetRefFilters(ns, spec, specs, scope, chainFilters, inboundFilters)
+	}
+	return chainFilters, inboundFilters
+}
+
+// resolveTargetRefFilters resolves CHAIN/INBOUND filters for each targetRef in the spec.
+func (r *Reconciler) resolveTargetRefFilters(ns string, spec *configprotov1.HTTPFilterSpec, specs map[string]*configprotov1.HTTPFilterSpec, scope configprotov1.HTTPFilterSpec_Scope, chainFilters, inboundFilters map[string]proxy.ExtensionFilter) {
+	for _, t := range spec.GetTargetRefs() {
+		if (t.GetGroup() != "" && t.GetGroup() != "core") || t.GetKind() != "Service" {
+			continue
+		}
+		svcKey := ns + "/" + t.GetName()
+		// Deterministic pick delegated to the shared projector (name-sorted).
+		if scope == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
+			if ef := gammaproject.ServiceChainFilter(svcKey, specs); ef != nil {
+				chainFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
+			}
+		} else {
+			if ef := gammaproject.ServiceInboundFilter(svcKey, specs); ef != nil {
+				inboundFilters[svcKey] = proxy.ExtensionFilter{Name: ef.GetName(), Config: ef.GetConfig()}
+			}
+		}
+	}
+}
+
+// projectAllRoutes projects HTTP and GRPC routes into per-service route maps.
+// It returns the route map and port sets for target-port collection.
+func (r *Reconciler) projectAllRoutes(
+	httpList *gatewayv1.HTTPRouteList,
+	grpcList *gatewayv1.GRPCRouteList,
+	grants []gatewayv1beta1.ReferenceGrant,
+	httpFilters map[string]*configapisv1.HTTPFilter,
+	specs map[string]*configprotov1.HTTPFilterSpec,
+) (map[string][]proxy.GammaRoute, map[string]map[uint32]struct{}) {
+	routes := map[string][]proxy.GammaRoute{}
+	// routeTargetPorts: the real Service port(s) each route target is addressed on
+	// (proposal 023 M2), accumulated from the parentRef ports. A target may be
+	// addressed on several ports across routes; collect the distinct set.
+	portSets := map[string]map[uint32]struct{}{}
+	r.projectHTTPRouteItems(httpList, grants, httpFilters, specs, routes, portSets)
+	r.projectGRPCRouteItems(grpcList, grants, httpFilters, specs, routes, portSets)
+	return routes, portSets
+}
+
+// projectHTTPRouteItems projects each HTTPRoute item into the routes and portSets maps.
+func (r *Reconciler) projectHTTPRouteItems(
+	httpList *gatewayv1.HTTPRouteList,
+	grants []gatewayv1beta1.ReferenceGrant,
+	httpFilters map[string]*configapisv1.HTTPFilter,
+	specs map[string]*configprotov1.HTTPFilterSpec,
+	routes map[string][]proxy.GammaRoute,
+	portSets map[string]map[uint32]struct{},
+) {
+	for i := range httpList.Items {
+		hr := &httpList.Items[i]
+		for _, p := range gammaproject.ServiceParents(hr.Spec.ParentRefs, hr.Namespace) {
+			addToPortSets(portSets, p.Key, p.Port)
+			svcFilters := gammaproject.ServiceFilters(p.Key, specs)
+			for _, rule := range hr.Spec.Rules {
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters, svcFilters))
+			}
+		}
+	}
+}
+
+// projectGRPCRouteItems projects each GRPCRoute item into the routes and portSets maps.
+func (r *Reconciler) projectGRPCRouteItems(
+	grpcList *gatewayv1.GRPCRouteList,
+	grants []gatewayv1beta1.ReferenceGrant,
+	httpFilters map[string]*configapisv1.HTTPFilter,
+	specs map[string]*configprotov1.HTTPFilterSpec,
+	routes map[string][]proxy.GammaRoute,
+	portSets map[string]map[uint32]struct{},
+) {
+	for i := range grpcList.Items {
+		gr := &grpcList.Items[i]
+		for _, p := range gammaproject.ServiceParents(gr.Spec.ParentRefs, gr.Namespace) {
+			addToPortSets(portSets, p.Key, p.Port)
+			svcFilters := gammaproject.ServiceFilters(p.Key, specs)
+			for _, rule := range gr.Spec.Rules {
+				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters, svcFilters))
+			}
+		}
+	}
+}
+
+// addToPortSets records port in portSets[key], skipping zero ports.
+func addToPortSets(portSets map[string]map[uint32]struct{}, key string, port uint32) {
+	if port == 0 {
+		return
+	}
+	if portSets[key] == nil {
+		portSets[key] = map[uint32]struct{}{}
+	}
+	portSets[key][port] = struct{}{}
+}
+
+// buildRouteTargetPorts converts portSets (keyed by service) into sorted port slices.
+func buildRouteTargetPorts(portSets map[string]map[uint32]struct{}) map[string][]uint32 {
+	routeTargetPorts := make(map[string][]uint32, len(portSets))
+	for key, set := range portSets {
+		ports := make([]uint32, 0, len(set))
+		for p := range set {
+			ports = append(ports, p)
+		}
+		slices.Sort(ports) // stable order so the cache's change-detection is deterministic
+		routeTargetPorts[key] = ports
+	}
+	return routeTargetPorts
+}
+
+// writeHTTPRouteStatuses publishes Gateway API status for every Service-parented HTTPRoute.
+func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatewayv1.HTTPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
 		resolved, reason, msg := r.backendsResolve(ctx, hr.Namespace, "HTTPRoute", httpBackendRefs(hr.Spec.Rules), grants)
@@ -273,6 +352,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			r.Log.WarnContext(ctx, "failed to write HTTPRoute status", "route", hr.Name, "namespace", hr.Namespace, "error", err.Error())
 		}
 	}
+}
+
+// writeGRPCRouteStatuses publishes Gateway API status for every Service-parented GRPCRoute.
+func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatewayv1.GRPCRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
 		resolved, reason, msg := r.backendsResolve(ctx, gr.Namespace, "GRPCRoute", grpcBackendRefs(gr.Spec.Rules), grants)
@@ -280,7 +363,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			r.Log.WarnContext(ctx, "failed to write GRPCRoute status", "route", gr.Name, "namespace", gr.Namespace, "error", err.Error())
 		}
 	}
-	return reconcile.Result{}, nil
 }
 
 // writeRouteStatus upserts our (mesh controller) RouteParentStatus for each
