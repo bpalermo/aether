@@ -195,9 +195,12 @@ jobs:
           cp test/conformance/mesh/manifests.yaml \
             gateway-api/conformance/mesh/manifests.yaml
 
-      # Hard gate (43/43 on kind + talos). -parallel 1: gateway-api 1.6 marked
-      # many tests Parallel; concurrent same-match routes flap between backends
-      # until aether implements cross-route oldest-wins precedence (#533).
+      # Hard gate (43/43 on kind + talos). Runs the suite's native parallelism:
+      # aether's cross-route precedence (oldest creationTimestamp, then ns/name —
+      # the reconciler's pre-projection sort + the cache's stable specificity
+      # sort) resolves same-match routes deterministically (#533). The earlier
+      # wrong-backend failures were per-test-cleanup pollution (1.6 made
+      # CleanupTestResources opt-in; the runner now sets it).
       - name: Run GATEWAY-HTTP conformance
         id: conformance
         working-directory: gateway-api/conformance
@@ -209,7 +212,6 @@ jobs:
           go test . \
             -tags conformance \
             -run TestAetherGatewayHTTP \
-            -parallel 1 \
             -v -timeout 60m
 
       - name: Upload conformance report
@@ -348,7 +350,6 @@ jobs:
           go test . \
             -tags conformance \
             -run TestAetherMeshHTTP \
-            -parallel 1 \
             -v -timeout 60m
 
       - name: Upload conformance report
