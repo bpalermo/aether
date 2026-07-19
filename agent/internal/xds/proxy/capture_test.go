@@ -5,6 +5,7 @@ import (
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 
+	"github.com/bpalermo/aether/agent/internal/xds/config"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -12,6 +13,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -186,8 +188,24 @@ func TestNewPassthroughOriginalDstCluster(t *testing.T) {
 	assert.Equal(t, clusterv3.Cluster_CLUSTER_PROVIDED, cl.GetLbPolicy())
 	// No transport socket — passthrough is plaintext.
 	assert.Nil(t, cl.GetTransportSocket())
-	// No upstream HTTP protocol options — raw TCP.
-	assert.Empty(t, cl.GetTypedExtensionProtocolOptions())
+
+	// USE_DOWNSTREAM_PROTOCOL upstream options (issue #568): sniffed cleartext HTTP
+	// (h2c OR http/1.1) transits the cap_http HCM to this cluster; the upstream dial
+	// MUST mirror the downstream protocol or an h2c gRPC client to a non-mesh
+	// h2-only server resets ("protocol error"). Assert the cluster carries the
+	// use-downstream config with BOTH codecs populated.
+	tepo := cl.GetTypedExtensionProtocolOptions()
+	require.Contains(t, tepo, config.UpstreamHTTPProtocolOptionsKey,
+		"passthrough must carry upstream HTTP protocol options to preserve h2c (#568)")
+	var protoOpts httpv3.HttpProtocolOptions
+	require.NoError(t, tepo[config.UpstreamHTTPProtocolOptionsKey].UnmarshalTo(&protoOpts))
+	useDownstream, ok := protoOpts.GetUpstreamProtocolOptions().(*httpv3.HttpProtocolOptions_UseDownstreamProtocolConfig)
+	require.True(t, ok, "expected UseDownstreamProtocolConfig, got %T", protoOpts.GetUpstreamProtocolOptions())
+	require.NotNil(t, useDownstream.UseDownstreamProtocolConfig)
+	assert.NotNil(t, useDownstream.UseDownstreamProtocolConfig.GetHttpProtocolOptions(),
+		"http/1.1 downstream must map to h1 upstream")
+	assert.NotNil(t, useDownstream.UseDownstreamProtocolConfig.GetHttp2ProtocolOptions(),
+		"h2c downstream must map to h2c upstream (the #568 fix)")
 
 	// SO_MARK on the upstream sockets (proposal 022 M2-default): the CNI
 	// redirect-all rule RETURNs this mark so the proxy's own forwarded egress is

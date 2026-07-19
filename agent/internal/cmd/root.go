@@ -265,18 +265,20 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	// Remove the aether startup taint from this node once the CNI server is
-	// serving, so workload pods (which don't tolerate it) can schedule here. The
-	// operator registers the taint via the kubelet; this closes the cold-start
-	// window where a pod's CNI ADD would arrive before the agent is ready.
-	// Unconditional (proposal 031): a no-op when the taint isn't registered.
-	if err = m.Add(&node.TaintRemover{
+	// Remove the aether startup taint from this node whenever it is present and
+	// the CNI server is serving, so workload pods (which don't tolerate it) can
+	// schedule here. This is a reconciler on this agent's own Node, so it also
+	// drops the taint the controller's node-taint guard re-applies after a reboot
+	// or agent outage (issue #569, gaps G1/G2), not just the one the kubelet
+	// registered at boot. Unconditional (proposal 031): a no-op when the taint
+	// isn't present. Best-effort: NeedLeaderElection=false, never fails startup.
+	if err = (&node.TaintRemover{
 		Client:     m.GetClient(),
 		NodeName:   cfg.NodeName,
 		SocketPath: cfg.CNIServerConfig.SocketPath,
 		Log:        l,
-	}); err != nil {
-		return fmt.Errorf("failed to add startup-taint remover: %w", err)
+	}).SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
 	}
 
 	// Rebuild the cluster/endpoint/route snapshot when the registry reports
