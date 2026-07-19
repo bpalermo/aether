@@ -162,6 +162,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/matching/common_inputs/transport_socket/v3:transport_socket",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/quic/v3:quic",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
         "@com_github_envoyproxy_go_control_plane_envoy//type/matcher/v3:matcher",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
