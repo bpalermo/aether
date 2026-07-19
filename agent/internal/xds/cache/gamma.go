@@ -62,16 +62,35 @@ func (c *SnapshotCache) effectiveServiceRoutesLocked() map[string][]proxy.GammaR
 	return out
 }
 
-// serviceRoutesSnapshot returns a shallow copy of the effective (local ∪ imported)
-// GAMMA rules for use during a snapshot rebuild (read once, outside the cluster lock).
+// serviceRoutesSnapshot returns the effective (local ∪ imported) GAMMA rules
+// with unavailable extension filters stripped, for use during a snapshot
+// rebuild (read once, outside the cluster lock). Memoized on depGen (issue
+// #540 — previously the merge + strip scan re-ran on EVERY snapshot): the
+// returned map is shared across calls until the next mutation and must be
+// treated as read-only (the depSet convention). Takes the write lock because
+// a rebuild stores the memo.
 func (c *SnapshotCache) serviceRoutesSnapshot() map[string][]proxy.GammaRoute {
-	c.depMu.RLock()
-	defer c.depMu.RUnlock()
+	c.depMu.Lock()
+	defer c.depMu.Unlock()
+	return c.effectiveStrippedRoutesLocked()
+}
+
+// effectiveStrippedRoutesLocked returns the effective GAMMA rules post-strip,
+// memoized on the input generation counter (the #539 depGen idiom): while
+// depGen is unchanged the previously built map is still exact and is returned
+// as-is. Caller must hold depMu for writing (a rebuild stores the memo).
+func (c *SnapshotCache) effectiveStrippedRoutesLocked() map[string][]proxy.GammaRoute {
+	if c.effRoutesValid && c.effRoutesGen == c.depGen {
+		return c.effRoutes
+	}
 	eff := c.effectiveServiceRoutesLocked()
 	out := make(map[string][]proxy.GammaRoute, len(eff))
 	for k, v := range eff {
 		out[k] = c.stripUnavailableExtensions(v)
 	}
+	c.effRoutes = out
+	c.effRoutesGen = c.depGen
+	c.effRoutesValid = true
 	return out
 }
 
@@ -79,6 +98,8 @@ func (c *SnapshotCache) serviceRoutesSnapshot() map[string][]proxy.GammaRoute {
 // present on this node — today only ext_authz when the authz sidecar is disabled
 // (proposal 027): a typed_per_filter_config naming an absent chain filter rejects
 // the whole route config, so a stray policy must degrade to a no-op, not a NACK.
+// Runs once per effective-routes memo rebuild (issue #540), so the Warn below
+// fires per route mutation, not per snapshot.
 func (c *SnapshotCache) stripUnavailableExtensions(rules []proxy.GammaRoute) []proxy.GammaRoute {
 	if c.authzSidecar {
 		return rules
@@ -128,18 +149,6 @@ func (c *SnapshotCache) SetRouteTargetPorts(ports map[string][]uint32) {
 	if changed {
 		c.signalDependencyChange()
 	}
-}
-
-// routeTargetPortsSnapshot returns a shallow copy of the route-target port map for
-// use during a snapshot rebuild (read once, outside the cluster lock).
-func (c *SnapshotCache) routeTargetPortsSnapshot() map[string][]uint32 {
-	c.depMu.RLock()
-	defer c.depMu.RUnlock()
-	out := make(map[string][]uint32, len(c.routeTargetPorts))
-	for k, v := range c.routeTargetPorts {
-		out[k] = v
-	}
-	return out
 }
 
 // equalRouteTargetPorts reports content equality of two route-target port maps
