@@ -126,6 +126,44 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		telemetry.EndSpan(span, retErr)
 	}()
 
+	all, err := s.listRegistryEndpoints(ctx)
+	if err != nil {
+		retErr = err
+		return
+	}
+
+	// Serialize against pod lifecycle so an in-flight AddPod (stored after the
+	// registry write) or RemovePod cannot race the liveness judgment.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	pods, err := s.storage.GetAll(ctx)
+	if err != nil {
+		s.log.DebugContext(ctx, "ghost sweep: failed to list local pods", "error", err)
+		retErr = err
+		return
+	}
+	storedPods = len(pods)
+
+	// Ground-truth reconcile: the manager cache is scoped to spec.nodeName=<this
+	// node>, so this lists exactly this node's pods, cheaply. Used to prune
+	// storage entries whose pod K8s no longer has, and to surface live pods
+	// storage is missing. If the list fails we must NOT prune by pod-absence (an
+	// empty list would nuke every entry), so that half is skipped this cycle.
+	nodePods, nodePodsOK := s.listNodePods(ctx)
+
+	pods, stalePruned, orphansPruned = s.pruneStaleStoragePods(ctx, pods, nodePods, nodePodsOK)
+	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK)
+
+	live, terminating := s.classifyPods(pods)
+	ghostsRemoved = s.deregisterGhostEndpoints(ctx, all, live, terminating)
+	missingRegistered = s.registerMissingEndpoints(ctx, live, all)
+}
+
+// listRegistryEndpoints fetches all registry endpoints for this node across all
+// swept protocols. It uses the authoritative lister when available to avoid
+// cache-staleness (see sweepGhostEndpoints comment).
+func (s *CNIServer) listRegistryEndpoints(ctx context.Context) (map[string][]*registryv1.ServiceEndpoint, error) {
 	// The sweep decides what to (de)register, so it must diff against the
 	// AUTHORITATIVE registry state, never the watch-fed cache: a fresh or
 	// failed-over registrar with an empty snapshot emits no events, the cache
@@ -150,34 +188,19 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		}
 		if err != nil {
 			s.log.DebugContext(ctx, "ghost sweep: failed to list registry endpoints", "protocol", protocol.String(), "error", err)
-			retErr = err
-			return
+			return nil, err
 		}
 		for svc, eps := range listed {
 			all[svc] = append(all[svc], eps...)
 		}
 	}
+	return all, nil
+}
 
-	// Serialize against pod lifecycle so an in-flight AddPod (stored after the
-	// registry write) or RemovePod cannot race the liveness judgment.
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-
-	pods, err := s.storage.GetAll(ctx)
-	if err != nil {
-		s.log.DebugContext(ctx, "ghost sweep: failed to list local pods", "error", err)
-		retErr = err
-		return
-	}
-	storedPods = len(pods)
-
-	// Ground-truth reconcile: the manager cache is scoped to spec.nodeName=<this
-	// node>, so this lists exactly this node's pods, cheaply. Used to prune
-	// storage entries whose pod K8s no longer has, and to surface live pods
-	// storage is missing. If the list fails we must NOT prune by pod-absence (an
-	// empty list would nuke every entry), so that half is skipped this cycle.
-	nodePods, nodePodsOK := s.listNodePods(ctx)
-
+// pruneStaleStoragePods removes pods from storage whose network namespace is
+// gone or whose Kubernetes pod no longer exists. Returns the surviving pods
+// and the counts of stale and orphaned pods pruned.
+func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) ([]*cniv1.CNIPod, int, int) {
 	// Prune storage entries that no longer correspond to a live pod: a missed CNI
 	// DEL left the file behind. Keeping it both re-registers a dead endpoint (the
 	// missing-direction loop would treat it as a live local pod) and makes Envoy
@@ -191,6 +214,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// clusters (which carry the netns) — so the dead-netns cluster leaves the
 	// snapshot. The pruned pod's registry endpoints then fall through to ghost
 	// deregistration below.
+	stalePruned, orphansPruned := 0, 0
 	fresh := pods[:0]
 	for _, p := range pods {
 		netns := p.GetNetworkNamespace()
@@ -200,63 +224,87 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 			fresh = append(fresh, p)
 			continue
 		}
-		if err := s.storage.RemoveResource(ctx, types.ContainerID(p.GetContainerId())); err != nil {
-			s.log.ErrorContext(ctx, "ghost sweep: failed to prune pod storage", "pod", p.GetName(), "netns", netns, "error", err)
-			fresh = append(fresh, p) // keep it; retry next sweep
+		kept, wasOrphaned := s.pruneOnePod(ctx, p, netns, orphaned)
+		if kept {
+			fresh = append(fresh, p)
 			continue
 		}
-		if netns != "" {
-			if err := s.snapshotCache.RemovePod(ctx, netns); err != nil {
-				s.log.ErrorContext(ctx, "ghost sweep: failed to drop listener for pruned pod", "pod", p.GetName(), "netns", netns, "error", err)
-			}
-		}
-		if orphaned {
+		if wasOrphaned {
 			orphansPruned++
-			s.log.InfoContext(ctx, "ghost sweep: pruned orphaned pod (Kubernetes pod gone; CNI DEL missed, netns pin lingered)",
-				"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
 		} else {
 			stalePruned++
-			s.log.InfoContext(ctx, "ghost sweep: pruned stale pod (network namespace gone; CNI DEL missed)",
-				"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
 		}
 	}
-	pods = fresh
+	return fresh, stalePruned, orphansPruned
+}
 
+// pruneOnePod removes a single stale or orphaned pod from storage and drops its
+// listener from the snapshot. Returns (kept=true) if the pod should be retained
+// in the fresh list (storage removal failed), and (orphaned) for log/metric routing.
+func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns string, orphaned bool) (kept bool, wasOrphaned bool) {
+	if err := s.storage.RemoveResource(ctx, types.ContainerID(p.GetContainerId())); err != nil {
+		s.log.ErrorContext(ctx, "ghost sweep: failed to prune pod storage", "pod", p.GetName(), "netns", netns, "error", err)
+		return true, orphaned // keep it; retry next sweep
+	}
+	if netns != "" {
+		if err := s.snapshotCache.RemovePod(ctx, netns); err != nil {
+			s.log.ErrorContext(ctx, "ghost sweep: failed to drop listener for pruned pod", "pod", p.GetName(), "netns", netns, "error", err)
+		}
+	}
+	if orphaned {
+		s.log.InfoContext(ctx, "ghost sweep: pruned orphaned pod (Kubernetes pod gone; CNI DEL missed, netns pin lingered)",
+			"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
+	} else {
+		s.log.InfoContext(ctx, "ghost sweep: pruned stale pod (network namespace gone; CNI DEL missed)",
+			"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
+	}
+	return false, orphaned
+}
+
+// reportMissingStoragePods emits warnings for live mesh-managed K8s pods that
+// have no entry in local storage (a lost CNI ADD). Returns the count of such
+// pods found.
+func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) int {
 	// Surface live mesh-managed pods on this node that local storage has no entry
 	// for: a lost CNI ADD (talos worker-01, 2026-06-22: prober-k7vsm running with
 	// no listener). The agent has no CNI data (netns, IPs) to synthesize a
 	// listener, so it cannot self-heal — emit a metric + warning so the gap is
 	// visible (the pod must be rolled) instead of silently serving no listener.
-	if nodePodsOK {
-		stored := make(map[string]struct{}, len(pods))
-		for _, p := range pods {
-			stored[podKey(p.GetNamespace(), p.GetName())] = struct{}{}
-		}
-		for key, kp := range nodePods {
-			if _, ok := stored[key]; ok {
-				continue
-			}
-			// Only a Running, non-terminating, mesh-managed pod is a genuine lost
-			// ADD; a Pending pod is mid-CNI-ADD and a terminating one is mid-removal
-			// — both have a legitimately transient storage gap.
-			if kp.Status.Phase != corev1.PodRunning || kp.DeletionTimestamp != nil {
-				continue
-			}
-			if !isMeshManagedK8sPod(kp) {
-				continue
-			}
-			missingStorage++
-			s.log.WarnContext(ctx, "ghost sweep: live mesh pod missing from local storage (CNI ADD lost; pod has no listener and must be rolled)",
-				"pod", kp.GetName(), "namespace", kp.GetNamespace(), "podIP", kp.Status.PodIP)
-		}
+	if !nodePodsOK {
+		return 0
 	}
+	missingStorage := 0
+	stored := make(map[string]struct{}, len(pods))
+	for _, p := range pods {
+		stored[podKey(p.GetNamespace(), p.GetName())] = struct{}{}
+	}
+	for key, kp := range nodePods {
+		if _, ok := stored[key]; ok {
+			continue
+		}
+		// Only a Running, non-terminating, mesh-managed pod is a genuine lost
+		// ADD; a Pending pod is mid-CNI-ADD and a terminating one is mid-removal
+		// — both have a legitimately transient storage gap.
+		if kp.Status.Phase != corev1.PodRunning || kp.DeletionTimestamp != nil {
+			continue
+		}
+		if !isMeshManagedK8sPod(kp) {
+			continue
+		}
+		missingStorage++
+		s.log.WarnContext(ctx, "ghost sweep: live mesh pod missing from local storage (CNI ADD lost; pod has no listener and must be rolled)",
+			"pod", kp.GetName(), "namespace", kp.GetNamespace(), "podIP", kp.Status.PodIP)
+	}
+	return missingStorage
+}
 
-	// Live local pods by IP. Terminating pods are tracked separately: their
-	// endpoints are deliberately still registered (marked DRAINING by the
-	// termination watch, removed at CNI DEL) — they are neither ghosts to
-	// deregister nor missing entries to re-register.
-	live := make(map[string]*cniv1.CNIPod, len(pods))
-	terminating := make(map[string]struct{})
+// classifyPods splits a slice of stored pods into a live-by-IP map and a
+// terminating-IP set. Terminating pods are tracked separately: their endpoints
+// are deliberately still registered (marked DRAINING by the termination watch,
+// removed at CNI DEL) — they are neither ghosts nor missing entries.
+func (s *CNIServer) classifyPods(pods []*cniv1.CNIPod) (live map[string]*cniv1.CNIPod, terminating map[string]struct{}) {
+	live = make(map[string]*cniv1.CNIPod, len(pods))
+	terminating = make(map[string]struct{})
 	for _, p := range pods {
 		if isIgnorablePod(p) {
 			continue
@@ -271,39 +319,75 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 			live[ip] = p
 		}
 	}
+	return live, terminating
+}
 
-	registered := make(map[string]struct{})
+// deregisterGhostEndpoints removes registry entries for this node that no live
+// local pod accounts for. Returns the count of ghost endpoints removed.
+func (s *CNIServer) deregisterGhostEndpoints(ctx context.Context, all map[string][]*registryv1.ServiceEndpoint, live map[string]*cniv1.CNIPod, terminating map[string]struct{}) int {
+	ghostsRemoved := 0
 	for service, endpoints := range all {
+		ghostsRemoved += s.deregisterGhostEndpointsForService(ctx, service, endpoints, live, terminating)
+	}
+	return ghostsRemoved
+}
+
+// deregisterGhostEndpointsForService removes ghost endpoints for a single service.
+// Returns the count of endpoints deregistered.
+func (s *CNIServer) deregisterGhostEndpointsForService(ctx context.Context, service string, endpoints []*registryv1.ServiceEndpoint, live map[string]*cniv1.CNIPod, terminating map[string]struct{}) int {
+	removed := 0
+	for _, ep := range endpoints {
+		// Own only this cluster's slice of this node's endpoints: registrars
+		// run per cluster against a shared mesh registry, and node names are
+		// NOT unique across clusters — matching on NodeName alone could
+		// deregister another cluster's endpoints.
+		if ep.GetClusterName() != s.clusterName || ep.GetKubernetesMetadata().GetNodeName() != s.nodeName {
+			continue // another agent's (or cluster's) responsibility
+		}
+		if _, ok := live[ep.GetIp()]; ok {
+			continue
+		}
+		if _, ok := terminating[ep.GetIp()]; ok {
+			continue // draining; CNI DEL owns the final removal
+		}
+		if err := s.registry.UnregisterEndpoint(ctx, service, ep.GetIp()); err != nil {
+			s.log.ErrorContext(ctx, "ghost sweep: failed to deregister ghost endpoint", "error", err,
+				"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
+			continue
+		}
+		removed++
+		s.log.InfoContext(ctx, "ghost sweep: deregistered ghost endpoint",
+			"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
+	}
+	return removed
+}
+
+// registeredIPs returns the set of IPs present in the registry for this node,
+// derived from the all-endpoints map and the live-pods map.
+func (s *CNIServer) registeredIPs(all map[string][]*registryv1.ServiceEndpoint, live map[string]*cniv1.CNIPod) map[string]struct{} {
+	registered := make(map[string]struct{})
+	for _, endpoints := range all {
 		for _, ep := range endpoints {
-			// Own only this cluster's slice of this node's endpoints: registrars
-			// run per cluster against a shared mesh registry, and node names are
-			// NOT unique across clusters — matching on NodeName alone could
-			// deregister another cluster's endpoints.
 			if ep.GetClusterName() != s.clusterName || ep.GetKubernetesMetadata().GetNodeName() != s.nodeName {
-				continue // another agent's (or cluster's) responsibility
+				continue
 			}
 			if _, ok := live[ep.GetIp()]; ok {
 				registered[ep.GetIp()] = struct{}{}
-				continue
 			}
-			if _, ok := terminating[ep.GetIp()]; ok {
-				continue // draining; CNI DEL owns the final removal
-			}
-			if err := s.registry.UnregisterEndpoint(ctx, service, ep.GetIp()); err != nil {
-				s.log.ErrorContext(ctx, "ghost sweep: failed to deregister ghost endpoint", "error", err,
-					"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
-				continue
-			}
-			ghostsRemoved++
-			s.log.InfoContext(ctx, "ghost sweep: deregistered ghost endpoint",
-				"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
 		}
 	}
+	return registered
+}
 
+// registerMissingEndpoints registers live local pods absent from the registry
+// (lost ADD registration, registry data loss). Returns the count registered.
+func (s *CNIServer) registerMissingEndpoints(ctx context.Context, live map[string]*cniv1.CNIPod, all map[string][]*registryv1.ServiceEndpoint) int {
 	// Missing direction: live local pods absent from the registry (lost ADD
 	// registration, registry data loss). Register at the mode-default health
 	// (EDS mode: UNHEALTHY) and reset the liveness transition cache so the next
 	// healthy observation re-promotes.
+	registered := s.registeredIPs(all, live)
+	missingRegistered := 0
 	for ip, pod := range live {
 		if _, ok := registered[ip]; ok {
 			continue
@@ -326,6 +410,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		s.log.InfoContext(ctx, "ghost sweep: registered missing endpoint",
 			"service", serviceName, "ip", ip, "pod", pod.GetName())
 	}
+	return missingRegistered
 }
 
 // listNodePods returns this node's pods keyed by namespace/name. The agent's

@@ -235,168 +235,257 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		return fmt.Errorf("starting initial envoy epoch: %w", err)
 	}
 
-	debounce := time.NewTimer(debounceDelay)
-	debounce.Stop()
-	var debounceC <-chan time.Time
-	bindRetries := 0
-	crashRetries := 0
-
-	arm := func(reason string) {
-		s.log.DebugContext(ctx, "hot restart armed", "reason", reason, "debounce", debounceDelay)
-		s.metrics.restartTriggered(reason)
-		debounce.Reset(debounceDelay)
-		debounceC = debounce.C
+	lp := &restartLoop{
+		s:       s,
+		ctx:     ctx,
+		debounce: time.NewTimer(debounceDelay),
 	}
+	lp.debounce.Stop()
+	return lp.run(sigCh, trigger)
+}
 
+// restartLoop holds the mutable state for the Run event loop, allowing the loop
+// body to be split into helpers without passing every variable as a parameter.
+type restartLoop struct {
+	s        *Supervisor
+	ctx      context.Context
+	debounce *time.Timer
+	debounceC   <-chan time.Time
+	bindRetries int
+	crashRetries int
+}
+
+// arm arms (or re-arms) the debounce timer for a hot-restart trigger.
+func (lp *restartLoop) arm(reason string) {
+	lp.s.log.DebugContext(lp.ctx, "hot restart armed", "reason", reason, "debounce", debounceDelay)
+	lp.s.metrics.restartTriggered(reason)
+	lp.debounce.Reset(debounceDelay)
+	lp.debounceC = lp.debounce.C
+}
+
+// run is the event loop for the hot-restart supervisor.
+func (lp *restartLoop) run(sigCh <-chan os.Signal, trigger <-chan struct{}) error {
 	for {
 		select {
-		case <-ctx.Done():
-			// If our Envoy no longer answers admin LIVE at our own epoch, its
-			// sockets have (very likely) been transferred to a surging successor
-			// that is still initializing — the DaemonSet deletes this pod the moment
-			// it turns NotReady, which is exactly that window. Do NOT signal Envoy
-			// (the successor still needs its hot-restart parent alive, even before
-			// reaching LIVE — killing it aborts the successor with errno 111): wait
-			// for the successor's parent-shutdown protocol to terminate it, with a
-			// deadline fallback. The check cannot rely on the successor having
-			// published its epoch, since it does so only once LIVE.
-			//
-			// StateDir is always set in production (the supervisor only runs in the
-			// cross-pod configuration); the guard keeps unit-test supervisors that
-			// run without coordination state on the plain shutdown path.
-			if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
-				s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy")
-				s.awaitProtocolTermination()
-				return nil
-			}
-			s.log.InfoContext(ctx, "termination requested, shutting down all envoy epochs")
-			s.shutdown()
-			return nil
+		case <-lp.ctx.Done():
+			return lp.s.handleShutdown(lp.ctx)
 
 		case sig := <-sigCh:
-			switch sig {
-			case syscall.SIGHUP:
-				arm("sighup")
-			case syscall.SIGUSR1:
-				s.forwardToCurrent(syscall.SIGUSR1)
-			}
+			lp.handleSignal(sig)
 
 		case <-trigger:
-			arm("config_change")
+			lp.arm("config_change")
 
-		case <-debounceC:
-			debounceC = nil
-			// Defer the restart while the current epoch is still initializing:
-			// forking epoch N+1 against a not-yet-LIVE N makes Envoy exit with
-			// "previous envoy process is still initializing", which the main loop
-			// treats as a fatal newest-epoch death (container restart, brief node
-			// data-plane gap). Re-arm and retry once N is LIVE. Skipped when no
-			// admin address is configured.
-			if s.cfg.AdminAddress != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
-				s.log.DebugContext(ctx, "current epoch not yet live; deferring hot restart", "epoch", s.currentEpoch())
-				arm("deferred_not_live")
-				continue
-			}
-			// Pre-validate the changed bootstrap ON THIS NODE before forking
-			// the new epoch. Every supervisor sees a ConfigMap change at the
-			// same time (fsnotify), so a config that fails at runtime takes
-			// down every node's data plane simultaneously, bypassing all
-			// rollout safety — observed 2026-06-11 (rev 64): a resource
-			// monitor that validated fine in docker was fatal in the
-			// privileged pod environment, and the fleet-wide simultaneous hot
-			// restart turned it into a 13-minute cluster outage. envoy
-			// --mode validate executes bootstrap initialization in the same
-			// environment as the real fork, so it catches exactly that
-			// class. On failure: keep the current epoch serving, count it,
-			// and wait for the next config change.
-			if err := s.validateConfig(ctx); err != nil {
-				s.metrics.configValidationFailed()
-				s.log.ErrorContext(ctx, "changed bootstrap config failed node-local validation; KEEPING current epoch (hot restart skipped)", "error", err)
-				continue
-			}
-			s.log.InfoContext(ctx, "performing hot restart")
-			if err := s.hotRestart(); err != nil {
-				s.log.ErrorContext(ctx, "hot restart failed; keeping current epoch", "error", err)
+		case <-lp.debounceC:
+			lp.debounceC = nil
+			if err := lp.handleDebounce(); err != nil {
+				return err
 			}
 
-		case err := <-s.watchdogFired:
+		case err := <-lp.s.watchdogFired:
 			// The newest Envoy is wedged (see watchLiveness): kill everything and
 			// exit non-zero. Kubernetes recreates the pod; the fresh supervisor
 			// re-probes the (now dead) predecessor and recovers at epoch 0.
-			s.log.ErrorContext(ctx, "liveness watchdog fired; terminating for container restart", "error", err)
-			s.shutdown()
+			lp.s.log.ErrorContext(lp.ctx, "liveness watchdog fired; terminating for container restart", "error", err)
+			lp.s.shutdown()
 			return err
 
-		case exit := <-s.childExited:
-			if exit.epoch == s.currentEpoch() {
-				if exit.err == nil {
-					s.metrics.childExited(exitSuccessorTerminated)
-					// Clean exit (status 0) of our newest epoch: that's the
-					// successor's hot-restart parent-shutdown protocol terminating us
-					// (a crash would be non-zero/signaled). The signal
-					// is deliberate process state, not the shared epoch file — the
-					// successor publishes its epoch only once LIVE, which may be
-					// after it terminates us. Don't exit (restartPolicy=Always would
-					// relaunch and collide): await deletion by the DaemonSet.
-					s.log.InfoContext(ctx, "newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
-					s.reap(exit.epoch)
-					<-ctx.Done()
-					return nil
-				}
-				// A fresh epoch that died non-LIVE within seconds: either a base-id
-				// bind collision (a predecessor still holds the domain socket; exits
-				// errno 98, no signal) or a genuine Envoy crash (a fatal SIGNAL).
-				// Retry epoch detection in-process — a predecessor keeps serving
-				// meanwhile — instead of exiting into CrashLoopBackOff. A crash gets
-				// a much smaller budget so a deterministically crashing Envoy
-				// surfaces fast instead of masquerading as a collision for minutes.
-				if s.quickNonLiveExit() {
-					crash := isCrashSignal(exit.err)
-					attempt, budget := bindRetries+1, maxBindCollisionRetries
-					if crash {
-						attempt, budget = crashRetries+1, maxCrashRetries
-					}
-					if attempt <= budget {
-						if crash {
-							crashRetries++
-						} else {
-							bindRetries++
-						}
-						s.metrics.childExited(exitBindCollision)
-						s.reap(exit.epoch)
-						kind := "suspected base-id bind collision with a live predecessor"
-						if crash {
-							kind = "envoy crashed on launch (fatal signal)"
-						}
-						s.log.InfoContext(ctx, kind+"; retrying epoch detection in-process",
-							"epoch", exit.epoch, "attempt", attempt, "budget", budget, "crashSignal", crash, "error", exit.err.Error())
-						select {
-						case <-ctx.Done():
-							s.shutdown()
-							return nil
-						case <-time.After(bindCollisionRetryPause):
-						}
-						s.resetEpochForRetry()
-						s.initStartEpoch(ctx)
-						s.gateReadinessIfSuccessor()
-						if err := s.hotRestart(); err != nil {
-							return fmt.Errorf("relaunching envoy after retry: %w", err)
-						}
-						continue
-					}
-				}
-				// The newest epoch died unexpectedly: nothing left serving traffic.
-				// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).
-				s.metrics.childExited(exitUnexpected)
-				s.reap(exit.epoch)
-				s.shutdown()
-				return fmt.Errorf("envoy epoch %d exited unexpectedly: %w", exit.epoch, exit.err)
+		case exit := <-lp.s.childExited:
+			retErr, done := lp.handleChildExit(exit)
+			if done {
+				return retErr
 			}
-			// An older epoch finished draining after a hot restart: expected. Reap it.
-			s.metrics.childExited(exitDrained)
-			s.reap(exit.epoch)
 		}
 	}
+}
+
+// handleSignal dispatches an OS signal received by Run.
+func (lp *restartLoop) handleSignal(sig os.Signal) {
+	switch sig {
+	case syscall.SIGHUP:
+		lp.arm("sighup")
+	case syscall.SIGUSR1:
+		lp.s.forwardToCurrent(syscall.SIGUSR1)
+	}
+}
+
+// handleDebounce is called when the debounce timer fires. It defers or performs
+// the hot restart, returning a non-nil error on fatal failure.
+func (lp *restartLoop) handleDebounce() error {
+	rearm, err := lp.s.handleDebounce(lp.ctx)
+	if err != nil {
+		return err
+	}
+	if rearm != "" {
+		lp.arm(rearm)
+	}
+	return nil
+}
+
+// handleChildExit is called when a child process exits. Returns (err, done=true)
+// when the supervisor should exit.
+func (lp *restartLoop) handleChildExit(exit childExit) (retErr error, done bool) {
+	retErr, done, rearm := lp.s.handleChildExit(lp.ctx, exit, &lp.bindRetries, &lp.crashRetries)
+	if rearm != "" {
+		lp.arm(rearm)
+	}
+	return retErr, done
+}
+
+// handleShutdown implements the ctx.Done case of the Run select: if this
+// supervisor is in the mid-handoff window (Envoy not LIVE at our epoch), it
+// waits for the successor's parent-shutdown protocol to terminate our Envoy
+// before returning; otherwise it signals all children and drains.
+func (s *Supervisor) handleShutdown(ctx context.Context) error {
+	// If our Envoy no longer answers admin LIVE at our own epoch, its
+	// sockets have (very likely) been transferred to a surging successor
+	// that is still initializing — the DaemonSet deletes this pod the moment
+	// it turns NotReady, which is exactly that window. Do NOT signal Envoy
+	// (the successor still needs its hot-restart parent alive, even before
+	// reaching LIVE — killing it aborts the successor with errno 111): wait
+	// for the successor's parent-shutdown protocol to terminate it, with a
+	// deadline fallback. The check cannot rely on the successor having
+	// published its epoch, since it does so only once LIVE.
+	//
+	// StateDir is always set in production (the supervisor only runs in the
+	// cross-pod configuration); the guard keeps unit-test supervisors that
+	// run without coordination state on the plain shutdown path.
+	if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
+		s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy")
+		s.awaitProtocolTermination()
+		return nil
+	}
+	s.log.InfoContext(ctx, "termination requested, shutting down all envoy epochs")
+	s.shutdown()
+	return nil
+}
+
+// handleDebounce implements the debounceC case of the Run select: defers the
+// restart if the current epoch is not yet LIVE, validates the config, then
+// performs the hot restart. Returns a non-empty rearm reason if the caller
+// should re-arm the debounce, or a non-nil error on fatal failure.
+func (s *Supervisor) handleDebounce(ctx context.Context) (rearmReason string, err error) {
+	// Defer the restart while the current epoch is still initializing:
+	// forking epoch N+1 against a not-yet-LIVE N makes Envoy exit with
+	// "previous envoy process is still initializing", which the main loop
+	// treats as a fatal newest-epoch death (container restart, brief node
+	// data-plane gap). Re-arm and retry once N is LIVE. Skipped when no
+	// admin address is configured.
+	if s.cfg.AdminAddress != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
+		s.log.DebugContext(ctx, "current epoch not yet live; deferring hot restart", "epoch", s.currentEpoch())
+		return "deferred_not_live", nil
+	}
+	// Pre-validate the changed bootstrap ON THIS NODE before forking
+	// the new epoch. Every supervisor sees a ConfigMap change at the
+	// same time (fsnotify), so a config that fails at runtime takes
+	// down every node's data plane simultaneously, bypassing all
+	// rollout safety — observed 2026-06-11 (rev 64): a resource
+	// monitor that validated fine in docker was fatal in the
+	// privileged pod environment, and the fleet-wide simultaneous hot
+	// restart turned it into a 13-minute cluster outage. envoy
+	// --mode validate executes bootstrap initialization in the same
+	// environment as the real fork, so it catches exactly that
+	// class. On failure: keep the current epoch serving, count it,
+	// and wait for the next config change.
+	if err := s.validateConfig(ctx); err != nil {
+		s.metrics.configValidationFailed()
+		s.log.ErrorContext(ctx, "changed bootstrap config failed node-local validation; KEEPING current epoch (hot restart skipped)", "error", err)
+		return "", nil
+	}
+	s.log.InfoContext(ctx, "performing hot restart")
+	if err := s.hotRestart(); err != nil {
+		s.log.ErrorContext(ctx, "hot restart failed; keeping current epoch", "error", err)
+	}
+	return "", nil
+}
+
+// handleChildExit implements the childExited case of the Run select loop.
+// It returns (err, done=true) when the supervisor should exit, or
+// (nil, false) to continue; rearmReason is non-empty if the arm function
+// should be called (bind-collision retry re-arms via continue, so the
+// caller must call arm before continuing the loop).
+func (s *Supervisor) handleChildExit(ctx context.Context, exit childExit, bindRetries, crashRetries *int) (retErr error, done bool, rearmReason string) {
+	if exit.epoch != s.currentEpoch() {
+		// An older epoch finished draining after a hot restart: expected. Reap it.
+		s.metrics.childExited(exitDrained)
+		s.reap(exit.epoch)
+		return nil, false, ""
+	}
+	if exit.err == nil {
+		s.metrics.childExited(exitSuccessorTerminated)
+		// Clean exit (status 0) of our newest epoch: that's the
+		// successor's hot-restart parent-shutdown protocol terminating us
+		// (a crash would be non-zero/signaled). The signal
+		// is deliberate process state, not the shared epoch file — the
+		// successor publishes its epoch only once LIVE, which may be
+		// after it terminates us. Don't exit (restartPolicy=Always would
+		// relaunch and collide): await deletion by the DaemonSet.
+		s.log.InfoContext(ctx, "newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
+		s.reap(exit.epoch)
+		<-ctx.Done()
+		return nil, true, ""
+	}
+	if retried, retErr, done := s.retryBindCollision(ctx, exit, bindRetries, crashRetries); retried {
+		return retErr, done, ""
+	}
+	// The newest epoch died unexpectedly: nothing left serving traffic.
+	// Bail non-zero so Kubernetes recreates the pod (SIGCHLD-fatal).
+	s.metrics.childExited(exitUnexpected)
+	s.reap(exit.epoch)
+	s.shutdown()
+	return fmt.Errorf("envoy epoch %d exited unexpectedly: %w", exit.epoch, exit.err), true, ""
+}
+
+// retryBindCollision handles the bind-collision / crash-on-launch retry logic
+// for a newest epoch that died non-LIVE within seconds of launch. Returns
+// (retried=true, err, done) when the case was handled (either retried or
+// budget exhausted non-retried), (false, nil, false) when this was not a
+// quick non-live exit and the caller should fall through.
+func (s *Supervisor) retryBindCollision(ctx context.Context, exit childExit, bindRetries, crashRetries *int) (retried bool, retErr error, done bool) {
+	// A fresh epoch that died non-LIVE within seconds: either a base-id
+	// bind collision (a predecessor still holds the domain socket; exits
+	// errno 98, no signal) or a genuine Envoy crash (a fatal SIGNAL).
+	// Retry epoch detection in-process — a predecessor keeps serving
+	// meanwhile — instead of exiting into CrashLoopBackOff. A crash gets
+	// a much smaller budget so a deterministically crashing Envoy
+	// surfaces fast instead of masquerading as a collision for minutes.
+	if !s.quickNonLiveExit() {
+		return false, nil, false
+	}
+	crash := isCrashSignal(exit.err)
+	attempt, budget := *bindRetries+1, maxBindCollisionRetries
+	if crash {
+		attempt, budget = *crashRetries+1, maxCrashRetries
+	}
+	if attempt > budget {
+		return false, nil, false
+	}
+	if crash {
+		*crashRetries++
+	} else {
+		*bindRetries++
+	}
+	s.metrics.childExited(exitBindCollision)
+	s.reap(exit.epoch)
+	kind := "suspected base-id bind collision with a live predecessor"
+	if crash {
+		kind = "envoy crashed on launch (fatal signal)"
+	}
+	s.log.InfoContext(ctx, kind+"; retrying epoch detection in-process",
+		"epoch", exit.epoch, "attempt", attempt, "budget", budget, "crashSignal", crash, "error", exit.err.Error())
+	select {
+	case <-ctx.Done():
+		s.shutdown()
+		return true, nil, true
+	case <-time.After(bindCollisionRetryPause):
+	}
+	s.resetEpochForRetry()
+	s.initStartEpoch(ctx)
+	s.gateReadinessIfSuccessor()
+	if err := s.hotRestart(); err != nil {
+		return true, fmt.Errorf("relaunching envoy after retry: %w", err), true
+	}
+	return true, nil, false
 }
 
 // hotRestart forks a new Envoy child at the next restart epoch and schedules

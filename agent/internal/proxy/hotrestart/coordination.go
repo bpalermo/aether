@@ -181,22 +181,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			if live {
 				everLive = true
 				holding = false
-				if launched, wasLive := s.epochProgress(); !wasLive {
-					// First LIVE confirmation for this epoch: the handoff (or
-					// initial start, epoch 0) completed.
-					s.metrics.handoffCompleted(time.Since(launched).Seconds())
-				}
-				s.markEpochLive()
-				s.writeState(epoch) // LIVE-gated heartbeat
-				// Hold readiness until the cross-pod handoff is fully complete (the
-				// predecessor has been terminated by this Envoy's parent-shutdown), so
-				// the DaemonSet doesn't delete the old pod while we still need it.
-				if !ready && !time.Now().Before(s.readyGateTime()) {
-					s.setReady()
-					ready = true
-					s.metrics.readyTransition(true)
-					s.log.InfoContext(ctx, "pod ready: envoy live at newest epoch", "epoch", epoch)
-				}
+				ready = s.onLiveEpoch(ctx, epoch, ready)
 				continue
 			}
 			// Hold readiness while this supervisor's Envoy is still the serving
@@ -211,38 +196,78 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			// coincided with pod churn (e2e 2026-06-11). The wedge watchdogs below
 			// still run: a successor stuck pre-LIVE or an unreachable admin ends
 			// the hold via container restart, and the child exiting ends it here.
-			hold := ready && reachable && s.childTracked(epoch)
-			if hold && !holding {
-				holding = true
-				s.log.InfoContext(ctx, "holding readiness: serving as hot-restart parent mid-handoff", "epoch", epoch)
-			}
-			if ready && !hold {
-				s.clearReady()
-				ready = false
-				holding = false
-				s.metrics.readyTransition(false)
-				s.log.InfoContext(ctx, "pod not ready: envoy not live at newest epoch", "epoch", epoch)
-			}
-
-			launched, wasLive := s.epochProgress()
-			if epoch > 0 && !wasLive && s.childTracked(epoch) && time.Since(launched) > s.handoffDeadline() {
-				s.metrics.wedged(wedgeHandoffTimeout)
-				s.fireWatchdog(fmt.Errorf(
-					"hot-restart handoff watchdog: epoch %d not LIVE within %s of launch (parent likely died mid-handoff)",
-					epoch, s.handoffDeadline(),
-				))
-				return
-			}
-			if everLive && !reachable && s.childTracked(epoch) && time.Since(unreachableSince) > s.adminUnresponsiveDeadline() {
-				s.metrics.wedged(wedgeAdminUnresponsive)
-				s.fireWatchdog(fmt.Errorf(
-					"admin watchdog: envoy admin %s unresponsive for %s with child alive at epoch %d",
-					s.cfg.AdminAddress, s.adminUnresponsiveDeadline(), epoch,
-				))
+			ready, holding = s.onNotLiveEpoch(ctx, epoch, ready, reachable, holding)
+			if s.checkWedgeWatchdogs(ctx, epoch, everLive, reachable, unreachableSince) {
 				return
 			}
 		}
 	}
+}
+
+// onLiveEpoch handles a tick where admin reports LIVE at the current epoch:
+// records handoff completion, publishes the heartbeat, and gates readiness.
+// Returns the updated ready state.
+func (s *Supervisor) onLiveEpoch(ctx context.Context, epoch int, ready bool) bool {
+	if launched, wasLive := s.epochProgress(); !wasLive {
+		// First LIVE confirmation for this epoch: the handoff (or
+		// initial start, epoch 0) completed.
+		s.metrics.handoffCompleted(time.Since(launched).Seconds())
+	}
+	s.markEpochLive()
+	s.writeState(epoch) // LIVE-gated heartbeat
+	// Hold readiness until the cross-pod handoff is fully complete (the
+	// predecessor has been terminated by this Envoy's parent-shutdown), so
+	// the DaemonSet doesn't delete the old pod while we still need it.
+	if !ready && !time.Now().Before(s.readyGateTime()) {
+		s.setReady()
+		ready = true
+		s.metrics.readyTransition(true)
+		s.log.InfoContext(ctx, "pod ready: envoy live at newest epoch", "epoch", epoch)
+	}
+	return ready
+}
+
+// onNotLiveEpoch handles a tick where admin does not report LIVE at the current
+// epoch: manages the readiness-hold logic for the mid-handoff parent state.
+// Returns the updated ready and holding states.
+func (s *Supervisor) onNotLiveEpoch(ctx context.Context, epoch int, ready, reachable, holding bool) (bool, bool) {
+	hold := ready && reachable && s.childTracked(epoch)
+	if hold && !holding {
+		holding = true
+		s.log.InfoContext(ctx, "holding readiness: serving as hot-restart parent mid-handoff", "epoch", epoch)
+	}
+	if ready && !hold {
+		s.clearReady()
+		ready = false
+		holding = false
+		s.metrics.readyTransition(false)
+		s.log.InfoContext(ctx, "pod not ready: envoy not live at newest epoch", "epoch", epoch)
+	}
+	return ready, holding
+}
+
+// checkWedgeWatchdogs fires the watchdog if the handoff or admin-unresponsive
+// watchdog thresholds are exceeded. Returns true if the caller should return
+// (watchdog fired).
+func (s *Supervisor) checkWedgeWatchdogs(ctx context.Context, epoch int, everLive, reachable bool, unreachableSince time.Time) bool {
+	launched, wasLive := s.epochProgress()
+	if epoch > 0 && !wasLive && s.childTracked(epoch) && time.Since(launched) > s.handoffDeadline() {
+		s.metrics.wedged(wedgeHandoffTimeout)
+		s.fireWatchdog(fmt.Errorf(
+			"hot-restart handoff watchdog: epoch %d not LIVE within %s of launch (parent likely died mid-handoff)",
+			epoch, s.handoffDeadline(),
+		))
+		return true
+	}
+	if everLive && !reachable && s.childTracked(epoch) && time.Since(unreachableSince) > s.adminUnresponsiveDeadline() {
+		s.metrics.wedged(wedgeAdminUnresponsive)
+		s.fireWatchdog(fmt.Errorf(
+			"admin watchdog: envoy admin %s unresponsive for %s with child alive at epoch %d",
+			s.cfg.AdminAddress, s.adminUnresponsiveDeadline(), epoch,
+		))
+		return true
+	}
+	return false
 }
 
 func (s *Supervisor) setReady() {
