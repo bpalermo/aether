@@ -17,6 +17,7 @@ go_library(
         "//controller/internal/gatewayapi",
         "//controller/internal/httpfilter",
         "//controller/internal/meshconfig",
+        "//controller/internal/nodetaint",
         "//controller/internal/podmutate",
         "//controller/internal/webhook",
         "@com_github_spf13_cobra//:cobra",
