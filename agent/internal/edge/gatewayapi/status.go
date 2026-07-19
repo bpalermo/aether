@@ -90,171 +90,12 @@ func (r *Reconciler) writeGatewayStatuses(
 		gw := &ourGateways[i]
 		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
 
-		// Compute the SPEC-derived desired status once. These inputs depend on the
-		// Gateway spec + the routes/certs/assigned-IP we resolved this reconcile —
-		// NOT on the Gateway's current status — so they're stable across the
-		// conflict-retry re-Gets in writeGatewayStatus below.
-		listenerInputs := make([]listenerStatusInput, 0, len(gw.Spec.Listeners))
-		allListenersProgrammed := true
-		anyListenerAccepted := false
-		anyUnsupportedProtocol := false
-		for _, ln := range gw.Spec.Listeners {
-			// Unsupported listener protocol (gateway-api 1.6's
-			// GatewayListenerUnsupportedProtocol contract): the listener is not
-			// accepted (UnsupportedProtocol), publishes empty supportedKinds, and
-			// counts against the Gateway's Accepted/Programmed rollup below.
-			if attachment.SupportedKindsFor(ln.Protocol) == nil {
-				// NOTE: deliberately NOT counted against allListenersProgrammed —
-				// the suite's readiness poller requires top-level Programmed=True
-				// on the mixed (supported+unsupported) fixture Gateway; only a
-				// Gateway with NO accepted listener rolls up Programmed=False.
-				anyUnsupportedProtocol = true
-				msg := fmt.Sprintf("Listener protocol %q is not supported by the aether edge (supported: HTTP, HTTPS, TLS, TCP)", ln.Protocol)
-				listenerInputs = append(listenerInputs, listenerStatusInput{
-					name:           ln.Name,
-					supportedKinds: []gatewayv1.RouteGroupKind{},
-					attached:       0,
-					accepted: gatewaystatus.Condition{
-						Type:    string(gatewayv1.ListenerConditionAccepted),
-						Status:  metav1.ConditionFalse,
-						Reason:  string(gatewayv1.ListenerReasonUnsupportedProtocol),
-						Message: msg,
-					},
-					programmed: gatewaystatus.Condition{
-						Type:    string(gatewayv1.ListenerConditionProgrammed),
-						Status:  metav1.ConditionFalse,
-						Reason:  string(gatewayv1.ListenerReasonInvalid),
-						Message: msg,
-					},
-					resolved: gatewaystatus.Condition{
-						Type:    string(gatewayv1.ListenerConditionResolvedRefs),
-						Status:  metav1.ConditionTrue,
-						Reason:  string(gatewayv1.ListenerReasonResolvedRefs),
-						Message: "No references to resolve",
-					},
-				})
-				continue
-			}
-			anyListenerAccepted = true
-			attached := att.AttachedRoutesForListener(ctx, gw, ln, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys)
+		listenerInputs, allProgrammed, anyAccepted, anyUnsupported := r.buildListenerStatusInputs(
+			ctx, gw, gk, att, tlsResults, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys,
+		)
 
-			// ResolvedRefs: InvalidRouteKinds (allowedRoutes.kinds names an
-			// unsupported kind) takes precedence; then InvalidCertificateRef
-			// (a TLS listener whose certificateRefs don't resolve).
-			resolvedStatus := metav1.ConditionTrue
-			resolvedReason := string(gatewayv1.ListenerReasonResolvedRefs)
-			resolvedMsg := "All listener references resolved"
-			programmed := true
-			switch {
-			case attachment.ListenerHasInvalidRouteKinds(ln):
-				resolvedStatus = metav1.ConditionFalse
-				resolvedReason = string(gatewayv1.ListenerReasonInvalidRouteKinds)
-				resolvedMsg = "allowedRoutes.kinds names a Route kind this listener does not support"
-				programmed = false
-			default:
-				if res, ok := tlsResults[listenerStatusKey{Gateway: gk, Name: ln.Name}]; ok && res.hasTLS && !res.resolved {
-					resolvedStatus = metav1.ConditionFalse
-					resolvedReason = string(gatewayv1.ListenerReasonInvalidCertificateRef)
-					if res.reason != "" {
-						resolvedReason = res.reason
-					}
-					resolvedMsg = res.message
-					programmed = false
-				}
-			}
+		acceptedTop, programmedTop := r.computeGatewayTopConditions(ctx, gw, allProgrammed, anyAccepted, anyUnsupported)
 
-			programmedStatus := metav1.ConditionTrue
-			programmedReason := string(gatewayv1.ListenerReasonProgrammed)
-			programmedMsg := "Listener programmed"
-			if !programmed {
-				programmedStatus = metav1.ConditionFalse
-				programmedReason = string(gatewayv1.ListenerReasonInvalid)
-				programmedMsg = "Listener not programmed: " + resolvedMsg
-				allListenersProgrammed = false
-			}
-
-			listenerInputs = append(listenerInputs, listenerStatusInput{
-				name:           ln.Name,
-				supportedKinds: attachment.ListenerSupportedKinds(ln),
-				attached:       attached,
-				accepted: gatewaystatus.Condition{
-					Type:    string(gatewayv1.ListenerConditionAccepted),
-					Status:  metav1.ConditionTrue,
-					Reason:  string(gatewayv1.ListenerReasonAccepted),
-					Message: "Listener accepted",
-				},
-				programmed: gatewaystatus.Condition{
-					Type:    string(gatewayv1.ListenerConditionProgrammed),
-					Status:  programmedStatus,
-					Reason:  programmedReason,
-					Message: programmedMsg,
-				},
-				resolved: gatewaystatus.Condition{
-					Type:    string(gatewayv1.ListenerConditionResolvedRefs),
-					Status:  resolvedStatus,
-					Reason:  resolvedReason,
-					Message: resolvedMsg,
-				},
-			})
-		}
-
-		// Top-level Programmed is False when any listener failed to program (e.g.
-		// invalid TLS or invalid route kinds), so the Gateway is not advertised as
-		// fully programmed while a listener is broken.
-		programmedTop := gatewaystatus.Condition{
-			Type:    string(gatewayv1.GatewayConditionProgrammed),
-			Status:  metav1.ConditionTrue,
-			Reason:  string(gatewayv1.GatewayReasonProgrammed),
-			Message: "Gateway programmed into the aether edge data plane",
-		}
-		if !allListenersProgrammed {
-			programmedTop.Status = metav1.ConditionFalse
-			programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
-			programmedTop.Message = "One or more listeners are not programmed (invalid TLS or route kinds)"
-		}
-		if !anyListenerAccepted && len(gw.Spec.Listeners) > 0 {
-			// All listeners rejected (unsupported protocols): nothing programs.
-			programmedTop.Status = metav1.ConditionFalse
-			programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
-			programmedTop.Message = "No listener is accepted (unsupported protocols)"
-		}
-		acceptedTop := gatewaystatus.Condition{
-			Type:    string(gatewayv1.GatewayConditionAccepted),
-			Status:  metav1.ConditionTrue,
-			Reason:  string(gatewayv1.GatewayReasonAccepted),
-			Message: "Gateway accepted by the aether edge controller",
-		}
-		// Listener-protocol rollup (1.6 contract): no accepted listener at all →
-		// Accepted=False/ListenersNotValid; some unsupported but ≥1 accepted →
-		// Accepted stays True with reason ListenersNotValid.
-		switch {
-		case !anyListenerAccepted && len(gw.Spec.Listeners) > 0:
-			acceptedTop.Status = metav1.ConditionFalse
-			acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
-			acceptedTop.Message = "No listener is accepted (unsupported protocols)"
-		case anyUnsupportedProtocol:
-			acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
-			acceptedTop.Message = "Gateway accepted; some listeners are not valid (unsupported protocols)"
-		}
-		// An infrastructure.parametersRef that is present but unresolvable rejects
-		// the Gateway (Accepted=False/InvalidParameters — Gateway API spec, pinned
-		// by the GatewayInvalidParametersRef conformance test). The data plane
-		// stays tolerant (listeners keep serving on compiled defaults) so a
-		// briefly-dangling EdgeConfig doesn't drop live traffic; only the
-		// advertised status reflects the invalid ref.
-		if msg, invalid := r.invalidParametersRef(ctx, gw); invalid {
-			acceptedTop.Status = metav1.ConditionFalse
-			acceptedTop.Reason = string(gatewayv1.GatewayReasonInvalidParameters)
-			acceptedTop.Message = msg
-			programmedTop.Status = metav1.ConditionFalse
-			programmedTop.Reason = string(gatewayv1.GatewayReasonInvalid)
-			programmedTop.Message = msg
-		}
-
-		// status.addresses: Phase 2 uses the per-Gateway LB IP; Phase 1 uses the
-		// shared edge LB IP. An empty list never overwrites a previously-published
-		// address (writeGatewayStatus leaves the old one and waits for the next
-		// reconcile once MetalLB assigns an IP).
 		var addrs []gatewayv1.GatewayStatusAddress
 		if ip, ok := perGWAssignedIPs[gk]; ok && ip != "" {
 			addrs = []gatewayv1.GatewayStatusAddress{{
@@ -270,6 +111,181 @@ func (r *Reconciler) writeGatewayStatuses(
 			r.Log.WarnContext(ctx, "failed to write Gateway status", "gateway", gw.Name, "error", err.Error())
 		}
 	}
+}
+
+// buildListenerStatusInputs computes the per-listener status inputs for a Gateway.
+// Returns the inputs slice and three rollup booleans: allProgrammed, anyAccepted, anyUnsupported.
+func (r *Reconciler) buildListenerStatusInputs(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	gk gatewayKey,
+	att *attachment.Resolver,
+	tlsResults map[listenerStatusKey]listenerTLSResult,
+	httpRoutes []gatewayv1.HTTPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
+	tlsRoutes []gatewayv1.TLSRoute,
+	gateways map[gatewayKey]struct{},
+	listenerKeys map[gatewayListenerKey]struct{},
+) ([]listenerStatusInput, bool, bool, bool) {
+	inputs := make([]listenerStatusInput, 0, len(gw.Spec.Listeners))
+	allProgrammed := true
+	anyAccepted := false
+	anyUnsupported := false
+	for _, ln := range gw.Spec.Listeners {
+		if attachment.SupportedKindsFor(ln.Protocol) == nil {
+			// NOTE: deliberately NOT counted against allProgrammed —
+			// the suite's readiness poller requires top-level Programmed=True
+			// on the mixed (supported+unsupported) fixture Gateway.
+			anyUnsupported = true
+			inputs = append(inputs, unsupportedListenerInput(ln))
+			continue
+		}
+		anyAccepted = true
+		attached := att.AttachedRoutesForListener(ctx, gw, ln, httpRoutes, tcpRoutes, tlsRoutes, gateways, listenerKeys)
+		inp, programmed := buildAcceptedListenerInput(ln, gk, attached, tlsResults)
+		if !programmed {
+			allProgrammed = false
+		}
+		inputs = append(inputs, inp)
+	}
+	return inputs, allProgrammed, anyAccepted, anyUnsupported
+}
+
+// unsupportedListenerInput returns the listenerStatusInput for a listener with an unsupported protocol.
+func unsupportedListenerInput(ln gatewayv1.Listener) listenerStatusInput {
+	msg := fmt.Sprintf("Listener protocol %q is not supported by the aether edge (supported: HTTP, HTTPS, TLS, TCP)", ln.Protocol)
+	return listenerStatusInput{
+		name:           ln.Name,
+		supportedKinds: []gatewayv1.RouteGroupKind{},
+		attached:       0,
+		accepted: gatewaystatus.Condition{
+			Type:    string(gatewayv1.ListenerConditionAccepted),
+			Status:  metav1.ConditionFalse,
+			Reason:  string(gatewayv1.ListenerReasonUnsupportedProtocol),
+			Message: msg,
+		},
+		programmed: gatewaystatus.Condition{
+			Type:    string(gatewayv1.ListenerConditionProgrammed),
+			Status:  metav1.ConditionFalse,
+			Reason:  string(gatewayv1.ListenerReasonInvalid),
+			Message: msg,
+		},
+		resolved: gatewaystatus.Condition{
+			Type:    string(gatewayv1.ListenerConditionResolvedRefs),
+			Status:  metav1.ConditionTrue,
+			Reason:  string(gatewayv1.ListenerReasonResolvedRefs),
+			Message: "No references to resolve",
+		},
+	}
+}
+
+// buildAcceptedListenerInput computes the listenerStatusInput for a supported-protocol listener.
+// Returns the input and whether the listener is programmed.
+func buildAcceptedListenerInput(ln gatewayv1.Listener, gk gatewayKey, attached int32, tlsResults map[listenerStatusKey]listenerTLSResult) (listenerStatusInput, bool) {
+	resolvedStatus := metav1.ConditionTrue
+	resolvedReason := string(gatewayv1.ListenerReasonResolvedRefs)
+	resolvedMsg := "All listener references resolved"
+	programmed := true
+
+	switch {
+	case attachment.ListenerHasInvalidRouteKinds(ln):
+		resolvedStatus = metav1.ConditionFalse
+		resolvedReason = string(gatewayv1.ListenerReasonInvalidRouteKinds)
+		resolvedMsg = "allowedRoutes.kinds names a Route kind this listener does not support"
+		programmed = false
+	default:
+		if res, ok := tlsResults[listenerStatusKey{Gateway: gk, Name: ln.Name}]; ok && res.hasTLS && !res.resolved {
+			resolvedStatus = metav1.ConditionFalse
+			resolvedReason = string(gatewayv1.ListenerReasonInvalidCertificateRef)
+			if res.reason != "" {
+				resolvedReason = res.reason
+			}
+			resolvedMsg = res.message
+			programmed = false
+		}
+	}
+
+	programmedStatus := metav1.ConditionTrue
+	programmedReason := string(gatewayv1.ListenerReasonProgrammed)
+	programmedMsg := "Listener programmed"
+	if !programmed {
+		programmedStatus = metav1.ConditionFalse
+		programmedReason = string(gatewayv1.ListenerReasonInvalid)
+		programmedMsg = "Listener not programmed: " + resolvedMsg
+	}
+
+	return listenerStatusInput{
+		name:           ln.Name,
+		supportedKinds: attachment.ListenerSupportedKinds(ln),
+		attached:       attached,
+		accepted: gatewaystatus.Condition{
+			Type:    string(gatewayv1.ListenerConditionAccepted),
+			Status:  metav1.ConditionTrue,
+			Reason:  string(gatewayv1.ListenerReasonAccepted),
+			Message: "Listener accepted",
+		},
+		programmed: gatewaystatus.Condition{
+			Type:    string(gatewayv1.ListenerConditionProgrammed),
+			Status:  programmedStatus,
+			Reason:  programmedReason,
+			Message: programmedMsg,
+		},
+		resolved: gatewaystatus.Condition{
+			Type:    string(gatewayv1.ListenerConditionResolvedRefs),
+			Status:  resolvedStatus,
+			Reason:  resolvedReason,
+			Message: resolvedMsg,
+		},
+	}, programmed
+}
+
+// computeGatewayTopConditions derives the top-level Accepted and Programmed conditions
+// for a Gateway from listener rollup booleans and an optional parametersRef check.
+func (r *Reconciler) computeGatewayTopConditions(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	allListenersProgrammed, anyListenerAccepted, anyUnsupportedProtocol bool,
+) (gatewaystatus.Condition, gatewaystatus.Condition) {
+	programmedTop := gatewaystatus.Condition{
+		Type:    string(gatewayv1.GatewayConditionProgrammed),
+		Status:  metav1.ConditionTrue,
+		Reason:  string(gatewayv1.GatewayReasonProgrammed),
+		Message: "Gateway programmed into the aether edge data plane",
+	}
+	if !allListenersProgrammed {
+		programmedTop.Status = metav1.ConditionFalse
+		programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+		programmedTop.Message = "One or more listeners are not programmed (invalid TLS or route kinds)"
+	}
+	if !anyListenerAccepted && len(gw.Spec.Listeners) > 0 {
+		programmedTop.Status = metav1.ConditionFalse
+		programmedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+		programmedTop.Message = "No listener is accepted (unsupported protocols)"
+	}
+	acceptedTop := gatewaystatus.Condition{
+		Type:    string(gatewayv1.GatewayConditionAccepted),
+		Status:  metav1.ConditionTrue,
+		Reason:  string(gatewayv1.GatewayReasonAccepted),
+		Message: "Gateway accepted by the aether edge controller",
+	}
+	switch {
+	case !anyListenerAccepted && len(gw.Spec.Listeners) > 0:
+		acceptedTop.Status = metav1.ConditionFalse
+		acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+		acceptedTop.Message = "No listener is accepted (unsupported protocols)"
+	case anyUnsupportedProtocol:
+		acceptedTop.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+		acceptedTop.Message = "Gateway accepted; some listeners are not valid (unsupported protocols)"
+	}
+	if msg, invalid := r.invalidParametersRef(ctx, gw); invalid {
+		acceptedTop.Status = metav1.ConditionFalse
+		acceptedTop.Reason = string(gatewayv1.GatewayReasonInvalidParameters)
+		acceptedTop.Message = msg
+		programmedTop.Status = metav1.ConditionFalse
+		programmedTop.Reason = string(gatewayv1.GatewayReasonInvalid)
+		programmedTop.Message = msg
+	}
+	return acceptedTop, programmedTop
 }
 
 // listenerStatusInput holds the spec-derived inputs for one listener's status,
@@ -417,26 +433,33 @@ func listenerStatusesEqual(a, b []gatewayv1.ListenerStatus) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Name != b[i].Name || a[i].AttachedRoutes != b[i].AttachedRoutes {
+		if !listenerStatusEqual(a[i], b[i]) {
 			return false
 		}
-		if len(a[i].SupportedKinds) != len(b[i].SupportedKinds) {
+	}
+	return true
+}
+
+func listenerStatusEqual(a, b gatewayv1.ListenerStatus) bool {
+	if a.Name != b.Name || a.AttachedRoutes != b.AttachedRoutes {
+		return false
+	}
+	if len(a.SupportedKinds) != len(b.SupportedKinds) {
+		return false
+	}
+	for j := range a.SupportedKinds {
+		if a.SupportedKinds[j].Kind != b.SupportedKinds[j].Kind {
 			return false
 		}
-		for j := range a[i].SupportedKinds {
-			if a[i].SupportedKinds[j].Kind != b[i].SupportedKinds[j].Kind {
-				return false
-			}
-		}
-		if len(a[i].Conditions) != len(b[i].Conditions) {
+	}
+	if len(a.Conditions) != len(b.Conditions) {
+		return false
+	}
+	for j := range a.Conditions {
+		ca, cb := a.Conditions[j], b.Conditions[j]
+		if ca.Type != cb.Type || ca.Status != cb.Status || ca.Reason != cb.Reason ||
+			ca.Message != cb.Message || ca.ObservedGeneration != cb.ObservedGeneration {
 			return false
-		}
-		for j := range a[i].Conditions {
-			ca, cb := a[i].Conditions[j], b[i].Conditions[j]
-			if ca.Type != cb.Type || ca.Status != cb.Status || ca.Reason != cb.Reason ||
-				ca.Message != cb.Message || ca.ObservedGeneration != cb.ObservedGeneration {
-				return false
-			}
 		}
 	}
 	return true
