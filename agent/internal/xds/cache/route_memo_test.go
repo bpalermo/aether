@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/serviceref"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,10 +63,10 @@ func referenceRouteTargetDomains(svc, fqdn, mesh string, bareNameCount map[strin
 	}
 	domains := make([]string, 0, len(baseNames)*2)
 	for _, n := range baseNames {
-		domains = append(domains, n, fmt.Sprintf("%s:%d", n, constants.ProxyOutboundPort))
+		domains = append(domains, n, fmt.Sprintf("%s:%d", n, meshconst.ProxyOutboundPort))
 	}
 	for _, p := range ports {
-		if p == 0 || p == constants.ProxyOutboundPort {
+		if p == 0 || p == meshconst.ProxyOutboundPort {
 			continue
 		}
 		for _, n := range baseNames {
@@ -207,7 +207,7 @@ func TestRouteTargetDomainsMemo_EquivalentToInline(t *testing.T) {
 		"team-a/echo": "echo.team-a.svc.cluster.local",
 	})
 	c.SetRouteTargetPorts(map[string][]uint32{
-		"team-a/echo": {80, 8080, 0, constants.ProxyOutboundPort}, // 0 and the mesh port must be skipped
+		"team-a/echo": {80, 8080, 0, meshconst.ProxyOutboundPort}, // 0 and the mesh port must be skipped
 		"team-b/echo": {9000},
 	})
 
@@ -217,7 +217,7 @@ func TestRouteTargetDomainsMemo_EquivalentToInline(t *testing.T) {
 	bareNameCount := map[string]int{"echo": 2, "solo": 1}
 	want := map[string][]string{
 		"team-a/echo": referenceRouteTargetDomains("team-a/echo", "echo.team-a.svc.cluster.local",
-			proxy.ServiceClusterName("team-a/echo", c.meshDomain), bareNameCount, []uint32{80, 8080, 0, constants.ProxyOutboundPort}),
+			proxy.ServiceClusterName("team-a/echo", c.meshDomain), bareNameCount, []uint32{80, 8080, 0, meshconst.ProxyOutboundPort}),
 		"team-b/echo": referenceRouteTargetDomains("team-b/echo", "echo.team-b.svc.cluster.local",
 			proxy.ServiceClusterName("team-b/echo", c.meshDomain), bareNameCount, []uint32{9000}),
 		"team-c/solo": referenceRouteTargetDomains("team-c/solo", "solo.team-c.svc.cluster.local",

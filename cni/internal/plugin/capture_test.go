@@ -5,7 +5,8 @@ import (
 	"testing"
 
 	"github.com/bpalermo/aether/cni/config"
-	commonconstants "github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/google/nftables/expr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,8 +17,8 @@ import (
 // daddr + dport meshPort -> redirect to tcpCapturePort. A wrong loopback
 // exclusion or port would silently break the explicit fast-lane or fail to capture.
 func TestCaptureRedirectExprs_TCP(t *testing.T) {
-	mesh := uint16(commonconstants.ProxyOutboundPort) // 18081
-	cap := uint16(commonconstants.ProxyCapturePort)   // 18001
+	mesh := uint16(meshconst.ProxyOutboundPort) // 18081
+	cap := uint16(meshconst.ProxyCapturePort)   // 18001
 	exprs := captureRedirectExprs(unix.IPPROTO_TCP, mesh, cap)
 	require.Len(t, exprs, 9)
 
@@ -52,8 +53,8 @@ func TestCaptureRedirectExprs_TCP(t *testing.T) {
 // UDP redirect to the same port number (18001) — the kernel differentiates them
 // at the socket layer by protocol, so the listeners do not collide.
 func TestCaptureRedirectExprs_UDP(t *testing.T) {
-	mesh := uint16(commonconstants.ProxyOutboundPort) // 18081
-	cap := uint16(commonconstants.ProxyCapturePort)   // 18001 (shared with TCP)
+	mesh := uint16(meshconst.ProxyOutboundPort) // 18081
+	cap := uint16(meshconst.ProxyCapturePort)   // 18001 (shared with TCP)
 	exprs := captureRedirectExprs(unix.IPPROTO_UDP, mesh, cap)
 	require.Len(t, exprs, 9)
 
@@ -116,7 +117,7 @@ func TestConntrackEstablishedAcceptExprs(t *testing.T) {
 // TestSkipCaptureSelfExprs verifies the rule that prevents re-redirecting
 // connections already destined for the capture listener port itself.
 func TestSkipCaptureSelfExprs(t *testing.T) {
-	cap := uint16(commonconstants.ProxyCapturePort) // 18001
+	cap := uint16(meshconst.ProxyCapturePort) // 18001
 	exprs := skipCaptureSelfExprs(cap)
 	// l4proto==tcp + dport==capturePort + accept = 5 expressions.
 	require.Len(t, exprs, 5)
@@ -142,7 +143,7 @@ func TestSkipCaptureSelfExprs(t *testing.T) {
 // TestRedirectAllTCPExprs verifies the broad-redirect rule: all non-loopback TCP
 // is redirected to capturePort, with NO dport constraint (unlike the scoped rule).
 func TestRedirectAllTCPExprs(t *testing.T) {
-	cap := uint16(commonconstants.ProxyCapturePort) // 18001
+	cap := uint16(meshconst.ProxyCapturePort) // 18001
 	exprs := redirectAllTCPExprs(cap)
 	// l4proto==tcp + loopback-excl (3 exprs) + redirect(2 exprs) = 7 total.
 	require.Len(t, exprs, 7)
@@ -176,8 +177,8 @@ func TestRedirectAllTCPExprs(t *testing.T) {
 // applies. This is the safety gate that keeps infra/opt-out pods off
 // redirect-all even when the node default is on.
 func TestPodRedirectAll(t *testing.T) {
-	annoTrue := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "true"}
-	annoFalse := map[string]string{commonconstants.AnnotationCaptureRedirectAll: "false"}
+	annoTrue := map[string]string{aetherannotations.AnnotationCaptureRedirectAll: "true"}
+	annoFalse := map[string]string{aetherannotations.AnnotationCaptureRedirectAll: "false"}
 	annoOther := map[string]string{"some.other/annotation": "true"}
 	withAnno := func(m map[string]string) config.AetherConf {
 		return config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &m}}
@@ -210,8 +211,8 @@ func TestPodRedirectAll(t *testing.T) {
 // expressions than captureRedirectExprs: the scoped rule adds a dport match (2
 // expressions: Payload + Cmp) that the redirect-all rule omits.
 func TestRedirectAllVsScopedDifference(t *testing.T) {
-	cap := uint16(commonconstants.ProxyCapturePort)
-	mesh := uint16(commonconstants.ProxyOutboundPort)
+	cap := uint16(meshconst.ProxyCapturePort)
+	mesh := uint16(meshconst.ProxyOutboundPort)
 	scoped := captureRedirectExprs(unix.IPPROTO_TCP, mesh, cap)
 	broad := redirectAllTCPExprs(cap)
 	// Scoped has 9, broad has 7: 2 fewer (the dport Payload + dport Cmp).
@@ -223,7 +224,7 @@ func TestRedirectAllVsScopedDifference(t *testing.T) {
 // gracefully on malformed/blank/out-of-range entries.
 func TestPodExcludedOutboundPorts(t *testing.T) {
 	anno := func(v string) config.AetherConf {
-		m := map[string]string{commonconstants.AnnotationCaptureExcludeOutboundPorts: v}
+		m := map[string]string{aetherannotations.AnnotationCaptureExcludeOutboundPorts: v}
 		return config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &m}}
 	}
 	tests := []struct {
@@ -251,7 +252,7 @@ func TestPodExcludedOutboundPorts(t *testing.T) {
 // IPv4-only prefix list and degrades gracefully on malformed/blank/non-IPv4 entries.
 func TestPodExcludedOutboundIPRanges(t *testing.T) {
 	anno := func(v string) config.AetherConf {
-		m := map[string]string{commonconstants.AnnotationCaptureExcludeOutboundIPRanges: v}
+		m := map[string]string{aetherannotations.AnnotationCaptureExcludeOutboundIPRanges: v}
 		return config.AetherConf{RuntimeConfig: &config.RuntimeConfig{PodAnnotations: &m}}
 	}
 	mk := func(s string) netip.Prefix { return netip.MustParsePrefix(s) }
@@ -316,7 +317,7 @@ func TestBuiltinRedirectAllExcludedRanges(t *testing.T) {
 // proxy's fwmark (little-endian u32) and accepts, so SO_MARK'd passthrough egress
 // bypasses the redirect (proposal 022 M2-default).
 func TestPassthroughMarkAcceptExprs(t *testing.T) {
-	exprs := passthroughMarkAcceptExprs(commonconstants.CapturePassthroughFwMark)
+	exprs := passthroughMarkAcceptExprs(meshconst.CapturePassthroughFwMark)
 	require.Len(t, exprs, 3)
 	require.IsType(t, &expr.Meta{}, exprs[0])
 	assert.Equal(t, expr.MetaKeyMARK, exprs[0].(*expr.Meta).Key)

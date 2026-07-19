@@ -13,7 +13,7 @@ import (
 
 	"github.com/bpalermo/aether/common/serviceref"
 
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	commonlog "github.com/bpalermo/aether/common/log"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -64,7 +64,7 @@ type Reconciler struct {
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Log = commonlog.Named(r.Log, "capture")
 	meshService := predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return o.GetLabels()[constants.LabelMeshService] == "true"
+		return o.GetLabels()[aetherlabels.LabelMeshService] == "true"
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}, builder.WithPredicates(meshService)).
@@ -88,7 +88,7 @@ func isHTTPAppProtocol(proto string) bool {
 // DNS records, and TCP-floor service set.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	list := &corev1.ServiceList{}
-	if err := r.List(ctx, list, client.MatchingLabels{constants.LabelMeshService: "true"}); err != nil {
+	if err := r.List(ctx, list, client.MatchingLabels{aetherlabels.LabelMeshService: "true"}); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -97,7 +97,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	var tcpServices []CaptureTCPService
 	for i := range list.Items {
 		s := &list.Items[i]
-		name := s.Annotations[constants.AnnotationMeshService]
+		name := s.Annotations[aetherlabels.AnnotationMeshService]
 		if name == "" {
 			name = s.Name
 		}
@@ -116,7 +116,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		// do not need — and must not have — a per-IP chain (filter-chain match
 		// precedence: destination-IP wins over application-protocol, so a per-IP
 		// chain would intercept HTTP to that VIP before the HCM chain could).
-		appProto := s.Annotations[constants.AnnotationMeshAppProtocol]
+		appProto := s.Annotations[aetherlabels.AnnotationMeshAppProtocol]
 		if !isHTTPAppProtocol(appProto) && ip != "" && ip != corev1.ClusterIPNone {
 			tcpServices = append(tcpServices, CaptureTCPService{
 				ServiceName: svc,

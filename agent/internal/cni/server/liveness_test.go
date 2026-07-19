@@ -16,7 +16,7 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -77,7 +77,7 @@ func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 	// Pin active mode: in (default) EDS mode the registration health is already
 	// UNHEALTHY, so a failing health check at first observation is not a
 	// transition (covered by TestReconcileLivenessEDSPromotion).
-	pod.Annotations[constants.AnnotationEndpointHealthCheckMode] = constants.HealthCheckModeActive
+	pod.Annotations[aetherannotations.AnnotationEndpointHealthCheckMode] = aetherannotations.HealthCheckModeActive
 
 	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
 
@@ -144,7 +144,7 @@ func TestReconcileLivenessEDSPromotion(t *testing.T) {
 // gets gated).
 func TestReconcileLivenessWarmupGrace(t *testing.T) {
 	pod := validCNIPod("pod-a", "default", "container-a")
-	pod.Annotations[constants.AnnotationEndpointHealthCheckMode] = constants.HealthCheckModeActive
+	pod.Annotations[aetherannotations.AnnotationEndpointHealthCheckMode] = aetherannotations.HealthCheckModeActive
 
 	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
 

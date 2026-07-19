@@ -21,7 +21,6 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
-	constants "github.com/bpalermo/aether/common/constants"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/referencegrant"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -36,6 +35,17 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
+
+// AnnotationGatewayHTTPRedirect is a Gateway annotation that opts a plain-HTTP
+// listener into HTTP→HTTPS redirect behaviour. When set to "true" on a Gateway
+// of the aether GatewayClass, the edge emits a 301-redirect listener on the
+// Gateway's HTTP port instead of serving routes directly.
+//
+// Default absent / "false" → the HTTP listener serves its attached HTTPRoutes
+// (no redirect). Operators MUST set this annotation on any Gateway whose HTTP
+// listener should redirect to HTTPS (e.g. the production api.palermo.dev edge
+// Gateway). The aether chart sets it automatically when edge.tls.enabled is true.
+const AnnotationGatewayHTTPRedirect = "gateway.aether.io/http-redirect"
 
 // RouteSink receives the projected virtual hosts, TLS certs, and L4 routes
 // (the snapshot cache).
@@ -310,7 +320,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	httpRedirect := false
 	gatewayHTTPRedirect := make(map[gatewayKey]bool, len(ourGateways))
 	for i := range ourGateways {
-		if ourGateways[i].Annotations[constants.AnnotationGatewayHTTPRedirect] == "true" {
+		if ourGateways[i].Annotations[AnnotationGatewayHTTPRedirect] == "true" {
 			httpRedirect = true
 			gk := gatewayKey{Namespace: ourGateways[i].Namespace, Name: ourGateways[i].Name}
 			gatewayHTTPRedirect[gk] = true

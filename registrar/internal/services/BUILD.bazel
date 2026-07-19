@@ -7,7 +7,7 @@ go_library(
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//api/aether/registry/v1:registry",
-        "//common/constants",
+        "//common/constants/labels",
         "//common/log",
         "//common/serviceref",
         "//registrar/internal/server",
@@ -25,7 +25,7 @@ go_test(
     embed = [":services"],
     deps = [
         "//api/aether/registry/v1:registry",
-        "//common/constants",
+        "//common/constants/labels",
         "//common/serviceref",
         "//registrar/internal/server",
         "@com_github_stretchr_testify//assert",

@@ -6,7 +6,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/controller/internal/podmutate",
     visibility = ["//controller:__subpackages__"],
     deps = [
-        "//common/constants",
+        "//common/constants/labels",
         "//common/log",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_sigs_controller_runtime//pkg/webhook/admission",
@@ -18,7 +18,7 @@ go_test(
     srcs = ["mutator_test.go"],
     embed = [":podmutate"],
     deps = [
-        "//common/constants",
+        "//common/constants/labels",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//admission/v1:admission",

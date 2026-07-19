@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/netip"
 
-	commonconstants "github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"go.uber.org/zap"
@@ -66,8 +66,8 @@ func installCaptureRedirect(netnsPath string, excludePorts []uint16, excludeRang
 // (UDPRoute without --l4-routes = no listener = datagrams discarded rather than
 // sent to an unexpected destination).
 func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
-	meshPort := uint16(commonconstants.ProxyOutboundPort)
-	capturePort := uint16(commonconstants.ProxyCapturePort)
+	meshPort := uint16(meshconst.ProxyOutboundPort)
+	capturePort := uint16(meshconst.ProxyCapturePort)
 
 	c, err := nftables.New()
 	if err != nil {
@@ -194,7 +194,7 @@ func installCaptureRedirectAll(netnsPath string, excludePorts []uint16, excludeR
 // rule position, but for a single-table approach both rules go in "output" with
 // the conntrack rule first (lower rule index wins in nft).
 func programCaptureRedirectAll(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
-	capturePort := uint16(commonconstants.ProxyCapturePort)
+	capturePort := uint16(meshconst.ProxyCapturePort)
 
 	c, err := nftables.New()
 	if err != nil {
@@ -219,7 +219,7 @@ func programCaptureRedirectAll(excludePorts []uint16, excludeRanges []netip.Pref
 	c.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
-		Exprs: passthroughMarkAcceptExprs(commonconstants.CapturePassthroughFwMark),
+		Exprs: passthroughMarkAcceptExprs(meshconst.CapturePassthroughFwMark),
 	})
 
 	// Rule 0b: excluded ports / IP ranges (proposal 022 M2-default) — accept ahead of

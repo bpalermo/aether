@@ -3,8 +3,10 @@ package proxy
 import (
 	"fmt"
 
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -17,7 +19,7 @@ const (
 	defaultOutboundAddress = "127.0.0.1"
 	// defaultHTTPOutboundPort is the port for outbound HTTP listeners. Shared
 	// with the CNI plugin, which probes it in-netns for data-plane readiness.
-	defaultHTTPOutboundPort = constants.ProxyOutboundPort
+	defaultHTTPOutboundPort = meshconst.ProxyOutboundPort
 	// perConnectionBufferLimitBytes caps read/write buffering per connection on
 	// every generated listener and cluster (Envoy edge-hardening guidance: 32
 	// KiB). Envoy's default is 1 MiB per connection per direction — with the
@@ -75,7 +77,7 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 	primary := AppPortFromPod(cniPod)
 	// TCP-floor (non-HTTP) services have no HTTP readiness surface: the probe is a
 	// raw TCP connect to the app port instead of an HTTP GET.
-	isTCP := cniPod.GetAnnotations()[constants.AnnotationEndpointProtocol] == constants.ProtocolTCP
+	isTCP := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointProtocol] == aetherannotations.ProtocolTCP
 	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, primary, AppHealthPathFromPod(cniPod), isTCP)
 
 	return inbound, outbound, appClusters, healthCluster, nil
@@ -86,7 +88,7 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 // from the trust domain, namespace, and service account using the standard
 // SPIRE convention: spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>.
 func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
-	if id, ok := cniPod.GetAnnotations()[constants.AnnotationSpiffeID]; ok && id != "" {
+	if id, ok := cniPod.GetAnnotations()[xdsconst.AnnotationSpiffeID]; ok && id != "" {
 		return id
 	}
 	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetServiceAccount())

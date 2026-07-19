@@ -33,6 +33,7 @@ import (
 	"github.com/bpalermo/aether/cni/internal/cri"
 	"github.com/bpalermo/aether/cni/internal/telemetry"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	commontelemetry "github.com/bpalermo/aether/common/telemetry"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -671,7 +672,7 @@ func podRedirectAllAnnotation(conf config.AetherConf) string {
 	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
 		return ""
 	}
-	return (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureRedirectAll]
+	return (*conf.RuntimeConfig.PodAnnotations)[aetherannotations.AnnotationCaptureRedirectAll]
 }
 
 // podExcludedOutboundPorts parses the capture.aether.io/exclude-outbound-ports
@@ -685,7 +686,7 @@ func podExcludedOutboundPorts(conf config.AetherConf) []uint16 {
 	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
 		return nil
 	}
-	raw := (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureExcludeOutboundPorts]
+	raw := (*conf.RuntimeConfig.PodAnnotations)[aetherannotations.AnnotationCaptureExcludeOutboundPorts]
 	if raw == "" {
 		return nil
 	}
@@ -718,7 +719,7 @@ func podExcludedOutboundIPRanges(conf config.AetherConf) []netip.Prefix {
 	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
 		return nil
 	}
-	raw := (*conf.RuntimeConfig.PodAnnotations)[constants.AnnotationCaptureExcludeOutboundIPRanges]
+	raw := (*conf.RuntimeConfig.PodAnnotations)[aetherannotations.AnnotationCaptureExcludeOutboundIPRanges]
 	if raw == "" {
 		return nil
 	}

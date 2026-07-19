@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/registry/export"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -201,11 +201,11 @@ func TestImportGenerator_MaterializesImportAndVIP(t *testing.T) {
 	// coexists with the same-named per-cluster mesh Service.
 	svc := &corev1.Service{}
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1-clusterset", Namespace: "team-a"}, svc))
-	assert.Equal(t, "true", svc.Labels[constants.LabelClustersetService])
+	assert.Equal(t, "true", svc.Labels[aetherlabels.LabelClustersetService])
 	assert.Empty(t, svc.Spec.Selector, "selectorless clusterset VIP: endpoints stay in the registry")
-	assert.Equal(t, "svc-1", svc.Annotations[constants.AnnotationMeshService])
-	assert.Equal(t, "svc-1", svc.Annotations[constants.AnnotationClustersetImport])
-	assert.Equal(t, "18081", svc.Annotations[constants.AnnotationMeshPort])
+	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationMeshService])
+	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationClustersetImport])
+	assert.Equal(t, "18081", svc.Annotations[aetherlabels.AnnotationMeshPort])
 	require.Len(t, svc.Spec.Ports, 1)
 	assert.Equal(t, int32(18081), svc.Spec.Ports[0].Port)
 	require.NotEmpty(t, svc.Spec.ClusterIP, "the clusterset VIP gets its own ClusterIP")
@@ -217,7 +217,7 @@ func TestImportGenerator_MaterializesImportAndVIP(t *testing.T) {
 
 	si := &mcsv1alpha1.ServiceImport{}
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "svc-1", Namespace: "team-a"}, si))
-	assert.Equal(t, "true", si.Labels[constants.LabelManagedServiceImport])
+	assert.Equal(t, "true", si.Labels[aetherlabels.LabelManagedServiceImport])
 	assert.Equal(t, mcsv1alpha1.ClusterSetIP, si.Spec.Type)
 	require.Len(t, si.Spec.Ports, 1)
 	assert.Equal(t, int32(18081), si.Spec.Ports[0].Port)
@@ -272,12 +272,12 @@ func TestImportGenerator_PrunesStale(t *testing.T) {
 	ctx := context.Background()
 	staleSI := &mcsv1alpha1.ServiceImport{ObjectMeta: metav1.ObjectMeta{
 		Name: "gone", Namespace: "team-a",
-		Labels: map[string]string{constants.LabelManagedServiceImport: "true"},
+		Labels: map[string]string{aetherlabels.LabelManagedServiceImport: "true"},
 	}}
 	staleSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
 		Name: "gone-clusterset", Namespace: "team-a",
-		Labels:      map[string]string{constants.LabelClustersetService: "true"},
-		Annotations: map[string]string{constants.AnnotationClustersetImport: "gone"},
+		Labels:      map[string]string{aetherlabels.LabelClustersetService: "true"},
+		Annotations: map[string]string{aetherlabels.AnnotationClustersetImport: "gone"},
 	}}
 	c := newIPAllocatingClient(t, staleSI, staleSvc)
 	exp := newFakeExporter("cluster-1")

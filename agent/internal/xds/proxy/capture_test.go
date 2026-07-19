@@ -6,7 +6,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -197,7 +197,7 @@ func TestNewPassthroughOriginalDstCluster(t *testing.T) {
 	require.Len(t, opts, 1)
 	assert.Equal(t, int64(1), opts[0].GetLevel()) // SOL_SOCKET
 	assert.Equal(t, int64(36), opts[0].GetName()) // SO_MARK
-	assert.Equal(t, int64(constants.CapturePassthroughFwMark), opts[0].GetIntValue())
+	assert.Equal(t, int64(meshconst.CapturePassthroughFwMark), opts[0].GetIntValue())
 	assert.Equal(t, corev3.SocketOption_STATE_PREBIND, opts[0].GetState())
 	assert.Nil(t, cl.GetUpstreamBindConfig().GetSourceAddress(), "no source_address — bind unchanged")
 }

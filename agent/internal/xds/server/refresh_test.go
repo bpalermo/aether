@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,7 +39,7 @@ func TestRegistryRefresher_ReloadsOnChange(t *testing.T) {
 		Namespace:        "default",
 		ServiceAccount:   "client",
 		NetworkNamespace: "/proc/100/ns/net",
-		Annotations:      map[string]string{constants.AnnotationConfigUpstreams: "echo"},
+		Annotations:      map[string]string{xdsconst.AnnotationConfigUpstreams: "echo"},
 	}, "example.org"))
 
 	var mu sync.Mutex
@@ -122,7 +122,7 @@ func TestRegistryRefresher_ReloadsOnDependencyChange(t *testing.T) {
 		Namespace:        "default",
 		ServiceAccount:   "client",
 		NetworkNamespace: "/proc/100/ns/net",
-		Annotations:      map[string]string{constants.AnnotationConfigUpstreams: "echo"},
+		Annotations:      map[string]string{xdsconst.AnnotationConfigUpstreams: "echo"},
 	}, "example.org"))
 
 	require.Eventually(t, func() bool {
@@ -189,7 +189,7 @@ func TestRegistryRefresher_LeadingEdgeDependencyChange(t *testing.T) {
 		Namespace:        "default",
 		ServiceAccount:   "client",
 		NetworkNamespace: "/proc/100/ns/net",
-		Annotations:      map[string]string{constants.AnnotationConfigUpstreams: "echo"},
+		Annotations:      map[string]string{xdsconst.AnnotationConfigUpstreams: "echo"},
 	}, "example.org"))
 
 	require.Eventually(t, func() bool {

@@ -12,6 +12,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
 	"go.opentelemetry.io/otel"
@@ -310,7 +311,7 @@ func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
 		return true
 	}
 
-	managed, ok := labels[constants.LabelAetherManaged]
+	managed, ok := labels[aetherlabels.LabelAetherManaged]
 	if !ok || managed != "true" {
 		return true
 	}

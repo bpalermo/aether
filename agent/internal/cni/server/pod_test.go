@@ -16,7 +16,7 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,7 +96,7 @@ func validCNIPod(name, namespace, containerID string) *cniv1.CNIPod {
 		Ips:              []string{"10.0.0.1"},
 		ServiceAccount:   "default",
 		Labels: map[string]string{
-			constants.LabelAetherManaged: "true",
+			aetherlabels.LabelAetherManaged: "true",
 		},
 		Annotations: map[string]string{},
 	}
@@ -110,7 +110,7 @@ func validK8sPod(name, namespace string) *corev1.Pod {
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				constants.LabelAetherManaged: "true",
+				aetherlabels.LabelAetherManaged: "true",
 			},
 			Annotations: map[string]string{},
 		},
@@ -133,7 +133,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "coredns",
 				Namespace: "kube-system",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			expected: true,
@@ -143,7 +143,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "agent",
 				Namespace: "aether-system",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			expected: true,
@@ -173,7 +173,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       nil,
 			},
 			expected: true,
@@ -183,7 +183,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{},
 			},
 			expected: true,
@@ -193,7 +193,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			expected: false,
@@ -203,7 +203,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "production",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1", "10.0.0.2"},
 			},
 			expected: false,
@@ -238,7 +238,7 @@ func TestValidateAndCheckIgnorable(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "coredns",
 				Namespace: "kube-system",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			wantIgnorable: true,
@@ -249,7 +249,7 @@ func TestValidateAndCheckIgnorable(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			wantIgnorable: false,

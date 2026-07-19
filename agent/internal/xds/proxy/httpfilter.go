@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	on_demandv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/on_demand/v3"
@@ -68,7 +68,7 @@ func readinessHttpFilter() *http_connection_managerv3.HttpFilter {
 				HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
 					StringMatch: &matcherv3.StringMatcher{
 						MatchPattern: &matcherv3.StringMatcher_Exact{
-							Exact: constants.ProxyReadinessPath,
+							Exact: meshconst.ProxyReadinessPath,
 						},
 					},
 				},

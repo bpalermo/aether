@@ -7,7 +7,7 @@ import (
 	"log/slog"
 
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	"github.com/bpalermo/aether/common/spire"
@@ -67,7 +67,7 @@ func init() {
 	manager.RegisterFlags(rootCmd, &cfg.Config)
 
 	rootCmd.Flags().StringVar(&cfg.ClusterName, "cluster-name", "", "Kubernetes cluster name (required)")
-	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", constants.DefaultMeshDomain, "DNS-style mesh domain (proposal 026 config export resolves backend clusters <svc>.<mesh-domain>)")
+	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", meshconst.DefaultMeshDomain, "DNS-style mesh domain (proposal 026 config export resolves backend clusters <svc>.<mesh-domain>)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, the config-export controller runs only on this cluster; empty = federated (every cluster may export)")
 	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006). MUST be unique per regional etcd cluster: one region = one etcd. Pointing two etcds at the same region splits the registry; pointing two regions at one etcd collides their writes.")
 	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
@@ -184,7 +184,7 @@ func runRegistrar(ctx context.Context) (retErr error) {
 	gen := &services.Generator{
 		Client:   m.GetClient(),
 		Snapshot: snapshot,
-		MeshPort: int32(constants.ProxyOutboundPort),
+		MeshPort: int32(meshconst.ProxyOutboundPort),
 		Interval: cfg.SyncInterval,
 		Log:      l,
 	}
@@ -215,7 +215,7 @@ func runRegistrar(ctx context.Context) (retErr error) {
 		importGen := &mcs.ImportGenerator{
 			Client:   m.GetClient(),
 			Exporter: exporter,
-			MeshPort: int32(constants.ProxyOutboundPort),
+			MeshPort: int32(meshconst.ProxyOutboundPort),
 			Interval: cfg.SyncInterval,
 			Log:      l,
 		}

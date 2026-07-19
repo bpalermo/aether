@@ -3,8 +3,8 @@ package proxy
 import (
 	"strings"
 
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/serviceref"
 )
 
@@ -29,7 +29,7 @@ import (
 // Trimming, empty-item dropping, and dedup operate on the normalized keys so a
 // bare name and its explicit "<pod-ns>/<name>" form collapse to one entry.
 func UpstreamsFromPod(cniPod *cniv1.CNIPod) []string {
-	raw, ok := cniPod.GetAnnotations()[constants.AnnotationConfigUpstreams]
+	raw, ok := cniPod.GetAnnotations()[xdsconst.AnnotationConfigUpstreams]
 	if !ok || raw == "" {
 		return nil
 	}

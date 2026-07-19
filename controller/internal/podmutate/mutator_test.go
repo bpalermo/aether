@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -28,7 +28,7 @@ func request(pod *corev1.Pod) admission.Request {
 // started nil. Checking the marshaled patch covers both.
 func patchesLabel(resp admission.Response) bool {
 	b, _ := json.Marshal(resp.Patches)
-	return strings.Contains(string(b), constants.LabelAetherManaged)
+	return strings.Contains(string(b), aetherlabels.LabelAetherManaged)
 }
 
 // TestMutator_InjectsLabelAndNdots: a pod with neither the managed label nor ndots
@@ -45,7 +45,7 @@ func TestMutator_InjectsLabelAndNdots(t *testing.T) {
 // left untouched even in a managed namespace.
 func TestMutator_RespectsOptOut(t *testing.T) {
 	m := NewMutator("2", slog.New(slog.DiscardHandler))
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Labels: map[string]string{constants.LabelAetherManaged: "false"}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Labels: map[string]string{aetherlabels.LabelAetherManaged: "false"}}}
 	resp := m.Handle(context.Background(), request(pod))
 	require.True(t, resp.Allowed)
 	assert.Empty(t, resp.Patches, "opt-out pod gets no patch")
@@ -57,7 +57,7 @@ func TestMutator_NoOpWhenAlreadyManagedWithNdots(t *testing.T) {
 	m := NewMutator("2", slog.New(slog.DiscardHandler))
 	v := "2"
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "p", Labels: map[string]string{constants.LabelAetherManaged: "true"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Labels: map[string]string{aetherlabels.LabelAetherManaged: "true"}},
 		Spec:       corev1.PodSpec{DNSConfig: &corev1.PodDNSConfig{Options: []corev1.PodDNSConfigOption{{Name: "ndots", Value: &v}}}},
 	}
 	resp := m.Handle(context.Background(), request(pod))
@@ -81,7 +81,7 @@ func TestMutator_RespectsExistingNdots(t *testing.T) {
 	m := NewMutator("2", slog.New(slog.DiscardHandler))
 	v := "1"
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{constants.LabelAetherManaged: "true"}},
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{aetherlabels.LabelAetherManaged: "true"}},
 		Spec:       corev1.PodSpec{DNSConfig: &corev1.PodDNSConfig{Options: []corev1.PodDNSConfigOption{{Name: "ndots", Value: &v}}}},
 	}
 	resp := m.Handle(context.Background(), request(pod))

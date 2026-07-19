@@ -8,6 +8,8 @@ go_library(
     deps = [
         "//api/aether/registry/v1:registry",
         "//common/constants",
+        "//common/constants/annotations",
+        "//common/constants/labels",
         "//common/log",
         "//common/serviceref",
         "@io_k8s_api//core/v1:core",
@@ -22,6 +24,8 @@ go_test(
     deps = [
         "//api/aether/registry/v1:registry",
         "//common/constants",
+        "//common/constants/annotations",
+        "//common/constants/labels",
         "//registry/registrytest",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

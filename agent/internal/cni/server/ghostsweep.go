@@ -11,6 +11,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
 	"go.opentelemetry.io/otel"
@@ -365,7 +366,7 @@ func isMeshManagedK8sPod(p *corev1.Pod) bool {
 	if constants.IsIgnoredNamespace(p.Namespace) {
 		return false
 	}
-	if p.Labels[constants.LabelAetherManaged] != "true" {
+	if p.Labels[aetherlabels.LabelAetherManaged] != "true" {
 		return false
 	}
 	return p.Status.PodIP != ""
