@@ -359,6 +359,11 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	c.trustDomain = trustDomain
 	c.localMu.Unlock()
 
+	// The merged workload map (and trust domain) feed every cached
+	// mTLS-injected cluster; rebuild them before the snapshot below reads the
+	// cache (issue #537).
+	c.recomputeMTLSClusters()
+
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
