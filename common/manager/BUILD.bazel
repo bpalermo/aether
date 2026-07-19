@@ -12,7 +12,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//common/log",
-        "//common/telemetry",
+        "//common/telemetry/setup",
         "@com_github_go_logr_logr//:logr",
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
