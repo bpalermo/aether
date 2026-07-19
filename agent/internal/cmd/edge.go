@@ -90,13 +90,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		"edgeHTTPPort", cfg.EdgeHTTPPort,
 	)
 
-	if logShutdown != nil {
-		defer func() {
-			if shutdownErr := logShutdown(ctx); shutdownErr != nil {
-				l.ErrorContext(ctx, "failed to flush OTel logs", "error", shutdownErr)
-			}
-		}()
-	}
+	defer deferLogShutdown(ctx)
 
 	// Watch Gateway API objects CLUSTER-WIDE. The edge reconciles every Gateway of
 	// our GatewayClass wherever it lives (namespace-agnostic): the conformance suite
@@ -127,24 +121,9 @@ func runEdge(ctx context.Context) (retErr error) {
 	// ==false opt-outs on the runnables are defensive — they preserve this
 	// invariant if leader election is ever enabled on the manager.
 
-	// Manager scheme = client-go built-ins + the Gateway API types so the
-	// reconciler reads typed Gateways/HTTPRoutes (no unstructured).
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register client-go scheme: %w", err)
-	}
-	if err := gatewayv1.Install(scheme); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
-	}
-	// ReferenceGrant is served as v1beta1 (the storage version) — needed to admit
-	// cross-namespace backendRefs.
-	if err := gatewayv1beta1.Install(scheme); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
-	}
-	// EdgeConfig / MeshConfig / HTTPFilter (config.aether.io) — the edge resolves
-	// per-Gateway EdgeConfig via the parametersRef chain (proposal 029).
-	if err := configapisv1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register config.aether.io scheme: %w", err)
+	scheme, err := buildEdgeScheme()
+	if err != nil {
+		return err
 	}
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) {
@@ -153,39 +132,15 @@ func runEdge(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if result.Shutdown != nil {
-		defer func() {
-			if shutdownErr := result.Shutdown(ctx); shutdownErr != nil {
-				l.ErrorContext(ctx, "failed to shutdown telemetry", "error", shutdownErr)
-			}
-		}()
-	}
+	defer deferTelemetryShutdown(ctx, result.Shutdown)
 	m := result.Manager
 
-	// Open the SPIRE Workload API source for registrar mTLS and to resolve the
-	// edge's own identity (trust domain + SVID name). The Envoy fetches its SVID
-	// from SPIRE directly over the spire_agent SDS cluster, so the agent runs no
-	// SPIRE bridge — it only needs the names to program into the clusters.
-	var spireSource *commonspire.Source
-	identityTrustDomain := cfg.MeshDomain
-	edgeSpiffeID := ""
-	if cfg.SpireEnabled {
-		spireSource, err = commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-		if err != nil {
-			return err
-		}
+	spireSource, identityTrustDomain, edgeSpiffeID, err := resolveEdgeIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	if spireSource != nil {
 		defer func() { retErr = errors.Join(retErr, spireSource.Close()) }()
-
-		identityTrustDomain, err = commonspire.TrustDomainFromSource(spireSource)
-		if err != nil {
-			return fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
-		}
-		svid, err := spireSource.GetX509SVID()
-		if err != nil {
-			return fmt.Errorf("failed to read edge SVID: %w", err)
-		}
-		edgeSpiffeID = svid.ID.String()
-		l.InfoContext(ctx, "resolved edge identity from SPIRE", "trustDomain", identityTrustDomain, "spiffeID", edgeSpiffeID)
 	}
 
 	reg, err := setupRegistrarClient(ctx, spireSource)
@@ -194,6 +149,102 @@ func runEdge(ctx context.Context) (retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
+	snapshotCache := configureEdgeSnapshotCache(edgeSpiffeID, identityTrustDomain)
+
+	ackTracker := ack.NewTracker(l)
+
+	// The edge runs no local workloads, so it loads listeners from an empty
+	// storage: PreListen's LoadListenersFromStorage finds zero pods and the
+	// edge-mode Listeners() returns the single public-facing listener instead.
+	emptyStorage, err := setupStorage(ctx, cfg.MountedLocalStorageDir)
+	if err != nil {
+		return err
+	}
+
+	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.NodeName, identityTrustDomain, reg, emptyStorage, snapshotCache, ackTracker.Callbacks(), l)
+	if err != nil {
+		return err
+	}
+	if err = m.Add(xdsSrv); err != nil {
+		return fmt.Errorf("failed to add xDS server: %w", err)
+	}
+
+	refresher := xdsServer.NewRegistryRefresher(cfg.ClusterName, cfg.NodeName, snapshotCache, reg, l)
+	if err = m.Add(refresher); err != nil {
+		return fmt.Errorf("failed to add registry refresher: %w", err)
+	}
+
+	if err = wireGatewayAPIReconciler(m, snapshotCache, routeNamespace); err != nil {
+		return err
+	}
+
+	l.DebugContext(ctx, "waiting for local storage to be ready")
+	if err = emptyStorage.WaitUntilReady(ctx); err != nil {
+		return err
+	}
+
+	l.DebugContext(ctx, "starting edge manager")
+	return m.Start(ctx)
+}
+
+// buildEdgeScheme constructs the manager scheme for the edge: client-go built-ins,
+// Gateway API types, and config.aether.io (EdgeConfig/MeshConfig/HTTPFilter).
+func buildEdgeScheme() (*runtime.Scheme, error) {
+	// Manager scheme = client-go built-ins + the Gateway API types so the
+	// reconciler reads typed Gateways/HTTPRoutes (no unstructured).
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("register client-go scheme: %w", err)
+	}
+	if err := gatewayv1.Install(scheme); err != nil {
+		return nil, fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+	}
+	// ReferenceGrant is served as v1beta1 (the storage version) — needed to admit
+	// cross-namespace backendRefs.
+	if err := gatewayv1beta1.Install(scheme); err != nil {
+		return nil, fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+	}
+	// EdgeConfig / MeshConfig / HTTPFilter (config.aether.io) — the edge resolves
+	// per-Gateway EdgeConfig via the parametersRef chain (proposal 029).
+	if err := configapisv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("register config.aether.io scheme: %w", err)
+	}
+	return scheme, nil
+}
+
+// resolveEdgeIdentity opens the SPIRE Workload API source and derives the edge's
+// trust domain and SPIFFE ID. When SPIRE is disabled, it returns nil source and
+// the mesh domain as trust domain. The caller is responsible for closing the source.
+func resolveEdgeIdentity(ctx context.Context) (*commonspire.Source, string, string, error) {
+	if !cfg.SpireEnabled {
+		return nil, cfg.MeshDomain, "", nil
+	}
+	// Open the SPIRE Workload API source for registrar mTLS and to resolve the
+	// edge's own identity (trust domain + SVID name). The Envoy fetches its SVID
+	// from SPIRE directly over the spire_agent SDS cluster, so the agent runs no
+	// SPIRE bridge — it only needs the names to program into the clusters.
+	spireSource, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
+	if err != nil {
+		return nil, "", "", err
+	}
+	identityTrustDomain, err := commonspire.TrustDomainFromSource(spireSource)
+	if err != nil {
+		_ = spireSource.Close()
+		return nil, "", "", fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
+	}
+	svid, err := spireSource.GetX509SVID()
+	if err != nil {
+		_ = spireSource.Close()
+		return nil, "", "", fmt.Errorf("failed to read edge SVID: %w", err)
+	}
+	edgeSpiffeID := svid.ID.String()
+	l.InfoContext(ctx, "resolved edge identity from SPIRE", "trustDomain", identityTrustDomain, "spiffeID", edgeSpiffeID)
+	return spireSource, identityTrustDomain, edgeSpiffeID, nil
+}
+
+// configureEdgeSnapshotCache creates and configures the xDS snapshot cache for edge
+// mode: geoip, edge HTTP/TLS ports, identity, and access-log/tracing globals.
+func configureEdgeSnapshotCache(edgeSpiffeID, identityTrustDomain string) *cache.SnapshotCache {
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
@@ -221,29 +272,12 @@ func runEdge(ctx context.Context) (retErr error) {
 		SampleRate: cfg.ProxyTraceSampleRate,
 	})
 
-	ackTracker := ack.NewTracker(l)
+	return snapshotCache
+}
 
-	// The edge runs no local workloads, so it loads listeners from an empty
-	// storage: PreListen's LoadListenersFromStorage finds zero pods and the
-	// edge-mode Listeners() returns the single public-facing listener instead.
-	emptyStorage, err := setupStorage(ctx, cfg.MountedLocalStorageDir)
-	if err != nil {
-		return err
-	}
-
-	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.NodeName, identityTrustDomain, reg, emptyStorage, snapshotCache, ackTracker.Callbacks(), l)
-	if err != nil {
-		return err
-	}
-	if err = m.Add(xdsSrv); err != nil {
-		return fmt.Errorf("failed to add xDS server: %w", err)
-	}
-
-	refresher := xdsServer.NewRegistryRefresher(cfg.ClusterName, cfg.NodeName, snapshotCache, reg, l)
-	if err = m.Add(refresher); err != nil {
-		return fmt.Errorf("failed to add registry refresher: %w", err)
-	}
-
+// wireGatewayAPIReconciler sets up the Gateway API reconciler for the edge. With TLS
+// enabled, it also initializes the Secret provider for TLS cert lookups.
+func wireGatewayAPIReconciler(m ctrl.Manager, snapshotCache *cache.SnapshotCache, routeNamespace string) error {
 	// Watch Gateways/HTTPRoutes and project them into the cache as the edge's
 	// virtual hosts + scoped dependency set. With TLS enabled, also resolve each
 	// Gateway listener's cert via the SecretProvider registry (kubernetes provider)
@@ -263,17 +297,10 @@ func runEdge(ctx context.Context) (retErr error) {
 		Secrets:          secretRegistry,
 		Log:              l,
 	}
-	if err = gwReconciler.SetupWithManager(m); err != nil {
+	if err := gwReconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up Gateway API reconciler: %w", err)
 	}
-
-	l.DebugContext(ctx, "waiting for local storage to be ready")
-	if err = emptyStorage.WaitUntilReady(ctx); err != nil {
-		return err
-	}
-
-	l.DebugContext(ctx, "starting edge manager")
-	return m.Start(ctx)
+	return nil
 }
 
 // currentPodName returns the edge pod's name from the POD_NAME downward-API env
