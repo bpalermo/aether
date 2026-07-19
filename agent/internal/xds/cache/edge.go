@@ -318,18 +318,27 @@ func (c *SnapshotCache) edgeGatewayListeners() []types.Resource {
 	var out []types.Resource
 	for _, gw := range gws {
 		edgeCfg := c.effectiveEdgeConfig(gw)
+		geoFilters := c.edgeGeoFilters()
 		for _, ln := range gw.Listeners {
-			if len(ln.TLSSecretNames) > 0 {
-				out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), edgeCfg))
-				if edgeCfg.GetHttp3().GetEnabled().GetValue() {
-					if h3ln := proxy.BuildEdgeGatewayHTTP3Listener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, c.edgeGeoFilters(), edgeCfg); h3ln != nil {
-						out = append(out, h3ln)
-					}
-				}
-			} else {
-				out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, c.edgeGeoFilters(), edgeCfg))
+			out = c.appendGatewayListenerLocked(out, gw, ln, edgeCfg, geoFilters)
+		}
+	}
+	return out
+}
+
+// appendGatewayListenerLocked appends Envoy listeners for one Gateway listener
+// entry (HTTPS + optional HTTP/3, or HTTP/redirect) to out and returns the updated
+// slice.
+func (c *SnapshotCache) appendGatewayListenerLocked(out []types.Resource, gw EdgeGatewayEntry, ln EdgeGatewayListenerEntry, edgeCfg *configv1.EdgeConfigSpec, geoFilters []*http_connection_managerv3.HttpFilter) []types.Resource {
+	if len(ln.TLSSecretNames) > 0 {
+		out = append(out, proxy.BuildEdgeGatewayHTTPSListener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, geoFilters, edgeCfg))
+		if edgeCfg.GetHttp3().GetEnabled().GetValue() {
+			if h3ln := proxy.BuildEdgeGatewayHTTP3Listener(gw.Namespace, gw.Name, ln.InternalPort, ln.TLSSecretNames, geoFilters, edgeCfg); h3ln != nil {
+				out = append(out, h3ln)
 			}
 		}
+	} else {
+		out = append(out, proxy.BuildEdgeGatewayHTTPListener(gw.Namespace, gw.Name, ln.InternalPort, ln.HTTPRedirect, geoFilters, edgeCfg))
 	}
 	return out
 }
@@ -431,79 +440,14 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost, listenerPort
 	var catchAllRoutes []Route
 
 	for _, v := range vhosts {
-		// Collect admissible routes (has a service, redirect, or direct-response status).
-		admitted := make([]Route, 0, len(v.Routes))
-		for _, r := range v.Routes {
-			if r.Redirect == nil && r.Service == "" && r.DirectResponseStatus == 0 {
-				continue
+		admitted, catchAll := c.admitVhostRoutes(v, listenerPort)
+		catchAllRoutes = append(catchAllRoutes, catchAll...)
+		for _, h := range admitted {
+			if _, seen := domainRoutes[h.domain]; !seen {
+				domainOrder = append(domainOrder, h.domain)
 			}
-			admitted = append(admitted, r)
+			domainRoutes[h.domain] = append(domainRoutes[h.domain], h.routes...)
 		}
-		if len(admitted) == 0 {
-			continue
-		}
-
-		// Determine the set of domains for this vhost. Empty Hosts = catch-all.
-		var domains []string
-		for _, h := range v.Hosts {
-			if h != "" {
-				domains = append(domains, h)
-			}
-		}
-		if len(domains) == 0 {
-			// Hostname-less route: accumulate into the single "*" catch-all vhost.
-			catchAllRoutes = append(catchAllRoutes, admitted...)
-			continue
-		}
-
-		// Group by domain: each domain in this vhost gets all admitted routes.
-		// Multiple VirtualHosts sharing a domain are merged here.
-		for _, h := range domains {
-			if _, seen := domainRoutes[h]; !seen {
-				domainOrder = append(domainOrder, h)
-			}
-			domainRoutes[h] = append(domainRoutes[h], admitted...)
-		}
-	}
-
-	// buildEnvoyRoute converts a cache Route to an Envoy route, resolving each
-	// backend's cluster name via edgeClusterNameLocked (mesh vs k8s cleartext).
-	// Caller must hold clusterMu.
-	buildEnvoyRoute := func(r Route) *routev3.Route {
-		// DirectResponseStatus: emit a fixed direct_response (no backend).
-		// Path/header/method/query matchers still apply so the route only matches
-		// when the request would have gone to the (unresolvable) backend.
-		if r.DirectResponseStatus != 0 {
-			return proxy.BuildEdgeDirectResponseRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, r.DirectResponseStatus)
-		}
-
-		// Inject the listener's external port into redirect routes when the redirect
-		// filter specifies neither Port nor Scheme (pure "preserve original" semantics).
-		// Without this, gammaRedirectAction leaves port_redirect=0, which makes Envoy
-		// use the listener's bound (internal) port — not the external port the client
-		// connected to. See GammaRedirect.ListenerPort for the full explanation.
-		redirect := r.Redirect
-		if redirect != nil && listenerPort != 0 && redirect.Port == 0 && redirect.Scheme == "" {
-			cp := *redirect
-			cp.ListenerPort = listenerPort
-			redirect = &cp
-		}
-
-		// Weighted multi-backend path: when Backends is populated use it.
-		if len(r.Backends) > 0 {
-			weighted := make([]proxy.WeightedRouteBackend, 0, len(r.Backends))
-			for _, b := range r.Backends {
-				cn := c.edgeClusterNameLocked(b.Service, b.BackendNamespace, b.Port)
-				weighted = append(weighted, proxy.WeightedRouteBackend{Cluster: cn, Weight: b.Weight})
-			}
-			return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, weighted, r.HeaderMutation, redirect, r.URLRewrite, r.Timeout)
-		}
-		// Legacy single-backend path (backward compat).
-		cluster := ""
-		if r.Service != "" {
-			cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
-		}
-		return proxy.BuildEdgeRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, cluster, r.HeaderMutation, redirect, r.URLRewrite, r.Timeout)
 	}
 
 	// Emit one Envoy virtual host per domain group, sorted by path specificity.
@@ -513,7 +457,7 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost, listenerPort
 		sortRoutesBySpecificity(merged)
 		routes := make([]*routev3.Route, 0, len(merged))
 		for _, r := range merged {
-			routes = append(routes, buildEnvoyRoute(r))
+			routes = append(routes, c.buildEnvoyRouteLocked(r, listenerPort))
 		}
 		out = append(out, proxy.BuildEdgeVirtualHost(domain, []string{domain}, routes))
 	}
@@ -524,11 +468,102 @@ func (c *SnapshotCache) buildEdgeVhostsLocked(vhosts []VirtualHost, listenerPort
 		sortRoutesBySpecificity(catchAllRoutes)
 		catchAll := make([]*routev3.Route, 0, len(catchAllRoutes))
 		for _, r := range catchAllRoutes {
-			catchAll = append(catchAll, buildEnvoyRoute(r))
+			catchAll = append(catchAll, c.buildEnvoyRouteLocked(r, listenerPort))
 		}
 		out = append(out, proxy.BuildEdgeVirtualHost("*", []string{"*"}, catchAll))
 	}
 	return out
+}
+
+// domainRouteGroup holds a domain name and the routes admitted for it.
+type domainRouteGroup struct {
+	domain string
+	routes []Route
+}
+
+// admitVhostRoutes filters routes from v to those that have a service, redirect,
+// or direct-response status. It returns per-domain groups for named hosts, and a
+// slice of catch-all routes (for the "*" vhost) for hostname-less routes.
+// Caller must hold clusterMu.
+func (c *SnapshotCache) admitVhostRoutes(v VirtualHost, listenerPort uint32) ([]domainRouteGroup, []Route) {
+	// Collect admissible routes (has a service, redirect, or direct-response status).
+	admitted := make([]Route, 0, len(v.Routes))
+	for _, r := range v.Routes {
+		if r.Redirect == nil && r.Service == "" && r.DirectResponseStatus == 0 {
+			continue
+		}
+		admitted = append(admitted, r)
+	}
+	if len(admitted) == 0 {
+		return nil, nil
+	}
+
+	// Determine the set of domains for this vhost. Empty Hosts = catch-all.
+	var domains []string
+	for _, h := range v.Hosts {
+		if h != "" {
+			domains = append(domains, h)
+		}
+	}
+	if len(domains) == 0 {
+		// Hostname-less route: accumulate into the single "*" catch-all vhost.
+		return nil, admitted
+	}
+
+	// Group by domain: each domain in this vhost gets all admitted routes.
+	// Multiple VirtualHosts sharing a domain are merged here.
+	groups := make([]domainRouteGroup, 0, len(domains))
+	for _, h := range domains {
+		groups = append(groups, domainRouteGroup{domain: h, routes: admitted})
+	}
+	_ = listenerPort // used by caller's buildEnvoyRouteLocked
+	return groups, nil
+}
+
+// buildEnvoyRouteLocked converts a cache Route to an Envoy route, resolving each
+// backend's cluster name via edgeClusterNameLocked (mesh vs k8s cleartext).
+// Caller must hold clusterMu.
+func (c *SnapshotCache) buildEnvoyRouteLocked(r Route, listenerPort uint32) *routev3.Route {
+	// DirectResponseStatus: emit a fixed direct_response (no backend).
+	// Path/header/method/query matchers still apply so the route only matches
+	// when the request would have gone to the (unresolvable) backend.
+	if r.DirectResponseStatus != 0 {
+		return proxy.BuildEdgeDirectResponseRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, r.DirectResponseStatus)
+	}
+
+	// Inject the listener's external port into redirect routes when the redirect
+	// filter specifies neither Port nor Scheme (pure "preserve original" semantics).
+	// Without this, gammaRedirectAction leaves port_redirect=0, which makes Envoy
+	// use the listener's bound (internal) port — not the external port the client
+	// connected to. See GammaRedirect.ListenerPort for the full explanation.
+	redirect := r.Redirect
+	if redirect != nil && listenerPort != 0 && redirect.Port == 0 && redirect.Scheme == "" {
+		cp := *redirect
+		cp.ListenerPort = listenerPort
+		redirect = &cp
+	}
+
+	// Weighted multi-backend path: when Backends is populated use it.
+	if len(r.Backends) > 0 {
+		return c.buildEnvoyWeightedRouteLocked(r, redirect)
+	}
+	// Legacy single-backend path (backward compat).
+	cluster := ""
+	if r.Service != "" {
+		cluster = c.edgeClusterNameLocked(r.Service, r.BackendNamespace, r.Port)
+	}
+	return proxy.BuildEdgeRoute(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, cluster, r.HeaderMutation, redirect, r.URLRewrite, r.Timeout)
+}
+
+// buildEnvoyWeightedRouteLocked builds an Envoy weighted multi-backend route from r.
+// Caller must hold clusterMu.
+func (c *SnapshotCache) buildEnvoyWeightedRouteLocked(r Route, redirect *proxy.GammaRedirect) *routev3.Route {
+	weighted := make([]proxy.WeightedRouteBackend, 0, len(r.Backends))
+	for _, b := range r.Backends {
+		cn := c.edgeClusterNameLocked(b.Service, b.BackendNamespace, b.Port)
+		weighted = append(weighted, proxy.WeightedRouteBackend{Cluster: cn, Weight: b.Weight})
+	}
+	return proxy.BuildEdgeRouteWeighted(r.Prefix, r.Exact, r.Headers, r.Method, r.QueryParams, weighted, r.HeaderMutation, redirect, r.URLRewrite, r.Timeout)
 }
 
 // hasPerGatewayAddressing reports whether per-Gateway addressing (Phase 2) is
@@ -610,37 +645,8 @@ func (c *SnapshotCache) edgeClusterNameLocked(service, backendNamespace string, 
 		key = serviceref.New(backendNamespace, service).Key()
 	}
 	meshFQDN := proxy.ServiceClusterName(key, c.meshDomain)
-	if _, ok := c.clusters[key]; ok {
-		// Mesh path: service is in the registry.
-		if port == 0 {
-			return meshFQDN
-		}
-		portName := proxy.PortClusterName(key, c.meshDomain, port)
-		if _, ok := c.clusters[portName]; ok {
-			return portName
-		}
-		if entry, ok := c.clusters[key]; ok && entry.sni == strconv.Itoa(int(port)) {
-			return meshFQDN
-		}
-		return portName
-	}
-	// Also check by mesh FQDN and per-port mesh name (some callers may have added
-	// clusters under those keys directly).
-	if _, ok := c.clusters[meshFQDN]; ok {
-		if port == 0 {
-			return meshFQDN
-		}
-		portName := proxy.PortClusterName(key, c.meshDomain, port)
-		if _, ok := c.clusters[portName]; ok {
-			return portName
-		}
-		return portName
-	}
-	if port != 0 {
-		portName := proxy.PortClusterName(key, c.meshDomain, port)
-		if _, ok := c.clusters[portName]; ok {
-			return portName
-		}
+	if name, ok := c.edgeMeshClusterNameLocked(key, meshFQDN, port); ok {
+		return name
 	}
 	// Non-mesh path: service is not in the registry. Route to the k8s Service FQDN
 	// over cleartext (STRICT_DNS, no transport socket). Port defaults to 80 if unset.
@@ -649,6 +655,39 @@ func (c *SnapshotCache) edgeClusterNameLocked(service, backendNamespace string, 
 		p = 80
 	}
 	return proxy.EdgeK8sClusterName(backendNamespace, service, p)
+}
+
+// edgeMeshClusterNameLocked looks up the cluster name for a mesh-registered service.
+// Returns ("", false) when the service is not found in the registry cluster map.
+// Caller must hold clusterMu.
+func (c *SnapshotCache) edgeMeshClusterNameLocked(key, meshFQDN string, port uint32) (string, bool) {
+	if _, ok := c.clusters[key]; ok {
+		// Mesh path: service is in the registry.
+		if port == 0 {
+			return meshFQDN, true
+		}
+		portName := proxy.PortClusterName(key, c.meshDomain, port)
+		if _, ok := c.clusters[portName]; ok {
+			return portName, true
+		}
+		if entry, ok := c.clusters[key]; ok && entry.sni == strconv.Itoa(int(port)) {
+			return meshFQDN, true
+		}
+		return portName, true
+	}
+	// Also check by mesh FQDN and per-port mesh name (some callers may have added
+	// clusters under those keys directly).
+	if _, ok := c.clusters[meshFQDN]; ok {
+		portName := proxy.PortClusterName(key, c.meshDomain, port)
+		return portName, true
+	}
+	if port != 0 {
+		portName := proxy.PortClusterName(key, c.meshDomain, port)
+		if _, ok := c.clusters[portName]; ok {
+			return portName, true
+		}
+	}
+	return "", false
 }
 
 // SetEdgeTCPRoutes replaces the edge's TCP listener routes (one per Gateway TCP
@@ -703,44 +742,54 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 	seen := make(map[string]struct{})
 	var services []string
 
-	addVhost := func(v VirtualHost) {
-		// A hostname-less route is NOT inert: per Gateway API it matches every host
-		// on its listener (the edge serves it via the catch-all "*" vhost), so its
-		// backend services must be scoped in (their clusters loaded) too.
-		// The dependency set is matched against the registry's namespace-qualified
-		// "<ns>/<svc>" keys (020 Part 1), so scope in the key, not the bare name.
-		addDep := func(svc, ns string) {
-			if svc == "" {
-				return
-			}
-			key := svc
-			if ns != "" {
-				key = serviceref.New(ns, svc).Key()
-			}
-			if _, ok := seen[key]; !ok {
-				seen[key] = struct{}{}
-				services = append(services, key)
-			}
+	addService := func(svc, ns string) {
+		if svc == "" {
+			return
 		}
-		for _, r := range v.Routes {
-			// Collect from Backends (weighted multi-backend).
-			for _, b := range r.Backends {
-				addDep(b.Service, b.BackendNamespace)
-			}
-			// Legacy single-backend field (also populated for single-backend routes).
-			addDep(r.Service, r.BackendNamespace)
+		key := svc
+		if ns != "" {
+			key = serviceref.New(ns, svc).Key()
+		}
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			services = append(services, key)
 		}
 	}
 
 	for _, v := range vhosts {
-		addVhost(v)
+		c.collectVhostDeps(v, addService)
 	}
 	// Per-Gateway vhosts (Phase 2).
 	for _, gw := range gws {
 		for _, v := range gw.VirtualHosts {
-			addVhost(v)
+			c.collectVhostDeps(v, addService)
 		}
 	}
+	collectEdgeTCPDeps(tcpRoutes, seen, &services)
+	collectEdgeTLSDeps(tlsRoutes, seen, &services)
+	c.SetStaticDependencies(services)
+}
+
+// collectVhostDeps calls addService for every backend service referenced by
+// the given VirtualHost's routes (multi-backend and legacy single-backend).
+func (c *SnapshotCache) collectVhostDeps(v VirtualHost, addService func(svc, ns string)) {
+	// A hostname-less route is NOT inert: per Gateway API it matches every host
+	// on its listener (the edge serves it via the catch-all "*" vhost), so its
+	// backend services must be scoped in (their clusters loaded) too.
+	// The dependency set is matched against the registry's namespace-qualified
+	// "<ns>/<svc>" keys (020 Part 1), so scope in the key, not the bare name.
+	for _, r := range v.Routes {
+		// Collect from Backends (weighted multi-backend).
+		for _, b := range r.Backends {
+			addService(b.Service, b.BackendNamespace)
+		}
+		// Legacy single-backend field (also populated for single-backend routes).
+		addService(r.Service, r.BackendNamespace)
+	}
+}
+
+// collectEdgeTCPDeps adds services from TCP routes to seen/services accumulators.
+func collectEdgeTCPDeps(tcpRoutes []proxy.EdgeL4TCPRoute, seen map[string]struct{}, services *[]string) {
 	for _, r := range tcpRoutes {
 		for _, b := range r.Backends {
 			if b.Service == "" {
@@ -748,10 +797,14 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 			}
 			if _, ok := seen[b.Service]; !ok {
 				seen[b.Service] = struct{}{}
-				services = append(services, b.Service)
+				*services = append(*services, b.Service)
 			}
 		}
 	}
+}
+
+// collectEdgeTLSDeps adds services from TLS routes to seen/services accumulators.
+func collectEdgeTLSDeps(tlsRoutes []proxy.EdgeL4TLSRoute, seen map[string]struct{}, services *[]string) {
 	for _, r := range tlsRoutes {
 		for _, rule := range r.Rules {
 			for _, b := range rule.Backends {
@@ -760,12 +813,11 @@ func (c *SnapshotCache) rebuildEdgeDependencies() {
 				}
 				if _, ok := seen[b.Service]; !ok {
 					seen[b.Service] = struct{}{}
-					services = append(services, b.Service)
+					*services = append(*services, b.Service)
 				}
 			}
 		}
 	}
-	c.SetStaticDependencies(services)
 }
 
 // edgeTCPListeners returns the edge's L4 listeners (TCP + TLS passthrough) derived
@@ -809,67 +861,78 @@ func (c *SnapshotCache) edgeK8sBackendClusters() []types.Resource {
 	gws := slices.Clone(c.edgeGateways)
 	c.edgeMu.RUnlock()
 
-	// key: "namespace/service:port" — the cluster NAME is keyed by the service port,
-	// matching edgeClusterNameLocked. dialPort is the resolved STRICT_DNS connect
-	// port (differs from port for headless Services; see RouteBackend.DialPort).
-	type k8sBackend struct {
-		namespace string
-		service   string
-		port      uint32
-		dialPort  uint32
-	}
-	seen := make(map[k8sBackend]struct{})
-	var backends []k8sBackend
-
-	addBackend := func(service, namespace string, port, dialPort uint32) {
-		p := port
-		if p == 0 {
-			p = 80
-		}
-		dp := dialPort
-		if dp == 0 {
-			dp = p
-		}
-		bk := k8sBackend{namespace: namespace, service: service, port: p, dialPort: dp}
-		if _, dup := seen[bk]; dup {
-			return
-		}
-		seen[bk] = struct{}{}
-		backends = append(backends, bk)
-	}
-
-	collectRoutes := func(routes []Route) {
-		for _, r := range routes {
-			// Weighted multi-backend: iterate each backend in the list.
-			for _, b := range r.Backends {
-				if b.Service == "" {
-					continue
-				}
-				addBackend(b.Service, b.BackendNamespace, b.Port, b.DialPort)
-			}
-			// Legacy single-backend field (also populated for single-backend routes).
-			if r.Service == "" {
-				continue
-			}
-			addBackend(r.Service, r.BackendNamespace, r.Port, r.DialPort)
-		}
-	}
-
-	for _, v := range vhosts {
-		collectRoutes(v.Routes)
-	}
-	for _, gw := range gws {
-		for _, v := range gw.VirtualHosts {
-			collectRoutes(v.Routes)
-		}
-	}
+	backends := c.collectK8sBackends(vhosts, gws)
 	if len(backends) == 0 {
 		return nil
 	}
 
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
+	return c.buildK8sClustersLocked(backends)
+}
 
+// k8sBackend identifies a unique cleartext k8s-Service backend triple.
+type k8sBackend struct {
+	namespace string
+	service   string
+	port      uint32
+	dialPort  uint32
+}
+
+// collectK8sBackends returns the deduplicated set of k8s backends referenced by
+// the edge's HTTP virtual hosts (Phase 1 and per-Gateway Phase 2).
+func (c *SnapshotCache) collectK8sBackends(vhosts []VirtualHost, gws []EdgeGatewayEntry) []k8sBackend {
+	seen := make(map[k8sBackend]struct{})
+	var backends []k8sBackend
+
+	for _, v := range vhosts {
+		collectK8sRoutesBackends(v.Routes, seen, &backends)
+	}
+	for _, gw := range gws {
+		for _, v := range gw.VirtualHosts {
+			collectK8sRoutesBackends(v.Routes, seen, &backends)
+		}
+	}
+	return backends
+}
+
+// addK8sBackend appends bk to backends when not already in seen.
+func addK8sBackend(service, namespace string, port, dialPort uint32, seen map[k8sBackend]struct{}, backends *[]k8sBackend) {
+	p := port
+	if p == 0 {
+		p = 80
+	}
+	dp := dialPort
+	if dp == 0 {
+		dp = p
+	}
+	bk := k8sBackend{namespace: namespace, service: service, port: p, dialPort: dp}
+	if _, dup := seen[bk]; dup {
+		return
+	}
+	seen[bk] = struct{}{}
+	*backends = append(*backends, bk)
+}
+
+// collectK8sRoutesBackends adds every backend referenced by routes to the seen/backends
+// accumulators.
+func collectK8sRoutesBackends(routes []Route, seen map[k8sBackend]struct{}, backends *[]k8sBackend) {
+	for _, r := range routes {
+		for _, b := range r.Backends {
+			if b.Service != "" {
+				addK8sBackend(b.Service, b.BackendNamespace, b.Port, b.DialPort, seen, backends)
+			}
+		}
+		if r.Service != "" {
+			addK8sBackend(r.Service, r.BackendNamespace, r.Port, r.DialPort, seen, backends)
+		}
+	}
+}
+
+// buildK8sClustersLocked emits a cleartext STRICT_DNS cluster resource for each
+// backend that is NOT already covered by a registry mesh cluster.
+// Caller must hold clusterMu.
+func (c *SnapshotCache) buildK8sClustersLocked(backends []k8sBackend) []types.Resource {
 	var out []types.Resource
 	for _, bk := range backends {
 		// Only emit a cleartext cluster if the service is NOT a registry cluster.
@@ -907,36 +970,37 @@ func equalRoutes(a, b []Route) bool {
 		return false
 	}
 	for i := range a {
-		ra, rb := a[i], b[i]
-		if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port || ra.BackendNamespace != rb.BackendNamespace || ra.DialPort != rb.DialPort {
-			return false
-		}
-		if ra.Method != rb.Method || ra.DirectResponseStatus != rb.DirectResponseStatus {
-			return false
-		}
-		if !equalRouteDuration(ra.Timeout, rb.Timeout) {
-			return false
-		}
-		if !equalRouteBackends(ra.Backends, rb.Backends) {
-			return false
-		}
-		if !equalHeaderMutation(ra.HeaderMutation, rb.HeaderMutation) {
-			return false
-		}
-		if !equalRouteRedirect(ra.Redirect, rb.Redirect) {
-			return false
-		}
-		if !equalRouteURLRewrite(ra.URLRewrite, rb.URLRewrite) {
-			return false
-		}
-		if !equalHeaderMatches(ra.Headers, rb.Headers) {
-			return false
-		}
-		if !equalQueryParamMatches(ra.QueryParams, rb.QueryParams) {
+		if !equalRoute(a[i], b[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// equalRoute reports whether two Route values are content-equal.
+func equalRoute(ra, rb Route) bool {
+	if ra.Prefix != rb.Prefix || ra.Exact != rb.Exact || ra.Service != rb.Service || ra.Port != rb.Port || ra.BackendNamespace != rb.BackendNamespace || ra.DialPort != rb.DialPort {
+		return false
+	}
+	if ra.Method != rb.Method || ra.DirectResponseStatus != rb.DirectResponseStatus {
+		return false
+	}
+	if !equalRouteDuration(ra.Timeout, rb.Timeout) {
+		return false
+	}
+	if !equalRouteBackends(ra.Backends, rb.Backends) {
+		return false
+	}
+	if !equalHeaderMutation(ra.HeaderMutation, rb.HeaderMutation) {
+		return false
+	}
+	if !equalRouteRedirect(ra.Redirect, rb.Redirect) {
+		return false
+	}
+	if !equalRouteURLRewrite(ra.URLRewrite, rb.URLRewrite) {
+		return false
+	}
+	return equalHeaderMatches(ra.Headers, rb.Headers) && equalQueryParamMatches(ra.QueryParams, rb.QueryParams)
 }
 
 // equalHeaderMatches reports whether two RouteHeaderMatch slices are identical.
@@ -1080,24 +1144,26 @@ func equalEdgeTLSRoutes(a, b []proxy.EdgeL4TLSRoute) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Port != b[i].Port {
+		if a[i].Port != b[i].Port || len(a[i].Rules) != len(b[i].Rules) {
 			return false
 		}
-		if len(a[i].Rules) != len(b[i].Rules) {
+		if !equalEdgeTLSRules(a[i].Rules, b[i].Rules) {
 			return false
 		}
-		for j := range a[i].Rules {
-			ra, rb := a[i].Rules[j], b[i].Rules[j]
-			if !slices.Equal(ra.SNIHostnames, rb.SNIHostnames) {
+	}
+	return true
+}
+
+// equalEdgeTLSRules reports whether two L4ServiceRoute slices are identical.
+func equalEdgeTLSRules(a, b []proxy.L4ServiceRoute) bool {
+	for j := range a {
+		ra, rb := a[j], b[j]
+		if !slices.Equal(ra.SNIHostnames, rb.SNIHostnames) || len(ra.Backends) != len(rb.Backends) {
+			return false
+		}
+		for k := range ra.Backends {
+			if ra.Backends[k] != rb.Backends[k] {
 				return false
-			}
-			if len(ra.Backends) != len(rb.Backends) {
-				return false
-			}
-			for k := range ra.Backends {
-				if ra.Backends[k] != rb.Backends[k] {
-					return false
-				}
 			}
 		}
 	}

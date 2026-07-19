@@ -287,36 +287,7 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 // a single transport socket presenting the edge SVID with no ALPN and no SNI,
 // so the destination inbound demuxes to the TCP floor DEFAULT chain.
 func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
-	c.edgeMu.RLock()
-	tcpRoutes := append([]proxy.EdgeL4TCPRoute(nil), c.edgeTCPRoutes...)
-	tlsRoutes := append([]proxy.EdgeL4TLSRoute(nil), c.edgeTLSRoutes...)
-	c.edgeMu.RUnlock()
-
-	// Collect the distinct service names referenced by edge L4 routes.
-	seen := make(map[string]struct{})
-	var services []string
-	for _, r := range tcpRoutes {
-		for _, b := range r.Backends {
-			if b.Service != "" && b.Cluster != "" {
-				if _, ok := seen[b.Service]; !ok {
-					seen[b.Service] = struct{}{}
-					services = append(services, b.Service)
-				}
-			}
-		}
-	}
-	for _, r := range tlsRoutes {
-		for _, rule := range r.Rules {
-			for _, b := range rule.Backends {
-				if b.Service != "" && b.Cluster != "" {
-					if _, ok := seen[b.Service]; !ok {
-						seen[b.Service] = struct{}{}
-						services = append(services, b.Service)
-					}
-				}
-			}
-		}
-	}
+	services := c.collectEdgeTCPServices()
 	if len(services) == 0 {
 		return nil
 	}
@@ -349,6 +320,40 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 	c.clusterMu.RUnlock()
 
 	return resources
+}
+
+// collectEdgeTCPServices returns the distinct service names (with a Cluster name
+// set) referenced by the edge's TCP and TLS L4 routes.
+func (c *SnapshotCache) collectEdgeTCPServices() []string {
+	c.edgeMu.RLock()
+	tcpRoutes := append([]proxy.EdgeL4TCPRoute(nil), c.edgeTCPRoutes...)
+	tlsRoutes := append([]proxy.EdgeL4TLSRoute(nil), c.edgeTLSRoutes...)
+	c.edgeMu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var services []string
+	addSvc := func(svc, cluster string) {
+		if svc == "" || cluster == "" {
+			return
+		}
+		if _, ok := seen[svc]; !ok {
+			seen[svc] = struct{}{}
+			services = append(services, svc)
+		}
+	}
+	for _, r := range tcpRoutes {
+		for _, b := range r.Backends {
+			addSvc(b.Service, b.Cluster)
+		}
+	}
+	for _, r := range tlsRoutes {
+		for _, rule := range r.Rules {
+			for _, b := range rule.Backends {
+				addSvc(b.Service, b.Cluster)
+			}
+		}
+	}
+	return services
 }
 
 // captureUDPClusters returns the UDP floor clusters for services with UDPRoute
@@ -422,51 +427,58 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	c.captureMu.RLock()
 	defer c.captureMu.RUnlock()
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.captureAuthorities)+len(gammaRoutes))
+	vhosts = c.appendSABackedCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters)
+	vhosts = c.appendRouteOnlyCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters)
+	return vhosts
+}
+
+// appendSABackedCaptureVhosts appends cap_http virtual hosts for services that have
+// SA-backed mesh authorities (captureAuthorities). Caller must hold captureMu.
+func (c *SnapshotCache) appendSABackedCaptureVhosts(vhosts []*routev3.VirtualHost, deps map[string]struct{}, gammaRoutes map[string][]proxy.GammaRoute, routeDomains map[string][]string, chainFilters map[string]proxy.ExtensionFilter) []*routev3.VirtualHost {
 	for svc, fqdn := range c.captureAuthorities {
 		if _, ok := deps[svc]; !ok {
 			continue
 		}
 		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
 		rules := gammaRoutes[svc]
-		// An SA-backed mesh Service can ALSO be a GAMMA route target — the
-		// MeshFrontend shape, where an HTTPRoute attaches (parentRef) to a Service
-		// that is its own backend (e.g. "echo-v2"). When it carries GAMMA rules, a
-		// client dials it by whatever short name Kubernetes search-domain resolution
-		// allows (the bare same-namespace name, <name>.<ns>, <name>.<ns>.svc) on its
-		// REAL Service port — so the vhost must host-match every spelling, exactly
-		// like a pure (no-own-SA) route target. Without the short-name + real-port
-		// domains the dial misses this vhost, falls through to passthrough, and the
-		// GAMMA filters (e.g. ResponseHeaderModifier) are never applied. When there
-		// are no GAMMA rules the minimal cluster.local + mesh spellings suffice (a
-		// plain mesh service has nothing to apply and passthrough reaches the same
-		// backend), and emitting bare short names for every mesh service would risk
-		// cross-namespace bare-name collisions (an NACK) — so only enrich the domain
-		// set for authorities that actually have rules.
-		var domains []string
-		if len(rules) > 0 {
-			domains = routeDomains[svc]
-			if len(domains) == 0 {
-				// Defensive: a route target with rules always has a memo entry
-				// unless its "<ns>/<svc>" key is unparseable AND it raced past a
-				// captureAuthorities swap. ParseKey failing means the short-name
-				// spellings (and bareNameCount/ports) are unused, so this inline
-				// render matches what the memo would have built.
-				domains = routeTargetDomains(svc, fqdn, mesh, nil, nil)
-			}
-		} else {
-			// Route both the cluster.local authority and the mesh-global
-			// <svc>.<meshDomain> authority (portless + :meshPort) to the service
-			// cluster, so a captured request reaches it under either name (the
-			// mesh-DNS path uses the latter).
-			domains = []string{
-				fqdn, fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort),
-				mesh, fmt.Sprintf("%s:%d", mesh, meshconst.ProxyOutboundPort),
-			}
-		}
+		domains := c.captureVhostDomains(svc, fqdn, mesh, rules, routeDomains)
 		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules)
 		applyChainFilter(vh, chainFilters, svc)
 		vhosts = append(vhosts, vh)
 	}
+	return vhosts
+}
+
+// captureVhostDomains returns the host-match domain list for an SA-backed service's
+// cap_http virtual host. When the service carries GAMMA rules the full short-name +
+// real-port domain set is used; otherwise only the cluster.local + mesh spellings.
+func (c *SnapshotCache) captureVhostDomains(svc, fqdn, mesh string, rules []proxy.GammaRoute, routeDomains map[string][]string) []string {
+	if len(rules) > 0 {
+		domains := routeDomains[svc]
+		if len(domains) == 0 {
+			// Defensive: a route target with rules always has a memo entry
+			// unless its "<ns>/<svc>" key is unparseable AND it raced past a
+			// captureAuthorities swap. ParseKey failing means the short-name
+			// spellings (and bareNameCount/ports) are unused, so this inline
+			// render matches what the memo would have built.
+			return routeTargetDomains(svc, fqdn, mesh, nil, nil)
+		}
+		return domains
+	}
+	// Route both the cluster.local authority and the mesh-global
+	// <svc>.<meshDomain> authority (portless + :meshPort) to the service
+	// cluster, so a captured request reaches it under either name (the
+	// mesh-DNS path uses the latter).
+	return []string{
+		fqdn, fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort),
+		mesh, fmt.Sprintf("%s:%d", mesh, meshconst.ProxyOutboundPort),
+	}
+}
+
+// appendRouteOnlyCaptureVhosts appends cap_http virtual hosts for GAMMA route
+// targets that have no SA-backed mesh Service of their own (the versioned-fanout
+// shape). Caller must hold captureMu.
+func (c *SnapshotCache) appendRouteOnlyCaptureVhosts(vhosts []*routev3.VirtualHost, deps map[string]struct{}, gammaRoutes map[string][]proxy.GammaRoute, routeDomains map[string][]string, chainFilters map[string]proxy.ExtensionFilter) []*routev3.VirtualHost {
 	// Service-based routing (proposal 023): a GAMMA route TARGET with no SA-backed
 	// mesh Service of its own (the versioned-fanout shape — an "echo" target routed
 	// to echo-v1/echo-v2) still needs a cap_http vhost. Its cluster.local authority

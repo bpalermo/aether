@@ -134,52 +134,67 @@ func (c *SnapshotCache) Listeners() []types.Resource {
 	//   - TCP listener(s) for each Gateway TCP port from TCPRoutes
 	//   - TLS passthrough listener(s) for each Gateway TLS port from TLSRoutes
 	if c.edge {
-		var resources []types.Resource
-
-		// Always emit the dedicated readiness listener so the kubelet probe has a
-		// stable target independent of which public listeners are bound. Under
-		// Phase 2 the public listeners move to per-Gateway internal ports and
-		// nothing binds the HTTPS port — probing it there fails and wedges the roll.
-		readinessPort := c.edgeReadinessPort
-		if readinessPort == 0 {
-			readinessPort = proxy.DefaultEdgeReadinessPort
-		}
-		resources = append(resources, proxy.BuildEdgeReadinessListener(readinessPort))
-
-		if c.hasPerGatewayAddressing() {
-			// Proposal 021 Phase 2: per-Gateway listeners, each with a unique name
-			// (edge_gw_<ns>_<gwname>_<internalPort>). No shared edge_http/edge_https
-			// listeners — every Gateway gets its own listener bound on its allocated
-			// internal port. L4 (TCP/TLS passthrough) listeners are still shared.
-			resources = append(resources, c.edgeGatewayListeners()...)
-		} else {
-			// Phase 1 / fallback: shared edge_http / edge_https / edge_redirect
-			// listeners on the configured global ports.
-			c.edgeHTTPRedirectMu.RLock()
-			httpRedirect := c.edgeHTTPRedirect
-			c.edgeHTTPRedirectMu.RUnlock()
-
-			if c.edgeTLSEnabled {
-				// TLS listener on httpsPort, under a name DISTINCT from the :80 listener so
-				// the two never collide in the snapshot/LDS (a shared name dropped :443).
-				resources = append(
-					resources,
-					proxy.BuildEdgeListener(proxy.EdgeHTTPSListenerName, c.edgeHTTPSPort, c.edgeTLSSecretNames()),
-				)
-			}
-			if httpRedirect {
-				// At least one Gateway opted into HTTP→HTTPS redirect: emit the redirect
-				// listener on the plain HTTP port (replaces a routing listener for that port).
-				resources = append(resources, proxy.BuildEdgeRedirectListener(c.edgeHTTPPort))
-			} else {
-				// Default: the HTTP-port listener serves its attached HTTPRoutes directly.
-				resources = append(resources, proxy.BuildEdgeListener(proxy.EdgeListenerName, c.edgeHTTPPort, nil))
-			}
-		}
-		resources = append(resources, c.edgeTCPListeners()...)
-		return resources
+		return c.edgeListeners()
 	}
+	return c.meshListeners()
+}
 
+// edgeListeners returns the edge-mode listener set (readiness + HTTP/HTTPS/TCP/TLS).
+func (c *SnapshotCache) edgeListeners() []types.Resource {
+	var resources []types.Resource
+
+	// Always emit the dedicated readiness listener so the kubelet probe has a
+	// stable target independent of which public listeners are bound. Under
+	// Phase 2 the public listeners move to per-Gateway internal ports and
+	// nothing binds the HTTPS port — probing it there fails and wedges the roll.
+	readinessPort := c.edgeReadinessPort
+	if readinessPort == 0 {
+		readinessPort = proxy.DefaultEdgeReadinessPort
+	}
+	resources = append(resources, proxy.BuildEdgeReadinessListener(readinessPort))
+
+	if c.hasPerGatewayAddressing() {
+		// Proposal 021 Phase 2: per-Gateway listeners, each with a unique name
+		// (edge_gw_<ns>_<gwname>_<internalPort>). No shared edge_http/edge_https
+		// listeners — every Gateway gets its own listener bound on its allocated
+		// internal port. L4 (TCP/TLS passthrough) listeners are still shared.
+		resources = append(resources, c.edgeGatewayListeners()...)
+	} else {
+		resources = c.appendEdgePhase1Listeners(resources)
+	}
+	resources = append(resources, c.edgeTCPListeners()...)
+	return resources
+}
+
+// appendEdgePhase1Listeners appends the Phase 1 shared edge_http / edge_https /
+// edge_redirect listeners to resources and returns the updated slice.
+func (c *SnapshotCache) appendEdgePhase1Listeners(resources []types.Resource) []types.Resource {
+	c.edgeHTTPRedirectMu.RLock()
+	httpRedirect := c.edgeHTTPRedirect
+	c.edgeHTTPRedirectMu.RUnlock()
+
+	if c.edgeTLSEnabled {
+		// TLS listener on httpsPort, under a name DISTINCT from the :80 listener so
+		// the two never collide in the snapshot/LDS (a shared name dropped :443).
+		resources = append(
+			resources,
+			proxy.BuildEdgeListener(proxy.EdgeHTTPSListenerName, c.edgeHTTPSPort, c.edgeTLSSecretNames()),
+		)
+	}
+	if httpRedirect {
+		// At least one Gateway opted into HTTP→HTTPS redirect: emit the redirect
+		// listener on the plain HTTP port (replaces a routing listener for that port).
+		resources = append(resources, proxy.BuildEdgeRedirectListener(c.edgeHTTPPort))
+	} else {
+		// Default: the HTTP-port listener serves its attached HTTPRoutes directly.
+		resources = append(resources, proxy.BuildEdgeListener(proxy.EdgeListenerName, c.edgeHTTPPort, nil))
+	}
+	return resources
+}
+
+// meshListeners returns the mesh-mode listener set (per-pod inbound/outbound +
+// health gateway + optional east-west waypoint tunnel).
+func (c *SnapshotCache) meshListeners() []types.Resource {
 	c.listenerMu.RLock()
 	defer c.listenerMu.RUnlock()
 
