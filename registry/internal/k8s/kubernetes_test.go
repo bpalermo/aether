@@ -4,12 +4,15 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
@@ -938,6 +941,171 @@ func TestKubernetesRegistry_TCPProtocolReturnsEmpty(t *testing.T) {
 	httpOne, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_HTTP)
 	require.NoError(t, err)
 	require.Len(t, httpOne, 1)
+}
+
+// ─── Node-locality cache (issue #541) ────────────────────────────────────────
+
+// nodeReadCounter tracks how many node reads (List/Get) hit the underlying client.
+type nodeReadCounter struct {
+	lists int
+	gets  int
+}
+
+// newCountingRegistry builds a KubernetesRegistry over a fake client whose node
+// reads are counted, returning the registry, the writable client (to mutate the
+// cluster mid-test), and the counter.
+func newCountingRegistry(objects ...client.Object) (*KubernetesRegistry, client.WithWatch, *nodeReadCounter) {
+	counter := &nodeReadCounter{}
+	c := fake.NewClientBuilder().
+		WithObjects(objects...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.NodeList); ok {
+					counter.lists++
+				}
+				return cl.List(ctx, list, opts...)
+			},
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Node); ok {
+					counter.gets++
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	return NewKubernetesRegistry(slog.New(slog.DiscardHandler), c, Config{ClusterName: "test-cluster"}), c, counter
+}
+
+// TestNodeLocalityCache_HitAvoidsNodeReads verifies the perf contract of #541:
+// repeated listings within the TTL resolve node localities from the cache — one
+// node List on the first call, zero node reads afterwards, and never per-node Gets.
+func TestNodeLocalityCache_HitAvoidsNodeReads(t *testing.T) {
+	r, _, counter := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1"),
+		managedPod("pod-b", "default", "svc-b", "10.0.0.2", "node-2"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+		topologyNode("node-2", "us-east-1", "us-east-1b"),
+	)
+
+	first, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	assert.Equal(t, 1, counter.lists, "first listing refreshes the cache with a single node List")
+	assert.Equal(t, 0, counter.gets, "node localities must never be resolved via per-node Gets")
+
+	// Repeated reloads (the hot path) are served entirely from the cache.
+	for range 5 {
+		got, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+		require.NoError(t, err)
+		assert.Equal(t, first, got, "cached localities must yield identical endpoints")
+	}
+	eps, err := r.ListEndpoints(context.Background(), "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, eps, 1)
+	assert.Equal(t, "us-east-1a", eps[0].GetLocality().GetZone())
+
+	assert.Equal(t, 1, counter.lists, "cache hits must not re-list nodes")
+	assert.Equal(t, 0, counter.gets)
+}
+
+// TestNodeLocalityCache_NodeAddedForcesRefresh verifies that a pod scheduled onto
+// a node the cache has never seen refreshes the cache immediately (no TTL wait)
+// and resolves the new node's locality correctly.
+func TestNodeLocalityCache_NodeAddedForcesRefresh(t *testing.T) {
+	r, c, counter := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+	ctx := context.Background()
+
+	_, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Equal(t, 1, counter.lists)
+
+	// A new node joins and a managed pod lands on it.
+	require.NoError(t, c.Create(ctx, topologyNode("node-2", "eu-west-1", "eu-west-1b")))
+	require.NoError(t, c.Create(ctx, managedPod("pod-b", "default", "svc-a", "10.0.0.2", "node-2")))
+
+	got, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, got["default/svc-a"], 2)
+	byPod := map[string]*registryv1.ServiceEndpoint{}
+	for _, ep := range got["default/svc-a"] {
+		byPod[ep.GetKubernetesMetadata().GetPodName()] = ep
+	}
+	require.Contains(t, byPod, "pod-b")
+	assert.Equal(t, "eu-west-1", byPod["pod-b"].GetLocality().GetRegion())
+	assert.Equal(t, "eu-west-1b", byPod["pod-b"].GetLocality().GetZone())
+	assert.Equal(t, 2, counter.lists, "unknown node must force a cache refresh")
+
+	// The refreshed cache serves subsequent calls without new node reads.
+	_, err = r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Equal(t, 2, counter.lists)
+	assert.Equal(t, 0, counter.gets)
+}
+
+// TestNodeLocalityCache_TTLExpiryRefreshes verifies the staleness bound: a node
+// label change is served stale within the TTL and picked up after it lapses.
+func TestNodeLocalityCache_TTLExpiryRefreshes(t *testing.T) {
+	r, c, counter := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+	ctx := context.Background()
+
+	// Deterministic clock.
+	now := time.Now()
+	r.now = func() time.Time { return now }
+
+	first, err := r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	assert.Equal(t, "us-east-1a", first[0].GetLocality().GetZone())
+	require.Equal(t, 1, counter.lists)
+
+	// The node's zone label changes (essentially never happens in practice).
+	var node corev1.Node
+	require.NoError(t, c.Get(ctx, client.ObjectKey{Name: "node-1"}, &node))
+	node.Labels[constants.AnnotationKubernetesNodeTopologyZone] = "us-east-1z"
+	require.NoError(t, c.Update(ctx, &node))
+
+	// Within the TTL the cached locality is served.
+	stale, err := r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Equal(t, "us-east-1a", stale[0].GetLocality().GetZone())
+	assert.Equal(t, 1, counter.lists)
+
+	// After the TTL lapses the next listing refreshes and observes the change.
+	now = now.Add(nodeLocalityCacheTTL + time.Second)
+	fresh, err := r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Equal(t, "us-east-1z", fresh[0].GetLocality().GetZone())
+	assert.Equal(t, 2, counter.lists)
+}
+
+// TestNodeLocalityCache_MissingNodeStillErrors pins the pre-cache error contract:
+// a managed pod referencing a node that does not exist fails the listing even
+// though node resolution now goes through the cache, and the failure is not
+// poisoned into the cache (the node appearing later heals the listing).
+func TestNodeLocalityCache_MissingNodeStillErrors(t *testing.T) {
+	r, c, _ := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-gone"),
+	)
+	ctx := context.Background()
+
+	_, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.ErrorContains(t, err, "node-gone")
+
+	_, err = r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.ErrorContains(t, err, "node-gone")
+
+	// The node shows up (e.g., registration race): the next listing succeeds.
+	require.NoError(t, c.Create(ctx, topologyNode("node-gone", "us-east-1", "us-east-1a")))
+	got, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, got["default/svc-a"], 1)
+	assert.Equal(t, "us-east-1a", got["default/svc-a"][0].GetLocality().GetZone())
 }
 
 // ─── Annotation parsing helpers (unit-level) ─────────────────────────────────
