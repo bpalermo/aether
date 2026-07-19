@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/meshdns"
+	"github.com/bpalermo/aether/agent/internal/xds/cache/cachemetrics"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	meshconst "github.com/bpalermo/aether/common/constants/mesh"
@@ -58,7 +59,7 @@ type SnapshotCache struct {
 	cachev3.SnapshotCache
 
 	log     *slog.Logger
-	metrics *cacheMetrics
+	metrics *cachemetrics.Metrics
 
 	nodeName string
 
@@ -436,7 +437,7 @@ type clusterEntry struct {
 func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the cache.
-	metrics, err := newCacheMetrics(otel.Meter(meterName))
+	metrics, err := cachemetrics.New(otel.Meter(cachemetrics.MeterName))
 	if err != nil {
 		log.Error("failed to create snapshot cache metrics; continuing without instrumentation", "error", err)
 	}

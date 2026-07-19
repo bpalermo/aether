@@ -1,4 +1,10 @@
-package cache
+// Package cachemetrics holds the agent xDS snapshot-generation instruments.
+//
+// The Metrics type is a thin wrapper over OpenTelemetry instruments recording
+// snapshot build outcomes, durations, versions, and demand-scoping shape
+// (cluster/upstream counts). All methods are nil-receiver-safe so the cache
+// runs unchanged when telemetry is disabled.
+package cachemetrics
 
 import (
 	"context"
@@ -7,16 +13,16 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// meterName identifies this instrumentation scope in metric backends.
-const meterName = "aether/agent-xds-cache"
+// MeterName identifies this instrumentation scope in metric backends.
+const MeterName = "aether/agent-xds-cache"
 
-// cacheMetrics holds the snapshot-generation instruments. All methods are
+// Metrics holds the snapshot-generation instruments. All methods are
 // nil-receiver-safe so the cache runs unchanged when telemetry is disabled.
 //
 // A snapshot build failure leaves Envoy on the previous version — stale
 // config — so the errors counter is a direct staleness signal, and the
 // version gauge shows whether snapshots keep advancing at all.
-type cacheMetrics struct {
+type Metrics struct {
 	builds   metric.Int64Counter
 	errors   metric.Int64Counter
 	duration metric.Float64Histogram
@@ -36,9 +42,9 @@ type cacheMetrics struct {
 	upstreamsMiss metric.Int64Counter
 }
 
-// newCacheMetrics registers the snapshot instruments on the given meter.
-func newCacheMetrics(meter metric.Meter) (*cacheMetrics, error) {
-	m := &cacheMetrics{}
+// New registers the snapshot instruments on the given meter.
+func New(meter metric.Meter) (*Metrics, error) {
+	m := &Metrics{}
 	var err error
 
 	if m.builds, err = meter.Int64Counter("aether.agent.snapshot.builds",
@@ -78,8 +84,8 @@ func newCacheMetrics(meter metric.Meter) (*cacheMetrics, error) {
 	return m, nil
 }
 
-// snapshotShape records per-snapshot size gauges.
-func (m *cacheMetrics) snapshotShape(ctx context.Context, clusters, declared, observed int) {
+// SnapshotShape records per-snapshot size gauges.
+func (m *Metrics) SnapshotShape(ctx context.Context, clusters, declared, observed int) {
 	if m == nil {
 		return
 	}
@@ -88,17 +94,17 @@ func (m *cacheMetrics) snapshotShape(ctx context.Context, clusters, declared, ob
 	m.upstreamsObserved.Record(ctx, int64(observed))
 }
 
-// upstreamMiss counts one ODCDS miss. The service name is deliberately NOT a
+// UpstreamMiss counts one ODCDS miss. The service name is deliberately NOT a
 // metric attribute (unbounded cardinality); it is logged instead.
-func (m *cacheMetrics) upstreamMiss(ctx context.Context, _ string) {
+func (m *Metrics) UpstreamMiss(ctx context.Context, _ string) {
 	if m == nil {
 		return
 	}
 	m.upstreamsMiss.Add(ctx, 1)
 }
 
-// generated records the outcome of one snapshot generation.
-func (m *cacheMetrics) generated(ctx context.Context, seconds float64, version int64, err error) {
+// Generated records the outcome of one snapshot generation.
+func (m *Metrics) Generated(ctx context.Context, seconds float64, version int64, err error) {
 	if m == nil {
 		return
 	}
