@@ -6,7 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/common/telemetry"
+	"github.com/bpalermo/aether/common/telemetry/setup"
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -33,7 +33,7 @@ func SetupManagerLogging(ctx context.Context, cfg Config, name, version string) 
 		return SetupLogging(cfg.Debug, name), nil, nil
 	}
 
-	provider, shutdown, err := telemetry.SetupLogs(ctx, telemetry.Config{
+	provider, shutdown, err := setup.SetupLogs(ctx, setup.Config{
 		ServiceName:    name,
 		ServiceVersion: version,
 		OTLPEndpoint:   cfg.OTLPEndpoint,

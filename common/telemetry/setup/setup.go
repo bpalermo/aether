@@ -1,6 +1,12 @@
-// Package telemetry provides OpenTelemetry instrumentation bridged into
-// controller-runtime's Prometheus registry, with optional OTLP gRPC export.
-package telemetry
+// Package setup wires OpenTelemetry providers for long-running binaries:
+// an SDK MeterProvider bridged into controller-runtime's Prometheus registry,
+// a TracerProvider, and a LoggerProvider, each with optional OTLP gRPC export.
+//
+// Only binary mains (agent, registrar, controller — via common/manager) may
+// import this package: it drags in the OTel SDK and every exporter. Packages
+// that merely instrument (spans, meters, attribute keys, gRPC stats handlers)
+// must import the parent common/telemetry package instead.
+package setup
 
 import (
 	"context"

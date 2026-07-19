@@ -12,8 +12,9 @@ import (
 const tracerName = "aether/cni-plugin"
 
 // startPodSpan starts a root span for a CNI pod operation. The span is a no-op
-// unless tracing was enabled via telemetry.Setup; the returned context carries
-// it into the gRPC client, where the stats handler propagates it to the agent.
+// unless tracing was enabled via the plugin's cni/internal/telemetry.Init; the
+// returned context carries it into the gRPC client, where the stats handler
+// propagates it to the agent.
 func startPodSpan(ctx context.Context, name, podName, namespace, containerID string) (context.Context, trace.Span) {
 	return otel.Tracer(tracerName).Start(
 		ctx, name,

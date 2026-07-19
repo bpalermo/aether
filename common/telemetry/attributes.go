@@ -1,3 +1,11 @@
+// Package telemetry is the instrumentation-only OpenTelemetry API surface
+// shared across Aether: attribute keys, span helpers, and gRPC stats handlers.
+// Everything here is a no-op until a binary main installs real providers via
+// common/telemetry/setup (or the CNI plugin's cni/internal/telemetry).
+//
+// This package must stay free of the OTel SDK, exporters, and Prometheus so
+// that short-lived binaries (the CNI plugin) can instrument without linking
+// provider/exporter machinery.
 package telemetry
 
 import "go.opentelemetry.io/otel/attribute"

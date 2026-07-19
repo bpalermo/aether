@@ -1,4 +1,4 @@
-package telemetry
+package setup
 
 import metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
