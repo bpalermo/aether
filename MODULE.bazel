@@ -117,6 +117,7 @@ use_repo(
     "com_github_testcontainers_testcontainers_go",
     "com_github_testcontainers_testcontainers_go_modules_dynamodb",
     "com_github_testcontainers_testcontainers_go_modules_etcd",
+    "com_github_uudashr_gocognit",
     "com_github_vladimirvivien_gexe",
     "com_github_zeebo_errs",
     "in_gopkg_natefinch_lumberjack_v2",

@@ -16,7 +16,7 @@ try-import %workspace%/colima.bazelrc
 test:macos --config=colima
 
 # Lint (usage: --config=lint or: bazel build --config=lint //...)
-build:lint --aspects=//bazel/lint:linters.bzl%buf,//bazel/lint:linters.bzl%buildifier,//bazel/lint:linters.bzl%shellcheck
+build:lint --aspects=//bazel/lint:linters.bzl%buf,//bazel/lint:linters.bzl%buildifier,//bazel/lint:linters.bzl%shellcheck,//bazel/lint:linters.bzl%gocognit
 
 # CI lint (usage: --config=ci — fails build on lint violations)
 build:ci --config=lint
