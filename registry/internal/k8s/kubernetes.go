@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,6 +27,13 @@ type Config struct {
 	ClusterName string
 }
 
+// nodeLocalityCacheTTL bounds how long cached node localities are served without
+// re-listing nodes. Topology labels essentially never change and a node's
+// InternalIP is stable for its lifetime, so a few minutes of staleness is safe;
+// a pod landing on a node that is not yet cached forces an immediate refresh
+// regardless of the TTL (see buildNodeLocalities).
+const nodeLocalityCacheTTL = 5 * time.Minute
+
 // KubernetesRegistry is a Registry implementation backed by the Kubernetes API server.
 // It reads pods labeled with aether.io/managed=true and converts them to ServiceEndpoints.
 // Write operations (Register/Unregister) are no-ops since the API server is the source of truth.
@@ -32,6 +41,17 @@ type KubernetesRegistry struct {
 	log         *slog.Logger
 	clusterName string
 	reader      client.Reader
+
+	// Node-locality cache (issue #541): List/ListAll run on every registry
+	// reload — dozens of times per minute during churn — and used to resolve
+	// node localities with serial per-node Gets each call. The cache is
+	// refreshed with a single node List and then served from memory until the
+	// TTL lapses or an unknown node shows up.
+	nodeMu          sync.Mutex
+	nodeCache       map[string]locality
+	nodeCacheExpiry time.Time
+	nodeCacheTTL    time.Duration
+	now             func() time.Time
 }
 
 // NewKubernetesRegistry creates a new Kubernetes API server backed Registry.
@@ -39,9 +59,11 @@ type KubernetesRegistry struct {
 // cache synchronization issues during startup.
 func NewKubernetesRegistry(log *slog.Logger, reader client.Reader, cfg Config) *KubernetesRegistry {
 	return &KubernetesRegistry{
-		log:         commonlog.Named(log, "registry-kubernetes"),
-		clusterName: cfg.ClusterName,
-		reader:      reader,
+		log:          commonlog.Named(log, "registry-kubernetes"),
+		clusterName:  cfg.ClusterName,
+		reader:       reader,
+		nodeCacheTTL: nodeLocalityCacheTTL,
+		now:          time.Now,
 	}
 }
 
@@ -106,6 +128,10 @@ func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, 
 	var endpoints []*registryv1.ServiceEndpoint
 	for i := range pods {
 		pod := &pods[i]
+		// The ServiceAccount filter stays in memory: spec.serviceAccountName is
+		// NOT a supported server-side pod field selector, and managed pods carry
+		// no per-service label — only aether.io/managed=true (issue #541).
+		//
 		// The registry key is the namespace-qualified "<ns>/<sa>" (020 Part 1),
 		// matching the CNI registration path (registry/cni.go) and the etcd/ddb
 		// backends. Keying by the bare ServiceAccount would collide same-named SAs
@@ -209,8 +235,12 @@ func (r *KubernetesRegistry) listManagedPods(ctx context.Context) ([]corev1.Pod,
 	return pods, nil
 }
 
-// buildNodeLocalities fetches topology labels for all unique nodes referenced by the given pods.
-// Results are cached by node name to avoid redundant API calls.
+// buildNodeLocalities resolves topology labels for all unique nodes referenced by the
+// given pods, served from a TTL'd in-memory cache (issue #541). On a cache miss —
+// TTL lapsed or a pod referencing a node the cache has never seen (node added) —
+// the whole cache is rebuilt with a single node List instead of the old serial
+// per-node Gets. As before, a pod referencing a node that does not exist fails the
+// listing.
 func (r *KubernetesRegistry) buildNodeLocalities(ctx context.Context, pods []corev1.Pod) (map[string]locality, error) {
 	// Collect unique node names
 	nodeNames := make(map[string]struct{})
@@ -219,14 +249,47 @@ func (r *KubernetesRegistry) buildNodeLocalities(ctx context.Context, pods []cor
 			nodeNames[nodeName] = struct{}{}
 		}
 	}
+	if len(nodeNames) == 0 {
+		return map[string]locality{}, nil
+	}
+
+	r.nodeMu.Lock()
+	defer r.nodeMu.Unlock()
+
+	if r.nodeCache == nil || !r.now().Before(r.nodeCacheExpiry) || !nodeCacheContainsAll(r.nodeCache, nodeNames) {
+		if err := r.refreshNodeCacheLocked(ctx); err != nil {
+			return nil, err
+		}
+	}
 
 	localities := make(map[string]locality, len(nodeNames))
 	for nodeName := range nodeNames {
-		var node corev1.Node
-		if err := r.reader.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
-			r.log.ErrorContext(ctx, "failed to get node for locality", "error", err, "node", nodeName)
-			return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		loc, ok := r.nodeCache[nodeName]
+		if !ok {
+			// The refresh just listed every node and this one is absent: the pod
+			// references a node that no longer exists. Fail the listing, matching
+			// the pre-cache per-node Get behavior (NotFound propagated as error).
+			r.log.ErrorContext(ctx, "failed to get node for locality", "node", nodeName)
+			return nil, fmt.Errorf("failed to get node %s: node not found", nodeName)
 		}
+		localities[nodeName] = loc
+	}
+
+	return localities, nil
+}
+
+// refreshNodeCacheLocked rebuilds the node-locality cache from a single node List.
+// Callers must hold nodeMu.
+func (r *KubernetesRegistry) refreshNodeCacheLocked(ctx context.Context) error {
+	var nodeList corev1.NodeList
+	if err := r.reader.List(ctx, &nodeList); err != nil {
+		r.log.ErrorContext(ctx, "failed to list nodes for locality", "error", err)
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	cache := make(map[string]locality, len(nodeList.Items))
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
 		loc := locality{
 			region: node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
 			zone:   node.Labels[constants.AnnotationKubernetesNodeTopologyZone],
@@ -237,10 +300,22 @@ func (r *KubernetesRegistry) buildNodeLocalities(ctx context.Context, pods []cor
 				break
 			}
 		}
-		localities[nodeName] = loc
+		cache[node.Name] = loc
 	}
 
-	return localities, nil
+	r.nodeCache = cache
+	r.nodeCacheExpiry = r.now().Add(r.nodeCacheTTL)
+	return nil
+}
+
+// nodeCacheContainsAll reports whether every requested node name is present in the cache.
+func nodeCacheContainsAll(cache map[string]locality, names map[string]struct{}) bool {
+	for name := range names {
+		if _, ok := cache[name]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // podToEndpoint converts a Kubernetes Pod to a ServiceEndpoint.
