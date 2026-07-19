@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -114,7 +115,9 @@ func TestSweepGhostEndpoints(t *testing.T) {
 
 // TestSweepPrunesStalePods: a stored pod whose network namespace no longer
 // exists (a missed CNI DEL) is removed from storage and its registry endpoint
-// deregistered; a live pod is untouched.
+// deregistered; a live pod is untouched. Since #566 a stale-netns pod is only
+// pruned after ghostNetnsFailThreshold consecutive failed passes (hysteresis),
+// so this drives the sweep to the threshold.
 func TestSweepPrunesStalePods(t *testing.T) {
 	ctx := context.Background()
 
@@ -140,6 +143,13 @@ func TestSweepPrunesStalePods(t *testing.T) {
 	}}
 	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
 
+	// Below the threshold the pod survives (hysteresis).
+	for i := 1; i < ghostNetnsFailThreshold; i++ {
+		s.sweepGhostEndpoints(ctx)
+		_, err := store.GetResource(ctx, types.ContainerID("container-stale"))
+		require.NoError(t, err, "stale pod kept below the netns-fail threshold (pass %d)", i)
+	}
+	// The threshold pass prunes it.
 	s.sweepGhostEndpoints(ctx)
 
 	_, err := store.GetResource(ctx, types.ContainerID("container-stale"))
@@ -284,4 +294,249 @@ func TestSweepPrefersAuthoritativeListing(t *testing.T) {
 
 	_, ok := reg.registered["default/default/10.0.0.1"]
 	require.True(t, ok, "sweep must re-register from the authoritative (empty) listing, not the stale cache")
+}
+
+// runningK8sPod returns a mesh-managed Kubernetes pod that is Running with an
+// assigned IP — the state the #566 API cross-check treats as "not a ghost".
+func runningK8sPod(name, namespace, ip string) *corev1.Pod {
+	p := validK8sPod(name, namespace)
+	p.Status.Phase = corev1.PodRunning
+	p.Status.PodIP = ip
+	return p
+}
+
+// TestSweepHysteresisTransientNetnsFailure (#566): a single (or below-threshold)
+// run of failed netns checks must NOT prune — only ghostNetnsFailThreshold
+// CONSECUTIVE failures do. A passing check in between resets the streak.
+func TestSweepHysteresisTransientNetnsFailure(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+
+	pod := validCNIPod("pod-a", "default", "container-a")
+	pod.NetworkNamespace = "/run/aether/netns/a"
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), pod))
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	// No k8s client: the netns-only path (no orphan/cross-check) is exercised.
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	// Two failed passes: below threshold, pod kept.
+	netnsExists = func(string) bool { return false }
+	for i := 1; i < ghostNetnsFailThreshold; i++ {
+		s.sweepGhostEndpoints(ctx)
+		_, err := store.GetResource(ctx, types.ContainerID("container-a"))
+		require.NoError(t, err, "pod kept below threshold (pass %d)", i)
+	}
+
+	// A passing check resets the streak: the prior failures no longer count.
+	netnsExists = func(string) bool { return true }
+	s.sweepGhostEndpoints(ctx)
+	assert.NotContains(t, s.netnsFailStreaks, "container-a", "passing netns check resets the streak")
+
+	// One more failure after the reset is again below threshold -> still kept.
+	netnsExists = func(string) bool { return false }
+	s.sweepGhostEndpoints(ctx)
+	_, err := store.GetResource(ctx, types.ContainerID("container-a"))
+	require.NoError(t, err, "streak restarted after the reset; single failure never prunes")
+}
+
+// TestSweepAPICrossCheckVetoesPrune (#566): a pod whose netns check fails but
+// which the K8s API still reports Running with a live IP is NOT a ghost — it is
+// never pruned no matter how many passes fail, and never accrues a streak.
+func TestSweepAPICrossCheckVetoesPrune(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false } // every netns check fails
+
+	pod := validCNIPod("pod-running", "default", "container-running")
+	pod.NetworkNamespace = "/run/aether/netns/running"
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-running"), pod))
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	// API says the pod is Running with an IP -> cross-check veto.
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-running", "default", "10.0.0.1")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	for i := 0; i < ghostNetnsFailThreshold+2; i++ {
+		s.sweepGhostEndpoints(ctx)
+	}
+
+	_, err := store.GetResource(ctx, types.ContainerID("container-running"))
+	require.NoError(t, err, "Running-per-API pod is never pruned despite netns stat failures")
+	assert.NotContains(t, s.netnsFailStreaks, "container-running", "cross-check veto never accrues a failure streak")
+}
+
+// TestSweepMassBreakerRefusesPrune (#566): a pass that would prune more than
+// pruneBreakerFraction of stored pods (and more than pruneBreakerMinPods
+// absolute) is refused wholesale — no pod is removed and the breaker metric
+// increments. Simulates the incident: every pod's netns check fails at once.
+func TestSweepMassBreakerRefusesPrune(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false } // all netns checks fail (the blip)
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	const n = 10
+	for i := 0; i < n; i++ {
+		id := "container-" + string(rune('a'+i))
+		p := validCNIPod("pod-"+string(rune('a'+i)), "default", id)
+		p.NetworkNamespace = "/run/aether/netns/" + id
+		p.Ips = []string{"10.0.1." + string(rune('0'+i))}
+		require.NoError(t, store.AddResource(ctx, types.ContainerID(id), p))
+	}
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	// No k8s client: nothing vetoes, so all n pods are candidates once past
+	// hysteresis — exactly the correlated-failure case the breaker guards.
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	// Drive past the hysteresis threshold; the breaker must refuse every pass.
+	for i := 0; i < ghostNetnsFailThreshold+1; i++ {
+		s.sweepGhostEndpoints(ctx)
+	}
+
+	all, err := store.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, n, "mass-delete breaker refused the prune; every pod kept")
+}
+
+// TestSweepMassBreakerMetricAndInterlock (#566 + #567): when the mass breaker
+// trips, the breaker metric increments and lost-ADD eviction is skipped in the
+// same pass (interlock).
+func TestSweepMassBreakerMetricAndInterlock(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false }
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	const n = 10
+	objs := make([]client.Object, 0, n)
+	for i := 0; i < n; i++ {
+		id := "container-" + string(rune('a'+i))
+		name := "pod-" + string(rune('a'+i))
+		p := validCNIPod(name, "default", id)
+		p.NetworkNamespace = "/run/aether/netns/" + id
+		p.Ips = []string{"10.0.2." + string(rune('0'+i))}
+		require.NoError(t, store.AddResource(ctx, types.ContainerID(id), p))
+		// The API still reports every pod Running WITHOUT an IP so the cross-check
+		// does not veto (podRunningWithIP requires an IP) — the pods remain prune
+		// candidates and the breaker must trip.
+		kp := runningK8sPod(name, "default", "")
+		objs = append(objs, kp)
+	}
+	// One extra live mesh pod that is missing from storage -> a lost-ADD that
+	// WOULD be a candidate for eviction if the breaker had not tripped.
+	objs = append(objs, runningK8sPod("pod-missing", "default", "10.9.9.9"))
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(objs...).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	m, reader := newTestCNIMetrics(t)
+	s.metrics = m
+
+	evictions := 0
+	s.evictPod = func(context.Context, string, string) error { evictions++; return nil }
+
+	for i := 0; i < ghostNetnsFailThreshold+lostAddEvictThreshold+2; i++ {
+		s.sweepGhostEndpoints(ctx)
+	}
+
+	all, err := store.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, n, "breaker refused prune; every stored pod kept")
+	assert.Zero(t, evictions, "eviction is interlocked off while the breaker trips")
+
+	tripped, found := metricSum(t, reader, "aether.agent.ghost_sweep.prune_breaker_tripped")
+	require.True(t, found, "breaker metric recorded")
+	assert.Positive(t, tripped, "breaker tripped at least once")
+}
+
+// TestSweepEvictsLostAddPodAfterThreshold (#567): a live mesh pod missing from
+// local storage is evicted only after lostAddEvictThreshold consecutive sweeps,
+// via the Eviction API, and its streak resets after eviction.
+func TestSweepEvictsLostAddPodAfterThreshold(t *testing.T) {
+	ctx := context.Background()
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]() // storage empty: the ADD was lost
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-lost", "default", "10.0.0.7")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	var evicted []string
+	s.evictPod = func(_ context.Context, ns, name string) error {
+		evicted = append(evicted, ns+"/"+name)
+		return nil
+	}
+
+	// Below the threshold: warned, not evicted.
+	for i := 1; i < lostAddEvictThreshold; i++ {
+		s.sweepGhostEndpoints(ctx)
+		assert.Empty(t, evicted, "not evicted below threshold (pass %d)", i)
+	}
+	// Threshold pass: evicted once.
+	s.sweepGhostEndpoints(ctx)
+	assert.Equal(t, []string{"default/pod-lost"}, evicted, "evicted at the threshold")
+	assert.NotContains(t, s.missingStorageStreaks, podKey("default", "pod-lost"), "streak reset after eviction")
+}
+
+// TestSweepLostAddEvictionRateLimited (#567): at most lostAddEvictPerPass pods
+// are evicted in a single sweep pass even when many are eligible.
+func TestSweepLostAddEvictionRateLimited(t *testing.T) {
+	ctx := context.Background()
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]() // all ADDs lost
+	objs := make([]client.Object, 0, 5)
+	for i := 0; i < 5; i++ {
+		objs = append(objs, runningK8sPod("pod-"+string(rune('a'+i)), "default", "10.0.3."+string(rune('0'+i))))
+	}
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(objs...).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	evictionsPerPass := 0
+	maxPerPass := 0
+	s.evictPod = func(context.Context, string, string) error { evictionsPerPass++; return nil }
+
+	for i := 0; i < lostAddEvictThreshold+3; i++ {
+		evictionsPerPass = 0
+		s.sweepGhostEndpoints(ctx)
+		if evictionsPerPass > maxPerPass {
+			maxPerPass = evictionsPerPass
+		}
+	}
+	assert.LessOrEqual(t, maxPerPass, lostAddEvictPerPass, "evictions are rate-limited per pass")
+	assert.Positive(t, maxPerPass, "some eviction happened once the threshold was crossed")
+}
+
+// TestSweepLostAddStreakResetsOnRecovery (#567): once a missing pod appears in
+// storage (CNI ADD re-ran) its streak resets, so a later recurrence must again
+// clear the full threshold before another eviction.
+func TestSweepLostAddStreakResetsOnRecovery(t *testing.T) {
+	ctx := context.Background()
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-x", "default", "10.0.0.1")).Build()
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	evictions := 0
+	s.evictPod = func(context.Context, string, string) error { evictions++; return nil }
+
+	// One below-threshold miss, then the pod registers (ADD lands): streak clears.
+	s.sweepGhostEndpoints(ctx)
+	require.Equal(t, 1, s.missingStorageStreaks[podKey("default", "pod-x")])
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-x"), validCNIPod("pod-x", "default", "container-x")))
+	s.sweepGhostEndpoints(ctx)
+	assert.NotContains(t, s.missingStorageStreaks, podKey("default", "pod-x"), "streak reset once the pod registered")
+	assert.Zero(t, evictions, "no eviction after recovery")
 }

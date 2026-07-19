@@ -8,6 +8,17 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "get", "watch"]
+  # Self-heal lost CNI ADDs (#567): evict a live mesh pod that has no local
+  # storage entry (no mesh listener) so sandbox recreation re-runs CNI ADD. The
+  # Eviction API is PDB-respecting; the ghost sweep rate-limits and interlocks it
+  # behind the prune circuit breaker.
+  - apiGroups: ["policy"]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  # Record a Warning Event on a pod when the agent evicts it for a lost CNI ADD.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
   - apiGroups: [""]
     resources: ["nodes"]
     # patch: remove the aether.io/agent-not-ready startup taint once CNI is serving.

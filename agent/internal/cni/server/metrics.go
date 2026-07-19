@@ -30,6 +30,8 @@ type cniMetrics struct {
 	orphansPruned     metric.Int64Counter
 	missingStorage    metric.Int64Counter
 	sweepErrors       metric.Int64Counter
+	pruneBreaker      metric.Int64Counter
+	lostAddEvictions  metric.Int64Counter
 	storagePods       metric.Int64Gauge
 	healthTransitions metric.Int64Counter
 	promotionDelay    metric.Float64Histogram
@@ -63,6 +65,14 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	if m.sweepErrors, err = meter.Int64Counter("aether.agent.ghost_sweep.errors",
 		metric.WithDescription("Ghost sweep cycles that failed before reconciling")); err != nil {
 		return nil, fmt.Errorf("sweep errors: %w", err)
+	}
+	if m.pruneBreaker, err = meter.Int64Counter("aether.agent.ghost_sweep.prune_breaker_tripped",
+		metric.WithDescription("Ghost sweep passes whose mass-delete circuit breaker refused to prune (correlated netns-check failure suspected)")); err != nil {
+		return nil, fmt.Errorf("prune breaker: %w", err)
+	}
+	if m.lostAddEvictions, err = meter.Int64Counter("aether.agent.ghost_sweep.lost_add_evictions",
+		metric.WithDescription("Pods evicted by the ghost sweep to force a fresh CNI ADD after a lost one left them with no mesh listener")); err != nil {
+		return nil, fmt.Errorf("lost add evictions: %w", err)
 	}
 	if m.storagePods, err = meter.Int64Gauge("aether.agent.storage.pods",
 		metric.WithDescription("Pods currently tracked in the agent's local file storage")); err != nil {
@@ -105,6 +115,23 @@ func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingR
 		m.missingStorage.Add(ctx, int64(missingStorage))
 	}
 	m.storagePods.Record(ctx, int64(storedPods))
+}
+
+// pruneBreakerTripped records a sweep pass whose mass-delete circuit breaker
+// refused to prune (#566).
+func (m *cniMetrics) pruneBreakerTripped(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.pruneBreaker.Add(ctx, 1)
+}
+
+// lostAddEvicted records a pod evicted to force a fresh CNI ADD (#567).
+func (m *cniMetrics) lostAddEvicted(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.lostAddEvictions.Add(ctx, 1)
 }
 
 func (m *cniMetrics) healthTransition(ctx context.Context, from, to string) {
