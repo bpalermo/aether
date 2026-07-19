@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/xds/cache/snapversion"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -40,14 +41,14 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	c.snapshotMu.Lock()
 	defer c.snapshotMu.Unlock()
 
-	v := generateSnapshotVersion(snapshotVersionLabel, c.version)
+	v := snapversion.Generate(snapshotVersionLabel, c.version)
 
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.snapshot.generate",
 		trace.WithAttributes(telemetry.AttrSnapshotVersion.String(v)))
 	defer func() { telemetry.EndSpan(span, retErr) }()
 	start := time.Now()
 	defer func() {
-		c.metrics.generated(ctx, time.Since(start).Seconds(), int64(c.version.Load()), retErr)
+		c.metrics.Generated(ctx, time.Since(start).Seconds(), int64(c.version.Load()), retErr)
 	}()
 
 	listeners := c.Listeners()
@@ -162,7 +163,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	declared := c.declaredCountLocked()
 	observed := c.observedCountLocked()
 	c.depMu.RUnlock()
-	c.metrics.snapshotShape(ctx, len(clusters), declared, observed)
+	c.metrics.SnapshotShape(ctx, len(clusters), declared, observed)
 
 	snapshot, err := cachev3.NewSnapshot(v, resources)
 	if err != nil {

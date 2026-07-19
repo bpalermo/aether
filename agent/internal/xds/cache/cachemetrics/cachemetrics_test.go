@@ -1,4 +1,4 @@
-package cache
+package cachemetrics
 
 import (
 	"context"
@@ -9,13 +9,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-func newTestCacheMetrics(t *testing.T) (*cacheMetrics, *sdkmetric.ManualReader) {
+func newTestMetrics(t *testing.T) (*Metrics, *sdkmetric.ManualReader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	m, err := newCacheMetrics(provider.Meter("test"))
+	m, err := New(provider.Meter("test"))
 	if err != nil {
-		t.Fatalf("newCacheMetrics() error = %v", err)
+		t.Fatalf("New() error = %v", err)
 	}
 	return m, reader
 }
@@ -52,17 +52,17 @@ func metricValue(t *testing.T, reader *sdkmetric.ManualReader, name string) (int
 }
 
 func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
-	var m *cacheMetrics
-	m.generated(context.Background(), 0.01, 1, nil)
-	m.generated(context.Background(), 0.01, 1, errors.New("boom"))
+	var m *Metrics
+	m.Generated(context.Background(), 0.01, 1, nil)
+	m.Generated(context.Background(), 0.01, 1, errors.New("boom"))
 }
 
 func TestCacheMetrics_GeneratedSuccess(t *testing.T) {
-	m, reader := newTestCacheMetrics(t)
+	m, reader := newTestMetrics(t)
 	ctx := context.Background()
 
-	m.generated(ctx, 0.01, 5, nil)
-	m.generated(ctx, 0.02, 6, nil)
+	m.Generated(ctx, 0.01, 5, nil)
+	m.Generated(ctx, 0.02, 6, nil)
 
 	if got, _ := metricValue(t, reader, "aether.agent.snapshot.builds"); got != 2 {
 		t.Errorf("builds = %d, want 2", got)
@@ -76,9 +76,9 @@ func TestCacheMetrics_GeneratedSuccess(t *testing.T) {
 }
 
 func TestCacheMetrics_GeneratedFailure(t *testing.T) {
-	m, reader := newTestCacheMetrics(t)
+	m, reader := newTestMetrics(t)
 
-	m.generated(context.Background(), 0.01, 5, errors.New("snapshot rejected"))
+	m.Generated(context.Background(), 0.01, 5, errors.New("snapshot rejected"))
 
 	if got, _ := metricValue(t, reader, "aether.agent.snapshot.errors"); got != 1 {
 		t.Errorf("errors = %d, want 1", got)

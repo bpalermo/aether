@@ -95,7 +95,7 @@ func (c *SnapshotCache) ObserveDependency(ctx context.Context, service string) b
 
 	c.log.InfoContext(ctx, "observed undeclared upstream (ODCDS miss); adding to node dependency set",
 		"service", service, "ttl", c.observedTTLValue().String())
-	c.metrics.upstreamMiss(ctx, service)
+	c.metrics.UpstreamMiss(ctx, service)
 	c.signalDependencyChange()
 	return true
 }

@@ -1,4 +1,4 @@
-package cache
+package snapversion
 
 import (
 	"strings"
@@ -9,9 +9,9 @@ import (
 	"go.uber.org/atomic"
 )
 
-// TestGenerateSnapshotVersion verifies that the version string is non-empty,
+// TestGenerate verifies that the version string is non-empty,
 // ends with the given label, and increments the counter on each call.
-func TestGenerateSnapshotVersion(t *testing.T) {
+func TestGenerate(t *testing.T) {
 	tests := []struct {
 		name  string
 		label string
@@ -26,7 +26,7 @@ func TestGenerateSnapshotVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			counter := atomic.NewUint64(0)
-			got := generateSnapshotVersion(tt.label, counter)
+			got := Generate(tt.label, counter)
 
 			assert.NotEmpty(t, got)
 			assert.Equal(t, uint64(1), counter.Load(), "counter should be incremented to 1 after one call")
@@ -36,29 +36,29 @@ func TestGenerateSnapshotVersion(t *testing.T) {
 	}
 }
 
-// TestGenerateSnapshotVersion_CounterMonotonicallyIncreases verifies that successive
+// TestGenerate_CounterMonotonicallyIncreases verifies that successive
 // calls produce strictly increasing counter values and distinct version strings.
-func TestGenerateSnapshotVersion_CounterMonotonicallyIncreases(t *testing.T) {
+func TestGenerate_CounterMonotonicallyIncreases(t *testing.T) {
 	counter := atomic.NewUint64(0)
 	label := "listener"
 
-	v1 := generateSnapshotVersion(label, counter)
-	v2 := generateSnapshotVersion(label, counter)
-	v3 := generateSnapshotVersion(label, counter)
+	v1 := Generate(label, counter)
+	v2 := Generate(label, counter)
+	v3 := Generate(label, counter)
 
 	assert.Equal(t, uint64(3), counter.Load())
 	assert.NotEqual(t, v1, v2, "consecutive versions should differ")
 	assert.NotEqual(t, v2, v3, "consecutive versions should differ")
 }
 
-// TestGenerateSnapshotVersion_ContainsTimestampCounterAndLabel verifies that the
+// TestGenerate_ContainsTimestampCounterAndLabel verifies that the
 // version string contains all three required parts: a non-zero timestamp, an
 // incrementing counter, and the provided label.
-func TestGenerateSnapshotVersion_ContainsTimestampCounterAndLabel(t *testing.T) {
+func TestGenerate_ContainsTimestampCounterAndLabel(t *testing.T) {
 	counter := atomic.NewUint64(9)
 	label := "cluster"
 
-	got := generateSnapshotVersion(label, counter)
+	got := Generate(label, counter)
 
 	parts := strings.Split(got, ".")
 	// Label may itself contain dots, but the prefix must be "timestamp.counter"
