@@ -7,16 +7,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bpalermo/aether/common/serviceref"
-
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	"google.golang.org/protobuf/proto"
 )
 
 // RemoveEndpoint removes a single endpoint by IP from the given cluster's
@@ -78,24 +74,14 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 
 // clustersEndpointsAndVhosts returns all cached cluster, endpoint, and virtual
 // host resources as separate slices. It returns the concrete vhost type to avoid
-// boxing/unboxing at the caller. Each service cluster speaks per-source mTLS to the
-// destination node, so the upstream transport-socket matcher (selecting the source
-// pod's certificate by its network namespace) is injected here from the current
-// local workloads; the stored cluster is cloned so prior snapshots are unaffected.
-// Before the node SVID is served the base cluster is emitted without the matcher.
+// boxing/unboxing at the caller. Each service cluster speaks per-source mTLS to
+// the destination node; the upstream transport-socket matcher (selecting the
+// source pod's certificate by its network namespace) is precomputed into
+// entry.mtlsCluster at entry build/invalidation time (refreshEntryMTLSLocked),
+// so snapshot generation only reads the cached proto (issue #537). Before the
+// node SVID is served mtlsCluster is nil and the base cluster is emitted
+// without the matcher.
 func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
-	c.localMu.RLock()
-	netnsToID := make(map[string]string, len(c.localWorkloads))
-	ids := make([]string, 0, len(c.localWorkloads))
-	for netns, id := range c.localWorkloads {
-		netnsToID[netns] = id
-		ids = append(ids, id)
-	}
-	nodeSpiffeID := c.nodeSpiffeID
-	trustDomain := c.trustDomain
-	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
-	c.localMu.RUnlock()
-
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 
@@ -113,42 +99,9 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			}
 			continue
 		}
-		cluster := entry.cluster
-		if nodeSpiffeID != "" {
-			// Expected server identities for this service: one SPIFFE ID per
-			// endpoint namespace. The peer SVID's SA is the BARE service name —
-			// entry.service is now the namespace-qualified "<ns>/<svc>" key
-			// (020 Part 1), so parse out the bare name for the sa/ segment (the
-			// namespace comes from sanNamespaces). The handshake then proves the
-			// peer IS the service asked for, not merely some workload in the TD.
-			saName := entry.service
-			if ref, ok := serviceref.ParseKey(entry.service); ok {
-				saName = ref.Name
-			}
-			sanURIs := make([]string, 0, len(entry.sanNamespaces))
-			for _, ns := range entry.sanNamespaces {
-				sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, ns, saName))
-			}
-			cl, _ := proto.Clone(entry.cluster).(*clusterv3.Cluster)
-			// entry.sni carries the destination port so the peer's inbound
-			// demuxes to the right loopback port (multi-port routing).
-			if c.edge {
-				// The edge has one identity and no local workloads: a single
-				// transport socket presenting the edge SVID, fetched over the
-				// spire_agent SDS cluster (SPIRE directly, no bridge).
-				cl.TransportSocket = proxy.EdgeUpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, entry.sni)
-			} else {
-				// Waypoint (proposal 019): remote endpoints are dialed at the node
-				// tunnel and demux by a structured SNI <port>.<svc>.<ns>.<meshDomain>
-				// (entry.sni is the port). The two-level matcher presents it only for
-				// waypoint-tagged endpoints. Empty when the feature is off.
-				waypointSNI := ""
-				if c.waypointEnabled {
-					waypointSNI = entry.sni + "." + proxy.ServiceClusterName(entry.service, c.meshDomain)
-				}
-				proxy.InjectUpstreamMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, entry.sni, waypointSNI)
-			}
-			cluster = cl
+		var cluster types.Resource = entry.cluster
+		if entry.mtlsCluster != nil {
+			cluster = entry.mtlsCluster
 		}
 		clusters = append(clusters, cluster)
 		if entry.loadAssignment != nil {
@@ -303,9 +256,9 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
 		// destination pod's mesh inbound (pod_ip:18008). The per-source mTLS transport
-		// socket is injected at snapshot time (clustersEndpointsAndVhosts).
+		// socket is precomputed into entry.mtlsCluster below (recomputeMTLSClustersLocked).
 		// Server-identity pinning: the union of the endpoints' namespaces
-		// renders the service's expected SPIFFE IDs at snapshot time.
+		// renders the service's expected SPIFFE IDs there too.
 		nsSet := make(map[string]struct{})
 		for _, endpoint := range endpoints {
 			if ns := endpoint.GetKubernetesMetadata().GetNamespace(); ns != "" {
@@ -486,6 +439,12 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 		c.clusters[name] = entry
 	}
+
+	// Precompute each entry's mTLS-injected cluster + SAN URIs (issue #537) so
+	// snapshot generation only reads the cached protos. Covers the freshly
+	// built entries AND the retained (grace-period) ones, under the same
+	// clusterMu hold that rebuilt the map.
+	c.recomputeMTLSClustersLocked()
 
 	c.clusterMu.Unlock()
 

@@ -34,6 +34,10 @@ func (c *SnapshotCache) SetNodeIdentity(ctx context.Context, nodeSpiffeID string
 	c.nodeSpiffeID = nodeSpiffeID
 	c.localMu.Unlock()
 
+	// The node SVID gates (and is embedded in) every cached mTLS-injected
+	// cluster; rebuild them before the snapshot reads the cache (issue #537).
+	c.recomputeMTLSClusters()
+
 	return c.generateSnapshot(ctx)
 }
 

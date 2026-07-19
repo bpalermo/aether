@@ -361,6 +361,21 @@ type clusterEntry struct {
 	// mTLS transport socket so the destination inbound demuxes to the right
 	// loopback port (multi-port routing, proposal 005). Empty = default chain.
 	sni string
+	// sanURIs is the cached render of sanNamespaces as the service's expected
+	// server SPIFFE IDs (spiffe://<td>/ns/<ns>/sa/<bare-service>), rebuilt
+	// together with mtlsCluster by refreshEntryMTLSLocked whenever the entry
+	// or the node's local mTLS state changes. Consumed by the TCP floor
+	// cluster builds (captureTCPClusters / edgeTCPClusters).
+	sanURIs []string
+	// mtlsCluster is the cached mTLS-injected copy of cluster (per-source
+	// transport-socket matcher, SAN pinning, SNI), precomputed at entry
+	// build/invalidation time (refreshEntryMTLSLocked) so snapshot generation
+	// only reads it (issue #537). Nil while the node SVID is unavailable — the
+	// bare cluster is emitted instead — and for TCP entries. NEVER mutate it
+	// in place: snapshots already set on go-control-plane alias it and xDS
+	// server goroutines marshal it without holding clusterMu. Invalidation
+	// paths REPLACE it with a freshly built clone.
+	mtlsCluster *clusterv3.Cluster
 	// tcp marks a PROTOCOL_TCP service entry. Such entries hold only the
 	// bare-name EDS load assignment (+ sanNamespaces/sni) for the transparent-
 	// capture TCP floor's "tcp:<svc>" cluster to reference; no HTTP (h2) cluster
@@ -526,6 +541,10 @@ func (c *SnapshotCache) SetEdgeIdentity(spiffeID, trustDomain string) {
 	c.nodeSpiffeID = spiffeID
 	c.trustDomain = trustDomain
 	c.localMu.Unlock()
+
+	// Rebuild the cached mTLS-injected clusters (usually a no-op here: the
+	// identity is set before the manager starts, ahead of any registry load).
+	c.recomputeMTLSClusters()
 }
 
 // SetRegistry stores the service registry for use in HasRegistryService.
@@ -594,6 +613,10 @@ func (c *SnapshotCache) setLocalWorkload(netns, spiffeID, trustDomain string) {
 	c.localWorkloads[netns] = spiffeID
 	c.trustDomain = trustDomain
 	c.localMu.Unlock()
+
+	// Every service cluster's per-source matcher embeds the netns→identity
+	// map; rebuild the cached mTLS-injected clusters (issue #537).
+	c.recomputeMTLSClusters()
 }
 
 // removeLocalWorkload drops a local pod's network namespace mapping.
@@ -601,4 +624,6 @@ func (c *SnapshotCache) removeLocalWorkload(netns string) {
 	c.localMu.Lock()
 	delete(c.localWorkloads, netns)
 	c.localMu.Unlock()
+
+	c.recomputeMTLSClusters()
 }
