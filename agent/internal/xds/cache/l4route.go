@@ -12,6 +12,7 @@ func (c *SnapshotCache) SetTCPServiceRoutes(routes map[string][]proxy.L4ServiceR
 	c.depMu.Lock()
 	changed := !equalL4ServiceRoutes(c.tcpServiceRoutes, routes)
 	c.tcpServiceRoutes = routes
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if !changed {
 		return
@@ -31,6 +32,7 @@ func (c *SnapshotCache) SetTLSServiceRoutes(routes map[string][]proxy.L4ServiceR
 	c.depMu.Lock()
 	changed := !equalL4ServiceRoutes(c.tlsServiceRoutes, routes)
 	c.tlsServiceRoutes = routes
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if !changed {
 		return
@@ -50,6 +52,7 @@ func (c *SnapshotCache) SetUDPServiceRoutes(routes map[string][]proxy.L4Backend)
 	c.depMu.Lock()
 	changed := !equalUDPRoutes(c.udpServiceRoutes, routes)
 	c.udpServiceRoutes = routes
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if !changed {
 		return

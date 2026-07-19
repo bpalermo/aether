@@ -44,6 +44,7 @@ func (c *SnapshotCache) setPodDependencies(netns string, cniPod *cniv1.CNIPod) {
 	c.depMu.Lock()
 	before := c.dependencySetLocked()
 	c.podDeps[netns] = deps
+	c.bumpDepGenLocked()
 	after := c.dependencySetLocked()
 	c.depMu.Unlock()
 
@@ -58,6 +59,7 @@ func (c *SnapshotCache) removePodDependencies(netns string) {
 	c.depMu.Lock()
 	before := c.dependencySetLocked()
 	delete(c.podDeps, netns)
+	c.bumpDepGenLocked()
 	after := c.dependencySetLocked()
 	c.depMu.Unlock()
 
@@ -81,6 +83,10 @@ func (c *SnapshotCache) ObserveDependency(ctx context.Context, service string) b
 	c.depMu.Lock()
 	_, known := c.dependencySetLocked()[service]
 	c.observedDeps[service] = time.Now()
+	// Bump even on a pure timestamp refresh: the memoized expiry horizon
+	// (depSetExpiry) may extend, and a stale horizon would expire this
+	// entry from the served set too early.
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 
 	if known {
@@ -110,6 +116,9 @@ func (c *SnapshotCache) PruneObservedDependencies() {
 			expired++
 		}
 	}
+	if expired > 0 {
+		c.bumpDepGenLocked()
+	}
 	c.depMu.Unlock()
 
 	if expired > 0 {
@@ -131,13 +140,46 @@ func (c *SnapshotCache) observedTTLValue() time.Duration {
 // dependencies. LoadClustersFromRegistry scopes the cluster/endpoint/route
 // snapshot to this set (demand-scoped distribution, proposal 004).
 func (c *SnapshotCache) DependencySet() map[string]struct{} {
-	c.depMu.RLock()
-	defer c.depMu.RUnlock()
-	return c.dependencySetLocked()
+	// Write lock (not RLock): dependencySetLocked may rebuild and store the
+	// memoized set. External callers get a copy — the memo is shared state.
+	c.depMu.Lock()
+	set := c.dependencySetLocked()
+	out := make(map[string]struct{}, len(set))
+	for svc := range set {
+		out[svc] = struct{}{}
+	}
+	c.depMu.Unlock()
+	return out
 }
 
-// dependencySetLocked builds the dependency set. Caller must hold depMu.
+// bumpDepGenLocked invalidates the memoized dependency set. EVERY writer of
+// ANY depMu-guarded field must call it after the write (rule of thumb: any
+// write under depMu bumps, even for fields dependencySetLocked does not read
+// today). Over-invalidation costs one recompute; a missed bump serves a stale
+// dependency set — clusters silently missing from the scoped snapshot.
+// Caller must hold depMu for writing.
+func (c *SnapshotCache) bumpDepGenLocked() {
+	c.depGen++
+}
+
+// dependencySetLocked returns the dependency set, memoized on the input
+// generation counter (issue #539): while depGen is unchanged the previously
+// built set is still exact and is returned as-is, EXCEPT that observed
+// dependencies expire by wall clock at read time without any mutator running
+// — so the memo also records the earliest observed-entry expiry
+// (depSetExpiry) and rebuilds once that instant passes, keeping expiry
+// semantics identical to the from-scratch build (PruneObservedDependencies
+// merely deletes already-expired entries later). The returned map is shared
+// across calls until the next rebuild and must be treated as read-only
+// (DependencySet hands external callers a copy). Caller must hold depMu for
+// writing (a rebuild stores the memo).
 func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
+	now := time.Now()
+	ttl := c.observedTTLValue()
+	if c.depSetValid && c.depSetGen == c.depGen && c.depSetTTL == ttl &&
+		(c.depSetExpiry.IsZero() || !now.After(c.depSetExpiry)) {
+		return c.depSet
+	}
 	set := make(map[string]struct{}, len(c.podDeps)*4+len(c.observedDeps)+len(c.staticDeps))
 	// Static (edge) dependencies: the explicitly exposed services.
 	for svc := range c.staticDeps {
@@ -170,11 +212,16 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 			set[u] = struct{}{}
 		}
 	}
-	now := time.Now()
-	ttl := c.observedTTLValue()
+	// Live observed dependencies, tracking the earliest wall-clock instant a
+	// memoized entry expires (an entry is live while now <= last+ttl, so the
+	// memo stays valid through that exact instant and rebuilds after).
+	var nextExpiry time.Time
 	for svc, last := range c.observedDeps {
 		if now.Sub(last) <= ttl {
 			set[svc] = struct{}{}
+			if exp := last.Add(ttl); nextExpiry.IsZero() || exp.Before(nextExpiry) {
+				nextExpiry = exp
+			}
 		}
 	}
 	// Service-based routing (proposal 023): a GAMMA route TARGET — the k8s Service an
@@ -208,6 +255,11 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 			}
 		}
 	}
+	c.depSet = set
+	c.depSetGen = c.depGen
+	c.depSetTTL = ttl
+	c.depSetExpiry = nextExpiry
+	c.depSetValid = true
 	return set
 }
 

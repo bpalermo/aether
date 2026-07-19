@@ -248,6 +248,23 @@ type SnapshotCache struct {
 	udpServiceRoutes map[string][]proxy.L4Backend
 	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
 	observedTTL time.Duration
+	// depGen counts mutations of the dependency-set inputs (issue #539): EVERY
+	// writer of ANY depMu-guarded field bumps it via bumpDepGenLocked, even for
+	// fields dependencySetLocked does not read today — over-invalidation costs
+	// one rebuild, a missed bump serves a stale dependency set (the demand-
+	// scoping bug class: clusters silently missing from the snapshot).
+	depGen uint64
+	// depSet/depSetGen/depSetTTL/depSetExpiry/depSetValid memoize
+	// dependencySetLocked: the cached set is served while depGen is unchanged,
+	// the TTL is unchanged, and no memoized observed dependency has crossed its
+	// TTL (depSetExpiry is the earliest such wall-clock instant; zero = none).
+	// depSet is shared with callers and must never be mutated after it is
+	// stored. All guarded by depMu.
+	depSet       map[string]struct{}
+	depSetGen    uint64
+	depSetTTL    time.Duration
+	depSetExpiry time.Time
+	depSetValid  bool
 	// depChanged receives a (coalesced) signal when the dependency set
 	// changes; the registry refresher rebuilds the scoped snapshot on it.
 	depChanged chan struct{}
@@ -597,6 +614,7 @@ func (c *SnapshotCache) SetStaticDependencies(services []string) {
 	c.depMu.Lock()
 	before := c.dependencySetLocked()
 	c.staticDeps = next
+	c.bumpDepGenLocked()
 	after := c.dependencySetLocked()
 	c.depMu.Unlock()
 

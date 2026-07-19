@@ -18,6 +18,7 @@ func (c *SnapshotCache) SetServiceRoutes(routes map[string][]proxy.GammaRoute) {
 	c.depMu.Lock()
 	changed := !equalServiceRoutes(c.serviceRoutes, routes)
 	c.serviceRoutes = routes
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
 		// Route-referenced extension filters live default-disabled in the per-pod
@@ -36,6 +37,7 @@ func (c *SnapshotCache) SetImportedServiceRoutes(routes map[string][]proxy.Gamma
 	c.depMu.Lock()
 	changed := !equalServiceRoutes(c.importedServiceRoutes, routes)
 	c.importedServiceRoutes = routes
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
 		c.regenerateAllHTTPListeners()
@@ -119,6 +121,9 @@ func (c *SnapshotCache) SetRouteTargetPorts(ports map[string][]uint32) {
 	c.depMu.Lock()
 	changed := !equalRouteTargetPorts(c.routeTargetPorts, ports)
 	c.routeTargetPorts = ports
+	// Not read by dependencySetLocked today; bumped under the blanket
+	// "every depMu write bumps" rule (over-invalidation is harmless).
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
 		c.signalDependencyChange()
@@ -308,6 +313,7 @@ func (c *SnapshotCache) SetServiceChainFilters(filters map[string]proxy.Extensio
 	c.depMu.Lock()
 	changed := !equalServiceChainFilters(c.serviceChainFilters, filters)
 	c.serviceChainFilters = filters
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
 		// INFO on change: the in-vivo debugging signal for "the filter never
@@ -324,6 +330,7 @@ func (c *SnapshotCache) SetImportedServiceChainFilters(filters map[string]proxy.
 	c.depMu.Lock()
 	changed := !equalServiceChainFilters(c.importedServiceChainFilters, filters)
 	c.importedServiceChainFilters = filters
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
 		c.log.Info("imported service chain filters updated", "count", len(filters))
@@ -429,6 +436,9 @@ func (c *SnapshotCache) SetServiceInboundFilters(filters map[string]proxy.Extens
 	c.depMu.Lock()
 	changed := !equalServiceChainFilters(c.serviceInboundFilters, filters)
 	c.serviceInboundFilters = filters
+	// Not read by dependencySetLocked today; bumped under the blanket
+	// "every depMu write bumps" rule (over-invalidation is harmless).
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
 		c.log.Info("service inbound filters updated", "count", len(filters))

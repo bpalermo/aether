@@ -178,6 +178,7 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	}
 	c.depMu.Lock()
 	c.captureTCPDeps = names
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 
 	// Per-pod capture listeners embed TCP floor chains; regenerate all of them.
