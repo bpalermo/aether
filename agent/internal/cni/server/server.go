@@ -22,6 +22,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -83,6 +85,27 @@ type CNIServer struct {
 	// drainPoolCloseDelay separates the two drain phases (see
 	// schedulePoolClose); overridable in tests.
 	drainPoolCloseDelay time.Duration
+
+	// netnsFailStreaks counts, per container ID, consecutive ghost-sweep passes
+	// whose netns-liveness check failed. A stored pod is classified a
+	// stale-netns ghost only after ghostNetnsFailThreshold consecutive failures
+	// (hysteresis), so a transient fleet-wide stat failure — the 2026-07-19
+	// power-blip signature — cannot mass-prune live pods (#566). Reset the moment
+	// a netns check passes or the pod leaves storage. Accessed only under
+	// lifecycleMu (the sweep holds it across the prune).
+	netnsFailStreaks map[string]int
+
+	// missingStorageStreaks counts, per namespace/name, consecutive ghost-sweep
+	// passes a live mesh pod was found missing from local storage (a lost CNI
+	// ADD). After lostAddEvictThreshold passes the agent evicts the pod to force
+	// sandbox recreation and a fresh CNI ADD (#567). Reset when the pod registers
+	// or disappears. Accessed only under lifecycleMu.
+	missingStorageStreaks map[string]int
+
+	// evictPod evicts a pod via the Kubernetes Eviction API (policy/v1,
+	// PDB-respecting). Overridable in tests (the fake client has no eviction
+	// subresource). Nil disables self-heal eviction.
+	evictPod func(ctx context.Context, namespace, name string) error
 }
 
 var _ xds.ServerCallback = (*CNIServer)(nil)
@@ -123,6 +146,15 @@ func NewCNIServer(clusterName string, nodeName string, trustDomain string, local
 		ackTracker:          ackTracker,
 		spireBridge:         spireBridge,
 		healthClient:        newHealthGatewayClient(cfg.ProxyHealthSocketPath),
+	}
+	// Self-heal lost-CNI-ADD pods via the Eviction API (#567): PDB-respecting, so
+	// a real deploy's disruption budget still applies. Nil client => no eviction.
+	if k8sClient != nil {
+		cniSrv.evictPod = func(ctx context.Context, namespace, name string) error {
+			return k8sClient.SubResource("eviction").Create(ctx,
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}},
+				&policyv1.Eviction{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}})
+		}
 	}
 
 	cniSrv.AddCallback(cniSrv)
