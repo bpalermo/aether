@@ -225,6 +225,7 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.26.0
 	github.com/google/nftables v0.3.0
 	github.com/miekg/dns v1.1.72
+	github.com/uudashr/gocognit v1.2.1
 	go.etcd.io/etcd/api/v3 v3.7.0
 	go.opentelemetry.io/contrib/bridges/otelslog v0.19.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.20.0
@@ -234,6 +235,8 @@ require (
 	sigs.k8s.io/gateway-api v1.6.1
 	sigs.k8s.io/mcs-api v0.5.2
 )
+
+tool github.com/uudashr/gocognit/cmd/gocognit
 
 // https://github.com/lyft/protoc-gen-star/pull/132
 replace github.com/lyft/protoc-gen-star/v2 => github.com/pquerna/protoc-gen-star/v2 v2.0.0-20250415201647-653a078eb414
