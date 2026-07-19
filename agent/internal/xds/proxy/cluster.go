@@ -270,9 +270,21 @@ func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
 				State:       corev3.SocketOption_STATE_PREBIND,
 			}},
 		},
-		// No TypedExtensionProtocolOptions: passthrough is plain TCP.
+		// Mirror the downstream protocol on the upstream dial (issue #568). Non-mesh
+		// egress that http_inspector sniffed as cleartext HTTP (h2c OR http/1.1)
+		// transits the cap_http HCM and lands here via the redirect-all catch-all's
+		// passthrough fallthrough. The HCM speaks HTTP to this cluster, so an h2c
+		// downstream (e.g. OTLP gRPC to a non-mesh otel-collector on :4317) MUST dial
+		// h2c upstream — the ORIGINAL_DST default of HTTP/1.1 resets an h2-only server
+		// ("reset reason: protocol error"). USE_DOWNSTREAM_PROTOCOL keeps h1→h1 and
+		// h2c→h2c. This only affects connections the HCM forwards (sniffed HTTP);
+		// raw-TCP and TLS passthrough hit the L4 cap_passthrough default chain via
+		// tcp_proxy, which ignores these HTTP-codec options entirely.
 		// No TransportSocket: plaintext — mesh mTLS does NOT apply here.
 		// No LbSubsetConfig / OutlierDetection: single-connection, no pool.
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.UseDownstreamProtocolOptions()),
+		},
 	}
 }
 
