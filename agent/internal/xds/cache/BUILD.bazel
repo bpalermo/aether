@@ -64,6 +64,7 @@ go_test(
         "chain_seam_test.go",
         "cluster_alias_test.go",
         "cluster_test.go",
+        "dependencies_memo_test.go",
         "dependencies_test.go",
         "edge_test.go",
         "listener_address_test.go",

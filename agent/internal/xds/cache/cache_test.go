@@ -72,6 +72,7 @@ func newTestCache(nodeName string) *SnapshotCache {
 func declareDeps(c *SnapshotCache, services ...string) {
 	c.depMu.Lock()
 	c.podDeps["test-netns"] = podDependencies{upstreams: services}
+	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 }
 
