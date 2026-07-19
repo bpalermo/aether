@@ -98,62 +98,21 @@ func runController(ctx context.Context) (retErr error) {
 		"spireEnabled", cfg.SpireEnabled,
 	)
 
-	if logShutdown != nil {
-		defer func() {
-			if shutdownErr := logShutdown(ctx); shutdownErr != nil {
-				l.ErrorContext(ctx, "failed to flush OTel logs", "error", shutdownErr)
-			}
-		}()
-	}
+	defer deferControllerLogShutdown(ctx)
 
-	// Manager scheme = client-go built-ins + the typed MeshConfig CRD, so the
-	// reconciler and webhook work against the typed object (no unstructured).
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register client-go scheme: %w", err)
+	spireSource, bootstrapOpts, err := buildControllerBootstrapOpts(ctx)
+	if err != nil {
+		return err
 	}
-	if err := crdv1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register MeshConfig scheme: %w", err)
-	}
-	// Gateway API types: the HTTPRoute validating webhook lists HTTPRoutes for the
-	// hostname-conflict check (proposal 018).
-	if err := gatewayv1.Install(scheme); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
-	}
-
-	// When SPIRE is enabled, serve the validating webhook with a SPIRE X.509 SVID
-	// (one-way TLS; the apiserver verifies against the SPIRE bundle injected as the
-	// caBundle). Otherwise controller-runtime serves from the Helm-provisioned cert
-	// in the default CertDir.
-	var spireSource *spire.Source
-	bootstrapOpts := []func(*ctrl.Options){func(o *ctrl.Options) { o.Scheme = scheme }}
-	if cfg.SpireEnabled {
-		src, srcErr := spire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-		if srcErr != nil {
-			return fmt.Errorf("failed to open SPIRE Workload API source: %w", srcErr)
-		}
-		spireSource = src
+	if spireSource != nil {
 		defer func() { retErr = errors.Join(retErr, spireSource.Close()) }()
-
-		bootstrapOpts = append(bootstrapOpts, func(o *ctrl.Options) {
-			o.WebhookServer = webhook.NewServer(webhook.Options{
-				TLSOpts: []func(*tls.Config){spire.WebhookServerCert(spireSource)},
-			})
-		})
-		l.InfoContext(ctx, "webhook serving with SPIRE SVID", "socket", cfg.SpireWorkloadSocketPath)
 	}
 
 	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, bootstrapOpts...)
 	if err != nil {
 		return err
 	}
-	if result.Shutdown != nil {
-		defer func() {
-			if shutdownErr := result.Shutdown(ctx); shutdownErr != nil {
-				l.ErrorContext(ctx, "failed to shutdown telemetry", "error", shutdownErr)
-			}
-		}()
-	}
+	defer deferControllerTelemetryShutdown(ctx, result.Shutdown)
 
 	m := result.Manager
 
@@ -187,20 +146,8 @@ func runController(ctx context.Context) (retErr error) {
 	// apiserver routes pods here.
 	m.GetWebhookServer().Register("/mutate", &admission.Webhook{Handler: podmutate.NewMutator(podNDots(cfg.MeshDomain), l)})
 
-	// In SPIRE mode the webhook presents an SVID, so the apiserver must trust the
-	// SPIRE CA: keep the ValidatingWebhookConfiguration caBundle in sync with the
-	// rotating trust bundle.
-	if cfg.SpireEnabled {
-		injector := &meshconfig.CABundleInjector{
-			Client:                    m.GetClient(),
-			Source:                    spireSource,
-			WebhookConfigName:         cfg.WebhookConfigName,
-			MutatingWebhookConfigName: cfg.MutatingWebhookConfigName,
-			Log:                       l,
-		}
-		if err = m.Add(injector); err != nil {
-			return fmt.Errorf("failed to add caBundle injector: %w", err)
-		}
+	if err = wireCABundleInjector(m, spireSource); err != nil {
+		return err
 	}
 
 	l.InfoContext(
@@ -210,6 +157,91 @@ func runController(ctx context.Context) (retErr error) {
 		"webhookPath", cwebhook.Path,
 	)
 	return m.Start(ctx)
+}
+
+// buildControllerBootstrapOpts builds the manager scheme and SPIRE webhook options.
+// When SPIRE is enabled, it opens the Workload API source and configures the webhook
+// to serve with an X.509 SVID; otherwise the default Helm-provisioned cert is used.
+// The caller is responsible for closing the returned spireSource.
+func buildControllerBootstrapOpts(ctx context.Context) (*spire.Source, []func(*ctrl.Options), error) {
+	// Manager scheme = client-go built-ins + the typed MeshConfig CRD, so the
+	// reconciler and webhook work against the typed object (no unstructured).
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, nil, fmt.Errorf("register client-go scheme: %w", err)
+	}
+	if err := crdv1.AddToScheme(scheme); err != nil {
+		return nil, nil, fmt.Errorf("register MeshConfig scheme: %w", err)
+	}
+	// Gateway API types: the HTTPRoute validating webhook lists HTTPRoutes for the
+	// hostname-conflict check (proposal 018).
+	if err := gatewayv1.Install(scheme); err != nil {
+		return nil, nil, fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+	}
+
+	bootstrapOpts := []func(*ctrl.Options){func(o *ctrl.Options) { o.Scheme = scheme }}
+
+	// When SPIRE is enabled, serve the validating webhook with a SPIRE X.509 SVID
+	// (one-way TLS; the apiserver verifies against the SPIRE bundle injected as the
+	// caBundle). Otherwise controller-runtime serves from the Helm-provisioned cert
+	// in the default CertDir.
+	if !cfg.SpireEnabled {
+		return nil, bootstrapOpts, nil
+	}
+	src, srcErr := spire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
+	if srcErr != nil {
+		return nil, nil, fmt.Errorf("failed to open SPIRE Workload API source: %w", srcErr)
+	}
+	bootstrapOpts = append(bootstrapOpts, func(o *ctrl.Options) {
+		o.WebhookServer = webhook.NewServer(webhook.Options{
+			TLSOpts: []func(*tls.Config){spire.WebhookServerCert(src)},
+		})
+	})
+	l.InfoContext(ctx, "webhook serving with SPIRE SVID", "socket", cfg.SpireWorkloadSocketPath)
+	return src, bootstrapOpts, nil
+}
+
+// wireCABundleInjector registers the CA bundle injector when SPIRE is enabled.
+// In SPIRE mode the webhook presents an SVID, so the apiserver must trust the
+// SPIRE CA: keep the ValidatingWebhookConfiguration caBundle in sync with the
+// rotating trust bundle.
+func wireCABundleInjector(m ctrl.Manager, spireSource *spire.Source) error {
+	if !cfg.SpireEnabled {
+		return nil
+	}
+	injector := &meshconfig.CABundleInjector{
+		Client:                    m.GetClient(),
+		Source:                    spireSource,
+		WebhookConfigName:         cfg.WebhookConfigName,
+		MutatingWebhookConfigName: cfg.MutatingWebhookConfigName,
+		Log:                       l,
+	}
+	if err := m.Add(injector); err != nil {
+		return fmt.Errorf("failed to add caBundle injector: %w", err)
+	}
+	return nil
+}
+
+// deferControllerLogShutdown flushes and stops the OTLP log exporter. No-op when
+// logShutdown is nil (OTLP logging is disabled).
+func deferControllerLogShutdown(ctx context.Context) {
+	if logShutdown == nil {
+		return
+	}
+	if err := logShutdown(ctx); err != nil {
+		l.ErrorContext(ctx, "failed to flush OTel logs", "error", err)
+	}
+}
+
+// deferControllerTelemetryShutdown runs the telemetry shutdown returned by
+// manager.Bootstrap. No-op when shutdown is nil.
+func deferControllerTelemetryShutdown(ctx context.Context, shutdown func(context.Context) error) {
+	if shutdown == nil {
+		return
+	}
+	if err := shutdown(ctx); err != nil {
+		l.ErrorContext(ctx, "failed to shutdown telemetry", "error", err)
+	}
 }
 
 // currentNamespace resolves the namespace the controller runs in, used as the

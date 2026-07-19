@@ -206,13 +206,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	// Flush and stop the OTLP log exporter last (registered first → runs last),
 	// so records emitted during the rest of shutdown are still exported. No-op
 	// when OTLP logging is disabled.
-	if logShutdown != nil {
-		defer func() {
-			if shutdownErr := logShutdown(ctx); shutdownErr != nil {
-				l.ErrorContext(ctx, "failed to flush OTel logs", "error", shutdownErr)
-			}
-		}()
-	}
+	defer deferLogShutdown(ctx)
 
 	// Scope the manager's Pod informer to this node: the agent only ever reads
 	// (CNI ADD enrichment) and watches (termination drain) its own node's pods,
@@ -228,13 +222,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if result.Shutdown != nil {
-		defer func() {
-			if shutdownErr := result.Shutdown(ctx); shutdownErr != nil {
-				l.ErrorContext(ctx, "failed to shutdown telemetry", "error", shutdownErr)
-			}
-		}()
-	}
+	defer deferTelemetryShutdown(ctx, result.Shutdown)
 
 	m := result.Manager
 
@@ -243,26 +231,12 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	// When SPIRE is enabled, open the Workload API source and resolve the real
-	// trust domain SPIRE issues into (e.g. "aether.internal"). That trust domain
-	// names the SDS resources / SPIFFE IDs the agent programs into Envoy so they
-	// match the secrets the SPIRE bridge delivers. Peer authorization uses the
-	// mesh domain — addressing (<svc>.<mesh-domain>) and identity
-	// (spiffe://<mesh-domain>/...) are one domain by design, never split.
-	var spireSource *commonspire.Source
-	identityTrustDomain := cfg.MeshDomain
-	if cfg.SpireEnabled {
-		spireSource, err = commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-		if err != nil {
-			return err
-		}
+	spireSource, identityTrustDomain, err := setupSpireSource(ctx)
+	if err != nil {
+		return err
+	}
+	if spireSource != nil {
 		defer func() { retErr = errors.Join(retErr, spireSource.Close()) }()
-
-		identityTrustDomain, err = commonspire.TrustDomainFromSource(spireSource)
-		if err != nil {
-			return fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
-		}
-		l.InfoContext(ctx, "resolved workload trust domain from SPIRE", "trustDomain", identityTrustDomain)
 	}
 
 	reg, err := setupRegistrarClient(ctx, spireSource)
@@ -271,65 +245,16 @@ func runAgent(ctx context.Context) (retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
-	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
-	snapshotCache.SetMeshDomain(cfg.MeshDomain)
-	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
-	// With SPIRE off no SVIDs/SDS exist; the cache builds the per-pod inbound
-	// listener cleartext so the mesh hop stays routable (the outbound clusters
-	// already go cleartext without a node SVID). Production keeps mTLS.
-	snapshotCache.SetSpireEnabled(cfg.SpireEnabled)
-	// Capture + the dormant redirect-all passthrough chain are unconditional
-	// (proposal 031); per-pod behavior is decided by the CNI (annotations +
-	// --capture-redirect-all-default). The tunnel port is the fixed constant.
-	snapshotCache.SetCaptureEnabled(true)
-	snapshotCache.SetCaptureRedirectAll(true)
-	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
-	if cfg.MeshDNS {
-		// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
-		// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The CNI DNATs
-		// each pod's :53 straight to it at HOST_IP:resolverPort (no Envoy DNS layer,
-		// no setns, no privilege increase).
-		hostIP := os.Getenv("HOST_IP")
-		resolverPort := uint32(meshconst.ProxyDNSResolverPort)
-		dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), l)
-		// Default the forward upstream to the agent's own resolv.conf (kube-dns, via
-		// ClusterFirstWithHostNet) when --mesh-dns-upstream is unset, so mesh DNS is
-		// safe to enable by default without per-cluster configuration.
-		upstreams := cfg.MeshDNSUpstream
-		if len(upstreams) == 0 {
-			upstreams = meshdns.NameserversFromResolvConf("/etc/resolv.conf")
-			l.Info("mesh-DNS upstream defaulted from /etc/resolv.conf", "upstreams", upstreams)
-		}
-		dnsServer.SetUpstreams(upstreams)
-		if err = m.Add(dnsServer); err != nil {
-			return fmt.Errorf("failed to add mesh-DNS resolver: %w", err)
-		}
-		snapshotCache.SetMeshDNSServer(dnsServer)
+	snapshotCache, err := configureSnapshotCache(ctx, m)
+	if err != nil {
+		return err
 	}
-	// Global access-log config, set once before the cache builds any listener.
-	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
-		Enabled:           cfg.AccessLogsEnabled,
-		SuccessSampleRate: cfg.AccessLogSuccessSampleRate,
-	})
-	// Global proxy data-plane tracing config, likewise set once up front.
-	proxy.SetTracingConfig(proxy.TracingConfig{
-		Enabled:    cfg.ProxyTracingEnabled,
-		SampleRate: cfg.ProxyTraceSampleRate,
-	})
 
-	// Tracks Envoy's delta-xDS ACK/NACKs so the CNI server can confirm (and
-	// diagnose) config delivery without polling the Envoy admin interface.
 	ackTracker := ack.NewTracker(l)
 
-	// Optionally create and start the SPIRE bridge for SDS
-	var spireBridge *spire.Bridge
-	if cfg.SpireEnabled {
-		spireBridge = spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, spireSource, l)
-		if err = m.Add(spireBridge); err != nil {
-			return fmt.Errorf("failed to add SPIRE bridge: %w", err)
-		}
-	} else {
-		l.InfoContext(ctx, "SPIRE integration disabled")
+	spireBridge, err := wireSpireBridge(ctx, m, snapshotCache, spireSource)
+	if err != nil {
+		return err
 	}
 
 	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain); err != nil {
@@ -362,93 +287,18 @@ func runAgent(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	// GAMMA east-west L7 routing (proposal 018, Phase 2): watch HTTPRoutes parented
-	// to a Service and enrich the outbound routes. Default off — registers nothing
-	// (and adds no gateway-api watch) unless --gamma is set.
-	if cfg.Gamma {
-		if err = gatewayv1.Install(m.GetScheme()); err != nil {
-			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
-		}
-		// ReferenceGrant (v1beta1) gates cross-namespace backendRefs on GAMMA routes.
-		if err = gatewayv1beta1.Install(m.GetScheme()); err != nil {
-			return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
-		}
-		// HTTPFilter (config.aether.io, proposal 025): the gamma reconciler watches it
-		// for ExtensionRef/targetRef escape-hatch filters. MUST be in the scheme —
-		// without it the watch fails ("no kind is registered") and the manager
-		// crash-loops on cache sync, killing the CNI socket with it. The RESTMapper
-		// gate (#453) does not cover this: it checks the CRD on the API server, not
-		// the client scheme.
-		if err = configapisv1.AddToScheme(m.GetScheme()); err != nil {
-			return fmt.Errorf("register config.aether.io scheme: %w", err)
-		}
-		gammaReconciler := &gamma.Reconciler{
-			Client:     m.GetClient(),
-			Sink:       snapshotCache,
-			MeshDomain: cfg.MeshDomain,
-			Log:        l,
-		}
-		if err = gammaReconciler.SetupWithManager(m); err != nil {
-			return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
-		}
+	if err = wireGAMMA(m, snapshotCache); err != nil {
+		return err
 	}
 
-	// Cross-cluster config import (proposal 026): poll the registrar for config
-	// projections peer clusters exported and materialize the imported GAMMA routes
-	// into the cache (merged with local routes; local wins). Default off
-	// (--import-config). No-op when the registry backend has no cross-cluster config
-	// plane (kubernetes/dynamodb don't implement registry.ConfigImporter).
-	if cfg.AuthzSidecar {
-		snapshotCache.SetAuthzSidecar(cfg.AuthzSidecarTimeout, cfg.AuthzSidecarFailureModeAllow)
-	}
-	if cfg.ImportConfig {
-		if imp, ok := reg.(registry.ConfigImporter); ok {
-			importer := configimport.NewImporter(imp, snapshotCache, cfg.ClusterName, cfg.ControlCluster, 0, l)
-			if err = m.Add(importer); err != nil {
-				return fmt.Errorf("failed to add config importer: %w", err)
-			}
-		} else {
-			l.Warn("config import enabled but the registry backend has no cross-cluster config plane; skipping")
-		}
+	wireAuthzAndConfigImport(ctx, m, reg, snapshotCache)
+
+	if err = wireL4Routes(m, snapshotCache); err != nil {
+		return err
 	}
 
-	// L4 route types (proposal 018, Phase 3b): watch TCPRoutes, TLSRoutes, and
-	// UDPRoutes parented to a Service and project weighted TCP floor chains /
-	// per-SNI TLS chains onto the capture listener. Unconditional since proposal
-	// 031: the reconciler CRD-detects each type and degrades when absent.
-	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
-	{
-		// v1 (all route types since gateway-api 1.6) + v1beta1 (ReferenceGrant).
-		if err = gatewayv1.Install(m.GetScheme()); err != nil {
-			return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
-		}
-		if err = gatewayv1beta1.Install(m.GetScheme()); err != nil {
-			return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
-		}
-		l4Reconciler := &l4route.Reconciler{
-			Client:     m.GetClient(),
-			Sink:       snapshotCache,
-			MeshDomain: cfg.MeshDomain,
-			Log:        l,
-		}
-		if err = l4Reconciler.SetupWithManager(m); err != nil {
-			return fmt.Errorf("failed to set up L4 route reconciler: %w", err)
-		}
-	}
-
-	// Transparent capture (Phase 3a) and mesh DNS (mesh-global FQDN) both read the
-	// generated mesh Services: capture wants their cluster.local authorities (cap_http),
-	// mesh DNS wants their ClusterIPs (the DnsTable). One reconciler feeds both;
-	// capture is unconditional (proposal 031), so it always runs.
-	{
-		captureReconciler := &capture.Reconciler{
-			Client: m.GetClient(),
-			Sink:   snapshotCache,
-			Log:    l,
-		}
-		if err = captureReconciler.SetupWithManager(m); err != nil {
-			return fmt.Errorf("failed to set up transparent-capture reconciler: %w", err)
-		}
+	if err = wireCaptureReconciler(m, snapshotCache); err != nil {
+		return err
 	}
 
 	l.DebugContext(ctx, "waiting for local storage to be ready")
@@ -458,6 +308,222 @@ func runAgent(ctx context.Context) (retErr error) {
 
 	l.DebugContext(ctx, "local storage is ready, starting manager")
 	return m.Start(ctx)
+}
+
+// setupSpireSource opens the SPIRE Workload API source and resolves the trust domain.
+// When SPIRE is disabled, it returns nil source and the mesh domain as trust domain.
+// The caller is responsible for closing the returned source via defer.
+func setupSpireSource(ctx context.Context) (*commonspire.Source, string, error) {
+	if !cfg.SpireEnabled {
+		return nil, cfg.MeshDomain, nil
+	}
+	// When SPIRE is enabled, open the Workload API source and resolve the real
+	// trust domain SPIRE issues into (e.g. "aether.internal"). That trust domain
+	// names the SDS resources / SPIFFE IDs the agent programs into Envoy so they
+	// match the secrets the SPIRE bridge delivers. Peer authorization uses the
+	// mesh domain — addressing (<svc>.<mesh-domain>) and identity
+	// (spiffe://<mesh-domain>/...) are one domain by design, never split.
+	spireSource, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
+	if err != nil {
+		return nil, "", err
+	}
+	identityTrustDomain, err := commonspire.TrustDomainFromSource(spireSource)
+	if err != nil {
+		_ = spireSource.Close()
+		return nil, "", fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
+	}
+	l.InfoContext(ctx, "resolved workload trust domain from SPIRE", "trustDomain", identityTrustDomain)
+	return spireSource, identityTrustDomain, nil
+}
+
+// configureSnapshotCache creates and configures the xDS snapshot cache, including
+// optional mesh-DNS server wiring. Global access-log and tracing configs are also
+// set here before the cache builds any listener.
+func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.SnapshotCache, error) {
+	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
+	snapshotCache.SetMeshDomain(cfg.MeshDomain)
+	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
+	// With SPIRE off no SVIDs/SDS exist; the cache builds the per-pod inbound
+	// listener cleartext so the mesh hop stays routable (the outbound clusters
+	// already go cleartext without a node SVID). Production keeps mTLS.
+	snapshotCache.SetSpireEnabled(cfg.SpireEnabled)
+	// Capture + the dormant redirect-all passthrough chain are unconditional
+	// (proposal 031); per-pod behavior is decided by the CNI (annotations +
+	// --capture-redirect-all-default). The tunnel port is the fixed constant.
+	snapshotCache.SetCaptureEnabled(true)
+	snapshotCache.SetCaptureRedirectAll(true)
+	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
+
+	if err := wireMeshDNS(ctx, m, snapshotCache); err != nil {
+		return nil, err
+	}
+
+	// Global access-log config, set once before the cache builds any listener.
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
+		Enabled:           cfg.AccessLogsEnabled,
+		SuccessSampleRate: cfg.AccessLogSuccessSampleRate,
+	})
+	// Global proxy data-plane tracing config, likewise set once up front.
+	proxy.SetTracingConfig(proxy.TracingConfig{
+		Enabled:    cfg.ProxyTracingEnabled,
+		SampleRate: cfg.ProxyTraceSampleRate,
+	})
+
+	return snapshotCache, nil
+}
+
+// wireMeshDNS starts the in-process mesh-DNS resolver and connects it to the
+// snapshot cache when --mesh-dns is enabled. It is a no-op when disabled.
+func wireMeshDNS(ctx context.Context, m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if !cfg.MeshDNS {
+		return nil
+	}
+	// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
+	// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The CNI DNATs
+	// each pod's :53 straight to it at HOST_IP:resolverPort (no Envoy DNS layer,
+	// no setns, no privilege increase).
+	hostIP := os.Getenv("HOST_IP")
+	resolverPort := uint32(meshconst.ProxyDNSResolverPort)
+	dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), l)
+	// Default the forward upstream to the agent's own resolv.conf (kube-dns, via
+	// ClusterFirstWithHostNet) when --mesh-dns-upstream is unset, so mesh DNS is
+	// safe to enable by default without per-cluster configuration.
+	upstreams := cfg.MeshDNSUpstream
+	if len(upstreams) == 0 {
+		upstreams = meshdns.NameserversFromResolvConf("/etc/resolv.conf")
+		l.Info("mesh-DNS upstream defaulted from /etc/resolv.conf", "upstreams", upstreams)
+	}
+	dnsServer.SetUpstreams(upstreams)
+	if err := m.Add(dnsServer); err != nil {
+		return fmt.Errorf("failed to add mesh-DNS resolver: %w", err)
+	}
+	snapshotCache.SetMeshDNSServer(dnsServer)
+	return nil
+}
+
+// wireSpireBridge optionally creates and registers the SPIRE bridge for SDS when
+// SPIRE is enabled. Returns the bridge (nil when SPIRE is disabled).
+func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.SnapshotCache, spireSource *commonspire.Source) (*spire.Bridge, error) {
+	if !cfg.SpireEnabled {
+		l.InfoContext(ctx, "SPIRE integration disabled")
+		return nil, nil
+	}
+	// Optionally create and start the SPIRE bridge for SDS
+	spireBridge := spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, spireSource, l)
+	if err := m.Add(spireBridge); err != nil {
+		return nil, fmt.Errorf("failed to add SPIRE bridge: %w", err)
+	}
+	return spireBridge, nil
+}
+
+// wireGAMMA registers the GAMMA east-west L7 routing reconciler when --gamma is set
+// (proposal 018, Phase 2). It installs the required Gateway API and config.aether.io
+// schemes and sets up the reconciler with the manager.
+func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if !cfg.Gamma {
+		return nil
+	}
+	// GAMMA east-west L7 routing (proposal 018, Phase 2): watch HTTPRoutes parented
+	// to a Service and enrich the outbound routes. Default off — registers nothing
+	// (and adds no gateway-api watch) unless --gamma is set.
+	if err := gatewayv1.Install(m.GetScheme()); err != nil {
+		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+	}
+	// ReferenceGrant (v1beta1) gates cross-namespace backendRefs on GAMMA routes.
+	if err := gatewayv1beta1.Install(m.GetScheme()); err != nil {
+		return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+	}
+	// HTTPFilter (config.aether.io, proposal 025): the gamma reconciler watches it
+	// for ExtensionRef/targetRef escape-hatch filters. MUST be in the scheme —
+	// without it the watch fails ("no kind is registered") and the manager
+	// crash-loops on cache sync, killing the CNI socket with it. The RESTMapper
+	// gate (#453) does not cover this: it checks the CRD on the API server, not
+	// the client scheme.
+	if err := configapisv1.AddToScheme(m.GetScheme()); err != nil {
+		return fmt.Errorf("register config.aether.io scheme: %w", err)
+	}
+	gammaReconciler := &gamma.Reconciler{
+		Client:     m.GetClient(),
+		Sink:       snapshotCache,
+		MeshDomain: cfg.MeshDomain,
+		Log:        l,
+	}
+	if err := gammaReconciler.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+	}
+	return nil
+}
+
+// wireAuthzAndConfigImport applies the authz-sidecar config to the snapshot cache
+// and registers the cross-cluster config importer when --import-config is set.
+// Cross-cluster config import (proposal 026): poll the registrar for config
+// projections peer clusters exported and materialize the imported GAMMA routes
+// into the cache (merged with local routes; local wins). Default off
+// (--import-config). No-op when the registry backend has no cross-cluster config
+// plane (kubernetes/dynamodb don't implement registry.ConfigImporter).
+func wireAuthzAndConfigImport(ctx context.Context, m ctrl.Manager, reg registry.Registry, snapshotCache *cache.SnapshotCache) {
+	if cfg.AuthzSidecar {
+		snapshotCache.SetAuthzSidecar(cfg.AuthzSidecarTimeout, cfg.AuthzSidecarFailureModeAllow)
+	}
+	if !cfg.ImportConfig {
+		return
+	}
+	imp, ok := reg.(registry.ConfigImporter)
+	if !ok {
+		l.Warn("config import enabled but the registry backend has no cross-cluster config plane; skipping")
+		return
+	}
+	importer := configimport.NewImporter(imp, snapshotCache, cfg.ClusterName, cfg.ControlCluster, 0, l)
+	if err := m.Add(importer); err != nil {
+		l.ErrorContext(ctx, "failed to add config importer", "error", err)
+	}
+}
+
+// wireL4Routes installs Gateway API schemes and registers the L4 route reconciler
+// (proposal 018, Phase 3b). Unconditional since proposal 031: the reconciler
+// CRD-detects each type and degrades when absent.
+func wireL4Routes(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	// L4 route types (proposal 018, Phase 3b): watch TCPRoutes, TLSRoutes, and
+	// UDPRoutes parented to a Service and project weighted TCP floor chains /
+	// per-SNI TLS chains onto the capture listener. Unconditional since proposal
+	// 031: the reconciler CRD-detects each type and degrades when absent.
+	// NOTE: UDPRoute is control-plane only until the CNI UDP redirect lands.
+	// v1 (all route types since gateway-api 1.6) + v1beta1 (ReferenceGrant).
+	if err := gatewayv1.Install(m.GetScheme()); err != nil {
+		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+	}
+	if err := gatewayv1beta1.Install(m.GetScheme()); err != nil {
+		return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+	}
+	l4Reconciler := &l4route.Reconciler{
+		Client:     m.GetClient(),
+		Sink:       snapshotCache,
+		MeshDomain: cfg.MeshDomain,
+		Log:        l,
+	}
+	if err := l4Reconciler.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up L4 route reconciler: %w", err)
+	}
+	return nil
+}
+
+// wireCaptureReconciler sets up the transparent-capture reconciler. It watches the
+// generated mesh Services: capture wants their cluster.local authorities (cap_http),
+// mesh DNS wants their ClusterIPs (the DnsTable). Unconditional (proposal 031).
+func wireCaptureReconciler(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	// Transparent capture (Phase 3a) and mesh DNS (mesh-global FQDN) both read the
+	// generated mesh Services: capture wants their cluster.local authorities (cap_http),
+	// mesh DNS wants their ClusterIPs (the DnsTable). One reconciler feeds both;
+	// capture is unconditional (proposal 031), so it always runs.
+	captureReconciler := &capture.Reconciler{
+		Client: m.GetClient(),
+		Sink:   snapshotCache,
+		Log:    l,
+	}
+	if err := captureReconciler.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up transparent-capture reconciler: %w", err)
+	}
+	return nil
 }
 
 // setXDSServer creates and registers an Agent xDS server as a runnable with the Manager.
@@ -553,6 +619,28 @@ func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registr
 	}
 
 	return reg, nil
+}
+
+// deferLogShutdown flushes and stops the OTLP log exporter. No-op when
+// logShutdown is nil (OTLP logging is disabled).
+func deferLogShutdown(ctx context.Context) {
+	if logShutdown == nil {
+		return
+	}
+	if err := logShutdown(ctx); err != nil {
+		l.ErrorContext(ctx, "failed to flush OTel logs", "error", err)
+	}
+}
+
+// deferTelemetryShutdown runs the telemetry shutdown returned by manager.Bootstrap.
+// No-op when shutdown is nil.
+func deferTelemetryShutdown(ctx context.Context, shutdown func(context.Context) error) {
+	if shutdown == nil {
+		return
+	}
+	if err := shutdown(ctx); err != nil {
+		l.ErrorContext(ctx, "failed to shutdown telemetry", "error", err)
+	}
 }
 
 // must panics if err is non-nil. Use only for programming errors that should never occur at runtime.
