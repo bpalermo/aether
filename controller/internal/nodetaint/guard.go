@@ -96,9 +96,18 @@ func (g *Guard) Reconcile(ctx context.Context, req reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 
-	ready, err := g.hasReadyAgent(ctx, req.Name)
+	exists, ready, err := g.agentPodState(ctx, req.Name)
 	if err != nil {
 		return reconcile.Result{}, err
+	}
+	if !exists {
+		// No agent pod OBJECT for this node at all: the DaemonSet controller
+		// does not consider the node eligible (control-plane taint without a
+		// toleration, cordon+drain, ...). The guard must not manage such nodes —
+		// no agent will ever remove the taint there, and tainting a node the
+		// mesh doesn't cover is not this controller's call.
+		g.forget(req.Name)
+		return reconcile.Result{}, nil
 	}
 	if ready {
 		// A serving agent is present. Clear the debounce; the agent removes the
@@ -128,23 +137,29 @@ func (g *Guard) Reconcile(ctx context.Context, req reconcile.Request) (reconcile
 	return reconcile.Result{}, nil
 }
 
-// hasReadyAgent reports whether a Ready agent pod is running on the given node.
-func (g *Guard) hasReadyAgent(ctx context.Context, nodeName string) (bool, error) {
+// agentPodState reports whether any agent pod object is assigned to the given
+// node (regardless of phase — the DaemonSet controller creates the pod for every
+// eligible node), and whether a non-terminating Ready one is among them.
+func (g *Guard) agentPodState(ctx context.Context, nodeName string) (exists, ready bool, err error) {
 	var pods corev1.PodList
 	if err := g.Client.List(
 		ctx, &pods,
 		client.InNamespace(g.AgentNamespace),
 		client.MatchingLabels{agentNameLabel: agentNameValue},
 	); err != nil {
-		return false, err
+		return false, false, err
 	}
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		if p.Spec.NodeName == nodeName && p.DeletionTimestamp == nil && podReady(p) {
-			return true, nil
+		if p.Spec.NodeName != nodeName {
+			continue
+		}
+		exists = true
+		if p.DeletionTimestamp == nil && podReady(p) {
+			return true, true, nil
 		}
 	}
-	return false, nil
+	return exists, false, nil
 }
 
 // remainingGrace returns how long is left in the grace window for a node observed
