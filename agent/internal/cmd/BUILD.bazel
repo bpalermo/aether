@@ -32,7 +32,7 @@ go_library(
         "//api/aether/config/v1:config",
         "//common/apis/config/v1:config",
         "//common/config",
-        "//common/constants",
+        "//common/constants/mesh",
         "//common/manager",
         "//common/must",
         "//common/spire",

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/registry"
 	corev1 "k8s.io/api/core/v1"
@@ -119,14 +119,14 @@ func (g *ImportGenerator) reconcile(ctx context.Context) {
 // Service for a mesh service: <svc>-clusterset. A separate object (its own
 // ClusterIP) from the same-named per-cluster mesh Service, so the two coexist.
 func clustersetServiceName(service string) string {
-	return service + constants.ClustersetServiceNameSuffix
+	return service + aetherlabels.ClustersetServiceNameSuffix
 }
 
 // pruneServiceImports deletes managed ServiceImports whose service no longer has
 // any export in the clusterset.
 func (g *ImportGenerator) pruneServiceImports(ctx context.Context, desired map[client.ObjectKey]*desiredImport) {
 	var managed mcsv1alpha1.ServiceImportList
-	if err := g.List(ctx, &managed, client.MatchingLabels{constants.LabelManagedServiceImport: "true"}); err != nil {
+	if err := g.List(ctx, &managed, client.MatchingLabels{aetherlabels.LabelManagedServiceImport: "true"}); err != nil {
 		g.Log.ErrorContext(ctx, "list managed ServiceImports failed", "error", err)
 		return
 	}
@@ -147,7 +147,7 @@ func (g *ImportGenerator) pruneServiceImports(ctx context.Context, desired map[c
 // pruneClustersetServices deletes managed clusterset VIP Services with no export.
 func (g *ImportGenerator) pruneClustersetServices(ctx context.Context, desired map[client.ObjectKey]*desiredImport) {
 	var managed corev1.ServiceList
-	if err := g.List(ctx, &managed, client.MatchingLabels{constants.LabelClustersetService: "true"}); err != nil {
+	if err := g.List(ctx, &managed, client.MatchingLabels{aetherlabels.LabelClustersetService: "true"}); err != nil {
 		g.Log.ErrorContext(ctx, "list managed clusterset Services failed", "error", err)
 		return
 	}
@@ -157,9 +157,9 @@ func (g *ImportGenerator) pruneClustersetServices(ctx context.Context, desired m
 		// The clusterset Service name is <svc>-clusterset; the import key is keyed
 		// by the mesh service name, recorded on the Service's clusterset-import
 		// annotation (fall back to trimming the suffix off the name).
-		importName := s.Annotations[constants.AnnotationClustersetImport]
+		importName := s.Annotations[aetherlabels.AnnotationClustersetImport]
 		if importName == "" {
-			importName = strings.TrimSuffix(s.Name, constants.ClustersetServiceNameSuffix)
+			importName = strings.TrimSuffix(s.Name, aetherlabels.ClustersetServiceNameSuffix)
 		}
 		importKey := client.ObjectKey{Namespace: s.Namespace, Name: importName}
 		if _, ok := desired[importKey]; ok {
@@ -187,7 +187,7 @@ func (g *ImportGenerator) applyServiceImport(ctx context.Context, d *desiredImpo
 
 	existing := &mcsv1alpha1.ServiceImport{}
 	if err := g.Get(ctx, key, existing); err == nil {
-		if existing.Labels[constants.LabelManagedServiceImport] != "true" {
+		if existing.Labels[aetherlabels.LabelManagedServiceImport] != "true" {
 			g.Log.WarnContext(ctx, "a non-aether ServiceImport owns this name; skipping", "import", key.String())
 			return
 		}
@@ -209,7 +209,7 @@ func (g *ImportGenerator) applyServiceImport(ctx context.Context, d *desiredImpo
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      d.service,
 			Namespace: d.namespace,
-			Labels:    map[string]string{constants.LabelManagedServiceImport: "true"},
+			Labels:    map[string]string{aetherlabels.LabelManagedServiceImport: "true"},
 		},
 		Spec: mcsv1alpha1.ServiceImportSpec{
 			Type:  mcsv1alpha1.ClusterSetIP,
@@ -268,7 +268,7 @@ func (g *ImportGenerator) applyClustersetService(ctx context.Context, d *desired
 
 	existing := &corev1.Service{}
 	if err := g.Get(ctx, key, existing); err == nil {
-		if existing.Labels[constants.LabelClustersetService] != "true" {
+		if existing.Labels[aetherlabels.LabelClustersetService] != "true" {
 			g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping clusterset VIP", "service", key.String())
 			return ""
 		}
@@ -283,13 +283,13 @@ func (g *ImportGenerator) applyClustersetService(ctx context.Context, d *desired
 			Name:      name,
 			Namespace: d.namespace,
 			Labels: map[string]string{
-				constants.LabelClustersetService: "true",
-				constants.LabelMeshService:       "true",
+				aetherlabels.LabelClustersetService: "true",
+				aetherlabels.LabelMeshService:       "true",
 			},
 			Annotations: map[string]string{
-				constants.AnnotationMeshService:      d.service,
-				constants.AnnotationMeshPort:         strconv.Itoa(int(g.MeshPort)),
-				constants.AnnotationClustersetImport: d.service,
+				aetherlabels.AnnotationMeshService:      d.service,
+				aetherlabels.AnnotationMeshPort:         strconv.Itoa(int(g.MeshPort)),
+				aetherlabels.AnnotationClustersetImport: d.service,
 			},
 		},
 		Spec: corev1.ServiceSpec{

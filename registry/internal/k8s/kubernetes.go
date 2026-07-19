@@ -17,6 +17,8 @@ import (
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/serviceref"
 )
@@ -216,7 +218,7 @@ func (r *KubernetesRegistry) listManagedPods(ctx context.Context) ([]corev1.Pod,
 	var podList corev1.PodList
 	err := r.reader.List(
 		ctx, &podList,
-		client.MatchingLabels{constants.LabelAetherManaged: "true"},
+		client.MatchingLabels{aetherlabels.LabelAetherManaged: "true"},
 	)
 	if err != nil {
 		r.log.ErrorContext(ctx, "failed to list managed pods", "error", err)
@@ -291,8 +293,8 @@ func (r *KubernetesRegistry) refreshNodeCacheLocked(ctx context.Context) error {
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		loc := locality{
-			region: node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
-			zone:   node.Labels[constants.AnnotationKubernetesNodeTopologyZone],
+			region: node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyRegion],
+			zone:   node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyZone],
 		}
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeInternalIP {
@@ -378,10 +380,10 @@ func podHealth(pod *corev1.Pod) registryv1.ServiceEndpoint_Health {
 // yields ACTIVE; unset yields UNSPECIFIED, which consumers treat as active (the
 // default).
 func healthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
-	switch annotations[constants.AnnotationEndpointHealthCheckMode] {
-	case constants.HealthCheckModeEDS:
+	switch annotations[aetherannotations.AnnotationEndpointHealthCheckMode] {
+	case aetherannotations.HealthCheckModeEDS:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
-	case constants.HealthCheckModeActive:
+	case aetherannotations.HealthCheckModeActive:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_ACTIVE
 	default:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_UNSPECIFIED
@@ -390,7 +392,7 @@ func healthCheckModeFromAnnotations(annotations map[string]string) registryv1.Se
 
 // getPortFromAnnotations extracts the endpoint port from pod annotations.
 func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
-	s, ok := annotations[constants.AnnotationEndpointPort]
+	s, ok := annotations[aetherannotations.AnnotationEndpointPort]
 	if !ok {
 		return constants.DefaultEndpointPort, nil
 	}
@@ -403,7 +405,7 @@ func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
 
 // getWeightFromAnnotations extracts the endpoint weight from pod annotations.
 func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
-	s, ok := annotations[constants.AnnotationEndpointWeight]
+	s, ok := annotations[aetherannotations.AnnotationEndpointWeight]
 	if !ok {
 		return constants.DefaultEndpointWeight, nil
 	}
@@ -417,7 +419,7 @@ func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 // getEndpointMetadataFromAnnotations extracts endpoint metadata from pod annotations.
 func getEndpointMetadataFromAnnotations(annotations map[string]string) map[string]string {
 	metadata := map[string]string{}
-	prefix := constants.AnnotationAetherEndpointMetadataPrefix
+	prefix := aetherannotations.AnnotationAetherEndpointMetadataPrefix
 	for key, value := range annotations {
 		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
 			metadata[key[len(prefix):]] = value

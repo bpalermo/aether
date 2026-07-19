@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	commonconstants "github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,7 +37,7 @@ func removeTaint(node *corev1.Node, key string) (changed bool) {
 }
 
 // TaintRemover is a manager Runnable that removes the aether startup taint
-// (constants.TaintAgentNotReady) from this agent's OWN node once the CNI server
+// (aetherlabels.TaintAgentNotReady) from this agent's OWN node once the CNI server
 // is serving — signalled by its Unix socket existing, which means a pod's CNI
 // ADD can now be handled. Workload pods don't tolerate the taint, so they wait
 // until this runs. Best-effort: it never fails agent startup.
@@ -91,14 +91,14 @@ func (r *TaintRemover) removeFromNode(ctx context.Context) error {
 			lastErr = err
 		} else {
 			base := node.DeepCopy()
-			if !removeTaint(node, commonconstants.TaintAgentNotReady) {
+			if !removeTaint(node, aetherlabels.TaintAgentNotReady) {
 				r.Log.DebugContext(ctx, "startup taint already absent", "node", r.NodeName)
 				return nil
 			}
 			if err := r.Client.Patch(ctx, node, client.MergeFrom(base)); err != nil {
 				lastErr = err
 			} else {
-				r.Log.InfoContext(ctx, "removed startup taint", "node", r.NodeName, "taint", commonconstants.TaintAgentNotReady)
+				r.Log.InfoContext(ctx, "removed startup taint", "node", r.NodeName, "taint", aetherlabels.TaintAgentNotReady)
 				return nil
 			}
 		}

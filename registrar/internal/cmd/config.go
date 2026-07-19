@@ -26,7 +26,7 @@ type RegistrarConfig struct {
 	ClusterName string
 
 	// MeshDomain is the DNS-style domain mesh authorities live under
-	// (constants.DefaultMeshDomain). Used by the cross-cluster config export
+	// (meshconst.DefaultMeshDomain). Used by the cross-cluster config export
 	// controller (proposal 026) to resolve backend cluster names <svc>.<meshDomain>.
 	MeshDomain string
 

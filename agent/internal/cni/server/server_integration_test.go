@@ -17,7 +17,8 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -94,8 +95,8 @@ func testNode(name, region, zone string) *corev1.Node {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				constants.AnnotationKubernetesNodeTopologyRegion: region,
-				constants.AnnotationKubernetesNodeTopologyZone:   zone,
+				aetherannotations.AnnotationKubernetesNodeTopologyRegion: region,
+				aetherannotations.AnnotationKubernetesNodeTopologyZone:   zone,
 			},
 		},
 	}
@@ -192,7 +193,7 @@ func TestIntegration_AddPodEndToEnd(t *testing.T) {
 	assert.Equal(t, "my-pod", storedPod.GetName())
 	assert.Equal(t, "default", storedPod.GetNamespace())
 	// Labels should have been enriched from the k8s pod.
-	assert.Equal(t, "true", storedPod.GetLabels()[constants.LabelAetherManaged])
+	assert.Equal(t, "true", storedPod.GetLabels()[aetherlabels.LabelAetherManaged])
 	assert.Equal(t, "default", storedPod.GetServiceAccount())
 
 	cancel()

@@ -1,4 +1,6 @@
-package constants
+// Package mesh defines the cross-tree mesh data-plane ports, paths, domain, and
+// netfilter marks shared by the agent, CNI plugin, and registrar.
+package mesh
 
 const (
 	// ProxyOutboundPort is the port the per-pod outbound HTTP capture listener

@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/agent/internal/xds/config"
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -45,7 +48,7 @@ const (
 // application, taken from the endpoint.aether.io/health-path annotation, defaulting
 // to "/" when unset.
 func AppHealthPathFromPod(cniPod *cniv1.CNIPod) string {
-	if p, ok := cniPod.GetAnnotations()[constants.AnnotationEndpointHealthPath]; ok && p != "" {
+	if p, ok := cniPod.GetAnnotations()[xdsconst.AnnotationEndpointHealthPath]; ok && p != "" {
 		return p
 	}
 	return defaultAppHealthPath
@@ -65,7 +68,7 @@ func AppClusterName(cniPod *cniv1.CNIPod, port uint16) string {
 // A pod without the annotation yields just {default port} — today's shape.
 func AppPortsFromPod(cniPod *cniv1.CNIPod) []uint16 {
 	set := map[uint16]struct{}{AppPortFromPod(cniPod): {}}
-	if raw, ok := cniPod.GetAnnotations()[constants.AnnotationEndpointPorts]; ok && raw != "" {
+	if raw, ok := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointPorts]; ok && raw != "" {
 		for _, part := range strings.Split(raw, ",") {
 			t := strings.TrimSpace(part)
 			if t == "" {
@@ -94,7 +97,7 @@ func AppPortsFromPod(cniPod *cniv1.CNIPod) []uint16 {
 // (Envoy->app) hop uses this; the mesh hop is always HTTP/2 mTLS regardless.
 func AppPortProtocols(cniPod *cniv1.CNIPod) map[uint16]bool {
 	h2 := map[uint16]bool{}
-	raw, ok := cniPod.GetAnnotations()[constants.AnnotationEndpointPorts]
+	raw, ok := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointPorts]
 	if !ok || raw == "" {
 		return h2
 	}
@@ -116,7 +119,7 @@ func AppPortProtocols(cniPod *cniv1.CNIPod) map[uint16]bool {
 // the endpoint.aether.io/port annotation, defaulting to the standard endpoint
 // port when the annotation is absent or invalid.
 func AppPortFromPod(cniPod *cniv1.CNIPod) uint16 {
-	s, ok := cniPod.GetAnnotations()[constants.AnnotationEndpointPort]
+	s, ok := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointPort]
 	if !ok {
 		return constants.DefaultEndpointPort
 	}
@@ -263,7 +266,7 @@ func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
 				Description: "aether passthrough fwmark (CNI redirect-all self-exclusion)",
 				Level:       solSocket,
 				Name:        soMark,
-				Value:       &corev3.SocketOption_IntValue{IntValue: constants.CapturePassthroughFwMark},
+				Value:       &corev3.SocketOption_IntValue{IntValue: meshconst.CapturePassthroughFwMark},
 				State:       corev3.SocketOption_STATE_PREBIND,
 			}},
 		},

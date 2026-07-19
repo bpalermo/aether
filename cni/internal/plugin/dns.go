@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 
-	commonconstants "github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"go.uber.org/zap"
@@ -33,7 +33,7 @@ func installDNSRedirect(netnsPath, hostIP string, logger *zap.Logger) error {
 }
 
 func programDNSDNAT(hostIP net.IP, logger *zap.Logger) error {
-	port := uint16(commonconstants.ProxyDNSResolverPort)
+	port := uint16(meshconst.ProxyDNSResolverPort)
 
 	c, err := nftables.New()
 	if err != nil {

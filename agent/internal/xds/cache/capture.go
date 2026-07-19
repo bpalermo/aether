@@ -13,7 +13,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -30,7 +30,7 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 	l, err := proxy.GenerateUDPCaptureListener(
 		cniPod.GetName(),
 		cniPod.GetNetworkNamespace(),
-		constants.ProxyCapturePort,
+		meshconst.ProxyCapturePort,
 		udpRoutes,
 	)
 	if err != nil {
@@ -80,7 +80,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 	// entries are inert, so the (broader-than-per-pod) union is harmless.
 	extensionFilters := c.podExtensionHTTPFilters(cniPod)
 
-	l, err := proxy.GenerateCaptureListener(cniPod, constants.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
+	l, err := proxy.GenerateCaptureListener(cniPod, meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -459,8 +459,8 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 			// cluster, so a captured request reaches it under either name (the
 			// mesh-DNS path uses the latter).
 			domains = []string{
-				fqdn, fmt.Sprintf("%s:%d", fqdn, constants.ProxyOutboundPort),
-				mesh, fmt.Sprintf("%s:%d", mesh, constants.ProxyOutboundPort),
+				fqdn, fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort),
+				mesh, fmt.Sprintf("%s:%d", mesh, meshconst.ProxyOutboundPort),
 			}
 		}
 		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules)
@@ -718,11 +718,11 @@ func routeTargetDomains(svc, fqdn, mesh string, bareNameCount map[string]int, po
 	domains := make([]string, 0, len(baseNames)*2)
 	for _, n := range baseNames {
 		// Portless + the mesh :18081 spelling (the mesh-DNS path uses the latter).
-		domains = append(domains, n, fmt.Sprintf("%s:%d", n, constants.ProxyOutboundPort))
+		domains = append(domains, n, fmt.Sprintf("%s:%d", n, meshconst.ProxyOutboundPort))
 	}
 	// proposal 023 M2: also match the route target's REAL Service port(s).
 	for _, p := range ports {
-		if p == 0 || p == constants.ProxyOutboundPort {
+		if p == 0 || p == meshconst.ProxyOutboundPort {
 			continue // 0 = unset; :18081 already emitted above.
 		}
 		for _, n := range baseNames {

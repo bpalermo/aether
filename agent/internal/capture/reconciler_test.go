@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -51,11 +51,11 @@ func TestReconcile_ProjectsTCPServices(t *testing.T) {
 	tcpSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "svc-tcp", Namespace: "aether-test",
-			Labels: map[string]string{constants.LabelMeshService: "true"},
+			Labels: map[string]string{aetherlabels.LabelMeshService: "true"},
 			Annotations: map[string]string{
-				constants.AnnotationMeshService:     "svc-tcp",
-				constants.AnnotationMeshPort:        "9000",
-				constants.AnnotationMeshAppProtocol: "tcp",
+				aetherlabels.AnnotationMeshService:     "svc-tcp",
+				aetherlabels.AnnotationMeshPort:        "9000",
+				aetherlabels.AnnotationMeshAppProtocol: "tcp",
 			},
 		},
 		Spec: corev1.ServiceSpec{ClusterIP: "10.96.0.99"},
@@ -63,11 +63,11 @@ func TestReconcile_ProjectsTCPServices(t *testing.T) {
 	httpSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "svc-http", Namespace: "aether-test",
-			Labels: map[string]string{constants.LabelMeshService: "true"},
+			Labels: map[string]string{aetherlabels.LabelMeshService: "true"},
 			Annotations: map[string]string{
-				constants.AnnotationMeshService:     "svc-http",
-				constants.AnnotationMeshPort:        "8080",
-				constants.AnnotationMeshAppProtocol: "http",
+				aetherlabels.AnnotationMeshService:     "svc-http",
+				aetherlabels.AnnotationMeshPort:        "8080",
+				aetherlabels.AnnotationMeshAppProtocol: "http",
 			},
 		},
 		Spec: corev1.ServiceSpec{ClusterIP: "10.96.0.50"},
@@ -75,10 +75,10 @@ func TestReconcile_ProjectsTCPServices(t *testing.T) {
 	headless := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "svc-headless", Namespace: "aether-test",
-			Labels: map[string]string{constants.LabelMeshService: "true"},
+			Labels: map[string]string{aetherlabels.LabelMeshService: "true"},
 			Annotations: map[string]string{
-				constants.AnnotationMeshService:     "svc-headless",
-				constants.AnnotationMeshAppProtocol: "tcp",
+				aetherlabels.AnnotationMeshService:     "svc-headless",
+				aetherlabels.AnnotationMeshAppProtocol: "tcp",
 			},
 		},
 		Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
@@ -100,8 +100,8 @@ func TestReconcile_ProjectsAuthoritiesAndDNSRecords(t *testing.T) {
 	mesh := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "svc-1", Namespace: "aether-test",
-			Labels:      map[string]string{constants.LabelMeshService: "true"},
-			Annotations: map[string]string{constants.AnnotationMeshService: "svc-1", constants.AnnotationMeshPort: "8080"},
+			Labels:      map[string]string{aetherlabels.LabelMeshService: "true"},
+			Annotations: map[string]string{aetherlabels.AnnotationMeshService: "svc-1", aetherlabels.AnnotationMeshPort: "8080"},
 		},
 		Spec: corev1.ServiceSpec{ClusterIP: "10.96.0.42"},
 	}

@@ -20,7 +20,6 @@ go_library(
         "//agent/internal/xds/proxy",
         "//api/aether/config/v1:config",
         "//common/apis/config/v1:config",
-        "//common/constants",
         "//common/log",
         "//common/referencegrant",
         "//common/serviceref",

@@ -7,9 +7,9 @@ import (
 
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,7 +24,7 @@ func makeDepPod(name, sa, netns, upstreams string) *cniv1.CNIPod {
 		NetworkNamespace: netns,
 	}
 	if upstreams != "" {
-		pod.Annotations = map[string]string{constants.AnnotationConfigUpstreams: upstreams}
+		pod.Annotations = map[string]string{xdsconst.AnnotationConfigUpstreams: upstreams}
 	}
 	return pod
 }

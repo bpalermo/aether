@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	commonconstants "github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/google/nftables/expr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +15,7 @@ import (
 // DNAT to hostIP:ProxyDNSResolverPort, for both UDP and TCP.
 func TestDNSDNATExprs(t *testing.T) {
 	hostIP := net.ParseIP("10.0.0.5").To4()
-	port := uint16(commonconstants.ProxyDNSResolverPort) // 18054
+	port := uint16(meshconst.ProxyDNSResolverPort) // 18054
 	for _, proto := range []byte{unix.IPPROTO_UDP, unix.IPPROTO_TCP} {
 		exprs := dnsDNATExprs(proto, hostIP, port)
 		require.Len(t, exprs, 10)

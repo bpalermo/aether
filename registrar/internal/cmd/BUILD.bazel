@@ -10,7 +10,7 @@ go_library(
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//common/apis/config/v1:config",
-        "//common/constants",
+        "//common/constants/mesh",
         "//common/manager",
         "//common/must",
         "//common/spire",

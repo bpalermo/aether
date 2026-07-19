@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
@@ -70,7 +70,7 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 	assert.Empty(t, hc.GetClusterMinHealthyPercentages(), "pure server-state check, no cluster gating")
 	require.Len(t, hc.GetHeaders(), 1)
 	assert.Equal(t, ":path", hc.GetHeaders()[0].GetName())
-	assert.Equal(t, constants.ProxyReadinessPath, hc.GetHeaders()[0].GetStringMatch().GetExact())
+	assert.Equal(t, meshconst.ProxyReadinessPath, hc.GetHeaders()[0].GetStringMatch().GetExact())
 }
 
 // TestOutboundChainStatsFilter verifies the stats filter (proposals 007/012)

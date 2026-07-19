@@ -20,6 +20,8 @@ go_library(
         "//cni/internal/cri",
         "//cni/internal/telemetry",
         "//common/constants",
+        "//common/constants/annotations",
+        "//common/constants/mesh",
         "//common/retry",
         "//common/telemetry",
         "@com_github_containernetworking_cni//pkg/skel",
@@ -52,7 +54,8 @@ go_test(
     deps = [
         "//api/aether/cni/v1:cni",
         "//cni/config",
-        "//common/constants",
+        "//common/constants/annotations",
+        "//common/constants/mesh",
         "@com_github_containernetworking_cni//pkg/skel",
         "@com_github_containernetworking_cni//pkg/types",
         "@com_github_google_nftables//expr",

@@ -1,4 +1,7 @@
-package constants
+// Package labels defines the cross-tree Aether Kubernetes labels and the
+// mesh-service / clusterset label+annotation domain used to mark and link the
+// generated selectorless Services the registrar owns.
+package labels
 
 const (
 	aetherLabelPrefix = "aether.io"

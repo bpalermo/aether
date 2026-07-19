@@ -13,7 +13,7 @@ import (
 	"time"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/serviceref"
 	"github.com/bpalermo/aether/registrar/internal/server"
@@ -106,7 +106,7 @@ func (g *Generator) reconcile(ctx context.Context) {
 	}
 
 	var managed corev1.ServiceList
-	if err := g.List(ctx, &managed, client.MatchingLabels{constants.LabelMeshService: "true"}); err != nil {
+	if err := g.List(ctx, &managed, client.MatchingLabels{aetherlabels.LabelMeshService: "true"}); err != nil {
 		g.Log.ErrorContext(ctx, "list managed mesh Services failed", "error", err)
 		return
 	}
@@ -147,17 +147,17 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 
 	existing := &corev1.Service{}
 	if err := g.Get(ctx, key, existing); err == nil {
-		if existing.Labels[constants.LabelMeshService] != "true" {
+		if existing.Labels[aetherlabels.LabelMeshService] != "true" {
 			g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping mesh VIP", "service", key.String())
 			return
 		}
-		if existing.Annotations[constants.AnnotationMeshPort] == port &&
-			existing.Annotations[constants.AnnotationMeshAppProtocol] == appProto {
+		if existing.Annotations[aetherlabels.AnnotationMeshPort] == port &&
+			existing.Annotations[aetherlabels.AnnotationMeshAppProtocol] == appProto {
 			return // converged
 		}
-		existing.Annotations[constants.AnnotationMeshService] = d.service
-		existing.Annotations[constants.AnnotationMeshPort] = port
-		existing.Annotations[constants.AnnotationMeshAppProtocol] = appProto
+		existing.Annotations[aetherlabels.AnnotationMeshService] = d.service
+		existing.Annotations[aetherlabels.AnnotationMeshPort] = port
+		existing.Annotations[aetherlabels.AnnotationMeshAppProtocol] = appProto
 		if err := g.Update(ctx, existing); err != nil {
 			g.Log.ErrorContext(ctx, "update mesh Service failed", "service", key.String(), "error", err)
 		}
@@ -171,11 +171,11 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      d.service,
 			Namespace: d.namespace,
-			Labels:    map[string]string{constants.LabelMeshService: "true"},
+			Labels:    map[string]string{aetherlabels.LabelMeshService: "true"},
 			Annotations: map[string]string{
-				constants.AnnotationMeshService:     d.service,
-				constants.AnnotationMeshPort:        port,
-				constants.AnnotationMeshAppProtocol: appProto,
+				aetherlabels.AnnotationMeshService:     d.service,
+				aetherlabels.AnnotationMeshPort:        port,
+				aetherlabels.AnnotationMeshAppProtocol: appProto,
 			},
 		},
 		Spec: corev1.ServiceSpec{

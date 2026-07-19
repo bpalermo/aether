@@ -24,7 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	commonlog "github.com/bpalermo/aether/common/log"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -59,16 +59,16 @@ func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.R
 	}
 
 	// Explicit opt-out: a pod in a managed namespace can exclude itself.
-	if v, ok := pod.Labels[constants.LabelAetherManaged]; ok && v != "true" {
+	if v, ok := pod.Labels[aetherlabels.LabelAetherManaged]; ok && v != "true" {
 		return admission.Allowed("pod opted out of mesh management (aether.io/managed!=true)")
 	}
 
 	changed := false
-	if pod.Labels[constants.LabelAetherManaged] != "true" {
+	if pod.Labels[aetherlabels.LabelAetherManaged] != "true" {
 		if pod.Labels == nil {
 			pod.Labels = map[string]string{}
 		}
-		pod.Labels[constants.LabelAetherManaged] = "true"
+		pod.Labels[aetherlabels.LabelAetherManaged] = "true"
 		changed = true
 	}
 

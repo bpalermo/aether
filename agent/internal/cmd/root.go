@@ -47,7 +47,7 @@ import (
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/config"
-	commonconstants "github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
@@ -290,7 +290,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		// each pod's :53 straight to it at HOST_IP:resolverPort (no Envoy DNS layer,
 		// no setns, no privilege increase).
 		hostIP := os.Getenv("HOST_IP")
-		resolverPort := uint32(commonconstants.ProxyDNSResolverPort)
+		resolverPort := uint32(meshconst.ProxyDNSResolverPort)
 		dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), l)
 		// Default the forward upstream to the agent's own resolv.conf (kube-dns, via
 		// ClusterFirstWithHostNet) when --mesh-dns-upstream is unset, so mesh DNS is

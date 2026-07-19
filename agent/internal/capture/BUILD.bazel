@@ -6,7 +6,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/capture",
     visibility = ["//agent:__subpackages__"],
     deps = [
-        "//common/constants",
+        "//common/constants/labels",
         "//common/log",
         "//common/serviceref",
         "@io_k8s_api//core/v1:core",
@@ -23,7 +23,7 @@ go_test(
     srcs = ["reconciler_test.go"],
     embed = [":capture"],
     deps = [
-        "//common/constants",
+        "//common/constants/labels",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",

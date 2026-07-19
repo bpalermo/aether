@@ -5,7 +5,7 @@ import (
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,17 +39,17 @@ func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 		},
 		{
 			name:       "explicit http",
-			annotation: map[string]string{constants.AnnotationEndpointProtocol: "http"},
+			annotation: map[string]string{aetherannotations.AnnotationEndpointProtocol: "http"},
 			want:       registryv1.Service_PROTOCOL_HTTP,
 		},
 		{
 			name:       "tcp annotation selects PROTOCOL_TCP",
-			annotation: map[string]string{constants.AnnotationEndpointProtocol: "tcp"},
+			annotation: map[string]string{aetherannotations.AnnotationEndpointProtocol: "tcp"},
 			want:       registryv1.Service_PROTOCOL_TCP,
 		},
 		{
 			name:       "unknown value is rejected",
-			annotation: map[string]string{constants.AnnotationEndpointProtocol: "udp"},
+			annotation: map[string]string{aetherannotations.AnnotationEndpointProtocol: "udp"},
 			wantErr:    true,
 		},
 	}

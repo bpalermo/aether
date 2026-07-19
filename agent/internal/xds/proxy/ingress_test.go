@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -161,7 +161,7 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 		ServiceAccount:   "mp",
 		NetworkNamespace: "/var/run/netns/cni-a",
 		Ips:              []string{"10.0.0.1"},
-		Annotations:      map[string]string{constants.AnnotationEndpointPorts: "8080,9090"},
+		Annotations:      map[string]string{aetherannotations.AnnotationEndpointPorts: "8080,9090"},
 	}
 	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
 	require.NoError(t, err)

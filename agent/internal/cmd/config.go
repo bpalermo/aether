@@ -7,7 +7,7 @@ import (
 	"github.com/bpalermo/aether/agent/constants"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	commonconstants "github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/manager"
 )
 
@@ -42,7 +42,7 @@ type AgentConfig struct {
 	RegistrarAddress string
 
 	// MeshDomain is the DNS-style domain mesh authorities live under
-	// (<service>.<mesh-domain>); see constants.DefaultMeshDomain.
+	// (<service>.<mesh-domain>); see meshconst.DefaultMeshDomain.
 	MeshDomain string
 
 	// EmitStatsPod enables per-pod labels (source_pod/destination_pod) on the
@@ -172,7 +172,7 @@ func NewAgentConfig() *AgentConfig {
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
-		MeshDomain:              commonconstants.DefaultMeshDomain,
+		MeshDomain:              meshconst.DefaultMeshDomain,
 		SpireEnabled:            true,
 		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,

@@ -9,6 +9,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	"github.com/bpalermo/aether/common/serviceref"
 )
 
@@ -104,21 +105,21 @@ func getServiceName(cniPod *cniv1.CNIPod) (string, error) {
 // transparent-capture TCP floor). Any other value is rejected so a typo never
 // silently registers a service under the wrong (or unspecified) protocol.
 func getProtocolFromAnnotations(annotations map[string]string) (registryv1.Service_Protocol, error) {
-	switch annotations[constants.AnnotationEndpointProtocol] {
-	case "", constants.ProtocolHTTP:
+	switch annotations[aetherannotations.AnnotationEndpointProtocol] {
+	case "", aetherannotations.ProtocolHTTP:
 		return registryv1.Service_PROTOCOL_HTTP, nil
-	case constants.ProtocolTCP:
+	case aetherannotations.ProtocolTCP:
 		return registryv1.Service_PROTOCOL_TCP, nil
 	default:
 		return registryv1.Service_PROTOCOL_UNSPECIFIED, fmt.Errorf("invalid protocol annotation %q (want %q or %q)",
-			annotations[constants.AnnotationEndpointProtocol], constants.ProtocolHTTP, constants.ProtocolTCP)
+			annotations[aetherannotations.AnnotationEndpointProtocol], aetherannotations.ProtocolHTTP, aetherannotations.ProtocolTCP)
 	}
 }
 
 // getPortFromAnnotations extracts the endpoint port from pod annotations.
 // If the port annotation is not present, it returns the default endpoint port.
 func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
-	s, ok := annotations[constants.AnnotationEndpointPort]
+	s, ok := annotations[aetherannotations.AnnotationEndpointPort]
 	if !ok {
 		return constants.DefaultEndpointPort, nil
 	}
@@ -136,7 +137,7 @@ func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
 // is absent the set is just {defaultPort}.
 func getPortsFromAnnotations(annotations map[string]string, defaultPort uint16) ([]uint32, error) {
 	set := map[uint32]struct{}{uint32(defaultPort): {}}
-	if raw, ok := annotations[constants.AnnotationEndpointPorts]; ok && raw != "" {
+	if raw, ok := annotations[aetherannotations.AnnotationEndpointPorts]; ok && raw != "" {
 		for _, part := range strings.Split(raw, ",") {
 			t := strings.TrimSpace(part)
 			if t == "" {
@@ -166,7 +167,7 @@ func getPortsFromAnnotations(annotations map[string]string, defaultPort uint16) 
 // getWeightFromAnnotations extracts the endpoint weight from pod annotations.
 // If the weight annotation is not present, it returns the default endpoint weight.
 func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
-	s, ok := annotations[constants.AnnotationEndpointWeight]
+	s, ok := annotations[aetherannotations.AnnotationEndpointWeight]
 	if !ok {
 		return constants.DefaultEndpointWeight, nil
 	}
@@ -186,8 +187,8 @@ func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 // endpoints enter every client pre-warmed (no per-client first-HC round) and a
 // per-pod annotation opts back into per-client active checking.
 func HealthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
-	switch annotations[constants.AnnotationEndpointHealthCheckMode] {
-	case constants.HealthCheckModeActive:
+	switch annotations[aetherannotations.AnnotationEndpointHealthCheckMode] {
+	case aetherannotations.HealthCheckModeActive:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_ACTIVE
 	default:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
@@ -198,7 +199,7 @@ func HealthCheckModeFromAnnotations(annotations map[string]string) registryv1.Se
 // All annotations with the aether endpoint metadata prefix are included in the result.
 func getEndpointMetadataFromAnnotations(annotations map[string]string) map[string]string {
 	metadata := map[string]string{}
-	prefix := constants.AnnotationAetherEndpointMetadataPrefix
+	prefix := aetherannotations.AnnotationAetherEndpointMetadataPrefix
 	for key, value := range annotations {
 		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
 			metadataKey := key[len(prefix):]

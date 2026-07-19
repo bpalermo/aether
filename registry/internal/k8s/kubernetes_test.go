@@ -16,6 +16,8 @@ import (
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/registry/registrytest"
 )
 
@@ -43,7 +45,7 @@ func managedPod(name, namespace, serviceAccount, podIP, nodeName string) *corev1
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				constants.LabelAetherManaged: "true",
+				aetherlabels.LabelAetherManaged: "true",
 			},
 			Annotations: map[string]string{},
 		},
@@ -64,8 +66,8 @@ func topologyNode(name, region, zone string) *corev1.Node {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				constants.AnnotationKubernetesNodeTopologyRegion: region,
-				constants.AnnotationKubernetesNodeTopologyZone:   zone,
+				aetherannotations.AnnotationKubernetesNodeTopologyRegion: region,
+				aetherannotations.AnnotationKubernetesNodeTopologyZone:   zone,
 			},
 		},
 	}
@@ -331,7 +333,7 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					delete(p.Labels, constants.LabelAetherManaged)
+					delete(p.Labels, aetherlabels.LabelAetherManaged)
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -347,7 +349,7 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointPort] = "9090"
+					p.Annotations[aetherannotations.AnnotationEndpointPort] = "9090"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -380,7 +382,7 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointWeight] = "512"
+					p.Annotations[aetherannotations.AnnotationEndpointWeight] = "512"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -413,8 +415,8 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationAetherEndpointMetadataPrefix+"version"] = "v2"
-					p.Annotations[constants.AnnotationAetherEndpointMetadataPrefix+"env"] = "production"
+					p.Annotations[aetherannotations.AnnotationAetherEndpointMetadataPrefix+"version"] = "v2"
+					p.Annotations[aetherannotations.AnnotationAetherEndpointMetadataPrefix+"env"] = "production"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -450,7 +452,7 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointHealthCheckMode] = constants.HealthCheckModeEDS
+					p.Annotations[aetherannotations.AnnotationEndpointHealthCheckMode] = aetherannotations.HealthCheckModeEDS
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -484,7 +486,7 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointPort] = "not-a-port"
+					p.Annotations[aetherannotations.AnnotationEndpointPort] = "not-a-port"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -501,7 +503,7 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointWeight] = "not-a-weight"
+					p.Annotations[aetherannotations.AnnotationEndpointWeight] = "not-a-weight"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -783,7 +785,7 @@ func TestListAllEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointPort] = "99999999"
+					p.Annotations[aetherannotations.AnnotationEndpointPort] = "99999999"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -1067,7 +1069,7 @@ func TestNodeLocalityCache_TTLExpiryRefreshes(t *testing.T) {
 	// The node's zone label changes (essentially never happens in practice).
 	var node corev1.Node
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Name: "node-1"}, &node))
-	node.Labels[constants.AnnotationKubernetesNodeTopologyZone] = "us-east-1z"
+	node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyZone] = "us-east-1z"
 	require.NoError(t, c.Update(ctx, &node))
 
 	// Within the TTL the cached locality is served.
@@ -1131,37 +1133,37 @@ func TestGetPortFromAnnotations(t *testing.T) {
 		},
 		{
 			name:        "valid port annotation is parsed",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "9090"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "9090"},
 			expected:    9090,
 			wantErr:     false,
 		},
 		{
 			name:        "minimum port value 1 is valid",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "1"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "1"},
 			expected:    1,
 			wantErr:     false,
 		},
 		{
 			name:        "maximum port value 65535 is valid",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "65535"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "65535"},
 			expected:    65535,
 			wantErr:     false,
 		},
 		{
 			name:        "port value exceeding uint16 max returns error",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "65536"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "65536"},
 			expected:    0,
 			wantErr:     true,
 		},
 		{
 			name:        "non-numeric port annotation returns error",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "not-a-port"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "not-a-port"},
 			expected:    0,
 			wantErr:     true,
 		},
 		{
 			name:        "negative port annotation returns error",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "-1"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "-1"},
 			expected:    0,
 			wantErr:     true,
 		},
@@ -1201,31 +1203,31 @@ func TestGetWeightFromAnnotations(t *testing.T) {
 		},
 		{
 			name:        "valid weight annotation is parsed",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "512"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "512"},
 			expected:    512,
 			wantErr:     false,
 		},
 		{
 			name:        "weight of zero is valid",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "0"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "0"},
 			expected:    0,
 			wantErr:     false,
 		},
 		{
 			name:        "maximum uint32 weight is valid",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "4294967295"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "4294967295"},
 			expected:    4294967295,
 			wantErr:     false,
 		},
 		{
 			name:        "weight exceeding uint32 max returns error",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "4294967296"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "4294967296"},
 			expected:    0,
 			wantErr:     true,
 		},
 		{
 			name:        "non-numeric weight annotation returns error",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "heavy"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "heavy"},
 			expected:    0,
 			wantErr:     true,
 		},
@@ -1263,15 +1265,15 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 		{
 			name: "non-metadata annotations are ignored",
 			annotations: map[string]string{
-				"some.other.annotation/key":      "value",
-				constants.AnnotationEndpointPort: "8080",
+				"some.other.annotation/key":              "value",
+				aetherannotations.AnnotationEndpointPort: "8080",
 			},
 			expected: map[string]string{},
 		},
 		{
 			name: "single metadata annotation is extracted with key suffix",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
 			},
 			expected: map[string]string{
 				"version": "v2",
@@ -1280,9 +1282,9 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 		{
 			name: "multiple metadata annotations are all extracted",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
-				constants.AnnotationAetherEndpointMetadataPrefix + "env":     "production",
-				constants.AnnotationAetherEndpointMetadataPrefix + "tier":    "backend",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "env":     "production",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "tier":    "backend",
 			},
 			expected: map[string]string{
 				"version": "v2",
@@ -1293,16 +1295,16 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 		{
 			name: "annotation key equal to prefix alone is not extracted",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix: "value",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix: "value",
 			},
 			expected: map[string]string{},
 		},
 		{
 			name: "metadata annotations mixed with non-metadata annotations extracts only metadata",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix + "canary": "true",
-				constants.AnnotationEndpointPort:                            "9090",
-				constants.AnnotationEndpointWeight:                          "256",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "canary": "true",
+				aetherannotations.AnnotationEndpointPort:                            "9090",
+				aetherannotations.AnnotationEndpointWeight:                          "256",
 			},
 			expected: map[string]string{
 				"canary": "true",

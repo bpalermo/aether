@@ -13,7 +13,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/common/xds"
@@ -192,6 +192,6 @@ func queryNodeMetadata(ctx context.Context, nodeName string, client client.Clien
 		}
 	}
 
-	return node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
-		node.Labels[constants.AnnotationKubernetesNodeTopologyZone], nodeIP, nil
+	return node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyRegion],
+		node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyZone], nodeIP, nil
 }

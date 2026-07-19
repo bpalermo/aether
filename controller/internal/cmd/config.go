@@ -2,7 +2,7 @@
 package cmd
 
 import (
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
 )
@@ -61,6 +61,6 @@ func NewControllerConfig() *ControllerConfig {
 		},
 		MeshConfigMapName:       meshconfig.DefaultMeshConfigMapName,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
-		MeshDomain:              constants.DefaultMeshDomain,
+		MeshDomain:              meshconst.DefaultMeshDomain,
 	}
 }

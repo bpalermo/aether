@@ -12,6 +12,7 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//common/constants",
+        "//common/constants/annotations",
         "//common/serviceref",
         "//registry/export",
     ],
@@ -24,7 +25,7 @@ go_test(
     deps = [
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
-        "//common/constants",
+        "//common/constants/annotations",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

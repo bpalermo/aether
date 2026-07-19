@@ -8,7 +8,7 @@ import (
 	"github.com/bpalermo/aether/common/serviceref"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/registrar/internal/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,9 +49,9 @@ func TestGenerator_CreatesSelectorlessMeshService(t *testing.T) {
 
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
-	assert.Equal(t, "true", svc.Labels[constants.LabelMeshService])
-	assert.Equal(t, "svc-1", svc.Annotations[constants.AnnotationMeshService])
-	assert.Equal(t, "8080", svc.Annotations[constants.AnnotationMeshPort])
+	assert.Equal(t, "true", svc.Labels[aetherlabels.LabelMeshService])
+	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationMeshService])
+	assert.Equal(t, "8080", svc.Annotations[aetherlabels.AnnotationMeshPort])
 	assert.Empty(t, svc.Spec.Selector, "selectorless: no EndpointSlices, endpoints stay in the registry")
 	require.Len(t, svc.Spec.Ports, 1)
 	assert.Equal(t, int32(18081), svc.Spec.Ports[0].Port)
@@ -60,7 +60,7 @@ func TestGenerator_CreatesSelectorlessMeshService(t *testing.T) {
 func TestGenerator_PrunesStale(t *testing.T) {
 	stale := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
 		Name: "old", Namespace: "aether-test",
-		Labels: map[string]string{constants.LabelMeshService: "true"},
+		Labels: map[string]string{aetherlabels.LabelMeshService: "true"},
 	}}
 	g, c := newGen(seed("svc-1", "aether-test", 8080), stale)
 	g.reconcile(context.Background())
@@ -81,7 +81,7 @@ func TestGenerator_AnnotatesHTTPAppProtocol(t *testing.T) {
 
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
-	assert.Equal(t, AppProtocolHTTP, svc.Annotations[constants.AnnotationMeshAppProtocol],
+	assert.Equal(t, AppProtocolHTTP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
 		"PROTOCOL_HTTP services must be annotated as http")
 }
 
@@ -93,11 +93,11 @@ func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
 	existing := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "svc-1", Namespace: "aether-test",
-			Labels: map[string]string{constants.LabelMeshService: "true"},
+			Labels: map[string]string{aetherlabels.LabelMeshService: "true"},
 			Annotations: map[string]string{
-				constants.AnnotationMeshService:     "svc-1",
-				constants.AnnotationMeshPort:        "8080",
-				constants.AnnotationMeshAppProtocol: "tcp", // stale, should be corrected to "http"
+				aetherlabels.AnnotationMeshService:     "svc-1",
+				aetherlabels.AnnotationMeshPort:        "8080",
+				aetherlabels.AnnotationMeshAppProtocol: "tcp", // stale, should be corrected to "http"
 			},
 		},
 		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 18081}}},
@@ -107,7 +107,7 @@ func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
 
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
-	assert.Equal(t, AppProtocolHTTP, svc.Annotations[constants.AnnotationMeshAppProtocol],
+	assert.Equal(t, AppProtocolHTTP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
 		"stale app-protocol annotation must be corrected on reconcile")
 }
 
@@ -133,10 +133,10 @@ func TestGenerator_EmitsTCPMeshService(t *testing.T) {
 
 	svc, err := get(t, c, "aether-test", "tcp-svc")
 	require.NoError(t, err)
-	assert.Equal(t, "true", svc.Labels[constants.LabelMeshService])
-	assert.Equal(t, "tcp-svc", svc.Annotations[constants.AnnotationMeshService])
-	assert.Equal(t, "9000", svc.Annotations[constants.AnnotationMeshPort])
-	assert.Equal(t, AppProtocolTCP, svc.Annotations[constants.AnnotationMeshAppProtocol],
+	assert.Equal(t, "true", svc.Labels[aetherlabels.LabelMeshService])
+	assert.Equal(t, "tcp-svc", svc.Annotations[aetherlabels.AnnotationMeshService])
+	assert.Equal(t, "9000", svc.Annotations[aetherlabels.AnnotationMeshPort])
+	assert.Equal(t, AppProtocolTCP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
 		"PROTOCOL_TCP services must be annotated as tcp")
 	assert.Empty(t, svc.Spec.Selector, "selectorless: endpoints stay in the registry")
 }
@@ -152,5 +152,5 @@ func TestGenerator_DoesNotClobberUserService(t *testing.T) {
 	got, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "svc-1"}, got.Spec.Selector, "a user's Service of the same name is left untouched")
-	assert.NotEqual(t, "true", got.Labels[constants.LabelMeshService])
+	assert.NotEqual(t, "true", got.Labels[aetherlabels.LabelMeshService])
 }

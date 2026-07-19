@@ -3,8 +3,8 @@ package proxy
 import (
 	"testing"
 
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -87,7 +87,7 @@ func TestUpstreamsFromPod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pod := &cniv1.CNIPod{Name: "p", Namespace: tt.namespace}
 			if tt.annotation != nil {
-				pod.Annotations = map[string]string{constants.AnnotationConfigUpstreams: *tt.annotation}
+				pod.Annotations = map[string]string{xdsconst.AnnotationConfigUpstreams: *tt.annotation}
 			}
 			assert.Equal(t, tt.want, UpstreamsFromPod(pod))
 		})

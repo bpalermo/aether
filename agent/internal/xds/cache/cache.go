@@ -24,7 +24,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/registry"
 
 	commonlog "github.com/bpalermo/aether/common/log"
@@ -445,7 +445,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		SnapshotCache: cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),
 		log:           commonlog.Named(log, "cache"),
 		nodeName:      nodeName,
-		meshDomain:    constants.DefaultMeshDomain,
+		meshDomain:    meshconst.DefaultMeshDomain,
 		metrics:       metrics,
 		// Default to the production posture: SPIRE-backed mTLS on. The agent flips
 		// this off (SetSpireEnabled(false)) only when --spire-enabled=false.
