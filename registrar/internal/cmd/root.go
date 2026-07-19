@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/constants"
 	"github.com/bpalermo/aether/common/manager"
@@ -18,6 +17,7 @@ import (
 	"github.com/bpalermo/aether/registrar/internal/server"
 	"github.com/bpalermo/aether/registrar/internal/services"
 	"github.com/bpalermo/aether/registry"
+	"github.com/bpalermo/aether/registry/backend"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
@@ -320,33 +320,18 @@ func runRegistrar(ctx context.Context) (retErr error) {
 }
 
 func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
-	var reg registry.Registry
-
-	switch cfg.RegistryBackend {
-	case "kubernetes":
-		reg = registry.NewKubernetesRegistry(l, m.GetAPIReader(), registry.KubernetesConfig{
-			ClusterName: cfg.ClusterName,
-		})
-	case "dynamodb":
-		// Region comes from the standard AWS chain (AWS_REGION env — set by the
-		// chart's aws.region value — shared config, IMDS), falling back to
-		// us-east-1 so bare runs keep the historical default.
-		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load AWS config: %w", err)
-		}
-		if awsCfg.Region == "" {
-			awsCfg.Region = "us-east-1"
-		}
-		reg = registry.NewDynamoDBRegistry(l, awsCfg)
-	case "etcd":
-		reg = registry.NewEtcdRegistry(l, registry.EtcdConfig{
-			Endpoints: cfg.EtcdEndpoints,
-			Region:    cfg.Region,
-			Cluster:   cfg.ClusterName,
-		})
-	default:
-		return nil, fmt.Errorf("unsupported registry backend: %s (supported: kubernetes, dynamodb, etcd)", cfg.RegistryBackend)
+	// Backend selection lives in the registry/backend factory; this is the only
+	// consumer that links every backend. For dynamodb, the AWS region comes from
+	// the standard AWS chain (AWS_REGION env — set by the chart's aws.region
+	// value — shared config, IMDS), falling back to us-east-1.
+	reg, err := backend.New(ctx, l, cfg.RegistryBackend, backend.Config{
+		ClusterName:   cfg.ClusterName,
+		Reader:        m.GetAPIReader(),
+		EtcdEndpoints: cfg.EtcdEndpoints,
+		Region:        cfg.Region,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if err := reg.Initialize(ctx); err != nil {

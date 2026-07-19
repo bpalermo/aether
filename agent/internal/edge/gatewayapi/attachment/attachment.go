@@ -1,7 +1,14 @@
-package gatewayapi
+// Package attachment holds the edge Gateway API controller's route→listener
+// attachment resolution: parentRef matching, allowedRoutes (namespaces/kinds)
+// admission, ReferenceGrant-gated backendRef admission, and listener/route
+// hostname intersection. It is deliberately free of any xDS proxy/cache
+// dependency so the attachment semantics (and their tests) stand alone from
+// Envoy resource generation; the gatewayapi reconciler composes it.
+package attachment
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -9,8 +16,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+// Resolver resolves route→listener attachment. It needs only a Kubernetes
+// reader (to fetch route-namespace labels for allowedRoutes.namespaces
+// selectors) and a logger — no xDS proxy/cache types.
+type Resolver struct {
+	client.Reader
+	Log *slog.Logger
+}
 
 // routeAttachReason enumerates why a route does (Accepted) or does not attach to
 // any listener of a Gateway. The zero value (attachAccepted) means it attaches.
@@ -36,7 +52,7 @@ const (
 // otherwise protocol-default supported kinds; a kind not in the protocol default
 // is never accepted.
 func listenerAcceptsKind(ln gatewayv1.Listener, routeKind string) bool {
-	for _, s := range listenerSupportedKinds(ln) {
+	for _, s := range ListenerSupportedKinds(ln) {
 		if string(s.Kind) == routeKind {
 			return true
 		}
@@ -44,13 +60,13 @@ func listenerAcceptsKind(ln gatewayv1.Listener, routeKind string) bool {
 	return false
 }
 
-// listenerSupportedKinds returns the supportedKinds to publish on a listener's
+// ListenerSupportedKinds returns the supportedKinds to publish on a listener's
 // status: the protocol-default kinds, intersected with allowedRoutes.kinds when
 // the listener sets one. A listener whose allowedRoutes.kinds names only
 // unsupported kinds yields an empty (non-nil) slice, matching the upstream
 // conformance expectation (supportedKinds: []).
-func listenerSupportedKinds(ln gatewayv1.Listener) []gatewayv1.RouteGroupKind {
-	defaults := supportedKindsFor(ln.Protocol)
+func ListenerSupportedKinds(ln gatewayv1.Listener) []gatewayv1.RouteGroupKind {
+	defaults := SupportedKindsFor(ln.Protocol)
 	if ln.AllowedRoutes == nil || len(ln.AllowedRoutes.Kinds) == 0 {
 		return defaults
 	}
@@ -65,14 +81,14 @@ func listenerSupportedKinds(ln gatewayv1.Listener) []gatewayv1.RouteGroupKind {
 	return out
 }
 
-// listenerHasInvalidRouteKinds reports whether a listener's allowedRoutes.kinds
+// ListenerHasInvalidRouteKinds reports whether a listener's allowedRoutes.kinds
 // names any kind the listener's protocol does not support (drives the
 // ResolvedRefs=False / InvalidRouteKinds listener condition).
-func listenerHasInvalidRouteKinds(ln gatewayv1.Listener) bool {
+func ListenerHasInvalidRouteKinds(ln gatewayv1.Listener) bool {
 	if ln.AllowedRoutes == nil || len(ln.AllowedRoutes.Kinds) == 0 {
 		return false
 	}
-	defaults := supportedKindsFor(ln.Protocol)
+	defaults := SupportedKindsFor(ln.Protocol)
 	for _, want := range ln.AllowedRoutes.Kinds {
 		ok := false
 		for _, d := range defaults {
@@ -86,6 +102,22 @@ func listenerHasInvalidRouteKinds(ln gatewayv1.Listener) bool {
 		}
 	}
 	return false
+}
+
+// SupportedKindsFor maps a listener protocol to the Route kinds the edge serves
+// on it: HTTPRoute for HTTP/HTTPS, TCPRoute for TCP, TLSRoute for TLS.
+func SupportedKindsFor(protocol gatewayv1.ProtocolType) []gatewayv1.RouteGroupKind {
+	group := gatewayv1.Group(gatewayv1.GroupName)
+	switch protocol {
+	case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
+		return []gatewayv1.RouteGroupKind{{Group: &group, Kind: "HTTPRoute"}}
+	case gatewayv1.TCPProtocolType:
+		return []gatewayv1.RouteGroupKind{{Group: &group, Kind: "TCPRoute"}}
+	case gatewayv1.TLSProtocolType:
+		return []gatewayv1.RouteGroupKind{{Group: &group, Kind: "TLSRoute"}}
+	default:
+		return nil
+	}
 }
 
 func groupEqual(a, b *gatewayv1.Group) bool {
@@ -135,7 +167,7 @@ func parentRefNamesAnyListener(p gatewayv1.ParentReference, listeners []gatewayv
 // route in routeNamespace. The Gateway lives in gwNamespace. Selector matching
 // fetches the route namespace's labels via the client; a fetch failure is treated
 // as "not allowed" (fail-closed) rather than panicking.
-func (r *Reconciler) namespaceAllowed(ctx context.Context, gwNamespace, routeNamespace string, ln gatewayv1.Listener) bool {
+func (r *Resolver) namespaceAllowed(ctx context.Context, gwNamespace, routeNamespace string, ln gatewayv1.Listener) bool {
 	from := gatewayv1.NamespacesFromSame
 	var selector *metav1.LabelSelector
 	if ln.AllowedRoutes != nil && ln.AllowedRoutes.Namespaces != nil {
@@ -218,7 +250,7 @@ func hostnameMatch(a, b string) bool {
 // allowedRoutes.namespaces (NotAllowedByListeners), allowedRoutes.kinds, and
 // listener-hostname intersection (NoMatchingListenerHostname). A route attaches
 // when at least one listener of the Gateway accepts it on all axes.
-func (r *Reconciler) httpRouteAttachment(
+func (r *Resolver) httpRouteAttachment(
 	ctx context.Context,
 	gw *gatewayv1.Gateway,
 	parentRefs []gatewayv1.ParentReference,
@@ -264,4 +296,132 @@ func (r *Reconciler) httpRouteAttachment(
 		// specific reason found so far (namespace/hostname over NoMatchingParent).
 	}
 	return reason
+}
+
+// HTTPRouteAcceptance computes the route-level Accepted condition for an HTTPRoute
+// across all of our Gateways it references. The route is Accepted when it attaches
+// to at least one listener of at least one of our Gateways; otherwise the most
+// specific failure reason wins (NoMatchingListenerHostname > NotAllowedByListeners
+// > NoMatchingParent).
+func (r *Resolver) HTTPRouteAcceptance(ctx context.Context, hr *gatewayv1.HTTPRoute, gwByKey map[GatewayKey]*gatewayv1.Gateway) (bool, string, string) {
+	best := attachNoMatchingParent
+	for _, p := range hr.Spec.ParentRefs {
+		if !parentRefIsGateway(p) {
+			continue
+		}
+		key := GatewayKey{Namespace: parentRefNamespace(p.Namespace, hr.Namespace), Name: string(p.Name)}
+		gw, ok := gwByKey[key]
+		if !ok {
+			continue
+		}
+		switch r.httpRouteAttachment(ctx, gw, []gatewayv1.ParentReference{p}, hr.Namespace, hr.Spec.Hostnames) {
+		case attachAccepted:
+			return true, string(gatewayv1.RouteReasonAccepted), "Route accepted by the aether edge controller"
+		case attachNoMatchingListenerHostname:
+			best = attachNoMatchingListenerHostname
+		case attachNotAllowedByListeners:
+			if best != attachNoMatchingListenerHostname {
+				best = attachNotAllowedByListeners
+			}
+		}
+	}
+	switch best {
+	case attachNoMatchingListenerHostname:
+		return false, string(gatewayv1.RouteReasonNoMatchingListenerHostname), "No listener hostname intersects the route hostnames"
+	case attachNotAllowedByListeners:
+		return false, string(gatewayv1.RouteReasonNotAllowedByListeners), "Route namespace is not allowed by the listener allowedRoutes.namespaces"
+	default:
+		return false, string(gatewayv1.RouteReasonNoMatchingParent), "Route does not attach to a matching listener on this Gateway"
+	}
+}
+
+// AttachedRoutesForListener counts the routes (with Accepted=True) attached to a
+// specific listener. HTTP/HTTPS listeners accept HTTPRoutes attached to the
+// gateway; TCP/TLS listeners accept TCP/TLSRoutes whose parentRef resolves to
+// that listener's port (via GatewayParentPorts).
+func (r *Resolver) AttachedRoutesForListener(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	ln gatewayv1.Listener,
+	httpRoutes []gatewayv1.HTTPRoute,
+	tcpRoutes []gatewayv1.TCPRoute,
+	tlsRoutes []gatewayv1.TLSRoute,
+	gateways map[GatewayKey]struct{},
+	listenerKeys map[GatewayListenerKey]struct{},
+) int32 {
+	var count int32
+	switch ln.Protocol {
+	case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
+		for i := range httpRoutes {
+			hr := &httpRoutes[i]
+			if r.httpRouteAttachesToListener(ctx, gw, hr.Spec.ParentRefs, hr.Namespace, hr.Spec.Hostnames, ln) {
+				count++
+			}
+		}
+	case gatewayv1.TCPProtocolType:
+		for i := range tcpRoutes {
+			tr := &tcpRoutes[i]
+			ports := GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, listenerKeys)
+			if containsPort(ports, uint32(ln.Port)) {
+				count++
+			}
+		}
+	case gatewayv1.TLSProtocolType:
+		for i := range tlsRoutes {
+			tr := &tlsRoutes[i]
+			ports := GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, listenerKeys)
+			if containsPort(ports, uint32(ln.Port)) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// httpRouteAttachesToListener reports whether an HTTPRoute (in routeNamespace, with
+// routeHostnames) attaches to the given gateway listener. A parentRef with no
+// sectionName/port may attach to every HTTP/HTTPS listener; a sectionName or port
+// narrows it. Attachment additionally requires the listener to admit the route's
+// namespace (allowedRoutes.namespaces), accept HTTPRoute (allowedRoutes.kinds),
+// and the route's hostnames to intersect the listener hostname. The parentRef
+// namespace defaults to the route's namespace.
+func (r *Resolver) httpRouteAttachesToListener(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	parentRefs []gatewayv1.ParentReference,
+	routeNamespace string,
+	routeHostnames []gatewayv1.Hostname,
+	ln gatewayv1.Listener,
+) bool {
+	for _, p := range parentRefs {
+		if !parentRefIsGateway(p) {
+			continue
+		}
+		if string(p.Name) != gw.Name || parentRefNamespace(p.Namespace, routeNamespace) != gw.Namespace {
+			continue
+		}
+		if !parentRefSelectsListener(p, ln) {
+			continue
+		}
+		if !listenerAcceptsKind(ln, "HTTPRoute") {
+			continue
+		}
+		if !r.namespaceAllowed(ctx, gw.Namespace, routeNamespace, ln) {
+			continue
+		}
+		if !hostnamesIntersect(ln.Hostname, routeHostnames) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func containsPort(ports []uint32, port uint32) bool {
+	for _, p := range ports {
+		if p == port {
+			return true
+		}
+	}
+	return false
 }

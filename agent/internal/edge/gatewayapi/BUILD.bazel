@@ -3,7 +3,6 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "gatewayapi",
     srcs = [
-        "attachment.go",
         "edgeconfig_resolve.go",
         "features.go",
         "reconciler.go",
@@ -13,6 +12,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/edge/gatewayapi",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/edge/gatewayapi/attachment",
         "//agent/internal/edge/portalloc",
         "//agent/internal/edge/secret",
         "//agent/internal/gatewaystatus",
@@ -27,7 +27,6 @@ go_library(
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
-        "@io_k8s_apimachinery//pkg/labels",
         "@io_k8s_apimachinery//pkg/types",
         "@io_k8s_apimachinery//pkg/util/intstr",
         "@io_k8s_client_go//util/retry",
