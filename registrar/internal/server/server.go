@@ -188,20 +188,7 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 // reconnect, and an unset filter preserves the full watch.
 func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse]) error {
 	watcherID := fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
-
-	// nil = full watch; non-nil (possibly empty) = scoped to these services.
-	var filterServices []string
-	var filterSet map[string]struct{}
-	if f := req.GetFilter(); f != nil {
-		filterServices = f.GetServices()
-		if filterServices == nil {
-			filterServices = []string{}
-		}
-		filterSet = make(map[string]struct{}, len(filterServices))
-		for _, svc := range filterServices {
-			filterSet[svc] = struct{}{}
-		}
-	}
+	filterServices, filterSet := buildWatchFilter(req)
 	s.log.DebugContext(stream.Context(), "WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion(),
 		"filtered", filterSet != nil, "filterServices", len(filterServices))
 
@@ -210,34 +197,17 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		return err
 	}
 
-	// Send current snapshot (scoped to the filter) unless the client is
-	// already up-to-date.
 	events, currentVersion := s.snapshot.FullSnapshotEvents()
 	if req.GetLastVersion() != currentVersion {
-		for _, event := range events {
-			if filterSet != nil {
-				if _, inScope := filterSet[event.GetServiceName()]; !inScope {
-					continue
-				}
-			}
-			if err := stream.Send(event); err != nil {
-				return fmt.Errorf("failed to send snapshot event: %w", err)
-			}
+		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
+			return err
 		}
-	}
-	// Replay the full service catalog (every watcher, regardless of filter):
-	// agents keep a local index of service names so the on-demand cold path
-	// answers existence locally. Skipped when the client is current (its
-	// catalog is too: transitions ride the same versioned stream).
-	if req.GetLastVersion() != currentVersion {
-		for _, name := range s.snapshot.ServiceNames() {
-			if err := stream.Send(&registrarv1.WatchEndpointsResponse{
-				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED,
-				ServiceName: name,
-				Version:     currentVersion,
-			}); err != nil {
-				return fmt.Errorf("failed to send service catalog event: %w", err)
-			}
+		// Replay the full service catalog (every watcher, regardless of filter):
+		// agents keep a local index of service names so the on-demand cold path
+		// answers existence locally. Skipped when the client is current (its
+		// catalog is too: transitions ride the same versioned stream).
+		if err := sendServiceCatalog(stream, s.snapshot.ServiceNames(), currentVersion); err != nil {
+			return err
 		}
 	}
 
@@ -253,7 +223,60 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	// Subscribe and stream incremental events (fan-out indexed by service).
 	ch := s.broadcaster.Subscribe(watcherID, filterServices)
 	defer s.broadcaster.Unsubscribe(watcherID, ch)
+	return streamEvents(stream, ch)
+}
 
+// buildWatchFilter parses the request filter into a service list and lookup set.
+// nil filterSet = full watch; non-nil (possibly empty) = scoped watch.
+func buildWatchFilter(req *registrarv1.WatchEndpointsRequest) ([]string, map[string]struct{}) {
+	f := req.GetFilter()
+	if f == nil {
+		return nil, nil
+	}
+	filterServices := f.GetServices()
+	if filterServices == nil {
+		filterServices = []string{}
+	}
+	filterSet := make(map[string]struct{}, len(filterServices))
+	for _, svc := range filterServices {
+		filterSet[svc] = struct{}{}
+	}
+	return filterServices, filterSet
+}
+
+// sendFilteredSnapshot sends snapshot events scoped to filterSet (nil = send all).
+func sendFilteredSnapshot(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], events []*registrarv1.WatchEndpointsResponse, filterSet map[string]struct{}) error {
+	for _, event := range events {
+		if filterSet != nil {
+			if _, inScope := filterSet[event.GetServiceName()]; !inScope {
+				continue
+			}
+		}
+		if err := stream.Send(event); err != nil {
+			return fmt.Errorf("failed to send snapshot event: %w", err)
+		}
+	}
+	return nil
+}
+
+// sendServiceCatalog sends SERVICE_ADDED events for all names to the stream.
+// Catalog events are sent to ALL watchers regardless of filter (see Broadcast).
+func sendServiceCatalog(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], names []string, version string) error {
+	for _, name := range names {
+		if err := stream.Send(&registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED,
+			ServiceName: name,
+			Version:     version,
+		}); err != nil {
+			return fmt.Errorf("failed to send service catalog event: %w", err)
+		}
+	}
+	return nil
+}
+
+// streamEvents forwards incremental events from ch until the stream context ends
+// or the channel is closed (overflow/reconnect).
+func streamEvents(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], ch <-chan *registrarv1.WatchEndpointsResponse) error {
 	for {
 		select {
 		case <-stream.Context().Done():

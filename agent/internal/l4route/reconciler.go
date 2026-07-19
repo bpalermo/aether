@@ -134,68 +134,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // attached to a Service (parentRef kind=Service, empty group), and replaces
 // the sink's per-service rule sets.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
-	// Every List is CRD-gated (proposal 031): listing a kind whose CRD is
-	// absent errors every reconcile, so disabled types keep empty lists.
-	tcpList := &gatewayv1.TCPRouteList{}
-	if r.tcpEnabled {
-		if err := r.List(ctx, tcpList); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	tlsList := &gatewayv1.TLSRouteList{}
-	if r.tlsEnabled {
-		if err := r.List(ctx, tlsList); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	udpList := &gatewayv1.UDPRouteList{}
-	if r.udpEnabled {
-		if err := r.List(ctx, udpList); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
-	grantList := &gatewayv1beta1.ReferenceGrantList{}
-	if r.referenceGrantEnabled {
-		if err := r.List(ctx, grantList); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	grants := grantList.Items
-
-	tcpRoutes := map[string][]proxy.L4ServiceRoute{}
-	for i := range tcpList.Items {
-		tr := &tcpList.Items[i]
-		for _, svc := range serviceParents(tr.Spec.ParentRefs, tr.Namespace) {
-			for _, rule := range tr.Spec.Rules {
-				tcpRoutes[svc] = append(tcpRoutes[svc], r.buildTCPRoute(rule, tr.Namespace, "TCPRoute", grants))
-			}
-		}
+	tcpList, tlsList, udpList, grants, err := r.listL4Resources(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
 	}
 
-	tlsRoutes := map[string][]proxy.L4ServiceRoute{}
-	for i := range tlsList.Items {
-		tr := &tlsList.Items[i]
-		for _, svc := range serviceParents(tr.Spec.ParentRefs, tr.Namespace) {
-			hostnames := make([]string, 0, len(tr.Spec.Hostnames))
-			for _, h := range tr.Spec.Hostnames {
-				hostnames = append(hostnames, string(h))
-			}
-			for _, rule := range tr.Spec.Rules {
-				tlsRoutes[svc] = append(tlsRoutes[svc], r.buildTLSRoute(rule, hostnames, tr.Namespace, "TLSRoute", grants))
-			}
-		}
-	}
-
-	udpRoutes := map[string][]proxy.L4Backend{}
-	for i := range udpList.Items {
-		ur := &udpList.Items[i]
-		for _, svc := range serviceParents(ur.Spec.ParentRefs, ur.Namespace) {
-			for _, rule := range ur.Spec.Rules {
-				udpRoutes[svc] = append(udpRoutes[svc], r.buildUDPBackends(rule, ur.Namespace, "UDPRoute", grants)...)
-			}
-		}
-	}
+	tcpRoutes := r.projectTCPRoutes(tcpList, grants)
+	tlsRoutes := r.projectTLSRoutes(tlsList, grants)
+	udpRoutes := r.projectUDPRoutes(udpList, grants)
 
 	r.Sink.SetTCPServiceRoutes(tcpRoutes)
 	r.Sink.SetTLSServiceRoutes(tlsRoutes)
@@ -215,6 +161,92 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// every Service parentRef of each route we own (mesh controller). Failures are
 	// logged, not fatal — the data plane is already projected and the next
 	// reconcile retries.
+	r.writeTCPRouteStatuses(ctx, tcpList, grants)
+	r.writeTLSRouteStatuses(ctx, tlsList, grants)
+	r.writeUDPRouteStatuses(ctx, udpList, grants)
+	return reconcile.Result{}, nil
+}
+
+// listL4Resources lists TCPRoutes, TLSRoutes, UDPRoutes, and ReferenceGrants (all CRD-gated).
+func (r *Reconciler) listL4Resources(ctx context.Context) (*gatewayv1.TCPRouteList, *gatewayv1.TLSRouteList, *gatewayv1.UDPRouteList, []gatewayv1beta1.ReferenceGrant, error) {
+	// Every List is CRD-gated (proposal 031): listing a kind whose CRD is
+	// absent errors every reconcile, so disabled types keep empty lists.
+	tcpList := &gatewayv1.TCPRouteList{}
+	if r.tcpEnabled {
+		if err := r.List(ctx, tcpList); err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
+	tlsList := &gatewayv1.TLSRouteList{}
+	if r.tlsEnabled {
+		if err := r.List(ctx, tlsList); err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
+	udpList := &gatewayv1.UDPRouteList{}
+	if r.udpEnabled {
+		if err := r.List(ctx, udpList); err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
+	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs.
+	grantList := &gatewayv1beta1.ReferenceGrantList{}
+	if r.referenceGrantEnabled {
+		if err := r.List(ctx, grantList); err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
+	return tcpList, tlsList, udpList, grantList.Items, nil
+}
+
+// projectTCPRoutes builds the per-service TCPRoute map from the listed routes.
+func (r *Reconciler) projectTCPRoutes(tcpList *gatewayv1.TCPRouteList, grants []gatewayv1beta1.ReferenceGrant) map[string][]proxy.L4ServiceRoute {
+	tcpRoutes := map[string][]proxy.L4ServiceRoute{}
+	for i := range tcpList.Items {
+		tr := &tcpList.Items[i]
+		for _, svc := range serviceParents(tr.Spec.ParentRefs, tr.Namespace) {
+			for _, rule := range tr.Spec.Rules {
+				tcpRoutes[svc] = append(tcpRoutes[svc], r.buildTCPRoute(rule, tr.Namespace, "TCPRoute", grants))
+			}
+		}
+	}
+	return tcpRoutes
+}
+
+// projectTLSRoutes builds the per-service TLSRoute map from the listed routes.
+func (r *Reconciler) projectTLSRoutes(tlsList *gatewayv1.TLSRouteList, grants []gatewayv1beta1.ReferenceGrant) map[string][]proxy.L4ServiceRoute {
+	tlsRoutes := map[string][]proxy.L4ServiceRoute{}
+	for i := range tlsList.Items {
+		tr := &tlsList.Items[i]
+		for _, svc := range serviceParents(tr.Spec.ParentRefs, tr.Namespace) {
+			hostnames := make([]string, 0, len(tr.Spec.Hostnames))
+			for _, h := range tr.Spec.Hostnames {
+				hostnames = append(hostnames, string(h))
+			}
+			for _, rule := range tr.Spec.Rules {
+				tlsRoutes[svc] = append(tlsRoutes[svc], r.buildTLSRoute(rule, hostnames, tr.Namespace, "TLSRoute", grants))
+			}
+		}
+	}
+	return tlsRoutes
+}
+
+// projectUDPRoutes builds the per-service UDPRoute map from the listed routes.
+func (r *Reconciler) projectUDPRoutes(udpList *gatewayv1.UDPRouteList, grants []gatewayv1beta1.ReferenceGrant) map[string][]proxy.L4Backend {
+	udpRoutes := map[string][]proxy.L4Backend{}
+	for i := range udpList.Items {
+		ur := &udpList.Items[i]
+		for _, svc := range serviceParents(ur.Spec.ParentRefs, ur.Namespace) {
+			for _, rule := range ur.Spec.Rules {
+				udpRoutes[svc] = append(udpRoutes[svc], r.buildUDPBackends(rule, ur.Namespace, "UDPRoute", grants)...)
+			}
+		}
+	}
+	return udpRoutes
+}
+
+// writeTCPRouteStatuses publishes Gateway API status for every Service-parented TCPRoute.
+func (r *Reconciler) writeTCPRouteStatuses(ctx context.Context, tcpList *gatewayv1.TCPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range tcpList.Items {
 		tr := &tcpList.Items[i]
 		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, "TCPRoute", tcpBackendRefs(tr.Spec.Rules), grants)
@@ -222,6 +254,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			r.Log.WarnContext(ctx, "failed to write TCPRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
 	}
+}
+
+// writeTLSRouteStatuses publishes Gateway API status for every Service-parented TLSRoute.
+func (r *Reconciler) writeTLSRouteStatuses(ctx context.Context, tlsList *gatewayv1.TLSRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range tlsList.Items {
 		tr := &tlsList.Items[i]
 		resolved, reason, msg := r.backendsResolve(ctx, tr.Namespace, "TLSRoute", tlsBackendRefs(tr.Spec.Rules), grants)
@@ -229,6 +265,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			r.Log.WarnContext(ctx, "failed to write TLSRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
 	}
+}
+
+// writeUDPRouteStatuses publishes Gateway API status for every Service-parented UDPRoute.
+func (r *Reconciler) writeUDPRouteStatuses(ctx context.Context, udpList *gatewayv1.UDPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range udpList.Items {
 		ur := &udpList.Items[i]
 		resolved, reason, msg := r.backendsResolve(ctx, ur.Namespace, "UDPRoute", udpBackendRefs(ur.Spec.Rules), grants)
@@ -236,7 +276,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			r.Log.WarnContext(ctx, "failed to write UDPRoute status", "route", ur.Name, "namespace", ur.Namespace, "error", err.Error())
 		}
 	}
-	return reconcile.Result{}, nil
 }
 
 // writeRouteStatus upserts our (mesh controller) RouteParentStatus for each

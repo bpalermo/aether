@@ -158,10 +158,6 @@ func (b *Broadcaster) filteredCountLocked() int {
 func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	// Collect overflowed watchers under the read lock; closing them requires
 	// the write lock, taken afterwards to avoid lock-upgrade deadlocks.
-	type droppedWatcher struct {
-		id string
-		w  *watcher
-	}
 	var dropped []droppedWatcher
 
 	send := func(id string, w *watcher, event *registrarv1.WatchEndpointsResponse) {
@@ -198,10 +194,21 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	}
 	b.mu.RUnlock()
 
-	if len(dropped) == 0 {
-		return
+	if len(dropped) > 0 {
+		b.closeDroppedWatchers(dropped)
 	}
+}
 
+type droppedWatcher struct {
+	id string
+	w  *watcher
+}
+
+// closeDroppedWatchers acquires the write lock and closes the channels of
+// overflowed watchers, forcing them to reconnect for a fresh snapshot.
+// Re-checks identity before closing (watcher may have reconnected or been
+// unsubscribed between the read and write locks).
+func (b *Broadcaster) closeDroppedWatchers(dropped []droppedWatcher) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, d := range dropped {

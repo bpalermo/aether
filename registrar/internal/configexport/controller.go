@@ -76,33 +76,70 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 // and reconciles it into the registry: SetConfig changed/new projections, UnsetConfig
 // the ones this cluster previously exported but no longer has.
 func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
+	httpList, grpcList, grantList, exportList, err := c.listExportResources(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	exported := buildExportedSet(exportList)
+	httpFilters := c.httpFilterSpecs(ctx)
+
+	desired := c.projectHTTPRoutes(httpList, exported, grantList.Items, httpFilters)
+	for svc, routes := range c.projectGRPCRoutes(grpcList, exported, grantList.Items, httpFilters) {
+		desired[svc] = append(desired[svc], routes...)
+	}
+	desiredFilter := c.resolveChainFilters(exported, httpFilters, desired)
+
+	current, err := c.Exporter.ListConfig(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	own := ownCurrentProjections(current, c.Cluster)
+
+	version := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := c.applyDesired(ctx, desired, desiredFilter, own, version); err != nil {
+		return reconcile.Result{}, err
+	}
+	if err := c.pruneStale(ctx, desired, own); err != nil {
+		return reconcile.Result{}, err
+	}
+	c.metrics.observe(ctx, len(desired))
+	return reconcile.Result{}, nil
+}
+
+// listExportResources lists all resources needed for the export reconciliation.
+func (c *Controller) listExportResources(ctx context.Context) (*gatewayv1.HTTPRouteList, *gatewayv1.GRPCRouteList, *gatewayv1beta1.ReferenceGrantList, *mcsv1alpha1.ServiceExportList, error) {
 	httpList := &gatewayv1.HTTPRouteList{}
 	if err := c.List(ctx, httpList); err != nil {
-		return reconcile.Result{}, err
+		return nil, nil, nil, nil, err
 	}
 	grpcList := &gatewayv1.GRPCRouteList{}
 	if err := c.List(ctx, grpcList); err != nil {
-		return reconcile.Result{}, err
+		return nil, nil, nil, nil, err
 	}
 	grantList := &gatewayv1beta1.ReferenceGrantList{}
 	if err := c.List(ctx, grantList); err != nil {
-		return reconcile.Result{}, err
+		return nil, nil, nil, nil, err
 	}
 	exportList := &mcsv1alpha1.ServiceExportList{}
 	if err := c.List(ctx, exportList); err != nil {
-		return reconcile.Result{}, err
+		return nil, nil, nil, nil, err
 	}
+	return httpList, grpcList, grantList, exportList, nil
+}
+
+// buildExportedSet builds the set of exported service keys from a ServiceExportList.
+func buildExportedSet(exportList *mcsv1alpha1.ServiceExportList) map[string]struct{} {
 	exported := make(map[string]struct{}, len(exportList.Items))
 	for i := range exportList.Items {
 		se := &exportList.Items[i]
 		exported[se.Namespace+"/"+se.Name] = struct{}{}
 	}
-	httpFilters := c.httpFilterSpecs(ctx)
+	return exported
+}
 
-	// Desired: per EXPORTED route-target, the projected GAMMA routes (+ the
-	// service-wide chain filter, 025 M4 — resolved after the route loops).
+// projectHTTPRoutes projects exported HTTPRoute rules into GammaRoute protos.
+func (c *Controller) projectHTTPRoutes(httpList *gatewayv1.HTTPRouteList, exported map[string]struct{}, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec) map[string][]*registryv1.GammaRoute {
 	desired := map[string][]*registryv1.GammaRoute{}
-	desiredFilter := map[string]*registryv1.ExtensionFilter{}
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
 		for _, p := range gammaproject.ServiceParents(hr.Spec.ParentRefs, hr.Namespace) {
@@ -111,10 +148,16 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			}
 			svcFilters := gammaproject.ServiceFilters(p.Key, httpFilters) // M3 targetRef-attached
 			for _, rule := range hr.Spec.Rules {
-				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectHTTPRule(rule, hr.Namespace, "HTTPRoute", c.MeshDomain, grantList.Items, httpFilters, svcFilters))
+				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectHTTPRule(rule, hr.Namespace, "HTTPRoute", c.MeshDomain, grants, httpFilters, svcFilters))
 			}
 		}
 	}
+	return desired
+}
+
+// projectGRPCRoutes projects exported GRPCRoute rules into GammaRoute protos.
+func (c *Controller) projectGRPCRoutes(grpcList *gatewayv1.GRPCRouteList, exported map[string]struct{}, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec) map[string][]*registryv1.GammaRoute {
+	desired := map[string][]*registryv1.GammaRoute{}
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
 		for _, p := range gammaproject.ServiceParents(gr.Spec.ParentRefs, gr.Namespace) {
@@ -123,13 +166,18 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			}
 			svcFilters := gammaproject.ServiceFilters(p.Key, httpFilters) // M3 targetRef-attached
 			for _, rule := range gr.Spec.Rules {
-				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectGRPCRule(rule, gr.Namespace, "GRPCRoute", c.MeshDomain, grantList.Items, httpFilters, svcFilters))
+				desired[p.Key] = append(desired[p.Key], gammaproject.ProjectGRPCRule(rule, gr.Namespace, "GRPCRoute", c.MeshDomain, grants, httpFilters, svcFilters))
 			}
 		}
 	}
+	return desired
+}
 
-	// Service-wide chain filters (025 M4): for every exported service — including one
-	// with a chain filter but NO routes (the filter alone is exportable config).
+// resolveChainFilters resolves the service-wide chain filters (025 M4) for every
+// exported service, including filter-only projections (no routes). Mutates desired
+// to add filter-only entries.
+func (c *Controller) resolveChainFilters(exported map[string]struct{}, httpFilters map[string]*configprotov1.HTTPFilterSpec, desired map[string][]*registryv1.GammaRoute) map[string]*registryv1.ExtensionFilter {
+	desiredFilter := map[string]*registryv1.ExtensionFilter{}
 	for svc := range exported {
 		if ef := gammaproject.ServiceChainFilter(svc, httpFilters); ef != nil {
 			desiredFilter[svc] = ef
@@ -138,20 +186,22 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			}
 		}
 	}
+	return desiredFilter
+}
 
-	// Current state this cluster authored (origin == self), to diff against.
-	current, err := c.Exporter.ListConfig(ctx)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
+// ownCurrentProjections filters a config projection list to those authored by cluster.
+func ownCurrentProjections(current []*registryv1.ServiceConfigProjection, cluster string) map[string]*registryv1.ServiceConfigProjection {
 	own := map[string]*registryv1.ServiceConfigProjection{}
 	for _, p := range current {
-		if p.GetOriginCluster() == c.Cluster {
+		if p.GetOriginCluster() == cluster {
 			own[p.GetService()] = p
 		}
 	}
+	return own
+}
 
-	version := time.Now().UTC().Format(time.RFC3339Nano)
+// applyDesired writes new or changed config projections to the exporter.
+func (c *Controller) applyDesired(ctx context.Context, desired map[string][]*registryv1.GammaRoute, desiredFilter map[string]*registryv1.ExtensionFilter, own map[string]*registryv1.ServiceConfigProjection, version string) error {
 	for svc, routes := range desired {
 		// Skip when unchanged — avoid churning importers with a fresh version every reconcile.
 		if existing, ok := own[svc]; ok && routesEqual(existing.GetRoutes(), routes) && proto.Equal(existing.GetServiceFilter(), desiredFilter[svc]) {
@@ -160,11 +210,16 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if err := c.Exporter.SetConfig(ctx, &registryv1.ServiceConfigProjection{Service: svc, Version: version, Routes: routes, ServiceFilter: desiredFilter[svc]}); err != nil {
 			c.metrics.writeError(ctx)
 			c.Log.ErrorContext(ctx, "failed to export config projection", "service", svc, "error", err)
-			return reconcile.Result{}, err
+			return err
 		}
 		c.Log.InfoContext(ctx, "exported config projection", "service", svc, "routes", len(routes))
 	}
-	// Unexport: services this cluster authored that are no longer exported/configured.
+	return nil
+}
+
+// pruneStale removes config projections this cluster authored that are no longer
+// exported or configured.
+func (c *Controller) pruneStale(ctx context.Context, desired map[string][]*registryv1.GammaRoute, own map[string]*registryv1.ServiceConfigProjection) error {
 	for svc := range own {
 		if _, ok := desired[svc]; ok {
 			continue
@@ -172,12 +227,11 @@ func (c *Controller) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if err := c.Exporter.UnsetConfig(ctx, svc); err != nil {
 			c.metrics.writeError(ctx)
 			c.Log.ErrorContext(ctx, "failed to unexport config projection", "service", svc, "error", err)
-			return reconcile.Result{}, err
+			return err
 		}
 		c.Log.InfoContext(ctx, "unexported config projection", "service", svc)
 	}
-	c.metrics.observe(ctx, len(desired))
-	return reconcile.Result{}, nil
+	return nil
 }
 
 // httpFilterSpecs builds the ExtensionRef lookup (proposal 025) keyed "<ns>/<name>",

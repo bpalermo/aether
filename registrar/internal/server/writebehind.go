@@ -134,7 +134,16 @@ func (q *WriteBehindQueue) Start(ctx context.Context) error {
 // flushDue attempts every due, unflushed op once.
 func (q *WriteBehindQueue) flushDue(ctx context.Context) {
 	now := time.Now()
+	due := q.collectDueOps(ctx, now)
+	for key, op := range due {
+		q.flushOp(ctx, key, op)
+	}
+}
 
+// collectDueOps locks the queue, collects ops that are due (not flushed, not
+// waiting, not expired), drops those that exceeded wbMaxAge, and returns the
+// collected ops. The caller must not hold q.mu.
+func (q *WriteBehindQueue) collectDueOps(ctx context.Context, now time.Time) map[wbKey]wbOp {
 	q.mu.Lock()
 	due := make(map[wbKey]wbOp)
 	for key, op := range q.ops {
@@ -151,39 +160,43 @@ func (q *WriteBehindQueue) flushDue(ctx context.Context) {
 		due[key] = *op
 	}
 	q.mu.Unlock()
+	return due
+}
 
-	for key, op := range due {
-		var err error
-		switch op.kind {
-		case wbRegister:
-			err = q.registry.RegisterEndpoint(ctx, key.service, key.protocol, op.endpoint)
-		case wbUnregister:
-			err = q.registry.UnregisterEndpoint(ctx, key.service, key.ip)
-		}
+// flushOp performs one registry write for the given op and updates the op's
+// state (backoff or flushed) under the queue lock. Skips the update when a
+// newer op has superseded this one mid-flight.
+func (q *WriteBehindQueue) flushOp(ctx context.Context, key wbKey, op wbOp) {
+	var err error
+	switch op.kind {
+	case wbRegister:
+		err = q.registry.RegisterEndpoint(ctx, key.service, key.protocol, op.endpoint)
+	case wbUnregister:
+		err = q.registry.UnregisterEndpoint(ctx, key.service, key.ip)
+	}
 
-		q.mu.Lock()
-		cur, ok := q.ops[key]
-		// A newer op may have superseded this one mid-flight; never touch it.
-		superseded := !ok || cur.kind != op.kind || (op.kind == wbRegister && !proto.Equal(cur.endpoint, op.endpoint))
-		if !superseded {
-			if err != nil {
-				cur.attempts++
-				backoff := wbInitialBackoff << min(cur.attempts, 5) // 2s,4s,...,32s≈cap
-				if backoff > wbMaxBackoff {
-					backoff = wbMaxBackoff
-				}
-				cur.nextAttempt = time.Now().Add(backoff)
-			} else {
-				cur.flushed = true // kept for shielding until Overlay observes it
-			}
-		}
-		q.mu.Unlock()
-
+	q.mu.Lock()
+	cur, ok := q.ops[key]
+	// A newer op may have superseded this one mid-flight; never touch it.
+	superseded := !ok || cur.kind != op.kind || (op.kind == wbRegister && !proto.Equal(cur.endpoint, op.endpoint))
+	if !superseded {
 		if err != nil {
-			q.metrics.wbFlushFailed(ctx)
-			q.log.DebugContext(ctx, "write-behind flush failed; will retry",
-				"service", key.service, "ip", key.ip, "error", err.Error())
+			cur.attempts++
+			backoff := wbInitialBackoff << min(cur.attempts, 5) // 2s,4s,...,32s≈cap
+			if backoff > wbMaxBackoff {
+				backoff = wbMaxBackoff
+			}
+			cur.nextAttempt = time.Now().Add(backoff)
+		} else {
+			cur.flushed = true // kept for shielding until Overlay observes it
 		}
+	}
+	q.mu.Unlock()
+
+	if err != nil {
+		q.metrics.wbFlushFailed(ctx)
+		q.log.DebugContext(ctx, "write-behind flush failed; will retry",
+			"service", key.service, "ip", key.ip, "error", err.Error())
 	}
 }
 

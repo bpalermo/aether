@@ -72,6 +72,22 @@ var protocolAppProtocol = map[registryv1.Service_Protocol]string{
 // reconcile makes the managed Services equal the snapshot catalog: create missing,
 // update drifted, prune stale (only Services this generator owns, by label).
 func (g *Generator) reconcile(ctx context.Context) {
+	desired := g.buildDesiredServices(ctx)
+
+	var managed corev1.ServiceList
+	if err := g.List(ctx, &managed, client.MatchingLabels{aetherlabels.LabelMeshService: "true"}); err != nil {
+		g.Log.ErrorContext(ctx, "list managed mesh Services failed", "error", err)
+		return
+	}
+	g.pruneServices(ctx, managed, desired)
+	for _, d := range desired {
+		g.apply(ctx, d)
+	}
+}
+
+// buildDesiredServices iterates all protocols in the snapshot and builds the
+// desired map of mesh VIP Services. Ordered (HTTP before TCP) for determinism.
+func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectKey]desiredService {
 	desired := map[client.ObjectKey]desiredService{}
 	// A service is registered under exactly one protocol (the registry key is
 	// name+protocol; the pod annotation picks it). Iterate every protocol so an
@@ -104,12 +120,11 @@ func (g *Generator) reconcile(ctx context.Context) {
 			}
 		}
 	}
+	return desired
+}
 
-	var managed corev1.ServiceList
-	if err := g.List(ctx, &managed, client.MatchingLabels{aetherlabels.LabelMeshService: "true"}); err != nil {
-		g.Log.ErrorContext(ctx, "list managed mesh Services failed", "error", err)
-		return
-	}
+// pruneServices deletes managed mesh Services that are no longer in desired.
+func (g *Generator) pruneServices(ctx context.Context, managed corev1.ServiceList, desired map[client.ObjectKey]desiredService) {
 	for i := range managed.Items {
 		s := &managed.Items[i]
 		key := client.ObjectKeyFromObject(s)
@@ -121,9 +136,6 @@ func (g *Generator) reconcile(ctx context.Context) {
 		} else {
 			g.Log.InfoContext(ctx, "pruned mesh Service (service gone from registry)", "service", key.String())
 		}
-	}
-	for _, d := range desired {
-		g.apply(ctx, d)
 	}
 }
 

@@ -208,6 +208,13 @@ func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol]
 	for key := range s.entries {
 		newServices[key.ServiceName] = struct{}{}
 	}
+
+	return s.nextVersion(), computeTransitions(oldServices, newServices)
+}
+
+// computeTransitions builds the sorted list of SERVICE_ADDED/SERVICE_REMOVED
+// catalog events that describe the diff between oldServices and newServices.
+func computeTransitions(oldServices, newServices map[string]struct{}) []*registrarv1.WatchEndpointsResponse {
 	var transitions []*registrarv1.WatchEndpointsResponse
 	for name := range newServices {
 		if _, ok := oldServices[name]; !ok {
@@ -226,8 +233,7 @@ func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol]
 		}
 		return transitions[i].GetServiceName() < transitions[j].GetServiceName()
 	})
-
-	return s.nextVersion(), transitions
+	return transitions
 }
 
 // Apply applies a set of events to the snapshot, updating it in place.
