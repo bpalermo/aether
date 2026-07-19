@@ -5,6 +5,16 @@ metadata:
   labels:
     {{- include "aether.controller.labels" . | nindent 4 }}
 rules:
+  # Node-taint guard (issue #569 / proposal 033): watch Nodes + agent DS pods and
+  # re-arm the aether.io/agent-not-ready:NoSchedule taint on a node whose agent
+  # pod is missing/not-Ready past a grace period. patch: add the taint (never
+  # removes — the agent owns removal). Pods are read to find each node's agent.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
   # Watch and report on the cluster-scoped MeshConfig CRs.
   - apiGroups: ["config.aether.io"]
     resources: ["meshconfigs"]

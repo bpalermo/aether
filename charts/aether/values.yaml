@@ -8,15 +8,20 @@
 # (via the MeshConfig CR); everything else is deterministic deploy-time config.
 # See docs/proposals/015_mesh-config.md.
 #
-# Startup taint (cold-start CNI gate, issue #261): this chart ships the
-# aether.io/agent-not-ready toleration (agent + proxy DaemonSets only), the
-# nodes/patch RBAC, and the agent-side taint removal (it drops the taint once its
-# CNI socket is serving). You MUST register nodes WITH the taint yourself so
-# workload pods wait for a ready agent — the chart cannot taint nodes. Examples:
+# Startup taint (cold-start CNI gate, issue #261; lifecycle #569): this chart
+# ships the aether.io/agent-not-ready toleration (all aether components — agent +
+# proxy DaemonSets, controller/registrar/edge Deployments), the nodes/patch RBAC,
+# the agent-side taint removal (it drops the taint once its CNI socket is serving),
+# AND the controller-side node-taint guard (it RE-ARMS the taint on a node whose
+# agent pod is missing/not-Ready past a ~30s grace, e.g. after a reboot or an agent
+# outage). You SHOULD still register nodes WITH the taint so a brand-new node is
+# gated before its agent's first reconcile:
 #   kubelet:  --register-with-taints=aether.io/agent-not-ready=true:NoSchedule
 #   Talos:    machine.kubelet.extraArgs."register-with-taints" (machineconfig)
-# The agent removes the taint unconditionally (needs the chart's nodes/patch
-# RBAC); removal is a no-op on nodes registered without it.
+# The agent removes the taint whenever it is present and CNI is serving (needs the
+# chart's nodes/patch RBAC); the guard only ever adds it, never removes it.
+# NOTE: the external SPIRE agent DaemonSet must also tolerate this taint — set it in
+# your spire helm values (spire-agent.tolerations), NOT here.
 
 # Override the chart name / fully-qualified resource name.
 nameOverride: ""

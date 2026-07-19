@@ -30,6 +30,7 @@ import (
 	"github.com/bpalermo/aether/controller/internal/gatewayapi"
 	"github.com/bpalermo/aether/controller/internal/httpfilter"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
+	"github.com/bpalermo/aether/controller/internal/nodetaint"
 	"github.com/bpalermo/aether/controller/internal/podmutate"
 	cwebhook "github.com/bpalermo/aether/controller/internal/webhook"
 	"github.com/spf13/cobra"
@@ -130,6 +131,10 @@ func runController(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to set up MeshConfig reconciler: %w", err)
 	}
 
+	if err = wireNodeTaintGuard(m, fallbackNamespace); err != nil {
+		return err
+	}
+
 	// All validation is served on one /validate endpoint, dispatched by Kind. The
 	// HTTPRoute validator uses the API reader for a cluster-wide hostname-conflict
 	// list (uncached, correct regardless of the manager cache scope).
@@ -199,6 +204,24 @@ func buildControllerBootstrapOpts(ctx context.Context) (*spire.Source, []func(*c
 	})
 	l.InfoContext(ctx, "webhook serving with SPIRE SVID", "socket", cfg.SpireWorkloadSocketPath)
 	return src, bootstrapOpts, nil
+}
+
+// wireNodeTaintGuard registers the leader-elected node-taint guard, which
+// re-arms the aether startup taint on a node whose agent pod is missing/not-Ready
+// past a grace period (issue #569: reboots don't re-apply register-with-taints,
+// and the old one-shot remover never re-armed). The agent DaemonSet runs in the
+// controller's own (fallback) namespace, so the guard selects agent pods there.
+// The guard never removes the taint — the per-node agent owns removal.
+func wireNodeTaintGuard(m ctrl.Manager, agentNamespace string) error {
+	guard := &nodetaint.Guard{
+		Client:         m.GetClient(),
+		AgentNamespace: agentNamespace,
+		Log:            l,
+	}
+	if err := guard.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up node-taint guard: %w", err)
+	}
+	return nil
 }
 
 // wireCABundleInjector registers the CA bundle injector when SPIRE is enabled.
