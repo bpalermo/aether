@@ -181,6 +181,22 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 		return c.depSet
 	}
 	set := make(map[string]struct{}, len(c.podDeps)*4+len(c.observedDeps)+len(c.staticDeps))
+	c.populateStaticDepsLocked(set)
+	c.populatePodDepsLocked(set)
+	nextExpiry := c.populateObservedDepsLocked(set, now, ttl)
+	eff := c.effectiveServiceRoutesLocked()
+	c.populateRouteDepsLocked(set, eff)
+	c.depSet = set
+	c.depSetGen = c.depGen
+	c.depSetTTL = ttl
+	c.depSetExpiry = nextExpiry
+	c.depSetValid = true
+	return set
+}
+
+// populateStaticDepsLocked adds static, TCP-floor, and chain-filter services to set.
+// Caller must hold depMu for writing.
+func (c *SnapshotCache) populateStaticDepsLocked(set map[string]struct{}) {
 	// Static (edge) dependencies: the explicitly exposed services.
 	for svc := range c.staticDeps {
 		set[svc] = struct{}{}
@@ -204,6 +220,11 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	for svc := range c.importedServiceChainFilters {
 		set[svc] = struct{}{}
 	}
+}
+
+// populatePodDepsLocked adds each pod's own service and declared upstreams to set.
+// Caller must hold depMu for writing.
+func (c *SnapshotCache) populatePodDepsLocked(set map[string]struct{}) {
 	for _, deps := range c.podDeps {
 		if deps.service != "" {
 			set[deps.service] = struct{}{}
@@ -212,6 +233,11 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 			set[u] = struct{}{}
 		}
 	}
+}
+
+// populateObservedDepsLocked adds live observed dependencies to set and returns
+// the earliest expiry instant for the memo. Caller must hold depMu for writing.
+func (c *SnapshotCache) populateObservedDepsLocked(set map[string]struct{}, now time.Time, ttl time.Duration) time.Time {
 	// Live observed dependencies, tracking the earliest wall-clock instant a
 	// memoized entry expires (an entry is live while now <= last+ttl, so the
 	// memo stays valid through that exact instant and rebuilds after).
@@ -224,6 +250,12 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 			}
 		}
 	}
+	return nextExpiry
+}
+
+// populateRouteDepsLocked adds GAMMA route targets and their backends (L7 and L4)
+// to set. Caller must hold depMu for writing.
+func (c *SnapshotCache) populateRouteDepsLocked(set map[string]struct{}, eff map[string][]proxy.GammaRoute) {
 	// Service-based routing (proposal 023): a GAMMA route TARGET — the k8s Service an
 	// HTTPRoute/GRPCRoute is attached to (parentRef) — is always in scope, so its
 	// cap_http vhost builds even when the target Service has no ServiceAccount-backed
@@ -232,7 +264,6 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	// GAMMA routes are explicit, cluster-wide config (few), so global scope is fine.
 	// Imported (peer-cluster) routes are in scope too (proposal 026): a route target
 	// whose config arrives cross-cluster still needs its cap_http vhost + backends.
-	eff := c.effectiveServiceRoutesLocked()
 	for svc := range eff {
 		set[svc] = struct{}{}
 	}
@@ -241,26 +272,21 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	// L4 routes (proposal 018 Phase 3b): same principle for TCP/TLS/UDP backends.
 	hasL7 := len(eff) > 0
 	hasL4 := len(c.tcpServiceRoutes) > 0 || len(c.tlsServiceRoutes) > 0 || len(c.udpServiceRoutes) > 0
-	if hasL7 || hasL4 {
-		base := make([]string, 0, len(set))
-		for svc := range set {
-			base = append(base, svc)
+	if !hasL7 && !hasL4 {
+		return
+	}
+	base := make([]string, 0, len(set))
+	for svc := range set {
+		base = append(base, svc)
+	}
+	for _, svc := range base {
+		if hasL7 {
+			routeBackendsFrom(eff, svc, set)
 		}
-		for _, svc := range base {
-			if hasL7 {
-				routeBackendsFrom(eff, svc, set)
-			}
-			if hasL4 {
-				c.l4RouteBackendsLocked(svc, set)
-			}
+		if hasL4 {
+			c.l4RouteBackendsLocked(svc, set)
 		}
 	}
-	c.depSet = set
-	c.depSetGen = c.depGen
-	c.depSetTTL = ttl
-	c.depSetExpiry = nextExpiry
-	c.depSetValid = true
-	return set
 }
 
 // observedCountLocked returns the number of live observed dependencies.

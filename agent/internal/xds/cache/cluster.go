@@ -181,24 +181,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// cost nothing. This takes the watch round-trip off the cold path: the
 	// FIRST reload after an observation builds the cluster. Fetch failures
 	// degrade to the old behavior (the watch catch-up repairs).
-	if cat, ok := reg.(registry.ServiceCatalog); ok {
-		for svc := range deps {
-			if _, have := serviceEndpoints[svc]; have {
-				continue
-			}
-			if !cat.HasService(svc) {
-				continue
-			}
-			eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_HTTP)
-			if err != nil {
-				c.log.InfoContext(ctx, "cold-path endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
-				continue
-			}
-			if len(eps) > 0 {
-				serviceEndpoints[svc] = eps
-			}
-		}
-	}
+	coldFillHTTPEndpoints(ctx, c.log, reg, deps, serviceEndpoints)
 
 	// TCP (non-HTTP) services: their endpoints are the SAME pods reached over a
 	// raw mTLS passthrough through the transparent-capture TCP floor. The floor's
@@ -210,27 +193,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	if err != nil {
 		return fmt.Errorf("failed to list TCP endpoints from registry: %w", err)
 	}
-	if cat, ok := reg.(registry.ServiceCatalog); ok {
-		for svc := range deps {
-			if _, have := tcpServiceEndpoints[svc]; have {
-				continue
-			}
-			if _, have := serviceEndpoints[svc]; have {
-				continue // already an HTTP dependency
-			}
-			if !cat.HasService(svc) {
-				continue
-			}
-			eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_TCP)
-			if err != nil {
-				c.log.InfoContext(ctx, "cold-path TCP endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
-				continue
-			}
-			if len(eps) > 0 {
-				tcpServiceEndpoints[svc] = eps
-			}
-		}
-	}
+	coldFillTCPEndpoints(ctx, c.log, reg, deps, serviceEndpoints, tcpServiceEndpoints)
 
 	c.log.DebugContext(ctx, "found service endpoints in registry",
 		"count", len(serviceEndpoints), "tcpCount", len(tcpServiceEndpoints), "dependencySet", len(deps))
@@ -247,6 +210,87 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	prev := c.clusters
 	c.clusters = make(map[string]clusterEntry, len(deps))
 	nodeSubsetKeys := make(map[string]struct{})
+	c.buildHTTPClustersLocked(ctx, deps, serviceEndpoints, gammaRoutes, chainFilters, localRegion, localZone, waypoint, nodeSubsetKeys)
+	c.buildTCPClustersLocked(ctx, deps, tcpServiceEndpoints, localRegion, localZone, waypoint)
+	c.retainAbsentClustersLocked(ctx, prev, deps)
+	// Precompute each entry's mTLS-injected cluster + SAN URIs (issue #537) so
+	// snapshot generation only reads the cached protos. Covers the freshly
+	// built entries AND the retained (grace-period) ones, under the same
+	// clusterMu hold that rebuilt the map.
+	c.recomputeMTLSClustersLocked()
+	c.clusterMu.Unlock()
+
+	// Publish the node-wide subset-key union as the shared ECDS mapping.
+	c.subsetMu.Lock()
+	c.subsetHeaderKeys = proxy.SortSubsetKeys(nodeSubsetKeys)
+	c.subsetMu.Unlock()
+
+	c.log.DebugContext(ctx, "loaded clusters from registry", "count", len(c.clusters))
+
+	return c.generateClusterSnapshot(ctx)
+}
+
+// coldFillHTTPEndpoints performs the RPC-fill cold path for HTTP services: deps
+// missing from the watch-fed listing are fetched directly from the registrar.
+func coldFillHTTPEndpoints(ctx context.Context, log interface {
+	InfoContext(context.Context, string, ...any)
+}, reg registry.Registry, deps map[string]struct{}, serviceEndpoints map[string][]*registryv1.ServiceEndpoint,
+) {
+	cat, ok := reg.(registry.ServiceCatalog)
+	if !ok {
+		return
+	}
+	for svc := range deps {
+		if _, have := serviceEndpoints[svc]; have {
+			continue
+		}
+		if !cat.HasService(svc) {
+			continue
+		}
+		eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_HTTP)
+		if err != nil {
+			log.InfoContext(ctx, "cold-path endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
+			continue
+		}
+		if len(eps) > 0 {
+			serviceEndpoints[svc] = eps
+		}
+	}
+}
+
+// coldFillTCPEndpoints performs the RPC-fill cold path for TCP services.
+func coldFillTCPEndpoints(ctx context.Context, log interface {
+	InfoContext(context.Context, string, ...any)
+}, reg registry.Registry, deps map[string]struct{}, serviceEndpoints, tcpServiceEndpoints map[string][]*registryv1.ServiceEndpoint,
+) {
+	cat, ok := reg.(registry.ServiceCatalog)
+	if !ok {
+		return
+	}
+	for svc := range deps {
+		if _, have := tcpServiceEndpoints[svc]; have {
+			continue
+		}
+		if _, have := serviceEndpoints[svc]; have {
+			continue // already an HTTP dependency
+		}
+		if !cat.HasService(svc) {
+			continue
+		}
+		eps, err := reg.ListEndpoints(ctx, svc, registryv1.Service_PROTOCOL_TCP)
+		if err != nil {
+			log.InfoContext(ctx, "cold-path TCP endpoint fetch failed; watch catch-up will fill in", "service", svc, "error", err.Error())
+			continue
+		}
+		if len(eps) > 0 {
+			tcpServiceEndpoints[svc] = eps
+		}
+	}
+}
+
+// buildHTTPClustersLocked populates c.clusters with HTTP service entries from
+// serviceEndpoints. Caller must hold clusterMu.
+func (c *SnapshotCache) buildHTTPClustersLocked(ctx context.Context, deps map[string]struct{}, serviceEndpoints map[string][]*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, localRegion, localZone string, waypoint proxy.WaypointRewrite, nodeSubsetKeys map[string]struct{}) {
 	for serviceName, endpoints := range serviceEndpoints {
 		// Demand scoping: only services in the node dependency set are
 		// distributed to this node's proxy. Everything else stays in the
@@ -254,115 +298,147 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		if _, inScope := deps[serviceName]; !inScope {
 			continue
 		}
-		// The outbound service cluster speaks per-source mTLS HTTP/2 to each
-		// destination pod's mesh inbound (pod_ip:18008). The per-source mTLS transport
-		// socket is precomputed into entry.mtlsCluster below (recomputeMTLSClustersLocked).
-		// Server-identity pinning: the union of the endpoints' namespaces
-		// renders the service's expected SPIFFE IDs there too.
-		nsSet := make(map[string]struct{})
-		for _, endpoint := range endpoints {
-			if ns := endpoint.GetKubernetesMetadata().GetNamespace(); ns != "" {
-				nsSet[ns] = struct{}{}
-			}
-		}
-		sanNamespaces := make([]string, 0, len(nsSet))
-		for ns := range nsSet {
-			sanNamespaces = append(sanNamespaces, ns)
-		}
-		sort.Strings(sanNamespaces)
-
-		// Provider-defined subset keys: the union of this service's endpoint
-		// metadata keys becomes its subset selectors, and the node-wide union
-		// (below) the shared subset-headers ECDS mapping — the provider's
-		// vocabulary travels to its consumers via the control plane.
-		serviceKeys := make(map[string]struct{})
-		for _, endpoint := range endpoints {
-			for key := range endpoint.GetMetadata() {
-				if proxy.ValidSubsetKey(key) {
-					serviceKeys[key] = struct{}{}
-				}
-			}
-		}
-		sortedKeys := proxy.SortSubsetKeys(serviceKeys)
-		for _, k := range sortedKeys {
-			nodeSubsetKeys[k] = struct{}{}
-		}
-
 		if len(endpoints) == 0 {
 			continue
 		}
-		fqdn := proxy.ServiceClusterName(serviceName, c.meshDomain)
-		// Default/primary port: what the portless FQDN resolves to. Endpoints of
-		// one service share the primary; take the first.
-		defaultPort := endpoints[0].GetPort()
+		c.buildHTTPServiceEntryLocked(serviceName, endpoints, gammaRoutes, chainFilters, localRegion, localZone, waypoint, nodeSubsetKeys)
+	}
+}
 
-		// Default cluster: name = FQDN, EDS = bare service (all endpoints), vhost
-		// carries both the portless and :defaultPort domains, SNI = default port.
-		defaultCla := proxy.NewClusterLoadAssignment(serviceName)
-		defaultEpMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
-		// Per-port buckets: endpoints advertising each non-default port (per-port
-		// EDS — safe new-port rollout: a caller of :P only ever lands on pods
-		// serving P).
-		type portBucket struct {
-			eps   []*endpointv3.LocalityLbEndpoints
-			epMap map[string]*endpointv3.LocalityLbEndpoints
-		}
-		buckets := make(map[uint32]*portBucket)
+// buildHTTPServiceEntryLocked builds and stores the cluster entries for one HTTP
+// service (default port cluster + per-non-default-port clusters). Caller must hold clusterMu.
+func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoints []*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, localRegion, localZone string, waypoint proxy.WaypointRewrite, nodeSubsetKeys map[string]struct{}) {
+	// The outbound service cluster speaks per-source mTLS HTTP/2 to each
+	// destination pod's mesh inbound (pod_ip:18008). The per-source mTLS transport
+	// socket is precomputed into entry.mtlsCluster below (recomputeMTLSClustersLocked).
+	// Server-identity pinning: the union of the endpoints' namespaces
+	// renders the service's expected SPIFFE IDs there too.
+	sanNamespaces := endpointSANNamespaces(endpoints)
+	sortedKeys := endpointSubsetKeys(endpoints, nodeSubsetKeys)
 
-		for _, endpoint := range endpoints {
-			lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone, waypoint)
-			defaultCla.Endpoints = append(defaultCla.Endpoints, lbEp)
-			defaultEpMap[endpoint.GetIp()] = lbEp
+	fqdn := proxy.ServiceClusterName(serviceName, c.meshDomain)
+	// Default/primary port: what the portless FQDN resolves to. Endpoints of
+	// one service share the primary; take the first.
+	defaultPort := endpoints[0].GetPort()
 
-			served := endpoint.GetPorts()
-			if len(served) == 0 {
-				served = []uint32{endpoint.GetPort()}
-			}
-			for _, p := range served {
-				if p == defaultPort {
-					continue
-				}
-				b := buckets[p]
-				if b == nil {
-					b = &portBucket{epMap: map[string]*endpointv3.LocalityLbEndpoints{}}
-					buckets[p] = b
-				}
-				b.eps = append(b.eps, lbEp)
-				b.epMap[endpoint.GetIp()] = lbEp
-			}
-		}
-		// Registry listing order is not guaranteed stable across syncs; sort so a
-		// re-sync with an unchanged endpoint set never hashes as an EDS change.
-		proxy.SortLocalityLbEndpoints(defaultCla.Endpoints)
+	defaultCla, defaultEpMap, buckets := buildHTTPEndpointBuckets(serviceName, endpoints, localRegion, localZone, waypoint, defaultPort)
 
-		c.clusters[serviceName] = clusterEntry{
-			cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
-			loadAssignment: defaultCla,
-			endpoints:      defaultEpMap,
-			vhost:          outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName], chainFilters, serviceName),
+	c.clusters[serviceName] = clusterEntry{
+		cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
+		loadAssignment: defaultCla,
+		endpoints:      defaultEpMap,
+		vhost:          outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName], chainFilters, serviceName),
+		sanNamespaces:  sanNamespaces,
+		service:        serviceName,
+		sni:            strconv.Itoa(int(defaultPort)),
+	}
+
+	// One cluster per non-default advertised port.
+	for port, b := range buckets {
+		portName := proxy.PortClusterName(serviceName, c.meshDomain, port)
+		pcla := proxy.NewClusterLoadAssignment(portName)
+		pcla.Endpoints = b.eps
+		proxy.SortLocalityLbEndpoints(pcla.Endpoints)
+		c.clusters[portName] = clusterEntry{
+			cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
+			loadAssignment: pcla,
+			endpoints:      b.epMap,
+			vhost:          outboundPortVhostWithChainFilter(portName, chainFilters, serviceName),
 			sanNamespaces:  sanNamespaces,
 			service:        serviceName,
-			sni:            strconv.Itoa(int(defaultPort)),
+			sni:            strconv.Itoa(int(port)),
 		}
+	}
+}
 
-		// One cluster per non-default advertised port.
-		for port, b := range buckets {
-			portName := proxy.PortClusterName(serviceName, c.meshDomain, port)
-			pcla := proxy.NewClusterLoadAssignment(portName)
-			pcla.Endpoints = b.eps
-			proxy.SortLocalityLbEndpoints(pcla.Endpoints)
-			c.clusters[portName] = clusterEntry{
-				cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
-				loadAssignment: pcla,
-				endpoints:      b.epMap,
-				vhost:          outboundPortVhostWithChainFilter(portName, chainFilters, serviceName),
-				sanNamespaces:  sanNamespaces,
-				service:        serviceName,
-				sni:            strconv.Itoa(int(port)),
+// portBucket accumulates per-port endpoints for a service.
+type portBucket struct {
+	eps   []*endpointv3.LocalityLbEndpoints
+	epMap map[string]*endpointv3.LocalityLbEndpoints
+}
+
+// buildHTTPEndpointBuckets builds the default CLA/epMap and per-port buckets for a
+// service's endpoints.
+func buildHTTPEndpointBuckets(serviceName string, endpoints []*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite, defaultPort uint32) (*endpointv3.ClusterLoadAssignment, map[string]*endpointv3.LocalityLbEndpoints, map[uint32]*portBucket) {
+	// Default cluster: name = FQDN, EDS = bare service (all endpoints), vhost
+	// carries both the portless and :defaultPort domains, SNI = default port.
+	defaultCla := proxy.NewClusterLoadAssignment(serviceName)
+	defaultEpMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
+	// Per-port buckets: endpoints advertising each non-default port (per-port
+	// EDS — safe new-port rollout: a caller of :P only ever lands on pods
+	// serving P).
+	buckets := make(map[uint32]*portBucket)
+
+	for _, endpoint := range endpoints {
+		lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone, waypoint)
+		defaultCla.Endpoints = append(defaultCla.Endpoints, lbEp)
+		defaultEpMap[endpoint.GetIp()] = lbEp
+
+		served := endpoint.GetPorts()
+		if len(served) == 0 {
+			served = []uint32{endpoint.GetPort()}
+		}
+		for _, p := range served {
+			if p == defaultPort {
+				continue
+			}
+			b := buckets[p]
+			if b == nil {
+				b = &portBucket{epMap: map[string]*endpointv3.LocalityLbEndpoints{}}
+				buckets[p] = b
+			}
+			b.eps = append(b.eps, lbEp)
+			b.epMap[endpoint.GetIp()] = lbEp
+		}
+	}
+	// Registry listing order is not guaranteed stable across syncs; sort so a
+	// re-sync with an unchanged endpoint set never hashes as an EDS change.
+	proxy.SortLocalityLbEndpoints(defaultCla.Endpoints)
+	return defaultCla, defaultEpMap, buckets
+}
+
+// endpointSANNamespaces derives the sorted SAN namespace list from the endpoints'
+// Kubernetes metadata (server-identity pinning).
+func endpointSANNamespaces(endpoints []*registryv1.ServiceEndpoint) []string {
+	nsSet := make(map[string]struct{})
+	for _, endpoint := range endpoints {
+		if ns := endpoint.GetKubernetesMetadata().GetNamespace(); ns != "" {
+			nsSet[ns] = struct{}{}
+		}
+	}
+	sanNamespaces := make([]string, 0, len(nsSet))
+	for ns := range nsSet {
+		sanNamespaces = append(sanNamespaces, ns)
+	}
+	sort.Strings(sanNamespaces)
+	return sanNamespaces
+}
+
+// endpointSubsetKeys derives the sorted subset key list for a service's endpoints
+// and adds them to the node-wide nodeSubsetKeys union.
+func endpointSubsetKeys(endpoints []*registryv1.ServiceEndpoint, nodeSubsetKeys map[string]struct{}) []string {
+	// Provider-defined subset keys: the union of this service's endpoint
+	// metadata keys becomes its subset selectors, and the node-wide union
+	// (below) the shared subset-headers ECDS mapping — the provider's
+	// vocabulary travels to its consumers via the control plane.
+	serviceKeys := make(map[string]struct{})
+	for _, endpoint := range endpoints {
+		for key := range endpoint.GetMetadata() {
+			if proxy.ValidSubsetKey(key) {
+				serviceKeys[key] = struct{}{}
 			}
 		}
 	}
+	sortedKeys := proxy.SortSubsetKeys(serviceKeys)
+	for _, k := range sortedKeys {
+		nodeSubsetKeys[k] = struct{}{}
+	}
+	return sortedKeys
+}
 
+// buildTCPClustersLocked populates c.clusters with TCP service entries. Caller
+// must hold clusterMu.
+func (c *SnapshotCache) buildTCPClustersLocked(ctx context.Context, deps map[string]struct{}, tcpServiceEndpoints map[string][]*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite) {
 	// TCP service entries: bare-name EDS load assignment + SAN/sni only. The
 	// capture TCP floor's "tcp:<svc>" cluster (captureTCPClusters) references
 	// this EDS resource (by bare name) and pins peer identity from sanNamespaces.
@@ -373,18 +449,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		if len(endpoints) == 0 {
 			continue
 		}
-		nsSet := make(map[string]struct{})
-		for _, endpoint := range endpoints {
-			if ns := endpoint.GetKubernetesMetadata().GetNamespace(); ns != "" {
-				nsSet[ns] = struct{}{}
-			}
-		}
-		sanNamespaces := make([]string, 0, len(nsSet))
-		for ns := range nsSet {
-			sanNamespaces = append(sanNamespaces, ns)
-		}
-		sort.Strings(sanNamespaces)
-
+		sanNamespaces := endpointSANNamespaces(endpoints)
 		defaultPort := endpoints[0].GetPort()
 		cla := proxy.NewClusterLoadAssignment(serviceName)
 		epMap := make(map[string]*endpointv3.LocalityLbEndpoints, len(endpoints))
@@ -394,7 +459,6 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			epMap[endpoint.GetIp()] = lbEp
 		}
 		proxy.SortLocalityLbEndpoints(cla.Endpoints)
-
 		c.clusters[serviceName] = clusterEntry{
 			loadAssignment: cla,
 			endpoints:      epMap,
@@ -404,7 +468,12 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 			tcp:            true,
 		}
 	}
+}
 
+// retainAbsentClustersLocked re-inserts entries from prev that are no longer in
+// c.clusters but are still in the dependency set, applying the retention grace.
+// Caller must hold clusterMu.
+func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map[string]clusterEntry, deps map[string]struct{}) {
 	// Retain recently disappeared services with an empty endpoint set —
 	// but only services still IN the dependency set (a destination mid-churn
 	// can transiently empty its endpoint listing; the retained empty cluster
@@ -439,23 +508,6 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 		c.clusters[name] = entry
 	}
-
-	// Precompute each entry's mTLS-injected cluster + SAN URIs (issue #537) so
-	// snapshot generation only reads the cached protos. Covers the freshly
-	// built entries AND the retained (grace-period) ones, under the same
-	// clusterMu hold that rebuilt the map.
-	c.recomputeMTLSClustersLocked()
-
-	c.clusterMu.Unlock()
-
-	// Publish the node-wide subset-key union as the shared ECDS mapping.
-	c.subsetMu.Lock()
-	c.subsetHeaderKeys = proxy.SortSubsetKeys(nodeSubsetKeys)
-	c.subsetMu.Unlock()
-
-	c.log.DebugContext(ctx, "loaded clusters from registry", "count", len(c.clusters))
-
-	return c.generateClusterSnapshot(ctx)
 }
 
 // defaultServiceRetentionGrace is how long a service that vanished from the

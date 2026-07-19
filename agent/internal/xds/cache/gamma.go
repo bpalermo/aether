@@ -218,8 +218,21 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 	if !equalGammaURLRewrite(a.URLRewrite, b.URLRewrite) {
 		return false
 	}
-	for i := range a.Matches {
-		ma, mb := a.Matches[i], b.Matches[i]
+	if !equalGammaMatches(a.Matches, b.Matches) {
+		return false
+	}
+	for i := range a.Backends {
+		if a.Backends[i] != b.Backends[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// equalGammaMatches reports whether two GammaMatch slices are identical.
+func equalGammaMatches(a, b []proxy.GammaMatch) bool {
+	for i := range a {
+		ma, mb := a[i], b[i]
 		if ma.Prefix != mb.Prefix || ma.Exact != mb.Exact || ma.Regex != mb.Regex || len(ma.Headers) != len(mb.Headers) {
 			return false
 		}
@@ -227,11 +240,6 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 			if ma.Headers[j] != mb.Headers[j] {
 				return false
 			}
-		}
-	}
-	for i := range a.Backends {
-		if a.Backends[i] != b.Backends[i] {
-			return false
 		}
 	}
 	return true
@@ -269,38 +277,40 @@ func equalGammaHeaderMutation(a, b *proxy.GammaHeaderMutation) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	if len(a.SetRequest) != len(b.SetRequest) || len(a.AddRequest) != len(b.AddRequest) ||
-		len(a.RemoveRequest) != len(b.RemoveRequest) || len(a.SetResponse) != len(b.SetResponse) ||
-		len(a.AddResponse) != len(b.AddResponse) || len(a.RemoveResponse) != len(b.RemoveResponse) {
-		return false
-	}
-	for i := range a.SetRequest {
-		if a.SetRequest[i] != b.SetRequest[i] {
+	return equalGammaHMutationLengths(a, b) &&
+		equalGammaHeaderKVs(a.SetRequest, b.SetRequest) &&
+		equalGammaHeaderKVs(a.AddRequest, b.AddRequest) &&
+		equalGammaHeaderStrings(a.RemoveRequest, b.RemoveRequest) &&
+		equalGammaHeaderKVs(a.SetResponse, b.SetResponse) &&
+		equalGammaHeaderKVs(a.AddResponse, b.AddResponse) &&
+		equalGammaHeaderStrings(a.RemoveResponse, b.RemoveResponse)
+}
+
+// equalGammaHMutationLengths reports whether two GammaHeaderMutation values have
+// identical slice lengths for all six header mutation fields.
+func equalGammaHMutationLengths(a, b *proxy.GammaHeaderMutation) bool {
+	return len(a.SetRequest) == len(b.SetRequest) &&
+		len(a.AddRequest) == len(b.AddRequest) &&
+		len(a.RemoveRequest) == len(b.RemoveRequest) &&
+		len(a.SetResponse) == len(b.SetResponse) &&
+		len(a.AddResponse) == len(b.AddResponse) &&
+		len(a.RemoveResponse) == len(b.RemoveResponse)
+}
+
+// equalGammaHeaderKVs reports whether two GammaHeaderKV slices are identical.
+func equalGammaHeaderKVs(a, b []proxy.GammaHeaderKV) bool {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
-	for i := range a.AddRequest {
-		if a.AddRequest[i] != b.AddRequest[i] {
-			return false
-		}
-	}
-	for i := range a.RemoveRequest {
-		if a.RemoveRequest[i] != b.RemoveRequest[i] {
-			return false
-		}
-	}
-	for i := range a.SetResponse {
-		if a.SetResponse[i] != b.SetResponse[i] {
-			return false
-		}
-	}
-	for i := range a.AddResponse {
-		if a.AddResponse[i] != b.AddResponse[i] {
-			return false
-		}
-	}
-	for i := range a.RemoveResponse {
-		if a.RemoveResponse[i] != b.RemoveResponse[i] {
+	return true
+}
+
+// equalGammaHeaderStrings reports whether two string slices are identical element-by-element.
+func equalGammaHeaderStrings(a, b []string) bool {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
