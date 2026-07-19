@@ -26,11 +26,11 @@ shellcheck = lint_shellcheck_aspect(
 shellcheck_test = lint_test(aspect = shellcheck)
 
 # gocognit reports Go functions over a cognitive-complexity threshold.
-# Threshold is a ratchet: the smallest value >= 20 with zero current
-# violations. See bazel/lint/gocognit.bzl for the ratchet rationale.
+# 15 is the target (reached via the #556 campaign, PRs #558-#563); the
+# aspect lints production code only. See bazel/lint/gocognit.bzl.
 gocognit = lint_gocognit_aspect(
     binary = Label("@com_github_uudashr_gocognit//cmd/gocognit"),
-    threshold = 109,
+    threshold = 15,
 )
 
 gocognit_test = lint_test(aspect = gocognit)

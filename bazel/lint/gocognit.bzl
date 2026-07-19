@@ -1,8 +1,8 @@
 """API for declaring a gocognit cognitive-complexity lint aspect.
 
 gocognit (https://github.com/uudashr/gocognit) reports Go functions whose
-cognitive complexity exceeds a threshold. This aspect visits Go rules
-(go_library / go_binary / go_test), filters out generated sources, and runs
+cognitive complexity exceeds a threshold. This aspect visits production Go
+rules (go_library / go_binary), filters out generated sources, and runs
 gocognit with `-over <threshold>`.
 
 Typical usage in `bazel/lint/linters.bzl`:
@@ -12,24 +12,19 @@ load("//bazel/lint:gocognit.bzl", "lint_gocognit_aspect")
 
 gocognit = lint_gocognit_aspect(
     binary = Label("@com_github_uudashr_gocognit//cmd/gocognit"),
-    threshold = 109,
+    threshold = 15,
 )
 
 gocognit_test = lint_test(aspect = gocognit)
 ```
 
-## Threshold / ratchet policy
+## Threshold / scope policy
 
-The ideal cognitive-complexity target is **20** (gocognit's documented
-recommendation). At the time this aspect was introduced the repo had 49
-functions over 20 (worst case: `buildVirtualHost` at 109), which is far more
-than the 5-function budget the team is willing to refactor in one change. So
-the threshold is set to the smallest value >= 20 that yields ZERO current
-violations (a ratchet): `-over 109`. Lower it as complexity is paid down — the
-eventual goal is `-over 20`. What blocks 20 today is the backlog of
-already-complex functions (see the PR that introduced this aspect for the full
-list); those must be refactored (out of scope for that change) before the
-ratchet can tighten.
+The threshold is **15**: the aspect was introduced at a ratchet of 109 (the
+then-smallest zero-violation value), and the #556 campaign refactored all 65
+production functions over 15, so the gate now sits at the target. Test code
+(go_test rules) is deliberately NOT visited: complexity gating on validated
+e2e/conformance harnesses adds churn risk for no production value.
 
 ## Contract
 
@@ -226,7 +221,7 @@ def _gocognit_aspect_impl(target, ctx):
     _run_gocognit(ctx, srcs, outputs.machine_out, outputs.machine_exit_code)
     return [info]
 
-def lint_gocognit_aspect(binary, threshold, rule_kinds = ["go_library", "go_binary", "go_test"]):
+def lint_gocognit_aspect(binary, threshold, rule_kinds = ["go_library", "go_binary"]):
     """A factory function to create the gocognit linter aspect.
 
     Args:

@@ -131,62 +131,16 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 
 	r.log.DebugContext(ctx, "watching registry for endpoint changes")
 
-	// arm (re)arms the debounce window. Stop+drain before Reset so a prior
-	// expiry doesn't leave a stale tick queued. Stop reporting true means the
-	// timer was already armed — this signal coalesced.
-	arm := func() {
-		if timer.Stop() {
-			if r.coalesced != nil {
-				r.coalesced.Add(ctx, 1)
-			}
-		} else {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(r.debounce)
-	}
-
-	// reload rebuilds the scoped snapshot now (shared by the debounce expiry
-	// and the dependency-change leading edge).
-	var lastReload time.Time
-	reload := func() {
-		lastReload = time.Now()
-		// Re-assert the watch filter from the current dependency set
-		// before reloading: a grown set must reach the registrar so the
-		// watch cache receives the newly in-scope services (no-op when
-		// unchanged; the resulting watch events trigger the next reload).
-		AssertWatchFilter(r.cache, r.registry)
-		if err := r.cache.LoadClustersFromRegistry(ctx, r.clusterName, r.nodeName, r.registry); err != nil {
-			r.log.ErrorContext(ctx, "failed to refresh clusters from registry", "error", err)
-			if r.refreshErrors != nil {
-				r.refreshErrors.Add(ctx, 1)
-			}
-			return
-		}
-		r.log.DebugContext(ctx, "refreshed clusters from registry")
-	}
+	loop := &refreshLoop{r: r, timer: timer}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-changes:
-			arm()
+			loop.arm(ctx)
 		case <-depChanges:
-			// The node dependency set changed (pod add/remove, changed
-			// declared upstreams, or an ODCDS observation). Unlike registry
-			// event bursts, this is a single latency-critical event — an
-			// ODCDS observation has a PAUSED REQUEST behind it — so it fires
-			// the reload immediately on the leading edge; only when reloads
-			// are already hot (within one debounce window) does it fall back
-			// to the trailing debounce to coalesce storms.
-			if time.Since(lastReload) >= r.debounce {
-				reload()
-			} else {
-				arm()
-			}
+			loop.onDependencyChange(ctx)
 		case <-pruneTicker.C:
 			// Each signals a dependency change (handled above) when anything
 			// expired: observed (ODCDS) entries past their idle TTL, and
@@ -196,7 +150,66 @@ func (r *RegistryRefresher) Start(ctx context.Context) error {
 			r.cache.PruneObservedDependencies()
 			r.cache.SignalIfRetentionExpired()
 		case <-timer.C:
-			reload()
+			loop.reload(ctx)
 		}
+	}
+}
+
+// refreshLoop carries the debounce state shared between Start's select loop
+// and its helpers.
+type refreshLoop struct {
+	r          *RegistryRefresher
+	timer      *time.Timer
+	lastReload time.Time
+}
+
+// arm (re)arms the debounce window. Stop+drain before Reset so a prior
+// expiry doesn't leave a stale tick queued. Stop reporting true means the
+// timer was already armed — this signal coalesced.
+func (l *refreshLoop) arm(ctx context.Context) {
+	if l.timer.Stop() {
+		if l.r.coalesced != nil {
+			l.r.coalesced.Add(ctx, 1)
+		}
+	} else {
+		select {
+		case <-l.timer.C:
+		default:
+		}
+	}
+	l.timer.Reset(l.r.debounce)
+}
+
+// reload rebuilds the scoped snapshot now (shared by the debounce expiry
+// and the dependency-change leading edge).
+func (l *refreshLoop) reload(ctx context.Context) {
+	l.lastReload = time.Now()
+	// Re-assert the watch filter from the current dependency set
+	// before reloading: a grown set must reach the registrar so the
+	// watch cache receives the newly in-scope services (no-op when
+	// unchanged; the resulting watch events trigger the next reload).
+	AssertWatchFilter(l.r.cache, l.r.registry)
+	if err := l.r.cache.LoadClustersFromRegistry(ctx, l.r.clusterName, l.r.nodeName, l.r.registry); err != nil {
+		l.r.log.ErrorContext(ctx, "failed to refresh clusters from registry", "error", err)
+		if l.r.refreshErrors != nil {
+			l.r.refreshErrors.Add(ctx, 1)
+		}
+		return
+	}
+	l.r.log.DebugContext(ctx, "refreshed clusters from registry")
+}
+
+// onDependencyChange handles a node dependency-set change (pod add/remove,
+// changed declared upstreams, or an ODCDS observation). Unlike registry
+// event bursts, this is a single latency-critical event — an ODCDS
+// observation has a PAUSED REQUEST behind it — so it fires the reload
+// immediately on the leading edge; only when reloads are already hot (within
+// one debounce window) does it fall back to the trailing debounce to
+// coalesce storms.
+func (l *refreshLoop) onDependencyChange(ctx context.Context) {
+	if time.Since(l.lastReload) >= l.r.debounce {
+		l.reload(ctx)
+	} else {
+		l.arm(ctx)
 	}
 }
