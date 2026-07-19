@@ -236,8 +236,8 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	}
 
 	lp := &restartLoop{
-		s:       s,
-		ctx:     ctx,
+		s:        s,
+		ctx:      ctx,
 		debounce: time.NewTimer(debounceDelay),
 	}
 	lp.debounce.Stop()
@@ -247,11 +247,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 // restartLoop holds the mutable state for the Run event loop, allowing the loop
 // body to be split into helpers without passing every variable as a parameter.
 type restartLoop struct {
-	s        *Supervisor
-	ctx      context.Context
-	debounce *time.Timer
-	debounceC   <-chan time.Time
-	bindRetries int
+	s            *Supervisor
+	ctx          context.Context
+	debounce     *time.Timer
+	debounceC    <-chan time.Time
+	bindRetries  int
 	crashRetries int
 }
 
