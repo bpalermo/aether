@@ -58,12 +58,7 @@ func (v *Validator) Handle(ctx context.Context, req admission.Request) admission
 // checkChainConflict returns a denial when another CHAIN-scope HTTPFilter in the
 // namespace targets one of hf's target services; nil when admissible.
 func (v *Validator) checkChainConflict(ctx context.Context, hf *crdv1.HTTPFilter) *admission.Response {
-	targets := map[string]struct{}{}
-	for _, t := range hf.Spec.GetTargetRefs() {
-		if (t.GetGroup() == "" || t.GetGroup() == "core") && t.GetKind() == "Service" {
-			targets[t.GetName()] = struct{}{}
-		}
-	}
+	targets := chainTargetServices(hf)
 	list := &crdv1.HTTPFilterList{}
 	if err := v.Reader.List(ctx, list, client.InNamespace(hf.GetNamespace())); err != nil {
 		// Fail-closed would block all CHAIN applies on a transient list error; the
@@ -77,17 +72,36 @@ func (v *Validator) checkChainConflict(ctx context.Context, hf *crdv1.HTTPFilter
 			other.Spec.GetScope() != configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
 			continue
 		}
-		for _, t := range other.Spec.GetTargetRefs() {
-			if (t.GetGroup() != "" && t.GetGroup() != "core") || t.GetKind() != "Service" {
-				continue
-			}
-			if _, clash := targets[t.GetName()]; clash {
-				resp := admission.Denied(fmt.Sprintf(
-					"service %q already has a CHAIN-scope HTTPFilter (%q); at most one service-wide filter per service",
-					t.GetName(), other.GetName(),
-				))
-				return &resp
-			}
+		if resp := v.findChainConflict(other, targets); resp != nil {
+			return resp
+		}
+	}
+	return nil
+}
+
+// chainTargetServices returns the set of Service names that hf's targetRefs name.
+func chainTargetServices(hf *crdv1.HTTPFilter) map[string]struct{} {
+	targets := map[string]struct{}{}
+	for _, t := range hf.Spec.GetTargetRefs() {
+		if (t.GetGroup() == "" || t.GetGroup() == "core") && t.GetKind() == "Service" {
+			targets[t.GetName()] = struct{}{}
+		}
+	}
+	return targets
+}
+
+// findChainConflict checks whether other's targetRefs clash with targets; returns a denial or nil.
+func (v *Validator) findChainConflict(other *crdv1.HTTPFilter, targets map[string]struct{}) *admission.Response {
+	for _, t := range other.Spec.GetTargetRefs() {
+		if (t.GetGroup() != "" && t.GetGroup() != "core") || t.GetKind() != "Service" {
+			continue
+		}
+		if _, clash := targets[t.GetName()]; clash {
+			resp := admission.Denied(fmt.Sprintf(
+				"service %q already has a CHAIN-scope HTTPFilter (%q); at most one service-wide filter per service",
+				t.GetName(), other.GetName(),
+			))
+			return &resp
 		}
 	}
 	return nil

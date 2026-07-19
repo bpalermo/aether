@@ -495,25 +495,7 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 	for {
 		event, err := stream.Recv()
 		if err != nil {
-			// DataLoss means the registrar force-resynced this watcher (its
-			// event buffer overflowed). Resuming from lastVersion could skip
-			// the missed events — batches share a version, so lastVersion may
-			// match the current version while events were still dropped. Clear
-			// the resume token so the reconnect receives a full snapshot.
-			if status.Code(err) == codes.DataLoss {
-				r.log.InfoContext(ctx, "registrar forced a resync; requesting full snapshot on reconnect")
-				return ""
-			}
-			if status.Code(err) == codes.Canceled && ctx.Err() == nil {
-				// The stream was cancelled locally (SetServiceFilter
-				// re-asserting a changed filter), not a registrar failure.
-				r.log.DebugContext(ctx, "watch stream ended for filter re-assertion")
-				return lastVersion
-			}
-			if err != io.EOF && ctx.Err() == nil {
-				r.log.ErrorContext(ctx, "watch stream disconnected", "error", err)
-			}
-			return lastVersion
+			return r.handleStreamError(ctx, err, lastVersion)
 		}
 
 		// Clear cache before the first FULL_SNAPSHOT event to replace stale data.
@@ -524,41 +506,69 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 			snapshotCleared = true
 		}
 
-		switch event.GetType() {
-		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED:
-			if catalogReplay != nil {
-				// Pre-marker: catalog replay, accumulated and swapped at the
-				// marker so a reconnect can't leave stale names behind.
-				catalogReplay[event.GetServiceName()] = struct{}{}
-			} else {
-				// Post-marker: incremental transition.
-				r.mu.Lock()
-				r.services[event.GetServiceName()] = struct{}{}
-				r.mu.Unlock()
-			}
-		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED:
-			r.mu.Lock()
-			delete(r.services, event.GetServiceName())
-			r.mu.Unlock()
-		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE:
-			if catalogReplay != nil && event.GetVersion() != connectVersion {
-				// The server resent state: swap the catalog wholesale
-				// (possibly to empty — a fresh registrar with no services).
-				r.mu.Lock()
-				r.services = catalogReplay
-				r.mu.Unlock()
-			}
-			catalogReplay = nil
-			// The cache now holds a complete world view.
-			r.readyOnce.Do(func() { close(r.ready) })
-		}
-
+		r.handleCatalogEvent(ctx, event, &catalogReplay, connectVersion)
 		r.applyEvent(ctx, event)
 
 		if event.GetVersion() != "" {
 			lastVersion = event.GetVersion()
 			r.metrics.versionApplied(ctx, lastVersion)
 		}
+	}
+}
+
+// handleStreamError classifies a stream.Recv error and returns the appropriate resume token.
+func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, lastVersion string) string {
+	// DataLoss means the registrar force-resynced this watcher (its
+	// event buffer overflowed). Resuming from lastVersion could skip
+	// the missed events — batches share a version, so lastVersion may
+	// match the current version while events were still dropped. Clear
+	// the resume token so the reconnect receives a full snapshot.
+	if status.Code(err) == codes.DataLoss {
+		r.log.InfoContext(ctx, "registrar forced a resync; requesting full snapshot on reconnect")
+		return ""
+	}
+	if status.Code(err) == codes.Canceled && ctx.Err() == nil {
+		// The stream was cancelled locally (SetServiceFilter
+		// re-asserting a changed filter), not a registrar failure.
+		r.log.DebugContext(ctx, "watch stream ended for filter re-assertion")
+		return lastVersion
+	}
+	if err != io.EOF && ctx.Err() == nil {
+		r.log.ErrorContext(ctx, "watch stream disconnected", "error", err)
+	}
+	return lastVersion
+}
+
+// handleCatalogEvent processes SERVICE_ADDED, SERVICE_REMOVED, and SNAPSHOT_COMPLETE
+// events to maintain the services catalog.
+func (r *RegistrarRegistry) handleCatalogEvent(ctx context.Context, event *registrarv1.WatchEndpointsResponse, catalogReplay *map[string]struct{}, connectVersion string) {
+	switch event.GetType() {
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED:
+		if *catalogReplay != nil {
+			// Pre-marker: catalog replay, accumulated and swapped at the
+			// marker so a reconnect can't leave stale names behind.
+			(*catalogReplay)[event.GetServiceName()] = struct{}{}
+		} else {
+			// Post-marker: incremental transition.
+			r.mu.Lock()
+			r.services[event.GetServiceName()] = struct{}{}
+			r.mu.Unlock()
+		}
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED:
+		r.mu.Lock()
+		delete(r.services, event.GetServiceName())
+		r.mu.Unlock()
+	case registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE:
+		if *catalogReplay != nil && event.GetVersion() != connectVersion {
+			// The server resent state: swap the catalog wholesale
+			// (possibly to empty — a fresh registrar with no services).
+			r.mu.Lock()
+			r.services = *catalogReplay
+			r.mu.Unlock()
+		}
+		*catalogReplay = nil
+		// The cache now holds a complete world view.
+		r.readyOnce.Do(func() { close(r.ready) })
 	}
 }
 

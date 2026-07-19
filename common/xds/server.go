@@ -80,32 +80,9 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	if s.cfg.Network == "unix" {
-		// net.Listen("unix", …) fails with EADDRINUSE if the socket file already
-		// exists. Go unlinks it on a graceful Close, but a non-graceful exit
-		// (SIGKILL, OOM, a segfault) leaves it behind — every subsequent restart
-		// would then crash-loop on bind until the file is cleared by hand. Remove a
-		// stale socket first so the agent restarts cleanly however its predecessor
-		// died. Safe in the node-singleton model: only one process binds this path,
-		// and the roll is delete-then-add, so no live listener is ever displaced.
-		if err := os.Remove(s.cfg.Address); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("failed to remove stale socket %s: %w", s.cfg.Address, err)
-		}
-	}
-
-	listener, err := net.Listen(s.cfg.Network, s.cfg.Address)
+	listener, err := s.listen(ctx)
 	if err != nil {
-		s.Log.ErrorContext(ctx, "failed to listen", "error", err, "network", s.cfg.Network, "address", s.cfg.Address)
-		return fmt.Errorf("failed to listen: %w", err)
-	}
-
-	if s.cfg.Network == "unix" {
-		if err := os.Chmod(s.cfg.Address, os.ModePerm); err != nil {
-			if closeErr := listener.Close(); closeErr != nil {
-				s.Log.ErrorContext(ctx, "failed to close listener during cleanup", "error", closeErr)
-			}
-			return fmt.Errorf("failed to set socket file permissions: %w", err)
-		}
+		return err
 	}
 
 	errCh := make(chan error, 1)
@@ -125,8 +102,40 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.shutdown()
 	case serveErr := <-errCh:
 		return serveErr
-
 	}
+}
+
+// listen prepares the network listener, removing stale unix sockets and setting
+// permissions as needed.
+func (s *Server) listen(ctx context.Context) (net.Listener, error) {
+	if s.cfg.Network == "unix" {
+		// net.Listen("unix", …) fails with EADDRINUSE if the socket file already
+		// exists. Go unlinks it on a graceful Close, but a non-graceful exit
+		// (SIGKILL, OOM, a segfault) leaves it behind — every subsequent restart
+		// would then crash-loop on bind until the file is cleared by hand. Remove a
+		// stale socket first so the agent restarts cleanly however its predecessor
+		// died. Safe in the node-singleton model: only one process binds this path,
+		// and the roll is delete-then-add, so no live listener is ever displaced.
+		if err := os.Remove(s.cfg.Address); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("failed to remove stale socket %s: %w", s.cfg.Address, err)
+		}
+	}
+
+	listener, err := net.Listen(s.cfg.Network, s.cfg.Address)
+	if err != nil {
+		s.Log.ErrorContext(ctx, "failed to listen", "error", err, "network", s.cfg.Network, "address", s.cfg.Address)
+		return nil, fmt.Errorf("failed to listen: %w", err)
+	}
+
+	if s.cfg.Network == "unix" {
+		if err := os.Chmod(s.cfg.Address, os.ModePerm); err != nil {
+			if closeErr := listener.Close(); closeErr != nil {
+				s.Log.ErrorContext(ctx, "failed to close listener during cleanup", "error", closeErr)
+			}
+			return nil, fmt.Errorf("failed to set socket file permissions: %w", err)
+		}
+	}
+	return listener, nil
 }
 
 // NeedLeaderElection returns false so the server runs on all replicas,

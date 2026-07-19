@@ -94,6 +94,24 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 	if spec == nil {
 		return errors.New("spec is required")
 	}
+	opaque := spec.GetFilter() != "" || spec.GetTypedConfig() != nil
+	if err := validateFormCount(spec, opaque); err != nil {
+		return err
+	}
+	if spec.GetFilter() == ExtAuthzFilterName {
+		return errors.New("ext_authz must use the typed extAuthz form (the transport is system-owned; opaque payloads could name arbitrary clusters)")
+	}
+	if err := validateScope(spec); err != nil {
+		return err
+	}
+	if !opaque {
+		return validateTypedForms(spec)
+	}
+	return validateOpaqueForm(spec)
+}
+
+// validateFormCount ensures exactly one authoring form is set.
+func validateFormCount(spec *configprotov1.HTTPFilterSpec, opaque bool) error {
 	forms := 0
 	if spec.GetHeaderToMetadata() != nil {
 		forms++
@@ -104,17 +122,17 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 	if spec.GetRbac() != nil {
 		forms++
 	}
-	opaque := spec.GetFilter() != "" || spec.GetTypedConfig() != nil
 	if opaque {
 		forms++
 	}
 	if forms != 1 {
 		return errors.New("set exactly one authoring form: headerToMetadata, extAuthz, rbac, or filter+typedConfig (opaque)")
 	}
-	typed := !opaque
-	if spec.GetFilter() == ExtAuthzFilterName {
-		return errors.New("ext_authz must use the typed extAuthz form (the transport is system-owned; opaque payloads could name arbitrary clusters)")
-	}
+	return nil
+}
+
+// validateScope checks scope-specific constraints.
+func validateScope(spec *configprotov1.HTTPFilterSpec) error {
 	if spec.GetScope() == configprotov1.HTTPFilterSpec_SCOPE_CHAIN {
 		if !targetsAService(spec) {
 			return errors.New("spec.scope CHAIN (service-wide always-on) requires a targetRef of kind Service")
@@ -128,40 +146,61 @@ func ValidateSpec(spec *configprotov1.HTTPFilterSpec) error {
 			return errors.New("spec.scope INBOUND supports the extAuthz and rbac forms (v1)")
 		}
 	}
-	if typed {
-		for i, r := range spec.GetHeaderToMetadata().GetRules() {
-			if r.GetHeader() == "" || r.GetMetadataKey() == "" {
-				return fmt.Errorf("headerToMetadata.rules[%d]: header and metadataKey are required", i)
-			}
+	return nil
+}
+
+// validateTypedForms validates the typed authoring forms (headerToMetadata, extAuthz, rbac).
+func validateTypedForms(spec *configprotov1.HTTPFilterSpec) error {
+	for i, r := range spec.GetHeaderToMetadata().GetRules() {
+		if r.GetHeader() == "" || r.GetMetadataKey() == "" {
+			return fmt.Errorf("headerToMetadata.rules[%d]: header and metadataKey are required", i)
 		}
-		if ea := spec.GetExtAuthz(); ea != nil && ea.GetDisabled() && len(ea.GetContextExtensions()) > 0 {
-			return errors.New("extAuthz: disabled and contextExtensions are mutually exclusive")
-		}
-		if rb := spec.GetRbac(); rb != nil {
-			if len(rb.GetPolicies()) == 0 {
-				return errors.New("rbac: at least one policy is required")
-			}
-			for i, pol := range rb.GetPolicies() {
-				if pol.GetName() == "" {
-					return fmt.Errorf("rbac.policies[%d]: name is required", i)
-				}
-				if len(pol.GetPrincipals()) == 0 {
-					return fmt.Errorf("rbac.policies[%d]: at least one principal is required", i)
-				}
-				for j, pr := range pol.GetPrincipals() {
-					if (pr.GetSpiffeId() == "") == (pr.GetNamespace() == "") {
-						return fmt.Errorf("rbac.policies[%d].principals[%d]: exactly one of spiffeId or namespace", i, j)
-					}
-				}
-				for j, pm := range pol.GetPermissions() {
-					if (pm.GetPathPrefix() == "") == (pm.GetMethod() == "") {
-						return fmt.Errorf("rbac.policies[%d].permissions[%d]: exactly one of pathPrefix or method", i, j)
-					}
-				}
-			}
-		}
+	}
+	if ea := spec.GetExtAuthz(); ea != nil && ea.GetDisabled() && len(ea.GetContextExtensions()) > 0 {
+		return errors.New("extAuthz: disabled and contextExtensions are mutually exclusive")
+	}
+	return validateRBACForm(spec.GetRbac())
+}
+
+// validateRBACForm validates the rbac typed form; rb may be nil (returns nil).
+func validateRBACForm(rb *configprotov1.RBACRoute) error {
+	if rb == nil {
 		return nil
 	}
+	if len(rb.GetPolicies()) == 0 {
+		return errors.New("rbac: at least one policy is required")
+	}
+	for i, pol := range rb.GetPolicies() {
+		if err := validateRBACPolicy(i, pol); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateRBACPolicy validates a single RBAC policy entry.
+func validateRBACPolicy(i int, pol *configprotov1.RBACRoute_Policy) error {
+	if pol.GetName() == "" {
+		return fmt.Errorf("rbac.policies[%d]: name is required", i)
+	}
+	if len(pol.GetPrincipals()) == 0 {
+		return fmt.Errorf("rbac.policies[%d]: at least one principal is required", i)
+	}
+	for j, pr := range pol.GetPrincipals() {
+		if (pr.GetSpiffeId() == "") == (pr.GetNamespace() == "") {
+			return fmt.Errorf("rbac.policies[%d].principals[%d]: exactly one of spiffeId or namespace", i, j)
+		}
+	}
+	for j, pm := range pol.GetPermissions() {
+		if (pm.GetPathPrefix() == "") == (pm.GetMethod() == "") {
+			return fmt.Errorf("rbac.policies[%d].permissions[%d]: exactly one of pathPrefix or method", i, j)
+		}
+	}
+	return nil
+}
+
+// validateOpaqueForm validates the opaque filter+typedConfig form.
+func validateOpaqueForm(spec *configprotov1.HTTPFilterSpec) error {
 	name := spec.GetFilter()
 	if name == "" {
 		return errors.New("spec.filter is required")
@@ -205,63 +244,78 @@ func targetsAService(spec *configprotov1.HTTPFilterSpec) bool {
 // error.
 func Render(spec *configprotov1.HTTPFilterSpec) (string, *anypb.Any, error) {
 	if rb := spec.GetRbac(); rb != nil {
-		rules := renderRBACRules(rb)
-		per := &rbac_filterv3.RBACPerRoute{Rbac: &rbac_filterv3.RBAC{}}
-		if rb.GetMode() == configprotov1.RBACRoute_MODE_AUDIT {
-			// AUDIT: shadow rules only — evaluated + counted (rbac.shadow_*
-			// stats under the aether_audit_ prefix), never enforced.
-			per.Rbac.ShadowRules = rules
-			per.Rbac.ShadowRulesStatPrefix = "aether_audit_"
-		} else {
-			per.Rbac.Rules = rules
-		}
-		a, err := anypb.New(per)
-		if err != nil {
-			return "", nil, fmt.Errorf("render rbac: %w", err)
-		}
-		return RBACFilterName, a, nil
+		return renderRBACPerRoute(rb)
 	}
 	if ea := spec.GetExtAuthz(); ea != nil {
-		var cfg *ext_authzv3.ExtAuthzPerRoute
-		if ea.GetDisabled() {
-			cfg = &ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_Disabled{Disabled: true}}
-		} else {
-			cfg = &ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{
-				CheckSettings: &ext_authzv3.CheckSettings{
-					ContextExtensions:           ea.GetContextExtensions(),
-					DisableRequestBodyBuffering: ea.GetDisableRequestBodyBuffering(),
-				},
-			}}
-		}
-		a, err := anypb.New(cfg)
-		if err != nil {
-			return "", nil, fmt.Errorf("render extAuthz: %w", err)
-		}
-		return ExtAuthzFilterName, a, nil
+		return renderExtAuthzPerRoute(ea)
 	}
 	if h2m := spec.GetHeaderToMetadata(); h2m != nil {
-		cfg := &header_to_metadatav3.Config{}
-		for _, r := range h2m.GetRules() {
-			ns := r.GetMetadataNamespace()
-			if ns == "" {
-				ns = defaultMetadataNamespace
-			}
-			cfg.RequestRules = append(cfg.RequestRules, &header_to_metadatav3.Config_Rule{
-				Header: r.GetHeader(),
-				OnHeaderPresent: &header_to_metadatav3.Config_KeyValuePair{
-					MetadataNamespace: ns,
-					Key:               r.GetMetadataKey(),
-					Type:              header_to_metadatav3.Config_STRING,
-				},
-			})
-		}
-		a, err := anypb.New(cfg)
-		if err != nil {
-			return "", nil, fmt.Errorf("render headerToMetadata: %w", err)
-		}
-		return HeaderToMetadataFilterName, a, nil
+		return renderHeaderToMetadata(h2m)
 	}
 	return spec.GetFilter(), spec.GetTypedConfig(), nil
+}
+
+// renderRBACPerRoute builds the RBAC per-route config from the typed form.
+func renderRBACPerRoute(rb *configprotov1.RBACRoute) (string, *anypb.Any, error) {
+	rules := renderRBACRules(rb)
+	per := &rbac_filterv3.RBACPerRoute{Rbac: &rbac_filterv3.RBAC{}}
+	if rb.GetMode() == configprotov1.RBACRoute_MODE_AUDIT {
+		// AUDIT: shadow rules only — evaluated + counted (rbac.shadow_*
+		// stats under the aether_audit_ prefix), never enforced.
+		per.Rbac.ShadowRules = rules
+		per.Rbac.ShadowRulesStatPrefix = "aether_audit_"
+	} else {
+		per.Rbac.Rules = rules
+	}
+	a, err := anypb.New(per)
+	if err != nil {
+		return "", nil, fmt.Errorf("render rbac: %w", err)
+	}
+	return RBACFilterName, a, nil
+}
+
+// renderExtAuthzPerRoute builds the ExtAuthz per-route config from the typed form.
+func renderExtAuthzPerRoute(ea *configprotov1.ExtAuthzRoute) (string, *anypb.Any, error) {
+	var cfg *ext_authzv3.ExtAuthzPerRoute
+	if ea.GetDisabled() {
+		cfg = &ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_Disabled{Disabled: true}}
+	} else {
+		cfg = &ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{
+			CheckSettings: &ext_authzv3.CheckSettings{
+				ContextExtensions:           ea.GetContextExtensions(),
+				DisableRequestBodyBuffering: ea.GetDisableRequestBodyBuffering(),
+			},
+		}}
+	}
+	a, err := anypb.New(cfg)
+	if err != nil {
+		return "", nil, fmt.Errorf("render extAuthz: %w", err)
+	}
+	return ExtAuthzFilterName, a, nil
+}
+
+// renderHeaderToMetadata builds the header_to_metadata config from the typed form.
+func renderHeaderToMetadata(h2m *configprotov1.HeaderToMetadata) (string, *anypb.Any, error) {
+	cfg := &header_to_metadatav3.Config{}
+	for _, r := range h2m.GetRules() {
+		ns := r.GetMetadataNamespace()
+		if ns == "" {
+			ns = defaultMetadataNamespace
+		}
+		cfg.RequestRules = append(cfg.RequestRules, &header_to_metadatav3.Config_Rule{
+			Header: r.GetHeader(),
+			OnHeaderPresent: &header_to_metadatav3.Config_KeyValuePair{
+				MetadataNamespace: ns,
+				Key:               r.GetMetadataKey(),
+				Type:              header_to_metadatav3.Config_STRING,
+			},
+		})
+	}
+	a, err := anypb.New(cfg)
+	if err != nil {
+		return "", nil, fmt.Errorf("render headerToMetadata: %w", err)
+	}
+	return HeaderToMetadataFilterName, a, nil
 }
 
 // renderRBACRules builds the config.rbac.v3.RBAC rule set from the typed form.

@@ -415,10 +415,40 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 	// routes pre-sorted (descending specificity). Without this, an earlier rule's
 	// "/" prefix shadows every later, more-specific rule (e.g. "/v2"). The edge path
 	// already does this (sortRoutesBySpecificity); GAMMA must match.
-	type scoredRoute struct {
-		route *routev3.Route
-		key   int64
+	scored := buildScoredRoutes(name, rules)
+	// Stable sort by descending specificity: ties preserve document order (Gateway
+	// API tie-break after path/method/header is creation order, approximated here).
+	slices.SortStableFunc(scored, func(a, b scoredRoute) int {
+		if a.key > b.key {
+			return -1
+		}
+		if a.key < b.key {
+			return 1
+		}
+		return 0
+	})
+	routes := make([]*routev3.Route, 0, len(scored)+1)
+	for _, s := range scored {
+		routes = append(routes, s.route)
 	}
+	routes = append(routes, &routev3.Route{
+		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: name},
+			RetryPolicy:      outboundRetryPolicy(),
+		}},
+	})
+	return &routev3.VirtualHost{Name: name, Domains: domains, Routes: routes}
+}
+
+// scoredRoute pairs an Envoy route with its Gateway API specificity key for sorting.
+type scoredRoute struct {
+	route *routev3.Route
+	key   int64
+}
+
+// buildScoredRoutes expands each GammaRule+match into a scoredRoute.
+func buildScoredRoutes(name string, rules []GammaRoute) []scoredRoute {
 	var scored []scoredRoute
 	for _, rule := range rules {
 		matches := rule.Matches
@@ -443,29 +473,7 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 			scored = append(scored, scoredRoute{route: r, key: gammaMatchSpecificity(m)})
 		}
 	}
-	// Stable sort by descending specificity: ties preserve document order (Gateway
-	// API tie-break after path/method/header is creation order, approximated here).
-	slices.SortStableFunc(scored, func(a, b scoredRoute) int {
-		if a.key != b.key {
-			if a.key > b.key {
-				return -1
-			}
-			return 1
-		}
-		return 0
-	})
-	routes := make([]*routev3.Route, 0, len(scored)+1)
-	for _, s := range scored {
-		routes = append(routes, s.route)
-	}
-	routes = append(routes, &routev3.Route{
-		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-		Action: &routev3.Route_Route{Route: &routev3.RouteAction{
-			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: name},
-			RetryPolicy:      outboundRetryPolicy(),
-		}},
-	})
-	return &routev3.VirtualHost{Name: name, Domains: domains, Routes: routes}
+	return scored
 }
 
 // headerMutationFields converts a GammaHeaderMutation into the four Envoy route-level

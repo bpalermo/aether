@@ -64,13 +64,33 @@ func ServiceParents(refs []gatewayv1.ParentReference, routeNamespace string) []S
 // ServiceFilters); they are appended after any per-route ExtensionRef.
 func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec, serviceFilters []*registryv1.ExtensionFilter) *registryv1.GammaRoute {
 	gr := &registryv1.GammaRoute{}
-	if rule.Timeouts != nil && rule.Timeouts.Request != nil {
-		if d, err := time.ParseDuration(string(*rule.Timeouts.Request)); err == nil && d > 0 {
-			gr.Timeout = durationpb.New(d)
-		}
-	}
+	gr.Timeout = httpRouteTimeout(rule.Timeouts)
 	gr.Backends = projectBackends(rule.BackendRefs, routeNamespace, routeKind, meshDomain, grants)
-	for _, m := range rule.Matches {
+	gr.Matches = projectHTTPMatches(rule.Matches)
+	gr.HeaderMutation = httpHeaderMutation(rule.Filters)
+	gr.Redirect = httpRedirect(rule.Filters)
+	gr.UrlRewrite = httpURLRewrite(rule.Filters)
+	gr.ExtensionFilters = collectHTTPExtensionFilters(rule.Filters, routeNamespace, httpFilters)
+	gr.ExtensionFilters = append(gr.ExtensionFilters, serviceFilters...)
+	return gr
+}
+
+// httpRouteTimeout extracts the request timeout from an HTTPRouteTimeouts, or nil.
+func httpRouteTimeout(timeouts *gatewayv1.HTTPRouteTimeouts) *durationpb.Duration {
+	if timeouts == nil || timeouts.Request == nil {
+		return nil
+	}
+	d, err := time.ParseDuration(string(*timeouts.Request))
+	if err != nil || d <= 0 {
+		return nil
+	}
+	return durationpb.New(d)
+}
+
+// projectHTTPMatches converts HTTPRouteMatch entries to GammaMatch protos.
+func projectHTTPMatches(matches []gatewayv1.HTTPRouteMatch) []*registryv1.GammaMatch {
+	var out []*registryv1.GammaMatch
+	for _, m := range matches {
 		gm := &registryv1.GammaMatch{}
 		if m.Path != nil && m.Path.Value != nil {
 			if m.Path.Type != nil && *m.Path.Type == gatewayv1.PathMatchExact {
@@ -82,20 +102,22 @@ func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, me
 		for _, h := range m.Headers {
 			gm.Headers = append(gm.Headers, &registryv1.GammaHeaderMatch{Name: string(h.Name), Value: h.Value})
 		}
-		gr.Matches = append(gr.Matches, gm)
+		out = append(out, gm)
 	}
-	gr.HeaderMutation = httpHeaderMutation(rule.Filters)
-	gr.Redirect = httpRedirect(rule.Filters)
-	gr.UrlRewrite = httpURLRewrite(rule.Filters)
-	for _, f := range rule.Filters {
+	return out
+}
+
+// collectHTTPExtensionFilters gathers per-route ExtensionRef filters from an HTTPRoute's filters.
+func collectHTTPExtensionFilters(filters []gatewayv1.HTTPRouteFilter, routeNamespace string, httpFilters map[string]*configprotov1.HTTPFilterSpec) []*registryv1.ExtensionFilter {
+	var out []*registryv1.ExtensionFilter
+	for _, f := range filters {
 		if f.Type == gatewayv1.HTTPRouteFilterExtensionRef {
 			if ef, ok := resolveExtensionFilter(f.ExtensionRef, routeNamespace, httpFilters); ok {
-				gr.ExtensionFilters = append(gr.ExtensionFilters, ef)
+				out = append(out, ef)
 			}
 		}
 	}
-	gr.ExtensionFilters = append(gr.ExtensionFilters, serviceFilters...)
-	return gr
+	return out
 }
 
 // ProjectGRPCRule projects one GRPCRoute rule. gRPC rides HTTP/2 as POST
@@ -104,54 +126,73 @@ func ProjectHTTPRule(rule gatewayv1.HTTPRouteRule, routeNamespace, routeKind, me
 func ProjectGRPCRule(rule gatewayv1.GRPCRouteRule, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant, httpFilters map[string]*configprotov1.HTTPFilterSpec, serviceFilters []*registryv1.ExtensionFilter) *registryv1.GammaRoute {
 	gr := &registryv1.GammaRoute{}
 	gr.Backends = projectGRPCBackends(rule.BackendRefs, routeNamespace, routeKind, meshDomain, grants)
-	for _, m := range rule.Matches {
+	gr.Matches = projectGRPCMatches(rule.Matches)
+	gr.HeaderMutation = grpcHeaderMutation(rule.Filters)
+	gr.ExtensionFilters = collectGRPCExtensionFilters(rule.Filters, routeNamespace, httpFilters)
+	gr.ExtensionFilters = append(gr.ExtensionFilters, serviceFilters...)
+	return gr
+}
+
+// projectGRPCMatches converts GRPCRouteMatch entries to GammaMatch protos.
+func projectGRPCMatches(matches []gatewayv1.GRPCRouteMatch) []*registryv1.GammaMatch {
+	var out []*registryv1.GammaMatch
+	for _, m := range matches {
 		gm := &registryv1.GammaMatch{}
 		if m.Method != nil {
-			svc, method := "", ""
-			if m.Method.Service != nil {
-				svc = *m.Method.Service
-			}
-			if m.Method.Method != nil {
-				method = *m.Method.Method
-			}
-			matchType := gatewayv1.GRPCMethodMatchExact
-			if m.Method.Type != nil {
-				matchType = *m.Method.Type
-			}
-			switch matchType {
-			case gatewayv1.GRPCMethodMatchExact:
-				if svc != "" && method != "" {
-					gm.Exact = fmt.Sprintf("/%s/%s", svc, method)
-				} else if svc != "" {
-					gm.Prefix = fmt.Sprintf("/%s/", svc)
-				}
-			case gatewayv1.GRPCMethodMatchRegularExpression:
-				svcPart := svc
-				if svcPart == "" {
-					svcPart = "[^/]+"
-				}
-				methodPart := method
-				if methodPart == "" {
-					methodPart = "[^/]+"
-				}
-				gm.Regex = fmt.Sprintf("/%s/%s", svcPart, methodPart)
-			}
+			applyGRPCMethodMatch(gm, m.Method)
 		}
 		for _, h := range m.Headers {
 			gm.Headers = append(gm.Headers, &registryv1.GammaHeaderMatch{Name: string(h.Name), Value: h.Value})
 		}
-		gr.Matches = append(gr.Matches, gm)
+		out = append(out, gm)
 	}
-	gr.HeaderMutation = grpcHeaderMutation(rule.Filters)
-	for _, f := range rule.Filters {
+	return out
+}
+
+// applyGRPCMethodMatch populates gm's path fields from a GRPCMethodMatch.
+func applyGRPCMethodMatch(gm *registryv1.GammaMatch, method *gatewayv1.GRPCMethodMatch) {
+	svc, meth := "", ""
+	if method.Service != nil {
+		svc = *method.Service
+	}
+	if method.Method != nil {
+		meth = *method.Method
+	}
+	matchType := gatewayv1.GRPCMethodMatchExact
+	if method.Type != nil {
+		matchType = *method.Type
+	}
+	switch matchType {
+	case gatewayv1.GRPCMethodMatchExact:
+		if svc != "" && meth != "" {
+			gm.Exact = fmt.Sprintf("/%s/%s", svc, meth)
+		} else if svc != "" {
+			gm.Prefix = fmt.Sprintf("/%s/", svc)
+		}
+	case gatewayv1.GRPCMethodMatchRegularExpression:
+		svcPart := svc
+		if svcPart == "" {
+			svcPart = "[^/]+"
+		}
+		methodPart := meth
+		if methodPart == "" {
+			methodPart = "[^/]+"
+		}
+		gm.Regex = fmt.Sprintf("/%s/%s", svcPart, methodPart)
+	}
+}
+
+// collectGRPCExtensionFilters gathers per-route ExtensionRef filters from a GRPCRoute's filters.
+func collectGRPCExtensionFilters(filters []gatewayv1.GRPCRouteFilter, routeNamespace string, httpFilters map[string]*configprotov1.HTTPFilterSpec) []*registryv1.ExtensionFilter {
+	var out []*registryv1.ExtensionFilter
+	for _, f := range filters {
 		if f.Type == gatewayv1.GRPCRouteFilterExtensionRef {
 			if ef, ok := resolveExtensionFilter(f.ExtensionRef, routeNamespace, httpFilters); ok {
-				gr.ExtensionFilters = append(gr.ExtensionFilters, ef)
+				out = append(out, ef)
 			}
 		}
 	}
-	gr.ExtensionFilters = append(gr.ExtensionFilters, serviceFilters...)
-	return gr
+	return out
 }
 
 func projectBackends(refs []gatewayv1.HTTPBackendRef, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant) []*registryv1.GammaBackend {
