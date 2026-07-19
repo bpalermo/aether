@@ -168,11 +168,6 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // attached to them, resolves each Gateway listener's TLS cert, and replaces the
 // cache's virtual-host and L4 route sets.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
-	// Our Gateways (those of our GatewayClass) and, per listener hostname, the SDS
-	// cert name to present. listenerCerts also accumulates the cert bytes to push.
-	// Cluster-wide ReferenceGrants gate cross-namespace backendRefs and listener
-	// certificateRefs (drop + RefNotPermitted). The edge cache is cluster-wide
-	// (post-#323). Listed first so resolveGateways can enforce them on cert refs.
 	grantList := &gatewayv1beta1.ReferenceGrantList{}
 	if err := r.List(ctx, grantList); err != nil {
 		return reconcile.Result{}, err
@@ -184,22 +179,68 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return reconcile.Result{}, err
 	}
 
-	// Build a map of Gateway key → listener hostnames so we can compute the
-	// effective hostname intersection for each HTTPRoute (Gateway API §spec:
-	// effective hostnames = route.Hostnames ∩ listener.Hostname; a route with no
-	// hostnames inherits the listener's; a listener with no hostname admits all
-	// route hostnames).
 	gwListenerHostnames := attachment.BuildGatewayListenerHostnames(ourGateways)
 
-	// --- HTTPRoutes (cluster-wide) ---
-	httpRoutes := &gatewayv1.HTTPRouteList{}
-	if err := r.List(ctx, httpRoutes); err != nil {
+	httpRoutes, vhosts, err := r.listAndProjectHTTPRoutes(ctx, gateways, gwListenerHostnames, hostCerts, grants)
+	if err != nil {
 		return reconcile.Result{}, err
 	}
-	// Deterministic order so (a) same-hostname merge in the cache is stable and
-	// (b) the Gateway API tie-break for routes of equal path specificity is correct:
-	// oldest creationTimestamp first, then namespace, then name. The cache's stable
-	// path-specificity sort preserves this order for equal-specificity routes.
+
+	tcpRouteList, tcpRoutes, err := r.listAndProjectTCPRoutes(ctx, gateways, gatewayListeners, grants)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	tlsRouteList, tlsRoutes, err := r.listAndProjectTLSRoutes(ctx, gateways, gatewayListeners, grants)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	httpRedirect, gatewayHTTPRedirect := computeHTTPRedirect(ourGateways)
+	r.Sink.SetEdgeHTTPRedirect(httpRedirect)
+
+	if r.Secrets != nil {
+		if err := r.Sink.SetEdgeTLSSecrets(ctx, certs); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+
+	perGWAssignedIPs := r.reconcilePhase2(ctx, ourGateways, perGWHostCerts, vhosts, gatewayHTTPRedirect)
+
+	r.Sink.SetVirtualHosts(vhosts)
+	r.Sink.SetEdgeTCPRoutes(tcpRoutes)
+	r.Sink.SetEdgeTLSRoutes(tlsRoutes)
+	r.Log.DebugContext(
+		ctx, "projected gateway-api routes",
+		"httpRoutes", len(httpRoutes.Items),
+		"tcpRoutes", len(tcpRouteList.Items),
+		"tlsRoutes", len(tlsRouteList.Items),
+		"virtualHosts", len(vhosts),
+		"tcpListeners", len(tcpRoutes),
+		"tlsListeners", len(tlsRoutes),
+		"tlsCerts", len(certs),
+	)
+
+	r.writeGatewayClassStatus(ctx)
+	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, tlsResults, perGWAssignedIPs)
+	r.writeRouteStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, grants)
+	return reconcile.Result{}, nil
+}
+
+// listAndProjectHTTPRoutes lists all HTTPRoutes and builds virtual hosts for those
+// attached to our Gateways. Returns the raw list (for status) and the projected vhosts.
+func (r *Reconciler) listAndProjectHTTPRoutes(
+	ctx context.Context,
+	gateways map[gatewayKey]struct{},
+	gwListenerHostnames map[string][]string,
+	hostCerts map[string]string,
+	grants []gatewayv1beta1.ReferenceGrant,
+) (*gatewayv1.HTTPRouteList, []cache.VirtualHost, error) {
+	httpRoutes := &gatewayv1.HTTPRouteList{}
+	if err := r.List(ctx, httpRoutes); err != nil {
+		return nil, nil, err
+	}
+	// Deterministic order: oldest creationTimestamp first, then namespace, then name.
 	slices.SortFunc(httpRoutes.Items, func(a, b gatewayv1.HTTPRoute) int {
 		ta := a.CreationTimestamp.Time
 		tb := b.CreationTimestamp.Time
@@ -221,39 +262,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			continue
 		}
 		vh := r.buildVirtualHost(ctx, hr, hostCerts, grants)
-		// A hostname-less route is NOT inert: per Gateway API it matches every host on
-		// its listener, served via the cache's catch-all "*" vhost. Only an empty
-		// route set (no backend/redirect produced a route) makes it skippable.
 		if len(vh.Routes) == 0 {
 			continue
 		}
-		// Scope the vhost to the Gateways the route actually attaches to (Phase 2
-		// assigns by attachment, not by the vhost's cert tag).
-		gwKeys := attachment.AttachedGatewayKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
-		vh.Gateways = gwKeys
-		// Compute effective hostnames: route.Hostnames ∩ each attached listener's
-		// hostnames. When a parentRef has a sectionName, intersect with that
-		// listener only (not the whole Gateway). This makes hostname-less routes
-		// inherit the specific listener's hostname and ensures routes with explicit
-		// hostnames that don't match any listener are discarded rather than leaking
-		// into the catch-all "*" vhost (where they would incorrectly match requests
-		// to unrelated hosts — the no-intersecting-hosts 500 bug).
+		vh.Gateways = attachment.AttachedGatewayKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
 		hostnameLookupKeys := attachment.AttachedHostnameLookupKeys(hr.Spec.ParentRefs, hr.Namespace, gateways)
 		vh.Hosts = attachment.EffectiveHostnames(vh.Hosts, hostnameLookupKeys, gwListenerHostnames)
-		// If the route declared explicit hostnames but none intersect with any
-		// attached listener, discard the vhost entirely. An empty effective-hostname
-		// set means "no listener admits this route" — it must not produce routes at
-		// all, not even in the catch-all "*" vhost.
 		if len(hr.Spec.Hostnames) > 0 && len(vh.Hosts) == 0 {
 			continue
 		}
 		vhosts = append(vhosts, vh)
 	}
+	return httpRoutes, vhosts, nil
+}
 
-	// --- TCPRoutes (cluster-wide) ---
+// listAndProjectTCPRoutes lists all TCPRoutes and projects them into per-port backends.
+func (r *Reconciler) listAndProjectTCPRoutes(
+	ctx context.Context,
+	gateways map[gatewayKey]struct{},
+	gatewayListeners map[gatewayListenerKey]struct{},
+	grants []gatewayv1beta1.ReferenceGrant,
+) (*gatewayv1.TCPRouteList, []proxy.EdgeL4TCPRoute, error) {
 	tcpRouteList := &gatewayv1.TCPRouteList{}
 	if err := r.List(ctx, tcpRouteList); err != nil {
-		return reconcile.Result{}, err
+		return nil, nil, err
 	}
 	tcpByPort := make(map[uint32][]proxy.L4Backend)
 	for i := range tcpRouteList.Items {
@@ -278,11 +310,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		return 0
 	})
+	return tcpRouteList, tcpRoutes, nil
+}
 
-	// --- TLSRoutes (cluster-wide) ---
+// listAndProjectTLSRoutes lists all TLSRoutes and projects them into per-port service routes.
+func (r *Reconciler) listAndProjectTLSRoutes(
+	ctx context.Context,
+	gateways map[gatewayKey]struct{},
+	gatewayListeners map[gatewayListenerKey]struct{},
+	grants []gatewayv1beta1.ReferenceGrant,
+) (*gatewayv1.TLSRouteList, []proxy.EdgeL4TLSRoute, error) {
 	tlsRouteList := &gatewayv1.TLSRouteList{}
 	if err := r.List(ctx, tlsRouteList); err != nil {
-		return reconcile.Result{}, err
+		return nil, nil, err
 	}
 	tlsByPort := make(map[uint32][]proxy.L4ServiceRoute)
 	for i := range tlsRouteList.Items {
@@ -314,9 +354,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		return 0
 	})
+	return tlsRouteList, tlsRoutes, nil
+}
 
-	// Determine per-Gateway HTTP redirect opt-in (gateway.aether.io/http-redirect).
-	// In Phase 1 this is a single bool; in Phase 2 it is tracked per Gateway key.
+// computeHTTPRedirect scans ourGateways for the http-redirect annotation.
+// Returns the Phase 1 bool and the per-Gateway map.
+func computeHTTPRedirect(ourGateways []gatewayv1.Gateway) (bool, map[gatewayKey]bool) {
 	httpRedirect := false
 	gatewayHTTPRedirect := make(map[gatewayKey]bool, len(ourGateways))
 	for i := range ourGateways {
@@ -326,82 +369,51 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			gatewayHTTPRedirect[gk] = true
 		}
 	}
-	r.Sink.SetEdgeHTTPRedirect(httpRedirect)
+	return httpRedirect, gatewayHTTPRedirect
+}
 
-	if r.Secrets != nil {
-		if err := r.Sink.SetEdgeTLSSecrets(ctx, certs); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-
-	// Per-Gateway addressing (proposal 021 Phase 2, unconditional since 031
-	// round 2): when EdgeServiceName is set, we manage per-Gateway LoadBalancer
-	// Services and emit per-Gateway listeners. Phase 1 (shared SetVirtualHosts
-	// path) remains only as the EdgeServiceName-empty / port-allocation-failure
-	// fallback.
-	var perGWAssignedIPs map[gatewayKey]string
-	if r.EdgeServiceName != "" && len(ourGateways) > 0 {
-		allocations, allocErr := allocateGatewayListenerPorts(ourGateways, perGWHostCerts)
-		if allocErr != nil {
-			r.Log.WarnContext(ctx, "per-Gateway port allocation failed, falling back to Phase 1",
-				"error", allocErr.Error())
-			// Fall through to Phase 1 path.
-			r.Sink.SetEdgeGateways(nil)
-		} else {
-			edgeConfigs := make(map[gatewayKey]*configv1.EdgeConfigSpec, len(ourGateways))
-			for i := range ourGateways {
-				gw := &ourGateways[i]
-				edgeConfigs[gatewayKey{Namespace: gw.Namespace, Name: gw.Name}] = r.resolveEdgeConfig(ctx, gw)
-			}
-			ips, svcErr := r.reconcileGatewayServices(ctx, ourGateways, allocations, edgeConfigs)
-			if svcErr != nil {
-				r.Log.WarnContext(ctx, "per-Gateway Service reconcile error", "error", svcErr.Error())
-			}
-			perGWAssignedIPs = ips
-			entries := buildEdgeGatewayEntries(ourGateways, vhosts, allocations, gatewayHTTPRedirect, edgeConfigs)
-			r.Sink.SetEdgeGateways(entries)
-			r.Log.DebugContext(ctx, "projected per-Gateway entries",
-				"gateways", len(entries), "ourGateways", len(ourGateways),
-				"totalVhosts", len(vhosts))
-			// In Phase 2 we still call SetVirtualHosts with the full vhosts so
-			// the Phase 1 fallback route table is up-to-date (no-op at snapshot
-			// time when per-Gateway mode is active, but keeps state consistent
-			// for edge cases like a reconcile that loses the Phase 2 allocations).
-		}
-	} else {
-		// Phase 1 / disabled: clear any stale Phase 2 state, and garbage-collect any
-		// per-Gateway Services left over from a previous Phase 2 run. The Phase 2
-		// reconcile path is skipped here, so without this the Services orphan and
-		// keep holding their LoadBalancer IP (e.g. the pinned edge address), which
-		// blocks the shared Service from reclaiming it on a downgrade.
+// reconcilePhase2 handles the per-Gateway Service / per-Gateway listener (Phase 2) path,
+// or falls back to Phase 1 (SetEdgeGateways(nil)). Returns the assigned IPs map.
+func (r *Reconciler) reconcilePhase2(
+	ctx context.Context,
+	ourGateways []gatewayv1.Gateway,
+	perGWHostCerts map[gatewayKey]map[string]string,
+	vhosts []cache.VirtualHost,
+	gatewayHTTPRedirect map[gatewayKey]bool,
+) map[gatewayKey]string {
+	if r.EdgeServiceName == "" || len(ourGateways) == 0 {
 		r.Sink.SetEdgeGateways(nil)
 		if r.EdgeServiceName != "" {
 			if err := r.gcStaleGatewayServices(ctx, map[string]struct{}{}); err != nil {
 				r.Log.WarnContext(ctx, "GC of stale per-Gateway Services failed", "error", err.Error())
 			}
 		}
+		return nil
 	}
-	r.Sink.SetVirtualHosts(vhosts)
-	r.Sink.SetEdgeTCPRoutes(tcpRoutes)
-	r.Sink.SetEdgeTLSRoutes(tlsRoutes)
-	r.Log.DebugContext(
-		ctx, "projected gateway-api routes",
-		"httpRoutes", len(httpRoutes.Items),
-		"tcpRoutes", len(tcpRouteList.Items),
-		"tlsRoutes", len(tlsRouteList.Items),
-		"virtualHosts", len(vhosts),
-		"tcpListeners", len(tcpRoutes),
-		"tlsListeners", len(tlsRoutes),
-		"tlsCerts", len(certs),
-	)
 
-	// Publish Gateway API status (the conformance on-ramp). Failures are logged,
-	// not fatal — the data plane is already projected and the next reconcile
-	// retries. The GatewayClass, Gateways, and routes we own all get conditions.
-	r.writeGatewayClassStatus(ctx)
-	r.writeGatewayStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, tlsResults, perGWAssignedIPs)
-	r.writeRouteStatuses(ctx, ourGateways, httpRoutes.Items, tcpRouteList.Items, tlsRouteList.Items, gateways, gatewayListeners, grants)
-	return reconcile.Result{}, nil
+	allocations, allocErr := allocateGatewayListenerPorts(ourGateways, perGWHostCerts)
+	if allocErr != nil {
+		r.Log.WarnContext(ctx, "per-Gateway port allocation failed, falling back to Phase 1",
+			"error", allocErr.Error())
+		r.Sink.SetEdgeGateways(nil)
+		return nil
+	}
+
+	edgeConfigs := make(map[gatewayKey]*configv1.EdgeConfigSpec, len(ourGateways))
+	for i := range ourGateways {
+		gw := &ourGateways[i]
+		edgeConfigs[gatewayKey{Namespace: gw.Namespace, Name: gw.Name}] = r.resolveEdgeConfig(ctx, gw)
+	}
+	ips, svcErr := r.reconcileGatewayServices(ctx, ourGateways, allocations, edgeConfigs)
+	if svcErr != nil {
+		r.Log.WarnContext(ctx, "per-Gateway Service reconcile error", "error", svcErr.Error())
+	}
+	entries := buildEdgeGatewayEntries(ourGateways, vhosts, allocations, gatewayHTTPRedirect, edgeConfigs)
+	r.Sink.SetEdgeGateways(entries)
+	r.Log.DebugContext(ctx, "projected per-Gateway entries",
+		"gateways", len(entries), "ourGateways", len(ourGateways),
+		"totalVhosts", len(vhosts))
+	return ips
 }
 
 // gatewayKey / gatewayListenerKey are the attachment package's Gateway and
@@ -535,39 +547,10 @@ func (r *Reconciler) resolveListenerTLS(
 	}
 	var firstResolved string
 	for _, ref := range ln.TLS.CertificateRefs {
-		// Only core ("") group Secret kind is supported; any other group/kind is an
-		// invalid certificateRef.
-		if ref.Group != nil && string(*ref.Group) != "" {
-			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q has unsupported group %q", ref.Name, *ref.Group)}
+		sdsName, fail := r.resolveCertRef(ctx, gw, ref, certs, grants)
+		if fail != nil {
+			return *fail
 		}
-		if ref.Kind != nil && string(*ref.Kind) != "Secret" {
-			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q has unsupported kind %q", ref.Name, *ref.Kind)}
-		}
-		name := string(ref.Name)
-		// The Secret lives in certificateRef.namespace, defaulting to the GATEWAY's
-		// own namespace — NOT the edge's namespace. A cross-namespace ref (namespace
-		// set and != the Gateway's) is permitted only by a ReferenceGrant in the
-		// Secret's namespace; otherwise it is RefNotPermitted (and not resolved).
-		certNS := gw.Namespace
-		if ref.Namespace != nil && string(*ref.Namespace) != "" {
-			certNS = string(*ref.Namespace)
-		}
-		if referencegrant.CrossNamespace(certNS, gw.Namespace) &&
-			!referencegrant.PermitsSecret(grants, gw.Namespace, certNS, name) {
-			return listenerTLSResult{hasTLS: true, resolved: false, reason: string(gatewayv1.ListenerReasonRefNotPermitted), message: fmt.Sprintf("certificateRef %s/%s is not permitted by any ReferenceGrant", certNS, name)}
-		}
-		secretRef := certNS + "/" + name
-		sdsName, sErr := r.Secrets.SDSName(configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, secretRef)
-		if sErr != nil {
-			r.Log.WarnContext(ctx, "gateway listener TLS provider unavailable", "gateway", gw.Name, "secret", secretRef, "error", sErr.Error())
-			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q provider unavailable", name)}
-		}
-		cert, cErr := r.Secrets.Resolve(ctx, configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, secretRef)
-		if cErr != nil {
-			r.Log.WarnContext(ctx, "gateway listener TLS cert unresolved", "gateway", gw.Name, "secret", secretRef, "error", cErr.Error())
-			return listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q did not resolve: %v", name, cErr)}
-		}
-		certs[sdsName] = cache.EdgeTLSCert{Cert: cert.Cert, Key: cert.Key}
 		if firstResolved == "" {
 			firstResolved = sdsName
 		}
@@ -576,6 +559,46 @@ func (r *Reconciler) resolveListenerTLS(
 		hostCerts[host] = firstResolved
 	}
 	return listenerTLSResult{hasTLS: true, resolved: true}
+}
+
+// resolveCertRef validates and resolves a single certificateRef. Returns the SDS name
+// on success, or a non-nil listenerTLSResult on failure.
+func (r *Reconciler) resolveCertRef(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	ref gatewayv1.SecretObjectReference,
+	certs map[string]cache.EdgeTLSCert,
+	grants []gatewayv1beta1.ReferenceGrant,
+) (string, *listenerTLSResult) {
+	if ref.Group != nil && string(*ref.Group) != "" {
+		return "", &listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q has unsupported group %q", ref.Name, *ref.Group)}
+	}
+	if ref.Kind != nil && string(*ref.Kind) != "Secret" {
+		return "", &listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q has unsupported kind %q", ref.Name, *ref.Kind)}
+	}
+	name := string(ref.Name)
+	certNS := gw.Namespace
+	if ref.Namespace != nil && string(*ref.Namespace) != "" {
+		certNS = string(*ref.Namespace)
+	}
+	if referencegrant.CrossNamespace(certNS, gw.Namespace) &&
+		!referencegrant.PermitsSecret(grants, gw.Namespace, certNS, name) {
+		fail := listenerTLSResult{hasTLS: true, resolved: false, reason: string(gatewayv1.ListenerReasonRefNotPermitted), message: fmt.Sprintf("certificateRef %s/%s is not permitted by any ReferenceGrant", certNS, name)}
+		return "", &fail
+	}
+	secretRef := certNS + "/" + name
+	sdsName, sErr := r.Secrets.SDSName(configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, secretRef)
+	if sErr != nil {
+		r.Log.WarnContext(ctx, "gateway listener TLS provider unavailable", "gateway", gw.Name, "secret", secretRef, "error", sErr.Error())
+		return "", &listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q provider unavailable", name)}
+	}
+	cert, cErr := r.Secrets.Resolve(ctx, configv1.SecretProvider_SECRET_PROVIDER_KUBERNETES, secretRef)
+	if cErr != nil {
+		r.Log.WarnContext(ctx, "gateway listener TLS cert unresolved", "gateway", gw.Name, "secret", secretRef, "error", cErr.Error())
+		return "", &listenerTLSResult{hasTLS: true, resolved: false, message: fmt.Sprintf("certificateRef %q did not resolve: %v", name, cErr)}
+	}
+	certs[sdsName] = cache.EdgeTLSCert{Cert: cert.Cert, Key: cert.Key}
+	return sdsName, nil
 }
 
 // buildVirtualHost maps one HTTPRoute to an edge VirtualHost: its hostnames become
@@ -603,181 +626,179 @@ func (r *Reconciler) buildVirtualHost(ctx context.Context, hr *gatewayv1.HTTPRou
 		vh.Hosts = append(vh.Hosts, string(h))
 	}
 	for _, rule := range hr.Spec.Rules {
-		redirect := buildHTTPRedirect(rule.Filters)
-		urlRewrite := buildHTTPURLRewrite(rule.Filters)
-		timeout := buildRouteTimeout(rule.Timeouts)
-
-		// Collect ALL admissible backends in this rule with their weights.
-		// backendRef.weight nil → default 1 (per Gateway API spec).
-		backends := r.buildHTTPRouteBackends(ctx, rule.BackendRefs, hr.Namespace, grants)
-
-		// A rule must have either at least one backend or a redirect to produce a route.
-		// Exception: a rule where all backends are UNRESOLVABLE (InvalidKind /
-		// BackendNotFound / RefNotPermitted) must still produce a route that returns
-		// HTTP 500 — the Gateway API data-plane contract for invalid backends.
-		// Detect this: no admissible backends (buildHTTPRouteBackends filtered them
-		// all out) AND no redirect AND the rule actually has declared backendRefs
-		// (so it is "invalid" rather than "empty").
-		if redirect == nil {
-			if len(backends) == 0 {
-				// Two 500 cases (the Gateway API data-plane contract): a rule whose
-				// backendRefs are all UNRESOLVABLE (invalid kind, missing Service,
-				// ungranted cross-namespace ref), and — since gateway-api 1.6's
-				// HTTPRouteNoBackendRefs test pins it — a rule with NO backendRefs at
-				// all (omitted or empty list). Emit a fixed 500 route with the
-				// path/header match still applied.
-				resolved := false
-				if len(rule.BackendRefs) > 0 {
-					resolved, _, _ = r.backendsResolveHTTP(ctx, hr.Namespace, []gatewayv1.HTTPRouteRule{rule}, grants)
-				}
-				if !resolved {
-					mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
-					if len(rule.Matches) == 0 {
-						vh.Routes = append(vh.Routes, cache.Route{
-							Prefix:               "/",
-							HeaderMutation:       mutation,
-							DirectResponseStatus: 500,
-						})
-					} else {
-						for _, m := range rule.Matches {
-							prefix, exact := "/", ""
-							if m.Path != nil && m.Path.Value != nil {
-								switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
-								case gatewayv1.PathMatchExact:
-									exact = *m.Path.Value
-									prefix = ""
-								default:
-									prefix = *m.Path.Value
-								}
-							}
-							var hdrs []proxy.RouteHeaderMatch
-							for _, h := range m.Headers {
-								hm := proxy.RouteHeaderMatch{Name: string(h.Name), Value: h.Value}
-								if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
-									hm.Regex = true
-								}
-								hdrs = append(hdrs, hm)
-							}
-							method := ""
-							if m.Method != nil {
-								method = string(*m.Method)
-							}
-							var qps []proxy.RouteQueryParamMatch
-							for _, q := range m.QueryParams {
-								qm := proxy.RouteQueryParamMatch{Name: string(q.Name), Value: q.Value}
-								if q.Type != nil && *q.Type == gatewayv1.QueryParamMatchRegularExpression {
-									qm.Regex = true
-								}
-								qps = append(qps, qm)
-							}
-							vh.Routes = append(vh.Routes, cache.Route{
-								Prefix:               prefix,
-								Exact:                exact,
-								Headers:              hdrs,
-								Method:               method,
-								QueryParams:          qps,
-								HeaderMutation:       mutation,
-								DirectResponseStatus: 500,
-							})
-						}
-					}
-					continue
-				}
-			} else if len(backends) == 0 {
-				// No backends, no redirect, no declared backendRefs → skip (inert rule).
-				continue
-			}
-		}
-
-		mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
-
-		// For backward-compat we also populate the legacy Service/Port/BackendNamespace
-		// from the first backend so that code paths that read those fields still work.
-		var legacySvc, legacyNS string
-		var legacyPort, legacyDialPort uint32
-		if len(backends) > 0 {
-			legacySvc = backends[0].Service
-			legacyPort = backends[0].Port
-			legacyNS = backends[0].BackendNamespace
-			legacyDialPort = backends[0].DialPort
-		}
-
-		if len(rule.Matches) == 0 {
-			vh.Routes = append(vh.Routes, cache.Route{
-				Prefix:           "/",
-				Exact:            "",
-				Service:          legacySvc,
-				Port:             legacyPort,
-				BackendNamespace: legacyNS,
-				DialPort:         legacyDialPort,
-				Backends:         backends,
-				HeaderMutation:   mutation,
-				Redirect:         redirect,
-				URLRewrite:       urlRewrite,
-				Timeout:          timeout,
-			})
+		routes, skip := r.buildRoutesForRule(ctx, hr, rule, grants)
+		if skip {
 			continue
 		}
-		for _, m := range rule.Matches {
-			prefix, exact := "/", ""
-			if m.Path != nil && m.Path.Value != nil {
-				switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
-				case gatewayv1.PathMatchExact:
-					exact = *m.Path.Value
-					prefix = ""
-				default: // PathPrefix (and unimplemented types) → prefix
-					prefix = *m.Path.Value
-				}
-			}
-
-			// Build per-match header predicates.
-			var hdrs []proxy.RouteHeaderMatch
-			for _, h := range m.Headers {
-				hm := proxy.RouteHeaderMatch{Name: string(h.Name), Value: h.Value}
-				if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
-					hm.Regex = true
-				}
-				hdrs = append(hdrs, hm)
-			}
-
-			// Method match: convert to uppercase string (Gateway API enum).
-			method := ""
-			if m.Method != nil {
-				method = string(*m.Method)
-			}
-
-			// Build per-match query-parameter predicates.
-			var qps []proxy.RouteQueryParamMatch
-			for _, q := range m.QueryParams {
-				qm := proxy.RouteQueryParamMatch{Name: string(q.Name), Value: q.Value}
-				if q.Type != nil && *q.Type == gatewayv1.QueryParamMatchRegularExpression {
-					qm.Regex = true
-				}
-				qps = append(qps, qm)
-			}
-
-			vh.Routes = append(vh.Routes, cache.Route{
-				Prefix:           prefix,
-				Exact:            exact,
-				Service:          legacySvc,
-				Port:             legacyPort,
-				BackendNamespace: legacyNS,
-				DialPort:         legacyDialPort,
-				Backends:         backends,
-				HeaderMutation:   mutation,
-				Redirect:         redirect,
-				URLRewrite:       urlRewrite,
-				Headers:          hdrs,
-				Method:           method,
-				QueryParams:      qps,
-				Timeout:          timeout,
-			})
-		}
+		vh.Routes = append(vh.Routes, routes...)
 	}
 	if cert := certForHosts(vh.Hosts, hostCerts); cert != "" {
 		vh.TLSSecret = cert
 	}
 	return vh
+}
+
+// buildRoutesForRule converts one HTTPRoute rule into cache.Routes. Returns (routes, skip=true)
+// when the rule should be omitted entirely (no backends, no redirect, not an invalid-backend 500 case).
+func (r *Reconciler) buildRoutesForRule(
+	ctx context.Context,
+	hr *gatewayv1.HTTPRoute,
+	rule gatewayv1.HTTPRouteRule,
+	grants []gatewayv1beta1.ReferenceGrant,
+) ([]cache.Route, bool) {
+	redirect := buildHTTPRedirect(rule.Filters)
+	urlRewrite := buildHTTPURLRewrite(rule.Filters)
+	timeout := buildRouteTimeout(rule.Timeouts)
+	backends := r.buildHTTPRouteBackends(ctx, rule.BackendRefs, hr.Namespace, grants)
+
+	if redirect == nil && len(backends) == 0 {
+		return r.buildInvalidOrEmptyRoutes(ctx, hr, rule, grants)
+	}
+
+	mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
+	var legacySvc, legacyNS string
+	var legacyPort, legacyDialPort uint32
+	if len(backends) > 0 {
+		legacySvc = backends[0].Service
+		legacyPort = backends[0].Port
+		legacyNS = backends[0].BackendNamespace
+		legacyDialPort = backends[0].DialPort
+	}
+
+	if len(rule.Matches) == 0 {
+		return []cache.Route{{
+			Prefix:           "/",
+			Service:          legacySvc,
+			Port:             legacyPort,
+			BackendNamespace: legacyNS,
+			DialPort:         legacyDialPort,
+			Backends:         backends,
+			HeaderMutation:   mutation,
+			Redirect:         redirect,
+			URLRewrite:       urlRewrite,
+			Timeout:          timeout,
+		}}, false
+	}
+
+	routes := make([]cache.Route, 0, len(rule.Matches))
+	for _, m := range rule.Matches {
+		prefix, exact := buildMatchPath(m)
+		routes = append(routes, cache.Route{
+			Prefix:           prefix,
+			Exact:            exact,
+			Service:          legacySvc,
+			Port:             legacyPort,
+			BackendNamespace: legacyNS,
+			DialPort:         legacyDialPort,
+			Backends:         backends,
+			HeaderMutation:   mutation,
+			Redirect:         redirect,
+			URLRewrite:       urlRewrite,
+			Headers:          buildMatchHeaders(m),
+			Method:           buildMatchMethod(m),
+			QueryParams:      buildMatchQueryParams(m),
+			Timeout:          timeout,
+		})
+	}
+	return routes, false
+}
+
+// buildInvalidOrEmptyRoutes handles the no-backend / no-redirect case: emits 500 routes for
+// unresolvable backends, or signals skip for truly inert rules.
+func (r *Reconciler) buildInvalidOrEmptyRoutes(
+	ctx context.Context,
+	hr *gatewayv1.HTTPRoute,
+	rule gatewayv1.HTTPRouteRule,
+	grants []gatewayv1beta1.ReferenceGrant,
+) ([]cache.Route, bool) {
+	// No declared backendRefs → inert rule, skip.
+	if len(rule.BackendRefs) == 0 {
+		// gateway-api 1.6 HTTPRouteNoBackendRefs: empty list also emits 500.
+		// Fall through to the unresolved path below.
+	} else {
+		resolved, _, _ := r.backendsResolveHTTP(ctx, hr.Namespace, []gatewayv1.HTTPRouteRule{rule}, grants)
+		if resolved {
+			// All backends resolved but none admissible — inert rule (no redirect, no backend).
+			return nil, true
+		}
+	}
+	// Unresolvable backends or empty list: emit 500 routes.
+	mutation := buildEdgeHTTPHeaderMutation(rule.Filters)
+	if len(rule.Matches) == 0 {
+		return []cache.Route{{
+			Prefix:               "/",
+			HeaderMutation:       mutation,
+			DirectResponseStatus: 500,
+		}}, false
+	}
+	routes := make([]cache.Route, 0, len(rule.Matches))
+	for _, m := range rule.Matches {
+		prefix, exact := buildMatchPath(m)
+		routes = append(routes, cache.Route{
+			Prefix:               prefix,
+			Exact:                exact,
+			Headers:              buildMatchHeaders(m),
+			Method:               buildMatchMethod(m),
+			QueryParams:          buildMatchQueryParams(m),
+			HeaderMutation:       mutation,
+			DirectResponseStatus: 500,
+		})
+	}
+	return routes, false
+}
+
+// buildMatchPath extracts the prefix/exact path values from an HTTPRouteMatch.
+func buildMatchPath(m gatewayv1.HTTPRouteMatch) (prefix, exact string) {
+	prefix = "/"
+	if m.Path == nil || m.Path.Value == nil {
+		return
+	}
+	switch ptrType(m.Path.Type, gatewayv1.PathMatchPathPrefix) {
+	case gatewayv1.PathMatchExact:
+		return "", *m.Path.Value
+	default:
+		return *m.Path.Value, ""
+	}
+}
+
+// buildMatchHeaders converts HTTPRoute header match predicates to proxy types.
+func buildMatchHeaders(m gatewayv1.HTTPRouteMatch) []proxy.RouteHeaderMatch {
+	if len(m.Headers) == 0 {
+		return nil
+	}
+	hdrs := make([]proxy.RouteHeaderMatch, 0, len(m.Headers))
+	for _, h := range m.Headers {
+		hm := proxy.RouteHeaderMatch{Name: string(h.Name), Value: h.Value}
+		if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
+			hm.Regex = true
+		}
+		hdrs = append(hdrs, hm)
+	}
+	return hdrs
+}
+
+// buildMatchMethod returns the method string from an HTTPRouteMatch (empty when unset).
+func buildMatchMethod(m gatewayv1.HTTPRouteMatch) string {
+	if m.Method == nil {
+		return ""
+	}
+	return string(*m.Method)
+}
+
+// buildMatchQueryParams converts HTTPRoute query-parameter match predicates to proxy types.
+func buildMatchQueryParams(m gatewayv1.HTTPRouteMatch) []proxy.RouteQueryParamMatch {
+	if len(m.QueryParams) == 0 {
+		return nil
+	}
+	qps := make([]proxy.RouteQueryParamMatch, 0, len(m.QueryParams))
+	for _, q := range m.QueryParams {
+		qm := proxy.RouteQueryParamMatch{Name: string(q.Name), Value: q.Value}
+		if q.Type != nil && *q.Type == gatewayv1.QueryParamMatchRegularExpression {
+			qm.Regex = true
+		}
+		qps = append(qps, qm)
+	}
+	return qps
 }
 
 // backendExists reports whether a named backend is admissible on the data plane:
@@ -829,47 +850,51 @@ func (r *Reconciler) backendExists(ctx context.Context, name, namespace string) 
 func (r *Reconciler) buildHTTPRouteBackends(ctx context.Context, refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) []cache.RouteBackend {
 	out := make([]cache.RouteBackend, 0, len(refs))
 	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue // only core Services
+		if rb, ok := r.httpBackendRefToRouteBackend(ctx, b, routeNamespace, grants); ok {
+			out = append(out, rb)
 		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		name := string(b.Name)
-		if name == "" {
-			continue
-		}
-		if !attachment.BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", name, grants) {
-			continue
-		}
-		ns := routeNamespace
-		if b.Namespace != nil && string(*b.Namespace) != "" {
-			ns = string(*b.Namespace)
-		}
-		// Registry-aware existence check: a backend is admissible if it is a
-		// mesh/registry service OR a real k8s Service. Only drop on confirmed
-		// non-existence in both (BackendNotFound). Transient API errors leave the
-		// backend admitted to avoid false-positive 500s on API server hiccups.
-		if !r.backendExists(ctx, name, ns) {
-			continue // BackendNotFound: drop from admitted set
-		}
-		var port uint32
-		if b.Port != nil {
-			port = uint32(*b.Port)
-		}
-		weight := uint32(1) // default per Gateway API spec
-		if b.Weight != nil {
-			weight = uint32(*b.Weight)
-		}
-		out = append(out, cache.RouteBackend{
-			Service:          name,
-			BackendNamespace: ns,
-			Port:             port,
-			Weight:           weight,
-			DialPort:         r.resolveDialPort(ctx, ns, name, port),
-		})
 	}
 	return out
+}
+
+// httpBackendRefToRouteBackend converts a single HTTPBackendRef to a RouteBackend if admissible.
+// Returns (backend, true) when admitted, (zero, false) when the ref should be skipped.
+func (r *Reconciler) httpBackendRefToRouteBackend(ctx context.Context, b gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) (cache.RouteBackend, bool) {
+	if b.Group != nil && string(*b.Group) != "" {
+		return cache.RouteBackend{}, false
+	}
+	if b.Kind != nil && string(*b.Kind) != "Service" {
+		return cache.RouteBackend{}, false
+	}
+	name := string(b.Name)
+	if name == "" {
+		return cache.RouteBackend{}, false
+	}
+	if !attachment.BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", name, grants) {
+		return cache.RouteBackend{}, false
+	}
+	ns := routeNamespace
+	if b.Namespace != nil && string(*b.Namespace) != "" {
+		ns = string(*b.Namespace)
+	}
+	if !r.backendExists(ctx, name, ns) {
+		return cache.RouteBackend{}, false
+	}
+	var port uint32
+	if b.Port != nil {
+		port = uint32(*b.Port)
+	}
+	weight := uint32(1)
+	if b.Weight != nil {
+		weight = uint32(*b.Weight)
+	}
+	return cache.RouteBackend{
+		Service:          name,
+		BackendNamespace: ns,
+		Port:             port,
+		Weight:           weight,
+		DialPort:         r.resolveDialPort(ctx, ns, name, port),
+	}, true
 }
 
 // resolveDialPort returns the TCP port the edge's cleartext STRICT_DNS cluster must
@@ -1016,23 +1041,29 @@ func buildHTTPRedirect(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaRedirect
 		if rd.StatusCode != nil {
 			r.StatusCode = *rd.StatusCode
 		}
-		if rd.Path != nil {
-			switch rd.Path.Type {
-			case gatewayv1.FullPathHTTPPathModifier:
-				if rd.Path.ReplaceFullPath != nil {
-					r.PathType = "ReplaceFullPath"
-					r.PathValue = *rd.Path.ReplaceFullPath
-				}
-			case gatewayv1.PrefixMatchHTTPPathModifier:
-				if rd.Path.ReplacePrefixMatch != nil {
-					r.PathType = "ReplacePrefixMatch"
-					r.PathValue = *rd.Path.ReplacePrefixMatch
-				}
-			}
-		}
+		applyRedirectPath(r, rd.Path)
 		return r
 	}
 	return nil
+}
+
+// applyRedirectPath applies a path modifier to a GammaRedirect.
+func applyRedirectPath(r *proxy.GammaRedirect, path *gatewayv1.HTTPPathModifier) {
+	if path == nil {
+		return
+	}
+	switch path.Type {
+	case gatewayv1.FullPathHTTPPathModifier:
+		if path.ReplaceFullPath != nil {
+			r.PathType = "ReplaceFullPath"
+			r.PathValue = *path.ReplaceFullPath
+		}
+	case gatewayv1.PrefixMatchHTTPPathModifier:
+		if path.ReplacePrefixMatch != nil {
+			r.PathType = "ReplacePrefixMatch"
+			r.PathValue = *path.ReplacePrefixMatch
+		}
+	}
 }
 
 // buildHTTPURLRewrite extracts the first URLRewrite filter and converts it to a
@@ -1047,23 +1078,29 @@ func buildHTTPURLRewrite(filters []gatewayv1.HTTPRouteFilter) *proxy.GammaURLRew
 		if rw.Hostname != nil {
 			r.Hostname = string(*rw.Hostname)
 		}
-		if rw.Path != nil {
-			switch rw.Path.Type {
-			case gatewayv1.FullPathHTTPPathModifier:
-				if rw.Path.ReplaceFullPath != nil {
-					r.PathType = "ReplaceFullPath"
-					r.PathValue = *rw.Path.ReplaceFullPath
-				}
-			case gatewayv1.PrefixMatchHTTPPathModifier:
-				if rw.Path.ReplacePrefixMatch != nil {
-					r.PathType = "ReplacePrefixMatch"
-					r.PathValue = *rw.Path.ReplacePrefixMatch
-				}
-			}
-		}
+		applyURLRewritePath(r, rw.Path)
 		return r
 	}
 	return nil
+}
+
+// applyURLRewritePath applies a path modifier to a GammaURLRewrite.
+func applyURLRewritePath(r *proxy.GammaURLRewrite, path *gatewayv1.HTTPPathModifier) {
+	if path == nil {
+		return
+	}
+	switch path.Type {
+	case gatewayv1.FullPathHTTPPathModifier:
+		if path.ReplaceFullPath != nil {
+			r.PathType = "ReplaceFullPath"
+			r.PathValue = *path.ReplaceFullPath
+		}
+	case gatewayv1.PrefixMatchHTTPPathModifier:
+		if path.ReplacePrefixMatch != nil {
+			r.PathType = "ReplacePrefixMatch"
+			r.PathValue = *path.ReplacePrefixMatch
+		}
+	}
 }
 
 // buildEdgeHTTPHeaderMutation merges all RequestHeaderModifier and
@@ -1084,29 +1121,37 @@ func buildEdgeHTTPHeaderMutation(filters []gatewayv1.HTTPRouteFilter) *proxy.Gam
 				continue
 			}
 			ensure()
-			for _, h := range f.RequestHeaderModifier.Set {
-				m.SetRequest = append(m.SetRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			for _, h := range f.RequestHeaderModifier.Add {
-				m.AddRequest = append(m.AddRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			m.RemoveRequest = append(m.RemoveRequest, f.RequestHeaderModifier.Remove...)
+			applyRequestHeaderModifier(m, f.RequestHeaderModifier)
 		case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
 			if f.ResponseHeaderModifier == nil {
 				continue
 			}
 			ensure()
-			for _, h := range f.ResponseHeaderModifier.Set {
-				m.SetResponse = append(m.SetResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			for _, h := range f.ResponseHeaderModifier.Add {
-				m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
-			}
-			m.RemoveResponse = append(m.RemoveResponse, f.ResponseHeaderModifier.Remove...)
+			applyResponseHeaderModifier(m, f.ResponseHeaderModifier)
 			// Redirect, rewrite, mirror: handled by dedicated builders above; skip here.
 		}
 	}
 	return m
+}
+
+func applyRequestHeaderModifier(m *proxy.GammaHeaderMutation, mod *gatewayv1.HTTPHeaderFilter) {
+	for _, h := range mod.Set {
+		m.SetRequest = append(m.SetRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+	}
+	for _, h := range mod.Add {
+		m.AddRequest = append(m.AddRequest, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+	}
+	m.RemoveRequest = append(m.RemoveRequest, mod.Remove...)
+}
+
+func applyResponseHeaderModifier(m *proxy.GammaHeaderMutation, mod *gatewayv1.HTTPHeaderFilter) {
+	for _, h := range mod.Set {
+		m.SetResponse = append(m.SetResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+	}
+	for _, h := range mod.Add {
+		m.AddResponse = append(m.AddResponse, proxy.GammaHeaderKV{Name: string(h.Name), Value: h.Value})
+	}
+	m.RemoveResponse = append(m.RemoveResponse, mod.Remove...)
 }
 
 // boolPtr returns a pointer to the given bool value. Used to set

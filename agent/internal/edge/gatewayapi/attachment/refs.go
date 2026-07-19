@@ -111,26 +111,38 @@ func GatewayParentPorts(
 		if _, ok := gateways[gk]; !ok {
 			continue
 		}
-		// If a sectionName (listener name) is specified, match only that listener;
-		// otherwise match all listeners of the given protocol on this gateway.
-		if p.Port != nil {
-			port := uint32(*p.Port)
-			key := GatewayListenerKey{Gateway: gk, Port: port, Protocol: protocol}
-			if _, ok := listenerKeys[key]; ok {
-				if _, dup := seen[port]; !dup {
-					seen[port] = struct{}{}
-					ports = append(ports, port)
-				}
+		ports = collectParentRefPorts(p, gk, protocol, listenerKeys, seen, ports)
+	}
+	return ports
+}
+
+// collectParentRefPorts appends the matching ports for a single parentRef/gateway
+// pair, deduplicating via seen.
+func collectParentRefPorts(
+	p gatewayv1.ParentReference,
+	gk GatewayKey,
+	protocol gatewayv1.ProtocolType,
+	listenerKeys map[GatewayListenerKey]struct{},
+	seen map[uint32]struct{},
+	ports []uint32,
+) []uint32 {
+	if p.Port != nil {
+		port := uint32(*p.Port)
+		key := GatewayListenerKey{Gateway: gk, Port: port, Protocol: protocol}
+		if _, ok := listenerKeys[key]; ok {
+			if _, dup := seen[port]; !dup {
+				seen[port] = struct{}{}
+				ports = append(ports, port)
 			}
-			continue
 		}
-		// No port specified: include all matching-protocol listeners on this gateway.
-		for k := range listenerKeys {
-			if k.Gateway == gk && k.Protocol == protocol {
-				if _, dup := seen[k.Port]; !dup {
-					seen[k.Port] = struct{}{}
-					ports = append(ports, k.Port)
-				}
+		return ports
+	}
+	// No port specified: include all matching-protocol listeners on this gateway.
+	for k := range listenerKeys {
+		if k.Gateway == gk && k.Protocol == protocol {
+			if _, dup := seen[k.Port]; !dup {
+				seen[k.Port] = struct{}{}
+				ports = append(ports, k.Port)
 			}
 		}
 	}

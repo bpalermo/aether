@@ -113,7 +113,23 @@ func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, perGWHostCerts map[ga
 		return portalloc.Key{Namespace: ns, GatewayName: name, ListenerName: fmt.Sprintf("port-%d", port)}
 	}
 
-	// One allocator key per (Gateway, external port).
+	keys := collectPortAllocKeys(gws, portKey)
+	ports, err := portalloc.AssignAll(keys)
+	if err != nil {
+		return nil, fmt.Errorf("per-Gateway port allocation: %w", err)
+	}
+
+	result := make(map[gatewayKey][]gatewayListenerAllocation, len(gws))
+	for _, gw := range gws {
+		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
+		gwHostCerts := perGWHostCerts[gk]
+		result[gk] = buildGatewayAllocations(gw, gwHostCerts, ports, portKey)
+	}
+	return result, nil
+}
+
+// collectPortAllocKeys builds the deduplicated list of portalloc.Keys across all Gateways.
+func collectPortAllocKeys(gws []gatewayv1.Gateway, portKey func(ns, name string, port uint32) portalloc.Key) []portalloc.Key {
 	var keys []portalloc.Key
 	seen := map[portalloc.Key]struct{}{}
 	for _, gw := range gws {
@@ -125,50 +141,38 @@ func allocateGatewayListenerPorts(gws []gatewayv1.Gateway, perGWHostCerts map[ga
 			}
 		}
 	}
-	ports, err := portalloc.AssignAll(keys)
-	if err != nil {
-		return nil, fmt.Errorf("per-Gateway port allocation: %w", err)
-	}
+	return keys
+}
 
-	result := make(map[gatewayKey][]gatewayListenerAllocation, len(gws))
-	for _, gw := range gws {
-		gk := gatewayKey{Namespace: gw.Namespace, Name: gw.Name}
-		// Use this Gateway's own hostCerts map so cert lookup is scoped to certs
-		// resolved for THIS Gateway only. A shared map would let a later-resolved
-		// Gateway overwrite the catch-all entry ("") and contaminate the cert set of
-		// an earlier-resolved Gateway that also had a catch-all TLS listener.
-		gwHostCerts := perGWHostCerts[gk] // nil-safe: listenerCert handles nil map
-		// Group listeners by external port, unioning their certs (an HTTPS port may
-		// host several listeners with different hostnames/certs — SNI selects).
-		certsByPort := map[uint32]map[string]struct{}{}
-		var portOrder []uint32
-		for _, ln := range gw.Spec.Listeners {
-			ep := uint32(ln.Port)
-			if _, ok := certsByPort[ep]; !ok {
-				certsByPort[ep] = map[string]struct{}{}
-				portOrder = append(portOrder, ep)
-			}
-			if c := listenerCert(ln, gwHostCerts); c != "" {
-				certsByPort[ep][c] = struct{}{}
-			}
+// buildGatewayAllocations constructs the allocations for a single Gateway.
+func buildGatewayAllocations(gw gatewayv1.Gateway, gwHostCerts map[string]string, ports map[portalloc.Key]uint32, portKey func(ns, name string, port uint32) portalloc.Key) []gatewayListenerAllocation {
+	certsByPort := map[uint32]map[string]struct{}{}
+	var portOrder []uint32
+	for _, ln := range gw.Spec.Listeners {
+		ep := uint32(ln.Port)
+		if _, ok := certsByPort[ep]; !ok {
+			certsByPort[ep] = map[string]struct{}{}
+			portOrder = append(portOrder, ep)
 		}
-		allocs := make([]gatewayListenerAllocation, 0, len(portOrder))
-		for _, ep := range portOrder {
-			certSet := certsByPort[ep]
-			certs := make([]string, 0, len(certSet))
-			for c := range certSet {
-				certs = append(certs, c)
-			}
-			sort.Strings(certs)
-			allocs = append(allocs, gatewayListenerAllocation{
-				externalPort:   ep,
-				internalPort:   ports[portKey(gw.Namespace, gw.Name, ep)],
-				tlsSecretNames: certs,
-			})
+		if c := listenerCert(ln, gwHostCerts); c != "" {
+			certsByPort[ep][c] = struct{}{}
 		}
-		result[gk] = allocs
 	}
-	return result, nil
+	allocs := make([]gatewayListenerAllocation, 0, len(portOrder))
+	for _, ep := range portOrder {
+		certSet := certsByPort[ep]
+		certs := make([]string, 0, len(certSet))
+		for c := range certSet {
+			certs = append(certs, c)
+		}
+		sort.Strings(certs)
+		allocs = append(allocs, gatewayListenerAllocation{
+			externalPort:   ep,
+			internalPort:   ports[portKey(gw.Namespace, gw.Name, ep)],
+			tlsSecretNames: certs,
+		})
+	}
+	return allocs
 }
 
 // listenerCert resolves the SDS cert name for one listener from the already-resolved
@@ -184,6 +188,35 @@ func listenerCert(ln gatewayv1.Listener, hostCerts map[string]string) string {
 		}
 	}
 	return hostCerts[""]
+}
+
+// buildGatewayServicePorts converts gateway listener allocations into k8s ServicePorts,
+// deduplicating by external port and adding UDP ports when HTTP/3 is enabled on TLS listeners.
+func buildGatewayServicePorts(allocs []gatewayListenerAllocation, gkCfg *configv1.EdgeConfigSpec) []corev1.ServicePort {
+	ports := make([]corev1.ServicePort, 0, len(allocs))
+	seenPort := make(map[uint32]struct{}, len(allocs))
+	for _, a := range allocs {
+		if _, dup := seenPort[a.externalPort]; dup {
+			continue
+		}
+		seenPort[a.externalPort] = struct{}{}
+		portName := fmt.Sprintf("port-%d", a.externalPort)
+		ports = append(ports, corev1.ServicePort{
+			Name:       portName,
+			Port:       int32(a.externalPort),
+			TargetPort: intstr.FromInt32(int32(a.internalPort)),
+			Protocol:   corev1.ProtocolTCP,
+		})
+		if len(a.tlsSecretNames) > 0 && gkCfg.GetHttp3().GetEnabled().GetValue() {
+			ports = append(ports, corev1.ServicePort{
+				Name:       portName + "-udp",
+				Port:       int32(a.externalPort),
+				TargetPort: intstr.FromInt32(int32(a.internalPort)),
+				Protocol:   corev1.ProtocolUDP,
+			})
+		}
+	}
+	return ports
 }
 
 // reconcileGatewayServices creates/updates the per-Gateway LoadBalancer Service
@@ -237,32 +270,7 @@ func (r *Reconciler) reconcileGatewayServices(
 		// that passes multiple allocations for the same external port still yields a
 		// single ServicePort rather than a Service the API server refuses.
 		gkCfg := edgeConfigs[gk]
-		ports := make([]corev1.ServicePort, 0, len(allocs))
-		seenPort := make(map[uint32]struct{}, len(allocs))
-		for _, a := range allocs {
-			if _, dup := seenPort[a.externalPort]; dup {
-				continue
-			}
-			seenPort[a.externalPort] = struct{}{}
-			portName := fmt.Sprintf("port-%d", a.externalPort)
-			ports = append(ports, corev1.ServicePort{
-				Name:       portName,
-				Port:       int32(a.externalPort),
-				TargetPort: intstr.FromInt32(int32(a.internalPort)),
-				Protocol:   corev1.ProtocolTCP,
-			})
-			// UDP port for HTTP/3: same external port, different protocol so k8s
-			// allows it alongside the TCP port. Required for LBs to pass QUIC
-			// datagrams through to the edge pod.
-			if len(a.tlsSecretNames) > 0 && gkCfg.GetHttp3().GetEnabled().GetValue() {
-				ports = append(ports, corev1.ServicePort{
-					Name:       portName + "-udp",
-					Port:       int32(a.externalPort),
-					TargetPort: intstr.FromInt32(int32(a.internalPort)),
-					Protocol:   corev1.ProtocolUDP,
-				})
-			}
-		}
+		ports := buildGatewayServicePorts(allocs, gkCfg)
 		if len(ports) == 0 {
 			// No listeners — skip creating a Service for this Gateway.
 			continue
@@ -330,19 +338,11 @@ func (r *Reconciler) createOrUpdateGatewayService(
 
 	if errors.IsNotFound(err) {
 		apply(svc)
-		if cerr := r.Create(ctx, svc); cerr != nil {
-			// Idempotency: a concurrent reconcile (stale cache) may have created it
-			// between our Get and Create — re-fetch and fall through to the update
-			// path instead of surfacing an AlreadyExists error (reconcile churn).
-			if !errors.IsAlreadyExists(cerr) {
-				return fmt.Errorf("create per-Gateway Service %s: %w", svc.Name, cerr)
-			}
-			if gerr := r.Get(ctx, key, existing); gerr != nil {
-				return fmt.Errorf("get per-Gateway Service %s after create race: %w", svc.Name, gerr)
-			}
-		} else {
-			r.Log.InfoContext(ctx, "created per-Gateway LoadBalancer Service",
-				"gateway", gwNamespace+"/"+gwName, "service", svc.Name, "pinnedIP", pinnedIP)
+		created, cerr := r.tryCreateGatewayService(ctx, svc, key, existing, gwNamespace, gwName, pinnedIP)
+		if cerr != nil {
+			return cerr
+		}
+		if created {
 			return nil
 		}
 	}
@@ -353,6 +353,24 @@ func (r *Reconciler) createOrUpdateGatewayService(
 		return fmt.Errorf("update per-Gateway Service %s: %w", svc.Name, uerr)
 	}
 	return nil
+}
+
+// tryCreateGatewayService attempts to Create svc. On AlreadyExists it re-fetches
+// into existing and returns (false, nil) to fall through to the update path.
+// On success returns (true, nil). On other errors returns (false, err).
+func (r *Reconciler) tryCreateGatewayService(ctx context.Context, svc *corev1.Service, key types.NamespacedName, existing *corev1.Service, gwNamespace, gwName, pinnedIP string) (bool, error) {
+	if cerr := r.Create(ctx, svc); cerr != nil {
+		if !errors.IsAlreadyExists(cerr) {
+			return false, fmt.Errorf("create per-Gateway Service %s: %w", svc.Name, cerr)
+		}
+		if gerr := r.Get(ctx, key, existing); gerr != nil {
+			return false, fmt.Errorf("get per-Gateway Service %s after create race: %w", svc.Name, gerr)
+		}
+		return false, nil
+	}
+	r.Log.InfoContext(ctx, "created per-Gateway LoadBalancer Service",
+		"gateway", gwNamespace+"/"+gwName, "service", svc.Name, "pinnedIP", pinnedIP)
+	return true, nil
 }
 
 // readServiceLBIP returns the first LoadBalancer ingress IP (or hostname) of the

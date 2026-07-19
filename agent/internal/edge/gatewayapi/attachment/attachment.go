@@ -265,37 +265,48 @@ func (r *Resolver) httpRouteAttachment(
 		if string(p.Name) != gw.Name || parentRefNamespace(p.Namespace, routeNamespace) != gw.Namespace {
 			continue
 		}
-		// The parentRef targets this Gateway. Does its sectionName/port name a
-		// real listener?
 		if !parentRefNamesAnyListener(p, gw.Spec.Listeners) {
-			// NoMatchingParent unless a better (already-found) reason exists.
 			continue
 		}
-		// Walk the listeners this parentRef selects, narrowing the failure reason
-		// from namespace → hostname as we get closer to a match.
 		for _, ln := range gw.Spec.Listeners {
-			if !parentRefSelectsListener(p, ln) {
-				continue
+			lnReason, accepted := r.checkListenerAttach(ctx, gw, p, ln, routeNamespace, routeHostnames, reason)
+			if accepted {
+				return attachAccepted
 			}
-			if !listenerAcceptsKind(ln, "HTTPRoute") {
-				continue
-			}
-			if !r.namespaceAllowed(ctx, gw.Namespace, routeNamespace, ln) {
-				if reason == attachNoMatchingParent {
-					reason = attachNotAllowedByListeners
-				}
-				continue
-			}
-			if !hostnamesIntersect(ln.Hostname, routeHostnames) {
-				reason = attachNoMatchingListenerHostname
-				continue
-			}
-			return attachAccepted
+			reason = lnReason
 		}
-		// This parentRef named a real listener but none accepted; keep the most
-		// specific reason found so far (namespace/hostname over NoMatchingParent).
 	}
 	return reason
+}
+
+// checkListenerAttach tests whether parentRef p attaches to listener ln on Gateway gw
+// for an HTTPRoute in routeNamespace with routeHostnames. Returns the updated reason
+// and whether the listener fully accepted the route.
+func (r *Resolver) checkListenerAttach(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	p gatewayv1.ParentReference,
+	ln gatewayv1.Listener,
+	routeNamespace string,
+	routeHostnames []gatewayv1.Hostname,
+	reason routeAttachReason,
+) (routeAttachReason, bool) {
+	if !parentRefSelectsListener(p, ln) {
+		return reason, false
+	}
+	if !listenerAcceptsKind(ln, "HTTPRoute") {
+		return reason, false
+	}
+	if !r.namespaceAllowed(ctx, gw.Namespace, routeNamespace, ln) {
+		if reason == attachNoMatchingParent {
+			reason = attachNotAllowedByListeners
+		}
+		return reason, false
+	}
+	if !hostnamesIntersect(ln.Hostname, routeHostnames) {
+		return attachNoMatchingListenerHostname, false
+	}
+	return reason, true
 }
 
 // HTTPRouteAcceptance computes the route-level Accepted condition for an HTTPRoute
@@ -349,30 +360,47 @@ func (r *Resolver) AttachedRoutesForListener(
 	gateways map[GatewayKey]struct{},
 	listenerKeys map[GatewayListenerKey]struct{},
 ) int32 {
-	var count int32
 	switch ln.Protocol {
 	case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
-		for i := range httpRoutes {
-			hr := &httpRoutes[i]
-			if r.httpRouteAttachesToListener(ctx, gw, hr.Spec.ParentRefs, hr.Namespace, hr.Spec.Hostnames, ln) {
-				count++
-			}
-		}
+		return r.countAttachedHTTPRoutes(ctx, gw, ln, httpRoutes)
 	case gatewayv1.TCPProtocolType:
-		for i := range tcpRoutes {
-			tr := &tcpRoutes[i]
-			ports := GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, listenerKeys)
-			if containsPort(ports, uint32(ln.Port)) {
-				count++
-			}
-		}
+		return countAttachedTCPRoutes(tcpRoutes, gateways, listenerKeys, ln)
 	case gatewayv1.TLSProtocolType:
-		for i := range tlsRoutes {
-			tr := &tlsRoutes[i]
-			ports := GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, listenerKeys)
-			if containsPort(ports, uint32(ln.Port)) {
-				count++
-			}
+		return countAttachedTLSRoutes(tlsRoutes, gateways, listenerKeys, ln)
+	}
+	return 0
+}
+
+func (r *Resolver) countAttachedHTTPRoutes(ctx context.Context, gw *gatewayv1.Gateway, ln gatewayv1.Listener, httpRoutes []gatewayv1.HTTPRoute) int32 {
+	var count int32
+	for i := range httpRoutes {
+		hr := &httpRoutes[i]
+		if r.httpRouteAttachesToListener(ctx, gw, hr.Spec.ParentRefs, hr.Namespace, hr.Spec.Hostnames, ln) {
+			count++
+		}
+	}
+	return count
+}
+
+func countAttachedTCPRoutes(routes []gatewayv1.TCPRoute, gateways map[GatewayKey]struct{}, listenerKeys map[GatewayListenerKey]struct{}, ln gatewayv1.Listener) int32 {
+	var count int32
+	port := uint32(ln.Port)
+	for i := range routes {
+		tr := &routes[i]
+		if containsPort(GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, listenerKeys), port) {
+			count++
+		}
+	}
+	return count
+}
+
+func countAttachedTLSRoutes(routes []gatewayv1.TLSRoute, gateways map[GatewayKey]struct{}, listenerKeys map[GatewayListenerKey]struct{}, ln gatewayv1.Listener) int32 {
+	var count int32
+	port := uint32(ln.Port)
+	for i := range routes {
+		tr := &routes[i]
+		if containsPort(GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TLSProtocolType, listenerKeys), port) {
+			count++
 		}
 	}
 	return count

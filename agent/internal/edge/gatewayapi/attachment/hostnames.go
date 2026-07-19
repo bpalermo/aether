@@ -106,49 +106,47 @@ func EffectiveHostnames(routeHosts []string, gwKeys []string, gwListenerHostname
 	for _, gwKey := range gwKeys {
 		lnHostnames, ok := gwListenerHostnames[gwKey]
 		if !ok {
-			// Unknown Gateway — should not happen (key was from AttachedGatewayKeys).
 			continue
 		}
 		for _, lh := range lnHostnames {
-			if lh == "" {
-				// Listener has no hostname restriction: admit all route hostnames.
-				if len(routeHosts) == 0 {
-					// route "" + listener "" = "*" (true catch-all). A no-hostname
-					// listener with a no-hostname route admits ALL hosts. Return nil
-					// immediately — no specific hostname from any other listener in
-					// this key's union can narrow a catch-all back down. The caller
-					// treats nil/empty Hosts as the "*" catch-all vhost.
-					//
-					// Previously this was `continue` (add nothing and keep processing),
-					// which caused a multi-listener Gateway (e.g. one listener with no
-					// hostname + two listeners with specific hostnames) to produce a
-					// Hosts set of only the specific listener hostnames — silently
-					// dropping the catch-all listener's "admit all" contribution. A
-					// request like Host:example.org matched neither specific hostname,
-					// fell through to the 404 catch-all vhost, and returned 404 instead
-					// of the expected redirect. (HTTPRouteRedirectPortAndScheme, 443 subtests)
-					return nil
-				}
-				for _, rh := range routeHosts {
-					add(rh)
-				}
-				continue
-			}
-			// Listener has a hostname (exact or wildcard).
-			if len(routeHosts) == 0 {
-				// Route has no hostname constraint: inherits the listener's hostname.
-				add(lh)
-				continue
-			}
-			// Intersect each route hostname against this listener hostname.
-			for _, rh := range routeHosts {
-				if h, ok := hostnameIntersect(lh, rh); ok {
-					add(h)
-				}
+			if catchAll := intersectListenerHostname(lh, routeHosts, add); catchAll {
+				return nil
 			}
 		}
 	}
 	return result
+}
+
+// intersectListenerHostname merges one listener hostname into the effective set
+// via add. Returns true when the combination is a true catch-all (both listener
+// and route have no hostname), which signals the caller to return nil immediately.
+func intersectListenerHostname(lh string, routeHosts []string, add func(string)) bool {
+	if lh != "" {
+		// Listener has a hostname (exact or wildcard).
+		if len(routeHosts) == 0 {
+			// Route has no hostname constraint: inherits the listener's hostname.
+			add(lh)
+			return false
+		}
+		// Intersect each route hostname against this listener hostname.
+		for _, rh := range routeHosts {
+			if h, ok := hostnameIntersect(lh, rh); ok {
+				add(h)
+			}
+		}
+		return false
+	}
+	// Listener has no hostname restriction: admit all route hostnames.
+	if len(routeHosts) == 0 {
+		// route "" + listener "" = "*" (true catch-all). Return nil immediately —
+		// no specific hostname from any other listener can narrow a catch-all back
+		// down. (HTTPRouteRedirectPortAndScheme, 443 subtests)
+		return true
+	}
+	for _, rh := range routeHosts {
+		add(rh)
+	}
+	return false
 }
 
 // hostnameIntersect returns the more-specific of two hostnames if they match,
