@@ -12,7 +12,10 @@ rules:
   # storage entry (no mesh listener) so sandbox recreation re-runs CNI ADD. The
   # Eviction API is PDB-respecting; the ghost sweep rate-limits and interlocks it
   # behind the prune circuit breaker.
-  - apiGroups: ["policy"]
+  # NOTE: the pods/eviction subresource create is authorized under the CORE ("")
+  # apiGroup, NOT "policy" — despite the Eviction object being policy/v1. Using
+  # "policy" here silently 403s every eviction (found via a node-reboot G1 test).
+  - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
   # Record a Warning Event on a pod when the agent evicts it for a lost CNI ADD.
