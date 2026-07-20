@@ -63,3 +63,23 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
+
+{{/*
+Upstream authorization list (config.aether.io/upstreams, proposal 004).
+
+Unions the reachability tier's echo service names with the mesh_dns tier's
+resolved authorities: a mesh_dns target dials a real ClusterIP, so its upstream
+cluster must be authorized too. Each mesh_dns FQDN is reduced to its host (the
+":port" is dropped) since authorization keys on the authority, not the port.
+Empty when neither tier is configured.
+*/}}
+{{- define "prober.upstreams" -}}
+{{- $u := list -}}
+{{- range .Values.probe.reachabilityTargets -}}
+{{- $u = append $u . -}}
+{{- end -}}
+{{- range .Values.probe.meshDNSTargets -}}
+{{- $u = append $u (splitList ":" . | first) -}}
+{{- end -}}
+{{- join "," $u -}}
+{{- end -}}

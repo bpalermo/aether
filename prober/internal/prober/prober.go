@@ -35,12 +35,23 @@ const (
 
 	tierLiveness     = "liveness"
 	tierReachability = "reachability"
+	tierMeshDNS      = "mesh_dns"
+
+	// defaultMeshDNSPort is appended to a mesh_dns target that omits a port so the
+	// probe still dials the local mesh egress listener after resolving the name.
+	defaultMeshDNSPort = "18081"
 
 	resultSuccess         = "success"
 	resultHTTPError       = "http_error"
 	resultConnectionError = "connection_error"
 	resultTimeout         = "timeout"
 	resultSaturated       = "saturated"
+	// resultDNSError and its refinements are emitted only by the mesh_dns tier: a
+	// name-resolution failure is an independently alertable signal, distinct from a
+	// post-resolution connect failure (which stays connection_error).
+	resultDNSError    = "dns_error"
+	resultDNSNXDomain = "dns_nxdomain"
+	resultDNSTimeout  = "dns_timeout"
 )
 
 // Config configures the prober.
@@ -50,6 +61,7 @@ type Config struct {
 	LivenessAuthority   string
 	MeshDomain          string
 	ReachabilityTargets []string
+	MeshDNSTargets      []string
 	Rate                float64
 	Timeout             time.Duration
 	MaxConcurrent       int
@@ -130,7 +142,32 @@ func New(ctx context.Context, cfg Config, log logr.Logger, version string) (*Pro
 			authority: svc + "." + cfg.MeshDomain,
 		})
 	}
+	// Mesh-DNS tier (optional): unlike the tiers above, the URL is the REAL
+	// namespace-qualified name and the authority is left empty, so the Go transport
+	// resolves the FQDN through the system resolver (CNI :53 DNAT → agent mesh-DNS
+	// resolver → ClusterIP) instead of dialing the fixed egress with a Host override.
+	// This is the whole point: it exercises the mesh-DNS path the other tiers bypass,
+	// closing the blind spot where a mesh-DNS outage is invisible.
+	for _, fqdn := range cfg.MeshDNSTargets {
+		p.targets = append(p.targets, target{
+			tier: tierMeshDNS,
+			name: fqdn,
+			url:  "http://" + withDefaultPort(fqdn, defaultMeshDNSPort) + "/",
+			// authority intentionally left empty: do NOT override the Host, so the
+			// transport actually resolves and connects to the real name.
+		})
+	}
 	return p, nil
+}
+
+// withDefaultPort returns authority unchanged when it already carries a port,
+// otherwise it appends ":port". It handles the no-port case only (mesh-DNS targets
+// are hostnames, never bracketed IPv6 literals).
+func withDefaultPort(authority, port string) string {
+	if _, _, err := net.SplitHostPort(authority); err == nil {
+		return authority
+	}
+	return authority + ":" + port
 }
 
 func newMeter(ctx context.Context, endpoint, version string) (metric.Meter, *sdkmetric.MeterProvider, error) {
@@ -224,7 +261,11 @@ func (p *Prober) probe(ctx context.Context, t target) {
 		p.record(t, resultConnectionError, 0)
 		return
 	}
-	req.Host = t.authority
+	// mesh_dns targets carry no authority: leaving req.Host unset preserves the
+	// FQDN so the transport resolves and dials the real name (the point of the tier).
+	if t.authority != "" {
+		req.Host = t.authority
+	}
 	// Mark the probe not-sampled so the mesh proxy's HCM doesn't create and export
 	// a span per probe. The proxy's tracing is parent-based: a request that already
 	// carries a trace context honors its sampled decision instead of rolling
@@ -264,10 +305,28 @@ func notSampledTraceparent() string {
 }
 
 // classifyErr maps a request error to a result. connection_error is the class the
-// proxy-emitted metric is blind to (no response produced / listener down).
+// proxy-emitted metric is blind to (no response produced / listener down). A
+// name-resolution failure is split out into the dns_* classes so a mesh-DNS
+// regression is an unambiguous, independently alertable signal — never folded into
+// connection_error. A connect failure AFTER successful resolution stays
+// connection_error.
 func classifyErr(ctx context.Context, err error) string {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return resultTimeout
+	}
+	// A DNS failure is checked before the generic net.Error timeout branch: a
+	// *net.DNSError also satisfies net.Error, and a resolution timeout must surface
+	// as dns_timeout (not the transport timeout) so the mesh-DNS signal is distinct.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		switch {
+		case dnsErr.IsNotFound:
+			return resultDNSNXDomain
+		case dnsErr.IsTimeout:
+			return resultDNSTimeout
+		default:
+			return resultDNSError
+		}
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
