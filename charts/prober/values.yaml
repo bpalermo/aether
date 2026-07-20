@@ -32,6 +32,14 @@ probe:
   # Optional reachability tier: echo upstream service names. When non-empty, the
   # pod gets config.aether.io/upstreams so the agent programs those clusters.
   reachabilityTargets: []
+  # Optional mesh_dns tier: namespace-qualified FQDN authorities (host[:port],
+  # default port 18081). Unlike liveness/reachability these are RESOLVED through the
+  # mesh DNS path (CNI :53 DNAT → agent resolver → ClusterIP) rather than being
+  # Host-overridden, so a real mesh-DNS outage becomes an alertable dns_* signal
+  # (closes the blind spot behind issue #574). Only works because this pod is
+  # mesh-managed. Each target's host is also added to config.aether.io/upstreams.
+  meshDNSTargets:
+    - "echo.aether-test.aether.internal:18081"
 
 # OTel: push the probe SLI to the collector (host:port, insecure). Empty disables
 # telemetry (the prober still runs but emits nothing).

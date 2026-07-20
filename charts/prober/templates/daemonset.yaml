@@ -16,10 +16,13 @@ spec:
         # Mesh injection: the CNI intercepts this pod and the agent plumbs the
         # per-pod egress listener at {{ .Values.probe.egress }}.
         aether.io/managed: "true"
-      {{- with .Values.probe.reachabilityTargets }}
+      {{- $upstreams := include "prober.upstreams" . }}
+      {{- with $upstreams }}
       annotations:
-        # Reachability tier only: authorize the echo upstream clusters (proposal 004).
-        config.aether.io/upstreams: {{ join "," . | quote }}
+        # Authorize the upstream clusters the reachability and mesh_dns tiers dial
+        # (proposal 004). The mesh_dns tier resolves a real ClusterIP, so its
+        # upstream must be authorized here too.
+        config.aether.io/upstreams: {{ . | quote }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "prober.serviceAccountName" . }}
@@ -36,6 +39,12 @@ spec:
             - "--timeout={{ .Values.probe.timeout }}"
             {{- with .Values.probe.reachabilityTargets }}
             - "--reachability-targets={{ join "," . }}"
+            {{- end }}
+            {{- with .Values.probe.meshDNSTargets }}
+            # mesh_dns tier: these FQDNs are RESOLVED through the mesh DNS path (not
+            # Host-overridden), so a mesh-DNS outage surfaces as an alertable dns_*
+            # result — closing the blind spot behind issue #574.
+            - "--mesh-dns-targets={{ join "," . }}"
             {{- end }}
             {{- with .Values.telemetry.otlpEndpoint }}
             - "--otlp-endpoint={{ . }}"

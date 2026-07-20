@@ -37,6 +37,7 @@ func GetCommand() *cobra.Command {
 	f.StringVar(&cfg.LivenessAuthority, "liveness-authority", cfg.LivenessAuthority, "reserved Host authority for the liveness probe (must not be a real service)")
 	f.StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "mesh authority suffix for reachability targets")
 	f.StringSliceVar(&cfg.ReachabilityTargets, "reachability-targets", cfg.ReachabilityTargets, "optional echo upstream service names for the reachability tier")
+	f.StringSliceVar(&cfg.MeshDNSTargets, "mesh-dns-targets", cfg.MeshDNSTargets, "optional namespace-qualified FQDN authorities (host[:port], default port 18081) for the mesh_dns tier; these are resolved through the mesh DNS path rather than Host-overridden")
 	f.Float64Var(&cfg.Rate, "rate", cfg.Rate, "probes per second per target")
 	f.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "per-probe timeout")
 	f.IntVar(&cfg.MaxConcurrent, "max-concurrent", cfg.MaxConcurrent, "max in-flight probes per target")
