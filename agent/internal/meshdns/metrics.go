@@ -19,7 +19,7 @@ type metrics struct {
 func newMetrics() *metrics {
 	q, err := otel.Meter("aether/mesh-dns").Int64Counter(
 		"aether.mesh_dns.queries",
-		metric.WithDescription("Mesh-DNS queries handled by the in-agent resolver, by result (answered=mesh hit, forwarded=relayed to upstream, forward_error=upstream failed)"),
+		metric.WithDescription("Mesh-DNS queries handled by the in-agent resolver, by result (answered=mesh hit, forwarded=relayed to upstream, forward_error=upstream failed, nxdomain=authoritative mesh miss, cold=SERVFAIL for a mesh name before records were ever populated)"),
 	)
 	if err != nil {
 		return nil
@@ -38,4 +38,11 @@ const (
 	resultAnswered     = "answered"
 	resultForwarded    = "forwarded"
 	resultForwardError = "forward_error"
+	// resultNXDomain is an authoritative miss: a name under the mesh domain that
+	// is not in the record table, answered NXDOMAIN once records are populated.
+	resultNXDomain = "nxdomain"
+	// resultCold is a mesh-domain query received before the record table was ever
+	// populated (warm-start snapshot empty + no reconcile yet); answered SERVFAIL
+	// so the client retries instead of caching a negative answer.
+	resultCold = "cold"
 )

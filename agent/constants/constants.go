@@ -12,6 +12,15 @@ const (
 	// here (the node hostPath doesn't exist in the edge pod).
 	DefaultEdgeRegistryDir = constants.CNIDefaultRegistryPath
 
+	// DefaultMeshDNSSnapshotPath is the default host-persistent file the in-process
+	// mesh-DNS resolver persists its last-known record table to (and warm-loads at
+	// boot). It lives in a dedicated SUBDIRECTORY under the CNI registry hostPath so
+	// it survives a rolling agent restart (a new pod) yet stays out of the CNI pod
+	// store's top-level *.json scan (setupStorage/loadAll unmarshals every top-level
+	// .json there as a CNIPod — a subdir is skipped), closing the mesh_dns cold
+	// window (Fix 1).
+	DefaultMeshDNSSnapshotPath = DefaultHostCNIRegistryDir + "/mesh-dns/records.json"
+
 	// DefaultXdsSocketPath is the default Unix domain socket path for the xDS server
 	DefaultXdsSocketPath = "/run/aether/xds.sock"
 	// DefaultCNISocketPath is the default Unix domain socket path for the CNI server
