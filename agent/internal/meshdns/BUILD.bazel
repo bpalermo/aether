@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/meshdns",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//common/file",
         "//common/log",
         "//common/serviceref",
         "@com_github_miekg_dns//:dns",
@@ -27,6 +28,7 @@ go_test(
     ],
     embed = [":meshdns"],
     deps = [
+        "@com_github_miekg_dns//:dns",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

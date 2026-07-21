@@ -128,6 +128,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
 	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
 	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
+	rootCmd.Flags().StringVar(&cfg.MeshDNSSnapshotPath, "mesh-dns-snapshot-path", cfg.MeshDNSSnapshotPath, "Host-persistent file the in-process mesh-DNS resolver persists its last-known record table to and warm-loads at boot, closing the agent-roll cold window (proposal 018, mesh-global FQDN). Defaults under the CNI registry hostPath so it survives a rolling restart; empty disables persistence")
 }
 
 // registerSharedFlags registers the flags common to the node agent (root) and
@@ -376,6 +377,13 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 
 // wireMeshDNS starts the in-process mesh-DNS resolver and connects it to the
 // snapshot cache when --mesh-dns is enabled. It is a no-op when disabled.
+//
+// The resolver binds EARLY — directly in a goroutine, NOT via m.Add — so its UDP+TCP
+// sockets are open the moment the agent process starts, before controller-runtime's
+// cache-gated Runnable group waits on informer sync. On an agent roll that closes the
+// "bind gap" where DNAT'd :53 packets hit a closed port and clients time out (Fix 1).
+// Combined with the warm-start snapshot loaded in NewServer, the fresh agent answers
+// mesh names from last-known ClusterIPs within ms of boot.
 func wireMeshDNS(ctx context.Context, m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	if !cfg.MeshDNS {
 		return nil
@@ -386,7 +394,7 @@ func wireMeshDNS(ctx context.Context, m ctrl.Manager, snapshotCache *cache.Snaps
 	// no setns, no privilege increase).
 	hostIP := os.Getenv("HOST_IP")
 	resolverPort := uint32(meshconst.ProxyDNSResolverPort)
-	dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), l)
+	dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), cfg.MeshDNSSnapshotPath, l)
 	// Default the forward upstream to the agent's own resolv.conf (kube-dns, via
 	// ClusterFirstWithHostNet) when --mesh-dns-upstream is unset, so mesh DNS is
 	// safe to enable by default without per-cluster configuration.
@@ -396,9 +404,15 @@ func wireMeshDNS(ctx context.Context, m ctrl.Manager, snapshotCache *cache.Snaps
 		l.Info("mesh-DNS upstream defaulted from /etc/resolv.conf", "upstreams", upstreams)
 	}
 	dnsServer.SetUpstreams(upstreams)
-	if err := m.Add(dnsServer); err != nil {
-		return fmt.Errorf("failed to add mesh-DNS resolver: %w", err)
-	}
+	// Bind now, off the cache-gated Runnable group. Start honours ctx.Done for
+	// graceful miekg/dns Shutdown; a bind error is fatal (a wedged resolver silently
+	// breaks every pod's DNS), so crash so the DaemonSet restarts us.
+	go func() {
+		if err := dnsServer.Start(ctx); err != nil {
+			l.ErrorContext(ctx, "mesh-DNS resolver failed", "error", err)
+			os.Exit(1)
+		}
+	}()
 	snapshotCache.SetMeshDNSServer(dnsServer)
 	return nil
 }

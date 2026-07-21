@@ -139,6 +139,12 @@ type AgentConfig struct {
 	// MeshDNSUpstream is the upstream resolver(s) (host[:port]) the mesh-DNS filter
 	// forwards non-mesh queries to — the cluster kube-dns.
 	MeshDNSUpstream []string
+	// MeshDNSSnapshotPath is the host-persistent file the mesh-DNS resolver writes
+	// its last-known record table to on every reconcile and warm-loads at boot, so a
+	// rolling agent restart answers mesh names from last-known ClusterIPs within ms
+	// of process start (before the informer cache syncs the first reconcile). Lives
+	// under the CNI registry hostPath so it survives the pod (a restart = a new pod).
+	MeshDNSSnapshotPath string
 	// GatewayClassName is the GatewayClass whose Gateways this edge serves.
 	GatewayClassName string
 
@@ -171,6 +177,7 @@ func NewAgentConfig() *AgentConfig {
 		GatewayClassName:        "aether",
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		MeshDNSSnapshotPath:     constants.DefaultMeshDNSSnapshotPath,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
 		MeshDomain:              meshconst.DefaultMeshDomain,
 		SpireEnabled:            true,
