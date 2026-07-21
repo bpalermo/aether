@@ -28,11 +28,15 @@ func TestLookup(t *testing.T) {
 	assertMeshMiss(t, s, "unknown.team-a.aether.internal.")
 	assertMeshMiss(t, s, "svc-1.aether-test.aether.internal.", "wrong namespace")
 
-	// Not mesh names at all -> forwarded (isMeshName false).
+	// The resolver owns the WHOLE zone: any name under .meshDomain is a mesh name
+	// (answered authoritatively, never forwarded) even when malformed.
+	assert.True(t, s.isMeshName("svc-1.aether.internal."), "single label under the zone is still ours")
+	assert.True(t, s.isMeshName("a.b.c.aether.internal."), "three labels under the zone are still ours")
+
+	// Not under the mesh domain -> forwarded (isMeshName false). The bare apex has no
+	// leading label and is not matched (harmless: nobody resolves it as a service).
 	assert.False(t, s.isMeshName("svc-1.aether-test.svc.cluster.local."), "cluster.local is not a mesh name")
-	assert.False(t, s.isMeshName("svc-1.aether.internal."), "single label (no namespace) is not a mesh name")
-	assert.False(t, s.isMeshName("a.b.c.aether.internal."), "three labels under the mesh domain")
-	assert.False(t, s.isMeshName("aether.internal."), "the bare mesh domain")
+	assert.False(t, s.isMeshName("aether.internal."), "the bare mesh domain apex")
 	assert.False(t, s.isMeshName("google.com."), "external name")
 }
 
@@ -142,6 +146,26 @@ func TestServeMeshMissReadyIsNXDomain(t *testing.T) {
 	assert.Equal(t, dns.RcodeNameError, resp.Rcode, "ready mesh miss -> NXDOMAIN")
 	assert.True(t, resp.Authoritative)
 	assert.Empty(t, resp.Answer)
+}
+
+// TestServeMalformedUnderZoneIsNXDomain: a name under the mesh domain that is NOT a
+// well-formed "<svc>.<ns>" (wrong label count, e.g. the flat "<svc>.<meshDomain>" or a
+// three-label spelling) is answered authoritative NXDOMAIN and NEVER forwarded — even
+// while cold, since a structurally invalid name can never become valid.
+func TestServeMalformedUnderZoneIsNXDomain(t *testing.T) {
+	// Cold server (never populated) + a black-hole upstream: if a malformed mesh name
+	// were ever forwarded, forward() would answer NON-authoritative; we assert the
+	// opposite, so forwarding is ruled out.
+	s := NewServer("aether.internal", "127.0.0.1:0", "", slog.New(slog.DiscardHandler))
+	s.SetUpstreams([]string{"127.0.0.1:1"})
+
+	for _, name := range []string{"svc-1.aether.internal", "a.b.c.aether.internal"} {
+		resp := serve(s, query(name, dns.TypeA))
+		require.NotNil(t, resp, name)
+		assert.Equal(t, dns.RcodeNameError, resp.Rcode, "%s -> NXDOMAIN", name)
+		assert.True(t, resp.Authoritative, "%s answered authoritatively, not forwarded", name)
+		assert.Empty(t, resp.Answer, name)
+	}
 }
 
 // TestServeMeshHitAnswersWithEDNS0: a mesh hit answers the A record and echoes the

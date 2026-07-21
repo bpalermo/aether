@@ -167,13 +167,14 @@ func (s *Server) Start(ctx context.Context) error {
 // the name consistently EXISTS. Forwarding the AAAA would yield NXDOMAIN upstream, and
 // c-ares (curl/Alpine) then concludes the whole name is gone.
 //
-// The resolver is AUTHORITATIVE for the mesh domain: a name under .meshDomain that
-// is not in the record table is NEVER forwarded to kube-dns (which has no mesh
-// zone and would answer SERVFAIL/NXDOMAIN, surfacing as roll-correlated failures).
-// Instead the miss is answered locally — NXDOMAIN once records have ever been
-// populated (a real miss), or SERVFAIL while still cold (never populated, so the
-// name may simply not have been reconciled yet — retryable). Only genuinely
-// non-mesh names (cluster.local, external) are forwarded upstream.
+// The resolver is AUTHORITATIVE for the ENTIRE mesh domain: ANY name under
+// .meshDomain is answered locally and NEVER forwarded to kube-dns (which has no mesh
+// zone and would answer SERVFAIL/NXDOMAIN or a slow upstream round-trip, surfacing as
+// roll-correlated failures). A well-formed "<svc>.<ns>" miss is NXDOMAIN once records
+// have ever been populated (a real miss) or SERVFAIL while still cold (never
+// populated, so the name may simply not have been reconciled yet — retryable); a
+// malformed spelling under the zone is always NXDOMAIN. Only genuinely non-mesh names
+// (cluster.local, external) are forwarded upstream.
 func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if len(r.Question) == 1 {
 		q := r.Question[0]
@@ -185,9 +186,17 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	s.forward(w, r)
 }
 
-// serveMesh answers a mesh-domain query authoritatively: a hit returns the A record
-// (NODATA for non-A), a miss returns NXDOMAIN when ready or SERVFAIL when still cold.
+// serveMesh answers a mesh-domain query authoritatively: a well-formed "<svc>.<ns>"
+// hit returns the A record (NODATA for non-A) and a miss returns NXDOMAIN when ready
+// or SERVFAIL when still cold; a malformed name under the zone (wrong label count)
+// is always NXDOMAIN — it can never exist, so retrying can't help.
 func (s *Server) serveMesh(w dns.ResponseWriter, r *dns.Msg, q dns.Question) {
+	if _, _, ok := s.parseMeshName(q.Name); !ok {
+		// Under the mesh domain but not a well-formed "<svc>.<ns>" name. Structurally
+		// invalid regardless of readiness: authoritative NXDOMAIN, never forwarded.
+		s.writeRcode(w, r, dns.RcodeNameError, resultNXDomain)
+		return
+	}
 	ip, ready := s.lookup(q.Name)
 	if ip == "" {
 		if !ready {
@@ -231,15 +240,17 @@ func (s *Server) writeRcode(w dns.ResponseWriter, r *dns.Msg, rcode int, result 
 	s.metrics.record(result)
 }
 
-// isMeshName reports whether qname is a well-formed name under the mesh domain
-// ("<svc>.<ns>.<meshDomain>", exactly two labels before the suffix). Names under
-// the mesh domain that are answered authoritatively (hit, NXDOMAIN, or cold
-// SERVFAIL) — never forwarded. A malformed name under the mesh domain (wrong label
-// count) is NOT a mesh name and falls through to forwarding, matching the previous
-// lookup()=="" behaviour for those spellings.
+// isMeshName reports whether qname is any name UNDER the mesh domain (has at least
+// one label before ".<meshDomain>"). The resolver owns the whole zone, so every such
+// name is answered authoritatively and NEVER forwarded — a well-formed "<svc>.<ns>"
+// resolves (hit / NXDOMAIN / cold SERVFAIL in serveMesh), and a malformed spelling
+// (wrong label count, e.g. the flat "<svc>.<meshDomain>") is an authoritative
+// NXDOMAIN rather than a wasted, slow round-trip to kube-dns (which has no mesh zone).
+// The bare apex "<meshDomain>" has no leading label and is not matched (it falls
+// through to forwarding — harmless, nobody resolves it as a service).
 func (s *Server) isMeshName(qname string) bool {
-	_, _, ok := s.parseMeshName(qname)
-	return ok
+	name := strings.TrimSuffix(strings.ToLower(qname), ".")
+	return strings.HasSuffix(name, "."+s.meshDomain)
 }
 
 // parseMeshName splits <svc>.<ns>.<meshDomain> into (ns, svc). ok is false when the
