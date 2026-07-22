@@ -72,6 +72,25 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
 
+{{/* -------------------------------------------------------------- mesh-dns */}}
+{{- define "aether.meshDns.fullname" -}}
+{{- printf "%s-mesh-dns" (include "aether.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- define "aether.meshDns.selectorLabels" -}}
+app.kubernetes.io/name: aether-mesh-dns
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: mesh-dns
+{{- end -}}
+{{- define "aether.meshDns.labels" -}}
+helm.sh/chart: {{ include "aether.chart" . }}
+{{ include "aether.meshDns.selectorLabels" . }}
+app.kubernetes.io/part-of: aether
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Chart.AppVersion }}
+app.kubernetes.io/version: {{ . | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* ------------------------------------------------------------------ proxy */}}
 {{- define "aether.proxy.fullname" -}}{{- "aether-proxy" -}}{{- end -}}
 {{- define "aether.proxy.serviceAccountName" -}}{{ include "aether.proxy.fullname" . }}{{- end -}}

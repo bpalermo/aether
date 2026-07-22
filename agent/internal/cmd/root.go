@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/bpalermo/aether/agent/constants"
@@ -35,7 +34,6 @@ import (
 	"github.com/bpalermo/aether/agent/internal/configimport"
 	"github.com/bpalermo/aether/agent/internal/gamma"
 	"github.com/bpalermo/aether/agent/internal/l4route"
-	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/node"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
@@ -47,7 +45,6 @@ import (
 	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
 	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
 	"github.com/bpalermo/aether/common/config"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/must"
 	commonspire "github.com/bpalermo/aether/common/spire"
@@ -357,9 +354,7 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
 
-	if err := wireMeshDNS(ctx, m, snapshotCache); err != nil {
-		return nil, err
-	}
+	wireMeshDNS(snapshotCache)
 
 	// Global access-log config, set once before the cache builds any listener.
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
@@ -375,46 +370,21 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	return snapshotCache, nil
 }
 
-// wireMeshDNS starts the in-process mesh-DNS resolver and connects it to the
-// snapshot cache when --mesh-dns is enabled. It is a no-op when disabled.
+// wireMeshDNS wires the snapshot cache to PERSIST the mesh service->IP record table
+// to the host-persistent snapshot file when --mesh-dns is enabled. It is a no-op
+// when disabled.
 //
-// The resolver binds EARLY — directly in a goroutine, NOT via m.Add — so its UDP+TCP
-// sockets are open the moment the agent process starts, before controller-runtime's
-// cache-gated Runnable group waits on informer sync. On an agent roll that closes the
-// "bind gap" where DNAT'd :53 packets hit a closed port and clients time out (Fix 1).
-// Combined with the warm-start snapshot loaded in NewServer, the fresh agent answers
-// mesh names from last-known ClusterIPs within ms of boot.
-func wireMeshDNS(ctx context.Context, m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+// The agent no longer serves DNS itself (issue #578): the resolver was decoupled
+// into the standalone aether-mesh-dns DaemonSet, which watches this snapshot file
+// (fsnotify), serves HOST_IP:18054, and — being surge-capable with SO_REUSEPORT —
+// hands off hitlessly across its own rolls (which an agent roll could never do,
+// since deleting the agent pod tore down the resolver with it). The agent's only
+// remaining role is to keep writing the snapshot from its capture reconciler.
+func wireMeshDNS(snapshotCache *cache.SnapshotCache) {
 	if !cfg.MeshDNS {
-		return nil
+		return
 	}
-	// In-process DNS resolver (Istio-style): a host-local miekg/dns server that
-	// answers <svc>.<meshDomain> and forwards the rest to kube-dns. The CNI DNATs
-	// each pod's :53 straight to it at HOST_IP:resolverPort (no Envoy DNS layer,
-	// no setns, no privilege increase).
-	hostIP := os.Getenv("HOST_IP")
-	resolverPort := uint32(meshconst.ProxyDNSResolverPort)
-	dnsServer := meshdns.NewServer(cfg.MeshDomain, fmt.Sprintf("%s:%d", hostIP, resolverPort), cfg.MeshDNSSnapshotPath, l)
-	// Default the forward upstream to the agent's own resolv.conf (kube-dns, via
-	// ClusterFirstWithHostNet) when --mesh-dns-upstream is unset, so mesh DNS is
-	// safe to enable by default without per-cluster configuration.
-	upstreams := cfg.MeshDNSUpstream
-	if len(upstreams) == 0 {
-		upstreams = meshdns.NameserversFromResolvConf("/etc/resolv.conf")
-		l.Info("mesh-DNS upstream defaulted from /etc/resolv.conf", "upstreams", upstreams)
-	}
-	dnsServer.SetUpstreams(upstreams)
-	// Bind now, off the cache-gated Runnable group. Start honours ctx.Done for
-	// graceful miekg/dns Shutdown; a bind error is fatal (a wedged resolver silently
-	// breaks every pod's DNS), so crash so the DaemonSet restarts us.
-	go func() {
-		if err := dnsServer.Start(ctx); err != nil {
-			l.ErrorContext(ctx, "mesh-DNS resolver failed", "error", err)
-			os.Exit(1)
-		}
-	}()
-	snapshotCache.SetMeshDNSServer(dnsServer)
-	return nil
+	snapshotCache.SetMeshDNSSnapshotPath(cfg.MeshDNSSnapshotPath)
 }
 
 // wireSpireBridge optionally creates and registers the SPIRE bridge for SDS when

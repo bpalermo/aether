@@ -1,12 +1,15 @@
 package meshdns
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
@@ -98,6 +101,116 @@ func TestSetRecordsPersistsSnapshot(t *testing.T) {
 	ip, ready := s2.lookup("echo.default.aether.internal.")
 	assert.Equal(t, "10.111.0.6", ip)
 	assert.True(t, ready)
+}
+
+// TestSnapshotRoundTrip: WriteSnapshot then ReadSnapshot returns the same table,
+// and a missing file surfaces os.ErrNotExist so callers can treat it as cold.
+func TestSnapshotRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "records.json") // dir does not exist yet
+	want := map[string]string{"team-a/svc-1": "10.111.0.5", "default/echo": "10.111.0.6"}
+	require.NoError(t, WriteSnapshot(path, want), "WriteSnapshot creates the parent dir")
+
+	got, err := ReadSnapshot(path)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	_, err = ReadSnapshot(filepath.Join(t.TempDir(), "missing.json"))
+	assert.ErrorIs(t, err, os.ErrNotExist, "a missing snapshot is distinguishable as not-exist")
+}
+
+// TestReloadFromSnapshot: after a snapshot is rewritten on disk, ReloadFromSnapshot
+// re-reads it and the resolver answers from the new table.
+func TestReloadFromSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.json")
+	require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.111.0.6"}))
+
+	s := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.DiscardHandler))
+	ip, _ := s.lookup("echo.default.aether.internal.")
+	require.Equal(t, "10.111.0.6", ip, "warm-started from the initial snapshot")
+
+	// The agent rewrites the snapshot with a new IP; the daemon reloads.
+	require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.222.0.9"}))
+	s.ReloadFromSnapshot()
+
+	ip, ready := s.lookup("echo.default.aether.internal.")
+	assert.Equal(t, "10.222.0.9", ip, "reloaded the rewritten record")
+	assert.True(t, ready)
+}
+
+// TestReusePortCoBind: two Servers with WithReusePort co-bind the same host:port
+// simultaneously (the surge-handoff guarantee) and both answer mesh queries. Without
+// SO_REUSEPORT the second bind would fail with EADDRINUSE.
+func TestReusePortCoBind(t *testing.T) {
+	addr := fmt.Sprintf("127.0.0.1:%d", freeUDPPort(t))
+	records := map[string]string{"default/echo": "10.111.0.6"}
+
+	s1 := newReusePortServer(t, addr, records)
+	s2 := newReusePortServer(t, addr, records) // co-bind the SAME addr
+
+	// Both resolvers answer over their shared port (the kernel load-balances across
+	// the two SO_REUSEPORT sockets; either answering proves both are live).
+	assertResolves(t, addr, "echo.default.aether.internal.", "10.111.0.6")
+	assertResolves(t, addr, "echo.default.aether.internal.", "10.111.0.6")
+
+	_ = s1
+	_ = s2
+}
+
+// newReusePortServer starts a reuse-port Server bound to addr with the given
+// records, waits for it to bind, and registers cleanup to stop it.
+func newReusePortServer(t *testing.T, addr string, records map[string]string) *Server {
+	t.Helper()
+	s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler), WithReusePort(true))
+	s.SetRecords(records)
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- s.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-errc:
+		case <-time.After(2 * time.Second):
+		}
+	})
+	waitForUDP(t, addr)
+	return s
+}
+
+// assertResolves sends a UDP A query to addr and asserts the answer IP.
+func assertResolves(t *testing.T, addr, name, want string) {
+	t.Helper()
+	c := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	resp, _, err := c.Exchange(query(name, dns.TypeA), addr)
+	require.NoError(t, err)
+	require.Len(t, resp.Answer, 1)
+	a, ok := resp.Answer[0].(*dns.A)
+	require.True(t, ok)
+	assert.Equal(t, want, a.A.String())
+}
+
+// freeUDPPort grabs an ephemeral UDP port and releases it so a reuse-port Server
+// can bind it.
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := pc.LocalAddr().(*net.UDPAddr).Port
+	require.NoError(t, pc.Close())
+	return port
+}
+
+// waitForUDP polls until a UDP query to addr succeeds (the server has bound).
+func waitForUDP(t *testing.T, addr string) {
+	t.Helper()
+	c := &dns.Client{Net: "udp", Timeout: 200 * time.Millisecond}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, err := c.Exchange(query("echo.default.aether.internal.", dns.TypeA), addr); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("resolver did not bind %s in time", addr)
 }
 
 // fakeResponseWriter captures the reply message ServeDNS writes.

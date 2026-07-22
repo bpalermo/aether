@@ -142,14 +142,31 @@ agent:
   # RSS through 6 proxy + 14 service rolls). This is the riskiest blast radius
   # (every meshed pod's egress); set false to revert to per-pod opt-in.
   captureRedirectAllDefault: true
-  # Mesh DNS (proposal 018, mesh-global FQDN): the node agent runs an in-process
-  # resolver answering <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
-  # (namespace-free, globally routable) and forwarding the rest to meshDnsUpstream;
-  # the CNI DNATs each pod's :53 straight to it. Default ON. meshDnsUpstream defaults
-  # to the agent's own resolv.conf (kube-dns via ClusterFirstWithHostNet) when empty,
-  # so no per-cluster config is needed; set it only to override.
+  # Mesh DNS (proposal 018, mesh-global FQDN): a resolver answers <svc>.<ns>.<meshDomain>
+  # from the generated mesh Services' ClusterIPs and forwards the rest to meshDnsUpstream;
+  # the CNI DNATs each pod's :53 straight to HOST_IP:18054. Default ON. meshDnsUpstream
+  # defaults to the resolver's own resolv.conf (kube-dns via ClusterFirstWithHostNet)
+  # when empty, so no per-cluster config is needed; set it only to override.
+  #
+  # Issue #578: the resolver is DECOUPLED from the agent into the standalone
+  # aether-mesh-dns DaemonSet (see meshDnsDaemon below) so agent rolls no longer gap
+  # mesh DNS. The agent now only PERSISTS the record snapshot; the daemon serves
+  # :18054, watches the snapshot, and — being surge-capable with SO_REUSEPORT — hands
+  # off hitlessly across its own rolls. This `meshDns` toggle gates BOTH the agent's
+  # persist path and the daemon deployment.
   meshDns: true
   meshDnsUpstream: []
+  # The standalone mesh-DNS resolver DaemonSet (issue #578). Deployed exactly when
+  # agent.meshDns is true. It mounts the agent's registry hostPath read-only and
+  # serves HOST_IP:18054 from the snapshot the agent writes.
+  meshDnsDaemon:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
   # Image as repository + digest (digest-pinned for immutability). Mirror to a
   # private registry by overriding `repository` alone; the digest is preserved.
   image:

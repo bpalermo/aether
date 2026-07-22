@@ -116,17 +116,22 @@ func (c *SnapshotCache) capturePassthroughCluster() types.Resource {
 	return proxy.NewPassthroughOriginalDstCluster()
 }
 
-// SetMeshDNSServer wires the agent's in-process DNS resolver (proposal 018, mesh-global
-// FQDN), or nil when mesh DNS is off. The CNI DNATs each pod's :53 directly to the
-// resolver's host listener, so the cache only feeds it the mesh records — no Envoy
-// DNS listeners or cluster.
-func (c *SnapshotCache) SetMeshDNSServer(s *meshdns.Server) { c.meshDNS = s }
+// SetMeshDNSSnapshotPath sets the host-persistent file the mesh service->IP record
+// table is written to (proposal 018, mesh-global FQDN; issue #578), or empty when
+// mesh DNS is off. The agent no longer serves DNS: the standalone aether-mesh-dns
+// DaemonSet watches this file and serves :18054, and the CNI DNATs each pod's :53
+// straight to it. The cache only persists records here.
+func (c *SnapshotCache) SetMeshDNSSnapshotPath(path string) { c.meshDNSSnapshotPath = path }
 
-// SetMeshDNSRecords feeds the in-process resolver the mesh service -> IP table (from
-// the mesh-Service reconciler). No-op when mesh DNS is off.
+// SetMeshDNSRecords persists the mesh service -> IP table (from the mesh-Service
+// reconciler) to the snapshot file the standalone resolver daemon watches. No-op
+// when mesh DNS is off (empty path). A persist error is logged, never fatal.
 func (c *SnapshotCache) SetMeshDNSRecords(records map[string]string) {
-	if c.meshDNS != nil {
-		c.meshDNS.SetRecords(records)
+	if c.meshDNSSnapshotPath == "" {
+		return
+	}
+	if err := meshdns.WriteSnapshot(c.meshDNSSnapshotPath, records); err != nil {
+		c.log.Warn("failed to persist mesh-DNS snapshot", "path", c.meshDNSSnapshotPath, "error", err)
 	}
 }
 
