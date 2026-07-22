@@ -57,7 +57,10 @@ go_library(
 
 go_test(
     name = "cmd_test",
-    srcs = ["config_test.go"],
+    srcs = [
+        "config_test.go",
+        "meshdns_test.go",
+    ],
     embed = [":cmd"],
     deps = [
         "//agent/internal/cni/server",

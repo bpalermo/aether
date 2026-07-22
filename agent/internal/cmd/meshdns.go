@@ -23,11 +23,13 @@ const meshDnsReloadDebounce = 200 * time.Millisecond
 // meshDnsCfg holds the flag-bound configuration for the mesh-dns subcommand
 // (issue #578: the standalone, surge-capable mesh-DNS resolver DaemonSet).
 var (
-	meshDnsSnapshotPath string
-	meshDnsMeshDomain   string
-	meshDnsUpstream     []string
-	meshDnsDebug        bool
-	meshDnsOTLPEndpoint string
+	meshDnsSnapshotPath   string
+	meshDnsMeshDomain     string
+	meshDnsUpstream       []string
+	meshDnsDebug          bool
+	meshDnsOTLPEndpoint   string
+	meshDnsReadyMarker    string
+	meshDnsReadinessCheck bool
 )
 
 var meshDnsCmd = &cobra.Command{
@@ -40,6 +42,17 @@ var meshDnsCmd = &cobra.Command{
 		"access — records come only from the file.",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		// --readiness-check is the exec readiness probe: exit 0 iff this pod's
+		// pod-local ready marker is present (the distroless agent image has no shell
+		// or cat, so the probe re-execs this binary). The marker is written only once
+		// THIS process has bound its listeners, so the surge rollout keeps the
+		// predecessor until the successor truly serves.
+		if meshDnsReadinessCheck {
+			if _, err := os.Stat(meshDnsReadyMarker); err != nil {
+				return fmt.Errorf("not ready: %w", err)
+			}
+			return nil
+		}
 		return runMeshDNS(cmd.Context())
 	},
 }
@@ -67,6 +80,7 @@ func runMeshDNS(ctx context.Context) error {
 	server := meshdns.NewServerWithOptions(
 		meshDnsMeshDomain, addr, meshDnsSnapshotPath, log,
 		meshdns.WithReusePort(true),
+		meshdns.WithReadyMarker(meshDnsReadyMarker),
 	)
 	upstreams := meshDnsUpstream
 	if len(upstreams) == 0 {
@@ -172,6 +186,8 @@ func init() {
 	f.StringArrayVar(&meshDnsUpstream, "mesh-dns-upstream", nil, "Upstream resolver(s) (host[:port]) non-mesh queries are forwarded to; defaults to /etc/resolv.conf")
 	f.BoolVar(&meshDnsDebug, "debug", false, "Enable debug-level logging")
 	f.StringVar(&meshDnsOTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for mesh-DNS metrics push (e.g. collector:4317); empty disables telemetry")
+	f.StringVar(&meshDnsReadyMarker, "ready-marker", "/run/aether/mesh-dns.ready", "Pod-local path for the readiness marker written once the resolver's listeners are bound")
+	f.BoolVar(&meshDnsReadinessCheck, "readiness-check", false, "Exit 0 iff the --ready-marker file exists (exec readiness probe mode)")
 
 	rootCmd.AddCommand(meshDnsCmd)
 }

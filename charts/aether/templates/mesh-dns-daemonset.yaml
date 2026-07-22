@@ -51,6 +51,7 @@ spec:
             - "mesh-dns"
             - "--debug={{ .Values.debug }}"
             - "--mesh-domain={{ .Values.meshDomain }}"
+            - "--ready-marker=/run/aether/mesh-dns.ready"
             {{- range .Values.agent.meshDnsUpstream }}
             - "--mesh-dns-upstream={{ . }}"
             {{- end }}
@@ -74,6 +75,25 @@ spec:
             # Stamped onto every OTel signal so metrics are filterable per node/pod.
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "k8s.node.name=$(HOST_IP),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+          # Pod-local readiness: passes only once THIS process has bound its
+          # UDP+TCP listeners (it writes the marker after the sockets are up). With
+          # maxSurge:1/maxUnavailable:0 this holds the predecessor pod until the
+          # successor is truly serving, so their SO_REUSEPORT sockets overlap and the
+          # handoff is zero-gap. It must be pod-local, not a network probe: a probe to
+          # hostIP:18054 could be answered by the OTHER co-bound REUSEPORT socket and
+          # falsely mark this pod ready before it has bound.
+          readinessProbe:
+            exec:
+              command:
+                - "/agent"
+                - "mesh-dns"
+                - "--readiness-check"
+                - "--ready-marker=/run/aether/mesh-dns.ready"
+            initialDelaySeconds: 0
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 2
+            successThreshold: 1
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -89,6 +109,9 @@ spec:
               mountPath: /host/var/lib/aether/registry
               readOnly: true
               mountPropagation: HostToContainer
+            # Writable scratch for the pod-local ready marker (root fs is read-only).
+            - name: run-aether
+              mountPath: /run/aether
           resources:
             {{- toYaml .Values.agent.meshDnsDaemon.resources | nindent 12 }}
       volumes:
@@ -96,4 +119,8 @@ spec:
           hostPath:
             path: /var/lib/aether/registry
             type: DirectoryOrCreate
+        # Pod-local (per-pod) emptyDir so each surge pod's marker proves ITS own
+        # process is serving — never shared across the predecessor/successor.
+        - name: run-aether
+          emptyDir: {}
 {{- end }}

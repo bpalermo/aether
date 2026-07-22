@@ -176,6 +176,47 @@ func newReusePortServer(t *testing.T, addr string, records map[string]string) *S
 	return s
 }
 
+// TestReadyMarkerWrittenOnStartRemovedOnCancel: Start writes the pod-local ready
+// marker once the listeners are bound, and removes it when the context is cancelled.
+func TestReadyMarkerWrittenOnStartRemovedOnCancel(t *testing.T) {
+	addr := fmt.Sprintf("127.0.0.1:%d", freeUDPPort(t))
+	marker := filepath.Join(t.TempDir(), "sub", "mesh-dns.ready") // dir created by Start
+
+	s := NewServerWithOptions("aether.internal", addr, "", slog.New(slog.DiscardHandler),
+		WithReusePort(true), WithReadyMarker(marker))
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- s.Start(ctx) }()
+
+	// Once the resolver answers over UDP its listeners are bound, so the marker
+	// (written right after buildServers) must exist.
+	waitForUDP(t, addr)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 2*time.Second, 20*time.Millisecond, "ready marker written after bind")
+
+	// Shutdown removes the marker so a terminating pod stops reporting ready.
+	cancel()
+	select {
+	case <-errc:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return after cancel")
+	}
+	_, err := os.Stat(marker)
+	assert.ErrorIs(t, err, os.ErrNotExist, "ready marker removed on shutdown")
+}
+
+// TestReadyMarkerDisabledWhenUnset: with no marker path, Start writes nothing (and
+// does not fail). Guards the empty-path no-op branch.
+func TestReadyMarkerDisabledWhenUnset(t *testing.T) {
+	s := NewServer("aether.internal", "127.0.0.1:0", "", slog.New(slog.DiscardHandler))
+	// Both helpers must be safe no-ops when readyMarker is empty.
+	s.writeReadyMarker(context.Background())
+	s.removeReadyMarker()
+	assert.Empty(t, s.readyMarker)
+}
+
 // assertResolves sends a UDP A query to addr and asserts the answer IP.
 func assertResolves(t *testing.T, addr, name, want string) {
 	t.Helper()
