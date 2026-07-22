@@ -83,16 +83,21 @@ spec:
           # hostIP:18054 could be answered by the OTHER co-bound REUSEPORT socket and
           # falsely mark this pod ready before it has bound.
           readinessProbe:
+            # The check re-execs the full /agent binary (distroless image, no shell),
+            # whose cold start under the daemon's small CPU request exceeds the 1s
+            # default probe timeout — so give it headroom (timeout 5s) and a longer
+            # period to bound the exec churn. Readiness only gates surge handoffs, so
+            # a 5s period is ample; the old pod keeps serving until the new one passes.
             exec:
               command:
                 - "/agent"
                 - "mesh-dns"
                 - "--readiness-check"
                 - "--ready-marker=/run/aether/mesh-dns.ready"
-            initialDelaySeconds: 0
-            periodSeconds: 2
-            timeoutSeconds: 1
-            failureThreshold: 2
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
             successThreshold: 1
           securityContext:
             readOnlyRootFilesystem: true
