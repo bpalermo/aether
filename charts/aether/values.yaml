@@ -160,13 +160,17 @@ agent:
   # agent.meshDns is true. It mounts the agent's registry hostPath read-only and
   # serves HOST_IP:18054 from the snapshot the agent writes.
   meshDnsDaemon:
+    # The readiness probe re-execs the full /agent binary every few seconds, which
+    # transiently spawns a second process — so the daemon needs CPU burst headroom
+    # (else the cold-start exec throttles past the probe timeout) and memory headroom
+    # (two /agent processes momentarily) beyond what the tiny resident resolver uses.
     resources:
       requests:
-        cpu: 50m
-        memory: 32Mi
-      limits:
         cpu: 100m
-        memory: 64Mi
+        memory: 48Mi
+      limits:
+        cpu: 300m
+        memory: 128Mi
   # Image as repository + digest (digest-pinned for immutability). Mirror to a
   # private registry by overriding `repository` alone; the digest is preserved.
   image:
