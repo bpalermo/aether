@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -22,12 +23,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/bpalermo/aether/common/file"
 	"github.com/bpalermo/aether/common/serviceref"
 
 	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/miekg/dns"
+	"golang.org/x/sys/unix"
 )
 
 const answerTTL = 30
@@ -44,6 +47,7 @@ type Server struct {
 	meshDomain   string
 	addr         string
 	snapshotPath string
+	reusePort    bool
 	log          *slog.Logger
 	client       *dns.Client
 	metrics      *metrics
@@ -54,12 +58,28 @@ type Server struct {
 	upstreams []string
 }
 
+// Option configures a Server built via NewServerWithOptions.
+type Option func(*Server)
+
+// WithReusePort makes Start bind the UDP+TCP listeners with SO_REUSEPORT (and
+// SO_REUSEADDR) so two Servers can co-bind the same host:port simultaneously.
+// This is what makes the standalone mesh-DNS DaemonSet's surge (maxSurge:1)
+// hitless: the successor pod binds :18054 while the predecessor still serves.
+func WithReusePort(v bool) Option {
+	return func(s *Server) { s.reusePort = v }
+}
+
 // NewServer builds the resolver for meshDomain, listening on addr (host:port).
 // snapshotPath, when non-empty, is a host-persistent file the last-known record
 // table is written to on every SetRecords and warm-loaded from at boot (Fix 1):
 // a freshly-restarted agent answers mesh names from last-known ClusterIPs within
 // ms of process start, before the informer cache has synced the first reconcile.
 func NewServer(meshDomain, addr, snapshotPath string, log *slog.Logger) *Server {
+	return NewServerWithOptions(meshDomain, addr, snapshotPath, log)
+}
+
+// NewServerWithOptions is NewServer plus functional options (e.g. WithReusePort).
+func NewServerWithOptions(meshDomain, addr, snapshotPath string, log *slog.Logger, opts ...Option) *Server {
 	s := &Server{
 		meshDomain:   meshDomain,
 		addr:         addr,
@@ -68,6 +88,9 @@ func NewServer(meshDomain, addr, snapshotPath string, log *slog.Logger) *Server 
 		client:       &dns.Client{Net: "udp"},
 		metrics:      newMetrics(),
 		records:      map[string]string{},
+	}
+	for _, o := range opts {
+		o(s)
 	}
 	s.loadSnapshot()
 	return s
@@ -82,16 +105,11 @@ func (s *Server) loadSnapshot() {
 	if s.snapshotPath == "" {
 		return
 	}
-	data, err := os.ReadFile(s.snapshotPath)
+	records, err := ReadSnapshot(s.snapshotPath)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			s.log.Warn("failed to read mesh-DNS snapshot; starting cold", "path", s.snapshotPath, "error", err)
 		}
-		return
-	}
-	var records map[string]string
-	if err := json.Unmarshal(data, &records); err != nil {
-		s.log.Warn("failed to parse mesh-DNS snapshot; starting cold", "path", s.snapshotPath, "error", err)
 		return
 	}
 	s.mu.Lock()
@@ -103,6 +121,30 @@ func (s *Server) loadSnapshot() {
 	s.log.Info("warm-started mesh-DNS records from snapshot", "path", s.snapshotPath, "records", len(records))
 }
 
+// ReloadFromSnapshot re-reads the snapshot file and swaps in its record table. It
+// is the daemon's fsnotify handler: the writing agent persists a new snapshot and
+// the standalone resolver picks it up without an informer. A missing/corrupt file
+// is a no-op (the resolver keeps its current table) — never fatal. Unlike
+// SetRecords it does NOT re-persist (it read from disk); an empty table still
+// flips ready so misses answer NXDOMAIN, matching SetRecords' semantics.
+func (s *Server) ReloadFromSnapshot() {
+	if s.snapshotPath == "" {
+		return
+	}
+	records, err := ReadSnapshot(s.snapshotPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			s.log.Warn("failed to reload mesh-DNS snapshot; keeping current records", "path", s.snapshotPath, "error", err)
+		}
+		return
+	}
+	s.mu.Lock()
+	s.records = records
+	s.ready = true
+	s.mu.Unlock()
+	s.log.Info("reloaded mesh-DNS records from snapshot", "path", s.snapshotPath, "records", len(records))
+}
+
 // SetRecords replaces the service->IP answer table, flips the ready flag (so a
 // subsequent mesh miss answers NXDOMAIN, not SERVFAIL), and persists the table to
 // the host-persistent snapshot so a future agent restart warm-starts from it.
@@ -111,30 +153,47 @@ func (s *Server) SetRecords(records map[string]string) {
 	s.records = records
 	s.ready = true
 	s.mu.Unlock()
-	s.persistSnapshot(records)
-}
-
-// persistSnapshot atomically writes the record table to the snapshot file. Errors
-// are logged, never fatal: a failed persist only means the NEXT restart starts
-// cold, and serving continues normally.
-func (s *Server) persistSnapshot(records map[string]string) {
 	if s.snapshotPath == "" {
 		return
 	}
+	if err := WriteSnapshot(s.snapshotPath, records); err != nil {
+		s.log.Warn("failed to persist mesh-DNS snapshot", "path", s.snapshotPath, "error", err)
+	}
+}
+
+// ReadSnapshot loads and parses the JSON record table (\"<ns>/<svc>\" -> A-record
+// IP) from path. A caller can distinguish a missing file via errors.Is(err,
+// fs.ErrNotExist) and treat it as a cold start.
+func ReadSnapshot(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var records map[string]string
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, fmt.Errorf("parse mesh-DNS snapshot %s: %w", path, err)
+	}
+	return records, nil
+}
+
+// WriteSnapshot atomically writes the record table to path (creating the parent
+// dir). It is the shared persist path used by the agent's capture sink and by
+// Server.SetRecords, so the standalone resolver daemon warm-starts and reloads
+// from exactly what the agent wrote.
+func WriteSnapshot(path string, records map[string]string) error {
 	data, err := json.Marshal(records)
 	if err != nil {
-		s.log.Warn("failed to marshal mesh-DNS snapshot", "error", err)
-		return
+		return fmt.Errorf("marshal mesh-DNS snapshot: %w", err)
 	}
 	// The snapshot lives in a dedicated subdir under the host-persistent registry
 	// volume; create it (host mount is DirectoryOrCreate, the subdir is ours).
-	if err := os.MkdirAll(filepath.Dir(s.snapshotPath), snapshotDirMode); err != nil {
-		s.log.Warn("failed to create mesh-DNS snapshot dir", "path", s.snapshotPath, "error", err)
-		return
+	if err := os.MkdirAll(filepath.Dir(path), snapshotDirMode); err != nil {
+		return fmt.Errorf("create mesh-DNS snapshot dir %s: %w", filepath.Dir(path), err)
 	}
-	if err := file.AtomicWrite(s.snapshotPath, data, snapshotFileMode); err != nil {
-		s.log.Warn("failed to persist mesh-DNS snapshot", "path", s.snapshotPath, "error", err)
+	if err := file.AtomicWrite(path, data, snapshotFileMode); err != nil {
+		return fmt.Errorf("write mesh-DNS snapshot %s: %w", path, err)
 	}
+	return nil
 }
 
 // SetUpstreams sets the resolver(s) non-mesh queries are forwarded to (host[:port]).
@@ -144,14 +203,25 @@ func (s *Server) SetUpstreams(u []string) {
 	s.mu.Unlock()
 }
 
-// Start serves UDP + TCP on the host address until the context is cancelled.
+// Start serves UDP + TCP on the host address until the context is cancelled. When
+// reusePort is set the listeners are opened with SO_REUSEPORT (+SO_REUSEADDR) so a
+// successor process can co-bind the same host:port during a surge rollout — the
+// standalone daemon's hitless handoff. Otherwise it uses miekg/dns's own
+// ListenAndServe (the in-agent single-binder path).
 func (s *Server) Start(ctx context.Context) error {
-	udp := &dns.Server{Addr: s.addr, Net: "udp", Handler: s}
-	tcp := &dns.Server{Addr: s.addr, Net: "tcp", Handler: s}
+	udp, tcp, err := s.buildServers(ctx)
+	if err != nil {
+		return err
+	}
 	errc := make(chan error, 2)
-	go func() { errc <- udp.ListenAndServe() }()
-	go func() { errc <- tcp.ListenAndServe() }()
-	s.log.InfoContext(ctx, "mesh DNS resolver listening", "addr", s.addr)
+	if s.reusePort {
+		go func() { errc <- udp.ActivateAndServe() }()
+		go func() { errc <- tcp.ActivateAndServe() }()
+	} else {
+		go func() { errc <- udp.ListenAndServe() }()
+		go func() { errc <- tcp.ListenAndServe() }()
+	}
+	s.log.InfoContext(ctx, "mesh DNS resolver listening", "addr", s.addr, "reusePort", s.reusePort)
 	select {
 	case <-ctx.Done():
 		_ = udp.Shutdown()
@@ -160,6 +230,45 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errc:
 		return err
 	}
+}
+
+// buildServers constructs the UDP and TCP dns.Servers. With reusePort it
+// pre-binds the sockets (SO_REUSEPORT+SO_REUSEADDR via net.ListenConfig) and
+// hands them to dns.Server as PacketConn/Listener for ActivateAndServe;
+// otherwise it returns Addr-configured servers for ListenAndServe.
+func (s *Server) buildServers(ctx context.Context) (udp, tcp *dns.Server, err error) {
+	if !s.reusePort {
+		return &dns.Server{Addr: s.addr, Net: "udp", Handler: s},
+			&dns.Server{Addr: s.addr, Net: "tcp", Handler: s}, nil
+	}
+	lc := net.ListenConfig{Control: reusePortControl}
+	pc, err := lc.ListenPacket(ctx, "udp", s.addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("mesh-DNS udp listen %s: %w", s.addr, err)
+	}
+	ln, err := lc.Listen(ctx, "tcp", s.addr)
+	if err != nil {
+		_ = pc.Close()
+		return nil, nil, fmt.Errorf("mesh-DNS tcp listen %s: %w", s.addr, err)
+	}
+	return &dns.Server{PacketConn: pc, Handler: s},
+		&dns.Server{Listener: ln, Handler: s}, nil
+}
+
+// reusePortControl is the net.ListenConfig.Control hook that sets SO_REUSEPORT
+// and SO_REUSEADDR on the raw socket before bind, letting two resolver processes
+// co-bind the same HOST_IP:18054 during a surge rollout.
+func reusePortControl(_, _ string, c syscall.RawConn) error {
+	var sockErr error
+	if err := c.Control(func(fd uintptr) {
+		if sockErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); sockErr != nil {
+			return
+		}
+		sockErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+	}); err != nil {
+		return err
+	}
+	return sockErr
 }
 
 // ServeDNS answers a known mesh name authoritatively for EVERY query type — A

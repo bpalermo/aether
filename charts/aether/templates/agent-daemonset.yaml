@@ -100,10 +100,10 @@ spec:
             - "--east-west-waypoint"
             {{- end }}
             {{- if .Values.agent.meshDns }}
+            # Gates the agent's PERSIST path only (issue #578): the agent writes the
+            # mesh record snapshot but no longer serves DNS — the standalone
+            # aether-mesh-dns DaemonSet binds :18054 and forwards to --mesh-dns-upstream.
             - "--mesh-dns"
-            {{- range .Values.agent.meshDnsUpstream }}
-            - "--mesh-dns-upstream={{ . }}"
-            {{- end }}
             {{- end }}
             # Aether system config, inherited from the umbrella global block.
             - "--mesh-domain={{ .Values.meshDomain }}"
@@ -171,14 +171,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- if .Values.agent.meshDns }}
-            # The node IP the in-process mesh-DNS resolver binds + the per-pod Envoy
-            # DNS listeners' mesh_dns cluster targets (proposal 018, mesh-global FQDN).
-            - name: HOST_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
-            {{- end }}
             # Stamped onto every OTel signal (metrics/traces/logs) via
             # resource.WithFromEnv(), so logs are filterable per node/pod in
             # VictoriaLogs. Refs the env vars defined above ($(VAR) expansion).

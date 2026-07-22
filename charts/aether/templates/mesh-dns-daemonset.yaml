@@ -1,0 +1,99 @@
+{{- if .Values.agent.meshDns }}
+# The standalone mesh-DNS resolver DaemonSet (issue #578). Decoupled from the agent
+# so agent rolls no longer gap mesh DNS: this daemon owns HOST_IP:18054 alone (only a
+# UDP/TCP socket, no host-path UDS to collide), so maxSurge:1 + SO_REUSEPORT gives a
+# truly hitless handoff across its own rolls. It has no Kubernetes API access — records
+# come only from the snapshot file the agent writes under the shared registry hostPath
+# (mounted read-only here). The CNI DNAT target (:18054) is unchanged.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "aether.meshDns.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.meshDns.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "aether.meshDns.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Surge: the successor binds :18054 (via SO_REUSEPORT) while the predecessor
+      # still serves, so no per-node window has zero listeners on the DNAT target.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "aether.meshDns.labels" . | nindent 8 }}
+    spec:
+      hostNetwork: true
+      # Resolve the default upstream from the node's resolv.conf (kube-dns);
+      # ClusterFirst is ignored for hostNetwork pods.
+      dnsPolicy: ClusterFirstWithHostNet
+      # Reuse the agent ServiceAccount — this daemon makes no API calls, so it needs
+      # no RBAC of its own.
+      serviceAccountName: {{ include "aether.agent.serviceAccountName" . }}
+      priorityClassName: system-node-critical
+      tolerations:
+        # Serve DNS on a not-yet-ready node (the agent removes this taint once its
+        # CNI is serving); mirrors the agent so mesh DNS is up as early as possible.
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: mesh-dns
+          image: {{ include "aether.image" .Values.agent.image | quote }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          command: ["/agent"]
+          args:
+            - "mesh-dns"
+            - "--debug={{ .Values.debug }}"
+            - "--mesh-domain={{ .Values.meshDomain }}"
+            {{- range .Values.agent.meshDnsUpstream }}
+            - "--mesh-dns-upstream={{ . }}"
+            {{- end }}
+            {{- with .Values.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+          env:
+            # The node IP the resolver binds :18054 on.
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Stamped onto every OTel signal so metrics are filterable per node/pod.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.node.name=$(HOST_IP),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+            capabilities:
+              # It binds 18054 (>1024) on host-net, so no NET_BIND_SERVICE and no
+              # NET_ADMIN are required — drop everything.
+              drop:
+                - ALL
+          volumeMounts:
+            # Read-only: the daemon only READS the snapshot the agent writes.
+            - name: cni-registry-dir
+              mountPath: /host/var/lib/aether/registry
+              readOnly: true
+              mountPropagation: HostToContainer
+          resources:
+            {{- toYaml .Values.agent.meshDnsDaemon.resources | nindent 12 }}
+      volumes:
+        - name: cni-registry-dir
+          hostPath:
+            path: /var/lib/aether/registry
+            type: DirectoryOrCreate
+{{- end }}

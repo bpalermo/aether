@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/xds/cache/cachemetrics"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
@@ -332,11 +331,13 @@ type SnapshotCache struct {
 	// A nil/empty slice means all captured traffic goes through the HCM chain.
 	captureTCPServices []captureTCPEntry
 
-	// meshDNS is the agent's in-process DNS resolver (proposal 018, mesh-global FQDN),
-	// or nil when mesh DNS is off. Set once (SetMeshDNSServer); the cache feeds it the
-	// mesh records. The CNI DNATs each pod's :53 straight to the resolver's host
-	// listener — no Envoy DNS listeners or cluster.
-	meshDNS *meshdns.Server
+	// meshDNSSnapshotPath is the host-persistent file the capture reconciler writes
+	// the mesh service->IP record table to (proposal 018, mesh-global FQDN; issue
+	// #578). Empty when mesh DNS is off. The agent no longer serves DNS itself: the
+	// standalone aether-mesh-dns DaemonSet watches this file and serves :18054, so
+	// the cache only PERSISTS records here (via meshdns.WriteSnapshot) and the daemon
+	// reloads on change. The CNI DNATs each pod's :53 straight to that daemon.
+	meshDNSSnapshotPath string
 
 	version *atomic.Uint64
 
