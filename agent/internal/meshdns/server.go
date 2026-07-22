@@ -47,6 +47,7 @@ type Server struct {
 	meshDomain   string
 	addr         string
 	snapshotPath string
+	readyMarker  string
 	reusePort    bool
 	log          *slog.Logger
 	client       *dns.Client
@@ -67,6 +68,18 @@ type Option func(*Server)
 // hitless: the successor pod binds :18054 while the predecessor still serves.
 func WithReusePort(v bool) Option {
 	return func(s *Server) { s.reusePort = v }
+}
+
+// WithReadyMarker makes Start write a pod-local ready-marker file at path once the
+// UDP+TCP listeners are bound (and remove it on shutdown). The exec readiness probe
+// (`agent mesh-dns --readiness-check`) stats this file, so the DaemonSet's
+// maxSurge:1/maxUnavailable:0 rollout keeps the predecessor pod until the successor
+// is TRULY bound — that overlap is what lets SO_REUSEPORT hand off with zero gap.
+// The marker is intentionally pod-local (each container's own fs): a network probe
+// to hostIP:18054 could be answered by the OTHER co-bound REUSEPORT socket and
+// falsely mark this process ready before it has bound. An empty path disables it.
+func WithReadyMarker(path string) Option {
+	return func(s *Server) { s.readyMarker = path }
 }
 
 // NewServer builds the resolver for meshDomain, listening on addr (host:port).
@@ -213,6 +226,11 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Both listeners are bound now (buildServers pre-binds the sockets on the
+	// reusePort path and dns.Server binds them synchronously otherwise): report
+	// ready so a surge successor is only marked Ready once it can actually serve.
+	s.writeReadyMarker(ctx)
+	defer s.removeReadyMarker()
 	errc := make(chan error, 2)
 	if s.reusePort {
 		go func() { errc <- udp.ActivateAndServe() }()
@@ -229,6 +247,38 @@ func (s *Server) Start(ctx context.Context) error {
 		return nil
 	case err := <-errc:
 		return err
+	}
+}
+
+// writeReadyMarker creates (truncating) the pod-local ready-marker file. A
+// write error is logged but never fatal — the resolver's job is serving DNS, and
+// a missing marker only degrades the surge handoff (the probe stays not-ready),
+// it never breaks resolution. A no-op when no marker path is configured.
+func (s *Server) writeReadyMarker(ctx context.Context) {
+	if s.readyMarker == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.readyMarker), snapshotDirMode); err != nil {
+		s.log.WarnContext(ctx, "failed to create mesh-DNS ready-marker dir", "path", s.readyMarker, "error", err)
+		return
+	}
+	f, err := os.OpenFile(s.readyMarker, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, snapshotFileMode)
+	if err != nil {
+		s.log.WarnContext(ctx, "failed to write mesh-DNS ready-marker", "path", s.readyMarker, "error", err)
+		return
+	}
+	_ = f.Close()
+	s.log.InfoContext(ctx, "mesh-DNS ready-marker written", "path", s.readyMarker)
+}
+
+// removeReadyMarker best-effort deletes the ready-marker on shutdown so a
+// terminating pod stops reporting ready (its readiness probe then fails).
+func (s *Server) removeReadyMarker() {
+	if s.readyMarker == "" {
+		return
+	}
+	if err := os.Remove(s.readyMarker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		s.log.Warn("failed to remove mesh-DNS ready-marker on shutdown", "path", s.readyMarker, "error", err)
 	}
 }
 
