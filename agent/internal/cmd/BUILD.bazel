@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "config.go",
         "edge.go",
-        "meshdns.go",
         "root.go",
         "supervisor.go",
     ],
@@ -20,7 +19,6 @@ go_library(
         "//agent/internal/edge/secret",
         "//agent/internal/gamma",
         "//agent/internal/l4route",
-        "//agent/internal/meshdns",
         "//agent/internal/node",
         "//agent/internal/proxy/hotrestart",
         "//agent/internal/spire",
@@ -39,7 +37,6 @@ go_library(
         "//common/spire",
         "//registry",
         "//registry/registrarclient",
-        "@com_github_fsnotify_fsnotify//:fsnotify",
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/fields",
@@ -57,10 +54,7 @@ go_library(
 
 go_test(
     name = "cmd_test",
-    srcs = [
-        "config_test.go",
-        "meshdns_test.go",
-    ],
+    srcs = ["config_test.go"],
     embed = [":cmd"],
     deps = [
         "//agent/internal/cni/server",
