@@ -25,4 +25,11 @@ go_multi_arch_image(
     name = "agent_image",
     binary = ":agent",
     repository = "bpalermo/aether/agent",
+    # Ship the slim standalone mesh-DNS binary in the same image (#583). The
+    # aether-mesh-dns DaemonSet runs /mesh-dns instead of re-execing the full /agent,
+    # so its (re-exec'd) readiness probe is cheap. One image carries both entrypoints;
+    # a separate mesh-dns image/publish pipeline is deferred (#583's other option).
+    tars_layer = {
+        "/mesh-dns": "//agent/cmd/mesh-dns:mesh-dns",
+    },
 )

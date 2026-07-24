@@ -46,9 +46,8 @@ spec:
         - name: mesh-dns
           image: {{ include "aether.image" .Values.agent.image | quote }}
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
-          command: ["/agent"]
+          command: ["/mesh-dns"]
           args:
-            - "mesh-dns"
             - "--debug={{ .Values.debug }}"
             - "--mesh-domain={{ .Values.meshDomain }}"
             - "--ready-marker=/run/aether/mesh-dns.ready"
@@ -83,20 +82,24 @@ spec:
           # hostIP:18054 could be answered by the OTHER co-bound REUSEPORT socket and
           # falsely mark this pod ready before it has bound.
           readinessProbe:
-            # The check re-execs the full /agent binary (distroless image, no shell),
-            # whose cold start under the daemon's small CPU request exceeds the 1s
-            # default probe timeout — so give it headroom (timeout 5s) and a longer
-            # period to bound the exec churn. Readiness only gates surge handoffs, so
-            # a 5s period is ample; the old pod keeps serving until the new one passes.
+            # The check re-execs the SLIM /mesh-dns binary (#583) — not the full
+            # /agent — to stat this pod's ready marker (distroless image, no shell). We
+            # keep an exec marker probe rather than #582's in-process httpGet: on this
+            # host-network + maxSurge DaemonSet two pods share the host netns, so a
+            # health port either collides (wedging the surge) or is REUSEPORT-ambiguous
+            # (kubelet could hit the PEER pod's socket = the false-ready #580 rejected).
+            # The exec marker is provably pod-local. The slim binary makes the re-exec
+            # cheap, so we can drop the CPU headroom and lengthen the period. A modest
+            # 2s timeout is ample; readiness only gates surge handoffs, so a 15s period
+            # bounds the exec churn — the old pod keeps serving until the new one passes.
             exec:
               command:
-                - "/agent"
-                - "mesh-dns"
+                - "/mesh-dns"
                 - "--readiness-check"
                 - "--ready-marker=/run/aether/mesh-dns.ready"
             initialDelaySeconds: 1
-            periodSeconds: 5
-            timeoutSeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 2
             failureThreshold: 3
             successThreshold: 1
           securityContext:

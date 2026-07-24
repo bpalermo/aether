@@ -10,10 +10,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // WriteFileAtomic writes data to a file atomically using a temporary file and rename.
@@ -30,13 +29,13 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	}
 	tempPath := tempFile.Name()
 
-	log := ctrl.Log.WithName("file")
+	log := slog.Default().With("logger", "file")
 
 	// Clean up temp file on error
 	defer func() {
 		if err != nil {
 			if rmErr := os.Remove(tempPath); rmErr != nil {
-				log.V(1).Info("failed to remove temp file during cleanup", "path", tempPath, "error", rmErr)
+				log.Debug("failed to remove temp file during cleanup", "path", tempPath, "error", rmErr)
 			}
 		}
 	}()
@@ -44,7 +43,7 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	// Write data to the temp file
 	if _, err = tempFile.Write(data); err != nil {
 		if closeErr := tempFile.Close(); closeErr != nil {
-			log.V(1).Info("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
+			log.Debug("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
 		}
 		return fmt.Errorf("failed to write to temp file: %w", err)
 	}
@@ -52,7 +51,7 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	// Ensure data is flushed to the disk
 	if err = tempFile.Sync(); err != nil {
 		if closeErr := tempFile.Close(); closeErr != nil {
-			log.V(1).Info("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
+			log.Debug("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
 		}
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
@@ -136,6 +135,6 @@ func tryMarkLargeFileAsNotNeeded(size int64, in *os.File) {
 	}
 	if err := markNotNeeded(in); err != nil {
 		// Error is fine, this is just an optimization anyway. Continue
-		ctrl.Log.Error(err, "failed to mark not needed, continuing anyways")
+		slog.Default().With("logger", "file").Error("failed to mark not needed, continuing anyways", "error", err)
 	}
 }

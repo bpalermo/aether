@@ -8,3 +8,10 @@ fileExistenceTests:
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'
+  # The slim standalone mesh-DNS binary ships in the same image (#583); the
+  # aether-mesh-dns DaemonSet runs /mesh-dns instead of re-execing the full /agent.
+  - name: 'mesh-dns'
+    path: '/mesh-dns'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'

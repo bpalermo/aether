@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "mesh-dns_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/agent/cmd/mesh-dns",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//agent/constants",
+        "//agent/internal/meshdns",
+        "//common/constants/mesh",
+        "//common/log",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_binary(
+    name = "mesh-dns",
+    embed = [":mesh-dns_lib"],
+    visibility = ["//visibility:public"],
+    x_defs = {
+        "github.com/bpalermo/aether/agent/cmd/mesh-dns.Version": "{STABLE_GIT_VERSION}",
+    },
+)
