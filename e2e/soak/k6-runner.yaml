@@ -1,0 +1,72 @@
+# Distributed k6 mesh load for the 8h soak: one runner per worker node, each at
+# 60 iters/s (constant-arrival-rate) against mesh services by NAME, so the run
+# exercises mesh DNS + the cross-node data path under churn.
+#
+# The ConfigMap this mounts is built from k6-mesh-soak.js — see README.md.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: k6-soak-loader
+  namespace: aether-test
+  labels:
+    app.kubernetes.io/name: k6-soak-loader
+    app.kubernetes.io/component: load-generator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k6-soak-loader
+  template:
+    metadata:
+      labels:
+        # REQUIRED: without this label the pod gets no ndots injection and no
+        # per-pod CNI :53 DNAT, so mesh DNS never resolves and the whole run is
+        # invalid (this silently wasted the 2026-07-19 soak).
+        aether.io/managed: "true"
+        app.kubernetes.io/name: k6-soak-loader
+        app.kubernetes.io/component: load-generator
+      annotations:
+        # Pre-warm ODCDS clusters so the first requests aren't cold-service misses.
+        config.aether.io/upstreams: "echo,svc-1,svc-2,svc-3,svc-4,svc-5"
+        capture.aether.io/exclude-outbound-ports: "6565"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: k6
+          image: grafana/k6:latest
+          args:
+            - run
+            - --no-usage-report
+            - /soak/test.js
+          volumeMounts:
+            - name: soak-script
+              mountPath: /soak
+          resources:
+            # k6 accumulates metric samples in memory for the end-of-run summary, so
+            # a 7h40m run outgrows a small limit: at 256Mi every runner OOM-restarted
+            # ~3-5h in (07-23 and 07-24 soaks), fragmenting the run and losing the
+            # http_req_failed summary. 1Gi comfortably covers the full 8h.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 400m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 12345
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: soak-script
+          configMap:
+            name: k6-soak-script
+      restartPolicy: Always
