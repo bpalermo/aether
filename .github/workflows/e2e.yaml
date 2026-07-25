@@ -504,3 +504,53 @@ jobs:
       - name: Tear down
         if: always()
         run: ./e2e/multicluster_replicator.sh down || true
+
+  # --- Auto-file when the NIGHTLY run fails.
+  #
+  # This suite sat red for three consecutive nights (07-23..07-25) before anyone
+  # noticed: a scheduled run that fails notifies nobody and leaves no artifact, so
+  # a real regression (the mesh-DNS decoupling breaking the multi-cluster harness,
+  # #589) stayed invisible. This job turns that into a tracked issue.
+  #
+  # Deliberately scoped to `schedule`: PR runs already surface failures in the PR,
+  # so auto-filing those would be pure noise. And it updates ONE rolling issue
+  # rather than filing per night — three duplicate issues is how people learn to
+  # ignore them, which is the very failure mode this exists to prevent.
+  report-failure:
+    needs: [build, gateway-http, mesh-http, waypoint, replicator]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the nightly-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: |
+            build=${{ needs.build.result }}
+            gateway-http=${{ needs.gateway-http.result }}
+            mesh-http=${{ needs.mesh-http.result }}
+            waypoint=${{ needs.waypoint.result }}
+            replicator=${{ needs.replicator.result }}
+        run: |
+          set -euo pipefail
+          title="Nightly e2e failing"
+          failed=$(echo "$RESULTS" | awk -F= '$2=="failure"{printf "`%s` ", $1}')
+          [ -n "$failed" ] || failed="(no job reported failure — check the run)"
+
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "Failed jobs: ${failed}" \
+            "Run: ${RUN_URL}" \
+            "_Filed automatically by the \`report-failure\` job; this issue is reused for consecutive failures._")
+
+          # Dedupe on an OPEN issue with this exact title. Title-based (not label-based)
+          # so the job never depends on a label existing in the repo.
+          num=$(gh issue list --state open --search "in:title \"${title}\"" -L 1 --json number -q '.[0].number // empty')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body "$body"
+            echo "commented on #$num"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
