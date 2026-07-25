@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,4 +83,21 @@ func TestResolveUpstreamsEmptyIsLoud(t *testing.T) {
 				"an empty upstream set is a node-wide DNS outage and must be loud")
 		})
 	}
+}
+
+// TestSnapshotWatcherRecoversWhenDirAppears: a missing snapshot dir is NOT terminal.
+// The agent creates it on startup/first write, so the daemon may legitimately start
+// first; treating that as permanent left it Ready but record-less forever (#589).
+func TestSnapshotWatcherRecoversWhenDirAppears(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mesh-dns", "records.json")
+	l := slog.New(slog.DiscardHandler)
+
+	// Dir absent: no watcher yet, and crucially the caller retries rather than exiting.
+	assert.Nil(t, newSnapshotWatcher(path, l), "no watcher while the dir is missing")
+
+	// Once the agent creates it, the very next attempt succeeds.
+	require.NoError(t, meshdns.EnsureSnapshotDir(path))
+	w := newSnapshotWatcher(path, l)
+	require.NotNil(t, w, "watcher established after the dir appears")
+	_ = w.Close()
 }

@@ -503,3 +503,18 @@ func TestServeNonMeshForwards(t *testing.T) {
 	assert.Equal(t, dns.RcodeServerFailure, resp.Rcode)
 	assert.False(t, resp.Authoritative, "forwarded (upstream failed), not an authoritative mesh answer")
 }
+
+// TestEnsureSnapshotDir: the agent pre-creates the snapshot's parent so the resolver
+// daemon -- which mounts the volume READ-ONLY and cannot create it -- always has a
+// directory to watch. Without this the daemon came up Ready but permanently
+// record-less on a fresh cluster (#589).
+func TestEnsureSnapshotDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mesh-dns", "records.json")
+	require.NoDirExists(t, filepath.Dir(path))
+
+	require.NoError(t, EnsureSnapshotDir(path))
+	assert.DirExists(t, filepath.Dir(path), "parent dir created")
+
+	// Idempotent: the agent calls it at startup AND on every write.
+	assert.NoError(t, EnsureSnapshotDir(path))
+}

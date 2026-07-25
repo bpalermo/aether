@@ -40,6 +40,12 @@ var Version = "dev"
 // ops back-to-back) into a single snapshot reload.
 const reloadDebounce = 200 * time.Millisecond
 
+// watchRetryInterval is how often we re-attempt an fsnotify watch that could not be
+// established (usually: the agent has not yet created the snapshot dir), and how often
+// we poll ReloadFromSnapshot while blind. Short enough that a fresh cluster converges
+// quickly, long enough to be free at steady state.
+const watchRetryInterval = 10 * time.Second
+
 // resolvConfPath is the node resolv.conf the default forward upstream is read from.
 // The DaemonSet runs ClusterFirstWithHostNet, so this points at the cluster kube-dns.
 const resolvConfPath = "/etc/resolv.conf"
@@ -169,18 +175,36 @@ func resolveUpstreams(l *slog.Logger, resolvConf string) []string {
 // atomic-rename the agent uses to update records is caught — fsnotify loses the watch
 // on the replaced inode, exactly as agent/storage handles it. Events on the snapshot
 // file are debounced and coalesced into a single ReloadFromSnapshot.
+// It RETRIES establishing the watch instead of giving up for the process lifetime.
+// The snapshot dir is created by the AGENT (this daemon mounts the volume read-only),
+// so on a fresh cluster the dir legitimately does not exist yet — treating that as
+// permanent left the daemon Ready but record-less forever (#589). While the watch is
+// down we still poll ReloadFromSnapshot, so records land even if fsnotify never works.
 func watchSnapshot(ctx context.Context, server *meshdns.Server, path string, l *slog.Logger) {
-	w := newSnapshotWatcher(path, l)
-	if w == nil {
-		// aether.mesh_dns.watch_active stays 0: records are frozen until restart.
-		return
+	for ctx.Err() == nil {
+		if w := newSnapshotWatcher(path, l); w != nil {
+			server.SetWatchActive(true)
+			// The agent may have written between our last reload and the watch being
+			// established; reload once so that window is never missed.
+			server.ReloadFromSnapshot()
+			runWatchLoop(ctx, w, server, path, l)
+			server.SetWatchActive(false)
+			_ = w.Close()
+		} else {
+			// Not watching yet: pick up records by polling until the dir appears.
+			server.ReloadFromSnapshot()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(watchRetryInterval):
+		}
 	}
-	server.SetWatchActive(true)
-	defer func() {
-		server.SetWatchActive(false)
-		_ = w.Close()
-	}()
+}
 
+// runWatchLoop services one established watcher until the context ends or the watcher
+// closes its channels (after which watchSnapshot re-establishes it).
+func runWatchLoop(ctx context.Context, w *fsnotify.Watcher, server *meshdns.Server, path string, l *slog.Logger) {
 	deb := &debouncer{delay: reloadDebounce}
 	for {
 		select {
@@ -205,18 +229,21 @@ func watchSnapshot(ctx context.Context, server *meshdns.Server, path string, l *
 	}
 }
 
-// newSnapshotWatcher creates an fsnotify watcher on the snapshot file's parent dir,
-// or nil (logged) when the watcher can't be set up — records then only load at start.
+// newSnapshotWatcher creates an fsnotify watcher on the snapshot file's parent dir, or
+// nil (logged) when it can't be set up yet. The caller RETRIES: a missing dir just
+// means the agent has not written its first snapshot, which is normal on a fresh
+// cluster, so this is warned rather than errored.
 func newSnapshotWatcher(path string, l *slog.Logger) *fsnotify.Watcher {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		l.Error("mesh-DNS snapshot watcher disabled; records will not reload until restart", "error", err)
+		l.Warn("mesh-DNS snapshot watcher unavailable; retrying", "error", err, "retryIn", watchRetryInterval)
 		return nil
 	}
 	dir := filepath.Dir(path)
 	if err := w.Add(dir); err != nil {
 		_ = w.Close()
-		l.Error("failed to watch mesh-DNS snapshot dir; records will not reload until restart", "error", err, "dir", dir)
+		l.Warn("mesh-DNS snapshot dir not watchable yet (the agent creates it on its first write); retrying",
+			"error", err, "dir", dir, "retryIn", watchRetryInterval)
 		return nil
 	}
 	l.Info("watching mesh-DNS snapshot for changes", "dir", dir, "path", path)

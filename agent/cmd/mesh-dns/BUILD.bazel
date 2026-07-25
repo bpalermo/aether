@@ -29,6 +29,7 @@ go_test(
     srcs = ["main_test.go"],
     embed = [":mesh-dns_lib"],
     deps = [
+        "//agent/internal/meshdns",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

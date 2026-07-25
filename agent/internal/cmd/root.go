@@ -34,6 +34,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/configimport"
 	"github.com/bpalermo/aether/agent/internal/gamma"
 	"github.com/bpalermo/aether/agent/internal/l4route"
+	"github.com/bpalermo/aether/agent/internal/meshdns"
 	"github.com/bpalermo/aether/agent/internal/node"
 	"github.com/bpalermo/aether/agent/internal/spire"
 	"github.com/bpalermo/aether/agent/internal/xds/ack"
@@ -388,6 +389,13 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 func wireMeshDNS(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	if !cfg.MeshDNS {
 		return nil
+	}
+	// Create the snapshot dir NOW rather than lazily on the first write. The resolver
+	// daemon mounts this volume read-only, so it cannot create the dir itself; if it
+	// starts before our first projection it finds nothing to watch. Non-fatal: mesh
+	// DNS is not worth failing the agent over, and the first write retries anyway.
+	if err := meshdns.EnsureSnapshotDir(cfg.MeshDNSSnapshotPath); err != nil {
+		l.Error("failed to pre-create the mesh-DNS snapshot dir", "path", cfg.MeshDNSSnapshotPath, "error", err)
 	}
 	snapshotCache.SetMeshDNSSnapshotPath(cfg.MeshDNSSnapshotPath)
 	if err := m.Add(&capture.MeshDNSHeartbeat{Rewriter: snapshotCache, Log: l}); err != nil {

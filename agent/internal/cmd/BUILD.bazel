@@ -19,6 +19,7 @@ go_library(
         "//agent/internal/edge/secret",
         "//agent/internal/gamma",
         "//agent/internal/l4route",
+        "//agent/internal/meshdns",
         "//agent/internal/node",
         "//agent/internal/proxy/hotrestart",
         "//agent/internal/spire",

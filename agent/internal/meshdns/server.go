@@ -42,6 +42,23 @@ const snapshotFileMode = 0o644
 // snapshotDirMode is the permission for the snapshot's parent directory.
 const snapshotDirMode = 0o755
 
+// EnsureSnapshotDir creates the snapshot's parent directory (a dedicated subdir under
+// the host-persistent registry volume; the host mount is DirectoryOrCreate, the subdir
+// is ours).
+//
+// The AGENT must call this at startup, not merely on its first write: the resolver
+// daemon mounts the volume READ-ONLY and so cannot create the directory itself. If the
+// daemon starts first and finds no directory, its fsnotify watch has nothing to attach
+// to — on a fresh cluster that left the daemon Ready but permanently record-less,
+// which is what broke the multi-cluster e2e (#589).
+func EnsureSnapshotDir(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, snapshotDirMode); err != nil {
+		return fmt.Errorf("create mesh-DNS snapshot dir %s: %w", dir, err)
+	}
+	return nil
+}
+
 // ErrSnapshotParse marks a snapshot that exists and was readable but could not be
 // decoded, so a caller (and the reload metric) can tell a corrupt file apart from an
 // I/O failure or a missing file (fs.ErrNotExist).
@@ -334,10 +351,8 @@ func WriteSnapshot(path string, records map[string]string, generation uint64) er
 	if err != nil {
 		return fmt.Errorf("marshal mesh-DNS snapshot: %w", err)
 	}
-	// The snapshot lives in a dedicated subdir under the host-persistent registry
-	// volume; create it (host mount is DirectoryOrCreate, the subdir is ours).
-	if err := os.MkdirAll(filepath.Dir(path), snapshotDirMode); err != nil {
-		return fmt.Errorf("create mesh-DNS snapshot dir %s: %w", filepath.Dir(path), err)
+	if err := EnsureSnapshotDir(path); err != nil {
+		return err
 	}
 	if err := file.AtomicWrite(path, data, snapshotFileMode); err != nil {
 		return fmt.Errorf("write mesh-DNS snapshot %s: %w", path, err)
