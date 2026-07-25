@@ -50,6 +50,21 @@ die() {
 	exit 1
 }
 
+# The data-path assertion dials a MESH DNS NAME, so a bare "curl 000" is ambiguous:
+# it could be routing, or it could be that nothing resolved the name at all. Dump the
+# resolver's state on failure so the next red run says which, instead of costing a
+# bisect (this suite sat red for three nights over exactly this).
+dump_mesh_dns() {
+	local c
+	for c in "$@"; do
+		printf '\033[1;33m  -- mesh-dns state on %s --\033[0m\n' "$c" >&2
+		kubectl --context "kind-$c" -n "$NS" get pods -l app.kubernetes.io/component=mesh-dns \
+			-o wide 2>&1 | sed 's/^/    /' >&2 || true
+		kubectl --context "kind-$c" -n "$NS" logs -l app.kubernetes.io/component=mesh-dns \
+			--tail=15 --prefix 2>&1 | sed 's/^/    /' >&2 || true
+	done
+}
+
 raise_inotify() {
 	if sudo -n true 2>/dev/null; then
 		sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288 >/dev/null 2>&1 &&
@@ -211,6 +226,11 @@ install_aether() {
 			$(img agent agent) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
 			--timeout 5m >/dev/null || die "aether install failed on '$c'"
 		kubectl --context "kind-$c" -n "$NS" rollout status ds/aether-agent --timeout=180s >/dev/null || true
+		# The data-path assertion resolves echo.<ns>.<mesh-domain>, and since #578 the
+		# AGENT no longer answers that -- the aether-mesh-dns DaemonSet does. Waiting
+		# only on the agent stopped implying "DNS is serving", which is what made this
+		# suite fail with an unexplained curl 000.
+		kubectl --context "kind-$c" -n "$NS" rollout status ds/aether-mesh-dns --timeout=180s >/dev/null || true
 		ok "aether up on '$c'"
 	done
 	rm -rf "$(dirname "$charts")"
@@ -295,7 +315,8 @@ verify() {
 	if [ "$code" = "200" ]; then
 		ok "cross-cluster call succeeded (HTTP 200) — waypoint data path works: client(a) -> b-node:$TUNNEL_PORT -> echo pod(b), mTLS end-to-end"
 	else
-		die "cross-cluster call returned $code (expected 200) — inspect a's EDS for echo (should be b-node-ip:$TUNNEL_PORT) and b's ew_tunnel listener"
+		dump_mesh_dns "$CLUSTER_A" "$CLUSTER_B"
+		die "cross-cluster call returned $code (expected 200) — the target is a MESH DNS NAME, so first rule out resolution using the mesh-dns state above; if DNS is healthy, inspect a's EDS for echo (should be b-node-ip:$TUNNEL_PORT) and b's ew_tunnel listener"
 	fi
 }
 
