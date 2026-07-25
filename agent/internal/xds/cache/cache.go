@@ -339,6 +339,18 @@ type SnapshotCache struct {
 	// reloads on change. The CNI DNATs each pod's :53 straight to that daemon.
 	meshDNSSnapshotPath string
 
+	// meshDNSMu guards the last-persisted mesh-DNS record table and its generation.
+	// Taken alone (never nested under captureMu/depMu): the persist path only writes
+	// a file and shares no state with snapshot building.
+	meshDNSMu sync.Mutex
+	// meshDNSRecords is the last table projected by the capture reconciler, kept so
+	// the freshness heartbeat can re-stamp it without a reconcile. nil until the
+	// first projection — the heartbeat must not write a false-fresh empty table.
+	meshDNSRecords map[string]string
+	// meshDNSGeneration advances only when the record CONTENT changes, so the daemon
+	// can tell a real update apart from a heartbeat re-stamp.
+	meshDNSGeneration uint64
+
 	version *atomic.Uint64
 
 	// regMu guards reg, the service registry used to resolve mesh service

@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "capture",
-    srcs = ["reconciler.go"],
+    srcs = [
+        "heartbeat.go",
+        "reconciler.go",
+    ],
     importpath = "github.com/bpalermo/aether/agent/internal/capture",
     visibility = ["//agent:__subpackages__"],
     deps = [
@@ -20,7 +23,10 @@ go_library(
 
 go_test(
     name = "capture_test",
-    srcs = ["reconciler_test.go"],
+    srcs = [
+        "heartbeat_test.go",
+        "reconciler_test.go",
+    ],
     embed = [":capture"],
     deps = [
         "//common/constants/labels",

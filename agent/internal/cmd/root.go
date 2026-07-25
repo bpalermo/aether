@@ -354,7 +354,9 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
 
-	wireMeshDNS(snapshotCache)
+	if err := wireMeshDNS(m, snapshotCache); err != nil {
+		return nil, err
+	}
 
 	// Global access-log config, set once before the cache builds any listener.
 	proxy.SetAccessLogConfig(proxy.AccessLogConfig{
@@ -379,12 +381,19 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 // (fsnotify), serves HOST_IP:18054, and — being surge-capable with SO_REUSEPORT —
 // hands off hitlessly across its own rolls (which an agent roll could never do,
 // since deleting the agent pod tore down the resolver with it). The agent's only
-// remaining role is to keep writing the snapshot from its capture reconciler.
-func wireMeshDNS(snapshotCache *cache.SnapshotCache) {
+// remaining role is to keep writing the snapshot from its capture reconciler — plus
+// the freshness heartbeat registered here (issue #586), which re-stamps the snapshot
+// every MeshDNSHeartbeatInterval even when nothing changed, so the daemon's
+// snapshot-age gauge measures the WRITER's liveness rather than cluster churn.
+func wireMeshDNS(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	if !cfg.MeshDNS {
-		return
+		return nil
 	}
 	snapshotCache.SetMeshDNSSnapshotPath(cfg.MeshDNSSnapshotPath)
+	if err := m.Add(&capture.MeshDNSHeartbeat{Rewriter: snapshotCache, Log: l}); err != nil {
+		return fmt.Errorf("failed to add mesh-DNS snapshot heartbeat: %w", err)
+	}
+	return nil
 }
 
 // wireSpireBridge optionally creates and registers the SPIRE bridge for SDS when

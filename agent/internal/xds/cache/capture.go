@@ -126,11 +126,50 @@ func (c *SnapshotCache) SetMeshDNSSnapshotPath(path string) { c.meshDNSSnapshotP
 // SetMeshDNSRecords persists the mesh service -> IP table (from the mesh-Service
 // reconciler) to the snapshot file the standalone resolver daemon watches. No-op
 // when mesh DNS is off (empty path). A persist error is logged, never fatal.
+//
+// The write always happens (it re-stamps the envelope's writtenAt, which is the
+// daemon's freshness signal), but the generation only advances when the record
+// CONTENT changed, so a heartbeat rewrite is distinguishable from a real update.
 func (c *SnapshotCache) SetMeshDNSRecords(records map[string]string) {
 	if c.meshDNSSnapshotPath == "" {
 		return
 	}
-	if err := meshdns.WriteSnapshot(c.meshDNSSnapshotPath, records); err != nil {
+	c.meshDNSMu.Lock()
+	if !equalStringMaps(c.meshDNSRecords, records) {
+		c.meshDNSGeneration++
+	}
+	c.meshDNSRecords = records
+	generation := c.meshDNSGeneration
+	c.meshDNSMu.Unlock()
+	c.writeMeshDNSSnapshot(records, generation)
+}
+
+// RewriteMeshDNSSnapshot re-persists the last projected record table with a fresh
+// writtenAt stamp and an UNCHANGED generation. It backs the periodic freshness
+// heartbeat (see capture.MeshDNSHeartbeat): the capture reconciler is event-driven
+// with no short resync, so on a quiet cluster the snapshot would otherwise look stale
+// to the resolver daemon and its snapshot-age gauge could not distinguish "nothing
+// changed" from "the agent is wedged".
+//
+// No-op when mesh DNS is off, and — importantly — before the first projection: writing
+// an empty table would flip the daemon ready and NXDOMAIN the whole mesh.
+func (c *SnapshotCache) RewriteMeshDNSSnapshot() {
+	if c.meshDNSSnapshotPath == "" {
+		return
+	}
+	c.meshDNSMu.Lock()
+	records, generation := c.meshDNSRecords, c.meshDNSGeneration
+	c.meshDNSMu.Unlock()
+	if records == nil {
+		return
+	}
+	c.writeMeshDNSSnapshot(records, generation)
+}
+
+// writeMeshDNSSnapshot persists the envelope; a write failure is logged, never fatal
+// (the daemon keeps serving its current table).
+func (c *SnapshotCache) writeMeshDNSSnapshot(records map[string]string, generation uint64) {
+	if err := meshdns.WriteSnapshot(c.meshDNSSnapshotPath, records, generation); err != nil {
 		c.log.Warn("failed to persist mesh-DNS snapshot", "path", c.meshDNSSnapshotPath, "error", err)
 	}
 }

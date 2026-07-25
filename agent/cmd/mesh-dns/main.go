@@ -40,6 +40,10 @@ var Version = "dev"
 // ops back-to-back) into a single snapshot reload.
 const reloadDebounce = 200 * time.Millisecond
 
+// resolvConfPath is the node resolv.conf the default forward upstream is read from.
+// The DaemonSet runs ClusterFirstWithHostNet, so this points at the cluster kube-dns.
+const resolvConfPath = "/etc/resolv.conf"
+
 // cfg holds the flag-bound configuration for the standalone mesh-DNS resolver.
 var (
 	snapshotPath   string
@@ -103,38 +107,62 @@ func run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	l := log.Named(log.NewLogger(debug), "mesh-dns")
+	// Metrics + log push, best-effort (push-only OTel like the proxy-supervisor): the
+	// daemon runs in the host netns with no controller-runtime manager and no scrape
+	// endpoint, and a surge predecessor/successor would collide on a scrape port. Set
+	// up BEFORE the logger and NewServer, so slog records reach the OTLP bridge and the
+	// global meter provider is live when meters are created. Telemetry failures are
+	// never fatal — serving DNS is the job.
+	tel, telErr := meshdns.SetupTelemetry(ctx, otlpEndpoint, Version)
+	defer tel.Shutdown()
+
+	// Fan the daemon's slog output to stderr (kubectl logs) AND, when telemetry is up,
+	// to the OTLP LoggerProvider — before #586 these logs died with the pod on every
+	// roll, which mattered because some failure modes only ever show up in a log line.
+	l := log.Named(log.NewLoggerWithHandler(debug, tel.LogHandler), "mesh-dns")
+	if telErr != nil {
+		l.Error("failed to set up mesh-DNS telemetry; continuing without metrics or log export", "error", telErr)
+	}
+	for _, w := range tel.Warnings {
+		l.Warn("mesh-DNS telemetry degraded", "error", w)
+	}
 
 	hostIP := os.Getenv("HOST_IP")
 	addr := fmt.Sprintf("%s:%d", hostIP, meshconst.ProxyDNSResolverPort)
-
-	// Metrics push, best-effort (push-only OTel like the proxy-supervisor): the daemon
-	// runs in the host netns with no controller-runtime manager and no scrape endpoint,
-	// and a surge predecessor/successor would collide on a scrape port. Set BEFORE
-	// NewServer so the global meter provider is live when meters are created.
-	// Telemetry failures are never fatal — serving DNS is the job.
-	shutdownTelemetry, telErr := meshdns.SetupTelemetry(ctx, otlpEndpoint, Version)
-	if telErr != nil {
-		l.Error("failed to set up mesh-DNS telemetry; continuing without metrics", "error", telErr)
-		shutdownTelemetry = func() {}
-	}
-	defer shutdownTelemetry()
 
 	server := meshdns.NewServerWithOptions(
 		meshDomain, addr, snapshotPath, l,
 		meshdns.WithReusePort(true),
 		meshdns.WithReadyMarker(readyMarker),
 	)
-	up := upstreams
-	if len(up) == 0 {
-		up = meshdns.NameserversFromResolvConf("/etc/resolv.conf")
-		l.Info("mesh-DNS upstream defaulted from /etc/resolv.conf", "upstreams", up)
-	}
-	server.SetUpstreams(up)
+	server.SetUpstreams(resolveUpstreams(l, resolvConfPath))
 
 	go watchSnapshot(ctx, server, snapshotPath, l)
 
 	return server.Start(ctx)
+}
+
+// resolveUpstreams returns the forward upstreams: the explicit --mesh-dns-upstream
+// flags, else the node resolv.conf's nameservers.
+//
+// An empty result is a LOUD failure, not a note: the CNI DNATs every managed pod's
+// :53 here, so with no upstream every non-mesh query (cluster.local AND external)
+// becomes a forward_error — a full DNS outage for the node's mesh pods. Behaviour is
+// unchanged (fail open: mesh names still resolve), only the reporting is: ERROR plus
+// aether.mesh_dns.upstreams_configured=0, instead of an INFO line reading
+// "upstreams=[]".
+func resolveUpstreams(l *slog.Logger, resolvConf string) []string {
+	if len(upstreams) > 0 {
+		return upstreams
+	}
+	up := meshdns.NameserversFromResolvConf(resolvConf)
+	if len(up) == 0 {
+		l.Error("mesh-DNS has NO upstream resolver: no --mesh-dns-upstream given and no nameserver could be read; every non-mesh query (cluster.local and external) will fail until this is fixed",
+			"resolvConf", resolvConf)
+		return nil
+	}
+	l.Info("mesh-DNS upstream defaulted from resolv.conf", "resolvConf", resolvConf, "upstreams", up)
+	return up
 }
 
 // watchSnapshot watches the snapshot file's PARENT directory (not the file) so the
@@ -144,9 +172,14 @@ func run(ctx context.Context) error {
 func watchSnapshot(ctx context.Context, server *meshdns.Server, path string, l *slog.Logger) {
 	w := newSnapshotWatcher(path, l)
 	if w == nil {
+		// aether.mesh_dns.watch_active stays 0: records are frozen until restart.
 		return
 	}
-	defer func() { _ = w.Close() }()
+	server.SetWatchActive(true)
+	defer func() {
+		server.SetWatchActive(false)
+		_ = w.Close()
+	}()
 
 	deb := &debouncer{delay: reloadDebounce}
 	for {
