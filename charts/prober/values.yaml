@@ -38,8 +38,17 @@ probe:
   # Host-overridden, so a real mesh-DNS outage becomes an alertable dns_* signal
   # (closes the blind spot behind issue #574). Only works because this pod is
   # mesh-managed. Each target's host is also added to config.aether.io/upstreams.
+  #
+  # Two targets on purpose — they exercise DIFFERENT resolver paths, and the
+  # `target` label keeps them separable:
+  #   *.aether.internal      -> answered authoritatively from the record snapshot
+  #   *.svc.cluster.local    -> NOT a mesh name, so it is FORWARDED to kube-dns
+  # Without the second, the forward path is unprobed: it carries the majority of a
+  # real workload's lookups, yet organic forward traffic here is near zero, so a
+  # kube-dns or upstream-failover regression would be invisible.
   meshDNSTargets:
     - "echo.aether-test.aether.internal:18081"
+    - "echo.aether-test.svc.cluster.local:18081"
 
 # OTel: push the probe SLI to the collector (host:port, insecure). Empty disables
 # telemetry (the prober still runs but emits nothing).
