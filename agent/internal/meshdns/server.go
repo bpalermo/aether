@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bpalermo/aether/common/file"
 	"github.com/bpalermo/aether/common/serviceref"
@@ -41,6 +42,33 @@ const snapshotFileMode = 0o644
 // snapshotDirMode is the permission for the snapshot's parent directory.
 const snapshotDirMode = 0o755
 
+// ErrSnapshotParse marks a snapshot that exists and was readable but could not be
+// decoded, so a caller (and the reload metric) can tell a corrupt file apart from an
+// I/O failure or a missing file (fs.ErrNotExist).
+var ErrSnapshotParse = errors.New("parse mesh-DNS snapshot")
+
+// Snapshot is the versioned on-disk mesh-DNS record envelope the agent writes and the
+// standalone resolver daemon reads (issue #586). The envelope exists because mtime
+// alone cannot prove freshness: the writer is event-driven, so the agent re-stamps
+// WrittenAt on a periodic heartbeat even when Records are unchanged, and the daemon
+// exports now-WrittenAt as aether.mesh_dns.snapshot_age_seconds. A wedged/crashed
+// agent then shows up as a growing age instead of silently serving a frozen table.
+//
+// The legacy bare-map form (just Records, no envelope) is still accepted on read —
+// see ReadSnapshot — so an in-place upgrade never starts cold.
+type Snapshot struct {
+	// WrittenAt is the writer's wall clock (unix seconds) at persist time. It is
+	// re-stamped by the heartbeat even when Records do not change. Zero means
+	// unknown (a legacy snapshot whose mtime could not be stat'd).
+	WrittenAt int64 `json:"writtenAt"`
+	// Generation is the writer's record-table version: it advances only when the
+	// record CONTENT changes, so a heartbeat rewrite keeps it stable. It is
+	// diagnostic only — the resolver always serves whatever Records it read.
+	Generation uint64 `json:"generation"`
+	// Records maps "<ns>/<svc>" to the mesh Service's A-record IP.
+	Records map[string]string `json:"records"`
+}
+
 // Server answers mesh A records and forwards the rest. Safe for concurrent use, and a
 // controller-runtime Runnable (Start serves until the context is cancelled).
 type Server struct {
@@ -53,10 +81,13 @@ type Server struct {
 	client       *dns.Client
 	metrics      *metrics
 
-	mu        sync.RWMutex
-	records   map[string]string // "<ns>/<svc>" -> A-record IP
-	ready     bool              // records have been populated at least once
-	upstreams []string
+	mu          sync.RWMutex
+	records     map[string]string // "<ns>/<svc>" -> A-record IP
+	ready       bool              // records have been populated at least once
+	upstreams   []string
+	writtenAt   int64  // Snapshot.WrittenAt of the table currently served (0 = unknown)
+	generation  uint64 // Snapshot.Generation of the table currently served
+	watchActive bool   // the fsnotify snapshot watcher is running
 }
 
 // Option configures a Server built via NewServerWithOptions.
@@ -99,14 +130,42 @@ func NewServerWithOptions(meshDomain, addr, snapshotPath string, log *slog.Logge
 		snapshotPath: snapshotPath,
 		log:          commonlog.Named(log, "mesh-dns"),
 		client:       &dns.Client{Net: "udp"},
-		metrics:      newMetrics(),
 		records:      map[string]string{},
 	}
 	for _, o := range opts {
 		o(s)
 	}
+	// Instruments (including the observable gauges reading s under its RWMutex) are
+	// built before the warm load so the very first snapshot read is counted.
+	s.metrics = newMetrics(s.observedState, s.log)
 	s.loadSnapshot()
 	return s
+}
+
+// observedState snapshots the resolver state the observable gauges export. It takes
+// the Server's RWMutex only to copy a handful of scalars and releases it before
+// returning, so the OTel collect callback never holds the lock across an export (and
+// never nests it under a metrics lock).
+func (s *Server) observedState() resolverState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return resolverState{
+		records:     int64(len(s.records)),
+		writtenAt:   s.writtenAt,
+		generation:  s.generation,
+		ready:       s.ready,
+		watchActive: s.watchActive,
+		upstreams:   int64(len(s.upstreams)),
+	}
+}
+
+// SetWatchActive records whether the daemon's fsnotify snapshot watcher is running.
+// It backs the aether.mesh_dns.watch_active gauge: 0 means the watcher never started
+// or has died, i.e. the resolver will serve its current table until it restarts.
+func (s *Server) SetWatchActive(active bool) {
+	s.mu.Lock()
+	s.watchActive = active
+	s.mu.Unlock()
 }
 
 // loadSnapshot warm-starts the record table from the on-disk snapshot, if present.
@@ -118,7 +177,7 @@ func (s *Server) loadSnapshot() {
 	if s.snapshotPath == "" {
 		return
 	}
-	records, err := ReadSnapshot(s.snapshotPath)
+	snap, err := s.readSnapshotCounted()
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			s.log.Warn("failed to read mesh-DNS snapshot; starting cold", "path", s.snapshotPath, "error", err)
@@ -126,12 +185,39 @@ func (s *Server) loadSnapshot() {
 		return
 	}
 	s.mu.Lock()
-	s.records = records
-	if len(records) > 0 {
+	s.records = snap.Records
+	s.writtenAt = snap.WrittenAt
+	s.generation = snap.Generation
+	if len(snap.Records) > 0 {
 		s.ready = true
 	}
 	s.mu.Unlock()
-	s.log.Info("warm-started mesh-DNS records from snapshot", "path", s.snapshotPath, "records", len(records))
+	s.log.Info("warm-started mesh-DNS records from snapshot",
+		"path", s.snapshotPath, "records", len(snap.Records), "generation", snap.Generation, "writtenAt", snap.WrittenAt)
+}
+
+// readSnapshotCounted reads the snapshot and increments
+// aether.mesh_dns.snapshot_reloads_total with the outcome (success / missing /
+// parse_error / read_error), so a wedged or corrupt snapshot is visible in metrics
+// and not only in a log line.
+func (s *Server) readSnapshotCounted() (*Snapshot, error) {
+	snap, err := ReadSnapshot(s.snapshotPath)
+	s.metrics.recordReload(reloadResult(err))
+	return snap, err
+}
+
+// reloadResult classifies a ReadSnapshot error into the reload metric's result label.
+func reloadResult(err error) string {
+	switch {
+	case err == nil:
+		return reloadSuccess
+	case errors.Is(err, fs.ErrNotExist):
+		return reloadMissing
+	case errors.Is(err, ErrSnapshotParse):
+		return reloadParseError
+	default:
+		return reloadReadError
+	}
 }
 
 // ReloadFromSnapshot re-reads the snapshot file and swaps in its record table. It
@@ -144,7 +230,7 @@ func (s *Server) ReloadFromSnapshot() {
 	if s.snapshotPath == "" {
 		return
 	}
-	records, err := ReadSnapshot(s.snapshotPath)
+	snap, err := s.readSnapshotCounted()
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			s.log.Warn("failed to reload mesh-DNS snapshot; keeping current records", "path", s.snapshotPath, "error", err)
@@ -152,49 +238,99 @@ func (s *Server) ReloadFromSnapshot() {
 		return
 	}
 	s.mu.Lock()
-	s.records = records
+	s.records = snap.Records
+	s.writtenAt = snap.WrittenAt
+	s.generation = snap.Generation
 	s.ready = true
 	s.mu.Unlock()
-	s.log.Info("reloaded mesh-DNS records from snapshot", "path", s.snapshotPath, "records", len(records))
+	s.log.Debug("reloaded mesh-DNS records from snapshot",
+		"path", s.snapshotPath, "records", len(snap.Records), "generation", snap.Generation, "writtenAt", snap.WrittenAt)
 }
 
 // SetRecords replaces the service->IP answer table, flips the ready flag (so a
 // subsequent mesh miss answers NXDOMAIN, not SERVFAIL), and persists the table to
 // the host-persistent snapshot so a future agent restart warm-starts from it.
+//
+// This is the in-process serve path (the standalone daemon is fed from disk instead),
+// so every call is a fresh projection: the generation advances unconditionally and
+// writtenAt is stamped now.
 func (s *Server) SetRecords(records map[string]string) {
 	s.mu.Lock()
+	s.generation++
 	s.records = records
+	s.writtenAt = time.Now().Unix()
 	s.ready = true
+	generation := s.generation
 	s.mu.Unlock()
 	if s.snapshotPath == "" {
 		return
 	}
-	if err := WriteSnapshot(s.snapshotPath, records); err != nil {
+	if err := WriteSnapshot(s.snapshotPath, records, generation); err != nil {
 		s.log.Warn("failed to persist mesh-DNS snapshot", "path", s.snapshotPath, "error", err)
 	}
 }
 
-// ReadSnapshot loads and parses the JSON record table (\"<ns>/<svc>\" -> A-record
-// IP) from path. A caller can distinguish a missing file via errors.Is(err,
-// fs.ErrNotExist) and treat it as a cold start.
-func ReadSnapshot(path string) (map[string]string, error) {
+// ReadSnapshot loads and parses the versioned snapshot envelope from path. A caller
+// can distinguish a missing file via errors.Is(err, fs.ErrNotExist) and treat it as a
+// cold start, and a corrupt one via errors.Is(err, ErrSnapshotParse).
+//
+// It also accepts the LEGACY bare-map form (`{"<ns>/<svc>":"<ip>"}`, everything
+// written before issue #586) so an in-place upgrade — a new daemon reading the old
+// agent's file, or a new agent's file read by an old daemon — never starts cold. A
+// legacy snapshot carries no writtenAt, so the file's mtime is used instead: the
+// freshness signal degrades to mtime exactly for the upgrade window and is exact
+// again on the first envelope write.
+func ReadSnapshot(path string) (*Snapshot, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var records map[string]string
-	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, fmt.Errorf("parse mesh-DNS snapshot %s: %w", path, err)
+	snap, legacy, err := parseSnapshot(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w %s: %w", ErrSnapshotParse, path, err)
 	}
-	return records, nil
+	if legacy {
+		if fi, statErr := os.Stat(path); statErr == nil {
+			snap.WrittenAt = fi.ModTime().Unix()
+		}
+	}
+	return snap, nil
 }
 
-// WriteSnapshot atomically writes the record table to path (creating the parent
-// dir). It is the shared persist path used by the agent's capture sink and by
-// Server.SetRecords, so the standalone resolver daemon warm-starts and reloads
+// parseSnapshot decodes either the versioned envelope or the legacy bare record map,
+// reporting which form it found. The envelope is tried first and only accepted when it
+// actually carries a "records" object; anything else falls back to the bare map, so a
+// legacy file whose service keys happen to collide with envelope field names still
+// decodes.
+func parseSnapshot(data []byte) (snap *Snapshot, legacy bool, err error) {
+	var envelope Snapshot
+	if err := json.Unmarshal(data, &envelope); err == nil && envelope.Records != nil {
+		return &envelope, false, nil
+	}
+	var records map[string]string
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, false, err
+	}
+	return &Snapshot{Records: records}, true, nil
+}
+
+// WriteSnapshot atomically writes the record table to path as a versioned envelope
+// (creating the parent dir), stamping writtenAt with the current wall clock and
+// carrying the caller's generation. It is the shared persist path used by the agent's
+// capture sink — both on a record change and on the periodic freshness heartbeat —
+// and by Server.SetRecords, so the standalone resolver daemon warm-starts and reloads
 // from exactly what the agent wrote.
-func WriteSnapshot(path string, records map[string]string) error {
-	data, err := json.Marshal(records)
+func WriteSnapshot(path string, records map[string]string, generation uint64) error {
+	if records == nil {
+		// Never emit "records": null — the reader would see an envelope without a
+		// records object and fall back to the legacy bare-map decode, which fails.
+		records = map[string]string{}
+	}
+	data, err := json.Marshal(&Snapshot{
+		WrittenAt:  time.Now().Unix(),
+		Generation: generation,
+		Records:    records,
+	})
 	if err != nil {
 		return fmt.Errorf("marshal mesh-DNS snapshot: %w", err)
 	}
@@ -335,38 +471,42 @@ func reusePortControl(_, _ string, c syscall.RawConn) error {
 // malformed spelling under the zone is always NXDOMAIN. Only genuinely non-mesh names
 // (cluster.local, external) are forwarded upstream.
 func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	start := time.Now()
+	result := s.serve(w, r)
+	s.metrics.observeQuery(result, time.Since(start))
+}
+
+// serve dispatches a query to the mesh or forward path and returns the metric result
+// label, so ServeDNS can time the whole handling in one place.
+func (s *Server) serve(w dns.ResponseWriter, r *dns.Msg) string {
 	if len(r.Question) == 1 {
 		q := r.Question[0]
 		if s.isMeshName(q.Name) {
-			s.serveMesh(w, r, q)
-			return
+			return s.serveMesh(w, r, q)
 		}
 	}
-	s.forward(w, r)
+	return s.forward(w, r)
 }
 
 // serveMesh answers a mesh-domain query authoritatively: a well-formed "<svc>.<ns>"
 // hit returns the A record (NODATA for non-A) and a miss returns NXDOMAIN when ready
 // or SERVFAIL when still cold; a malformed name under the zone (wrong label count)
 // is always NXDOMAIN — it can never exist, so retrying can't help.
-func (s *Server) serveMesh(w dns.ResponseWriter, r *dns.Msg, q dns.Question) {
+func (s *Server) serveMesh(w dns.ResponseWriter, r *dns.Msg, q dns.Question) string {
 	if _, _, ok := s.parseMeshName(q.Name); !ok {
 		// Under the mesh domain but not a well-formed "<svc>.<ns>" name. Structurally
 		// invalid regardless of readiness: authoritative NXDOMAIN, never forwarded.
-		s.writeRcode(w, r, dns.RcodeNameError, resultNXDomain)
-		return
+		return s.writeRcode(w, r, dns.RcodeNameError, resultNXDomain)
 	}
 	ip, ready := s.lookup(q.Name)
 	if ip == "" {
 		if !ready {
 			// Never populated: the name may simply not be reconciled yet. SERVFAIL is
 			// retryable and not negatively cached, unlike NXDOMAIN.
-			s.writeRcode(w, r, dns.RcodeServerFailure, resultCold)
-			return
+			return s.writeRcode(w, r, dns.RcodeServerFailure, resultCold)
 		}
 		// Authoritative miss: the mesh has records but not this name.
-		s.writeRcode(w, r, dns.RcodeNameError, resultNXDomain)
-		return
+		return s.writeRcode(w, r, dns.RcodeNameError, resultNXDomain)
 	}
 
 	m := new(dns.Msg)
@@ -387,16 +527,17 @@ func (s *Server) serveMesh(w dns.ResponseWriter, r *dns.Msg, q dns.Question) {
 	}
 	// Non-A (incl. AAAA): NODATA — empty answer, NOERROR, authoritative.
 	_ = w.WriteMsg(m)
-	s.metrics.record(resultAnswered)
+	return resultAnswered
 }
 
-// writeRcode replies with an authoritative bare rcode (no answer) and records the metric.
-func (s *Server) writeRcode(w dns.ResponseWriter, r *dns.Msg, rcode int, result string) {
+// writeRcode replies with an authoritative bare rcode (no answer) and returns the
+// caller's metric result label.
+func (s *Server) writeRcode(w dns.ResponseWriter, r *dns.Msg, rcode int, result string) string {
 	m := new(dns.Msg)
 	m.SetRcode(r, rcode)
 	m.Authoritative = true
 	_ = w.WriteMsg(m)
-	s.metrics.record(result)
+	return result
 }
 
 // isMeshName reports whether qname is any name UNDER the mesh domain (has at least
@@ -444,7 +585,7 @@ func (s *Server) lookup(qname string) (ip string, ready bool) {
 	return ip, ready
 }
 
-func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) {
+func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) string {
 	s.mu.RLock()
 	ups := s.upstreams
 	s.mu.RUnlock()
@@ -455,12 +596,11 @@ func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		if resp, _, err := s.client.Exchange(r, addr); err == nil && resp != nil {
 			_ = w.WriteMsg(resp)
-			s.metrics.record(resultForwarded)
-			return
+			return resultForwarded
 		}
 	}
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeServerFailure)
 	_ = w.WriteMsg(m)
-	s.metrics.record(resultForwardError)
+	return resultForwardError
 }

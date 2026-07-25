@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "mesh-dns_lib",
@@ -22,4 +22,14 @@ go_binary(
     x_defs = {
         "github.com/bpalermo/aether/agent/cmd/mesh-dns.Version": "{STABLE_GIT_VERSION}",
     },
+)
+
+go_test(
+    name = "mesh-dns_test",
+    srcs = ["main_test.go"],
+    embed = [":mesh-dns_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

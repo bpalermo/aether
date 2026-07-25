@@ -92,9 +92,11 @@ func TestSetRecordsPersistsSnapshot(t *testing.T) {
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
-	var got map[string]string
+	var got Snapshot
 	require.NoError(t, json.Unmarshal(raw, &got))
-	assert.Equal(t, map[string]string{"default/echo": "10.111.0.6"}, got)
+	assert.Equal(t, map[string]string{"default/echo": "10.111.0.6"}, got.Records)
+	assert.Equal(t, uint64(1), got.Generation)
+	assert.Positive(t, got.WrittenAt)
 
 	// A second server warm-starts from what the first persisted.
 	s2 := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.DiscardHandler))
@@ -103,33 +105,166 @@ func TestSetRecordsPersistsSnapshot(t *testing.T) {
 	assert.True(t, ready)
 }
 
-// TestSnapshotRoundTrip: WriteSnapshot then ReadSnapshot returns the same table,
-// and a missing file surfaces os.ErrNotExist so callers can treat it as cold.
+// TestSnapshotRoundTrip: WriteSnapshot then ReadSnapshot returns the same table via
+// the versioned envelope (records + generation + a fresh writtenAt), and a missing
+// file surfaces os.ErrNotExist so callers can treat it as cold.
 func TestSnapshotRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "records.json") // dir does not exist yet
 	want := map[string]string{"team-a/svc-1": "10.111.0.5", "default/echo": "10.111.0.6"}
-	require.NoError(t, WriteSnapshot(path, want), "WriteSnapshot creates the parent dir")
+	before := time.Now().Unix()
+	require.NoError(t, WriteSnapshot(path, want, 7), "WriteSnapshot creates the parent dir")
 
 	got, err := ReadSnapshot(path)
 	require.NoError(t, err)
-	assert.Equal(t, want, got)
+	assert.Equal(t, want, got.Records)
+	assert.Equal(t, uint64(7), got.Generation, "the caller's generation round-trips")
+	assert.GreaterOrEqual(t, got.WrittenAt, before, "writtenAt is stamped at write time")
+	assert.LessOrEqual(t, got.WrittenAt, time.Now().Unix())
+
+	// The on-disk form really is the envelope, not a bare map.
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var envelope map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &envelope))
+	assert.Contains(t, envelope, "records")
+	assert.Contains(t, envelope, "writtenAt")
+	assert.Contains(t, envelope, "generation")
 
 	_, err = ReadSnapshot(filepath.Join(t.TempDir(), "missing.json"))
 	assert.ErrorIs(t, err, os.ErrNotExist, "a missing snapshot is distinguishable as not-exist")
+}
+
+// TestReadSnapshotLegacyBareMap: a snapshot written by a pre-#586 agent is a BARE
+// record map with no envelope. ReadSnapshot must still accept it (an in-place upgrade
+// must never start the resolver cold) and back-fill writtenAt from the file mtime, so
+// the freshness gauge degrades gracefully instead of reading zero.
+func TestReadSnapshotLegacyBareMap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.json")
+	want := map[string]string{"team-a/svc-1": "10.111.0.5", "default/echo": "10.111.0.6"}
+	data, err := json.Marshal(want)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+
+	mtime := time.Now().Add(-90 * time.Second).Truncate(time.Second)
+	require.NoError(t, os.Chtimes(path, mtime, mtime))
+
+	got, err := ReadSnapshot(path)
+	require.NoError(t, err, "the legacy bare-map form is still readable")
+	assert.Equal(t, want, got.Records)
+	assert.Zero(t, got.Generation, "a legacy snapshot carries no generation")
+	assert.Equal(t, mtime.Unix(), got.WrittenAt, "writtenAt falls back to the file mtime")
+}
+
+// TestReadSnapshotLegacyEnvelopeShapedKeys: a legacy bare map whose service keys
+// happen to collide with envelope field names still decodes as the legacy form.
+func TestReadSnapshotLegacyEnvelopeShapedKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.json")
+	want := map[string]string{"generation/svc": "10.111.0.5", "writtenAt/svc": "10.111.0.6"}
+	data, err := json.Marshal(want)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+
+	got, err := ReadSnapshot(path)
+	require.NoError(t, err)
+	assert.Equal(t, want, got.Records)
+}
+
+// TestReadSnapshotCorrupt: a file that exists but does not decode is reported as a
+// parse error (distinct from a missing file and from an I/O failure), which is what
+// the snapshot_reloads_total result label keys off.
+func TestReadSnapshotCorrupt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.json")
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o644))
+
+	_, err := ReadSnapshot(path)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSnapshotParse)
+	assert.NotErrorIs(t, err, os.ErrNotExist)
+}
+
+// TestReloadResultClassification: every ReadSnapshot outcome maps to the expected
+// snapshot_reloads_total result label.
+func TestReloadResultClassification(t *testing.T) {
+	dir := t.TempDir()
+
+	ok := filepath.Join(dir, "ok.json")
+	require.NoError(t, WriteSnapshot(ok, map[string]string{"default/echo": "10.111.0.6"}, 1))
+	_, err := ReadSnapshot(ok)
+	assert.Equal(t, reloadSuccess, reloadResult(err))
+
+	_, err = ReadSnapshot(filepath.Join(dir, "missing.json"))
+	assert.Equal(t, reloadMissing, reloadResult(err))
+
+	corrupt := filepath.Join(dir, "corrupt.json")
+	require.NoError(t, os.WriteFile(corrupt, []byte("[1,2,3]"), 0o644))
+	_, err = ReadSnapshot(corrupt)
+	assert.Equal(t, reloadParseError, reloadResult(err))
+
+	// A directory in place of the file: readable path, unreadable content -> I/O error.
+	_, err = ReadSnapshot(dir)
+	assert.Equal(t, reloadReadError, reloadResult(err))
+}
+
+// TestObservedState: the values the observable gauges export track the snapshot the
+// resolver actually serves (records/writtenAt/generation/ready) plus the daemon's
+// watcher and upstream configuration.
+func TestObservedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.json")
+	require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.111.0.6"}, 3))
+
+	s := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.DiscardHandler))
+	st := s.observedState()
+	assert.Equal(t, int64(1), st.records)
+	assert.Equal(t, uint64(3), st.generation)
+	assert.True(t, st.ready, "a non-empty warm load is ready")
+	assert.False(t, st.watchActive, "the daemon has not started its watcher yet")
+	assert.Zero(t, st.upstreams)
+	assert.Positive(t, st.writtenAt, "writtenAt comes from the envelope")
+
+	s.SetWatchActive(true)
+	s.SetUpstreams([]string{"10.96.0.10", "10.96.0.11"})
+	require.NoError(t, WriteSnapshot(path, map[string]string{
+		"default/echo": "10.222.0.9", "team-a/svc-1": "10.222.0.10",
+	}, 4))
+	s.ReloadFromSnapshot()
+
+	st = s.observedState()
+	assert.Equal(t, int64(2), st.records)
+	assert.Equal(t, uint64(4), st.generation, "the reloaded generation is exported")
+	assert.True(t, st.watchActive)
+	assert.Equal(t, int64(2), st.upstreams)
+
+	s.SetWatchActive(false)
+	assert.False(t, s.observedState().watchActive, "a dead watcher is visible")
+}
+
+// TestObservedStateEmptySnapshot: an EMPTY snapshot is the silent-outage case — the
+// resolver is ready (so mesh misses are authoritative NXDOMAINs) with zero records.
+// The records gauge must show that.
+func TestObservedStateEmptySnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.json")
+	require.NoError(t, WriteSnapshot(path, map[string]string{}, 9))
+
+	s := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.DiscardHandler))
+	s.ReloadFromSnapshot()
+
+	st := s.observedState()
+	assert.Zero(t, st.records, "an empty table NXDOMAINs the whole mesh")
+	assert.True(t, st.ready)
 }
 
 // TestReloadFromSnapshot: after a snapshot is rewritten on disk, ReloadFromSnapshot
 // re-reads it and the resolver answers from the new table.
 func TestReloadFromSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.json")
-	require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.111.0.6"}))
+	require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.111.0.6"}, 1))
 
 	s := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.DiscardHandler))
 	ip, _ := s.lookup("echo.default.aether.internal.")
 	require.Equal(t, "10.111.0.6", ip, "warm-started from the initial snapshot")
 
 	// The agent rewrites the snapshot with a new IP; the daemon reloads.
-	require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.222.0.9"}))
+	require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.222.0.9"}, 2))
 	s.ReloadFromSnapshot()
 
 	ip, ready := s.lookup("echo.default.aether.internal.")
