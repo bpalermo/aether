@@ -1,0 +1,126 @@
+# Prometheus alerting rules for the mesh-DNS resolver (issue #586 follow-up).
+#
+# The resolver is on the critical path for EVERY managed pod's DNS: the CNI DNATs
+# all UDP+TCP :53 to HOST_IP:18054. It runs as its own DaemonSet (aether-mesh-dns)
+# and answers from a snapshot file the node AGENT writes -- a cross-process
+# dependency that most of these rules exist to watch.
+#
+# Install: merge into the Prometheus helm values under
+#   serverFiles:
+#     alerting_rules.yml:
+#       groups: [...]
+# See README.md in this directory.
+
+groups:
+  - name: aether-mesh-dns
+    rules:
+      # ---------------------------------------------------------------- P1
+      # The failure mode that is SILENTLY WRONG rather than loudly broken, and
+      # the one the external prober cannot see: it keeps resolving its long-lived
+      # target from the frozen snapshot and stays green the whole time.
+      - alert: MeshDNSSnapshotStale
+        expr: max by (node) (aether_mesh_dns_snapshot_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: critical
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS records are stale on {{ $labels.node }}"
+          description: >-
+            The agent re-stamps the snapshot every 60s; age is now {{ $value | humanize }}s.
+            The agent has stopped writing (crash, RBAC loss, or a wedged capture
+            reconciler). The daemon keeps serving the frozen table as AUTHORITATIVE
+            NXDOMAINs, which clients negatively cache: new services never resolve and
+            re-IP'd services resolve to dead ClusterIPs. The external prober will NOT
+            catch this.
+
+      # An empty snapshot makes every mesh name an authoritative NXDOMAIN.
+      - alert: MeshDNSNoRecords
+        expr: min by (node) (aether_mesh_dns_records) == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS is serving zero records on {{ $labels.node }}"
+          description: >-
+            The resolver has no A records, so every <svc>.<ns>.aether.internal lookup
+            returns an authoritative NXDOMAIN for every pod on this node.
+
+      # With no upstream, EVERY non-mesh name fails - cluster.local and external
+      # included, because all :53 traffic is DNAT'd here. Root cause is usually an
+      # unreadable /etc/resolv.conf at daemon start.
+      - alert: MeshDNSNoUpstreams
+        expr: min by (node) (aether_mesh_dns_upstreams_configured) == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS has no forward upstream on {{ $labels.node }}"
+          description: >-
+            Non-mesh resolution (cluster.local and external) is failing for every pod
+            on this node. Check the daemon log for the ERROR emitted at startup when
+            /etc/resolv.conf yields no nameservers.
+
+      # ---------------------------------------------------------------- P2
+      # A dead watcher means reloads stop silently; records then freeze and
+      # MeshDNSSnapshotStale follows. This fires first and is the better signal.
+      - alert: MeshDNSWatcherInactive
+        expr: min by (node) (aether_mesh_dns_watch_active) == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS snapshot watcher is inactive on {{ $labels.node }}"
+          description: >-
+            The fsnotify watcher failed to start or died, so record updates are no
+            longer picked up. Restart the aether-mesh-dns pod on this node.
+
+      - alert: MeshDNSReloadFailing
+        expr: sum by (node) (rate(aether_mesh_dns_snapshot_reloads_total{result!="success"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS snapshot reloads are failing on {{ $labels.node }}"
+          description: >-
+            Reloads are erroring ({{ $labels.result }}); the daemon keeps the last good
+            table. A parse_error usually means a truncated or corrupt snapshot file.
+
+      # External SLI. Deliberately EXCLUDES http_error: that is the cross-node drain
+      # path (a different failure domain), and including it would fire on every proxy
+      # roll. Generic `timeout` IS included -- a hung resolver surfaces as a context
+      # deadline, not as dns_timeout.
+      - alert: MeshDNSResolutionFailing
+        expr: |
+          sum by (node, target) (
+            rate(aether_probe_requests_total{tier="mesh_dns",result=~"dns_error|dns_nxdomain|dns_timeout|timeout"}[5m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: critical
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS resolution failing on {{ $labels.node }} for {{ $labels.target }}"
+          description: >-
+            The external prober cannot resolve {{ $labels.target }}. A *.aether.internal
+            target implicates the resolver's authoritative path; a *.svc.cluster.local
+            target implicates the FORWARD path (kube-dns or upstream failover).
+
+      # Catch-all: every daemon stopped reporting. Push-based OTLP means a dead
+      # daemon simply stops producing series rather than going to 0.
+      - alert: MeshDNSMetricsAbsent
+        expr: absent(aether_mesh_dns_ready)
+        for: 10m
+        labels:
+          severity: critical
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS is reporting no metrics fleet-wide"
+          description: >-
+            No aether_mesh_dns_* series for 10m. Either every daemon is down (DNS is
+            broken cluster-wide) or the OTLP metrics path is broken (check the
+            otel-collector for memory saturation, which sheds exports silently).
