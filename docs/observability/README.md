@@ -69,60 +69,38 @@ kubectl get cm prometheus-server -n prometheus \
 
 Rules appear under **Alerts** in the Prometheus UI once loaded.
 
-> **Note — no notification delivery.** There is currently no Alertmanager deployed, so
-> firing alerts are visible in the Prometheus UI but are **not routed anywhere**.
-> Deploying Alertmanager (or moving these to Grafana-managed alert rules with a contact
-> point) is required before they page anyone.
-
 ## Alert delivery (Alertmanager -> GitHub issue)
 
-Rules that fire nowhere are decoration. These two values changes turn the rules above
-into a tracked GitHub issue. Deploy `alertmanager-github-receiver.yaml` first (it
-documents the fine-grained-PAT prerequisite), then patch the Prometheus helm values:
+**This file is the source of truth for the rules; it is not where they are deployed
+from.** talos-main is GitOps-managed by Flux, so nothing here is applied by hand — the
+rules and the delivery path both live in
+[`bpalermo/k8s-talos-main`](https://github.com/bpalermo/k8s-talos-main):
 
-```yaml
-# 1. Load the rules. NOTE: prometheus.yml's `rule_files` ALREADY lists
-#    /etc/config/alerting_rules.yml -- the wiring exists, the file is just empty.
-#    So this is the only change needed to make alerts evaluate.
-serverFiles:
-  alerting_rules.yml:
-    groups:
-      # contents of mesh-dns-alerts.yml
-      - name: aether-mesh-dns
-        rules: [...]
+| what | where |
+|---|---|
+| rule group `aether-mesh-dns` | `clusters/talos-main/prometheus/values.yaml` → `serverFiles.alerting_rules.yml` |
+| Alertmanager routing + receiver | same file → `alertmanager.config` |
+| receiver Deployment | `clusters/talos-main/alertmanager-github-receiver/` |
+| GitHub PAT | SOPS-encrypted `secret.sops.yaml` in that dir (AWS KMS + PGP) |
 
-# 2. Enable Alertmanager. The chart wires prometheus.yml's `alerting.alertmanagers`
-#    automatically when the subchart is enabled -- no prometheus.yml edit needed.
-alertmanager:
-  enabled: true
-  config:
-    route:
-      receiver: github
-      # Group by alertname ONLY, not [alertname, node]: the receiver titles issues
-      # from .GroupLabels.alertname, so grouping by node would open one issue PER
-      # NODE per alert. One issue per condition, listing every firing instance, is
-      # the artifact you actually want to triage.
-      group_by: [alertname]
-      group_wait: 30s
-      group_interval: 5m
-      # Long, because the issue persists. A short repeat just re-comments on an
-      # issue that is already open and already being read.
-      repeat_interval: 12h
-    receivers:
-      - name: github
-        webhook_configs:
-          - url: http://alertmanager-github-receiver.o11y.svc.cluster.local:9393/v1/receiver
-            send_resolved: true   # required for -enable-auto-close to ever fire
-    inhibit_rules:
-      # When the whole fleet stops reporting, the per-node gauge alerts are not
-      # independent findings -- they are the same telemetry gap restated five times.
-      # Suppress them so the page says "metrics absent", not a wall of noise.
-      - source_matchers: [alertname = "MeshDNSMetricsAbsent"]
-        target_matchers: [alertname =~ "MeshDNSNoRecords|MeshDNSNoUpstreams|MeshDNSWatcherInactive"]
-        equal: []
-```
+A firing alert opens an issue on this repo labelled `alert`, and closes it on resolve.
+Issues are keyed on `GroupKey`, and `group_by: [alertname]` makes that stable — so one
+issue per condition listing every firing node, and a flapping alert **reopens** its issue
+rather than opening a new one.
 
-Then `helm upgrade` the Prometheus release and verify:
+Two things that are easy to get wrong, both already handled there:
+
+- **`Watchdog` must never reach the GitHub receiver.** It is a dead-man's switch
+  (`expr: vector(1)`) that fires permanently *by design*. Since `github` is now the
+  default receiver, its `→ "null"` route is load-bearing — without it you get one
+  immortal issue that can never be closed, and you learn to ignore the label.
+- **`measurementlab/alertmanager-github-receiver` cannot run on talos-main.** It is the
+  receiver everyone cites, but it is published **amd64-only** (neither `latest` nor
+  `v0.11` is a multi-arch index) while every talos-main node is **arm64**. We use
+  `ghcr.io/pfnet-research/alertmanager-to-github`, which ships a genuine multi-arch
+  index, pinned by digest.
+
+Verify what is actually loaded:
 
 ```bash
 kubectl get cm prometheus-server -n prometheus \
