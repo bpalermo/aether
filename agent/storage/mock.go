@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/bpalermo/aether/agent/types"
 	"google.golang.org/protobuf/proto"
@@ -13,6 +14,13 @@ import (
 // method, types in other packages cannot implement the interface directly;
 // MockStorage bridges that gap by living in package storage while exposing
 // configurable behaviour via exported function fields.
+//
+// Like LocalStorage — the implementation it stands in for — MockStorage is safe
+// for concurrent use. Production callers (the CNI server's liveness loop, ghost
+// sweep and drain timers) read and write storage from several goroutines, so a
+// double without that guarantee turns any test of those paths into a data race
+// on the backing map rather than a test of the code under test. The configurable
+// function fields are NOT guarded: set them before the storage is shared.
 type MockStorage[T proto.Message] struct {
 	// GetAllFunc is called by GetAll. If nil, GetAll iterates the resources map.
 	GetAllFunc func(ctx context.Context) ([]T, error)
@@ -26,6 +34,9 @@ type MockStorage[T proto.Message] struct {
 
 	// RemoveResourceFunc is called by RemoveResource. If nil, the resource is deleted from the map.
 	RemoveResourceFunc func(ctx context.Context, key types.ContainerID) error
+
+	// mu guards resources.
+	mu sync.RWMutex
 
 	// resources holds items added via AddResource when no AddResourceFunc is set.
 	resources map[types.ContainerID]T
@@ -59,6 +70,8 @@ func (m *MockStorage[T]) AddResource(ctx context.Context, key types.ContainerID,
 	if m.AddResourceFunc != nil {
 		return m.AddResourceFunc(ctx, key, resource)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.resources[key] = resource
 	return nil
 }
@@ -67,6 +80,8 @@ func (m *MockStorage[T]) RemoveResource(ctx context.Context, key types.Container
 	if m.RemoveResourceFunc != nil {
 		return m.RemoveResourceFunc(ctx, key)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.resources, key)
 	return nil
 }
@@ -75,6 +90,8 @@ func (m *MockStorage[T]) GetResource(ctx context.Context, key types.ContainerID)
 	if m.GetResourceFunc != nil {
 		return m.GetResourceFunc(ctx, key)
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	r, ok := m.resources[key]
 	if !ok {
 		var zero T
@@ -87,6 +104,8 @@ func (m *MockStorage[T]) GetAll(ctx context.Context) ([]T, error) {
 	if m.GetAllFunc != nil {
 		return m.GetAllFunc(ctx)
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	result := make([]T, 0, len(m.resources))
 	for _, v := range m.resources {
 		result = append(result, v)

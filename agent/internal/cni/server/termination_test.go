@@ -197,15 +197,26 @@ func TestHandlePodTerminatingPoolClosePhase(t *testing.T) {
 		return reg.LastHealth() == registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
 	}, 2*time.Second, 10*time.Millisecond, "phase 2: unhealthy re-registration after drain delay")
 
-	// Resurrection guard: pod removed (CNI DEL) before phase 2 fires.
+	// Resurrection guard: pod removed (CNI DEL) before phase 2 fires. The drain
+	// delay is widened first so the interleaving under test — DEL wins the race —
+	// is the one actually exercised rather than whichever the scheduler picks.
+	s.drainPoolCloseDelay = 200 * time.Millisecond
 	pod2 := validCNIPod("pod-2q", "default", "container-2q")
 	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-2q"), pod2))
 	s.handlePodTerminating(ctx, terminatingK8sPod("pod-2q", "default", "test-node"))
 	registeredBefore := reg.Registered()
-	require.NoError(t, store.RemoveResource(ctx, types.ContainerID("container-2q")))
 
-	time.Sleep(100 * time.Millisecond) // > test drain delay
-	assert.Equal(t, registeredBefore, reg.Registered(), "phase 2 must not re-register a removed pod")
+	// RemovePod deletes from storage under lifecycleMu; do the same here so the
+	// removal cannot land inside schedulePoolClose's critical section (between
+	// its existence check and the re-registration), which no real CNI DEL can do.
+	s.lifecycleMu.Lock()
+	require.NoError(t, store.RemoveResource(ctx, types.ContainerID("container-2q")))
+	s.lifecycleMu.Unlock()
+
+	// Poll past the drain deadline: phase 2 fires, finds no pod, closes nothing.
+	assert.Never(t, func() bool {
+		return reg.Registered() != registeredBefore
+	}, 500*time.Millisecond, 10*time.Millisecond, "phase 2 must not re-register a removed pod")
 }
 
 // TestDrainDelayForPod: phase 2 scales with the workload's sleep preStop
