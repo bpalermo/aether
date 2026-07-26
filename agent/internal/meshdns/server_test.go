@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -389,26 +390,24 @@ func waitForUDP(t *testing.T, addr string) {
 	t.Fatalf("resolver did not bind %s in time", addr)
 }
 
-// fakeResponseWriter captures the reply message ServeDNS writes.
-type fakeResponseWriter struct {
-	dns.ResponseWriter
-	msg *dns.Msg
-}
-
-func (f *fakeResponseWriter) WriteMsg(m *dns.Msg) error { f.msg = m; return nil }
-func (f *fakeResponseWriter) LocalAddr() net.Addr       { return &net.UDPAddr{} }
-func (f *fakeResponseWriter) RemoteAddr() net.Addr      { return &net.UDPAddr{} }
-
 func query(name string, qtype uint16) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(name), qtype)
 	return m
 }
 
+// serve drives the handler in-process over the production in-memory ResponseWriter
+// (memResponseWriter, shared with the self-check watchdog) presenting a UDP client.
 func serve(s *Server, r *dns.Msg) *dns.Msg {
-	w := &fakeResponseWriter{}
+	return serveFrom(s, r, nil)
+}
+
+// serveFrom drives the handler with a specific client address, so a test can present a
+// TCP-originated query (the forward path branches on it).
+func serveFrom(s *Server, r *dns.Msg, remote net.Addr) *dns.Msg {
+	w := newMemResponseWriter(remote)
 	s.ServeDNS(w, r)
-	return w.msg
+	return w.Msg()
 }
 
 // TestServeMeshMissColdIsServfail: a mesh miss BEFORE records are ever populated is
@@ -502,6 +501,195 @@ func TestServeNonMeshForwards(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, dns.RcodeServerFailure, resp.Rcode)
 	assert.False(t, resp.Authoritative, "forwarded (upstream failed), not an authoritative mesh answer")
+}
+
+// TestQueryProto: the transport a query arrived on is read off the writer's remote
+// address. Anything that is not a TCP address (including a nil one) is UDP.
+func TestQueryProto(t *testing.T) {
+	assert.Equal(t, protoUDP, queryProto(newMemResponseWriter(nil)))
+	assert.Equal(t, protoUDP, queryProto(newMemResponseWriter(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234})))
+	assert.Equal(t, protoTCP, queryProto(newMemResponseWriter(&net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234})))
+	assert.Equal(t, protoUDP, queryProto(newMemResponseWriter(nilAddr{})), "an unknown addr type is treated as UDP")
+}
+
+// nilAddr is an addr of neither UDP nor TCP type.
+type nilAddr struct{}
+
+func (nilAddr) Network() string { return "unix" }
+func (nilAddr) String() string  { return "@" }
+
+// TestForwardTCPQueryUsesTCP: a query that arrived over TCP is forwarded over TCP. The
+// CNI DNATs pod :53 for TCP too, and such a client has already decided it wants an
+// answer that does not fit a datagram — relaying it over UDP is what could hand it a
+// truncated reply we would then record as a clean "forwarded".
+func TestForwardTCPQueryUsesTCP(t *testing.T) {
+	seen := &protoRecorder{}
+	addr := startUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		seen.add(upstreamProto(w))
+		m := new(dns.Msg)
+		m.SetReply(r)
+		_ = w.WriteMsg(m)
+	})
+
+	s := NewServer("aether.internal", "127.0.0.1:0", "", slog.New(slog.DiscardHandler))
+	s.SetUpstreams([]string{addr})
+
+	resp := serveFrom(s, query("google.com", dns.TypeA), &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5555})
+	require.NotNil(t, resp)
+	assert.Equal(t, dns.RcodeSuccess, resp.Rcode)
+	assert.Equal(t, []string{protoTCP}, seen.all(), "a TCP-originated query is forwarded over TCP")
+
+	// A UDP-originated query still goes out over UDP (the cheap common path).
+	resp = serve(s, query("google.com", dns.TypeA))
+	require.NotNil(t, resp)
+	assert.Equal(t, []string{protoTCP, protoUDP}, seen.all())
+}
+
+// TestForwardTruncatedUDPReplyRetriesOverTCP: when the upstream truncates the UDP reply
+// (TC=1) the resolver re-asks over TCP and returns the full answer, instead of passing a
+// truncated reply back as a clean "forwarded" while the client loops.
+func TestForwardTruncatedUDPReplyRetriesOverTCP(t *testing.T) {
+	seen := &protoRecorder{}
+	addr := startUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		proto := upstreamProto(w)
+		seen.add(proto)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		if proto == protoUDP {
+			// Too big for a datagram: answer TC=1 with nothing, as a real upstream does.
+			m.Truncated = true
+			_ = w.WriteMsg(m)
+			return
+		}
+		m.Answer = []dns.RR{&dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+			A:   net.IPv4(93, 184, 216, 34),
+		}}
+		_ = w.WriteMsg(m)
+	})
+
+	s := NewServer("aether.internal", "127.0.0.1:0", "", slog.New(slog.DiscardHandler))
+	s.SetUpstreams([]string{addr})
+
+	resp := serve(s, query("big.example.com", dns.TypeA))
+	require.NotNil(t, resp)
+	assert.Equal(t, []string{protoUDP, protoTCP}, seen.all(), "UDP first, then the TCP retry")
+	assert.False(t, resp.Truncated, "the full TCP answer fits the client's buffer")
+	require.Len(t, resp.Answer, 1, "the client gets the answer, not an empty TC=1 reply")
+	a, ok := resp.Answer[0].(*dns.A)
+	require.True(t, ok)
+	assert.Equal(t, "93.184.216.34", a.A.String())
+}
+
+// TestForwardTruncatedRetryFailureKeepsTruncatedReply: if the TCP retry itself fails,
+// the client still gets the upstream's TC=1 reply — a signal it can act on (retry over
+// TCP, which the CNI also DNATs here) — rather than a SERVFAIL.
+func TestForwardTruncatedRetryFailureKeepsTruncatedReply(t *testing.T) {
+	addr := startUpstreamUDPOnly(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Truncated = true
+		_ = w.WriteMsg(m)
+	})
+
+	s := NewServer("aether.internal", "127.0.0.1:0", "", slog.New(slog.DiscardHandler))
+	s.SetUpstreams([]string{addr})
+
+	resp := serve(s, query("big.example.com", dns.TypeA))
+	require.NotNil(t, resp)
+	assert.True(t, resp.Truncated, "the truncated reply is passed through when TCP is unreachable")
+	assert.Equal(t, dns.RcodeSuccess, resp.Rcode, "not a SERVFAIL")
+}
+
+// TestUDPSizeFor: the re-truncation ceiling is the client's advertised EDNS0 buffer,
+// with RFC 1035's 512-byte floor when it asked without EDNS0 (or advertised less).
+func TestUDPSizeFor(t *testing.T) {
+	assert.Equal(t, dns.MinMsgSize, udpSizeFor(query("google.com", dns.TypeA)))
+
+	big := query("google.com", dns.TypeA)
+	big.SetEdns0(4096, false)
+	assert.Equal(t, 4096, udpSizeFor(big))
+
+	small := query("google.com", dns.TypeA)
+	small.SetEdns0(200, false)
+	assert.Equal(t, dns.MinMsgSize, udpSizeFor(small), "never below the 512-byte floor")
+}
+
+// protoRecorder collects, in order, the transports an upstream saw.
+type protoRecorder struct {
+	mu     sync.Mutex
+	protos []string
+}
+
+func (p *protoRecorder) add(proto string) {
+	p.mu.Lock()
+	p.protos = append(p.protos, proto)
+	p.mu.Unlock()
+}
+
+func (p *protoRecorder) all() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.protos...)
+}
+
+// upstreamProto reports which transport a query reached the TEST upstream over.
+func upstreamProto(w dns.ResponseWriter) string {
+	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
+		return protoTCP
+	}
+	return protoUDP
+}
+
+// startUpstream runs a test resolver on ONE host:port over BOTH udp and tcp (what a
+// real upstream looks like) and returns its address.
+func startUpstream(t *testing.T, h dns.HandlerFunc) string {
+	t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
+	startUpstreamOn(t, addr, "udp", h)
+	startUpstreamOn(t, addr, "tcp", h)
+	return addr
+}
+
+// startUpstreamUDPOnly runs a test resolver that answers over udp only, so a TCP retry
+// against it fails.
+func startUpstreamUDPOnly(t *testing.T, h dns.HandlerFunc) string {
+	t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", freeDNSPort(t))
+	startUpstreamOn(t, addr, "udp", h)
+	return addr
+}
+
+// startUpstreamOn binds one transport of the test upstream and waits for it to serve.
+func startUpstreamOn(t *testing.T, addr, network string, h dns.HandlerFunc) {
+	t.Helper()
+	started := make(chan struct{})
+	srv := &dns.Server{Addr: addr, Net: network, Handler: h}
+	srv.NotifyStartedFunc = func() { close(started) }
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("test upstream did not bind %s/%s in time", addr, network)
+	}
+}
+
+// freeDNSPort finds a port free on BOTH udp and tcp: the forward path dials one
+// host:port over either transport, so the test upstream must own both.
+func freeDNSPort(t *testing.T) int {
+	t.Helper()
+	for range 20 {
+		port := freeUDPPort(t)
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		require.NoError(t, ln.Close())
+		return port
+	}
+	t.Fatal("no port was free on both udp and tcp")
+	return 0
 }
 
 // TestEnsureSnapshotDir: the agent pre-creates the snapshot's parent so the resolver

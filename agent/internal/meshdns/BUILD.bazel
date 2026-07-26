@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "metrics.go",
         "resolvconf.go",
+        "selfcheck.go",
         "server.go",
         "telemetry.go",
     ],
@@ -34,6 +35,7 @@ go_test(
     name = "meshdns_test",
     srcs = [
         "resolvconf_test.go",
+        "selfcheck_test.go",
         "server_test.go",
     ],
     embed = [":meshdns"],
