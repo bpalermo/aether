@@ -43,7 +43,7 @@ GWAPI_VERSION="v1.5.1"
 SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.28.4}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.5.0}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
-IMAGES=(agent cni-install registrar controller)
+IMAGES=(agent mesh-dns cni-install registrar controller)
 # Origin-heartbeat lease TTL is 30s (replicator default); how long verify waits
 # for the mirror to expire after the origin dies (TTL + keepalive/gRPC slack).
 FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-90}"
@@ -245,7 +245,7 @@ install_aether() {
 			--set "registrar.region=$(region_of "$c")" \
 			--set "registrar.etcd.endpoints[0]=http://$(etcd_ip "$c"):2379" \
 			--set "registrar.peerEtcd[0]=$(region_of "$peer")=http://$(etcd_ip "$peer"):2379" \
-			$(img agent agent) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
+			$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
 			--timeout 5m >/dev/null || die "aether install failed on '$c'"
 		kubectl --context "kind-$c" -n "$NS" rollout status ds/aether-agent --timeout=180s >/dev/null || true
 		# client_code() resolves echo.<ns>.<mesh-domain>, and since #578 the AGENT no

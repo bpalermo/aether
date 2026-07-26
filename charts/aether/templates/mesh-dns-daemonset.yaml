@@ -44,8 +44,11 @@ spec:
           effect: NoSchedule
       containers:
         - name: mesh-dns
-          image: {{ include "aether.image" .Values.agent.image | quote }}
-          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          # Its own slim image (#583 option B) — NOT agent.image, which carries the
+          # full agent (controller-runtime, xDS, CNI server, SPIRE) this daemon never
+          # executes but would still pull onto every node and expose on a host port.
+          image: {{ include "aether.image" .Values.agent.meshDnsDaemon.image | quote }}
+          imagePullPolicy: {{ .Values.agent.meshDnsDaemon.image.pullPolicy }}
           command: ["/mesh-dns"]
           args:
             - "--debug={{ .Values.debug }}"

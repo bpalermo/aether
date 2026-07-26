@@ -61,8 +61,9 @@ jobs:
       - name: Build and load container images
         run: |
           retry() { for n in 1 2 3; do "$@" && return 0; echo "attempt $n failed; retrying in 20s"; sleep 20; done; return 1; }
-          for t in //agent/cmd/agent:image_load //cni/cmd/cni-install:image_load \
-                   //registrar/cmd/registrar:image_load //controller/cmd/controller:image_load; do
+          for t in //agent/cmd/agent:image_load //agent/cmd/mesh-dns:image_load \
+                   //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load \
+                   //controller/cmd/controller:image_load; do
             retry bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} "$t"
           done
 
@@ -70,6 +71,7 @@ jobs:
         run: |
           docker save \
             "${IMAGE_REGISTRY}/agent:latest" \
+            "${IMAGE_REGISTRY}/mesh-dns:latest" \
             "${IMAGE_REGISTRY}/cni-install:latest" \
             "${IMAGE_REGISTRY}/registrar:latest" \
             "${IMAGE_REGISTRY}/controller:latest" \
@@ -116,7 +118,7 @@ jobs:
 
       - name: Load images into kind
         run: |
-          for img in agent:latest cni-install:latest registrar:latest controller:latest; do
+          for img in agent:latest mesh-dns:latest cni-install:latest registrar:latest controller:latest; do
             kind load docker-image "${IMAGE_REGISTRY}/${img}" --name "${KIND_CLUSTER}"
           done
 
@@ -167,6 +169,7 @@ jobs:
             --set edge.tls.enabled=true \
             --set edge.gateway.create=false \
             $(img agent agent) \
+            $(img agent.meshDnsDaemon mesh-dns) \
             $(img cniInstall cni-install) \
             $(img registrar registrar) \
             $(img controller controller) \
@@ -279,7 +282,7 @@ jobs:
 
       - name: Load images into kind
         run: |
-          for img in agent:latest cni-install:latest registrar:latest controller:latest; do
+          for img in agent:latest mesh-dns:latest cni-install:latest registrar:latest controller:latest; do
             kind load docker-image "${IMAGE_REGISTRY}/${img}" --name "${KIND_CLUSTER}"
           done
 
@@ -309,6 +312,7 @@ jobs:
             --set spire.enabled=false \
             --set agent.gamma=true \
             $(img agent agent) \
+            $(img agent.meshDnsDaemon mesh-dns) \
             $(img cniInstall cni-install) \
             $(img registrar registrar) \
             $(img controller controller) \

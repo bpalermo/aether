@@ -160,6 +160,17 @@ agent:
   # agent.meshDns is true. It mounts the agent's registry hostPath read-only and
   # serves HOST_IP:18054 from the snapshot the agent writes.
   meshDnsDaemon:
+    # Its OWN image (#583 option B), carrying ONLY the slim /mesh-dns binary — no
+    # controller-runtime, no xDS/go-control-plane, no CNI server, no SPIRE. The daemon
+    # briefly shipped as an extra layer inside agent.image (the interim #583 measure),
+    # which made every node pull the whole agent for a process that executes none of
+    # it. Same repository+digest convention as agent.image: mirror to a private
+    # registry by overriding `repository` alone; the digest is preserved.
+    image:
+      repository: "{@//agent/cmd/mesh-dns:image_push.repository}"
+      digest: "{@//agent/cmd/mesh-dns:image_push.digest}"
+      tag: ""
+      pullPolicy: Always
     # Issue #583: the readiness probe now re-execs the SLIM /mesh-dns binary (only the
     # resolver + snapshot reload + telemetry — no controller-runtime/xDS/CNI/SPIRE), not
     # the full /agent, so the re-exec CPU headroom that inflated these limits is gone.

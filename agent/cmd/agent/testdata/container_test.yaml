@@ -8,10 +8,10 @@ fileExistenceTests:
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'
-  # The slim standalone mesh-DNS binary ships in the same image (#583); the
-  # aether-mesh-dns DaemonSet runs /mesh-dns instead of re-execing the full /agent.
-  - name: 'mesh-dns'
+  # The slim mesh-DNS daemon now has its OWN image
+  # (//agent/cmd/mesh-dns:mesh-dns_image, #583 option B). It was only ever bundled
+  # here to avoid standing up a second publish pipeline; assert it is gone so the
+  # agent image can't silently re-acquire it.
+  - name: 'no mesh-dns binary'
     path: '/mesh-dns'
-    shouldExist: true
-    permissions: '-rwxr-xr-x'
-    isExecutableBy: 'other'
+    shouldExist: false

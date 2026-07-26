@@ -33,7 +33,7 @@ REGION="local"
 NS="aether-system"
 GWAPI_VERSION="v1.5.1"
 MCS_VERSION="v0.5.0"
-IMAGES=(agent cni-install registrar controller)
+IMAGES=(agent mesh-dns cni-install registrar controller)
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -151,7 +151,7 @@ install_aether() {
 			--set "registrar.region=$REGION" \
 			--set "registrar.etcd.region=$REGION" \
 			--set "registrar.etcd.endpoints[0]=$etcd" \
-			$(img agent agent) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
+			$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
 			--timeout 4m >/dev/null
 		kubectl --context "kind-$c" -n "$NS" rollout status deploy/aether-registrar --timeout=150s >/dev/null
 		ok "aether registrar up on '$c'"

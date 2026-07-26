@@ -41,7 +41,7 @@ GWAPI_VERSION="v1.5.1"
 SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.28.4}"
 SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.5.0}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
-IMAGES=(agent cni-install registrar controller)
+IMAGES=(agent mesh-dns cni-install registrar controller)
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -223,7 +223,7 @@ install_aether() {
 			--set "registrar.region=$REGION" \
 			--set "registrar.etcd.region=$REGION" \
 			--set "registrar.etcd.endpoints[0]=$etcd" \
-			$(img agent agent) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
+			$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
 			--timeout 5m >/dev/null || die "aether install failed on '$c'"
 		kubectl --context "kind-$c" -n "$NS" rollout status ds/aether-agent --timeout=180s >/dev/null || true
 		# The data-path assertion resolves echo.<ns>.<mesh-domain>, and since #578 the
