@@ -73,3 +73,86 @@ Rules appear under **Alerts** in the Prometheus UI once loaded.
 > firing alerts are visible in the Prometheus UI but are **not routed anywhere**.
 > Deploying Alertmanager (or moving these to Grafana-managed alert rules with a contact
 > point) is required before they page anyone.
+
+## Alert delivery (Alertmanager -> GitHub issue)
+
+Rules that fire nowhere are decoration. These two values changes turn the rules above
+into a tracked GitHub issue. Deploy `alertmanager-github-receiver.yaml` first (it
+documents the fine-grained-PAT prerequisite), then patch the Prometheus helm values:
+
+```yaml
+# 1. Load the rules. NOTE: prometheus.yml's `rule_files` ALREADY lists
+#    /etc/config/alerting_rules.yml -- the wiring exists, the file is just empty.
+#    So this is the only change needed to make alerts evaluate.
+serverFiles:
+  alerting_rules.yml:
+    groups:
+      # contents of mesh-dns-alerts.yml
+      - name: aether-mesh-dns
+        rules: [...]
+
+# 2. Enable Alertmanager. The chart wires prometheus.yml's `alerting.alertmanagers`
+#    automatically when the subchart is enabled -- no prometheus.yml edit needed.
+alertmanager:
+  enabled: true
+  config:
+    route:
+      receiver: github
+      # Group by alertname ONLY, not [alertname, node]: the receiver titles issues
+      # from .GroupLabels.alertname, so grouping by node would open one issue PER
+      # NODE per alert. One issue per condition, listing every firing instance, is
+      # the artifact you actually want to triage.
+      group_by: [alertname]
+      group_wait: 30s
+      group_interval: 5m
+      # Long, because the issue persists. A short repeat just re-comments on an
+      # issue that is already open and already being read.
+      repeat_interval: 12h
+    receivers:
+      - name: github
+        webhook_configs:
+          - url: http://alertmanager-github-receiver.o11y.svc.cluster.local:9393/v1/receiver
+            send_resolved: true   # required for -enable-auto-close to ever fire
+    inhibit_rules:
+      # When the whole fleet stops reporting, the per-node gauge alerts are not
+      # independent findings -- they are the same telemetry gap restated five times.
+      # Suppress them so the page says "metrics absent", not a wall of noise.
+      - source_matchers: [alertname = "MeshDNSMetricsAbsent"]
+        target_matchers: [alertname =~ "MeshDNSNoRecords|MeshDNSNoUpstreams|MeshDNSWatcherInactive"]
+        equal: []
+```
+
+Then `helm upgrade` the Prometheus release and verify:
+
+```bash
+kubectl get cm prometheus-server -n prometheus \
+  -o go-template='{{index .data "alerting_rules.yml"}}' | head
+```
+
+Rules appear under **Alerts** in the Prometheus UI, and `ALERTS{alertstate="firing"}`
+becomes queryable via the Grafana Prometheus datasource.
+
+### Do the collector bump BEFORE enabling these
+
+Prometheus here is **OTLP-receive-only** (all scrape configs disabled,
+`web.enable-otlp-receiver`), so series arrive by push. Under memory pressure the
+otel-collector **sheds gauge exports** -- during the 2026-07-25/26 soak one node
+vanished from `aether_mesh_dns_records` and `snapshot_age_seconds` for a stretch while
+its resolver was provably healthy.
+
+Four of the seven rules key on exactly those gauges (`MeshDNSNoRecords`,
+`MeshDNSNoUpstreams`, `MeshDNSWatcherInactive`, `MeshDNSMetricsAbsent`). With a shedding
+collector a healthy node whose export was dropped is indistinguishable from a broken
+one, and `absent()` fires on the telemetry gap rather than a resolver failure. Enabling
+these before the collector has headroom trains everyone to ignore them within a week.
+
+`MeshDNSSnapshotStale` and `MeshDNSResolutionFailing` are safer -- the latter is
+counter-based, and counters self-heal across a refused export.
+
+### Prove each rule fires before trusting it
+
+Break something deliberately and confirm the expected rule -- and only that rule --
+fires. `MeshDNSResolutionFailing` most of all: its exclusion of `http_error` and
+inclusion of generic `timeout` is reasoned (a hung resolver surfaces as a context
+deadline, while `http_error` is the cross-node backend path) but has never been
+observed firing.
