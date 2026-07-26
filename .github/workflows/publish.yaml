@@ -38,9 +38,11 @@ jobs:
         run: |
           bazel build --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //...
       # `*.push` publishes each chart together with the images it references
-      # (aether.push -> agent + cni-install + registrar + controller images +
-      # the aether chart; crds.push -> the MeshConfig CRD chart; prober.push ->
-      # prober chart + image), so a single GHCR login covers images and charts.
+      # (aether.push -> agent + mesh-dns + cni-install + registrar + controller
+      # images + the aether chart; crds.push -> the MeshConfig CRD chart;
+      # prober.push -> prober chart + image), so a single GHCR login covers images
+      # and charts. Adding an image to a chart's `images` attr is all that is needed
+      # to get it published — no separate push step (mesh-dns, #583).
       - name: Push charts + images
         env:
           HELM_REGISTRY_USERNAME: ${{ github.actor }}

@@ -19,6 +19,7 @@ helm_chart(
     chart = "Chart.yaml",
     images = [
         "//agent/cmd/agent:image_push",
+        "//agent/cmd/mesh-dns:image_push",
         "//cni/cmd/cni-install:image_push",
         "//registrar/cmd/registrar:image_push",
         "//controller/cmd/controller:image_push",

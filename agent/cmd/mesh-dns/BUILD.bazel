@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 
 go_library(
     name = "mesh-dns_lib",
@@ -24,9 +25,22 @@ go_binary(
     },
 )
 
+# Dedicated image for the aether-mesh-dns DaemonSet (#583, option B). The daemon
+# used to ship inside the agent image (one extra /mesh-dns layer) purely to avoid
+# standing up a second publish pipeline; that made every node pull
+# controller-runtime, xDS/go-control-plane, the CNI server and SPIRE for a process
+# that binds a host port and answers every managed pod's :53 DNAT and executes none
+# of it. This image carries the slim binary alone.
+go_multi_arch_image(
+    name = "mesh-dns_image",
+    binary = ":mesh-dns",
+    repository = "bpalermo/aether/mesh-dns",
+)
+
 go_test(
     name = "mesh-dns_test",
     srcs = ["main_test.go"],
+    data = glob(["testdata/**"]),
     embed = [":mesh-dns_lib"],
     deps = [
         "//agent/internal/meshdns",

@@ -1,0 +1,18 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/mesh-dns"]
+  user: 65532 # nonroot
+fileExistenceTests:
+  # The slim standalone mesh-DNS binary (#583) — the ONLY thing in this image.
+  # The DaemonSet runs it as its command AND re-execs it for the readiness marker
+  # check, so it must be executable by the (non-root) runtime user.
+  - name: 'mesh-dns'
+    path: '/mesh-dns'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
+  # Guard against the agent image's payload leaking back in: this image exists to
+  # NOT carry the full agent (#583 option B).
+  - name: 'no agent binary'
+    path: '/agent'
+    shouldExist: false

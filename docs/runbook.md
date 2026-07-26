@@ -42,6 +42,7 @@ over Bazel).
 make build              # bazel build //...  (everything)
 
 make build-agent        # //agent/cmd/agent/...        (node agent + edge + supervisor)
+make build-mesh-dns     # //agent/cmd/mesh-dns/...     (slim standalone mesh-DNS daemon)
 make build-registrar    # //registrar/cmd/registrar/...
 make build-cni-install  # //cni/cmd/cni-install/...
 ```
@@ -109,13 +110,17 @@ make tidy               # bazel mod tidy
 
 ## 5. Container images
 
-In-repo images (agent, cni-install, registrar) build with `rules_img`:
+In-repo images (agent, mesh-dns, cni-install, registrar) build with `rules_img`:
 
 ```bash
-make load-all           # load agent + cni-install + registrar into local Docker
-make load-agent-image   # a single image (…-registrar-image, …-cni-install-image likewise)
+make load-all           # load agent + mesh-dns + cni-install + registrar into local Docker
+make load-agent-image   # a single image (…-mesh-dns-image, …-registrar-image, …-cni-install-image likewise)
 make push-all           # push all to the registry
 ```
+
+`mesh-dns` is its own image (#583): the `aether-mesh-dns` DaemonSet must NOT ship
+the full agent, so it gets the slim `/mesh-dns` binary alone (~7Mi vs the agent's
+~20Mi) and the chart pins it separately via `agent.meshDnsDaemon.image`.
 
 The `controller` image is not in `load-all`; load it with
 `bazel run //controller/cmd/controller:image_load`.
