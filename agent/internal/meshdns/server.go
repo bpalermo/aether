@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,6 +36,16 @@ import (
 )
 
 const answerTTL = 30
+
+// forwardTimeout bounds EVERY stage of an upstream exchange (dial, write, read).
+//
+// miekg/dns already applies an implicit 2s default (its unexported dnsTimeout) when a
+// Client leaves DialTimeout/ReadTimeout/WriteTimeout at zero, so this pins the same
+// value — behaviour is unchanged, the bound is simply visible here and can no longer
+// move silently under a dependency bump. It matters: the CNI DNATs every managed pod's
+// :53 here, so a forward that outlives its deadline pins a serve goroutine, and enough
+// of those is exactly the bound-but-blind wedge the self-check watchdog exists to catch.
+const forwardTimeout = 2 * time.Second
 
 // snapshotFileMode is the permission for the persisted records snapshot.
 const snapshotFileMode = 0o644
@@ -95,8 +106,20 @@ type Server struct {
 	readyMarker  string
 	reusePort    bool
 	log          *slog.Logger
-	client       *dns.Client
 	metrics      *metrics
+
+	// Separate forward clients per transport. A query that arrived over TCP must be
+	// relayed over TCP (the client already expects a large answer), and a UDP relay
+	// that comes back truncated is retried over TCP — see forward. They are kept as
+	// two clients rather than one whose Net is mutated, which would race across the
+	// concurrent serve goroutines.
+	udpClient *dns.Client
+	tcpClient *dns.Client
+
+	// lastAnswered is the unix second of the most recent query the resolver actually
+	// answered, stamped from the hot path with a single atomic store (no lock) and
+	// exported as aether.mesh_dns.last_answered_timestamp_seconds.
+	lastAnswered atomic.Int64
 
 	mu          sync.RWMutex
 	records     map[string]string // "<ns>/<svc>" -> A-record IP
@@ -146,7 +169,8 @@ func NewServerWithOptions(meshDomain, addr, snapshotPath string, log *slog.Logge
 		addr:         addr,
 		snapshotPath: snapshotPath,
 		log:          commonlog.Named(log, "mesh-dns"),
-		client:       &dns.Client{Net: "udp"},
+		udpClient:    newForwardClient(protoUDP),
+		tcpClient:    newForwardClient(protoTCP),
 		records:      map[string]string{},
 	}
 	for _, o := range opts {
@@ -159,6 +183,17 @@ func NewServerWithOptions(meshDomain, addr, snapshotPath string, log *slog.Logge
 	return s
 }
 
+// newForwardClient builds the upstream client for one transport ("udp" or "tcp") with
+// every timeout stated explicitly (see forwardTimeout).
+func newForwardClient(proto string) *dns.Client {
+	return &dns.Client{
+		Net:          proto,
+		DialTimeout:  forwardTimeout,
+		ReadTimeout:  forwardTimeout,
+		WriteTimeout: forwardTimeout,
+	}
+}
+
 // observedState snapshots the resolver state the observable gauges export. It takes
 // the Server's RWMutex only to copy a handful of scalars and releases it before
 // returning, so the OTel collect callback never holds the lock across an export (and
@@ -167,13 +202,23 @@ func (s *Server) observedState() resolverState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return resolverState{
-		records:     int64(len(s.records)),
-		writtenAt:   s.writtenAt,
-		generation:  s.generation,
-		ready:       s.ready,
-		watchActive: s.watchActive,
-		upstreams:   int64(len(s.upstreams)),
+		records:      int64(len(s.records)),
+		writtenAt:    s.writtenAt,
+		generation:   s.generation,
+		ready:        s.ready,
+		watchActive:  s.watchActive,
+		upstreams:    int64(len(s.upstreams)),
+		lastAnswered: s.lastAnswered.Load(),
 	}
+}
+
+// markAnswered stamps the wall clock of the most recent query the resolver actually
+// answered. It backs aether.mesh_dns.last_answered_timestamp_seconds, the only signal
+// that separates a resolver serving nothing because the node is quiet from one that is
+// bound but blind. Real traffic stamps it on the hot path (one atomic store) so a busy
+// resolver never looks idle, and the self-check watchdog stamps it on a quiet node.
+func (s *Server) markAnswered() {
+	s.lastAnswered.Store(time.Now().Unix())
 }
 
 // SetWatchActive records whether the daemon's fsnotify snapshot watcher is running.
@@ -382,6 +427,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// ready so a surge successor is only marked Ready once it can actually serve.
 	s.writeReadyMarker(ctx)
 	defer s.removeReadyMarker()
+	// Only NOW — bound, and with the marker already written — does the wedge watchdog
+	// start. It can therefore only ever take away a readiness the bind already earned,
+	// so it cannot flap the pod during startup. It stops when Start returns.
+	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
+	defer stopWatchdog()
+	go newSelfChecker(s).run(watchdogCtx)
 	errc := make(chan error, 2)
 	if s.reusePort {
 		go func() { errc <- udp.ActivateAndServe() }()
@@ -488,7 +539,29 @@ func reusePortControl(_, _ string, c syscall.RawConn) error {
 func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	start := time.Now()
 	result := s.serve(w, r)
-	s.metrics.observeQuery(result, time.Since(start))
+	if answeredResult(result) {
+		s.markAnswered()
+	}
+	s.metrics.observeQuery(result, queryProto(w), time.Since(start))
+}
+
+// answeredResult reports whether a result means the resolver produced a real answer,
+// which is what last_answered records. A cold SERVFAIL and a forward_error are
+// excluded: they are replies, but they are the resolver reporting that it CANNOT
+// answer, and a resolver stuck emitting them is not healthy.
+func answeredResult(result string) bool {
+	return result == resultAnswered || result == resultNXDomain || result == resultForwarded
+}
+
+// queryProto reports the transport a query ARRIVED on, read from the writer's remote
+// address: miekg/dns hands a *net.TCPAddr for the TCP listener and a *net.UDPAddr for
+// the UDP one. Anything else (including a nil addr) is reported as UDP, the
+// conservative default — UDP is the transport that needs no special forward handling.
+func queryProto(w dns.ResponseWriter) string {
+	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
+		return protoTCP
+	}
+	return protoUDP
 }
 
 // serve dispatches a query to the mesh or forward path and returns the metric result
@@ -600,16 +673,27 @@ func (s *Server) lookup(qname string) (ip string, ready bool) {
 	return ip, ready
 }
 
+// forward relays a non-mesh query (cluster.local, external) to the first upstream that
+// answers, and SERVFAILs — non-authoritatively, which is how the mesh cold path stays
+// distinguishable — when none does.
+//
+// The transport is not incidental. The CNI DNATs pod :53 for BOTH udp and tcp, so a
+// query can genuinely arrive over TCP, and a client that asked over TCP has already
+// decided it wants an answer too big for a datagram (usually after its own TC=1 retry).
+// Relaying that over UDP could return TC=1 again, which the old single-UDP-client code
+// recorded as a clean "forwarded" while the client looped or gave up. So: TCP in, TCP
+// out; and a UDP relay that comes back truncated is retried over TCP (see exchange).
 func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) string {
 	s.mu.RLock()
 	ups := s.upstreams
 	s.mu.RUnlock()
+	viaTCP := queryProto(w) == protoTCP
 	for _, up := range ups {
 		addr := up
 		if !strings.Contains(addr, ":") {
 			addr += ":53"
 		}
-		if resp, _, err := s.client.Exchange(r, addr); err == nil && resp != nil {
+		if resp := s.exchange(r, addr, viaTCP); resp != nil {
 			_ = w.WriteMsg(resp)
 			return resultForwarded
 		}
@@ -618,4 +702,50 @@ func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) string {
 	m.SetRcode(r, dns.RcodeServerFailure)
 	_ = w.WriteMsg(m)
 	return resultForwardError
+}
+
+// exchange relays r to ONE upstream over the transport the client used, returning nil
+// when that upstream failed (the caller then tries the next). A truncated UDP reply is
+// re-fetched over TCP, the standard recursive-resolver escalation.
+func (s *Server) exchange(r *dns.Msg, addr string, viaTCP bool) *dns.Msg {
+	if viaTCP {
+		return s.exchangeWith(s.tcpClient, r, addr)
+	}
+	resp := s.exchangeWith(s.udpClient, r, addr)
+	if resp == nil || !resp.Truncated {
+		return resp
+	}
+	// TC=1: the answer does not fit in a datagram. Re-ask over TCP. If that fails we
+	// still hand back the truncated reply — a TC=1 answer is a valid signal the client
+	// can act on (retry over TCP, which the CNI also DNATs here), and it beats SERVFAIL.
+	s.metrics.recordTruncated()
+	full := s.exchangeWith(s.tcpClient, r, addr)
+	if full == nil {
+		return resp
+	}
+	// The client asked over UDP and cannot receive more than it advertised, so pack the
+	// full answer back down to that size; Truncate re-sets TC=1 only if it still does
+	// not fit, and then the client's own TCP retry lands on the TCP path above.
+	full.Truncate(udpSizeFor(r))
+	return full
+}
+
+// exchangeWith runs one upstream exchange, mapping any failure to a nil reply.
+func (s *Server) exchangeWith(c *dns.Client, r *dns.Msg, addr string) *dns.Msg {
+	resp, _, err := c.Exchange(r, addr)
+	if err != nil {
+		return nil
+	}
+	return resp
+}
+
+// udpSizeFor is the largest UDP reply the client will accept: the EDNS0 buffer it
+// advertised, or RFC 1035's 512-byte floor when it asked without EDNS0.
+func udpSizeFor(r *dns.Msg) int {
+	if opt := r.IsEdns0(); opt != nil {
+		if size := int(opt.UDPSize()); size > dns.MinMsgSize {
+			return size
+		}
+	}
+	return dns.MinMsgSize
 }

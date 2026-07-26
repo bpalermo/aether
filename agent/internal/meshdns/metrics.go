@@ -32,14 +32,19 @@ type resolverState struct {
 	ready       bool
 	watchActive bool
 	upstreams   int64
+	// lastAnswered is the unix second of the last query the resolver actually answered
+	// (real traffic or a self-check); zero until it has answered anything at all.
+	lastAnswered int64
 }
 
 // metrics holds the resolver's OTel instruments. nil-safe: every record method is a
 // no-op when the meter failed to initialize.
 type metrics struct {
-	queries  metric.Int64Counter
-	duration metric.Float64Histogram
-	reloads  metric.Int64Counter
+	queries    metric.Int64Counter
+	duration   metric.Float64Histogram
+	reloads    metric.Int64Counter
+	selfChecks metric.Int64Counter
+	truncated  metric.Int64Counter
 }
 
 // newMetrics builds the resolver metrics on the global MeterProvider (a no-op meter
@@ -50,7 +55,11 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 	b := &meterBuilder{meter: otel.Meter(meterName)}
 
 	queries := b.counter("aether.mesh_dns.queries",
-		"Mesh-DNS queries handled by the resolver, by result (answered=mesh hit, forwarded=relayed to upstream, forward_error=upstream failed, nxdomain=authoritative mesh miss, cold=SERVFAIL for a mesh name before records were ever populated)")
+		"Mesh-DNS queries handled by the resolver, by result (answered=mesh hit, forwarded=relayed to upstream, forward_error=upstream failed, nxdomain=authoritative mesh miss, cold=SERVFAIL for a mesh name before records were ever populated) and by the transport the query arrived on (proto=udp|tcp; the CNI DNATs both)")
+	selfChecks := b.counter("aether.mesh_dns.self_check_total",
+		"In-process handler self-checks run by the wedge watchdog, by result (ok, fail). Consecutive failures remove the pod-local ready marker so the readiness probe flips the pod NotReady")
+	truncated := b.counter("aether.mesh_dns.responses_truncated_total",
+		"Upstream replies that came back truncated (TC=1) over UDP and were re-fetched over TCP")
 	reloads := b.counter("aether.mesh_dns.snapshot_reloads_total",
 		"Attempts to read the record snapshot the agent writes, by result (success, missing=file absent, parse_error=corrupt, read_error=I/O failure)")
 	duration := b.histogram("aether.mesh_dns.query.duration",
@@ -70,6 +79,8 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 		"Number of forward upstreams. Zero means every non-mesh query (cluster.local and external) fails")
 	ready := b.intGauge("aether.mesh_dns.ready",
 		"1 once records have ever been populated (mesh misses answer NXDOMAIN), 0 while cold (mesh misses answer SERVFAIL)")
+	lastAnswered := b.floatGauge("aether.mesh_dns.last_answered_timestamp_seconds",
+		"Unix timestamp of the last query the resolver actually answered — real traffic or the self-check watchdog. It stops advancing on a resolver that is bound but blind, which the ready marker alone cannot show")
 
 	if b.err != nil {
 		log.Warn("mesh-DNS metrics disabled: failed to create instruments", "error", b.err)
@@ -87,14 +98,23 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 		o.ObserveInt64(watchActive, boolGauge(st.watchActive))
 		o.ObserveInt64(upstreams, st.upstreams)
 		o.ObserveInt64(ready, boolGauge(st.ready))
+		if st.lastAnswered > 0 {
+			o.ObserveFloat64(lastAnswered, float64(st.lastAnswered))
+		}
 		return nil
 	}
-	if _, err := b.meter.RegisterCallback(observe, age, writtenAt, records, generation, watchActive, upstreams, ready); err != nil {
+	if _, err := b.meter.RegisterCallback(observe, age, writtenAt, records, generation, watchActive, upstreams, ready, lastAnswered); err != nil {
 		log.Warn("mesh-DNS metrics disabled: failed to register the gauge callback", "error", err)
 		return nil
 	}
 
-	return &metrics{queries: queries, duration: duration, reloads: reloads}
+	return &metrics{
+		queries:    queries,
+		duration:   duration,
+		reloads:    reloads,
+		selfChecks: selfChecks,
+		truncated:  truncated,
+	}
 }
 
 // meterBuilder creates instruments while latching the first error, so newMetrics
@@ -146,14 +166,38 @@ func boolGauge(v bool) int64 {
 	return 0
 }
 
-// observeQuery counts a handled query and records how long handling took.
-func (m *metrics) observeQuery(result string, d time.Duration) {
+// observeQuery counts a handled query (by result AND by the transport it arrived on)
+// and records how long handling took. The duration histogram keeps the result
+// dimension only: splitting 15 buckets by transport as well would double its series
+// count for a split whose latency profile is already carried by result.
+func (m *metrics) observeQuery(result, proto string, d time.Duration) {
 	if m == nil {
 		return
 	}
-	attrs := metric.WithAttributes(attribute.String("result", result))
-	m.queries.Add(context.Background(), 1, attrs)
-	m.duration.Record(context.Background(), d.Seconds(), attrs)
+	m.queries.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("result", result),
+		attribute.String("proto", proto),
+	))
+	m.duration.Record(context.Background(), d.Seconds(), metric.WithAttributes(
+		attribute.String("result", result),
+	))
+}
+
+// recordSelfCheck counts one watchdog self-check by outcome (ok / fail).
+func (m *metrics) recordSelfCheck(result string) {
+	if m == nil {
+		return
+	}
+	m.selfChecks.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", result)))
+}
+
+// recordTruncated counts an upstream reply that came back truncated over UDP and had
+// to be re-fetched over TCP.
+func (m *metrics) recordTruncated() {
+	if m == nil {
+		return
+	}
+	m.truncated.Add(context.Background(), 1)
 }
 
 // recordReload counts a snapshot read attempt by outcome.
@@ -175,6 +219,22 @@ const (
 	// populated (warm-start snapshot empty + no reconcile yet); answered SERVFAIL
 	// so the client retries instead of caching a negative answer.
 	resultCold = "cold"
+)
+
+const (
+	// protoUDP / protoTCP are the transports a query can arrive on — the CNI DNATs
+	// pod :53 for both — and double as the miekg/dns Client.Net values the forward
+	// path relays over.
+	protoUDP = "udp"
+	protoTCP = "tcp"
+)
+
+const (
+	// selfCheckOK is a watchdog check whose synthetic query got a sane reply.
+	selfCheckOK = "ok"
+	// selfCheckFail is a watchdog check that timed out or got an unusable reply —
+	// the resolver is bound but not answering.
+	selfCheckFail = "fail"
 )
 
 const (
