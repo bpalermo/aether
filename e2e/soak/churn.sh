@@ -13,6 +13,14 @@ BUILD_LABEL="${1:-unspecified-build}"
 LOG="${SOAK_CHURN_LOG:-/tmp/soak-churn.log}"
 T0=$(date +%s)
 
+# Start a FRESH log, archiving any previous run alongside it. Without this the driver
+# appends to the last soak's file, and `grep -c ROLLED` -- which teardown uses to confirm
+# 30 rolls -- silently double-counts, so a run looks complete when it is not.
+if [ -s "$LOG" ]; then
+	mv -f "$LOG" "$LOG.$(date -u +%Y%m%dT%H%M%SZ).prev"
+fi
+: >"$LOG"
+
 log() { echo "$(date -u +%FT%TZ) $*" >>"$LOG"; }
 
 # Sleep until T0 + $1 minutes.
