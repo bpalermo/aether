@@ -542,15 +542,17 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if answeredResult(result) {
 		s.markAnswered()
 	}
-	s.metrics.observeQuery(result, queryProto(w), time.Since(start))
+	s.metrics.observeQuery(result, queryProto(w), queryQType(r), time.Since(start))
 }
 
 // answeredResult reports whether a result means the resolver produced a real answer,
-// which is what last_answered records. A cold SERVFAIL and a forward_error are
-// excluded: they are replies, but they are the resolver reporting that it CANNOT
-// answer, and a resolver stuck emitting them is not healthy.
+// which is what last_answered records. NODATA counts: it is an authoritative reply
+// derived from the record table, and the handler ran end to end to produce it. A cold
+// SERVFAIL and a forward_error are excluded: they are replies, but they are the resolver
+// reporting that it CANNOT answer, and a resolver stuck emitting them is not healthy.
 func answeredResult(result string) bool {
-	return result == resultAnswered || result == resultNXDomain || result == resultForwarded
+	return result == resultAnswered || result == resultNoData ||
+		result == resultNXDomain || result == resultForwarded
 }
 
 // queryProto reports the transport a query ARRIVED on, read from the writer's remote
@@ -577,9 +579,9 @@ func (s *Server) serve(w dns.ResponseWriter, r *dns.Msg) string {
 }
 
 // serveMesh answers a mesh-domain query authoritatively: a well-formed "<svc>.<ns>"
-// hit returns the A record (NODATA for non-A) and a miss returns NXDOMAIN when ready
-// or SERVFAIL when still cold; a malformed name under the zone (wrong label count)
-// is always NXDOMAIN — it can never exist, so retrying can't help.
+// hit returns the A record (NODATA, counted apart, for non-A) and a miss returns
+// NXDOMAIN when ready or SERVFAIL when still cold; a malformed name under the zone
+// (wrong label count) is always NXDOMAIN — it can never exist, so retrying can't help.
 func (s *Server) serveMesh(w dns.ResponseWriter, r *dns.Msg, q dns.Question) string {
 	if _, _, ok := s.parseMeshName(q.Name); !ok {
 		// Under the mesh domain but not a well-formed "<svc>.<ns>" name. Structurally
@@ -613,8 +615,16 @@ func (s *Server) serveMesh(w dns.ResponseWriter, r *dns.Msg, q dns.Question) str
 			}}
 		}
 	}
-	// Non-A (incl. AAAA): NODATA — empty answer, NOERROR, authoritative.
+	// Non-A (incl. AAAA): NODATA — empty answer, NOERROR, authoritative. The reply is
+	// identical either way; only the metric result differs, so an AAAA trickle stays
+	// distinguishable from real A hits (see resultNoData). An A query whose stored
+	// record is not a parseable IPv4 also lands here — an empty answer is an empty
+	// answer, and a record-table defect surfacing as nodata on qtype=a is precisely
+	// the signal this split buys.
 	_ = w.WriteMsg(m)
+	if len(m.Answer) == 0 {
+		return resultNoData
+	}
 	return resultAnswered
 }
 

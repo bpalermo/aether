@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/miekg/dns"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -55,7 +56,7 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 	b := &meterBuilder{meter: otel.Meter(meterName)}
 
 	queries := b.counter("aether.mesh_dns.queries",
-		"Mesh-DNS queries handled by the resolver, by result (answered=mesh hit, forwarded=relayed to upstream, forward_error=upstream failed, nxdomain=authoritative mesh miss, cold=SERVFAIL for a mesh name before records were ever populated) and by the transport the query arrived on (proto=udp|tcp; the CNI DNATs both)")
+		"Mesh-DNS queries handled by the resolver, by result (answered=mesh hit with an A record, nodata=known mesh name asked for a non-A type, forwarded=relayed to upstream, forward_error=upstream failed, nxdomain=authoritative mesh miss, cold=SERVFAIL for a mesh name before records were ever populated), by the transport the query arrived on (proto=udp|tcp; the CNI DNATs both), and by bucketed query type (qtype=a|aaaa|https|srv|ptr|txt|cname|other)")
 	selfChecks := b.counter("aether.mesh_dns.self_check_total",
 		"In-process handler self-checks run by the wedge watchdog, by result (ok, fail). Consecutive failures remove the pod-local ready marker so the readiness probe flips the pod NotReady")
 	truncated := b.counter("aether.mesh_dns.responses_truncated_total",
@@ -166,17 +167,24 @@ func boolGauge(v bool) int64 {
 	return 0
 }
 
-// observeQuery counts a handled query (by result AND by the transport it arrived on)
-// and records how long handling took. The duration histogram keeps the result
-// dimension only: splitting 15 buckets by transport as well would double its series
-// count for a split whose latency profile is already carried by result.
-func (m *metrics) observeQuery(result, proto string, d time.Duration) {
+// observeQuery counts a handled query (by result, by the transport it arrived on AND by
+// bucketed query type) and records how long handling took.
+//
+// The duration histogram deliberately keeps the result dimension ONLY. Its 15 explicit
+// buckets make every extra attribute expensive — proto would double the series count and
+// qtype would multiply it by eight — and neither buys anything: latency here is decided
+// by the PATH taken, which result already names. A mesh hit and an AAAA NODATA do the
+// same map lookup under the same lock, and a forwarded SRV costs the same kube-dns round
+// trip as a forwarded A. qtype and proto answer "what is being asked, over what", which
+// is a counter question; result answers "how long did it take", which is the histogram's.
+func (m *metrics) observeQuery(result, proto, qtype string, d time.Duration) {
 	if m == nil {
 		return
 	}
 	m.queries.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("result", result),
 		attribute.String("proto", proto),
+		attribute.String("qtype", qtype),
 	))
 	m.duration.Record(context.Background(), d.Seconds(), metric.WithAttributes(
 		attribute.String("result", result),
@@ -209,7 +217,16 @@ func (m *metrics) recordReload(result string) {
 }
 
 const (
-	resultAnswered     = "answered"
+	// resultAnswered is a mesh hit that produced a real A record.
+	resultAnswered = "answered"
+	// resultNoData is a KNOWN mesh name asked for a type the resolver has no record
+	// for (AAAA and friends): NOERROR with an empty answer section, so the name
+	// consistently exists — see serveMesh. It is split out from resultAnswered
+	// because the two are operationally different: a healthy mesh shows a steady
+	// nodata trickle from the AAAA half of every dual-stack lookup, whereas nodata
+	// RISING against answered means clients are failing over to IPv6 or the record
+	// table has stopped producing usable A records. Conflated, that is invisible.
+	resultNoData       = "nodata"
 	resultForwarded    = "forwarded"
 	resultForwardError = "forward_error"
 	// resultNXDomain is an authoritative miss: a name under the mesh domain that
@@ -228,6 +245,68 @@ const (
 	protoUDP = "udp"
 	protoTCP = "tcp"
 )
+
+// qtype attribute values. This set is CLOSED, and that is the point: DNS defines ~90
+// query types, the CNI DNATs every managed pod's :53 straight here, and a buggy or
+// hostile client can therefore ask this resolver for arbitrary types. Emitting the raw
+// qtype would let any pod on the node inflate the counter's series count at will, so
+// queryQType maps to these buckets and EVERYTHING unrecognised collapses to qtypeOther.
+//
+// The named buckets are what a mesh resolver realistically sees and would act on:
+//
+//   - a: the only type the mesh record table can answer — the hit path itself.
+//   - aaaa: every dual-stack-capable resolver (glibc getaddrinfo, c-ares, Go) fires it
+//     alongside A, so it is essentially the whole nodata trickle. Watching it rise
+//     against a is the IPv6-failover signal the nodata split exists for.
+//   - https: curl 8.x, browsers and systemd-resolved query the HTTPS RR (type 65) next
+//     to A+AAAA. It is high volume and utterly routine, so leaving it in other would
+//     bury the genuinely exotic queries other is meant to expose.
+//   - srv: headless Services and gRPC/SIP-style discovery. Always forwarded (kube-dns
+//     owns _svc._proto), so it is the forward path's main non-address type.
+//   - ptr: reverse lookups from tooling and logging stacks; forwarded, and a burst of
+//     them is a classic accidental source of upstream latency.
+//   - txt: forwarded, normally near zero, and both a health-probe and an exfil channel —
+//     cheap to keep separable.
+//   - cname: what debugging tools (dig CNAME) and some client libraries ask directly,
+//     which distinguishes an operator/tool pattern from real workload traffic.
+//
+// Worst case is therefore 8 qtype x 6 result x 2 proto = 96 series per node, bounded no
+// matter what is asked; in practice only a handful are ever non-zero.
+const (
+	qtypeA     = "a"
+	qtypeAAAA  = "aaaa"
+	qtypeHTTPS = "https"
+	qtypeSRV   = "srv"
+	qtypePTR   = "ptr"
+	qtypeTXT   = "txt"
+	qtypeCNAME = "cname"
+	qtypeOther = "other"
+)
+
+// qtypeBuckets is the recognised-type lookup behind queryQType. A miss is qtypeOther,
+// which is what keeps the attribute's value set closed and its cardinality bounded.
+var qtypeBuckets = map[uint16]string{
+	dns.TypeA:     qtypeA,
+	dns.TypeAAAA:  qtypeAAAA,
+	dns.TypeHTTPS: qtypeHTTPS,
+	dns.TypeSRV:   qtypeSRV,
+	dns.TypePTR:   qtypePTR,
+	dns.TypeTXT:   qtypeTXT,
+	dns.TypeCNAME: qtypeCNAME,
+}
+
+// queryQType buckets the query's type for the qtype attribute (see qtypeBuckets). A
+// message without exactly one question is reported as qtypeOther: it is never a mesh
+// query (serve requires a single question) and has no single meaningful type.
+func queryQType(r *dns.Msg) string {
+	if r == nil || len(r.Question) != 1 {
+		return qtypeOther
+	}
+	if bucket, ok := qtypeBuckets[r.Question[0].Qtype]; ok {
+		return bucket
+	}
+	return qtypeOther
+}
 
 const (
 	// selfCheckOK is a watchdog check whose synthetic query got a sane reply.
