@@ -70,6 +70,110 @@ dump_mesh_dns() {
 	done
 }
 
+# Step 3's NEGATIVE assertion — client(a) must STOP reaching echo once region-b's
+# mirror expires from etcd-a — is the only withdrawal assertion in this suite and
+# the only one that flakes (#597). The withdrawal path is WATCH-driven end to end:
+# a's registrar syncs on the etcd watch with the 5s poll as a mere backstop
+# (registrar/internal/server/sync.go, registry/internal/etcd/etcd.go), and the
+# agent pushes xDS off the resulting broadcast. Expected latency is therefore
+# sub-second plus debounce, not the ~30s this assertion budgets — so a failure is
+# two orders of magnitude off the designed path and means a specific hop stalled.
+# Only three can:
+#   (1) a's local etcd watch broke and it fell back to the 5s poll;
+#   (2) a replicator leader-election / mirror-stream gap (the test kills b's
+#       registrar, which is b's replicator leader);
+#   (3) the endpoint outlived the registry — the registrar dropped it (the mirror
+#       provably expired) but the agent's xDS push or Envoy's EDS kept the host.
+# (3) is the consequential one: it would mean cross-cluster failover latency is
+# bounded by something other than the lease, defeating the origin-heartbeat design.
+# Print one section per hop so the next red run NAMES the hop instead of costing a
+# bisect. Cluster b needs no pod dump here: its registrar is deliberately at 0
+# replicas and echo is deliberately still alive — only b's etcd state is evidence.
+dump_failover_state() {
+	local region_b node
+	region_b="$(region_of "$CLUSTER_B")"
+
+	# Registry layer. Re-printed at failure time so the log is self-contained:
+	# etcd-a should hold NO region-b keys (mirror expired), etcd-b should still
+	# hold them all (origin data must persist).
+	printf '\033[1;33m  -- registry: %s keys (etcd-a = expired mirror, etcd-b = live origin) --\033[0m\n' "$region_b" >&2
+	local c
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		printf '    [etcd-%s]\n' "$c" >&2
+		docker exec "$(etcd_name "$c")" etcdctl get --prefix "/aether/v1/regions/$region_b/" \
+			--keys-only 2>&1 | grep -v '^$' | head -20 | sed 's/^/      /' >&2 || true
+	done
+
+	# Registrar layer on 'a' — this is what discriminates (1) from (2). Two greps,
+	# because the chart runs everything with --debug and the per-cycle chatter would
+	# otherwise crowd the rare, decisive lines out of any single tail:
+	#   * "etcd change watch established" (re-logged on every re-establish) and
+	#     "etcd watch error; will re-establish" => (1), the local watch lapsed and
+	#     syncing degraded to the 5s poll backstop;
+	#   * "peer mirror synced; watching" / "peer mirror failed" / lease + leader
+	#     lines => (2), a replicator leader-election or mirror-stream gap.
+	# The second grep shows the sync cadence itself: whether cycles are still
+	# ticking at all, and whether any of them detected the withdrawal.
+	printf '\033[1;33m  -- registrar(%s): watch / lease / leader-election trail --\033[0m\n' "$CLUSTER_A" >&2
+	kubectl --context "kind-$CLUSTER_A" -n "$NS" get pods -l app.kubernetes.io/component=registrar \
+		-o wide 2>&1 | sed 's/^/    /' >&2 || true
+	local rlogs
+	rlogs="$(kubectl --context "kind-$CLUSTER_A" -n "$NS" logs -l app.kubernetes.io/component=registrar \
+		--tail=2000 --prefix 2>/dev/null || true)"
+	printf '%s\n' "$rlogs" |
+		grep -E 'watch established|watch error|change notifications|failed to list endpoints|peer mirror|revision compacted|lease|leader|elect' |
+		tail -30 | sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- registrar(%s): sync cadence (is the loop still ticking?) --\033[0m\n' "$CLUSTER_A" >&2
+	printf '%s\n' "$rlogs" |
+		grep -E 'sync cycle|sync detected changes|initial sync complete|sync loop' |
+		tail -10 | sed 's/^/    /' >&2 || true
+
+	# Agent layer on 'a' — the first half of (3). The agent logs its snapshot
+	# rebuilds and the dependency-set transitions that drop a service's cluster.
+	printf '\033[1;33m  -- agent(%s): snapshot / dependency-set trail --\033[0m\n' "$CLUSTER_A" >&2
+	kubectl --context "kind-$CLUSTER_A" -n "$NS" logs -l app.kubernetes.io/component=agent \
+		-c agent --tail=400 --prefix 2>/dev/null |
+		grep -E 'echo|setting snapshot|dependency set|clusters from registry|watch stream|registry (watch|recovered)' |
+		tail -30 | sed 's/^/    /' >&2 || true
+
+	# The agent and the proxy are both hostNetwork, so the kind NODE container
+	# shares their netns: the agent's metrics (:8080) and Envoy's admin
+	# (127.0.0.1:9901 — loopback-only, unreachable from any pod netns, and both
+	# images are distroless so `kubectl exec ... curl` is impossible) are reachable
+	# with `docker exec <node> curl`, the same shape as the etcdctl dumps above.
+	# kindest/node ships curl. This is the suite's ONLY admin access and it stays a
+	# one-shot failure-path dump: /clusters renders on Envoy's main thread, which is
+	# why nothing in aether scrapes it.
+	node="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" get pod -l app=client \
+		-o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)"
+	if [ -z "$node" ]; then
+		printf '\033[1;33m  -- node-local state: SKIPPED (client pod node unresolved) --\033[0m\n' >&2
+		return
+	fi
+	printf '\033[1;33m  -- agent xDS snapshot metrics (node %s) --\033[0m\n' "$node" >&2
+	docker exec "$node" curl -s --max-time 5 http://127.0.0.1:8080/metrics 2>&1 |
+		grep -E '^aether_agent_(snapshot|upstreams|refresher|xds)' | sed 's/^/    /' >&2 || true
+
+	# Envoy layer — proves or clears (3) outright. Hosts still listed for the echo
+	# cluster means the registry withdrew but the data plane did not.
+	printf '\033[1;33m  -- envoy EDS for echo (admin /clusters, node %s) --\033[0m\n' "$node" >&2
+	local hosts
+	hosts="$(docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
+		grep -i echo | head -40 || true)"
+	if [ -n "$hosts" ]; then
+		printf '%s\n' "$hosts" | sed 's/^/    /' >&2
+		printf '    ^ cause (3): Envoy STILL holds echo hosts after the registry withdrew\n' >&2
+	else
+		printf '    (no echo cluster/host in Envoy — EDS did drop it, so either the stall is\n' >&2
+		printf '     upstream of Envoy, or the 200 rode an already-open upstream connection)\n' >&2
+	fi
+
+	# One post-dump probe: the dump takes seconds, so a call that fails NOW says the
+	# chain merely overran the budget, while one that still returns 200 says it never
+	# withdrew. Diagnostic only — the assertion above has already been decided.
+	printf '\033[1;33m  -- post-dump recheck: client(a) -> echo = %s --\033[0m\n' "$(client_code)" >&2
+}
+
 etcd_name() { echo "aether-etcd-region-$1"; }
 region_of() { echo "region-$1"; }
 
@@ -371,12 +475,17 @@ verify() {
 	mirror_present "$CLUSTER_B" "$region_b" || die "region $region_b's ORIGIN data vanished from its own etcd (must persist)"
 	ok "origin data intact in etcd-b (only the mirror expired)"
 	# a's registrar drops echo from its snapshot -> the client call must fail.
+	# 30s is a deliberately generous budget for a path designed to withdraw in
+	# well under a second; see dump_failover_state() for why it is not widened.
 	for i in 1 2 3 4 5 6; do
 		code="$(client_code)"
 		[ "$code" != "200" ] && break
 		sleep 5
 	done
-	[ "$code" != "200" ] || die "client(a) still reaches echo after region-b mirror expired"
+	if [ "$code" = "200" ]; then
+		dump_failover_state
+		die "client(a) still reaches echo 30s after the region-b mirror expired — the withdrawal path is WATCH-driven (a's registrar syncs off the etcd watch; the 5s poll is only a backstop), so the designed latency is sub-second plus debounce and 30s is ~2 orders of magnitude off it. Read the sections above in order to name the stalled hop: registry (is the mirror really gone from etcd-a?), registrar (a lapsed/re-establishing etcd watch = degraded to the 5s poll; lease/leader/mirror lines = a replicator leader-election gap), agent (did the snapshot rebuild without echo?), envoy /clusters (hosts still there = the withdrawal never reached the data plane, which would mean cross-cluster failover latency is NOT bounded by the origin-heartbeat lease). Refs #597"
+	fi
 	ok "client(a) -> echo now fails ($code) — a's EDS dropped the dead region"
 
 	log "4/4 recovery: restore region $region_b's registrar -> resync re-mirrors under a fresh lease"

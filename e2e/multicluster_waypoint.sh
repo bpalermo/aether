@@ -65,6 +65,36 @@ dump_mesh_dns() {
 	done
 }
 
+# The die message below used to tell a human to go "inspect a's EDS for echo".
+# Do it here instead — same #590 principle, and the only hop the mesh-dns dump
+# cannot speak for. The agent and proxy are both hostNetwork, so the kind NODE
+# container shares their netns: Envoy's admin binds 127.0.0.1:9901 (loopback-only,
+# unreachable from any pod netns, and both images are distroless so
+# `kubectl exec ... curl` is impossible), but `docker exec <node> curl` reaches it
+# — the same shape as the etcdctl dumps. kindest/node ships curl. Kept to a
+# one-shot failure-path dump: /clusters renders on Envoy's main thread, which is
+# why nothing in aether scrapes it.
+dump_echo_eds() {
+	local node hosts
+	node="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" get pod -l app=client \
+		-o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)"
+	if [ -z "$node" ]; then
+		printf '\033[1;33m  -- envoy EDS: SKIPPED (client pod node unresolved) --\033[0m\n' >&2
+		return
+	fi
+	printf '\033[1;33m  -- envoy EDS for echo on %s (admin /clusters, node %s) --\033[0m\n' "$CLUSTER_A" "$node" >&2
+	hosts="$(docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
+		grep -i echo | head -40 || true)"
+	if [ -n "$hosts" ]; then
+		printf '%s\n' "$hosts" | sed 's/^/    /' >&2
+		printf '    ^ the host should be b-node-ip:%s; a pod IP or an empty cluster means\n' "$TUNNEL_PORT" >&2
+		printf '      the waypoint rewrite did not happen\n' >&2
+	else
+		printf '    (no echo cluster in Envoy — a never learned the endpoint: check the shared\n' >&2
+		printf '     registry keys and the agent/registrar logs, not the waypoint)\n' >&2
+	fi
+}
+
 raise_inotify() {
 	if sudo -n true 2>/dev/null; then
 		sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288 >/dev/null 2>&1 &&
@@ -316,7 +346,8 @@ verify() {
 		ok "cross-cluster call succeeded (HTTP 200) — waypoint data path works: client(a) -> b-node:$TUNNEL_PORT -> echo pod(b), mTLS end-to-end"
 	else
 		dump_mesh_dns "$CLUSTER_A" "$CLUSTER_B"
-		die "cross-cluster call returned $code (expected 200) — the target is a MESH DNS NAME, so first rule out resolution using the mesh-dns state above; if DNS is healthy, inspect a's EDS for echo (should be b-node-ip:$TUNNEL_PORT) and b's ew_tunnel listener"
+		dump_echo_eds
+		die "cross-cluster call returned $code (expected 200) — the target is a MESH DNS NAME, so first rule out resolution using the mesh-dns state above; if DNS is healthy, read the EDS dump (a's echo host should be b-node-ip:$TUNNEL_PORT) and then b's ew_tunnel listener"
 	fi
 }
 
