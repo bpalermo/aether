@@ -60,14 +60,11 @@ serverFiles:
       # contents of mesh-dns-alerts.yml
 ```
 
-Then `helm upgrade` the Prometheus release. Verify with:
+`prometheus.yml`'s `rule_files` **already** lists `/etc/config/alerting_rules.yml` — the
+wiring exists, the file was just empty — so populating that key is the only change needed
+to make the rules evaluate.
 
-```bash
-kubectl get cm prometheus-server -n prometheus \
-  -o go-template='{{index .data "alerting_rules.yml"}}' | head
-```
-
-Rules appear under **Alerts** in the Prometheus UI once loaded.
+Do **not** `helm upgrade` by hand: those values are reconciled by Flux (see below).
 
 ## Alert delivery (Alertmanager -> GitHub issue)
 
