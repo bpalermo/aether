@@ -64,13 +64,6 @@ type L4Backend struct {
 	Weight uint32
 }
 
-// UDPServiceRoute holds the UDP routing rules for one mesh service derived from a
-// UDPRoute parentRef=Service.
-type UDPServiceRoute struct {
-	// Backends are the weighted backend clusters.
-	Backends []L4Backend
-}
-
 // BuildCaptureTCPRouteFilterChain builds a per-ClusterIP TCP floor filter chain
 // for a service that has a TCPRoute. It matches the service's ClusterIP as the
 // original destination (/32 prefix_ranges) and routes via tcp_proxy

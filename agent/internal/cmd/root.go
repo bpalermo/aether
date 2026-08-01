@@ -124,8 +124,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
 	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
-	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
-	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
+	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services (proposal 018, mesh-global FQDN); the mesh-dns daemon (agent/cmd/mesh-dns) owns upstream forwarding")
 	rootCmd.Flags().StringVar(&cfg.MeshDNSSnapshotPath, "mesh-dns-snapshot-path", cfg.MeshDNSSnapshotPath, "Host-persistent file the in-process mesh-DNS resolver persists its last-known record table to and warm-loads at boot, closing the agent-roll cold window (proposal 018, mesh-global FQDN). Defaults under the CNI registry hostPath so it survives a rolling restart; empty disables persistence")
 }
 

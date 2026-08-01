@@ -1,5 +1,5 @@
 # Keep envoy.bazelrc up-to-date by running:
-#   curl -sSL https://raw.githubusercontent.com/envoyproxy/envoy/v1.38.0/.bazelrc > envoy.bazelrc
+#   curl -sSL https://raw.githubusercontent.com/envoyproxy/envoy/v1.39.0/.bazelrc > envoy.bazelrc
 import %workspace%/envoy.bazelrc
 
 # Build the custom Envoy with Envoy's hermetic LLVM toolchain (clang + libc++ via

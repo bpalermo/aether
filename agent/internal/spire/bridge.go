@@ -145,16 +145,6 @@ func (b *Bridge) Started() <-chan struct{} {
 	return b.started
 }
 
-// NodeSpiffeID returns the SPIFFE ID of the agent's node identity once the node
-// SVID has been served, or "" if node-SVID serving is disabled or not yet ready.
-// It is the SDS secret name proxies reference for node-originated upstream mTLS
-// (the outbound clusters' no-match client cert) and the node-health listener.
-func (b *Bridge) NodeSpiffeID() string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.nodeSpiffeID
-}
-
 // Start connects to the SPIRE agent and begins subscribing to trust bundles.
 // It blocks until the context is canceled. Implements controller-runtime Runnable.
 func (b *Bridge) Start(ctx context.Context) error {
