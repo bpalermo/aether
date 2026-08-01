@@ -262,39 +262,58 @@ func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) (string, 
 			IP:          event.GetEndpoint().GetIp(),
 		}
 
+		var tr *registrarv1.WatchEndpointsResponse
 		switch event.GetType() {
 		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
-			before := s.serviceCountLocked(key.ServiceName)
-			// An UPDATED event replacing an existing entry must not raise the
-			// count: only a key that was absent adds an endpoint.
-			_, existed := s.entries[key]
-			s.entries[key] = &snapshotEntry{
-				ServiceName: event.GetServiceName(),
-				Protocol:    event.GetProtocol(),
-				Endpoint:    event.GetEndpoint(),
-			}
-			if !existed {
-				s.serviceCounts[key.ServiceName]++
-			}
-			if before == 0 {
-				transitions = append(transitions, serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, key.ServiceName))
-			}
+			tr = s.applyUpsertLocked(key, event)
 		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
-			if _, existed := s.entries[key]; existed {
-				delete(s.entries, key)
-				if n := s.serviceCounts[key.ServiceName] - 1; n > 0 {
-					s.serviceCounts[key.ServiceName] = n
-				} else {
-					// Never leave a zero resting in the map: its key set is the
-					// service catalog.
-					delete(s.serviceCounts, key.ServiceName)
-					transitions = append(transitions, serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, key.ServiceName))
-				}
-			}
+			tr = s.applyRemoveLocked(key)
+		}
+		if tr != nil {
+			transitions = append(transitions, tr)
 		}
 	}
 
 	return s.nextVersion(), transitions
+}
+
+// applyUpsertLocked stores an added/updated endpoint, maintaining serviceCounts,
+// and returns the SERVICE_ADDED transition when this is the service's first
+// endpoint (nil otherwise). Caller must hold mu for writing.
+func (s *Snapshot) applyUpsertLocked(key serviceKey, event *registrarv1.WatchEndpointsResponse) *registrarv1.WatchEndpointsResponse {
+	before := s.serviceCountLocked(key.ServiceName)
+	// An UPDATED event replacing an existing entry must not raise the count:
+	// only a key that was absent adds an endpoint.
+	_, existed := s.entries[key]
+	s.entries[key] = &snapshotEntry{
+		ServiceName: event.GetServiceName(),
+		Protocol:    event.GetProtocol(),
+		Endpoint:    event.GetEndpoint(),
+	}
+	if !existed {
+		s.serviceCounts[key.ServiceName]++
+	}
+	if before == 0 {
+		return serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, key.ServiceName)
+	}
+	return nil
+}
+
+// applyRemoveLocked deletes an endpoint if present, maintaining serviceCounts,
+// and returns the SERVICE_REMOVED transition when the service's last endpoint
+// went away (nil otherwise). Caller must hold mu for writing.
+func (s *Snapshot) applyRemoveLocked(key serviceKey) *registrarv1.WatchEndpointsResponse {
+	if _, existed := s.entries[key]; !existed {
+		return nil
+	}
+	delete(s.entries, key)
+	if n := s.serviceCounts[key.ServiceName] - 1; n > 0 {
+		s.serviceCounts[key.ServiceName] = n
+		return nil
+	}
+	// Never leave a zero resting in the map: its key set is the service catalog.
+	delete(s.serviceCounts, key.ServiceName)
+	return serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, key.ServiceName)
 }
 
 // FullSnapshotEvents returns the current contents of the snapshot as a slice of

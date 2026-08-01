@@ -162,14 +162,11 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	// Tally the enqueued events per type and record them once the read lock is
 	// released: the fan-out is O(events × watchers) and the counter is only
 	// meaningful in aggregate, so the instrument call does not belong inside it.
-	var broadcast map[registrarv1.WatchEndpointsResponse_EventType]int64
+	broadcast := make(map[registrarv1.WatchEndpointsResponse_EventType]int64, 4)
 
 	send := func(id string, w *watcher, event *registrarv1.WatchEndpointsResponse) {
 		select {
 		case w.ch <- event:
-			if broadcast == nil {
-				broadcast = make(map[registrarv1.WatchEndpointsResponse_EventType]int64, 4)
-			}
 			broadcast[event.GetType()]++
 		default:
 			// This watcher's view has diverged — schedule a force-resync.
