@@ -132,13 +132,10 @@ type AgentConfig struct {
 	EastWestWaypoint bool
 
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
-	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
-	// and forwards the rest to MeshDNSUpstream. Pairs with the CNI :53 redirect.
-	// Default off.
+	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs.
+	// Upstream forwarding lives in the mesh-dns daemon (agent/cmd/mesh-dns) since the
+	// #578 decouple. Pairs with the CNI :53 redirect. Default off.
 	MeshDNS bool
-	// MeshDNSUpstream is the upstream resolver(s) (host[:port]) the mesh-DNS filter
-	// forwards non-mesh queries to — the cluster kube-dns.
-	MeshDNSUpstream []string
 	// MeshDNSSnapshotPath is the host-persistent file the mesh-DNS resolver writes
 	// its last-known record table to on every reconcile and warm-loads at boot, so a
 	// rolling agent restart answers mesh names from last-known ClusterIPs within ms

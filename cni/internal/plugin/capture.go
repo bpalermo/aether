@@ -291,12 +291,10 @@ func programCaptureRedirectAll(excludePorts []uint16, excludeRanges []netip.Pref
 //	established = 0x2 (NFT_CT_STATE_ESTABLISHED)
 //	related     = 0x4 (NFT_CT_STATE_RELATED)
 func conntrackEstablishedAcceptExprs() []expr.Any {
-	// Conntrack state bitmask: established(2) | related(4) = 6.
-	const ctStateEstablishedRelated = 0x00000006
 	return []expr.Any{
 		// load ct state into reg1
 		&expr.Ct{Register: 1, SourceRegister: false, Key: expr.CtKeySTATE},
-		// reg1 & ctStateEstablishedRelated != 0  (bitwise AND then NEQ 0)
+		// reg1 & (established|related = 0x06) != 0  (bitwise AND then NEQ 0)
 		&expr.Bitwise{
 			SourceRegister: 1,
 			DestRegister:   1,

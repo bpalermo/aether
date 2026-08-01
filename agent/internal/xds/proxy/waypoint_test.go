@@ -41,5 +41,4 @@ func TestBuildWaypointIngressCluster(t *testing.T) {
 		assert.Equal(t, uint32(defaultInboundPort), ep.GetEndpoint().GetAddress().GetSocketAddress().GetPortValue(),
 			"pods are dialed at the mesh inbound port")
 	}
-	_ = waypointTunnelChainName // symmetry helper
 }

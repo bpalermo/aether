@@ -229,7 +229,6 @@ Node-agent-specific:
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |
 | `--mesh-dns` | `false` | Per-pod mesh DNS (018). |
-| `--mesh-dns-upstream` | `[]` | Upstream resolver(s) for non-mesh queries. |
 | `--authz-sidecar` | `false` | Node-local ext_authz sidecar entry (027). |
 | `--authz-sidecar-timeout` | `200ms` | Per-check gRPC timeout. |
 | `--authz-sidecar-failure-mode-allow` | `false` | Fail-open (default: fail-closed). |

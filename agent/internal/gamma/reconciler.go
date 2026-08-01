@@ -12,8 +12,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/bpalermo/aether/common/serviceref"
-
 	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
@@ -439,36 +437,12 @@ func (r *Reconciler) backendsResolve(_ context.Context, routeNamespace, routeKin
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
 }
 
-// backendServiceKey resolves a backendRef to its namespace-qualified "<ns>/<svc>"
-// registry key (020 Part 1): the backendRef's own namespace when set, else the
-// route's namespace. The resulting key feeds both the data-plane cluster name
-// (ServiceClusterName) and the node dependency set (routeBackendsLocked).
-func backendServiceKey(backendNamespace *gatewayv1.Namespace, routeNamespace, name string) string {
-	ns := routeNamespace
-	if bn := derefBackendNamespace(backendNamespace); bn != "" {
-		ns = bn
-	}
-	return serviceref.New(ns, name).Key()
-}
-
 // derefBackendNamespace returns the backendRef namespace ("" when unset).
 func derefBackendNamespace(ns *gatewayv1.Namespace) string {
 	if ns == nil {
 		return ""
 	}
 	return string(*ns)
-}
-
-// backendPermitted reports whether a backendRef is allowed onto the data plane: a
-// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant.
-// Non-permitted cross-namespace backends are dropped from the built route (the rest of
-// the route still applies), mirroring the RefNotPermitted status.
-func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
-	ns := derefBackendNamespace(backendNamespace)
-	if !referencegrant.CrossNamespace(ns, routeNamespace) {
-		return true
-	}
-	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
 }
 
 func httpBackendRefs(rules []gatewayv1.HTTPRouteRule) []gatewayv1.BackendObjectReference {
