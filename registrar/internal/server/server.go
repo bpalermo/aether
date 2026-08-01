@@ -3,13 +3,14 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/common/xds"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -24,11 +25,43 @@ type RegistrarServer struct {
 	registry    registry.Registry
 	snapshot    *Snapshot
 	broadcaster *Broadcaster
-	log         logr.Logger
+	log         *slog.Logger
 	metrics     *Metrics
+
+	// writeBehind, when set (UseWriteBehind), makes RegisterEndpoint /
+	// UnregisterEndpoint snapshot-first: apply + broadcast immediately, queue
+	// the external-registry write. Nil = legacy write-through (tests).
+	writeBehind *WriteBehindQueue
+
+	// synced, when set (GateOnSync), gates snapshot-serving RPCs until the
+	// syncer's first cycle completes: a freshly restarted registrar must not
+	// serve an empty/partial world view — agents derive route configs from it
+	// and 404 live traffic (rev-66 co-roll, 2026-06-11).
+	synced <-chan struct{}
 
 	// Embed xds.Server for gRPC lifecycle management.
 	xds.Server
+}
+
+// UseWriteBehind enables snapshot-first registry mutations through q.
+func (s *RegistrarServer) UseWriteBehind(q *WriteBehindQueue) { s.writeBehind = q }
+
+// GateOnSync makes snapshot-serving RPCs (WatchEndpoints, ListAllEndpoints)
+// block until ch is closed (the syncer's first completed cycle). Nil leaves
+// the RPCs ungated.
+func (s *RegistrarServer) GateOnSync(ch <-chan struct{}) { s.synced = ch }
+
+// awaitSynced blocks until the sync gate opens or ctx ends.
+func (s *RegistrarServer) awaitSynced(ctx context.Context) error {
+	if s.synced == nil {
+		return nil
+	}
+	select {
+	case <-s.synced:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // NewRegistrarServer creates a RegistrarServer and registers it on the gRPC server.
@@ -39,7 +72,7 @@ func NewRegistrarServer(
 	snapshot *Snapshot,
 	broadcaster *Broadcaster,
 	address string,
-	log logr.Logger,
+	log *slog.Logger,
 	metrics *Metrics,
 	grpcOpts ...grpc.ServerOption,
 ) *RegistrarServer {
@@ -47,7 +80,8 @@ func NewRegistrarServer(
 	cfg.Network = "tcp"
 	cfg.Address = address
 
-	// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+	// The TracerProvider is always installed, so this records real RPC spans (whose
+	// trace_id flows to logs); spans export only with --trace-export.
 	grpcOpts = append(grpcOpts, grpc.StatsHandler(telemetry.ServerStatsHandler()))
 	grpcSrv := grpc.NewServer(grpcOpts...)
 
@@ -55,7 +89,7 @@ func NewRegistrarServer(
 		registry:    reg,
 		snapshot:    snapshot,
 		broadcaster: broadcaster,
-		log:         log.WithName("registrar-server"),
+		log:         commonlog.Named(log, "registrar-server"),
 		metrics:     metrics,
 		Server:      xds.NewServer(cfg, log, xds.WithGRPCServer(grpcSrv)),
 	}
@@ -65,22 +99,30 @@ func NewRegistrarServer(
 	return srv
 }
 
-// RegisterEndpoint delegates to the external registry and broadcasts the change.
+// RegisterEndpoint applies the change to the snapshot and broadcasts it
+// immediately (discovery moves at watch latency), then writes the external
+// registry — through the write-behind queue when enabled, so a failing
+// external write can never make a serving pod invisible to the mesh (rev-68
+// roll regression). Without a queue (tests/legacy) the write is synchronous
+// and failures fail the RPC.
 func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1.RegisterEndpointRequest) (*registrarv1.RegisterEndpointResponse, error) {
-	s.log.V(1).Info("RegisterEndpoint", "service", req.GetServiceName(), "ip", req.GetEndpoint().GetIp())
+	s.log.DebugContext(ctx, "RegisterEndpoint", "service", req.GetServiceName(), "ip", req.GetEndpoint().GetIp())
 
-	if err := s.registry.RegisterEndpoint(ctx, req.GetServiceName(), req.GetProtocol(), req.GetEndpoint()); err != nil {
+	if s.writeBehind != nil {
+		s.writeBehind.EnqueueRegister(req.GetServiceName(), req.GetProtocol(), req.GetEndpoint())
+	} else if err := s.registry.RegisterEndpoint(ctx, req.GetServiceName(), req.GetProtocol(), req.GetEndpoint()); err != nil {
 		return nil, fmt.Errorf("failed to register endpoint: %w", err)
 	}
 
-	// Optimistic broadcast: notify watchers immediately.
+	// Snapshot-first broadcast: watchers see the endpoint immediately.
 	events := []*registrarv1.WatchEndpointsResponse{{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: req.GetServiceName(),
 		Protocol:    req.GetProtocol(),
 		Endpoint:    req.GetEndpoint(),
 	}}
-	version := s.snapshot.Apply(events)
+	version, transitions := s.snapshot.Apply(events)
+	events = append(events, transitions...)
 	for _, e := range events {
 		e.Version = version
 	}
@@ -90,12 +132,25 @@ func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1
 	return &registrarv1.RegisterEndpointResponse{}, nil
 }
 
-// UnregisterEndpoint delegates to the external registry and broadcasts the change.
+// UnregisterEndpoint applies the removal to the snapshot and broadcasts it
+// immediately, then writes the external registry (write-behind when enabled;
+// see RegisterEndpoint).
 func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrarv1.UnregisterEndpointRequest) (*registrarv1.UnregisterEndpointResponse, error) {
-	s.log.V(1).Info("UnregisterEndpoint", "service", req.GetServiceName(), "ips", req.GetIps())
+	s.log.DebugContext(ctx, "UnregisterEndpoint", "service", req.GetServiceName(), "ips", req.GetIps())
 
 	ips := req.GetIps()
-	if len(ips) == 1 {
+	if s.writeBehind != nil {
+		for _, ip := range ips {
+			// UnregisterEndpointRequest carries no protocol, but a service is
+			// registered under exactly one (HTTP or TCP). Supersede the pending
+			// register on every synced protocol so a TCP endpoint's removal isn't
+			// defeated by a still-pending TCP register keyed under a protocol the
+			// HTTP-only key would miss. The external delete is protocol-agnostic.
+			for _, protocol := range syncedProtocols {
+				s.writeBehind.EnqueueUnregister(req.GetServiceName(), protocol, ip)
+			}
+		}
+	} else if len(ips) == 1 {
 		if err := s.registry.UnregisterEndpoint(ctx, req.GetServiceName(), ips[0]); err != nil {
 			return nil, fmt.Errorf("failed to unregister endpoint: %w", err)
 		}
@@ -114,7 +169,8 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 			Endpoint:    &registryv1.ServiceEndpoint{Ip: ip},
 		})
 	}
-	version := s.snapshot.Apply(events)
+	version, transitions := s.snapshot.Apply(events)
+	events = append(events, transitions...)
 	for _, e := range events {
 		e.Version = version
 	}
@@ -126,25 +182,103 @@ func (s *RegistrarServer) UnregisterEndpoint(ctx context.Context, req *registrar
 
 // WatchEndpoints streams endpoint events to the agent. It first sends a full
 // snapshot (unless the client's last_version matches the current version), then
-// forwards incremental events from the broadcaster.
+// forwards incremental events from the broadcaster. A request filter scopes
+// both the snapshot and the incremental events to the named services
+// (demand-scoped distribution): the agent re-asserts its filter on every
+// reconnect, and an unset filter preserves the full watch.
 func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest, stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse]) error {
 	watcherID := fmt.Sprintf("%s/%s", req.GetClusterName(), req.GetNodeName())
-	s.log.V(1).Info("WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion())
+	filterServices, filterSet := buildWatchFilter(req)
+	s.log.DebugContext(stream.Context(), "WatchEndpoints", "watcher", watcherID, "lastVersion", req.GetLastVersion(),
+		"filtered", filterSet != nil, "filterServices", len(filterServices))
 
-	// Send current snapshot unless the client is already up-to-date.
-	events, currentVersion := s.snapshot.FullSnapshotEvents()
+	// Never serve a snapshot before the first sync has populated it.
+	if err := s.awaitSynced(stream.Context()); err != nil {
+		return err
+	}
+
+	events, currentVersion := s.snapshot.FullSnapshotEvents(filterSet)
 	if req.GetLastVersion() != currentVersion {
-		for _, event := range events {
-			if err := stream.Send(event); err != nil {
-				return fmt.Errorf("failed to send snapshot event: %w", err)
-			}
+		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
+			return err
+		}
+		// Replay the full service catalog (every watcher, regardless of filter):
+		// agents keep a local index of service names so the on-demand cold path
+		// answers existence locally. Skipped when the client is current (its
+		// catalog is too: transitions ride the same versioned stream).
+		if err := sendServiceCatalog(stream, s.snapshot.ServiceNames(), currentVersion); err != nil {
+			return err
 		}
 	}
 
-	// Subscribe and stream incremental events.
-	ch := s.broadcaster.Subscribe(watcherID)
-	defer s.broadcaster.Unsubscribe(watcherID, ch)
+	// Mark the snapshot boundary so the client knows its cache is complete
+	// (sent even when the snapshot was skipped: the client is current).
+	if err := stream.Send(&registrarv1.WatchEndpointsResponse{
+		Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+		Version: currentVersion,
+	}); err != nil {
+		return fmt.Errorf("failed to send snapshot-complete event: %w", err)
+	}
 
+	// Subscribe and stream incremental events (fan-out indexed by service).
+	ch := s.broadcaster.Subscribe(watcherID, filterServices)
+	defer s.broadcaster.Unsubscribe(watcherID, ch)
+	return streamEvents(stream, ch)
+}
+
+// buildWatchFilter parses the request filter into a service list and lookup set.
+// nil filterSet = full watch; non-nil (possibly empty) = scoped watch.
+func buildWatchFilter(req *registrarv1.WatchEndpointsRequest) ([]string, map[string]struct{}) {
+	f := req.GetFilter()
+	if f == nil {
+		return nil, nil
+	}
+	filterServices := f.GetServices()
+	if filterServices == nil {
+		filterServices = []string{}
+	}
+	filterSet := make(map[string]struct{}, len(filterServices))
+	for _, svc := range filterServices {
+		filterSet[svc] = struct{}{}
+	}
+	return filterServices, filterSet
+}
+
+// sendFilteredSnapshot sends snapshot events scoped to filterSet (nil = send all).
+// FullSnapshotEvents already applied the same filter; the check is kept as
+// defense in depth so no out-of-scope endpoint can reach a scoped watcher.
+func sendFilteredSnapshot(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], events []*registrarv1.WatchEndpointsResponse, filterSet map[string]struct{}) error {
+	for _, event := range events {
+		if filterSet != nil {
+			if _, inScope := filterSet[event.GetServiceName()]; !inScope {
+				continue
+			}
+		}
+		if err := stream.Send(event); err != nil {
+			return fmt.Errorf("failed to send snapshot event: %w", err)
+		}
+	}
+	return nil
+}
+
+// sendServiceCatalog sends SERVICE_ADDED events for all names to the stream.
+// Catalog events are sent to ALL watchers regardless of filter (see Broadcast).
+func sendServiceCatalog(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], names []string, version string) error {
+	for _, name := range names {
+		if err := stream.Send(&registrarv1.WatchEndpointsResponse{
+			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED,
+			ServiceName: name,
+			Version:     version,
+		}); err != nil {
+			return fmt.Errorf("failed to send service catalog event: %w", err)
+		}
+	}
+	return nil
+}
+
+// streamEvents forwards incremental events from ch until the stream context ends
+// or the channel is closed (overflow/reconnect).
+func streamEvents(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], ch <-chan *registrarv1.WatchEndpointsResponse) error {
 	for {
 		select {
 		case <-stream.Context().Done():
@@ -168,8 +302,14 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 }
 
 // ListAllEndpoints returns all endpoints from the local snapshot.
-func (s *RegistrarServer) ListAllEndpoints(_ context.Context, req *registrarv1.ListAllEndpointsRequest) (*registrarv1.ListAllEndpointsResponse, error) {
-	s.log.V(1).Info("ListAllEndpoints", "protocol", req.GetProtocol())
+func (s *RegistrarServer) ListAllEndpoints(ctx context.Context, req *registrarv1.ListAllEndpointsRequest) (*registrarv1.ListAllEndpointsResponse, error) {
+	s.log.DebugContext(ctx, "ListAllEndpoints", "protocol", req.GetProtocol())
+
+	// Never serve a snapshot before the first sync has populated it (agents
+	// fall back to this RPC at startup when their watch cache is empty).
+	if err := s.awaitSynced(ctx); err != nil {
+		return nil, err
+	}
 
 	endpoints, version := s.snapshot.GetAllWithVersion(req.GetProtocol())
 
@@ -182,4 +322,24 @@ func (s *RegistrarServer) ListAllEndpoints(_ context.Context, req *registrarv1.L
 		Services: services,
 		Version:  version,
 	}, nil
+}
+
+// ListAllConfig returns the clusterset-wide config projections (proposal 026,
+// multi-cluster config propagation). Agents pull this from the spoke registrar rather
+// than reading the registry directly (the standing directive: agents don't talk to the
+// store). When the backend has no cross-cluster config plane (kubernetes/dynamodb), the
+// registry does not implement ConfigExporter and this returns an empty set — config
+// stays cluster-local, which is the correct degenerate behaviour.
+func (s *RegistrarServer) ListAllConfig(ctx context.Context, _ *registrarv1.ListAllConfigRequest) (*registrarv1.ListAllConfigResponse, error) {
+	exporter, ok := s.registry.(registry.ConfigExporter)
+	if !ok {
+		return &registrarv1.ListAllConfigResponse{}, nil
+	}
+	projections, err := exporter.ListConfig(ctx)
+	if err != nil {
+		s.log.ErrorContext(ctx, "ListAllConfig failed", "error", err)
+		return nil, status.Error(codes.Internal, "failed to list config projections")
+	}
+	s.log.DebugContext(ctx, "ListAllConfig", "count", len(projections))
+	return &registrarv1.ListAllConfigResponse{Projections: projections}, nil
 }

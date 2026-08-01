@@ -7,30 +7,50 @@ import (
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewServiceCluster(t *testing.T) {
-	c := NewServiceCluster("svc-a")
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
 
-	assert.Equal(t, "svc-a", c.GetName())
+	// FQDN-only: the cluster name IS the mesh authority; the bare service
+	// name stays the stats key (alt_stat_name) and the EDS resource name.
+	assert.Equal(t, "svc-a.aether.internal", c.GetName())
+	assert.Equal(t, "svc-a", c.GetAltStatName())
+	assert.Equal(t, "svc-a", c.GetEdsClusterConfig().GetServiceName())
 	assert.Equal(t, clusterv3.Cluster_EDS, c.GetType())
 	assert.True(t, c.GetConnectionPoolPerDownstreamConnection(), "per-downstream pools prevent cross-source identity reuse")
 	require.NotNil(t, c.GetEdsClusterConfig().GetEdsConfig())
 	// HTTP/2 upstream protocol options for mTLS multiplexing.
 	assert.Contains(t, c.GetTypedExtensionProtocolOptions(), config.UpstreamHTTPProtocolOptionsKey)
-	// Subset selector by endpoint IP for per-pod affinity.
-	require.Len(t, c.GetLbSubsetConfig().GetSubsetSelectors(), 1)
-	assert.Equal(t, []string{subsetIPKey}, c.GetLbSubsetConfig().GetSubsetSelectors()[0].GetKeys())
+	// Always-on pinning selectors (ip/pod), NO_FALLBACK: pin or fail.
+	selectors := c.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, selectors, 2)
+	assert.Equal(t, []string{subsetIPKey}, selectors[0].GetKeys())
+	assert.Equal(t, []string{subsetPodNameKey}, selectors[1].GetKeys())
+	for _, sel := range selectors {
+		assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, sel.GetFallbackPolicy())
+	}
+	// Criteria-less traffic rides the cluster-level ANY_ENDPOINT fallback.
+	assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_ANY_ENDPOINT, c.GetLbSubsetConfig().GetFallbackPolicy())
 	// mTLS is injected at snapshot time, not at build time.
 	assert.Nil(t, c.GetTransportSocketMatcher(), "matcher injected later via InjectUpstreamMTLS")
 
-	// Active readiness health check against each endpoint's mesh readiness path.
-	require.Len(t, c.GetHealthChecks(), 1)
-	assert.Equal(t, MeshReadyPath, c.GetHealthChecks()[0].GetHttpHealthCheck().GetPath())
-	assert.True(t, c.GetCommonLbConfig().GetIgnoreNewHostsUntilFirstHc(), "don't route to a pod until its first readiness check passes")
-	assert.True(t, c.GetIgnoreHealthOnHostRemoval(), "EDS removals (early termination drain) must take effect immediately, not after an HC failure")
+	// Client-side active HC is retired (004 Phase 4): routability is EDS
+	// health (delegated liveness); fast local failure detection is outlier
+	// detection, which rides real traffic.
+	assert.Empty(t, c.GetHealthChecks(), "no per-client active health checks")
+	assert.False(t, c.GetCommonLbConfig().GetIgnoreNewHostsUntilFirstHc(), "EDS health already gates: endpoints register UNHEALTHY and are promoted pre-warmed")
+	od := c.GetOutlierDetection()
+	require.NotNil(t, od, "outlier detection replaces active HC for local failure detection")
+	assert.True(t, od.GetSplitExternalLocalOriginErrors())
+	assert.Equal(t, uint32(3), od.GetConsecutiveLocalOriginFailure().GetValue())
+	assert.Equal(t, uint32(5), od.GetConsecutive_5Xx().GetValue())
+	assert.Equal(t, uint32(50), od.GetMaxEjectionPercent().GetValue(),
+		"ejection cap keeps a local wave from emptying a cluster EDS believes healthy (panic-0)")
+	assert.True(t, c.GetIgnoreHealthOnHostRemoval(), "EDS removals (early termination drain) must take effect immediately, even for ejected hosts")
 }
 
 func TestInjectUpstreamMTLS(t *testing.T) {
@@ -41,8 +61,8 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	ids := []string{"spiffe://example.org/ns/test/sa/pod-a", "spiffe://example.org/ns/test/sa/pod-b"}
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
-	c := NewServiceCluster("svc-a")
-	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org")
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
+	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "8080", "")
 
 	// Per-source mTLS: a match per workload identity + the node identity, and
 	// on-no-match presents the node identity.
@@ -54,6 +74,36 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	require.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch(), "on-no-match present")
 	assert.GreaterOrEqual(t, len(c.GetTransportSocketMatcher().GetMatcherTree().GetExactMatchMap().GetMap()), 1,
 		"exact_match_map must never be empty (proto validation rejects it)")
+}
+
+// TestInjectUpstreamMTLS_Waypoint pins the two-level matcher (proposal 019
+// Design A): each source identity carries a local (port-SNI) AND a waypoint
+// (structured-SNI) socket, and the matcher branches on the endpoint waypoint
+// metadata before the source netns.
+func TestInjectUpstreamMTLS_Waypoint(t *testing.T) {
+	netnsToID := map[string]string{"/ns/a": "spiffe://example.org/ns/test/sa/pod-a"}
+	ids := []string{"spiffe://example.org/ns/test/sa/pod-a"}
+	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
+
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
+	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "8080", "8080.svc-a.aether.internal")
+
+	names := map[string]bool{}
+	for _, m := range c.GetTransportSocketMatches() {
+		names[m.GetName()] = true
+	}
+	// Both variants for the pod and the node.
+	assert.True(t, names[ids[0]], "local socket for the pod")
+	assert.True(t, names[waypointSocketName(ids[0])], "waypoint socket for the pod")
+	assert.True(t, names[node] && names[waypointSocketName(node)], "both node variants")
+
+	// Level 1 branches on endpoint metadata; the "true" leaf is a nested matcher
+	// (the waypoint sub-tree), and on-no-match is the local sub-tree.
+	tree := c.GetTransportSocketMatcher().GetMatcherTree()
+	assert.Equal(t, endpointMetadataInputName, tree.GetInput().GetName())
+	require.Contains(t, tree.GetExactMatchMap().GetMap(), subsetWaypointValue)
+	assert.NotNil(t, tree.GetExactMatchMap().GetMap()[subsetWaypointValue].GetMatcher(), "waypoint leaf is a sub-matcher")
+	assert.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch().GetMatcher(), "default is the local sub-matcher")
 }
 
 // TestInjectUpstreamMTLS_NoLocalWorkloads: an empty netns→SPIFFE-ID map must
@@ -72,8 +122,8 @@ func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
 		"only invalid entries": {"": "spiffe://example.org/x", "/ns/a": ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := NewServiceCluster("svc-a")
-			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org")
+			c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
+			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org", nil, "8080", "")
 
 			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
 			assert.Empty(t, c.GetTransportSocketMatches(), "no legacy matches without the matcher")
@@ -93,7 +143,7 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
 		Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY,
 	}
 
-	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep)
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "", WaypointRewrite{})
 	require.Len(t, lle.GetLbEndpoints(), 1)
 	endpoint := lle.GetLbEndpoints()[0].GetEndpoint()
 
@@ -118,7 +168,7 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
 		Ip:              "10.0.0.5",
 		HealthCheckMode: registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS,
 	}
-	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep)
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "", WaypointRewrite{})
 	assert.True(t, lle.GetLbEndpoints()[0].GetEndpoint().GetHealthCheckConfig().GetDisableActiveHealthCheck(),
 		"EDS-mode endpoints opt out of active health checking and rely on EDS health")
 }
@@ -126,9 +176,307 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
 func TestEndpointHealthStatus(t *testing.T) {
 	assert.Equal(t, corev3.HealthStatus_UNHEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY}))
+	// DRAINING (deletion requested) maps to Envoy DRAINING — two-phase drain
+	// phase 1: no new selections, established streams complete. The pool close
+	// happens in phase 2, when the termination watch re-registers UNHEALTHY
+	// after drainPoolCloseDelay (see endpointHealthStatus / schedulePoolClose).
+	assert.Equal(t, corev3.HealthStatus_DRAINING,
+		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_DRAINING}))
 	// Unspecified (older agents / fresh endpoints) and explicit healthy both route.
 	assert.Equal(t, corev3.HealthStatus_HEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{}))
 	assert.Equal(t, corev3.HealthStatus_HEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_HEALTHY}))
+}
+
+// TestServiceClusterDrainPoolClose pins the P2 drain-gap fix shape: pool
+// connections close on (EDS) health failure, panic routing is off, and the
+// retry circuit breaker has headroom for the drain-time reset burst.
+func TestServiceClusterDrainPoolClose(t *testing.T) {
+	c := NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil, true)
+	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
+		"pools must close at drain-mark, not at the app-exit GOAWAY race")
+	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
+	assert.Zero(t, c.GetCommonLbConfig().GetHealthyPanicThreshold().GetValue(),
+		"panic spraying at known-unhealthy hosts is never the mesh behavior")
+	thresholds := c.GetCircuitBreakers().GetThresholds()
+	require.Len(t, thresholds, 1)
+	assert.Equal(t, uint32(16), thresholds[0].GetMaxRetries().GetValue(),
+		"drain-time reset bursts must not be sacrificed to the retry breaker")
+}
+
+// TestServiceFromClusterName pins the deterministic authority<->service-key
+// bijection (020 Part 1): a two-label <svc>.<ns> directly under the mesh domain
+// maps back to the "<ns>/<svc>" key.
+func TestServiceFromClusterName(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{name: "mesh authority", in: "payments.team-a.aether.internal", want: "team-a/payments", ok: true},
+		{name: "default namespace", in: "echo.default.aether.internal", want: "default/echo", ok: true},
+		{name: "bare name rejected", in: "payments", ok: false},
+		{name: "single label (no ns) rejected", in: "payments.aether.internal", ok: false},
+		{name: "three labels rejected", in: "a.b.c.aether.internal", ok: false},
+		{name: "empty service rejected", in: ".team-a.aether.internal", ok: false},
+		{name: "foreign domain rejected", in: "payments.team-a.example.com", ok: false},
+		{name: "domain itself rejected", in: "aether.internal", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ServiceFromClusterName(tt.in, "aether.internal")
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.Equal(t, tt.want, got)
+				assert.Equal(t, tt.in, ServiceClusterName(got, "aether.internal"), "round-trips")
+			}
+		})
+	}
+}
+
+// TestNewServiceCluster_DerivedSubsetSelectors verifies provider-defined keys
+// become single-key NO_FALLBACK selectors after the fixed ip/pod pair.
+func TestNewServiceCluster_DerivedSubsetSelectors(t *testing.T) {
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"}, true)
+	selectors := c.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, selectors, 5)
+	assert.Equal(t, []string{"shard"}, selectors[2].GetKeys())
+	assert.Equal(t, []string{"version"}, selectors[3].GetKeys())
+	assert.Equal(t, []string{"shard", "version"}, selectors[4].GetKeys())
+	assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, selectors[4].GetFallbackPolicy())
+}
+
+// TestEndpointPriority pins the locality-failover priority mapping.
+func TestEndpointPriority(t *testing.T) {
+	ep := func(region, zone string) *registryv1.ServiceEndpoint {
+		if region == "" && zone == "" {
+			return &registryv1.ServiceEndpoint{}
+		}
+		return &registryv1.ServiceEndpoint{Locality: &registryv1.ServiceEndpoint_Locality{Region: region, Zone: zone}}
+	}
+	// Agent without locality: no preference anywhere.
+	assert.Equal(t, uint32(0), EndpointPriority("", "", ep("r1", "z1"), WaypointRewrite{}))
+	// Same zone -> 0, same region -> 1, elsewhere/unknown -> 2.
+	assert.Equal(t, uint32(0), EndpointPriority("r1", "z1", ep("r1", "z1"), WaypointRewrite{}))
+	assert.Equal(t, uint32(1), EndpointPriority("r1", "z1", ep("r1", "z2"), WaypointRewrite{}))
+	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("r2", "z1"), WaypointRewrite{}))
+	assert.Equal(t, uint32(2), EndpointPriority("r1", "z1", ep("", ""), WaypointRewrite{}))
+	// Agent with region but no zone: whole region is local.
+	assert.Equal(t, uint32(0), EndpointPriority("r1", "", ep("r1", "z9"), WaypointRewrite{}))
+}
+
+// TestServiceLocalityLbEndpoint_Priority verifies the EDS endpoint carries
+// the locality-derived priority.
+func TestServiceLocalityLbEndpoint_Priority(t *testing.T) {
+	ep := &registryv1.ServiceEndpoint{
+		Ip:       "10.0.0.5",
+		Locality: &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z2"},
+	}
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z1", WaypointRewrite{})
+	assert.Equal(t, uint32(1), lle.GetPriority(), "same region, different zone")
+	lle = ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "r1", "z2", WaypointRewrite{})
+	assert.Equal(t, uint32(0), lle.GetPriority(), "same zone")
+}
+
+// TestServiceLocalityLbEndpoint_Waypoint pins the split-horizon EDS rewrite
+// (proposal 019): a remote-cluster endpoint with a node IP is dialed at
+// node_ip:tunnelPort with waypoint metadata and a remote priority band; local
+// endpoints and the disabled default are dialed at pod_ip:15008 untouched.
+func TestServiceLocalityLbEndpoint_Waypoint(t *testing.T) {
+	remote := func() *registryv1.ServiceEndpoint {
+		return &registryv1.ServiceEndpoint{
+			Ip:          "10.244.9.9",
+			ClusterName: "cluster-b",
+			Locality:    &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z1"},
+			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
+				Namespace: "default", PodName: "svc-b-1", NodeName: "node-b", NodeIp: "192.168.0.42",
+			},
+		}
+	}
+	wp := WaypointRewrite{Enabled: true, TunnelPort: 18009, LocalCluster: "cluster-a"}
+
+	// Remote endpoint via waypoint: node IP + tunnel port, waypoint metadata,
+	// remote priority band (locality 0 + band 3).
+	lle := ServiceLocalityLbEndpointFromRegistryEndpoint(remote(), "r1", "z1", wp)
+	sa := lle.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "192.168.0.42", sa.GetAddress(), "dial the node, not the pod")
+	assert.Equal(t, uint32(18009), sa.GetPortValue(), "dial the tunnel port")
+	lb := lle.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
+	assert.Equal(t, "true", lb[subsetWaypointKey].GetStringValue(), "tagged for the waypoint transport socket")
+	assert.Equal(t, uint32(remoteClusterPriorityBand), lle.GetPriority(), "remote cluster is a failover band")
+
+	// Disabled (default): the same remote endpoint stays pod-direct, no tag.
+	off := ServiceLocalityLbEndpointFromRegistryEndpoint(remote(), "r1", "z1", WaypointRewrite{})
+	offSA := off.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, "10.244.9.9", offSA.GetAddress())
+	assert.Equal(t, uint32(defaultInboundPort), offSA.GetPortValue())
+	assert.NotContains(t, off.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields(), subsetWaypointKey)
+
+	// Local-cluster endpoint stays pod-direct even with waypoint on.
+	local := remote()
+	local.ClusterName = "cluster-a"
+	loc := ServiceLocalityLbEndpointFromRegistryEndpoint(local, "r1", "z1", wp)
+	assert.Equal(t, "10.244.9.9", loc.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress())
+	assert.Equal(t, uint32(0), loc.GetPriority(), "local cluster keeps its locality priority")
+
+	// Remote endpoint WITHOUT a node IP falls back to pod-direct (can't waypoint),
+	// but is still deprioritized as a remote cluster.
+	noIP := remote()
+	noIP.KubernetesMetadata.NodeIp = ""
+	fb := ServiceLocalityLbEndpointFromRegistryEndpoint(noIP, "r1", "z1", wp)
+	assert.Equal(t, "10.244.9.9", fb.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress(), "no node IP -> pod fallback")
+	assert.Equal(t, uint32(remoteClusterPriorityBand), fb.GetPriority(), "still a remote cluster")
+	assert.NotContains(t, fb.GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields(), subsetWaypointKey, "not tagged when it can't use the waypoint")
+}
+
+// TestSubsetKeyCombos pins multi-key combination generation: power set in
+// (length, lexicographic) order; keys past the cap fall back to singletons.
+func TestSubsetKeyCombos(t *testing.T) {
+	assert.Empty(t, subsetKeyCombos(nil))
+	assert.Equal(t, [][]string{{"a"}}, subsetKeyCombos([]string{"a"}))
+	assert.Equal(t, [][]string{{"a"}, {"b"}, {"a", "b"}}, subsetKeyCombos([]string{"a", "b"}))
+	assert.Equal(t, [][]string{
+		{"a"},
+		{"b"},
+		{"c"},
+		{"a", "b"},
+		{"a", "c"},
+		{"b", "c"},
+		{"a", "b", "c"},
+	}, subsetKeyCombos([]string{"a", "b", "c"}))
+
+	// Six keys: first four (lexicographic input order) combine fully
+	// (2^4-1 = 15), the rest are singletons.
+	combos := subsetKeyCombos([]string{"a", "b", "c", "d", "e", "f"})
+	assert.Len(t, combos, 15+2)
+	assert.Equal(t, []string{"e"}, combos[15])
+	assert.Equal(t, []string{"f"}, combos[16])
+}
+
+// TestSubsetSelectors_MultiKey verifies the full selector shape: pinned
+// ip/pod singletons (single_host_per_subset, never combined) followed by the
+// derived-key power set, all NO_FALLBACK.
+func TestSubsetSelectors_MultiKey(t *testing.T) {
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"}, true)
+	sel := c.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, sel, 2+3)
+
+	assert.Equal(t, []string{"ip"}, sel[0].GetKeys())
+	assert.True(t, sel[0].GetSingleHostPerSubset(), "ip subsets hold exactly one host")
+	assert.Equal(t, []string{"pod"}, sel[1].GetKeys())
+	assert.True(t, sel[1].GetSingleHostPerSubset())
+
+	assert.Equal(t, []string{"shard"}, sel[2].GetKeys())
+	assert.Equal(t, []string{"version"}, sel[3].GetKeys())
+	assert.Equal(t, []string{"shard", "version"}, sel[4].GetKeys(), "multi-key intersection selector")
+	for i, s := range sel {
+		assert.Equal(t, clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK, s.GetFallbackPolicy(), "selector %d", i)
+		if i >= 2 {
+			assert.False(t, s.GetSingleHostPerSubset(), "derived selectors are not single-host")
+		}
+	}
+}
+
+// TestNewUDPServiceCluster verifies the UDP floor cluster shape: plain EDS,
+// no h2 protocol options, no transport socket, no subset routing.
+//
+// The absence of a transport socket is the key invariant — UDP datagrams are
+// forwarded in plaintext (no mesh mTLS). Any regression that injects a
+// transport socket would silently break every UDP route by wrapping datagrams
+// in a TLS session the backend is not expecting.
+func TestNewUDPServiceCluster(t *testing.T) {
+	// Source LA mirrors a service's bare-name EDS: endpoints on the mesh inbound
+	// :15008 (TCP). UDPLoadAssignment must rewrite them to the app UDP port.
+	src := &endpointv3.ClusterLoadAssignment{
+		ClusterName: "svc-a",
+		Endpoints: []*endpointv3.LocalityLbEndpoints{{
+			LbEndpoints: []*endpointv3.LbEndpoint{{
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{Endpoint: &endpointv3.Endpoint{
+					Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+						Protocol:      corev3.SocketAddress_TCP,
+						Address:       "10.0.0.9",
+						PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 15008},
+					}}},
+				}},
+			}},
+		}},
+	}
+	la := UDPLoadAssignment(src, "udp:svc-a.aether.internal", 9000)
+	c := NewUDPServiceCluster("udp:svc-a.aether.internal", "svc-a", la)
+
+	assert.Equal(t, "udp:svc-a.aether.internal", c.GetName())
+	assert.Equal(t, "svc-a", c.GetAltStatName())
+	assert.Equal(t, clusterv3.Cluster_STATIC, c.GetType())
+	// Inline LA reaches the backend's app UDP port directly (not the mesh inbound).
+	sa := c.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	assert.Equal(t, corev3.SocketAddress_UDP, sa.GetProtocol())
+	assert.Equal(t, uint32(9000), sa.GetPortValue())
+	// The source LA is not mutated (clone).
+	assert.Equal(t, uint32(15008), src.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetPortValue())
+
+	// No per-downstream pool needed for UDP (no connection-level identity).
+	assert.False(t, c.GetConnectionPoolPerDownstreamConnection())
+
+	// No HTTP/2 protocol options: udp_proxy speaks raw UDP upstream.
+	assert.Empty(t, c.GetTypedExtensionProtocolOptions(), "UDP cluster must not configure h2 upstream protocol")
+
+	// No transport socket: UDP datagrams are plaintext (no mesh mTLS for UDP).
+	assert.Nil(t, c.GetTransportSocket(), "UDP cluster must not have a transport socket")
+	assert.Nil(t, c.GetTransportSocketMatcher(), "UDP cluster must not have a transport socket matcher")
+
+	// No subset routing: not meaningful for UDP.
+	assert.Nil(t, c.GetLbSubsetConfig(), "UDP cluster must not configure subset routing")
+
+	// Outlier detection present for fast failure.
+	od := c.GetOutlierDetection()
+	require.NotNil(t, od)
+	assert.True(t, od.GetSplitExternalLocalOriginErrors())
+	assert.Equal(t, uint32(3), od.GetConsecutiveLocalOriginFailure().GetValue())
+	assert.Equal(t, uint32(50), od.GetMaxEjectionPercent().GetValue())
+
+	// EDS removals honoured immediately (same as TCP/HTTP clusters).
+	assert.True(t, c.GetIgnoreHealthOnHostRemoval())
+}
+
+// TestUDPClusterName verifies the naming scheme and that it does not collide with
+// the TCP or HTTP cluster names for the same service. The input is the
+// namespace-qualified "<ns>/<svc>" key (020 Part 1); the rendered FQDN is
+// <svc>.<ns>.<meshDomain>.
+func TestUDPClusterName(t *testing.T) {
+	udp := UDPClusterName("team-a/payments", "aether.internal")
+	tcp := TCPClusterName("team-a/payments", "aether.internal")
+	http := ServiceClusterName("team-a/payments", "aether.internal")
+
+	assert.Equal(t, "udp:payments.team-a.aether.internal", udp)
+	assert.Equal(t, "tcp:payments.team-a.aether.internal", tcp)
+	assert.Equal(t, "payments.team-a.aether.internal", http)
+	assert.NotEqual(t, udp, tcp, "UDP and TCP clusters must have distinct names")
+	assert.NotEqual(t, udp, http, "UDP and HTTP clusters must have distinct names")
+}
+
+// TestClusterNamesStrict verifies the post-cutover strict behavior: a bare
+// (non-namespaced) key renders to "" across all cluster-name helpers — an empty
+// name matches no cluster (clean no-route), never a silent mis-route — while a
+// namespace-qualified "<ns>/<svc>" key renders the FQDN and round-trips back
+// through ServiceFromClusterName.
+func TestClusterNamesStrict(t *testing.T) {
+	const meshDomain = "aether.internal"
+
+	// Bare key: no namespace separator → "" everywhere.
+	assert.Empty(t, ServiceClusterName("payments", meshDomain))
+	assert.Empty(t, PortClusterName("payments", meshDomain, 8080))
+	assert.Empty(t, TCPClusterName("payments", meshDomain))
+	assert.Empty(t, UDPClusterName("payments", meshDomain))
+
+	// Namespace-qualified key: rendered FQDN, and a clean round-trip.
+	key := "team-a/payments"
+	fqdn := ServiceClusterName(key, meshDomain)
+	assert.Equal(t, "payments.team-a.aether.internal", fqdn)
+	assert.Equal(t, "payments.team-a.aether.internal:8080", PortClusterName(key, meshDomain, 8080))
+
+	got, ok := ServiceFromClusterName(fqdn, meshDomain)
+	require.True(t, ok)
+	assert.Equal(t, key, got, "FQDN must round-trip back to the <ns>/<svc> key")
 }

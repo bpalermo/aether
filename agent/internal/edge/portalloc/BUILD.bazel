@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "portalloc",
+    srcs = ["portalloc.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/edge/portalloc",
+    visibility = ["//agent:__subpackages__"],
+)
+
+go_test(
+    name = "portalloc_test",
+    srcs = ["portalloc_test.go"],
+    embed = [":portalloc"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

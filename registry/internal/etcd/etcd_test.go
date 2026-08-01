@@ -3,6 +3,7 @@ package etcd_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -10,7 +11,6 @@ import (
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry/internal/etcd"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcetcd "github.com/testcontainers/testcontainers-go/modules/etcd"
@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 	}
 
 	// Verify etcd is ready before running tests
-	ready := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	ready := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 30 * time.Second,
 	})
@@ -61,7 +61,7 @@ func keyPrefix(t *testing.T) string {
 func setupRegistry(ctx context.Context, t *testing.T) *etcd.EtcdRegistry {
 	t.Helper()
 
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   keyPrefix(t),
@@ -80,7 +80,7 @@ func TestEtcdRegistry_Initialize(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("successful connection", func(t *testing.T) {
-		registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 			Endpoints:   []string{testEndpoint},
 			DialTimeout: 5 * time.Second,
 			KeyPrefix:   keyPrefix(t),
@@ -92,7 +92,7 @@ func TestEtcdRegistry_Initialize(t *testing.T) {
 	})
 
 	t.Run("invalid endpoint", func(t *testing.T) {
-		registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+		registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 			Endpoints:   []string{"localhost:99999"},
 			DialTimeout: 1 * time.Second,
 		})
@@ -150,7 +150,7 @@ func TestEtcdRegistry_RegisterEndpoint(t *testing.T) {
 	assert.Equal(t, ep.Metadata["version"], endpoints[0].Metadata["version"])
 	assert.Equal(t, ep.ContainerMetadata.ContainerId, endpoints[0].ContainerMetadata.ContainerId)
 	assert.Equal(t, ep.KubernetesMetadata.Namespace, endpoints[0].KubernetesMetadata.Namespace)
-	// Feature parity with cloudmap: health round-trip.
+	// Health round-trip parity across registry backends.
 	assert.Equal(t, ep.Health, endpoints[0].Health)
 }
 
@@ -361,7 +361,7 @@ func TestEtcdRegistry_CustomKeyPrefix(t *testing.T) {
 
 	ctx := context.Background()
 
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   "/custom/prefix",
@@ -392,7 +392,7 @@ func TestEtcdRegistry_Close(t *testing.T) {
 
 	ctx := context.Background()
 
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{testEndpoint},
 		DialTimeout: 5 * time.Second,
 		KeyPrefix:   keyPrefix(t),
@@ -408,11 +408,186 @@ func TestEtcdRegistry_Close(t *testing.T) {
 }
 
 func TestEtcdRegistry_CloseWithoutStart(t *testing.T) {
-	registry := etcd.NewEtcdRegistry(logr.Discard(), etcd.Config{
+	registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
 		Endpoints:   []string{"localhost:2379"},
 		DialTimeout: 5 * time.Second,
 	})
 
 	err := registry.Close()
 	assert.NoError(t, err)
+}
+
+// TestEtcdRegistry_WatchSignalsChanges verifies the etcd backend satisfies
+// registry.ChangeNotifier: a write under the prefix fires a coalesced signal
+// on Changes(), so the registrar reacts at watch speed instead of polling.
+func TestEtcdRegistry_WatchSignalsChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+	ctx := context.Background()
+	registry := setupRegistry(ctx, t)
+
+	notifier, ok := interface{}(registry).(interface{ Changes() <-chan struct{} })
+	require.True(t, ok, "etcd registry must implement registry.ChangeNotifier")
+
+	// Drain any startup signal.
+	select {
+	case <-notifier.Changes():
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	ep := &registryv1.ServiceEndpoint{Ip: "10.0.9.9", ClusterName: "c", Port: 8080}
+	require.NoError(t, registry.RegisterEndpoint(ctx, "watch-svc", registryv1.Service_PROTOCOL_HTTP, ep))
+
+	select {
+	case <-notifier.Changes():
+		// got the signal
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not signal a change after RegisterEndpoint")
+	}
+
+	// A removal also signals.
+	require.NoError(t, registry.UnregisterEndpoint(ctx, "watch-svc", "10.0.9.9"))
+	select {
+	case <-notifier.Changes():
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not signal a change after UnregisterEndpoint")
+	}
+}
+
+// crossOriginRegistry builds an etcd registry sharing the given key-prefix root
+// but owning a distinct (region, cluster) partition, so several can write
+// disjoint origin subtrees into one etcd (proposal 006).
+func crossOriginRegistry(ctx context.Context, t *testing.T, prefix, region, cluster string) *etcd.EtcdRegistry {
+	t.Helper()
+	r := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
+		Endpoints:   []string{testEndpoint},
+		DialTimeout: 5 * time.Second,
+		KeyPrefix:   prefix,
+		Region:      region,
+		Cluster:     cluster,
+	})
+	require.NoError(t, r.Initialize(ctx))
+	t.Cleanup(func() { _ = r.Close() })
+	return r
+}
+
+// TestEtcdRegistry_ListEndpointsCrossOrigin verifies the origin-first key schema:
+// ListEndpoints returns the UNION of a service's endpoints across origins, two
+// origins sharing an IP (overlapping pod CIDRs across clusters) do NOT clobber
+// each other, and each origin's unregister touches only its own partition.
+func TestEtcdRegistry_ListEndpointsCrossOrigin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+	prefix := keyPrefix(t)
+	regA := crossOriginRegistry(ctx, t, prefix, "us-east", "cluster-a")
+	regB := crossOriginRegistry(ctx, t, prefix, "us-west", "cluster-b")
+
+	// SAME IP in both origins: origin-first keys keep the partitions disjoint, so
+	// neither write clobbers the other despite the shared IP.
+	const ip = "10.244.0.5"
+	require.NoError(t, regA.RegisterEndpoint(ctx, "svc", registryv1.Service_PROTOCOL_HTTP,
+		&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-a", Port: 8080}))
+	require.NoError(t, regB.RegisterEndpoint(ctx, "svc", registryv1.Service_PROTOCOL_HTTP,
+		&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-b", Port: 8080}))
+
+	// ListEndpoints ranges every origin and returns the union (from either reader).
+	eps, err := regA.ListEndpoints(ctx, "svc", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, eps, 2, "both origins' endpoints are returned despite the shared IP")
+	assert.ElementsMatch(t, []string{"cluster-a", "cluster-b"},
+		[]string{eps[0].GetClusterName(), eps[1].GetClusterName()})
+
+	// Each origin writes/deletes ONLY its own partition: A's unregister leaves B's
+	// endpoint intact.
+	require.NoError(t, regA.UnregisterEndpoint(ctx, "svc", ip))
+	eps, err = regB.ListEndpoints(ctx, "svc", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, eps, 1)
+	assert.Equal(t, "cluster-b", eps[0].GetClusterName())
+}
+
+// TestEtcdRegistry_ServiceExportsCrossOrigin verifies the MCS export plane: each
+// cluster writes its own export mark under its own partition, ListExports returns
+// the clusterset-wide union (origin cluster parsed from the key), and an unset
+// touches only the unsetting cluster's mark.
+func TestEtcdRegistry_ServiceExportsCrossOrigin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+	prefix := keyPrefix(t)
+	regA := crossOriginRegistry(ctx, t, prefix, "us-east", "cluster-a")
+	regB := crossOriginRegistry(ctx, t, prefix, "us-west", "cluster-b")
+
+	// The SAME service is exported from both clusters; each mark lives under its
+	// own origin partition.
+	require.NoError(t, regA.SetExport(ctx, "svc", "team-a"))
+	require.NoError(t, regB.SetExport(ctx, "svc", "team-a"))
+	require.NoError(t, regB.SetExport(ctx, "other", "team-b"))
+
+	// ListExports ranges every origin and returns the union (from either reader).
+	exports, err := regA.ListExports(ctx)
+	require.NoError(t, err)
+	require.Len(t, exports, 3)
+
+	byCluster := map[string][]string{}
+	for _, e := range exports {
+		byCluster[e.Cluster] = append(byCluster[e.Cluster], e.Service)
+		assert.NotEmpty(t, e.Namespace, "namespace round-trips through the mark value")
+	}
+	assert.ElementsMatch(t, []string{"svc"}, byCluster["cluster-a"])
+	assert.ElementsMatch(t, []string{"svc", "other"}, byCluster["cluster-b"])
+
+	// Each cluster unsets ONLY its own mark: A's unset leaves B's svc export intact.
+	require.NoError(t, regA.UnsetExport(ctx, "svc"))
+	exports, err = regB.ListExports(ctx)
+	require.NoError(t, err)
+	remaining := map[string]string{}
+	for _, e := range exports {
+		remaining[e.Cluster+"/"+e.Service] = e.Namespace
+	}
+	assert.NotContains(t, remaining, "cluster-a/svc")
+	assert.Contains(t, remaining, "cluster-b/svc")
+	assert.Contains(t, remaining, "cluster-b/other")
+}
+
+// TestEtcdRegistry_ConfigProjection_RoundTrip verifies SetConfig/ListConfig/UnsetConfig
+// (proposal 026 EM1b): a projected GAMMA config round-trips through the registry,
+// origin_cluster is stamped from the writing instance, and ListConfig ranges all origins.
+func TestEtcdRegistry_ConfigProjection_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+	ctx := context.Background()
+	registry := setupRegistry(ctx, t)
+
+	proj := &registryv1.ServiceConfigProjection{
+		Service: "team-a/echo",
+		Version: "v7",
+		Routes: []*registryv1.GammaRoute{{
+			Matches:  []*registryv1.GammaMatch{{Prefix: "/v2"}},
+			Backends: []*registryv1.GammaBackend{{Service: "team-a/echo-v2", Cluster: "echo-v2.team-a.aether.internal", Weight: 1}},
+		}},
+	}
+	require.NoError(t, registry.SetConfig(ctx, proj))
+
+	got, err := registry.ListConfig(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "team-a/echo", got[0].GetService())
+	assert.Equal(t, "v7", got[0].GetVersion())
+	assert.NotEmpty(t, got[0].GetOriginCluster(), "origin stamped from the key path")
+	require.Len(t, got[0].GetRoutes(), 1)
+	assert.Equal(t, "/v2", got[0].GetRoutes()[0].GetMatches()[0].GetPrefix())
+	assert.Equal(t, "echo-v2.team-a.aether.internal", got[0].GetRoutes()[0].GetBackends()[0].GetCluster())
+
+	require.NoError(t, registry.UnsetConfig(ctx, "team-a/echo"))
+	after, err := registry.ListConfig(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, after)
 }

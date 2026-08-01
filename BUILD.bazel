@@ -15,3 +15,10 @@ alias(
     name = "format",
     actual = "//bazel/format",
 )
+
+# format_multirun also generates a `.check` sibling (no-write, fails on diff)
+# used by `make format-check`; alias it so it is reachable as //:format.check.
+alias(
+    name = "format.check",
+    actual = "//bazel/format:format.check",
+)

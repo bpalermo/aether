@@ -1,10 +1,10 @@
 package xds
 
 import (
+	"log/slog"
 	"net/http"
 	"testing"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +40,7 @@ func TestHealthzCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewServerConfig()
-			srv := NewServer(cfg, logr.Discard())
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler))
 			srv.liveness.Store(tt.setLive)
 
 			err := srv.HealthzCheck(newTestRequest(t))
@@ -78,7 +78,7 @@ func TestReadyzCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewServerConfig()
-			srv := NewServer(cfg, logr.Discard())
+			srv := NewServer(cfg, slog.New(slog.DiscardHandler))
 			srv.readiness.Store(tt.setReady)
 
 			err := srv.ReadyzCheck(newTestRequest(t))

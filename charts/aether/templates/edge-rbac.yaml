@@ -1,0 +1,82 @@
+{{- if .Values.edge.enabled }}
+# Cluster-scoped: the edge is now namespace-agnostic. It reconciles every Gateway
+# of its GatewayClass wherever it lives and publishes status (Accepted/Programmed/
+# ResolvedRefs) on those Gateways and their Routes — the upstream conformance suite
+# creates its objects in its OWN namespaces, so a namespace-scoped Role would never
+# see them. The cluster-wide list/watch + status here is what unblocks the
+# north-south profile. GatewayClass is itself a cluster resource.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+rules:
+  # Gateway API (proposal 018): read Gateways + HTTPRoutes + TCPRoutes + TLSRoutes
+  # (and write their status) CLUSTER-WIDE. TCPRoute/TLSRoute live in
+  # gateway.networking.k8s.io/v1alpha2 but share the same apiGroup label in RBAC.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes", "tcproutes", "tlsroutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways/status", "httproutes/status", "tcproutes/status", "tlsroutes/status"]
+    verbs: ["get", "update", "patch"]
+  # GatewayClass (cluster resource): read it and set its Accepted status +
+  # supportedFeatures (conformance).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status"]
+    verbs: ["get", "update", "patch"]
+  # ReferenceGrant (v1beta1): admit cross-namespace backendRefs. Read-only; the
+  # presence/absence of a grant gates whether a cross-ns backend is served +
+  # surfaced as ResolvedRefs (RefNotPermitted otherwise).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["referencegrants"]
+    verbs: ["get", "list", "watch"]
+  # EdgeConfig (proposal 029): resolve the per-Gateway effective edge config via the
+  # GatewayClass/Gateway parametersRef chain. Read-only, cluster-wide.
+  - apiGroups: ["config.aether.io"]
+    resources: ["edgeconfigs"]
+    verbs: ["get", "list", "watch"]
+  # Resolve backendRef Services cluster-wide for the ResolvedRefs condition.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # Read Namespaces (their labels) to evaluate a listener's
+  # allowedRoutes.namespaces.from: Selector during route attachment. The cached
+  # client builds a Namespace informer for this, which needs list+watch — without
+  # it the informer never syncs and stalls cross-namespace route reconciliation.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Per-Gateway LoadBalancer Services (proposal 021 Phase 2): the edge controller
+  # creates/updates/deletes one LoadBalancer Service per Gateway in its own
+  # namespace so MetalLB assigns each Gateway its own external IP.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "update", "patch", "delete"]
+  {{- if .Values.edge.tls.enabled }}
+  # Read the kubernetes.io/tls Secrets a Gateway listener references (downstream
+  # certs, served to Envoy over SDS); watch for hot rotation.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aether.edge.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.edge.serviceAccountName" . }}
+    namespace: {{ include "aether.edge.namespace" . }}
+{{- end }}

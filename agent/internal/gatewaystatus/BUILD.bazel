@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gatewaystatus",
+    srcs = ["status.go"],
+    importpath = "github.com/bpalermo/aether/agent/internal/gatewaystatus",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "@io_k8s_apimachinery//pkg/api/meta",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+    ],
+)
+
+go_test(
+    name = "gatewaystatus_test",
+    srcs = ["status_test.go"],
+    embed = [":gatewaystatus"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_apimachinery//pkg/api/meta",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+    ],
+)

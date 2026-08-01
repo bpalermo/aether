@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/bpalermo/aether/common/manager"
-	"github.com/bpalermo/aether/common/spire"
 )
 
 const (
@@ -14,42 +13,71 @@ const (
 )
 
 // RegistrarConfig holds configuration for the Aether registrar.
+//
+// The registrar is a control-plane component: its telemetry (OTEL) and SPIRE
+// posture are aether system config, inherited from the aether umbrella chart's
+// globals as flags. MeshConfig is proxy-only and does not apply here. See
+// docs/proposals/015_mesh-config.md.
 type RegistrarConfig struct {
 	manager.Config
 
-	// ClusterName is the Kubernetes cluster name
+	// ClusterName is the Kubernetes cluster name. For the etcd backend it is also
+	// this registrar's authoritative cluster partition (proposal 006).
 	ClusterName string
 
-	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", "etcd", or "cloudmap")
+	// MeshDomain is the DNS-style domain mesh authorities live under
+	// (meshconst.DefaultMeshDomain). Used by the cross-cluster config export
+	// controller (proposal 026) to resolve backend cluster names <svc>.<meshDomain>.
+	MeshDomain string
+
+	// ControlCluster, when set, names the single authorized config-exporting cluster
+	// (proposal 026 EM3, Option E control-cluster authority). The config-export
+	// controller runs ONLY when this is empty (federated) or equals ClusterName (this
+	// IS the hub); spokes in control-cluster mode do not export. Endpoint export (MCS)
+	// is unaffected — it stays per-cluster.
+	ControlCluster string
+
+	// Region is this registrar's region — the etcd backend's authoritative
+	// partition root (proposal 006). Shared by every registrar on the same
+	// regional etcd; empty falls back to the etcd backend's default.
+	Region string
+
+	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", or "etcd")
 	RegistryBackend string
 
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
 	EtcdEndpoints []string
 
-	// CloudMapNamespace is the AWS Cloud Map HTTP namespace for service discovery
-	CloudMapNamespace string
+	// PeerEtcd lists peer regions' etcd endpoints for cross-region replication
+	// (proposal 006 Phase 2), one entry per peer region:
+	// <region>=<endpoint>[,<endpoint>...]. Empty disables replication.
+	// Requires the etcd backend and an explicit --region.
+	PeerEtcd []string
 
 	// SyncInterval is how often the registrar polls the external registry
 	SyncInterval time.Duration
 
+	// EnableMCS turns on Kubernetes Multi-Cluster Services (MCS-API) phase 1
+	// (proposals 018 + 006): the leader registrar watches ServiceExport objects
+	// and records exports in the origin-partitioned registry, and materializes a
+	// ServiceImport (ClusterSetIP) + a local clusterset VIP Service for every
+	// service exported anywhere in the clusterset. Requires a registry backend
+	// with a cross-cluster plane (etcd); no-ops for kubernetes/dynamodb. Default
+	// off — adds nothing (and no ServiceExport/ServiceImport RBAC) unless enabled.
+	EnableMCS bool
+
 	// GRPCAddress is the address for the registrar gRPC server
 	GRPCAddress string
 
-	// SpireEnabled controls whether the registrar uses SPIRE for mTLS
+	// SpireEnabled controls whether the registrar uses SPIRE for mTLS. The trust
+	// domain authorized for mTLS peers is resolved from the registrar's own SVID.
 	SpireEnabled bool
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
 	SpireWorkloadSocketPath string
-	// SpireTrustDomain is the SPIFFE trust domain authorized for mTLS peers
-	SpireTrustDomain string
 }
 
-const (
-	// DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
-	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
-	// DefaultSpireTrustDomain defaults to the ROOTCA sentinel, authorizing any
-	// peer that chains to the SPIRE root CA (no trust-domain restriction).
-	DefaultSpireTrustDomain = spire.RootCATrustDomain
-)
+// DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
+const DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
 
 // NewRegistrarConfig creates a RegistrarConfig with default values.
 func NewRegistrarConfig() *RegistrarConfig {
@@ -57,14 +85,28 @@ func NewRegistrarConfig() *RegistrarConfig {
 		Config: manager.Config{
 			HealthProbeBindAddress: ":8082",
 			MetricsBindAddress:     ":8081",
+			// Leader election: the registrar runs multiple replicas (HA endpoint
+			// stream), but the leader-only runnables — the mesh-Service VIP
+			// generator and the MCS ServiceImport generator (both
+			// NeedLeaderElection()=true) — must run on exactly ONE replica. Without
+			// leader election controller-runtime ignores NeedLeaderElection and runs
+			// every runnable on every replica, so two replicas' transiently-divergent
+			// registry snapshots fight create-vs-prune on the selectorless mesh
+			// Services every sync interval. That flap forces a full agent xDS snapshot
+			// rebuild each cycle; a captured request landing in the rebuild window
+			// misses the cap_http GAMMA vhost and falls through to the ORIGINAL_DST
+			// passthrough (kube-proxy round-robin), dropping the HTTPRoute feature
+			// (header mutation / redirect / weight). The per-replica
+			// syncer/broadcaster/write-behind stay NeedLeaderElection()=false, so the
+			// endpoint stream remains served by every replica.
+			LeaderElection:   true,
+			LeaderElectionID: "aether-registrar.registry.aether.io",
 		},
 		RegistryBackend:         "kubernetes",
 		EtcdEndpoints:           []string{"localhost:2379"},
-		CloudMapNamespace:       "aether",
 		SyncInterval:            defaultSyncInterval,
 		GRPCAddress:             defaultGRPCAddress,
 		SpireEnabled:            true,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
-		SpireTrustDomain:        DefaultSpireTrustDomain,
 	}
 }

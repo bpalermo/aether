@@ -1,0 +1,135 @@
+# aether-proxy: a SEPARATE Bazel workspace that builds a custom Envoy.
+#
+# This workspace is independent of the root aether bzlmod workspace — it is
+# listed in the root //.bazelignore, so `bazel build //...` / Gazelle in the repo
+# root never descend here. Build it explicitly: `cd proxy && bazel build //:image`.
+# It pins its own Bazel version (.bazelversion = 7.7.1, required by Envoy 1.38's
+# WORKSPACE build) and uses Envoy's own (pre-bzlmod) dependency macro chain.
+#
+# The Envoy macro sequence below mirrors envoyproxy/envoy@v1.38.0's WORKSPACE
+# exactly (incl. envoy_bazel_dependencies / envoy_repo / envoy_toolchains — the
+# latter registers the hermetic LLVM toolchain + @clang_platform, so no local
+# clang is needed). Modeled on github.com/bpalermo/istio-proxy. See proposal 010.
+workspace(name = "github_com_bpalermo_aether_proxy")
+
+# Our http_archives: container_structure_test, rules_oci, and the @envoy source
+# archive (pinned in //bazel/envoy:repository.bzl).
+load("//bazel:repositories.bzl", "repositories")
+
+repositories()
+
+# The curated compiled-in Envoy extension set (//bazel/extension_config), read by
+# Envoy via the @envoy_build_config repo.
+local_repository(
+    name = "envoy_build_config",
+    path = "bazel/extension_config",
+)
+
+# --- Envoy dependency macro chain (matches @envoy//WORKSPACE at v1.38.0) ---
+load("@envoy//bazel:api_binding.bzl", "envoy_api_binding")
+
+envoy_api_binding()
+
+load("@envoy//bazel:api_repositories.bzl", "envoy_api_dependencies")
+
+envoy_api_dependencies()
+
+load("@envoy//bazel:repositories.bzl", "envoy_dependencies")
+
+envoy_dependencies()
+
+load("@envoy//bazel:bazel_deps.bzl", "envoy_bazel_dependencies")
+
+envoy_bazel_dependencies()
+
+# Bazel 8 dropped the auto-registered legacy shell toolchain; Envoy 1.39 loads
+# sh_test/sh_binary from @rules_shell (pulled in by envoy_dependencies above)
+# but leaves toolchain registration to the root workspace.
+load("@rules_shell//shell:repositories.bzl", "rules_shell_dependencies", "rules_shell_toolchains")
+
+rules_shell_dependencies()
+
+rules_shell_toolchains()
+
+load("@envoy//bazel:repositories_extra.bzl", "envoy_dependencies_extra")
+
+envoy_dependencies_extra()
+
+load("@envoy//bazel:python_dependencies.bzl", "envoy_python_dependencies")
+
+envoy_python_dependencies()
+
+load("@envoy//bazel:dependency_imports.bzl", "envoy_dependency_imports")
+
+envoy_dependency_imports()
+
+load("@envoy//bazel:repo.bzl", "envoy_repo")
+
+envoy_repo()
+
+# Registers Envoy's hermetic LLVM C/C++ toolchain (+ @clang_platform). This is
+# what lets --config=clang build with no local clang installed.
+load("@envoy//bazel:toolchains.bzl", "envoy_toolchains")
+
+envoy_toolchains()
+
+load("@envoy//bazel:dependency_imports_extra.bzl", "envoy_dependency_imports_extra")
+
+envoy_dependency_imports_extra()
+
+# --- aarch64-EXEC hermetic clang toolchain (for RBE arm64 pool) ---
+#
+# Envoy's envoy_toolchains() + envoy_dependency_imports_extra() register Envoy's
+# @llvm_toolchain, which is configured for the DRIVER host's arch (x86_64 when
+# the Bazel server runs on an x64 machine). Its cc-toolchain-aarch64-linux has
+# exec_compatible_with=x86_64 — a cross-compile tool. When the RBE exec platform
+# is //bazel/platforms:rbe_buildbuddy_arm64 (cpu:aarch64), Bazel finds no matching
+# CC toolchain and fails analysis.
+#
+# Fix: register a second llvm_toolchain with exec_arch="aarch64". The toolchain
+# config repo runs with rctx.os.arch overridden to "aarch64", so it generates
+# cc-toolchain-aarch64-linux with exec_compatible_with=[cpu:aarch64, os:linux]
+# and downloads the aarch64 LLVM 18.1.8 distribution for the exec environment.
+# The sysroot mirrors Envoy's @sysroot_linux_arm64 (already fetched above).
+# cxx_cross_lib is omitted — for a native aarch64→aarch64 build the compiler's
+# own libc++ is used (stdlib="builtin-libc++").
+load("@toolchains_llvm//toolchain:rules.bzl", "llvm_toolchain")
+
+llvm_toolchain(
+    name = "llvm_toolchain_aarch64",
+    cxx_standard = {"": "c++20"},
+    exec_arch = "aarch64",
+    llvm_version = "18.1.8",
+    sysroot = {
+        "linux-aarch64": "@sysroot_linux_arm64//:sysroot",
+    },
+)
+
+load("@llvm_toolchain_aarch64//:toolchains.bzl", "llvm_register_toolchains")
+
+llvm_register_toolchains()
+
+# --- Our packaging toolchains (rules_oci + container_structure_test) ---
+# Run after the Envoy chain so Envoy's versions of shared deps (bazel_features,
+# bazel_skylib, …) win; rules_oci's later definitions are no-ops for those.
+load("@rules_oci//oci:dependencies.bzl", "rules_oci_dependencies")
+
+rules_oci_dependencies()
+
+load("@container_structure_test//:repositories.bzl", "container_structure_test_register_toolchain")
+
+container_structure_test_register_toolchain(name = "cst")
+
+load("@rules_oci//oci:repositories.bzl", "oci_register_toolchains")
+
+oci_register_toolchains(name = "oci")
+
+load("//bazel/oci:images.bzl", "oci_images")
+
+oci_images()
+
+# NOTE: the aether_stats filter is compiled into //:envoy as a native C++
+# extension (//source/extensions/filters/http/aether_stats, proposal 012) — no
+# Rust toolchain, crate_universe, or dynamic-module wiring is needed here. The
+# `envoy_rust_crate_index` repo that requires CARGO_BAZEL_REPIN comes from
+# @envoy's own in-tree dynamic_modules support, not from aether.

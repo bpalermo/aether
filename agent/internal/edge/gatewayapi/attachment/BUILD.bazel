@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "attachment",
+    srcs = [
+        "attachment.go",
+        "hostnames.go",
+        "refs.go",
+    ],
+    importpath = "github.com/bpalermo/aether/agent/internal/edge/gatewayapi/attachment",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//common/referencegrant",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+        "@io_k8s_sigs_gateway_api//apis/v1beta1",
+    ],
+)
+
+go_test(
+    name = "attachment_test",
+    srcs = ["attachment_test.go"],
+    embed = [":attachment"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+        "@io_k8s_sigs_gateway_api//apis/v1beta1",
+    ],
+)

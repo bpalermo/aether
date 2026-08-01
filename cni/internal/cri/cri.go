@@ -21,7 +21,8 @@ func GetContainerPID(ctx context.Context, criSocket, containerID string) (uint32
 		criSocket = defaultCRISocket
 	}
 
-	conn, err := grpc.NewClient(criSocket,
+	conn, err := grpc.NewClient(
+		criSocket,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

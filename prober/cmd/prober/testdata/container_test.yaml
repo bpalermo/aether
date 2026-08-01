@@ -1,0 +1,10 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/prober"]
+  user: 65532 # nonroot
+fileExistenceTests:
+  - name: 'prober'
+    path: '/prober'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'

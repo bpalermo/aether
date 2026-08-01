@@ -29,7 +29,7 @@ make format-check  # CI-friendly check (fails on drift)
 
 **Three binaries:**
 - `agent/cmd/agent` — Node DaemonSet. Manages xDS server (Envoy), CNI gRPC server, SPIRE bridge via `controller-runtime` Manager.
-- `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (DynamoDB/etcd/Cloud Map), maintains endpoint snapshot, streams to agents via gRPC.
+- `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (DynamoDB/etcd), maintains endpoint snapshot, streams to agents via gRPC.
 - `cni/cmd/cni` — CNI plugin binary (Add/Del/Check/GC/Status).
 
 **Key patterns:**

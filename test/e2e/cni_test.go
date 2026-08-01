@@ -65,7 +65,8 @@ func TestManagedPodRegistration(t *testing.T) {
 			ns := ctx.Value(testNamespaceKey).(string)
 
 			pods := &corev1.PodList{}
-			if err := cfg.Client().Resources().List(ctx, pods,
+			if err := cfg.Client().Resources().List(
+				ctx, pods,
 				resources.WithLabelSelector("app=echo,aether.io/managed=true"),
 				resources.WithFieldSelector("metadata.namespace="+ns),
 			); err != nil {
@@ -171,7 +172,8 @@ func TestUnmanagedPodIgnored(t *testing.T) {
 
 			// Verify the unmanaged pod does NOT have the aether.io/managed label
 			pods := &corev1.PodList{}
-			if err := cfg.Client().Resources().List(ctx, pods,
+			if err := cfg.Client().Resources().List(
+				ctx, pods,
 				resources.WithLabelSelector("app=unmanaged"),
 				resources.WithFieldSelector("metadata.namespace="+ns),
 			); err != nil {
@@ -189,7 +191,8 @@ func TestUnmanagedPodIgnored(t *testing.T) {
 
 			// Verify no pods with aether.io/managed=true exist in this namespace
 			managedPods := &corev1.PodList{}
-			if err := cfg.Client().Resources().List(ctx, managedPods,
+			if err := cfg.Client().Resources().List(
+				ctx, managedPods,
 				resources.WithLabelSelector("aether.io/managed=true"),
 				resources.WithFieldSelector("metadata.namespace="+ns),
 			); err != nil {
@@ -258,7 +261,8 @@ func TestPodDeletionCleanup(t *testing.T) {
 			}
 
 			pods := &corev1.PodList{}
-			if err := cfg.Client().Resources().List(ctx, pods,
+			if err := cfg.Client().Resources().List(
+				ctx, pods,
 				resources.WithLabelSelector("app=echo,aether.io/managed=true"),
 				resources.WithFieldSelector("metadata.namespace="+ns),
 			); err != nil {
@@ -292,7 +296,8 @@ func TestPodDeletionCleanup(t *testing.T) {
 			// Wait for all managed pods to be gone from the namespace
 			if err := wait.For(func(ctx context.Context) (bool, error) {
 				pods := &corev1.PodList{}
-				if err := cfg.Client().Resources().List(ctx, pods,
+				if err := cfg.Client().Resources().List(
+					ctx, pods,
 					resources.WithLabelSelector("app=echo,aether.io/managed=true"),
 					resources.WithFieldSelector("metadata.namespace="+ns),
 				); err != nil {

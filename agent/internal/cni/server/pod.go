@@ -12,6 +12,7 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/registry"
 	"go.opentelemetry.io/otel"
@@ -28,6 +29,12 @@ import (
 // data-plane proof that the listener serves is the CNI plugin's in-netns probe.
 const envoyAckTimeout = 2 * time.Second
 
+// unregisterTimeout bounds the best-effort registry deregistration on CNI DEL.
+// The local storage removal is already durable by then and the ghost sweep
+// reconciles any endpoint left behind, so this only caps how long the DEL waits
+// on the registrar (which may be rolling) before falling through to the sweep.
+const unregisterTimeout = 5 * time.Second
+
 // tracerName identifies this instrumentation scope in trace backends. The RPC
 // span itself comes from the otelgrpc stats handler; spans started here break
 // the pod lifecycle down into its API-server / registry / xDS / Envoy steps.
@@ -35,7 +42,8 @@ const tracerName = "aether/agent-cni-server"
 
 // startStepSpan starts a child span for one step of a pod lifecycle operation.
 func startStepSpan(ctx context.Context, name string, pod *cniv1.CNIPod) (context.Context, trace.Span) {
-	return otel.Tracer(tracerName).Start(ctx, name,
+	return otel.Tracer(tracerName).Start(
+		ctx, name,
 		trace.WithAttributes(
 			telemetry.AttrPodName.String(pod.GetName()),
 			telemetry.AttrPodNamespace.String(pod.GetNamespace()),
@@ -49,7 +57,7 @@ func startStepSpan(ctx context.Context, name string, pod *cniv1.CNIPod) (context
 // stores the pod locally, and registers its endpoints in the service registry.
 func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv1.AddPodResponse, error) {
 	cniPod := req.GetPod()
-	log := s.log.WithValues("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
+	log := s.log.With("pod", cniPod.GetName(), "namespace", cniPod.GetNamespace())
 
 	podUID, err := s.enhanceCNIPod(ctx, cniPod)
 	if err != nil {
@@ -61,8 +69,12 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		return nil, err
 	}
 	if ignorable {
-		log.V(1).Info("ignoring pod")
-		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS}, nil
+		// RESULT_IGNORED (not SUCCESS): tells the CNI plugin this pod is not
+		// mesh-managed so it installs NO capture/redirect. The plugin cannot see
+		// the aether.io/managed label (CRI passes annotations, not labels); the
+		// agent fetched it here via the API, so the agent is the single authority.
+		log.DebugContext(ctx, "ignoring pod")
+		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_IGNORED}, nil
 	}
 
 	// Store in the local storage. Whether this container was already known
@@ -70,7 +82,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	containerdID := types.ContainerID(cniPod.GetContainerId())
 	_, getErr := s.storage.GetResource(ctx, containerdID)
 	fresh := getErr != nil
-	log.Info("adding pod to storage", "containerID", containerdID)
+	log.InfoContext(ctx, "adding pod to storage", "containerID", containerdID)
 	if err := s.storage.AddResource(ctx, containerdID, cniPod); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add pod to storage: %v", err)
 	}
@@ -78,9 +90,9 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	if cniPod.GetTerminating() {
 		// Deletion already requested (CNI CHECK re-add, or ADD racing a delete):
 		// keep storage/xDS for drain, but never (re-)register the endpoint.
-		log.V(1).Info("pod is terminating; skipping endpoint registration")
+		log.DebugContext(ctx, "pod is terminating; skipping endpoint registration")
 	} else {
-		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, cniPod)
+		serviceName, protocol, sEndpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cniPod)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to build endpoint: %v", err)
 		}
@@ -99,7 +111,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		err = s.registry.RegisterEndpoint(regCtx, serviceName, protocol, sEndpoint)
 		telemetry.EndSpan(regSpan, err)
 		if err != nil {
-			log.Error(err, "failed to register endpoint; reconciliation sweep will retry", "service", serviceName)
+			log.ErrorContext(ctx, "failed to register endpoint; reconciliation sweep will retry", "error", err, "service", serviceName)
 		}
 	}
 
@@ -111,7 +123,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
 		selectors := spire.PodSelectors(cniPod.GetNamespace(), cniPod.GetServiceAccount(), cniPod.GetName(), podUID)
 		if err = s.spireBridge.SubscribePod(cniPod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
-			log.Error(err, "failed to subscribe to SVID", "spiffeID", spiffeID)
+			log.ErrorContext(ctx, "failed to subscribe to SVID", "error", err, "spiffeID", spiffeID)
 		}
 	}
 
@@ -131,7 +143,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 	waitErr := s.ackTracker.WaitListenerPresent(waitCtx, proxy.OutboundListenerName(cniPod))
 	telemetry.EndSpan(waitSpan, waitErr)
 	if waitErr != nil {
-		log.V(1).Info("envoy did not ack listener", "listener", proxy.OutboundListenerName(cniPod), "error", waitErr)
+		log.DebugContext(ctx, "envoy did not ack listener", "listener", proxy.OutboundListenerName(cniPod), "error", waitErr)
 	}
 
 	return &cniv1.AddPodResponse{
@@ -147,14 +159,14 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	containerId := req.GetContainerId()
 	podName := req.GetName()
 	namespace := req.GetNamespace()
-	log := s.log.WithValues("pod", podName, "namespace", namespace)
+	log := s.log.With("pod", podName, "namespace", namespace)
 
 	containerID := types.ContainerID(containerId)
 
 	storedPod, err := s.storage.GetResource(ctx, containerID)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.V(1).Info("resource was not found locally. we assume it was either already removed or ignored during registration")
+			log.DebugContext(ctx, "resource was not found locally. we assume it was either already removed or ignored during registration")
 			return &cniv1.RemovePodResponse{
 				Result: cniv1.RemovePodResponse_RESULT_SUCCESS,
 			}, nil
@@ -167,51 +179,71 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 		return nil, err
 	}
 	if ignorable {
-		log.V(1).Info("ignoring pod")
+		log.DebugContext(ctx, "ignoring pod")
 		return &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS}, nil
 	}
 
-	// Hold lifecycleMu from unregistration through storage removal so the
-	// liveness loop cannot interleave a health re-registration of a pod whose
-	// endpoint was just unregistered (which would resurrect it in the registry
-	// permanently).
+	// Detach from the request context so neither the durable local removal nor the
+	// best-effort registry/listener cleanup is skipped when the request ctx is
+	// canceled — the plugin's del timeout, a kubelet cancel, or agent SIGTERM (the
+	// xDS server force-stops in-flight RPCs after ShutdownTimeout). RemoveResource
+	// ignores ctx, but a canceled handler that returns early before reaching it is
+	// exactly what left ghost storage entries with lingering netns pins.
+	bgCtx := context.WithoutCancel(ctx)
+
+	// Serialize against the liveness loop and ghost sweep across the removal.
 	s.lifecycleMu.Lock()
 
-	serviceName, ips, err := registry.ExtractCNIPodInformation(storedPod)
-	unregCtx, unregSpan := startStepSpan(ctx, "cni_server.unregister_endpoints", storedPod)
-	err = s.registry.UnregisterEndpoints(unregCtx, serviceName, ips)
-	telemetry.EndSpan(unregSpan, err)
-	if err != nil {
+	// Remove from local storage FIRST. Local storage is the authoritative source
+	// of truth: the listener snapshot is rebuilt from it, the liveness loop reads
+	// it, and the ghost sweep reconciles the registry against it. Removing it first
+	// makes the delete durable even if the steps below fail, stops the liveness
+	// loop resurrecting the endpoint, and lets the sweep deregister whatever is
+	// left in the registry. This mirrors AddPod, which stores first and treats
+	// registration as best-effort. The ONLY fatal error here (kubelet retries the
+	// DEL) is the storage removal itself.
+	if err := s.storage.RemoveResource(bgCtx, containerID); err != nil {
 		s.lifecycleMu.Unlock()
-		return nil, status.Errorf(codes.Internal, "failed to unregister endpoints from service: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
 	}
 
-	// Unsubscribe from SVID for this pod (keyed by its network namespace).
-	if s.spireBridge != nil {
-		if unsubErr := s.spireBridge.UnsubscribePod(ctx, storedPod.GetNetworkNamespace()); unsubErr != nil {
-			log.Error(unsubErr, "failed to unsubscribe from SVID", "netns", storedPod.GetNetworkNamespace())
+	// Remove the per-pod listeners (best-effort): on failure the next snapshot
+	// rebuild — or an agent restart's load from the now-empty storage — drops them.
+	xdsCtx, xdsSpan := startStepSpan(bgCtx, "cni_server.xds_remove_pod", storedPod)
+	xdsErr := s.snapshotCache.RemovePod(xdsCtx, storedPod.GetNetworkNamespace())
+	telemetry.EndSpan(xdsSpan, xdsErr)
+	if xdsErr != nil {
+		log.ErrorContext(ctx, "failed to remove listener; snapshot rebuild will reconcile", "error", xdsErr, "netns", storedPod.GetNetworkNamespace())
+	}
+
+	// Deregister the endpoint (best-effort): the ghost sweep deregisters any
+	// endpoint with no live local pod, so a failure here (registrar rolling,
+	// shutdown) self-heals on the next sweep. Bounded so it can't hang the DEL.
+	if serviceName, ips, extractErr := registry.ExtractCNIPodInformation(storedPod); extractErr != nil {
+		log.ErrorContext(ctx, "failed to extract endpoint info; ghost sweep will reconcile", "error", extractErr)
+	} else {
+		unregCtx, unregCancel := context.WithTimeout(bgCtx, unregisterTimeout)
+		unregSpanCtx, unregSpan := startStepSpan(unregCtx, "cni_server.unregister_endpoints", storedPod)
+		unregErr := s.registry.UnregisterEndpoints(unregSpanCtx, serviceName, ips)
+		telemetry.EndSpan(unregSpan, unregErr)
+		unregCancel()
+		if unregErr != nil {
+			log.ErrorContext(ctx, "failed to unregister endpoints; ghost sweep will retry", "error", unregErr, "service", serviceName)
 		}
 	}
 
-	// Remove listener from xDS first
-	xdsCtx, xdsSpan := startStepSpan(ctx, "cni_server.xds_remove_pod", storedPod)
-	err = s.snapshotCache.RemovePod(xdsCtx, storedPod.GetNetworkNamespace())
-	telemetry.EndSpan(xdsSpan, err)
-	if err != nil {
-		s.lifecycleMu.Unlock()
-		return nil, status.Errorf(codes.Internal, "failed to remove listener: %v", err)
-	}
-
-	// Remove from the local storage
-	if err = s.storage.RemoveResource(ctx, containerID); err != nil {
-		s.lifecycleMu.Unlock()
-		return nil, status.Errorf(codes.Internal, "failed to remove pod from storage: %v", err)
+	// Unsubscribe from SVID for this pod (best-effort; keyed by its netns).
+	if s.spireBridge != nil {
+		if unsubErr := s.spireBridge.UnsubscribePod(bgCtx, storedPod.GetNetworkNamespace()); unsubErr != nil {
+			log.ErrorContext(ctx, "failed to unsubscribe from SVID", "error", unsubErr, "netns", storedPod.GetNetworkNamespace())
+		}
 	}
 	s.lifecycleMu.Unlock()
 
 	// Best-effort: wait for Envoy to ACK removal of both per-pod listeners —
 	// the inbound listener also binds (and dials) inside the pod netns, so
-	// netns teardown must not race either of them.
+	// netns teardown must not race either of them. Uses the request ctx so it
+	// short-circuits on shutdown (the durable work above is already done).
 	ackCtx, ackCancel := context.WithTimeout(ctx, envoyAckTimeout)
 	defer ackCancel()
 	waitCtx, waitSpan := startStepSpan(ackCtx, "cni_server.envoy_ack_wait", storedPod)
@@ -221,7 +253,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 	telemetry.EndSpan(waitSpan, waitErr)
 	if waitErr != nil {
-		log.V(1).Info("envoy did not ack listener removal", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
+		log.DebugContext(ctx, "envoy did not ack listener removal", "netns", storedPod.GetNetworkNamespace(), "error", waitErr)
 	}
 
 	return &cniv1.RemovePodResponse{
@@ -279,7 +311,7 @@ func isIgnorablePod(cniPod *cniv1.CNIPod) bool {
 		return true
 	}
 
-	managed, ok := labels[constants.LabelAetherManaged]
+	managed, ok := labels[aetherlabels.LabelAetherManaged]
 	if !ok || managed != "true" {
 		return true
 	}

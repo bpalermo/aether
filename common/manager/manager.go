@@ -5,13 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bpalermo/aether/common/telemetry"
+	"github.com/bpalermo/aether/common/telemetry/setup"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
-
-// defaultTraceSampleRate is the default head-sampling ratio for traces.
-const defaultTraceSampleRate = 0.1
 
 // Result holds the bootstrapped manager and an optional telemetry shutdown function.
 type Result struct {
@@ -20,30 +17,35 @@ type Result struct {
 }
 
 // Bootstrap sets up telemetry (if enabled), creates a controller-runtime Manager,
-// and registers the standard health and readiness probes.
-func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion string) (*Result, error) {
-	telemetryCfg := telemetry.Config{
+// and registers the standard health and readiness probes. Optional opts mutate
+// the ctrl.Options before the manager is built (e.g. to supply a custom webhook
+// server backed by SPIRE).
+func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion string, optFns ...func(*ctrl.Options)) (*Result, error) {
+	telemetryCfg := setup.Config{
 		ServiceName:     serviceName,
 		ServiceVersion:  serviceVersion,
 		OTLPEndpoint:    cfg.OTLPEndpoint,
 		TraceSampleRate: cfg.TraceSampleRate,
+		TraceExport:     cfg.TracingExport,
 	}
 
 	var shutdowns []func(context.Context) error
 	if cfg.OTelEnabled {
-		metricsShutdown, err := telemetry.Setup(ctx, telemetryCfg)
+		metricsShutdown, err := setup.Setup(ctx, telemetryCfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to setup telemetry: %w", err)
 		}
 		shutdowns = append(shutdowns, metricsShutdown)
 	}
-	if cfg.TracingEnabled {
-		tracingShutdown, err := telemetry.SetupTracing(ctx, telemetryCfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to setup tracing: %w", err)
-		}
-		shutdowns = append(shutdowns, tracingShutdown)
+	// Tracing is always installed: a TracerProvider issues the span contexts that
+	// give logs their trace_id/span_id (the slog/otelslog correlation), which is
+	// useful regardless of other telemetry. Span EXPORT stays opt-in (TraceExport)
+	// — see SetupTracing.
+	tracingShutdown, err := setup.SetupTracing(ctx, telemetryCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup tracing: %w", err)
 	}
+	shutdowns = append(shutdowns, tracingShutdown)
 
 	var shutdown func(context.Context) error
 	if len(shutdowns) > 0 {
@@ -58,10 +60,15 @@ func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion stri
 
 	opts := ctrl.Options{
 		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
-		Metrics:                telemetry.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
+		Metrics:                setup.ManagerMetricsOptions(cfg.MetricsEnabled, cfg.MetricsBindAddress),
+		LeaderElection:         cfg.LeaderElection,
+		LeaderElectionID:       cfg.LeaderElectionID,
 	}
 	if cfg.CacheOptions != nil {
 		opts.Cache = *cfg.CacheOptions
+	}
+	for _, opt := range optFns {
+		opt(&opts)
 	}
 	m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
 	if err != nil {
@@ -74,7 +81,7 @@ func Bootstrap(ctx context.Context, cfg Config, serviceName, serviceVersion stri
 	if err = m.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return nil, fmt.Errorf("failed to set up ready check: %w", err)
 	}
-	if err = m.AddReadyzCheck("cache-sync", telemetry.CacheSyncChecker(m)); err != nil {
+	if err = m.AddReadyzCheck("cache-sync", setup.CacheSyncChecker(m)); err != nil {
 		return nil, fmt.Errorf("failed to set up cache sync ready check: %w", err)
 	}
 

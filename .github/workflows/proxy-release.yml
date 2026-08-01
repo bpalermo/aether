@@ -1,0 +1,159 @@
+name: proxy-release
+
+# Post-merge release for the custom Envoy (//proxy): build per arch — both legs
+# offload the Envoy compile to BuildBuddy RBE (amd64 = x64 pool, arm64 = arm64
+# pool via @llvm_toolchain_aarch64). Push each arch by DIGEST (no per-arch tags),
+# then assemble one multi-arch manifest tagged with the commit SHA.
+# `bazel run //:push` runs the pusher locally, so the arm64 leg keeps a native
+# ubuntu-24.04-arm runner (RBE compiles the binary, runner executes the pusher).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "proxy/**"
+      - ".github/workflows/proxy-release.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BAZEL_REPIN: "true"
+  IMAGE: ghcr.io/bpalermo/aether/aether-proxy
+
+jobs:
+  build-push:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # amd64 offloads the heavy compile to BuildBuddy's x64 RBE pool.
+          - arch: amd64
+            runner: ubuntu-latest
+            bazel_config: rbe-buildbuddy-amd64
+          # arm64 offloads the heavy compile to BuildBuddy's arm64 RBE pool via
+          # @llvm_toolchain_aarch64. Keeps ubuntu-24.04-arm runner so that
+          # `bazel run //:push` executes the oci_push tool natively (the pusher
+          # binary is built for arm64 by RBE and needs an arm64 runner to run it).
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            bazel_config: rbe-buildbuddy-arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      # Both legs now use RBE; this step is never triggered but kept as a
+      # safety net if bb-cache is ever used as a fallback.
+      - name: Setup LLVM runtime libs
+        if: matrix.bazel_config == 'bb-cache'
+        uses: ./.github/actions/setup-llvm-libs
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push ${{ matrix.arch }} by digest (${{ matrix.bazel_config }})
+        # remote_tags=[] and no --tag → oci_push pushes the image by digest only
+        # (no tag lingers in the registry). Capture the pushed manifest digest.
+        working-directory: proxy
+        run: |
+          bazel run \
+            --config=ci \
+            --config=${{ matrix.bazel_config }} \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.ref_name }} \
+            //:push 2>&1 | tee "$RUNNER_TEMP/push.log"
+          digest="$(grep -oE '@sha256:[0-9a-f]{64}' "$RUNNER_TEMP/push.log" | head -1 | cut -d@ -f2)"
+          test -n "$digest"
+          echo "$digest" > "$RUNNER_TEMP/digest.txt"
+          echo "pushed ${{ matrix.arch }}: $digest"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest.txt
+          if-no-files-found: error
+
+  manifest:
+    needs: build-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          path: digests
+
+      # Combine the two per-arch images (by digest) into one multi-arch manifest,
+      # tagged with the commit SHA.
+      - name: Assemble multi-arch manifest
+        run: |
+          amd64="$(cat digests/digest-amd64/digest.txt)"
+          arm64="$(cat digests/digest-arm64/digest.txt)"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${{ github.sha }}" \
+            "${IMAGE}@${amd64}" \
+            "${IMAGE}@${arm64}"
+
+  # Pin the aether chart to the just-published image (commit-SHA tag) by opening a
+  # PR against the protected main branch. peter-evans reuses a single rolling
+  # branch, so repeat releases update the same PR; if the chart is already pinned
+  # to this SHA there's no diff and no PR.
+  bump-chart:
+    needs: manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Pin aether chart to aether-proxy:${{ github.sha }}
+        run: |
+          # The proxy image is repository + tag (see charts/aether/values.yaml);
+          # bump the tag on the line following the aether-proxy repository line.
+          sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|{n;s|^(\s*tag: ).*|\1'"${{ github.sha }}"'|}' \
+            charts/aether/values.yaml
+
+      - name: Open chart-bump PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # Default GITHUB_TOKEN works, but PRs it opens don't trigger CI (GitHub
+          # recursion guard). If main requires status checks to merge, set a PAT
+          # secret CHART_BUMP_PAT so the PR runs CI.
+          token: ${{ secrets.CHART_BUMP_PAT || secrets.GITHUB_TOKEN }}
+          base: main
+          branch: chore/proxy-image-bump
+          delete-branch: true
+          commit-message: "chore(proxy): pin aether chart to aether-proxy:${{ github.sha }}"
+          title: "chore(proxy): pin aether chart to aether-proxy:${{ github.sha }}"
+          body: |
+            Auto-generated by `proxy-release`. Pins the aether chart's proxy image
+            to the multi-arch image published for `${{ github.sha }}`.

@@ -21,6 +21,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,6 +33,7 @@ import (
 	"github.com/bpalermo/aether/cni/internal/cri"
 	"github.com/bpalermo/aether/cni/internal/telemetry"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	commontelemetry "github.com/bpalermo/aether/common/telemetry"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -100,7 +102,67 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
-	return p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
+	// Register with the agent FIRST (before any capture install). The agent fetches
+	// the pod's aether.io/managed LABEL from the API and is the single authority on
+	// whether the pod is mesh-managed — the CNI plugin cannot see labels (CRI passes
+	// annotations, not labels). A RESULT_IGNORED response means "not managed": install
+	// NO capture, or a managed=false pod in a non-ignored namespace would have its
+	// egress redirected to a capture port with no listener → blackholed control plane
+	// (the edge outage, fixed structurally here rather than per-pod annotation).
+	ignored, err := p.sendAddPod(context.Background(), netConf, cniPod, prevResult)
+	if err != nil {
+		return err
+	}
+	if ignored {
+		p.logger.Info("agent reports pod not mesh-managed; skipping capture install",
+			zap.String("namespace", string(k8sArgs.K8S_POD_NAMESPACE)),
+			zap.String("pod", string(k8sArgs.K8S_POD_NAME)))
+		return types.PrintResult(prevResult, netConf.CNIVersion)
+	}
+
+	// Transparent capture (proposal 018, Phase 3a): redirect outbound ClusterIP:18081
+	// to the pod-local capture listener. Unconditional for managed pods (proposal
+	// 031) — the Envoy side always carries the capture listener. Best-effort — a
+	// failure leaves the explicit fast-lane working, so it must not fail the pod's
+	// networking. Uses the runtime netns path (the rule lives in the kernel netns,
+	// not the bind-mount pin).
+	// Ports the pod excludes from capture (proposal 022, M2-default; Istio parity):
+	// connections to these dports bypass the mesh via an nft RETURN ahead of the
+	// redirect, in whichever capture path is active.
+	excludePorts := podExcludedOutboundPorts(netConf)
+	excludeRanges := podExcludedOutboundIPRanges(netConf)
+
+	if err := installCaptureRedirect(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
+		p.logger.Warn("failed to install transparent-capture redirect; continuing without capture",
+			zap.String("netns", args.Netns), zap.Error(err))
+	}
+
+	// Redirect-all capture (proposal 022): redirect ALL outbound non-local TCP into
+	// the capture listener; non-mesh egress passes through via ORIGINAL_DST (the
+	// capture listener unconditionally carries the passthrough fallback chain).
+	// Best-effort: failure leaves the scoped redirect in place.
+	//
+	// podRedirectAll resolves precedence: an explicit per-pod annotation (opt-in
+	// "true" / opt-out "false") wins, otherwise the node default
+	// (CaptureRedirectAllDefault — the M2-default flip for managed pods) applies.
+	if podRedirectAll(netConf) {
+		if err := installCaptureRedirectAll(args.Netns, excludePorts, excludeRanges, p.logger); err != nil {
+			p.logger.Warn("failed to install redirect-all capture (spike/M2a); continuing without redirect-all",
+				zap.String("netns", args.Netns), zap.Error(err))
+		}
+	}
+
+	// Mesh DNS (proposal 018, mesh-global FQDN): redirect the pod's :53 to the
+	// pod-local mesh-DNS listener. Best-effort — a failure leaves the pod's DNS on
+	// the original resolver (mesh names just won't resolve), never breaks networking.
+	if netConf.MeshDNSEnabled {
+		if err := installDNSRedirect(args.Netns, netConf.HostIP, p.logger); err != nil {
+			p.logger.Warn("failed to install mesh-DNS DNAT; continuing without mesh DNS",
+				zap.String("netns", args.Netns), zap.Error(err))
+		}
+	}
+
+	return types.PrintResult(prevResult, netConf.CNIVersion)
 }
 
 // CmdCheck handles the CNI Check operation for plugin health verification.
@@ -317,13 +379,13 @@ func (p *AetherPlugin) resolvePID(netns, criSocket, containerID string) *wrapper
 }
 
 // sendAddPod sends the pod to the agent and returns the previous result on success.
-func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, pod *cniv1.CNIPod, prevResult *current.Result) (retErr error) {
+func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, pod *cniv1.CNIPod, prevResult *current.Result) (ignored bool, retErr error) {
 	ctx, span := startPodSpan(ctx, "cni.add_pod", pod.GetName(), pod.GetNamespace(), pod.GetContainerId())
 	defer func() { commontelemetry.EndSpan(span, retErr) }()
 
 	client, err := NewCNIClient(p.logger, conf.AgentCNIPath)
 	if err != nil {
-		return fmt.Errorf("failed to create CNI client: %w", err)
+		return false, fmt.Errorf("failed to create CNI client: %w", err)
 	}
 	defer func() {
 		if cerr := client.Close(); cerr != nil {
@@ -333,11 +395,15 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 
 	res, err := client.AddPod(ctx, pod)
 	if err != nil {
-		return fmt.Errorf("failed to add pod to agent: %w", err)
+		return false, fmt.Errorf("failed to add pod to agent: %w", err)
 	}
 
+	// RESULT_IGNORED: the pod is not mesh-managed — caller skips capture install.
+	if res.Result == cniv1.AddPodResponse_RESULT_IGNORED {
+		return true, nil
+	}
 	if res.Result != cniv1.AddPodResponse_RESULT_SUCCESS {
-		return fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
+		return false, fmt.Errorf("adding pod to agent was not successful: %v", res.Result)
 	}
 
 	// Data-plane proof, before pod start completes: probe the outbound capture
@@ -356,7 +422,9 @@ func (p *AetherPlugin) sendAddPod(ctx context.Context, conf config.AetherConf, p
 		}
 	}
 
-	return types.PrintResult(prevResult, conf.CNIVersion)
+	// Managed pod registered + serving: NOT ignored. CmdAdd installs capture next
+	// and prints the CNI result.
+	return false, nil
 }
 
 // delProbeNetns resolves the netns path to probe during DEL: the pinned path
@@ -572,4 +640,123 @@ func fileExists(path string) bool {
 
 func ignorableNamespace(namespace string) bool {
 	return constants.IsIgnoredNamespace(namespace)
+}
+
+// podRedirectAll decides whether the pod gets the broad redirect-all capture
+// (proposal 022). Precedence, highest first:
+//
+//   - capture.aether.io/redirect-all="true"  → force ON (explicit opt-in; lets a
+//     single pod be tested while the node default is off).
+//   - capture.aether.io/redirect-all="false" → force OFF (explicit opt-out; carves
+//     an infra/hostNetwork/prober pod out of the managed-pod default).
+//   - otherwise → the node default: CaptureRedirectAllDefault (the M2-default flip,
+//     redirect-all for managed pods).
+//
+// Pod annotations reach the CNI plugin through the runtime config
+// (io.kubernetes.cri.pod-annotations), populated by containerd when the aether CNI
+// conf declares that capability.
+func podRedirectAll(conf config.AetherConf) bool {
+	switch podRedirectAllAnnotation(conf) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	return conf.CaptureRedirectAllDefault
+}
+
+// podRedirectAllAnnotation returns the raw capture.aether.io/redirect-all
+// annotation value ("" when unset), so podRedirectAll can distinguish an explicit
+// opt-out ("false") from "unset" (fall through to the node default).
+func podRedirectAllAnnotation(conf config.AetherConf) string {
+	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+		return ""
+	}
+	return (*conf.RuntimeConfig.PodAnnotations)[aetherannotations.AnnotationCaptureRedirectAll]
+}
+
+// podExcludedOutboundPorts parses the capture.aether.io/exclude-outbound-ports
+// annotation (proposal 022, M2-default; Istio parity) into a deduplicated list of
+// TCP destination ports to carve OUT of capture. The value is comma-separated
+// (e.g. "5432, 9000"); blanks and out-of-range/non-numeric entries are skipped so
+// a malformed annotation degrades to "exclude what parses" rather than failing the
+// pod's networking. Reaches the CNI via the same pod-annotations runtime config as
+// podRedirectAll. Returns nil when unset.
+func podExcludedOutboundPorts(conf config.AetherConf) []uint16 {
+	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+		return nil
+	}
+	raw := (*conf.RuntimeConfig.PodAnnotations)[aetherannotations.AnnotationCaptureExcludeOutboundPorts]
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[uint16]struct{})
+	var ports []uint16
+	for _, f := range strings.Split(raw, ",") {
+		n, err := strconv.ParseUint(strings.TrimSpace(f), 10, 16)
+		if err != nil || n == 0 {
+			continue
+		}
+		p := uint16(n)
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		ports = append(ports, p)
+	}
+	return ports
+}
+
+// podExcludedOutboundIPRanges parses the capture.aether.io/exclude-outbound-ip-ranges
+// annotation (proposal 022, M2-default; Istio parity) into a deduplicated list of
+// IPv4 destination prefixes to carve OUT of capture. The value is comma-separated
+// CIDRs (e.g. "10.0.0.0/8, 192.168.1.5/32"); a bare address is treated as a /32.
+// Blanks, unparseable entries, and non-IPv4 prefixes (the capture table is IPv4) are
+// skipped so a malformed annotation degrades to "exclude what parses" rather than
+// failing the pod's networking. Each prefix is normalised to its network address so
+// the nft mask/cmp matches. Returns nil when unset.
+func podExcludedOutboundIPRanges(conf config.AetherConf) []netip.Prefix {
+	if conf.RuntimeConfig == nil || conf.RuntimeConfig.PodAnnotations == nil {
+		return nil
+	}
+	raw := (*conf.RuntimeConfig.PodAnnotations)[aetherannotations.AnnotationCaptureExcludeOutboundIPRanges]
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[netip.Prefix]struct{})
+	var ranges []netip.Prefix
+	for _, f := range strings.Split(raw, ",") {
+		p, ok := parseIPv4RangeEntry(strings.TrimSpace(f))
+		if !ok {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		ranges = append(ranges, p)
+	}
+	return ranges
+}
+
+// parseIPv4RangeEntry parses one entry from the exclude-outbound-ip-ranges annotation.
+// A bare IPv4 address is treated as a /32. Returns (zero, false) when the entry is empty,
+// non-IPv4, or unparseable.
+func parseIPv4RangeEntry(s string) (netip.Prefix, bool) {
+	if s == "" {
+		return netip.Prefix{}, false
+	}
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		// Accept a bare IPv4 address as a /32.
+		addr, aerr := netip.ParseAddr(s)
+		if aerr != nil {
+			return netip.Prefix{}, false
+		}
+		p = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	if !p.Addr().Is4() {
+		return netip.Prefix{}, false
+	}
+	return p.Masked(), true
 }

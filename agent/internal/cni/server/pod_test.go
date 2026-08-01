@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	agentconstants "github.com/bpalermo/aether/agent/constants"
 	"github.com/bpalermo/aether/agent/internal/spire"
@@ -14,13 +16,13 @@ import (
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -64,7 +66,7 @@ func (r *testRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_
 // never reaches the liveness probe).
 func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache, healthSocket string) *CNIServer {
 	return &CNIServer{
-		log:           logr.Discard(),
+		log:           slog.New(slog.DiscardHandler),
 		clusterName:   "test-cluster",
 		nodeName:      "test-node",
 		trustDomain:   "example.org",
@@ -73,10 +75,13 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		storage:       stor,
 		registry:      reg,
 		snapshotCache: sc,
-		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()),
-		ackTracker:    ack.NewTracker(logr.Discard()),
+		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, slog.New(slog.DiscardHandler)),
+		ackTracker:    ack.NewTracker(slog.New(slog.DiscardHandler)),
 		healthClient:  newHealthGatewayClient(healthSocket),
-		k8sClient:     k8sClient,
+		// Effectively disables drain phase 2 so unrelated tests never race the
+		// pool-close goroutine; tests of phase 2 override this explicitly.
+		drainPoolCloseDelay: time.Hour,
+		k8sClient:           k8sClient,
 	}
 }
 
@@ -91,7 +96,7 @@ func validCNIPod(name, namespace, containerID string) *cniv1.CNIPod {
 		Ips:              []string{"10.0.0.1"},
 		ServiceAccount:   "default",
 		Labels: map[string]string{
-			constants.LabelAetherManaged: "true",
+			aetherlabels.LabelAetherManaged: "true",
 		},
 		Annotations: map[string]string{},
 	}
@@ -105,7 +110,7 @@ func validK8sPod(name, namespace string) *corev1.Pod {
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				constants.LabelAetherManaged: "true",
+				aetherlabels.LabelAetherManaged: "true",
 			},
 			Annotations: map[string]string{},
 		},
@@ -128,7 +133,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "coredns",
 				Namespace: "kube-system",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			expected: true,
@@ -138,7 +143,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "agent",
 				Namespace: "aether-system",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			expected: true,
@@ -168,7 +173,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       nil,
 			},
 			expected: true,
@@ -178,7 +183,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{},
 			},
 			expected: true,
@@ -188,7 +193,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			expected: false,
@@ -198,7 +203,7 @@ func TestIsIgnorablePod(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "production",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1", "10.0.0.2"},
 			},
 			expected: false,
@@ -233,7 +238,7 @@ func TestValidateAndCheckIgnorable(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "coredns",
 				Namespace: "kube-system",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			wantIgnorable: true,
@@ -244,7 +249,7 @@ func TestValidateAndCheckIgnorable(t *testing.T) {
 			pod: &cniv1.CNIPod{
 				Name:      "my-pod",
 				Namespace: "default",
-				Labels:    map[string]string{constants.LabelAetherManaged: "true"},
+				Labels:    map[string]string{aetherlabels.LabelAetherManaged: "true"},
 				Ips:       []string{"10.0.0.1"},
 			},
 			wantIgnorable: false,
@@ -301,7 +306,7 @@ func TestAddPod(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "pod in kube-system is ignored and returns success",
+			name: "pod in kube-system is ignored (RESULT_IGNORED)",
 			setupK8s: func() client.Client {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -323,7 +328,7 @@ func TestAddPod(t *testing.T) {
 					Ips:              []string{"10.0.0.1"},
 				},
 			},
-			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_SUCCESS},
+			want:    &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_IGNORED},
 			wantErr: false,
 		},
 		{
@@ -384,7 +389,7 @@ func TestAddPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sc := cache.NewSnapshotCache("test-node", logr.Discard())
+			sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
 			srv := newTestCNIServer(tt.setupK8s(), tt.setupStorage(), tt.setupRegistry(), sc, "")
 
 			got, err := srv.AddPod(context.Background(), tt.req)
@@ -480,7 +485,10 @@ func TestRemovePod(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "registry unregister failure returns error",
+			// The DEL removes local storage first (durable), then deregisters
+			// best-effort: a registrar failure must NOT fail the DEL — it would
+			// leave a ghost — the ghost sweep reconciles the registry instead.
+			name: "registry unregister failure is tolerated",
 			setupStorage: func() *storage.MockStorage[*cniv1.CNIPod] {
 				s := storage.NewMockStorage[*cniv1.CNIPod]()
 				s.GetResourceFunc = func(_ context.Context, _ types.ContainerID) (*cniv1.CNIPod, error) {
@@ -496,8 +504,8 @@ func TestRemovePod(t *testing.T) {
 				Namespace:   storedPod.GetNamespace(),
 				ContainerId: containerID,
 			},
-			want:    nil,
-			wantErr: true,
+			want:    &cniv1.RemovePodResponse{Result: cniv1.RemovePodResponse_RESULT_SUCCESS},
+			wantErr: false,
 		},
 		{
 			name: "storage remove failure returns error",
@@ -542,7 +550,7 @@ func TestRemovePod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sc := cache.NewSnapshotCache("test-node", logr.Discard())
+			sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
 			k8sClient := fake.NewClientBuilder().Build()
 			srv := newTestCNIServer(k8sClient, tt.setupStorage(), tt.setupRegistry(), sc, "")
 
@@ -556,4 +564,40 @@ func TestRemovePod(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestRemovePodDurableDeleteOnCanceledCtx is the guarantee: a CNI DEL removes
+// local storage even when the request context is already canceled (a SIGTERM-
+// aborted RPC or a plugin del-timeout) AND the registrar is unavailable. The
+// durable local delete must not be skipped — otherwise a ghost storage entry
+// (with a lingering netns pin) is left behind (issue #261).
+func TestRemovePodDurableDeleteOnCanceledCtx(t *testing.T) {
+	const containerID = "abc123"
+	storedPod := validCNIPod("my-pod", "default", containerID)
+
+	removed := false
+	st := storage.NewMockStorage[*cniv1.CNIPod]()
+	st.GetResourceFunc = func(_ context.Context, _ types.ContainerID) (*cniv1.CNIPod, error) {
+		return storedPod, nil
+	}
+	st.RemoveResourceFunc = func(_ context.Context, _ types.ContainerID) error {
+		removed = true
+		return nil
+	}
+	reg := &testRegistry{unregisterEndpointsErr: errors.New("registrar unavailable")}
+
+	sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
+	srv := newTestCNIServer(fake.NewClientBuilder().Build(), st, reg, sc, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled, like a SIGTERM-aborted DEL
+
+	resp, err := srv.RemovePod(ctx, &cniv1.RemovePodRequest{
+		Name:        storedPod.GetName(),
+		Namespace:   storedPod.GetNamespace(),
+		ContainerId: containerID,
+	})
+	require.NoError(t, err, "a canceled ctx + down registrar must not fail the DEL")
+	assert.Equal(t, cniv1.RemovePodResponse_RESULT_SUCCESS, resp.GetResult())
+	assert.True(t, removed, "local storage must be removed despite the canceled ctx and down registrar")
 }

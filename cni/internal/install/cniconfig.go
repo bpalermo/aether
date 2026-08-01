@@ -37,6 +37,12 @@ import (
 	  ]
 	}
 */
+
+// podAnnotationsCapability is the CNI capability key that makes containerd pass
+// the pod's annotations to the plugin via runtimeConfig. The plugin reads the
+// redirect-all opt-in annotation from there (proposal 022, M2a).
+const podAnnotationsCapability = "io.kubernetes.cri.pod-annotations"
+
 func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, error) {
 	pluginConfig := config.AetherConf{}
 
@@ -45,6 +51,14 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig.CNIVersion = "0.0.1"
 	pluginConfig.AgentCNIPath = constants.DefaultCNISocketPath
 	pluginConfig.OTLPEndpoint = cfg.OTLPEndpoint
+	pluginConfig.CaptureRedirectAllDefault = cfg.CaptureRedirectAllDefault
+	pluginConfig.MeshDNSEnabled = cfg.MeshDNSEnabled
+	pluginConfig.HostIP = cfg.HostIP
+	// Declare the pod-annotations capability so containerd populates
+	// runtimeConfig["io.kubernetes.cri.pod-annotations"] on each ADD. The plugin
+	// reads the capture.aether.io/redirect-all annotation from it to scope the
+	// redirect-all spike (proposal 022, M2a) to opt-in pods.
+	pluginConfig.Capabilities = map[string]bool{podAnnotationsCapability: true}
 
 	marshalledJSON, err := json.MarshalIndent(pluginConfig, "", "  ")
 	if err != nil {
@@ -97,11 +111,29 @@ func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir str
 	}
 	defer watcher.Close()
 
+	cniConfName, err = resolveConfName(ctx, cniConfName, mountedCNINetDir, watcher)
+	if err != nil {
+		return "", err
+	}
+
+	cniConfigFilepath := filepath.Join(mountedCNINetDir, cniConfName)
+
+	cniConfigFilepath, err = waitForConfigFile(ctx, cniConfigFilepath, watcher)
+	if err != nil {
+		return "", err
+	}
+
+	installLog.Info("CNI config file exists, proceeding", "filepath", cniConfigFilepath)
+	return cniConfigFilepath, nil
+}
+
+// resolveConfName waits until a CNI config filename is known, either from the provided
+// name or by discovering the first valid config file in mountedCNINetDir.
+func resolveConfName(ctx context.Context, cniConfName, mountedCNINetDir string, watcher *util.Watcher) (string, error) {
 	for len(cniConfName) == 0 {
 		cniConfNames, err := getConfigFilenames(mountedCNINetDir)
 		if err == nil || len(cniConfNames) > 0 {
-			cniConfName = cniConfNames[0]
-			break
+			return cniConfNames[0], nil
 		}
 		installLog.Error(err, "aether CNI is configured as chained plugin, but cannot find existing CNI network config")
 		installLog.Info("waiting for CNI network config file to be written in dir", "dir", mountedCNINetDir)
@@ -109,9 +141,12 @@ func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir str
 			return "", err
 		}
 	}
+	return cniConfName, nil
+}
 
-	cniConfigFilepath := filepath.Join(mountedCNINetDir, cniConfName)
-
+// waitForConfigFile waits until the given CNI config filepath exists, following
+// .conf/.conflist alternates as needed.
+func waitForConfigFile(ctx context.Context, cniConfigFilepath string, watcher *util.Watcher) (string, error) {
 	for !file.Exists(cniConfigFilepath) {
 		if strings.HasSuffix(cniConfigFilepath, ".conf") && file.Exists(cniConfigFilepath+"list") {
 			installLog.Info("file doesn't exist, but %[1]slist does; Using it as the CNI config file instead.", "filepath", cniConfigFilepath)
@@ -126,10 +161,7 @@ func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir str
 			}
 		}
 	}
-
-	installLog.Info("CNI config file exists, proceeding", "filepath", cniConfigFilepath)
-
-	return cniConfigFilepath, err
+	return cniConfigFilepath, nil
 }
 
 // getConfigFilenames follows similar semantics as kubelet

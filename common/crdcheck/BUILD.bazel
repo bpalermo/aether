@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "crdcheck",
+    srcs = ["crdcheck.go"],
+    importpath = "github.com/bpalermo/aether/common/crdcheck",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_apimachinery//pkg/api/meta",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+    ],
+)

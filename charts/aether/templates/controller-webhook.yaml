@@ -1,0 +1,179 @@
+{{/*
+Webhook serving trust (controller.webhook.spire — decoupled from mesh SPIRE):
+
+  controller.webhook.spire=true  — the controller serves the webhook with a SPIRE
+    SVID and injects the SPIRE trust bundle into this config's caBundle at runtime,
+    so no Secret is rendered and caBundle starts empty (failurePolicy: Ignore keeps
+    the webhook fail-open until the controller injects the bundle).
+
+  controller.webhook.spire=false (default) — a Helm self-signed cert (generated
+    once, reused on upgrade via lookup) is rendered as a Secret and its CA baked
+    into caBundle. Validates out of the box, independent of mesh SPIRE.
+*/}}
+{{- $svc := include "aether.controller.webhookServiceName" . -}}
+{{- $ns := include "aether.namespace" . -}}
+{{- $caBundle := "" -}}
+{{- if not .Values.controller.webhook.spire -}}
+{{- $cn := printf "%s.%s.svc" $svc $ns -}}
+{{- $altNames := list $cn (printf "%s.%s.svc.cluster.local" $svc $ns) -}}
+{{- $secretName := printf "%s-cert" $svc -}}
+{{- $existing := lookup "v1" "Secret" $ns $secretName -}}
+{{- $tlsCert := "" -}}
+{{- $tlsKey := "" -}}
+{{- if and $existing $existing.data (index $existing.data "ca.crt") -}}
+{{- $caBundle = index $existing.data "ca.crt" -}}
+{{- $tlsCert = index $existing.data "tls.crt" -}}
+{{- $tlsKey = index $existing.data "tls.key" -}}
+{{- else -}}
+{{- $ca := genCA "aether-controller-ca" 3650 -}}
+{{- $cert := genSignedCert $cn nil $altNames 3650 $ca -}}
+{{- $caBundle = $ca.Cert | b64enc -}}
+{{- $tlsCert = $cert.Cert | b64enc -}}
+{{- $tlsKey = $cert.Key | b64enc -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $caBundle }}
+  tls.crt: {{ $tlsCert }}
+  tls.key: {{ $tlsKey }}
+---
+{{- end }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+webhooks:
+  # One webhook entry, one /validate endpoint for every validated resource: the
+  # controller dispatches by Kind (see controller/internal/webhook). Per-resource
+  # rules carry their own scope (MeshConfig is the cluster-scoped singleton;
+  # HTTPRoute is namespaced — its hostname-conflict check, proposal 018).
+  - name: validate.config.aether.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # Ignore so a down/un-injected webhook (e.g. during the controller's own
+    # rollout, or before the SPIRE caBundle is injected) never wedges writes; the
+    # consumers re-validate (the reconciler for MeshConfig; the edge, which also
+    # runtime-dedups duplicate hosts, for HTTPRoute).
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /validate
+        port: 443
+      {{- if not .Values.controller.webhook.spire }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
+    rules:
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["meshconfigs"]
+        scope: "Cluster"
+      # HTTPFilter (proposal 025): fail-closed in-process proto-validate of the opaque
+      # escape-hatch typedConfig. failurePolicy: Ignore (above) keeps a down webhook
+      # from wedging writes; the agent reconciler skips an unresolvable/invalid filter.
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httpfilters"]
+        scope: "Namespaced"
+      # EdgeConfig: proto-validate the edge-hardening/HTTP3 spec (proposal 029).
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["edgeconfigs"]
+        scope: "Namespaced"
+      - apiGroups: ["gateway.networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httproutes"]
+        scope: "Namespaced"
+{{- if or .Values.controller.namespaceInjection .Values.controller.injectPodNdots }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}-pod-ndots
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+webhooks:
+  {{- if .Values.controller.namespaceInjection }}
+  # Namespace auto-injection (Istio-style): pods created in a namespace labeled
+  # aether.io/managed=true get the aether.io/managed=true POD label so the CNI
+  # meshes them — no per-pod label needed. A pod with aether.io/managed=false opts
+  # out. The handler also injects ndots into the now-managed pod.
+  - name: namespace-inject.pods.aether.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # Ignore: a down webhook must never block pod scheduling (a fail-closed pod
+    # webhook is a cluster-wide outage). A missed injection just leaves a pod
+    # unmeshed until its next admission.
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    reinvocationPolicy: Never
+    # Fire on every pod in a managed namespace; the handler honors a per-pod
+    # aether.io/managed=false opt-out.
+    namespaceSelector:
+      matchLabels:
+        aether.io/managed: "true"
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /mutate
+        port: 443
+      {{- if not .Values.controller.webhook.spire }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
+  {{- end }}
+  {{- if .Values.controller.injectPodNdots }}
+  # Inject dnsConfig ndots into pods ALREADY labeled aether.io/managed=true (the
+  # explicit-label path, in any namespace) so a mesh FQDN (<svc>.<meshDomain>) is
+  # resolved absolute-first, before the cluster.local search list — musl clients
+  # otherwise fail to resolve mesh names (proposal 018, mesh-global FQDN).
+  - name: ndots.pods.aether.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # Ignore: a down webhook must never block pod scheduling (a fail-closed pod
+    # webhook is a cluster-wide outage). Missing ndots only degrades musl mesh-DNS.
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    reinvocationPolicy: Never
+    # Only pods that opted into the mesh; never control-plane / system pods.
+    objectSelector:
+      matchLabels:
+        aether.io/managed: "true"
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /mutate
+        port: 443
+      {{- if not .Values.controller.webhook.spire }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
+  {{- end }}
+{{- end }}

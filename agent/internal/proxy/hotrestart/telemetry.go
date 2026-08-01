@@ -48,7 +48,8 @@ func NewTelemetry(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error) 
 		return nil, fmt.Errorf("supervisor telemetry requires an OTLP endpoint")
 	}
 
-	res, err := resource.New(ctx,
+	res, err := resource.New(
+		ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(telemetryServiceName),
 			semconv.ServiceVersion(cfg.ServiceVersion),
@@ -62,7 +63,8 @@ func NewTelemetry(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error) 
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	exporter, err := otlpmetricgrpc.New(ctx,
+	exporter, err := otlpmetricgrpc.New(
+		ctx,
 		otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint),
 		otlpmetricgrpc.WithInsecure(),
 		otlpmetricgrpc.WithTimeout(otlpTimeout),

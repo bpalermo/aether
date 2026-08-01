@@ -1,0 +1,80 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aether.agent.clusterScopedName" . }}
+  labels:
+    {{- include "aether.agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get", "watch"]
+  # Self-heal lost CNI ADDs (#567): evict a live mesh pod that has no local
+  # storage entry (no mesh listener) so sandbox recreation re-runs CNI ADD. The
+  # Eviction API is PDB-respecting; the ghost sweep rate-limits and interlocks it
+  # behind the prune circuit breaker.
+  # NOTE: the pods/eviction subresource create is authorized under the CORE ("")
+  # apiGroup, NOT "policy" — despite the Eviction object being policy/v1. Using
+  # "policy" here silently 403s every eviction (found via a node-reboot G1 test).
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  # Record a Warning Event on a pod when the agent evicts it for a lost CNI ADD.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    # patch: remove the aether.io/agent-not-ready startup taint once CNI is serving.
+    verbs: ["list", "get", "watch", "patch"]
+  {{- if .Values.agent.gamma }}
+  # GAMMA east-west (proposal 018): watch HTTP/GRPCRoutes parented to Services cluster-wide.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["list", "get", "watch"]
+  # Write Gateway API status (Accepted/ResolvedRefs RouteParentStatus, mesh controller).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes/status", "grpcroutes/status"]
+    verbs: ["get", "update", "patch"]
+  # HTTPFilter (proposal 025): the escape-hatch CRD a route ExtensionRef points at;
+  # the GAMMA reconciler lists/watches it to attach the filter to the route.
+  - apiGroups: ["config.aether.io"]
+    resources: ["httpfilters"]
+    verbs: ["list", "get", "watch"]
+  {{- end }}
+  # L4 route types (proposal 018, Phase 3b — unconditional since proposal 031,
+  # CRD-detected at runtime): watch TCPRoutes/TLSRoutes/UDPRoutes parented to
+  # Services cluster-wide.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["tcproutes", "tlsroutes", "udproutes"]
+    verbs: ["list", "get", "watch"]
+  # Write Gateway API status (Accepted/ResolvedRefs RouteParentStatus, mesh controller).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["tcproutes/status", "tlsroutes/status", "udproutes/status"]
+    verbs: ["get", "update", "patch"]
+  # ReferenceGrant (v1beta1): admit cross-namespace backendRefs on GAMMA/L4 routes.
+  # Read-only; a grant's presence gates whether a cross-ns backend is served +
+  # surfaced as ResolvedRefs (RefNotPermitted otherwise). Cluster-wide.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["referencegrants"]
+    verbs: ["list", "get", "watch"]
+  # Transparent capture (Phase 3a) / mesh DNS (mesh-global FQDN): watch the generated
+  # mesh Services for their cluster.local authorities + ClusterIPs. GAMMA + l4route also
+  # read Services to resolve backendRefs for the ResolvedRefs status condition.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "get", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aether.agent.clusterScopedName" . }}
+  labels:
+    {{- include "aether.agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aether.agent.clusterScopedName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.agent.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}

@@ -3,6 +3,7 @@ package hotrestart
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,14 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func newCoordSupervisor(t *testing.T) *Supervisor {
 	t.Helper()
-	return New(Config{StateDir: t.TempDir()}, logr.Discard(), nil)
+	return New(Config{StateDir: t.TempDir()}, slog.New(slog.DiscardHandler), nil)
 }
 
 // fakeAdmin starts an Envoy-admin stub that reports the given state and restart
@@ -119,16 +119,11 @@ func TestInitStartEpoch(t *testing.T) {
 		s.initStartEpoch(ctx)
 		assert.Equal(t, 0, s.nextEpoch)
 	})
-	t.Run("disabled (no StateDir) -> epoch 0", func(t *testing.T) {
-		s := New(Config{}, logr.Discard(), nil)
-		s.initStartEpoch(ctx)
-		assert.Equal(t, 0, s.nextEpoch)
-	})
 }
 
 func TestReadyMarker(t *testing.T) {
 	dir := t.TempDir()
-	s := New(Config{ReadyMarkerPath: filepath.Join(dir, "ready")}, logr.Discard(), nil)
+	s := New(Config{ReadyMarkerPath: filepath.Join(dir, "ready")}, slog.New(slog.DiscardHandler), nil)
 	_, err := os.Stat(s.cfg.ReadyMarkerPath)
 	require.True(t, os.IsNotExist(err))
 	s.setReady()
@@ -175,7 +170,7 @@ func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
 		StateDir:           t.TempDir(),
 		ReadyMarkerPath:    marker,
 		AdminAddress:       srv.Listener.Addr().String(),
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
@@ -240,7 +235,7 @@ func TestHandoffWatchdogFiresWhenSuccessorNeverLive(t *testing.T) {
 		// selects epoch 1 — which then never reaches LIVE (the wedge).
 		AdminAddress:    fakeAdmin(t, "LIVE", 0),
 		HandoffDeadline: 1 * time.Second,
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 	writeRawState(t, s, 0, 0)
 
 	runErr := make(chan error, 1)
@@ -287,7 +282,7 @@ func TestAdminWatchdogFiresWhenAdminUnreachableAfterLive(t *testing.T) {
 		ReadyMarkerPath:           marker,
 		AdminAddress:              srv.Listener.Addr().String(),
 		AdminUnresponsiveDeadline: 1 * time.Second,
-	}, logr.Discard(), nil)
+	}, slog.New(slog.DiscardHandler), nil)
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- s.Run(context.Background()) }()

@@ -4,6 +4,7 @@ package server
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -31,14 +32,46 @@ type snapshotEntry struct {
 type Snapshot struct {
 	mu      sync.RWMutex
 	entries map[serviceKey]*snapshotEntry
-	version atomic.Uint64
+	// serviceCounts is the per-service endpoint count derived from entries,
+	// maintained incrementally so the 0<->1 catalog transitions cost a map
+	// lookup instead of a full scan per event. INVARIANT: a service is present
+	// here iff it holds at least one entry (a count never rests at 0), so the
+	// key set is exactly the service catalog. Guarded by mu.
+	serviceCounts map[string]int
+	version       atomic.Uint64
 }
 
 // NewSnapshot creates an empty Snapshot starting at version 0.
 func NewSnapshot() *Snapshot {
 	return &Snapshot{
-		entries: make(map[serviceKey]*snapshotEntry),
+		entries:       make(map[serviceKey]*snapshotEntry),
+		serviceCounts: make(map[string]int),
 	}
+}
+
+// serviceCountLocked returns the number of endpoints stored for a service
+// across protocols. Caller must hold mu (read or write).
+func (s *Snapshot) serviceCountLocked(serviceName string) int {
+	return s.serviceCounts[serviceName]
+}
+
+// serviceTransition builds a catalog event (SERVICE_ADDED/SERVICE_REMOVED).
+func serviceTransition(t registrarv1.WatchEndpointsResponse_EventType, serviceName string) *registrarv1.WatchEndpointsResponse {
+	return &registrarv1.WatchEndpointsResponse{Type: t, ServiceName: serviceName}
+}
+
+// ServiceNames returns the sorted names of all services currently holding at
+// least one endpoint — the service catalog replayed to every new watcher.
+func (s *Snapshot) ServiceNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	names := make([]string, 0, len(s.serviceCounts))
+	for name := range s.serviceCounts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Version returns the current snapshot version as a string.
@@ -142,16 +175,29 @@ func (s *Snapshot) Diff(newEndpoints map[string]map[registryv1.Service_Protocol]
 }
 
 // Replace atomically replaces the entire snapshot contents with the provided
-// endpoints and bumps the version. It returns the new version string.
-func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) string {
+// endpoints and bumps the version. It returns the new version string plus
+// the service-catalog transitions (see Apply) between the old and new
+// contents; the caller stamps and broadcasts them.
+func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) (string, []*registrarv1.WatchEndpointsResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The count map's key set is the service catalog (see the invariant on
+	// serviceCounts), so the old catalog is read straight off it.
+	oldServices := make(map[string]struct{}, len(s.serviceCounts))
+	for name := range s.serviceCounts {
+		oldServices[name] = struct{}{}
+	}
+
 	s.entries = make(map[serviceKey]*snapshotEntry)
+	s.serviceCounts = make(map[string]int)
 	for svcName, protocols := range endpoints {
 		for protocol, eps := range protocols {
 			for _, ep := range eps {
 				key := serviceKey{ServiceName: svcName, Protocol: protocol, IP: ep.GetIp()}
+				if _, dup := s.entries[key]; !dup {
+					s.serviceCounts[svcName]++
+				}
 				s.entries[key] = &snapshotEntry{
 					ServiceName: svcName,
 					Protocol:    protocol,
@@ -161,19 +207,54 @@ func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol]
 		}
 	}
 
-	return s.nextVersion()
+	newServices := make(map[string]struct{}, len(s.serviceCounts))
+	for name := range s.serviceCounts {
+		newServices[name] = struct{}{}
+	}
+
+	return s.nextVersion(), computeTransitions(oldServices, newServices)
+}
+
+// computeTransitions builds the sorted list of SERVICE_ADDED/SERVICE_REMOVED
+// catalog events that describe the diff between oldServices and newServices.
+func computeTransitions(oldServices, newServices map[string]struct{}) []*registrarv1.WatchEndpointsResponse {
+	var transitions []*registrarv1.WatchEndpointsResponse
+	for name := range newServices {
+		if _, ok := oldServices[name]; !ok {
+			transitions = append(transitions, serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, name))
+		}
+	}
+	for name := range oldServices {
+		if _, ok := newServices[name]; !ok {
+			transitions = append(transitions, serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, name))
+		}
+	}
+	// Deterministic broadcast order (map iteration above is random).
+	sort.Slice(transitions, func(i, j int) bool {
+		if transitions[i].GetType() != transitions[j].GetType() {
+			return transitions[i].GetType() < transitions[j].GetType()
+		}
+		return transitions[i].GetServiceName() < transitions[j].GetServiceName()
+	})
+	return transitions
 }
 
 // Apply applies a set of events to the snapshot, updating it in place.
-// It returns the new version string.
-func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) string {
+// It returns the new version string plus the service-catalog transitions the
+// events caused (a service's endpoint count crossing 0<->1 emits
+// SERVICE_ADDED/SERVICE_REMOVED): deriving transitions inside Apply makes
+// the catalog impossible to desync from the endpoint data it summarizes.
+// Transitions are unversioned; the caller stamps and broadcasts them with
+// the batch.
+func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) (string, []*registrarv1.WatchEndpointsResponse) {
 	if len(events) == 0 {
-		return s.Version()
+		return s.Version(), nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var transitions []*registrarv1.WatchEndpointsResponse
 	for _, event := range events {
 		key := serviceKey{
 			ServiceName: event.GetServiceName(),
@@ -181,31 +262,85 @@ func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) string {
 			IP:          event.GetEndpoint().GetIp(),
 		}
 
+		var tr *registrarv1.WatchEndpointsResponse
 		switch event.GetType() {
 		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
-			s.entries[key] = &snapshotEntry{
-				ServiceName: event.GetServiceName(),
-				Protocol:    event.GetProtocol(),
-				Endpoint:    event.GetEndpoint(),
-			}
+			tr = s.applyUpsertLocked(key, event)
 		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
-			delete(s.entries, key)
+			tr = s.applyRemoveLocked(key)
+		}
+		if tr != nil {
+			transitions = append(transitions, tr)
 		}
 	}
 
-	return s.nextVersion()
+	return s.nextVersion(), transitions
+}
+
+// applyUpsertLocked stores an added/updated endpoint, maintaining serviceCounts,
+// and returns the SERVICE_ADDED transition when this is the service's first
+// endpoint (nil otherwise). Caller must hold mu for writing.
+func (s *Snapshot) applyUpsertLocked(key serviceKey, event *registrarv1.WatchEndpointsResponse) *registrarv1.WatchEndpointsResponse {
+	before := s.serviceCountLocked(key.ServiceName)
+	// An UPDATED event replacing an existing entry must not raise the count:
+	// only a key that was absent adds an endpoint.
+	_, existed := s.entries[key]
+	s.entries[key] = &snapshotEntry{
+		ServiceName: event.GetServiceName(),
+		Protocol:    event.GetProtocol(),
+		Endpoint:    event.GetEndpoint(),
+	}
+	if !existed {
+		s.serviceCounts[key.ServiceName]++
+	}
+	if before == 0 {
+		return serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, key.ServiceName)
+	}
+	return nil
+}
+
+// applyRemoveLocked deletes an endpoint if present, maintaining serviceCounts,
+// and returns the SERVICE_REMOVED transition when the service's last endpoint
+// went away (nil otherwise). Caller must hold mu for writing.
+func (s *Snapshot) applyRemoveLocked(key serviceKey) *registrarv1.WatchEndpointsResponse {
+	if _, existed := s.entries[key]; !existed {
+		return nil
+	}
+	delete(s.entries, key)
+	if n := s.serviceCounts[key.ServiceName] - 1; n > 0 {
+		s.serviceCounts[key.ServiceName] = n
+		return nil
+	}
+	// Never leave a zero resting in the map: its key set is the service catalog.
+	delete(s.serviceCounts, key.ServiceName)
+	return serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, key.ServiceName)
 }
 
 // FullSnapshotEvents returns the current contents of the snapshot as a slice of
 // FULL_SNAPSHOT events. This is used to send the initial state to a new watcher.
-func (s *Snapshot) FullSnapshotEvents() ([]*registrarv1.WatchEndpointsResponse, string) {
+// A non-nil filter scopes the result to those service names (a nil filter is
+// the unfiltered, cluster-wide snapshot): a demand-scoped watcher discards
+// everything outside its filter anyway, so the out-of-scope events are skipped
+// before their protos are ever built.
+func (s *Snapshot) FullSnapshotEvents(filter map[string]struct{}) ([]*registrarv1.WatchEndpointsResponse, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	events := make([]*registrarv1.WatchEndpointsResponse, 0, len(s.entries))
+	// A filtered watcher keeps at most its filter's services; sizing on the
+	// whole snapshot would reserve the very memory the filter exists to avoid.
+	capacity := len(s.entries)
+	if filter != nil {
+		capacity = min(capacity, len(filter))
+	}
+	events := make([]*registrarv1.WatchEndpointsResponse, 0, capacity)
 	version := s.Version()
 
 	for _, entry := range s.entries {
+		if filter != nil {
+			if _, inScope := filter[entry.ServiceName]; !inScope {
+				continue
+			}
+		}
 		events = append(events, &registrarv1.WatchEndpointsResponse{
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 			ServiceName: entry.ServiceName,

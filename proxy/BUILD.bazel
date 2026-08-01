@@ -1,0 +1,84 @@
+load("@container_structure_test//:defs.bzl", "container_structure_test")
+load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_binary")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
+
+# Custom aether Envoy: upstream core extensions (//bazel/extension_config) plus
+# our compiled-in C++ extensions.
+AETHER_EXTENSIONS = [
+    # aether_stats: source->destination request metrics (proposals 007/012).
+    "//source/extensions/filters/http/aether_stats:config",
+]
+
+envoy_cc_binary(
+    name = "envoy",
+    repository = "@envoy",
+    deps = AETHER_EXTENSIONS + [
+        "@envoy//source/exe:envoy_main_entry_lib",
+    ],
+)
+
+# The custom Envoy binary at /usr/local/bin/envoy.
+pkg_tar(
+    name = "envoy_tar",
+    srcs = [":envoy"],
+    extension = "tar.gz",
+    mode = "0755",
+    owner = "0.0",
+    package_dir = "/usr/local/bin/",
+    tags = ["manual"],
+)
+
+# Custom aether-proxy image: distroless/cc base + the custom Envoy binary.
+# Single-arch, built for the build host's native arch. Multi-arch is assembled in
+# CI from two native per-arch builds (amd64 on ubuntu-latest, arm64 on
+# ubuntu-24.04-arm) rather than cross-compiled — Envoy's arm64 cross-compile is
+# unreliable (LuaJIT host-tool linker); native per-arch is how upstream Envoy
+# builds it too (separate RBE pools).
+oci_image(
+    name = "image",
+    base = "@distroless_cc",
+    entrypoint = ["/usr/local/bin/envoy"],
+    tars = [
+        ":envoy_tar",
+    ],
+    visibility = ["//visibility:public"],
+    workdir = "/",
+)
+
+# Pushes the single-arch image. The release workflow passes per-arch tags at push
+# time (`bazel run //:push -- --tag dev-<arch> --tag <sha>-<arch>`); a combine job
+# then assembles the multi-arch manifest.
+oci_push(
+    name = "push",
+    image = ":image",
+    remote_tags = [],
+    repository = "ghcr.io/bpalermo/aether/aether-proxy",
+)
+
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = ["ghcr.io/bpalermo/aether/aether-proxy:latest"],
+)
+
+# Materialize the loadable image tarball for the structure test. rules_oci only
+# produces the tar via the `tarball` output group (it's expensive), so extract it
+# with a filegroup rather than referencing a (non-existent) :load.tar target.
+filegroup(
+    name = "image_tarball",
+    srcs = [":load"],
+    output_group = "tarball",
+)
+
+# PR gate (`bazel test //...`): builds the custom Envoy + image on RBE and
+# validates the image's structure. The `tar` driver runs against the image
+# tarball directly — no docker daemon, RBE-friendly. (The aether_stats filter
+# ships its own envoy_cc_test under source/extensions/filters/http/aether_stats.)
+container_structure_test(
+    name = "image_test",
+    configs = ["//integration:image.yaml"],
+    driver = "tar",
+    # The tar driver needs a .tar, not the oci_image — the oci_load tarball.
+    image = ":image_tarball",
+)

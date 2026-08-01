@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -16,8 +17,8 @@ import (
 	"github.com/bpalermo/aether/agent/storage"
 	"github.com/bpalermo/aether/agent/types"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
-	"github.com/go-logr/logr"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -62,10 +64,10 @@ func startCNIServer(t *testing.T, ctx context.Context, sockPath string, stor sto
 	}
 	k8sClient := builder.Build()
 
-	sc := cache.NewSnapshotCache("test-node", logr.Discard())
+	sc := cache.NewSnapshotCache("test-node", slog.New(slog.DiscardHandler))
 	cfg := &CNIServerConfig{SocketPath: sockPath}
 
-	srv, err := NewCNIServer("test-cluster", "test-node", "test-node", "example.org", stor, reg, sc, ack.NewTracker(logr.Discard()), spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, logr.Discard()), logr.Discard(), k8sClient, nil, cfg)
+	srv, err := NewCNIServer("test-cluster", "test-node", "example.org", stor, reg, sc, ack.NewTracker(slog.New(slog.DiscardHandler)), spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, slog.New(slog.DiscardHandler)), slog.New(slog.DiscardHandler), k8sClient, nil, cfg)
 	require.NoError(t, err)
 
 	errCh := make(chan error, 1)
@@ -76,7 +78,8 @@ func startCNIServer(t *testing.T, ctx context.Context, sockPath string, stor sto
 	// Wait for the server to be listening.
 	time.Sleep(500 * time.Millisecond)
 
-	conn, err := grpc.NewClient("unix:///"+sockPath,
+	conn, err := grpc.NewClient(
+		"unix:///"+sockPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	require.NoError(t, err, "failed to create gRPC client")
@@ -92,8 +95,8 @@ func testNode(name, region, zone string) *corev1.Node {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				constants.AnnotationKubernetesNodeTopologyRegion: region,
-				constants.AnnotationKubernetesNodeTopologyZone:   zone,
+				aetherannotations.AnnotationKubernetesNodeTopologyRegion: region,
+				aetherannotations.AnnotationKubernetesNodeTopologyZone:   zone,
 			},
 		},
 	}
@@ -150,7 +153,7 @@ func TestIntegration_ServerStartsAndAcceptsGRPCConnections(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_IGNORED, resp.GetResult())
 
 	cancel()
 	waitForServerShutdown(t, errCh)
@@ -190,7 +193,7 @@ func TestIntegration_AddPodEndToEnd(t *testing.T) {
 	assert.Equal(t, "my-pod", storedPod.GetName())
 	assert.Equal(t, "default", storedPod.GetNamespace())
 	// Labels should have been enriched from the k8s pod.
-	assert.Equal(t, "true", storedPod.GetLabels()[constants.LabelAetherManaged])
+	assert.Equal(t, "true", storedPod.GetLabels()[aetherlabels.LabelAetherManaged])
 	assert.Equal(t, "default", storedPod.GetServiceAccount())
 
 	cancel()
@@ -240,7 +243,7 @@ func TestIntegration_AddPodIgnorableNamespace(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, cniv1.AddPodResponse_RESULT_SUCCESS, resp.GetResult())
+	assert.Equal(t, cniv1.AddPodResponse_RESULT_IGNORED, resp.GetResult())
 
 	// Storage and registry should not have been called for an ignorable pod.
 	assert.False(t, addCalled, "storage should not be called for ignorable pod")

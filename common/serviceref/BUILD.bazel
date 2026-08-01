@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "serviceref",
+    srcs = ["serviceref.go"],
+    importpath = "github.com/bpalermo/aether/common/serviceref",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "serviceref_test",
+    srcs = ["serviceref_test.go"],
+    embed = [":serviceref"],
+)

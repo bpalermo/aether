@@ -9,9 +9,7 @@ go_library(
     ],
     importpath = "github.com/bpalermo/aether/common/file",
     visibility = ["//visibility:public"],
-    deps = [
-        "@io_k8s_sigs_controller_runtime//:controller-runtime",
-    ] + select({
+    deps = select({
         "@rules_go//go/platform:android": [
             "@org_golang_x_sys//unix",
         ],

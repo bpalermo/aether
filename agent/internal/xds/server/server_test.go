@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
@@ -10,9 +11,9 @@ import (
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 // mockRegistry implements registry.Registry for testing purposes.
@@ -75,10 +76,10 @@ func TestNewAgentXdsServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			snapshotCache := cache.NewSnapshotCache(tt.nodeName, logr.Discard())
+			snapshotCache := cache.NewSnapshotCache(tt.nodeName, slog.New(slog.DiscardHandler))
 			mockStore := storage.NewMockStorage[*cniv1.CNIPod]()
 			reg := &mockRegistry{}
-			log := logr.Discard()
+			log := slog.New(slog.DiscardHandler)
 
 			got, err := NewAgentXdsServer(ctx, tt.clusterName, tt.nodeName, "example.org", reg, mockStore, snapshotCache, nil, log)
 
@@ -98,11 +99,11 @@ func TestNewAgentXdsServer(t *testing.T) {
 // pre-listen callback on the embedded XdsServer.
 func TestNewAgentXdsServer_ImplementsServerCallback(t *testing.T) {
 	ctx := context.Background()
-	snapshotCache := cache.NewSnapshotCache("node-1", logr.Discard())
+	snapshotCache := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 	mockStore := storage.NewMockStorage[*cniv1.CNIPod]()
 	reg := &mockRegistry{}
 
-	got, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, logr.Discard())
+	got, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -110,6 +111,33 @@ func TestNewAgentXdsServer_ImplementsServerCallback(t *testing.T) {
 	// PreListen directly. The compile-time check below ensures the interface is met
 	// without depending on unexported fields.
 	var _ interface{ PreListen(context.Context) error } = got
+}
+
+// TestPerPodRunnablesOptOutOfLeaderElection verifies that the two per-pod
+// data-plane runnables — the xDS server and the registry refresher — report
+// NeedLeaderElection()==false. The edge enables leader election so its Gateway
+// API reconciler is a singleton (one status writer), but every replica must keep
+// feeding its own co-located Envoy; if either of these were leader-gated,
+// non-leader proxies would lose their control plane and data-plane HA would
+// break. Both must satisfy manager.LeaderElectionRunnable and answer false.
+func TestPerPodRunnablesOptOutOfLeaderElection(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	snapshotCache := cache.NewSnapshotCache("node-1", log)
+	mockStore := storage.NewMockStorage[*cniv1.CNIPod]()
+	reg := &mockRegistry{}
+
+	xdsSrv, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, log)
+	require.NoError(t, err)
+
+	refresher := NewRegistryRefresher("cluster-1", "node-1", snapshotCache, reg, log)
+
+	// Both are manager.LeaderElectionRunnable and must opt OUT (false) so they run
+	// on every replica, not just the leader.
+	var xdsLE manager.LeaderElectionRunnable = xdsSrv
+	var refresherLE manager.LeaderElectionRunnable = refresher
+	assert.False(t, xdsLE.NeedLeaderElection(), "xDS server must run on every replica (per-pod data plane)")
+	assert.False(t, refresherLE.NeedLeaderElection(), "registry refresher must run on every replica (per-pod data plane)")
 }
 
 // TestAgentXdsServer_PreListen verifies the PreListen method's error propagation behavior.
@@ -170,11 +198,11 @@ func TestAgentXdsServer_PreListen(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			snapshotCache := cache.NewSnapshotCache("node-1", logr.Discard())
+			snapshotCache := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
 			mockStore := storage.NewMockStorageWithGetAll(tt.storageGetAll)
 			reg := &mockRegistry{listAllEndpointsFunc: tt.registryListAll}
 
-			srv, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, logr.Discard())
+			srv, err := NewAgentXdsServer(ctx, "cluster-1", "node-1", "example.org", reg, mockStore, snapshotCache, nil, slog.New(slog.DiscardHandler))
 			require.NoError(t, err)
 
 			preListenErr := srv.PreListen(ctx)

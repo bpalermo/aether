@@ -1,0 +1,96 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aether.registrar.clusterScopedName" . }}
+  labels:
+    {{- include "aether.registrar.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "get", "watch"]
+  # Selectorless VIP Services across namespaces: the transparent-capture VIPs
+  # (proposal 018, Phase 3a — the generator is unconditional since 031 round 2:
+  # capture and mesh DNS resolve against these VIPs) and the clusterset.local
+  # VIPs the MCS ServiceImport generator materializes (enableMCS).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "get", "watch", "create", "update", "patch", "delete"]
+  {{- if .Values.registrar.enableMCS }}
+  # Multi-Cluster Services (MCS-API) phase 1 (proposals 018 + 006): the leader
+  # registrar watches ServiceExports (and stamps their status) and materializes
+  # ServiceImports + their status from the registry's clusterset-wide export view.
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceexports"]
+    verbs: ["list", "get", "watch"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceexports/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceimports"]
+    verbs: ["list", "get", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceimports/status"]
+    verbs: ["get", "update", "patch"]
+  # Cross-cluster config export (proposal 026): the leader registrar projects the
+  # GAMMA config of exported services and writes it to the registry. Read-only watch of
+  # the route config + ReferenceGrants + HTTPFilters (the escape-hatch CRD).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes", "referencegrants"]
+    verbs: ["list", "get", "watch"]
+  - apiGroups: ["config.aether.io"]
+    resources: ["httpfilters"]
+    verbs: ["list", "get", "watch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aether.registrar.clusterScopedName" . }}
+  labels:
+    {{- include "aether.registrar.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aether.registrar.clusterScopedName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.registrar.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}
+---
+# Leader election: the registrar runs multiple replicas, but its leader-only
+# runnables (mesh-Service VIP generator, MCS ServiceImport generator) must run on
+# exactly one replica. controller-runtime coordinates this with a Lease in the
+# registrar's own namespace, so grant namespaced lease + event access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aether.registrar.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.registrar.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "aether.registrar.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.registrar.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "aether.registrar.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.registrar.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}

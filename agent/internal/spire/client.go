@@ -3,9 +3,10 @@ package spire
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 
-	"github.com/go-logr/logr"
+	commonlog "github.com/bpalermo/aether/common/log"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 	"google.golang.org/grpc"
@@ -16,12 +17,12 @@ import (
 type Client struct {
 	conn   *grpc.ClientConn
 	client delegatedidentityv1.DelegatedIdentityClient
-	log    logr.Logger
+	log    *slog.Logger
 }
 
 // NewClient creates a new SPIRE Delegated Identity client connected to the
 // admin socket at the given path.
-func NewClient(ctx context.Context, socketPath string, log logr.Logger) (*Client, error) {
+func NewClient(ctx context.Context, socketPath string, log *slog.Logger) (*Client, error) {
 	conn, err := grpc.NewClient(
 		"passthrough:///unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -36,7 +37,7 @@ func NewClient(ctx context.Context, socketPath string, log logr.Logger) (*Client
 	return &Client{
 		conn:   conn,
 		client: delegatedidentityv1.NewDelegatedIdentityClient(conn),
-		log:    log.WithName("spire-client"),
+		log:    commonlog.Named(log, "spire-client"),
 	}, nil
 }
 
@@ -59,7 +60,7 @@ func (c *Client) SubscribeSVIDsBySelectors(ctx context.Context, selectors []*api
 			resp, recvErr := stream.Recv()
 			if recvErr != nil {
 				if ctx.Err() == nil {
-					c.log.Error(recvErr, "SVID subscription stream ended")
+					c.log.ErrorContext(ctx, "SVID subscription stream ended", "error", recvErr)
 				}
 				return
 			}
@@ -90,7 +91,7 @@ func (c *Client) SubscribeBundles(ctx context.Context) (<-chan *delegatedidentit
 			resp, recvErr := stream.Recv()
 			if recvErr != nil {
 				if ctx.Err() == nil {
-					c.log.Error(recvErr, "bundle subscription stream ended")
+					c.log.ErrorContext(ctx, "bundle subscription stream ended", "error", recvErr)
 				}
 				return
 			}

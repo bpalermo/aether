@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bpalermo/aether/agent/internal/xds/cache/snapversion"
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -40,14 +41,14 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	c.snapshotMu.Lock()
 	defer c.snapshotMu.Unlock()
 
-	v := generateSnapshotVersion(snapshotVersionLabel, c.version)
+	v := snapversion.Generate(snapshotVersionLabel, c.version)
 
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.snapshot.generate",
 		trace.WithAttributes(telemetry.AttrSnapshotVersion.String(v)))
 	defer func() { telemetry.EndSpan(span, retErr) }()
 	start := time.Now()
 	defer func() {
-		c.metrics.generated(ctx, time.Since(start).Seconds(), int64(c.version.Load()), retErr)
+		c.metrics.Generated(ctx, time.Since(start).Seconds(), int64(c.version.Load()), retErr)
 	}()
 
 	listeners := c.Listeners()
@@ -58,6 +59,40 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// clusters carry their endpoints inline, so they need no EDS resources.
 	clusters = append(clusters, c.appClusters()...)
 
+	// East/west waypoint ingress clusters (proposal 019 Phase 3b): STATIC clusters
+	// of this node's local pods per hosted service, that the tunnel listener
+	// forwards cross-cluster connections to. Empty unless --east-west-waypoint.
+	clusters = append(clusters, c.ewIngressClusters()...)
+
+	// TCP floor clusters (proposal 018, Phase 3a): one per non-HTTP service in the
+	// capture TCP set. These are separate EDS clusters using ALPN "aether-tcp" that
+	// share endpoints with the corresponding HTTP clusters. Only emitted when capture
+	// is enabled and there are non-HTTP services.
+	clusters = append(clusters, c.captureTCPClusters()...)
+
+	// Edge L4 TCP clusters (proposal 018, Phase 3b north-south): one per service
+	// referenced by an edge TCPRoute or TLSRoute. Like capture TCP clusters but use
+	// the edge SPIRE identity and fetch SDS from spire_agent directly.
+	if c.edge {
+		clusters = append(clusters, c.edgeTCPClusters()...)
+		// Cleartext k8s-Service clusters: one per unique non-mesh HTTPRoute backend
+		// (BackendNamespace, service, port). STRICT_DNS, no transport socket — the
+		// backend is a plain k8s Service, not a mesh-registered endpoint.
+		clusters = append(clusters, c.edgeK8sBackendClusters()...)
+	}
+	// UDP floor clusters (proposal 018, Phase 3b): one per service with UDPRoute
+	// backends. These are plain EDS clusters with no transport socket — UDP datagrams
+	// are not protected by mesh mTLS (known limitation). Only emitted when capture is
+	// enabled and there are UDPRoute rules.
+	clusters = append(clusters, c.captureUDPClusters()...)
+
+	// ORIGINAL_DST passthrough cluster (proposal 022, M2a spike): emitted only when
+	// redirect-all capture is enabled. The capture listener's DefaultFilterChain
+	// routes unrecognised (non-mesh) egress here in plain TCP.
+	if pt := c.capturePassthroughCluster(); pt != nil {
+		clusters = append(clusters, pt)
+	}
+
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))
 	for _, s := range c.secrets {
@@ -65,17 +100,56 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	}
 	c.secretMu.RUnlock()
 
+	// The shared subset-headers extension config (ECDS): every outbound
+	// HCM's header_to_metadata filter references this one resource, so
+	// vocabulary changes apply in place with no listener drain.
+	c.subsetMu.RLock()
+	subsetExt := proxy.BuildSubsetHeadersExtension(c.subsetHeaderKeys)
+	c.subsetMu.RUnlock()
+
 	resources := map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: listeners,
-		resourcev3.ClusterType:  clusters,
-		resourcev3.EndpointType: endpoints,
-		resourcev3.SecretType:   secrets,
+		resourcev3.ListenerType:        listeners,
+		resourcev3.ClusterType:         clusters,
+		resourcev3.EndpointType:        endpoints,
+		resourcev3.SecretType:          secrets,
+		resourcev3.ExtensionConfigType: {subsetExt},
 	}
-	if len(vhosts) > 0 {
-		resources[resourcev3.RouteType] = []types.Resource{proxy.BuildOutboundRouteConfiguration(vhosts)}
+	if c.edge {
+		if c.hasPerGatewayAddressing() {
+			// Proposal 021 Phase 2: one route config per Gateway (edge_rt_<ns>_<gwname>),
+			// serving only that Gateway's attached virtual hosts. Each listener's RDS
+			// reference is isolated — no cross-Gateway route leakage.
+			resources[resourcev3.RouteType] = c.edgeGatewayRouteConfigs()
+		} else {
+			// Phase 1 / fallback: single shared edge_http route config.
+			// Always emitted (even empty) so the listener's RDS reference resolves;
+			// the catch-all 404 vhost handles unmatched authorities. No ODCDS.
+			resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(c.virtualHostVhosts())}
+		}
+	} else {
+		var routes []types.Resource
+		if len(vhosts) > 0 {
+			routes = append(routes, proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain))
+		}
+		// Transparent capture (proposal 018, Phase 3a): the cap_http table the per-pod
+		// capture listeners reference over RDS. Always emitted when capture is on (it
+		// carries the on-demand catch-all) so the listeners' RDS resolves even with no
+		// in-scope authorities yet, and cold/off-node services recover via ODCDS.
+		if c.captureEnabled {
+			// captureKnownTargets pins every in-scope mesh authority to its cluster on
+			// the redirect-all catch-all (no-op when redirect-all is off), so a captured
+			// request to a known service never leaks to the ORIGINAL_DST passthrough
+			// while its dedicated cap_http vhost is mid-rebuild across a GAMMA churn.
+			routes = append(routes, proxy.BuildCaptureRouteConfiguration(
+				c.captureVhosts(), c.meshDomain, c.captureRedirectAll, c.captureKnownTargets()...,
+			))
+		}
+		if len(routes) > 0 {
+			resources[resourcev3.RouteType] = routes
+		}
 	}
 
-	c.log.V(1).Info("setting snapshot", "version", v,
+	c.log.DebugContext(ctx, "setting snapshot", "version", v,
 		"listeners", len(listeners), "clusters", len(clusters),
 		"endpoints", len(endpoints), "vhosts", len(vhosts), "secrets", len(secrets))
 	span.SetAttributes(
@@ -84,6 +158,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		attribute.Int("aether.snapshot.endpoints", len(endpoints)),
 		attribute.Int("aether.snapshot.secrets", len(secrets)),
 	)
+
+	declared, observed := c.dependencyCounts()
+	c.metrics.SnapshotShape(ctx, len(clusters), declared, observed)
 
 	snapshot, err := cachev3.NewSnapshot(v, resources)
 	if err != nil {

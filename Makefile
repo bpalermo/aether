@@ -50,6 +50,20 @@ load-agent-image:
 push-agent-image:
 	@bazel run //agent/cmd/agent:image_push
 
+# The slim mesh-DNS daemon (#583) — its own binary AND its own image, so the
+# aether-mesh-dns DaemonSet no longer ships the full agent.
+.PHONY: build-mesh-dns
+build-mesh-dns:
+	@bazel build //agent/cmd/mesh-dns/...
+
+.PHONY: load-mesh-dns-image
+load-mesh-dns-image:
+	@bazel run //agent/cmd/mesh-dns:image_load
+
+.PHONY: push-mesh-dns-image
+push-mesh-dns-image:
+	@bazel run //agent/cmd/mesh-dns:image_push
+
 .PHONY: build-cni-install
 build-cni-install:
 	@bazel build //cni/cmd/cni-install/...
@@ -75,7 +89,28 @@ push-registrar-image:
 	@bazel run //registrar/cmd/registrar:image_push
 
 .PHONY: load-all
-load-all: load-agent-image load-cni-install-image load-registrar-image
+load-all: load-agent-image load-mesh-dns-image load-cni-install-image load-registrar-image
 
 .PHONY: push-all
-push-all: push-agent-image push-cni-install-image push-registrar-image
+push-all: push-agent-image push-mesh-dns-image push-cni-install-image push-registrar-image
+
+# Publish everything in the order that works: image manifests FIRST, then the
+# charts (chart-only push targets). The combined `:*.push` targets race the
+# chart's digest reference against the image manifest upload and fail with
+# `Tag ... not found` (observed repeatedly); pushing images first avoids it.
+.PHONY: publish
+publish: push-all
+	@bazel run //charts/agent:agent.push_registry --stamp
+	@bazel run //charts/registrar:registrar.push_registry --stamp
+
+# --- Custom proxy (separate Bazel workspace under proxy/; see proposal 010) ---
+# These run inside proxy/ so its own Bazel version (.bazelversion=7.7.1) is used.
+# NOTE: building the proxy compiles Envoy from source (multi-hour); use a warm
+# cache / CI.
+.PHONY: load-proxy-image
+load-proxy-image:
+	@cd proxy && bazel run --config=release //:load
+
+.PHONY: push-proxy-image
+push-proxy-image:
+	@cd proxy && bazel run --config=release //:push --stamp

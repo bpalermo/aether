@@ -74,7 +74,8 @@ func (f *failingCNIService) RemovePod(_ context.Context, _ *cniv1.RemovePodReque
 // newBufconnClient creates a CNIClient backed by a bufconn listener for testing.
 func newBufconnClient(t *testing.T, lis *bufconn.Listener) *CNIClient {
 	t.Helper()
-	conn, err := grpc.NewClient("passthrough://bufnet",
+	conn, err := grpc.NewClient(
+		"passthrough://bufnet",
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
 			return lis.Dial()
 		}),

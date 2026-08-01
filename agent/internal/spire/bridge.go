@@ -17,12 +17,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"time"
 
+	commonlog "github.com/bpalermo/aether/common/log"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	"github.com/go-logr/logr"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
@@ -71,7 +72,7 @@ type Bridge struct {
 	socketPath string
 	client     *Client
 	store      SecretStore
-	log        logr.Logger
+	log        *slog.Logger
 	metrics    *bridgeMetrics
 
 	// Stream re-subscribe backoff bounds; set to the package constants in
@@ -114,19 +115,19 @@ type podSubscription struct {
 // NewBridge creates a new SPIRE bridge. nodeSource is the agent's own Workload
 // API SVID source used to serve the node identity; it may be nil to disable
 // node-SVID serving.
-func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, log logr.Logger) *Bridge {
+func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, log *slog.Logger) *Bridge {
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the bridge.
 	metrics, err := newBridgeMetrics(otel.Meter(meterName))
 	if err != nil {
-		log.Error(err, "failed to create SPIRE bridge metrics; continuing without instrumentation")
+		log.Error("failed to create SPIRE bridge metrics; continuing without instrumentation", "error", err)
 	}
 
 	return &Bridge{
 		socketPath:     socketPath,
 		store:          store,
 		nodeSource:     nodeSource,
-		log:            log.WithName("spire-bridge"),
+		log:            commonlog.Named(log, "spire-bridge"),
 		metrics:        metrics,
 		backoffInitial: initialStreamBackoff,
 		backoffMax:     maxStreamBackoff,
@@ -144,16 +145,6 @@ func (b *Bridge) Started() <-chan struct{} {
 	return b.started
 }
 
-// NodeSpiffeID returns the SPIFFE ID of the agent's node identity once the node
-// SVID has been served, or "" if node-SVID serving is disabled or not yet ready.
-// It is the SDS secret name proxies reference for node-originated upstream mTLS
-// (the outbound clusters' no-match client cert) and the node-health listener.
-func (b *Bridge) NodeSpiffeID() string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.nodeSpiffeID
-}
-
 // Start connects to the SPIRE agent and begins subscribing to trust bundles.
 // It blocks until the context is canceled. Implements controller-runtime Runnable.
 func (b *Bridge) Start(ctx context.Context) error {
@@ -166,82 +157,113 @@ func (b *Bridge) Start(ctx context.Context) error {
 	b.client = client
 	defer func() {
 		if closeErr := client.Close(); closeErr != nil {
-			b.log.V(1).Info("failed to close SPIRE client", "error", closeErr)
+			b.log.DebugContext(ctx, "failed to close SPIRE client", "error", closeErr)
 		}
 	}()
 
-	b.log.Info("connected to SPIRE agent", "socket", b.socketPath)
+	b.log.InfoContext(ctx, "connected to SPIRE agent", "socket", b.socketPath)
 	close(b.started)
 
 	// Serve the agent's own node SVID (for node-originated upstream mTLS and the
 	// node-health listener) and keep it refreshed on rotation.
 	if b.nodeSource != nil {
 		if err := b.refreshNodeSVID(ctx); err != nil {
-			b.log.Error(err, "serving initial node SVID")
+			b.log.ErrorContext(ctx, "serving initial node SVID", "error", err)
 		}
 		go b.runNodeSVIDRefresh(ctx)
 	}
 
-	// Maintain the bundle subscription for the bridge's lifetime, re-subscribing
-	// with backoff when the stream ends (e.g. the SPIRE agent restarts) instead
-	// of failing the runnable — which would take down the whole agent for a
-	// transient disconnect. SPIRE sends the full bundle set as the first response
-	// on every new stream, so a plain re-subscribe fully resynchronizes; the
-	// cached bundle secrets keep serving while disconnected.
+	return b.runBundleSubscriptionLoop(ctx, client)
+}
+
+// runBundleSubscriptionLoop maintains the bundle subscription for the bridge's
+// lifetime, re-subscribing with backoff when the stream ends (e.g. the SPIRE
+// agent restarts) instead of failing the runnable — which would take down the
+// whole agent for a transient disconnect. SPIRE sends the full bundle set as
+// the first response on every new stream, so a plain re-subscribe fully
+// resynchronizes; the cached bundle secrets keep serving while disconnected.
+func (b *Bridge) runBundleSubscriptionLoop(ctx context.Context, client *Client) error {
 	backoff := b.backoffInitial
 	first := true
 	for {
 		bundleCh, subErr := client.SubscribeBundles(ctx)
 		if subErr != nil {
-			if ctx.Err() != nil {
-				b.log.Info("shutting down SPIRE bridge")
+			ok, newBackoff := b.handleBundleSubscribeError(ctx, subErr, backoff)
+			if !ok {
 				return nil
 			}
-			b.metrics.streamFailed(ctx, streamBundle)
-			wait := jitteredBackoff(backoff)
-			b.log.Error(subErr, "subscribing to X.509 bundles failed; retrying", "backoff", wait)
-			if !sleepCtx(ctx, wait) {
-				b.log.Info("shutting down SPIRE bridge")
-				return nil
-			}
-			backoff = min(backoff*2, b.backoffMax)
+			backoff = newBackoff
 			first = false
 			continue
 		}
-		if first {
-			b.log.Info("subscribed to X.509 bundles")
-			first = false
-		} else {
-			b.metrics.streamReconnected(ctx, streamBundle)
-			b.log.Info("re-subscribed to X.509 bundles")
-		}
+		b.logBundleSubscribed(ctx, first)
+		first = false
 
-	receive:
-		for {
-			select {
-			case <-ctx.Done():
-				b.log.Info("shutting down SPIRE bridge")
-				return nil
-			case resp, ok := <-bundleCh:
-				if !ok {
-					break receive
-				}
-				// Receiving proves the stream is healthy; reset the backoff.
-				backoff = b.backoffInitial
-				if err := b.handleBundleUpdate(ctx, resp); err != nil {
-					b.log.Error(err, "handling bundle update")
-				}
-			}
+		done, newBackoff := b.drainBundleStream(ctx, bundleCh, backoff)
+		if done {
+			return nil
 		}
+		backoff = newBackoff
 
 		b.metrics.streamFailed(ctx, streamBundle)
 		wait := jitteredBackoff(backoff)
-		b.log.Info("bundle subscription stream closed; re-subscribing", "backoff", wait)
+		b.log.InfoContext(ctx, "bundle subscription stream closed; re-subscribing", "backoff", wait)
 		if !sleepCtx(ctx, wait) {
-			b.log.Info("shutting down SPIRE bridge")
+			b.log.InfoContext(ctx, "shutting down SPIRE bridge")
 			return nil
 		}
 		backoff = min(backoff*2, b.backoffMax)
+	}
+}
+
+// handleBundleSubscribeError handles a subscription error in runBundleSubscriptionLoop.
+// Returns (ok=false) if the context is cancelled and the loop should exit,
+// otherwise waits with backoff and returns (true, updatedBackoff).
+func (b *Bridge) handleBundleSubscribeError(ctx context.Context, subErr error, backoff time.Duration) (ok bool, newBackoff time.Duration) {
+	if ctx.Err() != nil {
+		b.log.InfoContext(ctx, "shutting down SPIRE bridge")
+		return false, backoff
+	}
+	b.metrics.streamFailed(ctx, streamBundle)
+	wait := jitteredBackoff(backoff)
+	b.log.ErrorContext(ctx, "subscribing to X.509 bundles failed; retrying", "error", subErr, "backoff", wait)
+	if !sleepCtx(ctx, wait) {
+		b.log.InfoContext(ctx, "shutting down SPIRE bridge")
+		return false, backoff
+	}
+	return true, min(backoff*2, b.backoffMax)
+}
+
+// logBundleSubscribed emits the appropriate log line for a successful bundle subscription.
+func (b *Bridge) logBundleSubscribed(ctx context.Context, first bool) {
+	if first {
+		b.log.InfoContext(ctx, "subscribed to X.509 bundles")
+	} else {
+		b.metrics.streamReconnected(ctx, streamBundle)
+		b.log.InfoContext(ctx, "re-subscribed to X.509 bundles")
+	}
+}
+
+// drainBundleStream reads from bundleCh until the channel is closed or the
+// context is cancelled. Returns (done=true) when the context is cancelled
+// (caller should return nil), and the updated backoff (reset to initial on
+// each successful receive).
+func (b *Bridge) drainBundleStream(ctx context.Context, bundleCh <-chan *delegatedidentityv1.SubscribeToX509BundlesResponse, backoff time.Duration) (done bool, newBackoff time.Duration) {
+	for {
+		select {
+		case <-ctx.Done():
+			b.log.InfoContext(ctx, "shutting down SPIRE bridge")
+			return true, backoff
+		case resp, ok := <-bundleCh:
+			if !ok {
+				return false, backoff
+			}
+			// Receiving proves the stream is healthy; reset the backoff.
+			backoff = b.backoffInitial
+			if err := b.handleBundleUpdate(ctx, resp); err != nil {
+				b.log.ErrorContext(ctx, "handling bundle update", "error", err)
+			}
+		}
 	}
 }
 
@@ -297,7 +319,7 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 	select {
 	case <-b.started:
 	default:
-		b.log.V(1).Info("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
+		b.log.Debug("bridge not started, skipping SVID subscription", "spiffeID", spiffeID)
 		return nil
 	}
 
@@ -322,60 +344,85 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 
 	b.log.Info("subscribed to SVIDs", "spiffeID", spiffeID)
 
-	go func() {
-		ch := svidCh
-		backoff := b.backoffInitial
-		for {
-		receive:
-			for {
-				select {
-				case <-subCtx.Done():
-					return
-				case resp, ok := <-ch:
-					if !ok {
-						break receive
-					}
-					// Receiving proves the stream is healthy; reset the backoff.
-					backoff = b.backoffInitial
-					// Use subCtx (tied to the bridge/subscription lifetime), not the
-					// caller's request context: SubscribePod is called synchronously
-					// from CmdAdd, whose context is cancelled as soon as it returns —
-					// pushing the SVID into the snapshot must outlive that request.
-					if handleErr := b.handleSVIDUpdate(subCtx, resp); handleErr != nil {
-						b.log.Error(handleErr, "handling SVID update", "spiffeID", spiffeID)
-					}
-				}
-			}
-
-			// The stream ended while the pod is still subscribed (e.g. the SPIRE
-			// agent restarted): re-subscribe with backoff so rotations keep
-			// flowing — exiting here would silently freeze this pod's SVID until
-			// it expired. The cached SVID keeps serving meanwhile, and the first
-			// response on the new stream is the current SVID set, so a plain
-			// re-subscribe fully resynchronizes.
-			b.metrics.streamFailed(subCtx, streamSVID)
-			for {
-				wait := jitteredBackoff(backoff)
-				b.log.Info("SVID subscription stream closed; re-subscribing", "spiffeID", spiffeID, "backoff", wait)
-				if !sleepCtx(subCtx, wait) {
-					return
-				}
-				backoff = min(backoff*2, b.backoffMax)
-				newCh, subErr := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
-				if subErr != nil {
-					b.metrics.streamFailed(subCtx, streamSVID)
-					b.log.Error(subErr, "re-subscribing to SVIDs failed; retrying", "spiffeID", spiffeID)
-					continue
-				}
-				ch = newCh
-				b.metrics.streamReconnected(subCtx, streamSVID)
-				b.log.Info("re-subscribed to SVIDs", "spiffeID", spiffeID)
-				break
-			}
-		}
-	}()
+	go b.runSVIDSubscriptionLoop(subCtx, svidCh, spiffeID, selectors)
 
 	return nil
+}
+
+// runSVIDSubscriptionLoop is the goroutine that drives an SVID subscription for
+// one pod. It reads from the initial channel and re-subscribes with backoff
+// whenever the stream closes (e.g. the SPIRE agent restarts). It exits when
+// subCtx is cancelled.
+func (b *Bridge) runSVIDSubscriptionLoop(subCtx context.Context, svidCh <-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, spiffeID string, selectors []*apitypes.Selector) {
+	ch := svidCh
+	backoff := b.backoffInitial
+	for {
+		backoff = b.drainSVIDStream(subCtx, ch, spiffeID, backoff)
+		if subCtx.Err() != nil {
+			return
+		}
+
+		// The stream ended while the pod is still subscribed (e.g. the SPIRE
+		// agent restarted): re-subscribe with backoff so rotations keep
+		// flowing — exiting here would silently freeze this pod's SVID until
+		// it expired. The cached SVID keeps serving meanwhile, and the first
+		// response on the new stream is the current SVID set, so a plain
+		// re-subscribe fully resynchronizes.
+		b.metrics.streamFailed(subCtx, streamSVID)
+		newCh, ok := b.resubscribeSVIDs(subCtx, selectors, spiffeID, &backoff)
+		if !ok {
+			return
+		}
+		ch = newCh
+	}
+}
+
+// drainSVIDStream reads responses from ch until it is closed or subCtx is
+// cancelled. Resets backoff to initial on each successful receive. Returns the
+// updated backoff.
+func (b *Bridge) drainSVIDStream(subCtx context.Context, ch <-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, spiffeID string, backoff time.Duration) time.Duration {
+	for {
+		select {
+		case <-subCtx.Done():
+			return backoff
+		case resp, ok := <-ch:
+			if !ok {
+				return backoff
+			}
+			// Receiving proves the stream is healthy; reset the backoff.
+			backoff = b.backoffInitial
+			// Use subCtx (tied to the bridge/subscription lifetime), not the
+			// caller's request context: SubscribePod is called synchronously
+			// from CmdAdd, whose context is cancelled as soon as it returns —
+			// pushing the SVID into the snapshot must outlive that request.
+			if handleErr := b.handleSVIDUpdate(subCtx, resp); handleErr != nil {
+				b.log.Error("handling SVID update", "error", handleErr, "spiffeID", spiffeID)
+			}
+		}
+	}
+}
+
+// resubscribeSVIDs retries subscribing to SVIDs with backoff until it succeeds
+// or subCtx is cancelled. Returns (channel, true) on success, (nil, false) when
+// the context was cancelled.
+func (b *Bridge) resubscribeSVIDs(subCtx context.Context, selectors []*apitypes.Selector, spiffeID string, backoff *time.Duration) (<-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, bool) {
+	for {
+		wait := jitteredBackoff(*backoff)
+		b.log.Info("SVID subscription stream closed; re-subscribing", "spiffeID", spiffeID, "backoff", wait)
+		if !sleepCtx(subCtx, wait) {
+			return nil, false
+		}
+		*backoff = min(*backoff*2, b.backoffMax)
+		newCh, subErr := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
+		if subErr != nil {
+			b.metrics.streamFailed(subCtx, streamSVID)
+			b.log.Error("re-subscribing to SVIDs failed; retrying", "error", subErr, "spiffeID", spiffeID)
+			continue
+		}
+		b.metrics.streamReconnected(subCtx, streamSVID)
+		b.log.Info("re-subscribed to SVIDs", "spiffeID", spiffeID)
+		return newCh, true
+	}
 }
 
 // UnsubscribePod stops the SVID subscription for the pod in the given network
@@ -440,7 +487,7 @@ func (b *Bridge) handleBundleUpdate(ctx context.Context, resp *delegatedidentity
 	}
 	b.mu.Unlock()
 
-	b.log.V(1).Info("processed bundle update", "trustDomains", len(resp.GetCaCertificates()))
+	b.log.DebugContext(ctx, "processed bundle update", "trustDomains", len(resp.GetCaCertificates()))
 
 	return b.pushSecrets(ctx)
 }
@@ -459,7 +506,7 @@ func (b *Bridge) handleSVIDUpdate(ctx context.Context, resp *delegatedidentityv1
 	}
 	b.mu.Unlock()
 
-	b.log.V(1).Info("processed SVID update", "svids", len(resp.GetX509Svids()))
+	b.log.DebugContext(ctx, "processed SVID update", "svids", len(resp.GetX509Svids()))
 
 	return b.pushSecrets(ctx)
 }
@@ -475,7 +522,7 @@ func (b *Bridge) runNodeSVIDRefresh(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := b.refreshNodeSVID(ctx); err != nil {
-				b.log.V(1).Info("refreshing node SVID", "error", err)
+				b.log.DebugContext(ctx, "refreshing node SVID", "error", err)
 			}
 		}
 	}
@@ -515,12 +562,12 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 	if firstServe {
 		if sink, ok := b.store.(NodeIdentitySink); ok {
 			if err := sink.SetNodeIdentity(ctx, secret.GetName()); err != nil {
-				b.log.Error(err, "setting node identity on cache", "spiffeID", secret.GetName())
+				b.log.ErrorContext(ctx, "setting node identity on cache", "error", err, "spiffeID", secret.GetName())
 			}
 		}
 	}
 
-	b.log.V(1).Info("served node SVID", "spiffeID", secret.GetName())
+	b.log.DebugContext(ctx, "served node SVID", "spiffeID", secret.GetName())
 	return b.pushSecrets(ctx)
 }
 

@@ -1,0 +1,2 @@
+# The crds chart has no configurable values; it exists solely to install the
+# aether CustomResourceDefinitions ahead of the controllers that use them.

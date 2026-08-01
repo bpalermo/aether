@@ -26,9 +26,15 @@ const (
 type cniMetrics struct {
 	ghostsRemoved     metric.Int64Counter
 	missingRegistered metric.Int64Counter
+	stalePruned       metric.Int64Counter
+	orphansPruned     metric.Int64Counter
+	missingStorage    metric.Int64Counter
 	sweepErrors       metric.Int64Counter
+	pruneBreaker      metric.Int64Counter
+	lostAddEvictions  metric.Int64Counter
 	storagePods       metric.Int64Gauge
 	healthTransitions metric.Int64Counter
+	promotionDelay    metric.Float64Histogram
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
@@ -44,9 +50,29 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		metric.WithDescription("Live local pods re-registered because the registry was missing them (missed CNI ADD registration)")); err != nil {
 		return nil, fmt.Errorf("missing registered: %w", err)
 	}
+	if m.stalePruned, err = meter.Int64Counter("aether.agent.ghost_sweep.stale_pruned",
+		metric.WithDescription("Local storage pod entries pruned because their network namespace no longer exists (missed CNI DEL); keeping them faults Envoy on the dead netns")); err != nil {
+		return nil, fmt.Errorf("stale pruned: %w", err)
+	}
+	if m.orphansPruned, err = meter.Int64Counter("aether.agent.ghost_sweep.orphans_pruned",
+		metric.WithDescription("Local storage pod entries pruned because the Kubernetes pod no longer exists (missed CNI DEL whose netns pin lingered, so the netns check could not catch it)")); err != nil {
+		return nil, fmt.Errorf("orphans pruned: %w", err)
+	}
+	if m.missingStorage, err = meter.Int64Counter("aether.agent.ghost_sweep.missing_storage",
+		metric.WithDescription("Live mesh-managed pods on this node with no local storage entry (lost CNI ADD); the agent cannot self-heal these — the pod must be rolled")); err != nil {
+		return nil, fmt.Errorf("missing storage: %w", err)
+	}
 	if m.sweepErrors, err = meter.Int64Counter("aether.agent.ghost_sweep.errors",
 		metric.WithDescription("Ghost sweep cycles that failed before reconciling")); err != nil {
 		return nil, fmt.Errorf("sweep errors: %w", err)
+	}
+	if m.pruneBreaker, err = meter.Int64Counter("aether.agent.ghost_sweep.prune_breaker_tripped",
+		metric.WithDescription("Ghost sweep passes whose mass-delete circuit breaker refused to prune (correlated netns-check failure suspected)")); err != nil {
+		return nil, fmt.Errorf("prune breaker: %w", err)
+	}
+	if m.lostAddEvictions, err = meter.Int64Counter("aether.agent.ghost_sweep.lost_add_evictions",
+		metric.WithDescription("Pods evicted by the ghost sweep to force a fresh CNI ADD after a lost one left them with no mesh listener")); err != nil {
+		return nil, fmt.Errorf("lost add evictions: %w", err)
 	}
 	if m.storagePods, err = meter.Int64Gauge("aether.agent.storage.pods",
 		metric.WithDescription("Pods currently tracked in the agent's local file storage")); err != nil {
@@ -56,11 +82,16 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		metric.WithDescription("Endpoint health transitions reflected into the registry by the liveness loop")); err != nil {
 		return nil, fmt.Errorf("health transitions: %w", err)
 	}
+	if m.promotionDelay, err = meter.Float64Histogram("aether.agent.liveness.promotion_delay_seconds",
+		metric.WithDescription("Seconds from the liveness loop first observing a pod's programmed health gateway to promoting it HEALTHY in the registry"),
+		metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("promotion delay: %w", err)
+	}
 
 	return m, nil
 }
 
-func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, storedPods int, err error) {
+func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, storedPods int, err error) {
 	if m == nil {
 		return
 	}
@@ -74,7 +105,33 @@ func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingR
 	if missingRegistered > 0 {
 		m.missingRegistered.Add(ctx, int64(missingRegistered))
 	}
+	if stalePruned > 0 {
+		m.stalePruned.Add(ctx, int64(stalePruned))
+	}
+	if orphansPruned > 0 {
+		m.orphansPruned.Add(ctx, int64(orphansPruned))
+	}
+	if missingStorage > 0 {
+		m.missingStorage.Add(ctx, int64(missingStorage))
+	}
 	m.storagePods.Record(ctx, int64(storedPods))
+}
+
+// pruneBreakerTripped records a sweep pass whose mass-delete circuit breaker
+// refused to prune (#566).
+func (m *cniMetrics) pruneBreakerTripped(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.pruneBreaker.Add(ctx, 1)
+}
+
+// lostAddEvicted records a pod evicted to force a fresh CNI ADD (#567).
+func (m *cniMetrics) lostAddEvicted(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.lostAddEvictions.Add(ctx, 1)
 }
 
 func (m *cniMetrics) healthTransition(ctx context.Context, from, to string) {
@@ -85,4 +142,15 @@ func (m *cniMetrics) healthTransition(ctx context.Context, from, to string) {
 		attrHealthFrom.String(from),
 		attrHealthTo.String(to),
 	))
+}
+
+// promotionDelayObserved records how long a new pod sat between its health
+// gateway becoming observable and its first HEALTHY promotion — the mesh's
+// endpoint-promotion latency (the e2e-measured gap that lets k8s rolls outpace
+// mesh routability).
+func (m *cniMetrics) promotionDelayObserved(ctx context.Context, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.promotionDelay.Record(ctx, seconds)
 }

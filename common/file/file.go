@@ -10,10 +10,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // WriteFileAtomic writes data to a file atomically using a temporary file and rename.
@@ -30,13 +29,13 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	}
 	tempPath := tempFile.Name()
 
-	log := ctrl.Log.WithName("file")
+	log := slog.Default().With("logger", "file")
 
 	// Clean up temp file on error
 	defer func() {
 		if err != nil {
 			if rmErr := os.Remove(tempPath); rmErr != nil {
-				log.V(1).Info("failed to remove temp file during cleanup", "path", tempPath, "error", rmErr)
+				log.Debug("failed to remove temp file during cleanup", "path", tempPath, "error", rmErr)
 			}
 		}
 	}()
@@ -44,7 +43,7 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	// Write data to the temp file
 	if _, err = tempFile.Write(data); err != nil {
 		if closeErr := tempFile.Close(); closeErr != nil {
-			log.V(1).Info("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
+			log.Debug("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
 		}
 		return fmt.Errorf("failed to write to temp file: %w", err)
 	}
@@ -52,7 +51,7 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	// Ensure data is flushed to the disk
 	if err = tempFile.Sync(); err != nil {
 		if closeErr := tempFile.Close(); closeErr != nil {
-			log.V(1).Info("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
+			log.Debug("failed to close temp file during cleanup", "path", tempPath, "error", closeErr)
 		}
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
@@ -86,20 +85,14 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 
 // AtomicWriteReader writes data from a reader atomically to a file with the specified permissions.
 // It uses a temporary file and atomically renames it, marking large files as not needed for cache optimization.
-func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
+func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) (retErr error) {
 	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if Exists(tmpFile.Name()) {
-			if rmErr := os.Remove(tmpFile.Name()); rmErr != nil {
-				if err != nil {
-					err = fmt.Errorf("%s: %w", rmErr.Error(), err)
-				} else {
-					err = rmErr
-				}
-			}
+			retErr = joinErrors(os.Remove(tmpFile.Name()), retErr)
 		}
 	}()
 
@@ -108,10 +101,8 @@ func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
 	}
 
 	n, err := io.Copy(tmpFile, data)
-	if _, err := io.Copy(tmpFile, data); err != nil {
-		if closeErr := tmpFile.Close(); closeErr != nil {
-			err = fmt.Errorf("%s: %w", closeErr.Error(), err)
-		}
+	if err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
 	tryMarkLargeFileAsNotNeeded(n, tmpFile)
@@ -120,6 +111,17 @@ func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
 	}
 
 	return os.Rename(tmpFile.Name(), path)
+}
+
+// joinErrors combines two errors into one; either may be nil.
+func joinErrors(a, b error) error {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return fmt.Errorf("%s: %w", a.Error(), b)
 }
 
 // tryMarkLargeFileAsNotNeeded attempts to mark a file as not needed in the page cache.
@@ -133,6 +135,6 @@ func tryMarkLargeFileAsNotNeeded(size int64, in *os.File) {
 	}
 	if err := markNotNeeded(in); err != nil {
 		// Error is fine, this is just an optimization anyway. Continue
-		ctrl.Log.Error(err, "failed to mark not needed, continuing anyways")
+		slog.Default().With("logger", "file").Error("failed to mark not needed, continuing anyways", "error", err)
 	}
 }

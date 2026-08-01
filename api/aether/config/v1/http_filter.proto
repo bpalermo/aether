@@ -1,0 +1,167 @@
+edition = "2024";
+
+package aether.config.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/any.proto";
+
+option features.field_presence = IMPLICIT;
+option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+
+// HTTPFilterSpec is the `.spec` of the HTTPFilter custom resource — the
+// proxy-extension escape hatch (proposal 025). An HTTPRoute/GRPCRoute rule references
+// it through a standard Gateway API `ExtensionRef` filter; aether attaches the named
+// Envoy HTTP filter to the route's typed_per_filter_config (and adds it to the HCM
+// chain default-disabled). The body is opaque Envoy config, validated fail-closed by
+// the aether-controller admission webhook (in-process proto-validate: @type resolve +
+// protoc-gen-validate), NOT by the CRD's OpenAPI schema. See docs/proposals/025.
+message HTTPFilterSpec {
+  // filter is the Envoy HTTP filter name (e.g. "envoy.filters.http.header_to_metadata").
+  // It MUST be in aether's allow-list of filters the proxy build compiles in; the
+  // webhook rejects others.
+  string filter = 1 [(buf.validate.field).string.min_len = 1];
+
+  // typed_config is the opaque Envoy filter config (the filter's `typed_config` Any).
+  // Carried verbatim into the route's typed_per_filter_config. The `@type` must
+  // resolve to a known Envoy message and pass its protoc-gen-validate constraints —
+  // enforced by the webhook, not here.
+  google.protobuf.Any typed_config = 2;
+
+  // scope selects where the filter applies (proposal 025 M4 semantics):
+  //   - ROUTE (default, incl. UNSPECIFIED): default-disabled in the HCM chain,
+  //     enabled per route via ExtensionRef / targetRef typed_per_filter_config.
+  //   - CHAIN: service-wide ALWAYS-ON — requires target_refs naming a Service; the
+  //     filter is enabled at the service's capture vhost (vhost-level
+  //     typed_per_filter_config), applying to ALL of that service's traffic. At most
+  //     ONE chain-scope filter per service (webhook-enforced; the projector
+  //     tie-breaks deterministically). Position in the chain is aether-owned (the
+  //     extension anchor); a per-route ExtensionRef overrides it (Envoy
+  //     most-specific-wins).
+  Scope scope = 3 [(buf.validate.field).enum.defined_only = true];
+
+  enum Scope {
+    SCOPE_UNSPECIFIED = 0;
+    SCOPE_ROUTE = 1;
+    SCOPE_CHAIN = 2;
+    // INBOUND (proposal 027 M3): destination-side enforcement — the filter is
+    // enabled on the TARGET service's own pods' INBOUND listeners, where the
+    // caller's verified SPIFFE identity (XFCC) is available. Requires a Service
+    // targetRef and (v1) the extAuthz form. NOT propagated cross-cluster: the
+    // enforcement point is co-located with the service's pods, so the owning
+    // cluster's config is authoritative by construction.
+    SCOPE_INBOUND = 3;
+  }
+
+  // target_refs attaches this filter to Gateway API objects (policy attachment,
+  // GEP-713/-2648 direct) — proposal 025 M3. The supported kind is Service (core
+  // group): the filter then applies to EVERY route targeting that Service, for all its
+  // callers (object-wide), in addition to any per-route ExtensionRef. Targets are
+  // same-namespace as this HTTPFilter. A Service-attached filter is a class-1 payload
+  // that rides proposal 026's config channel to peer clusters.
+  repeated PolicyTargetRef target_refs = 4;
+
+  // ext_authz opts this route/service into the node-local authorization sidecar
+  // (proposal 027). TYPED-ONLY: the transport (target/timeout/failure mode) is
+  // system-owned on the chain entry — this form carries only what
+  // ExtAuthzPerRoute can: per-route policy parameters and toggles. Requires the
+  // sidecar to be enabled on the cluster (proxy.authzSidecar.enabled); the agent
+  // drops it otherwise (logged) so a stray policy cannot NACK the proxy.
+  ExtAuthzRoute ext_authz = 6;
+
+  // rbac is the TYPED form of envoy.filters.http.rbac: LOCAL authorization —
+  // in-process allow/deny by verified peer identity (SPIFFE SAN on the inbound
+  // path; the aether.source metadata on egress) and path/method, with NO sidecar,
+  // no per-request RPC, and no failure mode (policy is config). mode AUDIT
+  // evaluates + counts (rbac.shadow_denied stats) without enforcing — dry-run a
+  // policy on live traffic, then flip to ENFORCE (identical rules by construction).
+  RBACRoute rbac = 7;
+
+  // header_to_metadata is the TYPED form of envoy.filters.http.header_to_metadata
+  // (proposal 025 M4 typed promotion): the one allow-listed filter Gateway API cannot
+  // express (it powers subset routing). Mutually exclusive with filter/typed_config —
+  // set exactly one authoring form; aether renders the Envoy proto internally.
+  HeaderToMetadata header_to_metadata = 5;
+}
+
+// ExtAuthzRoute is the per-route external-authorization form (renders to Envoy's
+// ExtAuthzPerRoute). Attaching it ENABLES the (otherwise disabled) system ext_authz
+// filter for the targeted route/service.
+message ExtAuthzRoute {
+  // context_extensions are passed to the authz service with every check for the
+  // targeted routes — the per-route policy parameters (e.g. {"policy": "payments-rw"}).
+  map<string, string> context_extensions = 1;
+  // disable_request_body_buffering skips sending the request body to the authz service.
+  bool disable_request_body_buffering = 2;
+  // disabled exempts the targeted route from a broader (service-wide) authz filter.
+  bool disabled = 3;
+}
+
+// RBACRoute is the typed local-authorization form (renders to Envoy's RBACPerRoute).
+message RBACRoute {
+  // mode: ENFORCE (default, incl. UNSPECIFIED) applies the policies; AUDIT
+  // evaluates them as shadow rules — counted, never enforced.
+  Mode mode = 1 [(buf.validate.field).enum.defined_only = true];
+  // action: ALLOW (default, incl. UNSPECIFIED) = only matching requests pass;
+  // DENY = matching requests are rejected, everything else passes.
+  Action action = 2 [(buf.validate.field).enum.defined_only = true];
+  repeated Policy policies = 3 [(buf.validate.field).repeated.min_items = 1];
+
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_ENFORCE = 1;
+    MODE_AUDIT = 2;
+  }
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_ALLOW = 1;
+    ACTION_DENY = 2;
+  }
+
+  message Policy {
+    string name = 1 [(buf.validate.field).string.min_len = 1];
+    // principals: WHO. At least one must match (OR). Empty is rejected — an
+    // any-principal policy should be explicit at the route level, not implicit.
+    repeated Principal principals = 2 [(buf.validate.field).repeated.min_items = 1];
+    // permissions: WHAT. At least one must match (OR); empty = any request.
+    repeated Permission permissions = 3;
+  }
+
+  // Principal matches the calling workload. Exactly one field.
+  message Principal {
+    // spiffe_id is an exact verified-peer SPIFFE ID (inbound mTLS SAN).
+    string spiffe_id = 1;
+    // namespace is aether sugar: any workload in the namespace — renders to a
+    // principal regex ^spiffe://[^/]+/ns/<namespace>/sa/.+ (trust-domain agnostic).
+    string namespace = 2;
+  }
+
+  // Permission matches the request. Exactly one field.
+  message Permission {
+    string path_prefix = 1;
+    // method is an HTTP method (GET, POST, ...).
+    string method = 2;
+  }
+}
+
+// HeaderToMetadata promotes the common header_to_metadata use to typed config: each
+// rule copies a request header's value into dynamic metadata when present.
+message HeaderToMetadata {
+  repeated Rule rules = 1 [(buf.validate.field).repeated.min_items = 1];
+
+  message Rule {
+    // header is the request header to read.
+    string header = 1 [(buf.validate.field).string.min_len = 1];
+    // metadata_key is the key written under the metadata namespace.
+    string metadata_key = 2 [(buf.validate.field).string.min_len = 1];
+    // metadata_namespace defaults to "envoy.lb" (the subset-routing namespace).
+    string metadata_namespace = 3;
+  }
+}
+
+// PolicyTargetRef is a Gateway API policy-attachment target: a namespace-local
+// group/kind/name. For M3, group = "" (core) and kind = "Service".
+message PolicyTargetRef {
+  string group = 1;
+  string kind = 2 [(buf.validate.field).string.min_len = 1];
+  string name = 3 [(buf.validate.field).string.min_len = 1];
+}

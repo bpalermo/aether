@@ -7,7 +7,9 @@ go_library(
     visibility = ["//registry:__subpackages__"],
     deps = [
         "//api/aether/registry/v1:registry",
-        "@com_github_go_logr_logr//:logr",
+        "//common/log",
+        "//common/serviceref",
+        "//registry/export",
         "@io_etcd_go_etcd_client_v3//:client",
         "@org_golang_google_protobuf//proto",
     ],
@@ -17,11 +19,13 @@ go_test(
     name = "etcd_test",
     size = "medium",
     srcs = ["etcd_test.go"],
-    tags = ["integration"],
+    tags = [
+        "integration",
+        "no-remote-exec",  # testcontainers needs local Docker, not a remote executor
+    ],
     deps = [
         ":etcd",
         "//api/aether/registry/v1:registry",
-        "@com_github_go_logr_logr//:logr",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@com_github_testcontainers_testcontainers_go_modules_etcd//:etcd",

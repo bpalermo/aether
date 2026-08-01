@@ -2,19 +2,27 @@ package registry
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	"github.com/bpalermo/aether/common/serviceref"
 )
 
 // NewServiceEndpointFromCNIPod creates a ServiceEndpoint from a CNIPod.
 // It extracts the service name from the pod's labels and the port and weight from annotations.
-// The service protocol is always HTTP. Container and Kubernetes metadata are included
-// along with node locality information.
-func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
-	protocol := registryv1.Service_PROTOCOL_HTTP
+// The service protocol comes from the endpoint.aether.io/protocol annotation
+// (default HTTP; "tcp" registers a non-HTTP TCP-over-mTLS service). Container
+// and Kubernetes metadata are included along with node locality information.
+func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegion string, nodeZone string, nodeIP string, cniPod *cniv1.CNIPod) (string, registryv1.Service_Protocol, *registryv1.ServiceEndpoint, error) {
+	protocol, err := getProtocolFromAnnotations(cniPod.GetAnnotations())
+	if err != nil {
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
+	}
 
 	serviceName, err := getServiceName(cniPod)
 	if err != nil {
@@ -31,10 +39,16 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
 	}
 
+	ports, err := getPortsFromAnnotations(cniPod.GetAnnotations(), port)
+	if err != nil {
+		return "", registryv1.Service_PROTOCOL_UNSPECIFIED, nil, err
+	}
+
 	endpoint := &registryv1.ServiceEndpoint{
 		Ip:              cniPod.GetIps()[0],
 		ClusterName:     clusterName,
 		Port:            uint32(port),
+		Ports:           ports,
 		Weight:          weight,
 		Metadata:        getEndpointMetadataFromAnnotations(cniPod.GetAnnotations()),
 		HealthCheckMode: HealthCheckModeFromAnnotations(cniPod.GetAnnotations()),
@@ -46,6 +60,7 @@ func NewServiceEndpointFromCNIPod(clusterName string, nodeName string, nodeRegio
 			Namespace: cniPod.GetNamespace(),
 			PodName:   cniPod.GetName(),
 			NodeName:  nodeName,
+			NodeIp:    nodeIP,
 		},
 		Locality: &registryv1.ServiceEndpoint_Locality{
 			Region: nodeRegion,
@@ -66,19 +81,45 @@ func ExtractCNIPodInformation(pod *cniv1.CNIPod) (string, []string, error) {
 	return serviceName, pod.GetIps(), nil
 }
 
-// getServiceName extracts the service name from the pod's service account.
+// getServiceName returns the namespace-qualified registry key for the pod's mesh
+// service: "<namespace>/<serviceAccount>" (proposal 020 Part 1). The identity
+// unit is still the ServiceAccount, but the key is now namespace-qualified so two
+// workloads sharing a ServiceAccount name across namespaces (e.g. "default") no
+// longer collapse into one service. serviceref is the single source of truth for
+// the key format.
 func getServiceName(cniPod *cniv1.CNIPod) (string, error) {
 	sa := cniPod.GetServiceAccount()
 	if sa == "" {
 		return "", fmt.Errorf("missing service account")
 	}
-	return sa, nil
+	ns := cniPod.GetNamespace()
+	if ns == "" {
+		return "", fmt.Errorf("missing namespace")
+	}
+	return serviceref.New(ns, sa).Key(), nil
+}
+
+// getProtocolFromAnnotations maps the endpoint.aether.io/protocol annotation to
+// the service protocol. Unset or "http" yields PROTOCOL_HTTP (default); "tcp"
+// yields PROTOCOL_TCP (a non-HTTP TCP-over-mTLS service, reached through the
+// transparent-capture TCP floor). Any other value is rejected so a typo never
+// silently registers a service under the wrong (or unspecified) protocol.
+func getProtocolFromAnnotations(annotations map[string]string) (registryv1.Service_Protocol, error) {
+	switch annotations[aetherannotations.AnnotationEndpointProtocol] {
+	case "", aetherannotations.ProtocolHTTP:
+		return registryv1.Service_PROTOCOL_HTTP, nil
+	case aetherannotations.ProtocolTCP:
+		return registryv1.Service_PROTOCOL_TCP, nil
+	default:
+		return registryv1.Service_PROTOCOL_UNSPECIFIED, fmt.Errorf("invalid protocol annotation %q (want %q or %q)",
+			annotations[aetherannotations.AnnotationEndpointProtocol], aetherannotations.ProtocolHTTP, aetherannotations.ProtocolTCP)
+	}
 }
 
 // getPortFromAnnotations extracts the endpoint port from pod annotations.
 // If the port annotation is not present, it returns the default endpoint port.
 func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
-	s, ok := annotations[constants.AnnotationEndpointPort]
+	s, ok := annotations[aetherannotations.AnnotationEndpointPort]
 	if !ok {
 		return constants.DefaultEndpointPort, nil
 	}
@@ -90,10 +131,43 @@ func getPortFromAnnotations(annotations map[string]string) (uint16, error) {
 	return uint16(port), nil
 }
 
+// getPortsFromAnnotations parses the full served-port set from the
+// endpoint.aether.io/ports annotation (comma-separated). The default port is
+// always included. Returns the sorted, de-duplicated set; when the annotation
+// is absent the set is just {defaultPort}.
+func getPortsFromAnnotations(annotations map[string]string, defaultPort uint16) ([]uint32, error) {
+	set := map[uint32]struct{}{uint32(defaultPort): {}}
+	if raw, ok := annotations[aetherannotations.AnnotationEndpointPorts]; ok && raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			t := strings.TrimSpace(part)
+			if t == "" {
+				continue
+			}
+			// Strip an optional "=proto" suffix (e.g. "9090=h2"): the protocol
+			// is an agent-local inbound concern; the registry carries only the
+			// numeric port set (per-port EDS membership).
+			if i := strings.IndexByte(t, '='); i >= 0 {
+				t = strings.TrimSpace(t[:i])
+			}
+			p, err := strconv.ParseUint(t, 10, 16)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ports annotation entry %q", t)
+			}
+			set[uint32(p)] = struct{}{}
+		}
+	}
+	ports := make([]uint32, 0, len(set))
+	for p := range set {
+		ports = append(ports, p)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports, nil
+}
+
 // getWeightFromAnnotations extracts the endpoint weight from pod annotations.
 // If the weight annotation is not present, it returns the default endpoint weight.
 func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
-	s, ok := annotations[constants.AnnotationEndpointWeight]
+	s, ok := annotations[aetherannotations.AnnotationEndpointWeight]
 	if !ok {
 		return constants.DefaultEndpointWeight, nil
 	}
@@ -113,8 +187,8 @@ func getWeightFromAnnotations(annotations map[string]string) (uint32, error) {
 // endpoints enter every client pre-warmed (no per-client first-HC round) and a
 // per-pod annotation opts back into per-client active checking.
 func HealthCheckModeFromAnnotations(annotations map[string]string) registryv1.ServiceEndpoint_HealthCheckMode {
-	switch annotations[constants.AnnotationEndpointHealthCheckMode] {
-	case constants.HealthCheckModeActive:
+	switch annotations[aetherannotations.AnnotationEndpointHealthCheckMode] {
+	case aetherannotations.HealthCheckModeActive:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_ACTIVE
 	default:
 		return registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS
@@ -125,7 +199,7 @@ func HealthCheckModeFromAnnotations(annotations map[string]string) registryv1.Se
 // All annotations with the aether endpoint metadata prefix are included in the result.
 func getEndpointMetadataFromAnnotations(annotations map[string]string) map[string]string {
 	metadata := map[string]string{}
-	prefix := constants.AnnotationAetherEndpointMetadataPrefix
+	prefix := aetherannotations.AnnotationAetherEndpointMetadataPrefix
 	for key, value := range annotations {
 		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
 			metadataKey := key[len(prefix):]

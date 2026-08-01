@@ -43,14 +43,22 @@ func TestRegistrarConfig_DefaultValues(t *testing.T) {
 			expected: []string{"localhost:2379"},
 		},
 		{
-			name:     "cloud map namespace defaults to aether",
-			got:      c.CloudMapNamespace,
-			expected: "aether",
-		},
-		{
 			name:     "debug is false by default",
 			got:      c.Debug,
 			expected: false,
+		},
+		{
+			// Leader election must be on so the leader-only mesh-Service / MCS
+			// generators run on exactly one replica (two replicas otherwise fight
+			// create-vs-prune on the selectorless mesh Services).
+			name:     "leader election is enabled by default",
+			got:      c.LeaderElection,
+			expected: true,
+		},
+		{
+			name:     "leader election ID is set",
+			got:      c.LeaderElectionID,
+			expected: "aether-registrar.registry.aether.io",
 		},
 	}
 
@@ -70,7 +78,6 @@ func TestRegistrarConfig_ConfigurableFields(t *testing.T) {
 	c.GRPCAddress = ":8443"
 	c.SyncInterval = 30 * time.Second
 	c.EtcdEndpoints = []string{"etcd-0:2379", "etcd-1:2379"}
-	c.CloudMapNamespace = "custom-namespace"
 
 	assert.True(t, c.Debug)
 	assert.Equal(t, "my-cluster", c.ClusterName)
@@ -78,7 +85,17 @@ func TestRegistrarConfig_ConfigurableFields(t *testing.T) {
 	assert.Equal(t, ":8443", c.GRPCAddress)
 	assert.Equal(t, 30*time.Second, c.SyncInterval)
 	assert.Equal(t, []string{"etcd-0:2379", "etcd-1:2379"}, c.EtcdEndpoints)
-	assert.Equal(t, "custom-namespace", c.CloudMapNamespace)
+}
+
+// TestRetiredFlagsGone pins the 031 round-2 retirements: the mesh-Service
+// generator is unconditional (capture + mesh DNS depend on its VIPs), and the
+// peer trust domain is resolved from the registrar's own SVID rather than
+// configured.
+func TestRetiredFlagsGone(t *testing.T) {
+	cmd := GetCommand()
+	for _, name := range []string{"generate-mesh-services", "spire-trust-domain"} {
+		assert.Nil(t, cmd.Flags().Lookup(name), "flag --%s was retired and must not be re-registered", name)
+	}
 }
 
 func TestRegistrarConfig_InstancesAreIndependent(t *testing.T) {

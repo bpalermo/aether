@@ -1,0 +1,17 @@
+{{- if and .Values.proxy.authzSidecar.enabled .Values.proxy.authzSidecar.opa.enabled }}
+{{- if not .Values.proxy.authzSidecar.opa.policy }}
+{{- fail "proxy.authzSidecar.opa.policy is required when the OPA preset is enabled" }}
+{{- end }}
+# Rego policy for the OPA authz sidecar (proposal 027). Mounted read-only at
+# /policy/policy.rego in the sidecar container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aether.fullname" . }}-opa-policy
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.agent.labels" . | nindent 4 }}
+data:
+  policy.rego: |
+    {{- .Values.proxy.authzSidecar.opa.policy | nindent 4 }}
+{{- end }}

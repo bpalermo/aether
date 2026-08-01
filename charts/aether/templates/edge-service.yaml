@@ -1,0 +1,35 @@
+{{- if .Values.edge.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  namespace: {{ include "aether.edge.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+spec:
+  # Per-Gateway addressing (proposal 021 Phase 2, unconditional): each Gateway
+  # gets its own LoadBalancer Service (owning the external IP, e.g.
+  # edge.gateway.address); this shared Service must NOT also claim a
+  # LoadBalancer IP or it collides with the per-Gateway one, so it stays
+  # ClusterIP (the edge controller reads its name as the per-Gateway base name).
+  type: ClusterIP
+  selector:
+    {{- include "aether.edge.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.edge.service.port }}
+      targetPort: http
+      protocol: TCP
+    {{- if .Values.edge.tls.enabled }}
+    - name: https
+      port: {{ .Values.edge.service.httpsPort }}
+      targetPort: https
+      protocol: TCP
+    {{- end }}
+    {{- range .Values.edge.service.extraPorts }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .port }}
+      protocol: {{ default "TCP" .protocol }}
+    {{- end }}
+{{- end }}

@@ -3,11 +3,12 @@ package registrar
 import (
 	"context"
 	"io"
+	"log/slog"
 	"testing"
+	"time"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -15,7 +16,7 @@ import (
 )
 
 func newTestRegistry() *RegistrarRegistry {
-	return NewRegistrarRegistry(logr.Discard(), Config{Address: "localhost:0"})
+	return NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "localhost:0"})
 }
 
 func makeEndpoint(ip string, port uint32) *registryv1.ServiceEndpoint {
@@ -41,10 +42,10 @@ func TestApplyEvent_FullSnapshot_AddsToCache(t *testing.T) {
 	}{
 		{
 			name:        "full snapshot adds endpoint to empty cache",
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    ep,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep},
+				"default/svc-a": {ep},
 			},
 		},
 	}
@@ -52,14 +53,30 @@ func TestApplyEvent_FullSnapshot_AddsToCache(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+			r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
+}
+
+// TestApplyEvent_DropsMalformedKey is the ingress-validation guard (the wire
+// boundary): a streamed event whose service key is not a namespace-qualified
+// "<ns>/<sa>" (a backend keying bug, e.g. the kubernetes backend before #427) is
+// dropped, not cached — so the agent never derives config from a key every
+// downstream consumer would skip, and the drop is counted (aether.agent.registry.
+// malformed_keys) instead of being silent.
+func TestApplyEvent_DropsMalformedKey(t *testing.T) {
+	r := newTestRegistry()
+	r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
+		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
+		ServiceName: "svc-a", // BARE — not the namespace-qualified "<ns>/<sa>"
+		Endpoint:    makeEndpoint("10.0.0.1", 8080),
+	})
+	assert.Empty(t, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED], "a bare-keyed event must be dropped, not cached")
 }
 
 func TestApplyEvent_EndpointAdded(t *testing.T) {
@@ -76,31 +93,31 @@ func TestApplyEvent_EndpointAdded(t *testing.T) {
 		{
 			name:         "adds endpoint to empty service",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{},
-			serviceName:  "svc-a",
+			serviceName:  "default/svc-a",
 			endpoint:     ep1,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1},
+				"default/svc-a": {ep1},
 			},
 		},
 		{
 			name: "adds second endpoint to existing service",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1},
+				"default/svc-a": {ep1},
 			},
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    ep2,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1, ep2},
+				"default/svc-a": {ep1, ep2},
 			},
 		},
 		{
 			name:         "adds endpoint to new service alongside existing service",
-			initialCache: map[string][]*registryv1.ServiceEndpoint{"svc-a": {ep1}},
-			serviceName:  "svc-b",
+			initialCache: map[string][]*registryv1.ServiceEndpoint{"default/svc-a": {ep1}},
+			serviceName:  "default/svc-b",
 			endpoint:     ep2,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1},
-				"svc-b": {ep2},
+				"default/svc-a": {ep1},
+				"default/svc-b": {ep2},
 			},
 		},
 	}
@@ -108,13 +125,13 @@ func TestApplyEvent_EndpointAdded(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
-			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
+			r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
 }
@@ -137,34 +154,34 @@ func TestApplyEvent_EndpointUpdated(t *testing.T) {
 		{
 			name: "updates existing endpoint by IP",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {original},
+				"default/svc-a": {original},
 			},
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    updated,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {updated},
+				"default/svc-a": {updated},
 			},
 		},
 		{
 			name: "updates correct endpoint when multiple exist",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {original, other},
+				"default/svc-a": {original, other},
 			},
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    updated,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {updated, other},
+				"default/svc-a": {updated, other},
 			},
 		},
 		{
 			name: "adds endpoint if IP not found during update",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {other},
+				"default/svc-a": {other},
 			},
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    updated,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {other, updated},
+				"default/svc-a": {other, updated},
 			},
 		},
 	}
@@ -172,13 +189,13 @@ func TestApplyEvent_EndpointUpdated(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
-			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
+			r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
 }
@@ -197,38 +214,38 @@ func TestApplyEvent_EndpointRemoved(t *testing.T) {
 		{
 			name: "removes the only endpoint and deletes service key",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1},
+				"default/svc-a": {ep1},
 			},
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    ep1,
 			expected:    map[string][]*registryv1.ServiceEndpoint{},
 		},
 		{
 			name: "removes one of multiple endpoints",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1, ep2},
+				"default/svc-a": {ep1, ep2},
 			},
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    ep1,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep2},
+				"default/svc-a": {ep2},
 			},
 		},
 		{
 			name: "remove on non-existent IP is a no-op",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep2},
+				"default/svc-a": {ep2},
 			},
-			serviceName: "svc-a",
+			serviceName: "default/svc-a",
 			endpoint:    ep1,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep2},
+				"default/svc-a": {ep2},
 			},
 		},
 		{
 			name:         "remove on non-existent service is a no-op",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{},
-			serviceName:  "svc-missing",
+			serviceName:  "default/svc-missing",
 			endpoint:     ep1,
 			expected:     map[string][]*registryv1.ServiceEndpoint{},
 		},
@@ -237,13 +254,13 @@ func TestApplyEvent_EndpointRemoved(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
-			r.applyEvent(&registrarv1.WatchEndpointsResponse{
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
+			r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 				ServiceName: tt.serviceName,
 				Endpoint:    tt.endpoint,
 			})
-			assert.Equal(t, tt.expected, r.cache)
+			assert.Equal(t, tt.expected, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 		})
 	}
 }
@@ -251,17 +268,17 @@ func TestApplyEvent_EndpointRemoved(t *testing.T) {
 func TestRemoveLocked_CleansUpEmptyServiceKey(t *testing.T) {
 	ep := makeEndpoint("10.0.0.1", 8080)
 	r := newTestRegistry()
-	r.cache = map[string][]*registryv1.ServiceEndpoint{
-		"svc-a": {ep},
+	r.cache[registryv1.Service_PROTOCOL_HTTP] = map[string][]*registryv1.ServiceEndpoint{
+		"default/svc-a": {ep},
 	}
 
 	r.mu.Lock()
-	r.removeLocked("svc-a", "10.0.0.1")
+	r.removeLocked(registryv1.Service_PROTOCOL_HTTP, "default/svc-a", "10.0.0.1")
 	r.mu.Unlock()
 
-	_, exists := r.cache["svc-a"]
+	_, exists := r.cache[registryv1.Service_PROTOCOL_HTTP]["default/svc-a"]
 	assert.False(t, exists, "service key should be removed from cache when no endpoints remain")
-	assert.Empty(t, r.cache)
+	assert.Empty(t, r.cache[registryv1.Service_PROTOCOL_HTTP])
 }
 
 func TestListAllEndpoints_ReadsFromCache(t *testing.T) {
@@ -276,21 +293,21 @@ func TestListAllEndpoints_ReadsFromCache(t *testing.T) {
 		{
 			name: "returns all services from populated cache",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1},
-				"svc-b": {ep2},
+				"default/svc-a": {ep1},
+				"default/svc-b": {ep2},
 			},
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1},
-				"svc-b": {ep2},
+				"default/svc-a": {ep1},
+				"default/svc-b": {ep2},
 			},
 		},
 		{
 			name: "returns single service from cache",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1, ep2},
+				"default/svc-a": {ep1, ep2},
 			},
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1, ep2},
+				"default/svc-a": {ep1, ep2},
 			},
 		},
 	}
@@ -298,7 +315,8 @@ func TestListAllEndpoints_ReadsFromCache(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
+			close(r.ready) // cache is populated; serve from it (not RPC)
 			got, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_UNSPECIFIED)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
@@ -319,18 +337,18 @@ func TestListEndpoints_ReadsFromCache(t *testing.T) {
 		{
 			name: "returns endpoints for matching service",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1, ep2},
-				"svc-b": {ep2},
+				"default/svc-a": {ep1, ep2},
+				"default/svc-b": {ep2},
 			},
-			service:  "svc-a",
+			service:  "default/svc-a",
 			expected: []*registryv1.ServiceEndpoint{ep1, ep2},
 		},
 		{
 			name: "returns single endpoint for service",
 			initialCache: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {ep1},
+				"default/svc-a": {ep1},
 			},
-			service:  "svc-a",
+			service:  "default/svc-a",
 			expected: []*registryv1.ServiceEndpoint{ep1},
 		},
 	}
@@ -338,7 +356,7 @@ func TestListEndpoints_ReadsFromCache(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRegistry()
-			r.cache = tt.initialCache
+			r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED] = tt.initialCache
 			got, err := r.ListEndpoints(context.Background(), tt.service, registryv1.Service_PROTOCOL_UNSPECIFIED)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
@@ -354,53 +372,53 @@ func TestCache_MultipleServices(t *testing.T) {
 	ep3 := makeEndpoint("10.0.0.3", 9090)
 
 	// Add endpoints across two services.
-	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+	r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-		ServiceName: "svc-a",
+		ServiceName: "default/svc-a",
 		Endpoint:    ep1,
 	})
-	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+	r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-		ServiceName: "svc-b",
+		ServiceName: "default/svc-b",
 		Endpoint:    ep2,
 	})
-	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+	r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-		ServiceName: "svc-a",
+		ServiceName: "default/svc-a",
 		Endpoint:    ep3,
 	})
 
 	assert.Equal(t, map[string][]*registryv1.ServiceEndpoint{
-		"svc-a": {ep1, ep3},
-		"svc-b": {ep2},
-	}, r.cache)
+		"default/svc-a": {ep1, ep3},
+		"default/svc-b": {ep2},
+	}, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 
 	// Remove svc-a entirely.
-	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+	r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
-		ServiceName: "svc-a",
+		ServiceName: "default/svc-a",
 		Endpoint:    ep1,
 	})
-	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+	r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
-		ServiceName: "svc-a",
+		ServiceName: "default/svc-a",
 		Endpoint:    ep3,
 	})
 
 	assert.Equal(t, map[string][]*registryv1.ServiceEndpoint{
-		"svc-b": {ep2},
-	}, r.cache)
+		"default/svc-b": {ep2},
+	}, r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED])
 
-	_, exists := r.cache["svc-a"]
+	_, exists := r.cache[registryv1.Service_PROTOCOL_UNSPECIFIED]["default/svc-a"]
 	assert.False(t, exists, "svc-a key should be absent after all endpoints removed")
 }
 
 func TestApplyEvent_SignalsChange(t *testing.T) {
 	r := newTestRegistry()
 
-	r.applyEvent(&registrarv1.WatchEndpointsResponse{
+	r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-		ServiceName: "svc-a",
+		ServiceName: "default/svc-a",
 		Endpoint:    makeEndpoint("10.0.0.1", 8080),
 	})
 
@@ -417,9 +435,9 @@ func TestSignalChange_Coalesces(t *testing.T) {
 	// A burst of events must collapse into a single pending signal (the notify
 	// channel is buffered with capacity 1 and written non-blocking).
 	for range 5 {
-		r.applyEvent(&registrarv1.WatchEndpointsResponse{
+		r.applyEvent(context.Background(), &registrarv1.WatchEndpointsResponse{
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-			ServiceName: "svc-a",
+			ServiceName: "default/svc-a",
 			Endpoint:    makeEndpoint("10.0.0.1", 8080),
 		})
 	}
@@ -456,7 +474,7 @@ func TestProcessStream_TracksLastVersion(t *testing.T) {
 		events: []*registrarv1.WatchEndpointsResponse{
 			{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-				ServiceName: "svc-a",
+				ServiceName: "default/svc-a",
 				Endpoint:    makeEndpoint("10.0.0.1", 8080),
 				Version:     "7",
 			},
@@ -480,7 +498,7 @@ func TestProcessStream_DataLossClearsResumeToken(t *testing.T) {
 		events: []*registrarv1.WatchEndpointsResponse{
 			{
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
-				ServiceName: "svc-a",
+				ServiceName: "default/svc-a",
 				Endpoint:    makeEndpoint("10.0.0.1", 8080),
 				Version:     "7",
 			},
@@ -500,4 +518,170 @@ func TestProcessStream_OtherErrorsKeepResumeToken(t *testing.T) {
 
 	got := r.processStream(context.Background(), stream, "5")
 	assert.Equal(t, "5", got, "transient errors must keep the resume token")
+}
+
+// TestSnapshotCompleteClosesReady verifies WaitReady unblocks once
+// processStream sees the SNAPSHOT_COMPLETE marker (Gap 2 of the rev-66 404
+// fix): consumers deriving config from the watch cache wait until it holds a
+// complete world view, the marker advances the resume token, and it mutates
+// no cache state.
+func TestSnapshotCompleteClosesReady(t *testing.T) {
+	r := newTestRegistry()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	require.Error(t, r.WaitReady(ctx), "WaitReady must block before SNAPSHOT_COMPLETE")
+	cancel()
+
+	stream := &fakeWatchStream{
+		events: []*registrarv1.WatchEndpointsResponse{
+			{
+				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
+				ServiceName: "default/svc-a",
+				Protocol:    registryv1.Service_PROTOCOL_HTTP,
+				Endpoint:    makeEndpoint("10.0.0.1", 8080),
+				Version:     "7",
+			},
+			{
+				Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+				Version: "7",
+			},
+			// A second marker (reconnect) must be harmless.
+			{
+				Type:    registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE,
+				Version: "8",
+			},
+		},
+		err: io.EOF,
+	}
+
+	got := r.processStream(context.Background(), stream, "")
+	assert.Equal(t, "8", got, "marker version must advance the resume token")
+	require.NoError(t, r.WaitReady(context.Background()), "ready must be closed after the marker")
+
+	eps, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Len(t, eps, 1, "marker must not mutate the cache")
+}
+
+// TestReconnectSignal verifies the watch loop's reconnect notification fires
+// (coalesced) so the agent can re-assert local registrations a failed-over
+// registrar replica may have lost from its write-behind queue.
+func TestReconnectSignal(t *testing.T) {
+	r := newTestRegistry()
+	select {
+	case <-r.Reconnects():
+		t.Fatal("no reconnect signal expected before any connection")
+	default:
+	}
+	r.signalReconnect()
+	r.signalReconnect() // coalesces, must not block
+	select {
+	case <-r.Reconnects():
+	default:
+		t.Fatal("reconnect signal expected")
+	}
+}
+
+// TestSetServiceFilter_ReassertsOnChangeOnly verifies the filter setter
+// cancels the active stream only when the effective set changes (order
+// -insensitive), and that the generation bump clears the resume token path.
+func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
+	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
+
+	cancels := 0
+	r.filterMu.Lock()
+	r.streamCancel = func() { cancels++ }
+	r.filterMu.Unlock()
+
+	r.SetServiceFilter([]string{"default/svc-a", "default/svc-b"})
+	assert.Equal(t, 1, cancels, "first filter must cancel the stream")
+
+	// Same set, different order: no re-assert.
+	r.SetServiceFilter([]string{"default/svc-b", "default/svc-a"})
+	assert.Equal(t, 1, cancels, "unchanged filter must not cancel")
+
+	// Shrink: re-assert.
+	r.SetServiceFilter([]string{"default/svc-a"})
+	assert.Equal(t, 2, cancels)
+
+	// Empty non-nil (watch nothing) differs from nil (full watch).
+	r.SetServiceFilter([]string{})
+	assert.Equal(t, 3, cancels)
+	r.SetServiceFilter(nil)
+	assert.Equal(t, 4, cancels)
+
+	services, gen := r.currentFilter()
+	assert.Nil(t, services)
+	assert.Equal(t, uint64(4), gen)
+}
+
+// TestServiceCatalog_ReplayAndIncrementals verifies the client catalog:
+// replay accumulates and swaps at SNAPSHOT_COMPLETE (when the server resent
+// state), stale names from a previous connection are dropped by the swap,
+// and post-marker transitions apply incrementally.
+func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
+	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
+
+	ev := func(t registrarv1.WatchEndpointsResponse_EventType, svc, version string) *registrarv1.WatchEndpointsResponse {
+		return &registrarv1.WatchEndpointsResponse{Type: t, ServiceName: svc, Version: version}
+	}
+
+	// First connection: replay svc-a, svc-b; complete at version 5.
+	stream := &fakeWatchStream{events: []*registrarv1.WatchEndpointsResponse{
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "default/svc-a", "5"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "default/svc-b", "5"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "5"),
+		// Post-marker incremental transitions.
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-c", "6"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, "default/svc-b", "7"),
+	}, err: io.EOF}
+	last := r.processStream(context.Background(), stream, "")
+	assert.Equal(t, "7", last)
+	assert.True(t, r.HasService("default/svc-a"))
+	assert.False(t, r.HasService("default/svc-b"), "incremental removal applies")
+	assert.True(t, r.HasService("svc-c"))
+	assert.False(t, r.HasService("ghost"))
+
+	// Reconnect where the server RESENT state (version moved): the swap must
+	// drop names the new catalog doesn't carry.
+	stream = &fakeWatchStream{events: []*registrarv1.WatchEndpointsResponse{
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-z", "9"),
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "9"),
+	}, err: io.EOF}
+	_ = r.processStream(context.Background(), stream, "7")
+	assert.True(t, r.HasService("svc-z"))
+	assert.False(t, r.HasService("default/svc-a"), "swap drops stale catalog entries")
+	assert.False(t, r.HasService("svc-c"))
+
+	// Reconnect where the client is CURRENT (marker version == resume token):
+	// no replay was sent; the catalog must survive.
+	stream = &fakeWatchStream{events: []*registrarv1.WatchEndpointsResponse{
+		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "9"),
+	}, err: io.EOF}
+	_ = r.processStream(context.Background(), stream, "9")
+	assert.True(t, r.HasService("svc-z"), "current client keeps its catalog")
+}
+
+// TestSetServiceFilter_PurgesOutOfScopeCache verifies entries for services
+// leaving the filter are dropped: the registrar sends no removals for
+// out-of-scope services, and a stale entry would poison the cold path's
+// RPC fill (ListEndpoints serves the cache before falling back to RPC).
+func TestSetServiceFilter_PurgesOutOfScopeCache(t *testing.T) {
+	r := NewRegistrarRegistry(slog.New(slog.DiscardHandler), Config{Address: "test"})
+	r.mu.Lock()
+	r.cache[registryv1.Service_PROTOCOL_HTTP] = map[string][]*registryv1.ServiceEndpoint{
+		"default/svc-a": {{Ip: "10.0.0.1"}},
+	}
+	r.cache[registryv1.Service_PROTOCOL_TCP] = map[string][]*registryv1.ServiceEndpoint{
+		"default/svc-b": {{Ip: "10.0.0.2"}}, // a TCP service must purge with the filter too
+	}
+	r.mu.Unlock()
+
+	r.SetServiceFilter([]string{"default/svc-a", "default/svc-b"})
+	r.SetServiceFilter([]string{"default/svc-a"}) // svc-b leaves the filter
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	assert.Contains(t, r.cache[registryv1.Service_PROTOCOL_HTTP], "default/svc-a")
+	assert.NotContains(t, r.cache[registryv1.Service_PROTOCOL_TCP], "default/svc-b", "out-of-scope entries must purge with the filter, across protocols")
 }

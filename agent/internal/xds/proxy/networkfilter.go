@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"time"
+
 	"github.com/bpalermo/aether/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -8,7 +10,9 @@ import (
 	setFilterStatev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	set_filter_state_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 const (
@@ -45,20 +49,42 @@ func buildSetFilterState(objectKey string, inlineStringFormatString string) *lis
 				// Shared with the upstream connection so the service cluster's
 				// transport-socket matcher can read the source pod's network namespace
 				// and select that pod's client certificate for the outbound mTLS.
-				SharedWithUpstream: setFilterStatev3.FilterStateValue_TRANSITIVE,
+				// ONCE (immediate upstream connection only) is sufficient for the
+				// single-hop transport: TRANSITIVE — which re-propagates through any
+				// further upstream hops — was HBONE/tunnel-era (#86) plumbing for the
+				// two-layer upstream path and was left behind when #98 flattened the
+				// transport; scoping it to one hop keeps a future chained/internal
+				// hop from silently inheriting source-netns cert selection.
+				SharedWithUpstream: setFilterStatev3.FilterStateValue_ONCE,
 			},
 		},
 	}
 	return networkFilter("envoy.filters.network.set_filter_state", filter)
 }
 
+// downstreamIdleTimeout bounds idle downstream connections on the per-pod HCMs
+// (inbound mesh mTLS conns from peer proxies, and app→proxy conns on the
+// outbound listener). It is the server-side backstop to the upstream
+// config.UpstreamIdleTimeout: peers reclaim their idle conns at 30s, so this
+// only catches clients that don't (Envoy's default is 1 hour, which let a
+// peer's leaked upstream conns pin ~7k inbound conns per listener). Kept well
+// above the upstream timeout so the client side always disconnects first.
+const downstreamIdleTimeout = 5 * time.Minute
+
 // buildHTTPConnectionManager creates an HTTP connection manager for processing HTTP traffic.
 // It includes a router HTTP filter and uses the provided route configuration.
-// If routeConfig is nil, routes will be retrieved via RDS.
-func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
+// If routeConfig is nil, routes will be retrieved via RDS. reporter tags the OTel
+// access logger (ReporterSource for egress, ReporterDestination for inbound); the
+// logger is attached only when access logging is enabled (buildAccessLog → nil).
+func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, routeConfig *routev3.RouteConfiguration) *http_connection_managerv3.HttpConnectionManager {
 	return &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: name,
 		CodecType:  http_connection_managerv3.HttpConnectionManager_AUTO,
+		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
+			IdleTimeout: durationpb.New(downstreamIdleTimeout),
+		},
+		AccessLog: buildAccessLog(reporter, podName, podNamespace),
+		Tracing:   buildTracing(),
 		HttpFilters: []*http_connection_managerv3.HttpFilter{
 			routerHttpFilter(),
 		},
@@ -71,6 +97,18 @@ func buildHTTPConnectionManager(name string, routeConfig *routev3.RouteConfigura
 // buildHTTPConnectionManagerFilter creates a network filter wrapping an HTTP connection manager.
 func buildHTTPConnectionManagerFilter(config *http_connection_managerv3.HttpConnectionManager) *listenerv3.Filter {
 	return networkFilter("envoy.http_connection_manager", config)
+}
+
+// buildTCPProxyNetworkFilter builds an envoy.filters.network.tcp_proxy network
+// filter that routes all TCP traffic to the named upstream cluster. statPrefix is
+// used for Envoy stats (tcp.<statPrefix>.*). The upstream transport socket is NOT
+// set here — it is injected at snapshot time via InjectUpstreamMTLS (same path as
+// the HCM egress clusters), so per-source mTLS and SPIFFE SAN pinning apply.
+func buildTCPProxyNetworkFilter(statPrefix, clusterName string) *listenerv3.Filter {
+	return networkFilter("envoy.filters.network.tcp_proxy", &tcp_proxyv3.TcpProxy{
+		StatPrefix:       statPrefix,
+		ClusterSpecifier: &tcp_proxyv3.TcpProxy_Cluster{Cluster: clusterName},
+	})
 }
 
 // networkFilter creates a network filter with the given name and configuration.

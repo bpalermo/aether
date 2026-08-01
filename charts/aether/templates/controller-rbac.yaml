@@ -1,0 +1,125 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+rules:
+  # Node-taint guard (issue #569 / proposal 033): watch Nodes + agent DS pods and
+  # re-arm the aether.io/agent-not-ready:NoSchedule taint on a node whose agent
+  # pod is missing/not-Ready past a grace period. patch: add the taint (never
+  # removes — the agent owns removal). Pods are read to find each node's agent.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Watch and report on the cluster-scoped MeshConfig CRs.
+  - apiGroups: ["config.aether.io"]
+    resources: ["meshconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["config.aether.io"]
+    resources: ["meshconfigs/status"]
+    verbs: ["get", "update", "patch"]
+  # List HTTPFilters for the one-CHAIN-filter-per-service validating webhook
+  # (proposal 025 M4).
+  - apiGroups: ["config.aether.io"]
+    resources: ["httpfilters"]
+    verbs: ["get", "list"]
+  # EdgeConfig validating webhook (proposal 029).
+  - apiGroups: ["config.aether.io"]
+    resources: ["edgeconfigs"]
+    verbs: ["get", "list"]
+  # List HTTPRoutes cluster-wide for the hostname-conflict validating webhook
+  # (proposal 018).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch"]
+  {{- if .Values.controller.webhook.spire }}
+  # Inject the SPIRE trust bundle into the webhook's caBundle (by name).
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  {{- if .Values.controller.injectPodNdots }}
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  {{- end }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aether.controller.clusterScopedName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.controller.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aether.controller.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+rules:
+  # Leader election (controller-runtime Lease) + events.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "aether.controller.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "aether.controller.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.controller.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}
+---
+# MeshConfig is namespaced and the reconciler co-locates its projected ConfigMap in
+# each MeshConfig's own namespace (any namespace), so ConfigMap write must be
+# cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}-meshconfig
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aether.controller.clusterScopedName" . }}-meshconfig
+  labels:
+    {{- include "aether.controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aether.controller.clusterScopedName" . }}-meshconfig
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.controller.serviceAccountName" . }}
+    namespace: {{ include "aether.namespace" . }}

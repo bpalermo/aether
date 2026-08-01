@@ -3,8 +3,8 @@ package proxy
 import (
 	"testing"
 
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,7 +19,7 @@ func TestSpiffeIDFromPod(t *testing.T) {
 			name: "annotation override",
 			cniPod: &cniv1.CNIPod{
 				Annotations: map[string]string{
-					constants.AnnotationSpiffeID: "spiffe://custom.domain/custom-id",
+					xdsconst.AnnotationSpiffeID: "spiffe://custom.domain/custom-id",
 				},
 				Namespace:      "default",
 				ServiceAccount: "my-sa",
@@ -40,7 +40,7 @@ func TestSpiffeIDFromPod(t *testing.T) {
 			name: "empty annotation falls back to constructed",
 			cniPod: &cniv1.CNIPod{
 				Annotations: map[string]string{
-					constants.AnnotationSpiffeID: "",
+					xdsconst.AnnotationSpiffeID: "",
 				},
 				Namespace:      "staging",
 				ServiceAccount: "worker",

@@ -1,14 +1,9 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "registry",
     srcs = [
-        "cloudmap.go",
         "cni.go",
-        "ddb.go",
-        "etcd.go",
-        "k8s.go",
-        "registrar.go",
         "registry.go",
     ],
     importpath = "github.com/bpalermo/aether/registry",
@@ -17,13 +12,21 @@ go_library(
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//common/constants",
-        "//registry/internal/cloudmap",
-        "//registry/internal/ddb",
-        "//registry/internal/etcd",
-        "//registry/internal/k8s",
-        "//registry/internal/registrar",
-        "@com_github_aws_aws_sdk_go_v2//aws",
-        "@com_github_go_logr_logr//:logr",
-        "@io_k8s_sigs_controller_runtime//pkg/client",
+        "//common/constants/annotations",
+        "//common/serviceref",
+        "//registry/export",
+    ],
+)
+
+go_test(
+    name = "registry_test",
+    srcs = ["cni_test.go"],
+    embed = [":registry"],
+    deps = [
+        "//api/aether/cni/v1:cni",
+        "//api/aether/registry/v1:registry",
+        "//common/constants/annotations",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )

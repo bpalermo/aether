@@ -1,0 +1,146 @@
+{{- if .Values.agent.meshDns }}
+# The standalone mesh-DNS resolver DaemonSet (issue #578). Decoupled from the agent
+# so agent rolls no longer gap mesh DNS: this daemon owns HOST_IP:18054 alone (only a
+# UDP/TCP socket, no host-path UDS to collide), so maxSurge:1 + SO_REUSEPORT gives a
+# truly hitless handoff across its own rolls. It has no Kubernetes API access — records
+# come only from the snapshot file the agent writes under the shared registry hostPath
+# (mounted read-only here). The CNI DNAT target (:18054) is unchanged.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "aether.meshDns.fullname" . }}
+  namespace: {{ include "aether.namespace" . }}
+  labels:
+    {{- include "aether.meshDns.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "aether.meshDns.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Surge: the successor binds :18054 (via SO_REUSEPORT) while the predecessor
+      # still serves, so no per-node window has zero listeners on the DNAT target.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "aether.meshDns.labels" . | nindent 8 }}
+    spec:
+      hostNetwork: true
+      # Resolve the default upstream from the node's resolv.conf (kube-dns);
+      # ClusterFirst is ignored for hostNetwork pods.
+      dnsPolicy: ClusterFirstWithHostNet
+      # Reuse the agent ServiceAccount — this daemon makes no API calls, so it needs
+      # no RBAC of its own.
+      serviceAccountName: {{ include "aether.agent.serviceAccountName" . }}
+      priorityClassName: system-node-critical
+      tolerations:
+        # Serve DNS on a not-yet-ready node (the agent removes this taint once its
+        # CNI is serving); mirrors the agent so mesh DNS is up as early as possible.
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: mesh-dns
+          # Its own slim image (#583 option B) — NOT agent.image, which carries the
+          # full agent (controller-runtime, xDS, CNI server, SPIRE) this daemon never
+          # executes but would still pull onto every node and expose on a host port.
+          image: {{ include "aether.image" .Values.agent.meshDnsDaemon.image | quote }}
+          imagePullPolicy: {{ .Values.agent.meshDnsDaemon.image.pullPolicy }}
+          command: ["/mesh-dns"]
+          args:
+            - "--debug={{ .Values.debug }}"
+            - "--mesh-domain={{ .Values.meshDomain }}"
+            - "--ready-marker=/run/aether/mesh-dns.ready"
+            {{- range .Values.agent.meshDnsUpstream }}
+            - "--mesh-dns-upstream={{ . }}"
+            {{- end }}
+            {{- with .Values.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+          env:
+            # The node IP the resolver binds :18054 on.
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # The node NAME for k8s.node.name — the agent stamps the same attribute
+            # from spec.nodeName, so mesh-DNS and agent signals join on one node label
+            # (HOST_IP was the node's IP, which never matched).
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Stamped onto every OTel signal (metrics AND logs, issue #586) via
+            # resource.WithFromEnv(), so both are filterable per node/pod.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.node.name=$(NODE_NAME),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+          # Pod-local readiness: passes only once THIS process has bound its
+          # UDP+TCP listeners (it writes the marker after the sockets are up). With
+          # maxSurge:1/maxUnavailable:0 this holds the predecessor pod until the
+          # successor is truly serving, so their SO_REUSEPORT sockets overlap and the
+          # handoff is zero-gap. It must be pod-local, not a network probe: a probe to
+          # hostIP:18054 could be answered by the OTHER co-bound REUSEPORT socket and
+          # falsely mark this pod ready before it has bound.
+          readinessProbe:
+            # The check re-execs the SLIM /mesh-dns binary (#583) — not the full
+            # /agent — to stat this pod's ready marker (distroless image, no shell). We
+            # keep an exec marker probe rather than #582's in-process httpGet: on this
+            # host-network + maxSurge DaemonSet two pods share the host netns, so a
+            # health port either collides (wedging the surge) or is REUSEPORT-ambiguous
+            # (kubelet could hit the PEER pod's socket = the false-ready #580 rejected).
+            # The exec marker is provably pod-local. The slim binary makes the re-exec
+            # cheap, so we can drop the CPU headroom and lengthen the period. A modest
+            # 2s timeout is ample; readiness only gates surge handoffs, so a 15s period
+            # bounds the exec churn — the old pod keeps serving until the new one passes.
+            exec:
+              command:
+                - "/mesh-dns"
+                - "--readiness-check"
+                - "--ready-marker=/run/aether/mesh-dns.ready"
+            initialDelaySeconds: 1
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+            capabilities:
+              # It binds 18054 (>1024) on host-net, so no NET_BIND_SERVICE and no
+              # NET_ADMIN are required — drop everything.
+              drop:
+                - ALL
+          volumeMounts:
+            # Read-only: the daemon only READS the snapshot the agent writes.
+            - name: cni-registry-dir
+              mountPath: /host/var/lib/aether/registry
+              readOnly: true
+              mountPropagation: HostToContainer
+            # Writable scratch for the pod-local ready marker (root fs is read-only).
+            - name: run-aether
+              mountPath: /run/aether
+          resources:
+            {{- toYaml .Values.agent.meshDnsDaemon.resources | nindent 12 }}
+      volumes:
+        - name: cni-registry-dir
+          hostPath:
+            path: /var/lib/aether/registry
+            type: DirectoryOrCreate
+        # Pod-local (per-pod) emptyDir so each surge pod's marker proves ITS own
+        # process is serving — never shared across the predecessor/successor.
+        - name: run-aether
+          emptyDir: {}
+{{- end }}

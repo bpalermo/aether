@@ -1,0 +1,551 @@
+# Default values for the aether chart.
+#
+# Aether is one system: the agent (DaemonSet), the per-node Envoy proxy, the
+# in-cluster registrar, and the mesh-config controller deploy together from this
+# single chart. System config (OTEL, SPIRE, mesh domain) is set ONCE at the top
+# level and referenced by every component — no umbrella/globals indirection. The
+# proxy data plane is the only thing whose observability can be retuned at runtime
+# (via the MeshConfig CR); everything else is deterministic deploy-time config.
+# See docs/proposals/015_mesh-config.md.
+#
+# Startup taint (cold-start CNI gate, issue #261; lifecycle #569): this chart
+# ships the aether.io/agent-not-ready toleration (all aether components — agent +
+# proxy DaemonSets, controller/registrar/edge Deployments), the nodes/patch RBAC,
+# the agent-side taint removal (it drops the taint once its CNI socket is serving),
+# AND the controller-side node-taint guard (it RE-ARMS the taint on a node whose
+# agent pod is missing/not-Ready past a ~30s grace, e.g. after a reboot or an agent
+# outage). You SHOULD still register nodes WITH the taint so a brand-new node is
+# gated before its agent's first reconcile:
+#   kubelet:  --register-with-taints=aether.io/agent-not-ready=true:NoSchedule
+#   Talos:    machine.kubelet.extraArgs."register-with-taints" (machineconfig)
+# The agent removes the taint whenever it is present and CNI is serving (needs the
+# chart's nodes/patch RBAC); the guard only ever adds it, never removes it.
+# NOTE: the external SPIRE agent DaemonSet must also tolerate this taint — set it in
+# your spire helm values (spire-agent.tolerations), NOT here.
+
+# Override the chart name / fully-qualified resource name.
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace all aether resources deploy into. Defaults to the release namespace.
+# Rendered with privileged pod-security labels (required by the agent's
+# hostNetwork + NET_ADMIN privileges) when create is true.
+namespace:
+  create: true
+  name: ""
+
+# Cluster name passed to the agent and registrar (`--cluster-name`).
+clusterName: talos-main
+
+# Cross-cluster config authority (proposal 026 EM3, Option E). When set to a cluster
+# name, ONLY that cluster's registrar exports GAMMA config and every cluster imports
+# config ONLY from that origin (single source of truth, no drift). Empty = federated
+# (every cluster may export; consumers trust any peer origin, highest-version wins).
+# Passed to both the agent and registrar (`--control-cluster`).
+controlCluster: ""
+
+# Enable verbose logging on all components (`--debug`).
+debug: true
+
+# DNS-style domain mesh authorities live under (<service>.<meshDomain>): clients
+# address services as <service>.<meshDomain>; also the ODCDS catch-all suffix.
+meshDomain: aether.internal
+
+# System-wide OTEL config — enable once, every component inherits it. The proxy
+# data plane may OVERRIDE its own access-log / tracing / metrics policy via the
+# MeshConfig CR (see meshConfig below), defaulting to this.
+otel:
+  # Enable the OTel MeterProvider + push telemetry to the collector everywhere.
+  enabled: false
+  # OTLP gRPC collector endpoint (host:port, insecure), e.g.
+  # "otel-collector.observability.svc:4317". Empty disables OTLP export and the
+  # proxy/CNI stat sink. NOTE: this is a deterministic, deploy-time value — the
+  # CNI plugin and Envoy bootstrap bake it in; it is never read from a runtime
+  # ConfigMap, so the fleet rolls atomically and a config change can't break CNI.
+  endpoint: ""
+  # Export component application logs over OTLP (tee'd into stderr).
+  logs: false
+  # Head-sampling ratio for traces (0.0-1.0); bounds exported spans only.
+  traceSampleRate: 0.1
+  # Export spans over OTLP (needs a collector traces pipeline).
+  traceExport: false
+
+# System-wide SPIRE config. `enabled` is the mesh-wide mTLS switch (agent,
+# registrar, and the controller webhook serving cert); the socket paths / trust
+# domain / admin socket are per-component plumbing.
+spire:
+  enabled: true
+  # Workload API socket path (the csi.spiffe.io mount + socket filename), shared
+  # by agent, registrar and controller. Every component resolves its trust
+  # domain (mTLS peer authorization) from its own SVID over this socket — there
+  # is no trustDomain value to configure (retired: it could silently disagree
+  # with what SPIRE actually issues).
+  workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
+  # SPIRE agent admin socket (Delegated Identity API) used by the agent to mint
+  # proxy SVIDs. hostPath is bind-mounted at mountPath; the socket is socketName.
+  adminSocket:
+    hostPath: /run/spire/agent/sockets/csi.spiffe.io/admin
+    mountPath: /run/spire/admin-sockets
+    socketName: admin.sock
+
+# Proxy MeshConfig — the controller seeds and projects the singleton MeshConfig CR
+# into a ConfigMap the agent mounts. The CR ONLY overrides the proxy data plane's
+# observability; everything else is inherited from the system config above.
+meshConfig:
+  # Seed the singleton MeshConfig CR (name "default") on first install only — it
+  # is created once and NEVER overwritten on upgrade (lookup-skip + Helm
+  # resource-policy: keep), so operators own it via kubectl thereafter. Set false
+  # to manage the CR entirely yourself.
+  createDefault: true
+  # The MeshConfig spec.proxy seeded into the default CR (protojson field names of
+  # aether.config.v1.MeshConfig.proxy). An empty block means the proxy inherits
+  # everything from the system config. Used only at first-install seeding.
+  proxy: {}
+    # accessLogsEnabled: false
+    # accessLogSuccessSampleRate: 100
+    # tracingEnabled: false
+    # traceSampleRate: 0.01
+    # emitStatsPod: false
+
+# --------------------------------------------------------------------- agent
+agent:
+  # GAMMA east-west L7 routing (proposal 018): the node agent watches HTTPRoutes
+  # and GRPCRoutes parented to a Service and applies them on the outbound +
+  # capture paths. Default ON since proposal 031: the reconciler CRD-detects the
+  # Gateway API types and degrades with a warning when they are absent, so this
+  # is safe without the CRDs installed. Kill switch — set false to disable the
+  # watches (and drop the cluster-wide route RBAC).
+  gamma: true
+  # Cross-cluster config import (proposal 026): poll the registrar for GAMMA config
+  # projections peer clusters exported and materialize them into the node proxy's
+  # routes (merged with local; local wins). Default off; no-op unless the registry
+  # backend has a cross-cluster config plane (etcd). Pairs with registrar.registryBackend=etcd.
+  importConfig: false
+  # East/west waypoint (proposal 019): when true, cross-cluster endpoints (a
+  # different cluster_name than this one) are dialed at their node's routable IP +
+  # the fixed tunnel port 18009 instead of their pod IP, and this node's
+  # host-network proxy SNI-forwards inbound tunnel traffic to local pods.
+  # Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint
+  # visibility (shared etcd) and a shared SPIRE trust domain across clusters.
+  # Default off.
+  eastWestWaypoint: false
+  # M2-default flip (proposal 022, Step 4): make redirect-all the DEFAULT for
+  # managed pods (Istio-style "capture what the app sends", zero per-pod config).
+  # Every non-system pod on the node is redirect-all'd UNLESS it carries the
+  # capture.aether.io/redirect-all="false" opt-out annotation (use it for infra /
+  # hostNetwork / prober pods). false = per-pod OPT-IN via the same annotation
+  # set to "true" (the passthrough chain itself is always present, proposal
+  # 031). Carve out destinations
+  # with capture.aether.io/exclude-outbound-ports / -ip-ranges (link-local +
+  # multicast are always excluded). Default ON — validated HITLESS on talos
+  # (2026-06-29 churn soak: external prober 100%, k6 0.012%, egress intact, stable
+  # RSS through 6 proxy + 14 service rolls). This is the riskiest blast radius
+  # (every meshed pod's egress); set false to revert to per-pod opt-in.
+  captureRedirectAllDefault: true
+  # Mesh DNS (proposal 018, mesh-global FQDN): a resolver answers <svc>.<ns>.<meshDomain>
+  # from the generated mesh Services' ClusterIPs and forwards the rest to meshDnsUpstream;
+  # the CNI DNATs each pod's :53 straight to HOST_IP:18054. Default ON. meshDnsUpstream
+  # defaults to the resolver's own resolv.conf (kube-dns via ClusterFirstWithHostNet)
+  # when empty, so no per-cluster config is needed; set it only to override.
+  #
+  # Issue #578: the resolver is DECOUPLED from the agent into the standalone
+  # aether-mesh-dns DaemonSet (see meshDnsDaemon below) so agent rolls no longer gap
+  # mesh DNS. The agent now only PERSISTS the record snapshot; the daemon serves
+  # :18054, watches the snapshot, and — being surge-capable with SO_REUSEPORT — hands
+  # off hitlessly across its own rolls. This `meshDns` toggle gates BOTH the agent's
+  # persist path and the daemon deployment.
+  meshDns: true
+  meshDnsUpstream: []
+  # The standalone mesh-DNS resolver DaemonSet (issue #578). Deployed exactly when
+  # agent.meshDns is true. It mounts the agent's registry hostPath read-only and
+  # serves HOST_IP:18054 from the snapshot the agent writes.
+  meshDnsDaemon:
+    # Its OWN image (#583 option B), carrying ONLY the slim /mesh-dns binary — no
+    # controller-runtime, no xDS/go-control-plane, no CNI server, no SPIRE. The daemon
+    # briefly shipped as an extra layer inside agent.image (the interim #583 measure),
+    # which made every node pull the whole agent for a process that executes none of
+    # it. Same repository+digest convention as agent.image: mirror to a private
+    # registry by overriding `repository` alone; the digest is preserved.
+    image:
+      repository: "{@//agent/cmd/mesh-dns:image_push.repository}"
+      digest: "{@//agent/cmd/mesh-dns:image_push.digest}"
+      tag: ""
+      pullPolicy: Always
+    # Issue #583: the readiness probe now re-execs the SLIM /mesh-dns binary (only the
+    # resolver + snapshot reload + telemetry — no controller-runtime/xDS/CNI/SPIRE), not
+    # the full /agent, so the re-exec CPU headroom that inflated these limits is gone.
+    # The resident resolver is ~12-15Mi RSS and a slim-binary stat is single-digit m
+    # (period lengthened to 15s too). These are conservative for the slim footprint;
+    # revisit against live usage if needed.
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+  # Image as repository + digest (digest-pinned for immutability). Mirror to a
+  # private registry by overriding `repository` alone; the digest is preserved.
+  image:
+    repository: "{@//agent/cmd/agent:image_push.repository}"
+    digest: "{@//agent/cmd/agent:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 200m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+  # The agent reaches the registry through the registrar (gRPC), never AWS — so it
+  # carries no AWS credentials. AWS is used only by the registrar's dynamodb
+  # backend (see registrar.aws).
+
+# CNI installer (init container). Its config is deterministic deploy-time data.
+cniInstall:
+  image:
+    repository: "{@//cni/cmd/cni-install:image_push.repository}"
+    digest: "{@//cni/cmd/cni-install:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 100m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 32Mi
+
+# Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
+proxy:
+  enabled: true
+  # External image (built by the //proxy workspace), tag-pinned to the publishing
+  # commit SHA. Mirror by overriding `repository`.
+  image:
+    repository: ghcr.io/bpalermo/aether/aether-proxy
+    tag: c2ecdabaa5edfde7ffca4704248af0c8d7794ac8
+    # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
+    # helper prefers digest over tag. Envoy v1.39.0 multi-arch index (#534).
+    digest: "sha256:27db36ed2407991b9dfc4440ee7d75225d63ebd63459a4a077893a548c9c049c"
+    pullPolicy: Always
+  logLevel: info
+  # Emit Envoy's own application logs as one JSON object per line (bootstrap
+  # application_log_config). Set false for Envoy's default text format.
+  jsonLogs: true
+  # Envoy hot restart tunables (the mechanism itself is not optional). See
+  # docs/proposals/001_proxy-hot-restart.md.
+  hotRestart:
+    baseId: 0
+    drainTime: 10s
+    parentShutdownTime: 15s
+    handoffDeadline: 0
+    adminUnresponsiveDeadline: 0
+    shmHostPath: /run/aether/shm
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 512Mi
+  # External authorization sidecar (proposal 027): an authz gRPC service co-located
+  # in this DaemonSet pod, reached over a Unix socket. When enabled, the proxy
+  # bootstrap gains a static `authz_sidecar` cluster and the agent emits a
+  # DISABLED ext_authz entry on the HTTP filter chains — zero effect until an
+  # HTTPFilter (extAuthz) opts a route/service in.
+  authzSidecar:
+    enabled: false
+    # Built-in OPA preset (opt-in): runs the OPA envoy plugin with the policy below.
+    opa:
+      enabled: false
+      image: openpolicyagent/opa:1.18.2-envoy-static
+      # Rego policy mounted via ConfigMap; must define the decision the plugin
+      # queries (envoy/authz/allow by default). Required when opa.enabled.
+      policy: ""
+    # Bring-your-own authz container (used when opa.enabled is false). Must serve
+    # envoy.service.auth.v3.Authorization on unix:///run/aether/authz/authz.sock.
+    image:
+      repository: ""
+      tag: ""
+      args: []
+    # Check timeout and the REQUIRED failure mode: DENY (fail-closed, requests 403
+    # when the sidecar is unreachable) or ALLOW (fail-open).
+    timeout: 200ms
+    failureMode: DENY
+  # Envoy overload manager graceful-degradation ladder; engages before the OOM
+  # kill. Keep maxHeapSizeBytes at ~75% of resources.limits.memory.
+  overload:
+    enabled: true
+    maxHeapSizeBytes: 402653184 # 384Mi = 75% of 512Mi
+
+# ----------------------------------------------------------------------- edge
+# North-south ingress gateway (proposal 003): an unprivileged Deployment running
+# Envoy + an `agent edge` sidecar that serves it xDS. The edge dials mesh pods
+# DIRECTLY over mTLS (no node DaemonSet in the path) and routes external traffic
+# by Gateway API HTTPRoutes (proposal 018): per-FQDN, ordered path-matched rules to
+# mesh services, attached to a Gateway of the edge's GatewayClass. Envoy fetches its
+# single SVID straight from SPIRE over the workload socket (no agent SPIRE bridge).
+# Disabled by default.
+edge:
+  enabled: false
+  # Trusted proxies in front of the edge (topology fact, proposal 028): feeds BOTH
+  # the HCM's client-address resolution and the geoip filter's XFF config.
+  xffNumTrustedHops: 0
+  # Edge best-practices config (proposal 029) — the fleet-default EdgeConfig the
+  # GatewayClass parametersRef points at. Override per-Gateway with your own EdgeConfig
+  # via Gateway.spec.infrastructure.parametersRef. Values are the Envoy edge defaults.
+  config:
+    name: ""                                # default "aether-edge-defaults"
+    useRemoteAddress: true                  # edge trusts the connection source, not XFF
+    # Canonical enum names (buf ENUM_VALUE_PREFIX): HEADERS_WITH_UNDERSCORES_ACTION_{ALLOW,REJECT_REQUEST,DROP_HEADER}.
+    headersWithUnderscoresAction: HEADERS_WITH_UNDERSCORES_ACTION_REJECT_REQUEST
+    streamIdleTimeout: 300s
+    requestTimeout: 300s                    # 0s disables
+    idleTimeout: 3600s
+    perConnectionBufferLimitBytes: 32768    # 32 KiB
+    http2:
+      maxConcurrentStreams: 100
+      initialStreamWindowSize: 65536        # 64 KiB
+      initialConnectionWindowSize: 1048576  # 1 MiB
+    http3:
+      enabled: false                        # QUIC/HTTP3 UDP listener on the HTTPS port (M3)
+  # GeoIP at the edge (proposal 028): emit x-geo-* request headers from a MaxMind
+  # database. The reserved x-geo-* namespace is ALWAYS stripped from client
+  # requests at the edge (the Envoy filter passes spoofed values through on a
+  # lookup miss — aether does not). Databases are bring-your-own (licensing).
+  geoip:
+    enabled: false
+    # Which headers to emit: country, city (both served by a city-type mmdb).
+    headers: [country]
+    database:
+      # Secret containing the mmdb; mounted read-only. Key = the file name below.
+      secretName: ""
+      fileName: GeoLite2-City.mmdb
+  # The edge is an ingress gateway, not a mesh workload, so it runs in its own
+  # namespace, isolated from the control plane. namespaceCreate lets the chart
+  # create it (with baseline PSA); set false if you manage the namespace yourself.
+  namespace: aether-ingress
+  namespaceCreate: true
+  # Gateway replicas behind the Service; rolled with the standard RollingUpdate
+  # + readiness gate (no hot-restart supervisor — nothing node-local to preserve).
+  replicaCount: 2
+  # The edge reuses the agent image (run as `agent edge`) and the proxy image
+  # (plain Envoy entrypoint). Override agent.image / proxy.image to mirror.
+  # Ports the edge's public-facing listeners bind (north-south). Privileged ports
+  # (<1024, e.g. 80/443) are bound by granting the Envoy container
+  # NET_BIND_SERVICE — the pod still runs unprivileged. With tls.enabled the edge
+  # serves HTTPS on httpsPort and an HTTP->HTTPS redirect on httpPort; otherwise
+  # plain HTTP on httpPort.
+  httpPort: 80
+  httpsPort: 443
+  # Default namespace for Gateway TLS certificate Secrets. Empty = the edge's
+  # own namespace. (Gateway/route watching is cluster-wide regardless; the
+  # readiness listener is the fixed port 18021, a proposal 030 constant.)
+  routeNamespace: ""
+  # The edge routes exclusively via Gateway API (proposal 018): it serves the
+  # HTTPRoutes attached to Gateways of this GatewayClass. Requires the Gateway API
+  # CRDs installed (standard channel); the chart renders this GatewayClass bound to
+  # the aether edge controller (gateway.aether.io/edge).
+  gatewayClassName: aether
+  # gateway controls the chart-managed Gateway resource for this edge deployment.
+  # By default the chart creates one Gateway of the aether GatewayClass with HTTP
+  # (and optionally HTTPS) listeners. Set create=false to manage your own Gateway
+  # (you MUST add gateway.aether.io/http-redirect: "true" to that Gateway if you
+  # want HTTP→HTTPS redirect). When tls.enabled=true the chart automatically adds
+  # the http-redirect annotation to the generated Gateway.
+  gateway:
+    create: true
+    # tlsSecretName / tlsSecretNamespace: the kubernetes.io/tls Secret holding the
+    # downstream TLS cert. REQUIRED when tls.enabled=true and gateway.create=true.
+    # The Secret must be in the edge namespace (or tlsSecretNamespace if set).
+    tlsSecretName: ""
+    tlsSecretNamespace: ""
+    # address pins the Gateway's spec.addresses. Under proposal 021 Phase 2
+    # (per-Gateway addressing) the edge controller requests this IP from MetalLB for
+    # the Gateway's own LoadBalancer Service, so the edge keeps a stable address
+    # (e.g. the IP api.palermo.dev resolves to). Empty = MetalLB auto-assigns from
+    # the pool.
+    address: ""
+    # hostname constrains the chart-managed Gateway's listeners (e.g.
+    # "*.palermo.dev"). Empty = listeners accept any host.
+    hostname: ""
+    # httpRoutes declares HTTPRoutes managed by this chart, each parented to the
+    # chart-managed edge Gateway above. This is the supported, declarative
+    # replacement for hand-applying HTTPRoute manifests (DEPRECATED). Each entry:
+    #   - name: api
+    #     hostnames: ["api.palermo.dev"]
+    #     rules:
+    #       - backendRefs:
+    #           - name: my-backend
+    #             port: 8080
+    # `rules` is a standard Gateway API HTTPRoute rules list (matches, backendRefs,
+    # filters), passed through verbatim.
+    httpRoutes: []
+  # Downstream (external-facing) TLS. Certs are referenced per Gateway listener
+  # (spec.listeners[].tls.certificateRefs, a kubernetes.io/tls Secret in the
+  # watched namespace), read by the edge agent and served to Envoy over SDS
+  # (SNI-selected, hot rotation, no pod roll). Aether does not issue certs — bring
+  # your own (cert-manager, kubectl, …). The edge->pod upstream hop stays mTLS.
+  tls:
+    enabled: false
+  # Envoy admin endpoint, bound to pod-local loopback (127.0.0.1) only — never
+  # exposed via a Service. Off by default (it is an unauthenticated control surface
+  # even on loopback); enable for diagnostics (config_dump/stats) and reach it with
+  # `kubectl port-forward <edge-pod> 9901:9901`.
+  admin:
+    enabled: false
+    port: 9901
+  # The shared edge Service is always ClusterIP (per-Gateway LoadBalancer
+  # Services own the external IPs — proposal 021 Phase 2, unconditional).
+  service:
+    port: 80
+    httpsPort: 443
+    # extraPorts declares additional TCP ports on the edge Service. Each entry
+    # becomes a spec.ports item. Use this to expose the ports bound by Gateway
+    # TCP/TLS listeners (TCPRoute/TLSRoute parented to the edge Gateway).
+    # Example: [{name: postgres, port: 5432, protocol: TCP}]
+    extraPorts: []
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  # The edge pod is unprivileged (private cgroup namespace), so the cgroup_memory
+  # overload monitor — fatal in the privileged node DaemonSet — works here.
+  overload:
+    enabled: true
+    maxHeapSizeBytes: 201326592 # 192Mi = 75% of 256Mi
+  # Hitless-rollout drain. The per-Gateway LoadBalancer Services use
+  # externalTrafficPolicy: Cluster, so on a rollout kube-proxy keeps routing to a
+  # terminating pod for the endpoint-propagation window. Without a drain, the edge
+  # Envoy receives SIGTERM and stops accepting BEFORE that endpoint is withdrawn,
+  # so connections kube-proxy still steers to it are reset (measured ~0.25%/roll).
+  #
+  # Mirrors the node proxy's two-phase drain (proxy.hotRestart.drainTime = 10s, the
+  # empirically 0-fail value): a native kubelet `sleep` preStop holds SIGTERM off
+  # both containers for preStopSeconds. The pod is already Terminating, so kube-proxy
+  # withdraws its endpoint during the sleep WHILE Envoy keeps accepting and serving
+  # in-flight requests. Only after the sleep does Envoy get SIGTERM and drain
+  # gracefully. terminationGracePeriodSeconds must comfortably exceed the sleep plus
+  # Envoy's own graceful-shutdown drain. The native `sleep` lifecycle action (GA
+  # k8s 1.30+) is used so no in-container shell is required — the edge Envoy/agent
+  # images are distroless (no /bin/sleep, curl, or wget).
+  drain:
+    # Seconds the preStop sleep holds off SIGTERM so kube-proxy propagates the
+    # endpoint removal while Envoy still serves. Matches proxy.hotRestart.drainTime.
+    # 0 disables the preStop hook entirely.
+    preStopSeconds: 10
+    # Pod terminationGracePeriodSeconds. Must exceed preStopSeconds plus Envoy's
+    # graceful drain so SIGKILL never lands mid-drain. Default 30 = 10s sleep +
+    # ~15s Envoy drain + buffer.
+    terminationGracePeriodSeconds: 30
+  # SPIRE identity for the edge (when spire.enabled): create a ClusterSPIFFEID so
+  # SPIRE issues the edge pod its SVID. Mirrors controller.webhook.clusterSpiffeID.
+  spire:
+    clusterSpiffeID:
+      create: true
+      # spire-controller-manager class name (e.g. "spire-mgmt-spire"). REQUIRED
+      # when create=true; empty = not rendered (manage the ClusterSPIFFEID yourself).
+      className: ""
+
+# ----------------------------------------------------------------- registrar
+registrar:
+  image:
+    repository: "{@//registrar/cmd/registrar:image_push.repository}"
+    digest: "{@//registrar/cmd/registrar:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  # 2 replicas ALWAYS (directive 2026-06-11): exercises the multi-replica
+  # write-behind topology permanently.
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  service:
+    port: 443
+    targetPort: 8443
+  # Registry backend (`--registry-backend`): kubernetes, dynamodb, etcd.
+  registryBackend: kubernetes
+  # Multi-Cluster Services (MCS-API) phase 1 (`--enable-mcs`; proposals 018 + 006):
+  # the leader registrar exports local ServiceExports to the registry and
+  # materializes a ServiceImport (ClusterSetIP) + a local clusterset.local VIP
+  # Service for every service exported anywhere in the clusterset. Requires the
+  # etcd backend (the cross-cluster plane); no-ops/errors for kubernetes/dynamodb.
+  # Default OFF — adds ServiceExport/ServiceImport RBAC only when enabled. The MCS
+  # ServiceExport/ServiceImport CRDs must be installed separately (the upstream
+  # sigs.k8s.io/mcs-api CRDs). DNS stays strictly local; the cross-cluster data
+  # path (remote endpoint resolution) is a later phase.
+  enableMCS: false
+  # Region owning this registrar's etcd partition (etcd backend; proposal 006).
+  # Keys are origin-first /aether/v1/regions/<region>/clusters/<clusterName>/…;
+  # shared by every registrar on the same regional etcd.
+  region: local
+  # etcd client endpoints (used when registryBackend == etcd).
+  etcd:
+    endpoints: []
+  # Peer regions' etcd endpoints for cross-region replication (proposal 006
+  # Phase 2), one entry per peer region: "<region>=<endpoint>[,<endpoint>...]".
+  # The leader registrar mirrors this region's own registry subtree verbatim
+  # into each peer's etcd under an origin-heartbeat lease: if this region dies,
+  # its mirror expires on the peers (TTL ~30s) — whole-region failover cleanup.
+  # Requires registryBackend=etcd and a non-default region (one region = one
+  # etcd). Empty = no replication.
+  peerEtcd: []
+  # AWS config for the dynamodb registry backend (IRSA web-identity, no static
+  # keys; issue #257). roleArn annotates the registrar ServiceAccount with
+  # eks.amazonaws.com/role-arn so the pod-identity webhook injects AWS_ROLE_ARN +
+  # a projected token. Empty = no AWS access (etcd/kubernetes backends).
+  aws:
+    region: us-east-1
+    roleArn: ""
+
+# ---------------------------------------------------------------- controller
+controller:
+  image:
+    repository: "{@//controller/cmd/controller:image_push.repository}"
+    digest: "{@//controller/cmd/controller:image_push.digest}"
+    tag: ""
+    pullPolicy: Always
+  # Leader election is on; extra replicas are warm standbys.
+  replicaCount: 1
+  # Pod-ndots mutating webhook (proposal 018, mesh-global FQDN): inject dnsConfig
+  # ndots (= the mesh-domain label count) into managed pods so a mesh FQDN
+  # (<svc>.<meshDomain>) resolves absolute-first, before the cluster.local search
+  # list — without it, musl/Alpine clients fail to resolve mesh names. Scoped to
+  # aether.io/managed pods, failurePolicy=Ignore. Default ON; pairs with mesh DNS.
+  injectPodNdots: true
+  # Namespace auto-injection (Istio-style): a pod created in a namespace labeled
+  # aether.io/managed=true is given the aether.io/managed=true POD label by the
+  # pod-mutating webhook, so the CNI meshes it without a per-pod label. A pod that
+  # sets aether.io/managed=false opts out. Only acts on explicitly-labeled
+  # namespaces (no-op otherwise), failurePolicy=Ignore. Default ON.
+  namespaceInjection: true
+  webhook:
+    # Webhook serving cert source — DECOUPLED from mesh SPIRE (spire.enabled).
+    #   false (default): a Helm self-signed cert (genSignedCert, caBundle baked
+    #     into the webhook config). Validates out of the box, no SPIRE setup.
+    #   true: serve with the controller's SPIRE X.509 SVID and inject the trust
+    #     bundle into the caBundle at runtime. Requires the ClusterSPIFFEID below
+    #     (or an equivalent) granting the controller the webhook Service DNS name
+    #     in its dnsNames, else the apiserver's TLS hostname check fails.
+    spire: false
+    # When spire=true, have the chart create the controller's ClusterSPIFFEID with
+    # the webhook Service DNS SANs, so SPIRE mode works without a manual entry.
+    clusterSpiffeID:
+      create: true
+      # spire-controller-manager class name for your SPIRE install (e.g.
+      # "spire-mgmt-spire"). REQUIRED when create=true; if empty the resource is
+      # not rendered (manage the ClusterSPIFFEID yourself).
+      className: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

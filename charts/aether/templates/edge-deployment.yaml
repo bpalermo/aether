@@ -1,0 +1,322 @@
+{{- if .Values.edge.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aether.edge.fullname" . }}
+  namespace: {{ include "aether.edge.namespace" . }}
+  labels:
+    {{- include "aether.edge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.edge.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aether.edge.selectorLabels" . | nindent 6 }}
+  # Standard rolling update behind the Service: the readiness probe (Envoy's
+  # /aether/readyz health_check filter, drain-aware) gates each replica, so no
+  # hot-restart supervisor is needed — nothing node-local to preserve.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      annotations:
+        # The CNI plugin gates capture by NAMESPACE (ignorableNamespace) and reads
+        # only pod ANNOTATIONS via CRI — it cannot see the aether.io/managed LABEL
+        # the agent uses. So a managed=false pod in a non-ignored namespace still
+        # gets the redirect-all capture (proposal 022, default-on), which blackholes
+        # ALL its egress (apiserver, registrar, collector) to a capture port with no
+        # listener → the edge control plane can't reach anything. Opt out explicitly
+        # via the annotation the CNI DOES honor. (Scoped :18081 redirect is harmless:
+        # the edge dials :443/:4317 and backend :18008, never a mesh :18081.)
+        capture.aether.io/redirect-all: "false"
+      labels:
+        {{- include "aether.edge.labels" . | nindent 8 }}
+        # The edge is an ingress gateway, not a mesh workload: no per-pod proxy.
+        # It runs in its own (non-aether-system) namespace, so the CNI plugin no
+        # longer skips it by namespace — this label is what keeps the agent's
+        # isIgnorablePod ignoring it. Namespace-agnostic, deliberately.
+        aether.io/managed: "false"
+    spec:
+      serviceAccountName: {{ include "aether.edge.serviceAccountName" . }}
+      # Hitless rollouts: the per-Gateway LoadBalancer Services use
+      # externalTrafficPolicy: Cluster, so kube-proxy keeps routing to a terminating
+      # pod for the endpoint-propagation window. The preStop `sleep` below holds
+      # SIGTERM off both containers while the pod is already Terminating, so the
+      # endpoint is withdrawn before Envoy stops accepting; this grace period must
+      # comfortably exceed that sleep plus Envoy's own graceful drain so the kubelet
+      # SIGKILL never lands mid-drain. See edge.drain in values.yaml.
+      terminationGracePeriodSeconds: {{ .Values.edge.drain.terminationGracePeriodSeconds }}
+      # Tolerate the aether startup taint: the edge is an ingress gateway, not a
+      # mesh workload — it dials pods directly and never uses the node proxy, so it
+      # must not wait for a node's agent to become ready. (Its own CNI ADD goes
+      # through the agent, which ignores it via managed=false; fails-closed +
+      # retries, no deadlock.) See #261.
+      tolerations:
+        - key: aether.io/agent-not-ready
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        # Edge control plane: serves xDS to the co-located Envoy over a pod-local
+        # socket. Subtractive agent mode — no CNI, no per-pod listeners, no SPIRE
+        # bridge (Envoy talks to SPIRE SDS directly).
+        - name: agent
+          image: {{ include "aether.image" .Values.agent.image | quote }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          args:
+            - "edge"
+            - "--debug={{ .Values.debug }}"
+            - "--cluster-name={{ .Values.clusterName }}"
+            # The registrar stays in the release namespace; the edge reaches it
+            # cross-namespace (the binary default assumes aether-system, so pass the
+            # release-namespace-correct address explicitly).
+            - "--registrar-address={{ include "aether.registrar.fullname" . }}.{{ include "aether.namespace" . }}.svc:{{ .Values.registrar.service.port }}"
+            # node-name (the xDS identity) derives from POD_NAME (downward API, below); the
+            # registry dir, ports, mesh domain, route namespace and SPIRE socket all
+            # use the binary defaults — passed below only when overridden.
+            {{- if ne .Values.meshDomain "aether.internal" }}
+            - "--mesh-domain={{ .Values.meshDomain }}"
+            {{- end }}
+            {{- if ne (int .Values.edge.httpPort) 80 }}
+            - "--edge-http-port={{ .Values.edge.httpPort }}"
+            {{- end }}
+            {{- with .Values.edge.routeNamespace }}
+            - "--route-namespace={{ . }}"
+            {{- end }}
+            {{- if ne .Values.edge.gatewayClassName "aether" }}
+            - "--gateway-class={{ .Values.edge.gatewayClassName }}"
+            {{- end }}
+            {{- if .Values.edge.xffNumTrustedHops }}
+            - "--xff-num-trusted-hops={{ .Values.edge.xffNumTrustedHops }}"
+            {{- end }}
+            {{- if .Values.edge.geoip.enabled }}
+            - "--geoip-city-db=/etc/aether/geoip/{{ .Values.edge.geoip.database.fileName }}"
+            - "--geoip-headers={{ join "," .Values.edge.geoip.headers }}"
+            {{- end }}
+            # Publish this edge's LoadBalancer address as every class-aether
+            # Gateway's status.addresses; also the base name for the per-Gateway
+            # LoadBalancer Services (proposal 021 Phase 2, unconditional).
+            - "--edge-service-name={{ include "aether.edge.fullname" . }}"
+            {{- if .Values.edge.tls.enabled }}
+            - "--edge-tls"
+            {{- if ne (int .Values.edge.httpsPort) 443 }}
+            - "--edge-https-port={{ .Values.edge.httpsPort }}"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.otel.enabled }}
+            - "--otel-enabled=true"
+            {{- end }}
+            {{- with .Values.otel.endpoint }}
+            - "--otlp-endpoint={{ . }}"
+            {{- end }}
+            {{- if .Values.otel.logs }}
+            - "--logs-enabled=true"
+            {{- end }}
+            - "--trace-sample-rate={{ .Values.otel.traceSampleRate }}"
+            {{- if .Values.otel.traceExport }}
+            - "--trace-export=true"
+            {{- end }}
+            - "--spire-enabled={{ .Values.spire.enabled }}"
+            {{- if and .Values.spire.enabled (ne .Values.spire.workloadSocketPath "/run/secrets/workload-spiffe-uds/socket") }}
+            - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+                  divisor: "1"
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- if gt (int .Values.edge.drain.preStopSeconds) 0 }}
+          # Keep the xDS control plane alive through the drain window so Envoy never
+          # loses its config source mid-drain. Native `sleep` action (no shell in the
+          # distroless agent image). The kubelet runs preStop on every container in
+          # parallel on pod deletion.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ .Values.edge.drain.preStopSeconds }}
+          {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: xds-sock
+              mountPath: /run/aether
+            - name: registry-dir
+              mountPath: /var/lib/aether/registry
+            # MeshConfig overrides (access logs / tracing / stats-pod) so the edge
+            # honors the same proxy observability policy as the node proxies.
+            - name: mesh-config
+              mountPath: /etc/aether
+              readOnly: true
+            {{- if .Values.spire.enabled }}
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+        # Public-facing Envoy. Plain entrypoint (no supervisor): the edge has no
+        # node-local state to preserve across restarts.
+        - name: envoy
+          image: {{ include "aether.image" .Values.proxy.image | quote }}
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          command:
+            - "/usr/local/bin/envoy"
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            - "-l"
+            - "{{ .Values.proxy.logLevel }}"
+            - "--service-cluster"
+            - "aether-edge"
+            - "--service-node"
+            - "$(POD_NAME)"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME)"
+          ports:
+            - name: http
+              containerPort: {{ .Values.edge.httpPort }}
+              protocol: TCP
+            {{- if .Values.edge.tls.enabled }}
+            - name: https
+              containerPort: {{ .Values.edge.httpsPort }}
+              protocol: TCP
+            {{- end }}
+            - name: readiness
+              # Fixed readiness port (proposal 030 constant; the flag was retired).
+              containerPort: 18021
+              protocol: TCP
+          readinessProbe:
+            # /aether/readyz (drain-aware: 200 serving, 503 draining) is served by a
+            # DEDICATED always-bound plain-HTTP readiness listener, independent of the
+            # public listeners — so the probe survives proposal 021 Phase 2, where the
+            # public listeners move to per-Gateway internal ports and nothing binds
+            # the HTTPS port (probing it there fails and wedges the rollout).
+            httpGet:
+              path: /aether/readyz
+              port: readiness
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 3
+          {{- if gt (int .Values.edge.drain.preStopSeconds) 0 }}
+          # Two-phase drain, mirroring the node proxy (proxy.hotRestart.drainTime).
+          # The pod is Terminating the moment deletion begins, so kube-proxy starts
+          # withdrawing this pod's Service endpoint. This native `sleep` preStop holds
+          # SIGTERM off Envoy for that propagation window WHILE Envoy keeps accepting
+          # and serving (no shell in the distroless proxy image, so the native
+          # lifecycle action is used, not exec). Only after the sleep does Envoy get
+          # SIGTERM and drain in-flight requests gracefully — by which point kube-proxy
+          # no longer routes new connections here.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ .Values.edge.drain.preStopSeconds }}
+          {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              {{- if or (lt (int .Values.edge.httpPort) 1024) (and .Values.edge.tls.enabled (lt (int .Values.edge.httpsPort) 1024)) }}
+              # Bind the privileged listener port(s) as non-root. NET_BIND_SERVICE
+              # is the only added cap; the pod still runs unprivileged.
+              add:
+                - NET_BIND_SERVICE
+              {{- end }}
+          volumeMounts:
+            - name: xds-sock
+              mountPath: /run/aether
+            - name: edge-config
+              mountPath: /etc/envoy
+              readOnly: true
+            {{- if .Values.edge.geoip.enabled }}
+            # MaxMind database (proposal 028): Envoy's geoip provider opens it at
+            # listener load.
+            - name: geoip-db
+              mountPath: /etc/aether/geoip
+              readOnly: true
+            {{- end }}
+            {{- if .Values.spire.enabled }}
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+      volumes:
+        # Pod-local: the agent serves xDS on /run/aether/xds.sock, Envoy dials it.
+        - name: xds-sock
+          emptyDir: {}
+        {{- if .Values.edge.geoip.enabled }}
+        - name: geoip-db
+          secret:
+            secretName: {{ required "edge.geoip.database.secretName is required when edge.geoip.enabled" .Values.edge.geoip.database.secretName }}
+        {{- end }}
+        - name: registry-dir
+          emptyDir: {}
+        # Projected from the MeshConfig CR by the aether-controller (release-derived
+        # name; the pod waits for it, like the node agent). See proposal 015.
+        - name: mesh-config
+          configMap:
+            name: {{ include "aether.meshConfigMapName" . }}
+        - name: edge-config
+          configMap:
+            name: {{ include "aether.edge.configMapName" . }}
+            items:
+              - key: envoy.yaml
+                path: envoy.yaml
+        {{- if .Values.spire.enabled }}
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+        {{- end }}
+{{- end }}

@@ -1,0 +1,100 @@
+name: proxy
+
+# PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1).
+# Always triggers on every PR (no path filters) so the `proxy` gate check below
+# always reports — symmetric with the control-plane `ci` workflow. The `changes`
+# job scopes the work: the heavy Envoy compile only runs when proxy/ changes; on
+# a control-plane-only PR the matrix skips and the `proxy` gate reports success.
+# Both legs offload the compile to BuildBuddy RBE (amd64 = x64 pool, arm64 = arm64
+# pool via @llvm_toolchain_aarch64). Does NOT build/push the image — that happens
+# on merge (proxy-release.yml).
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  CARGO_BAZEL_REPIN: "true"
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      proxy: ${{ steps.filter.outputs.proxy }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            proxy:
+              - 'proxy/**'
+              - '.github/workflows/proxy.yml'
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.proxy == 'true'
+    defaults:
+      run:
+        working-directory: proxy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # amd64 offloads the heavy compile to BuildBuddy's x64 RBE pool.
+          - arch: amd64
+            runner: ubuntu-latest
+            bazel_config: rbe-buildbuddy-amd64
+          # arm64 offloads the heavy compile to BuildBuddy's arm64 RBE pool via
+          # @llvm_toolchain_aarch64 (exec_arch=aarch64 hermetic clang-18).
+          # The driver runner is ubuntu-latest (x64) — only analysis + coordination
+          # runs locally; the actual compiles execute on BuildBuddy arm64 workers.
+          - arch: arm64
+            runner: ubuntu-latest
+            bazel_config: rbe-buildbuddy-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      # Native (non-RBE) builds compile locally and need the hermetic clang's
+      # libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6).
+      # Both arms now use RBE, so this step is never triggered — kept as a
+      # safety net if bb-cache is ever used as a fallback.
+      - name: Setup LLVM runtime libs
+        if: matrix.bazel_config == 'bb-cache'
+        uses: ./.github/actions/setup-llvm-libs
+
+      - name: Test (${{ matrix.arch }}, ${{ matrix.bazel_config }})
+        # //... runs //:image_test (compiles Envoy + validates the image structure).
+        run: |
+          bazel test \
+            --config=ci \
+            --config=${{ matrix.bazel_config }} \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            //...
+
+  # Single required status check — symmetric with the control-plane `ci` gate.
+  # Always runs so it reports on every PR (including control-plane-only PRs where
+  # the matrix skips); fails only if a leg that actually ran failed.
+  proxy:
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any proxy job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "::error::a required proxy job failed or was cancelled"
+          exit 1

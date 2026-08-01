@@ -8,10 +8,60 @@ import (
 
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Tests use synthetic netns paths that don't exist on disk; treat them as
+// present so the missing-netns guard in LoadListenersFromStorage doesn't skip
+// them. TestLoadListenersFromStorage_SkipsMissingNetns overrides this locally.
+func init() { netnsExists = func(string) bool { return true } }
+
+// TestApplyWaypointInboundServerNames pins the Phase 3 dest-side rewrite: a
+// secondary-port inbound chain also matches the structured waypoint SNI; the
+// no-SNI / nil-match chains are untouched; and it is a no-op with the flag off.
+func TestApplyWaypointInboundServerNames(t *testing.T) {
+	pod := &cniv1.CNIPod{Namespace: "team-a", ServiceAccount: "payments"}
+	newListener := func() *listenerv3.Listener {
+		return &listenerv3.Listener{FilterChains: []*listenerv3.FilterChain{
+			{FilterChainMatch: nil}, // TCP floor
+			{FilterChainMatch: &listenerv3.FilterChainMatch{ApplicationProtocols: []string{"h2"}}}, // primary, no SNI
+			{FilterChainMatch: &listenerv3.FilterChainMatch{ServerNames: []string{"8081"}}},        // secondary port
+		}}
+	}
+
+	// Enabled: the secondary-port chain gains "8081.payments.team-a.<meshDomain>".
+	on := newTestCache("node-1")
+	on.SetMeshDomain("aether.internal")
+	on.SetWaypointConfig(true, 18009)
+	l := newListener()
+	on.applyWaypointInboundServerNames(l, pod)
+	assert.Empty(t, l.GetFilterChains()[0].GetFilterChainMatch().GetServerNames(), "TCP floor untouched")
+	assert.Empty(t, l.GetFilterChains()[1].GetFilterChainMatch().GetServerNames(), "no-SNI h2 chain untouched")
+	assert.Equal(t, []string{"8081", "8081.payments.team-a.aether.internal"},
+		l.GetFilterChains()[2].GetFilterChainMatch().GetServerNames(), "secondary port also matches the structured SNI")
+
+	// Disabled: byte-identical.
+	off := newTestCache("node-1")
+	off.SetMeshDomain("aether.internal")
+	l2 := newListener()
+	off.applyWaypointInboundServerNames(l2, pod)
+	assert.Equal(t, []string{"8081"}, l2.GetFilterChains()[2].GetFilterChainMatch().GetServerNames(), "no-op when waypoint disabled")
+}
+
+// namedListenerEntry builds a listenerEntry whose inbound and outbound listeners
+// are well-formed (named) resources. Tests that inject listener entries directly
+// into the map must use named listeners: Listeners() now filters out any
+// nameless, addressless or typed-nil Listener (see appendListener), so an entry
+// built with bare nil inbound/outbound would contribute zero resources.
+func namedListenerEntry(inboundName, outboundName string) listenerEntry {
+	return listenerEntry{
+		inbound:  &listenerv3.Listener{Name: inboundName},
+		outbound: &listenerv3.Listener{Name: outboundName},
+	}
+}
 
 // makeCNIPod builds a minimal CNIPod that satisfies proxy.GenerateListenersFromRegistryPod.
 // A non-empty NetworkNamespace is the only field required for listener generation.
@@ -70,7 +120,8 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 		{
 			name: "two pods yield four resources",
 			setupFunc: func(c *SnapshotCache) {
-				seedListeners(c,
+				seedListeners(
+					c,
 					makeCNIPod("pod-a", "default", "/proc/100/ns/net"),
 					makeCNIPod("pod-b", "default", "/proc/200/ns/net"),
 				)
@@ -80,7 +131,8 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 		{
 			name: "three pods yield six resources",
 			setupFunc: func(c *SnapshotCache) {
-				seedListeners(c,
+				seedListeners(
+					c,
 					makeCNIPod("pod-a", "ns-a", "/proc/100/ns/net"),
 					makeCNIPod("pod-b", "ns-b", "/proc/200/ns/net"),
 					makeCNIPod("pod-c", "ns-c", "/proc/300/ns/net"),
@@ -92,7 +144,7 @@ func TestSnapshotCache_Listeners(t *testing.T) {
 			name: "direct map injection yields two resources per entry",
 			setupFunc: func(c *SnapshotCache) {
 				c.listeners = map[string]listenerEntry{
-					"/proc/1/ns/net": {inbound: nil, outbound: nil},
+					"/proc/1/ns/net": namedListenerEntry("inbound-1", "outbound-1"),
 				}
 			},
 			wantLen: 2,
@@ -235,6 +287,29 @@ func TestLoadListenersFromStorage_EmptyStorage(t *testing.T) {
 	assert.Empty(t, c.listeners)
 	// Only the always-present health gateway listener remains.
 	assert.Len(t, c.Listeners(), 1)
+}
+
+// TestLoadListenersFromStorage_SkipsMissingNetns verifies that a stored pod
+// whose network namespace is gone (a missed CNI DEL) is excluded from listener
+// generation, so its dead-netns cluster never enters the snapshot.
+func TestLoadListenersFromStorage_SkipsMissingNetns(t *testing.T) {
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(path string) bool { return path != "/proc/dead/ns/net" }
+
+	c := newTestCache("node-1")
+	initListeners(c)
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(context.Background(), "live", makeCNIPod("pod-live", "default", "/proc/100/ns/net")))
+	require.NoError(t, store.AddResource(context.Background(), "dead", makeCNIPod("pod-dead", "default", "/proc/dead/ns/net")))
+
+	_ = c.LoadListenersFromStorage(context.Background(), store, "example.org")
+
+	require.Len(t, c.listeners, 1, "only the live-netns pod produces a listener entry")
+	_, ok := c.listeners["/proc/100/ns/net"]
+	assert.True(t, ok, "live pod kept")
+	_, ok = c.listeners["/proc/dead/ns/net"]
+	assert.False(t, ok, "missing-netns pod skipped")
 }
 
 // TestLoadListenersFromStorage_ValidPodsMapPopulation verifies that valid pods
@@ -504,8 +579,8 @@ func TestSnapshotCache_AddPod(t *testing.T) {
 func TestSnapshotCache_Listeners_ThreadSafety(t *testing.T) {
 	c := newTestCache("node-1")
 	c.listeners = map[string]listenerEntry{
-		"/proc/100/ns/net": {inbound: nil, outbound: nil},
-		"/proc/200/ns/net": {inbound: nil, outbound: nil},
+		"/proc/100/ns/net": namedListenerEntry("inbound-100", "outbound-100"),
+		"/proc/200/ns/net": namedListenerEntry("inbound-200", "outbound-200"),
 	}
 
 	const goroutines = 20

@@ -11,9 +11,9 @@ go_library(
     importpath = "github.com/bpalermo/aether/agent/internal/spire",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//common/log",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
-        "@com_github_go_logr_logr//:logr",
         "@com_github_spiffe_go_spiffe_v2//spiffeid",
         "@com_github_spiffe_go_spiffe_v2//svid/x509svid",
         "@com_github_spiffe_spire_api_sdk//proto/spire/api/agent/delegatedidentity/v1:delegatedidentity",
@@ -37,7 +37,6 @@ go_test(
     embed = [":spire"],
     deps = [
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
-        "@com_github_go_logr_logr//:logr",
         "@com_github_spiffe_go_spiffe_v2//spiffeid",
         "@com_github_spiffe_go_spiffe_v2//svid/x509svid",
         "@com_github_spiffe_spire_api_sdk//proto/spire/api/agent/delegatedidentity/v1:delegatedidentity",

@@ -58,7 +58,8 @@ func Init(ctx context.Context, logger *zap.Logger, endpoint string) {
 }
 
 func setup(ctx context.Context, logger *zap.Logger, endpoint string) {
-	res, err := resource.New(ctx,
+	res, err := resource.New(
+		ctx,
 		resource.WithAttributes(semconv.ServiceName(serviceName)),
 		resource.WithFromEnv(),
 		resource.WithTelemetrySDK(),

@@ -2,62 +2,69 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	"go.opentelemetry.io/otel"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/grpc/stats"
 )
 
-func TestSetup(t *testing.T) {
-	shutdown, err := Setup(context.Background(), Config{
-		ServiceName:    "test-service",
-		ServiceVersion: "v0.0.1",
-	})
-	if err != nil {
-		t.Fatalf("Setup() error = %v", err)
-	}
+func TestEndSpan_RecordsError(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	tracer := provider.Tracer("test")
 
-	// Verify the global meter provider was set to an SDK provider.
-	if _, ok := otel.GetMeterProvider().(*sdkmetric.MeterProvider); !ok {
-		t.Fatal("expected global MeterProvider to be *sdkmetric.MeterProvider")
-	}
+	_, okSpan := tracer.Start(context.Background(), "ok")
+	EndSpan(okSpan, nil)
 
-	if err := shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown() error = %v", err)
+	_, failSpan := tracer.Start(context.Background(), "fail")
+	EndSpan(failSpan, errors.New("boom"))
+
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2", len(spans))
+	}
+	if spans[0].Status.Code != otelcodes.Unset {
+		t.Errorf("ok span status = %v, want Unset", spans[0].Status.Code)
+	}
+	if spans[1].Status.Code != otelcodes.Error {
+		t.Errorf("fail span status = %v, want Error", spans[1].Status.Code)
+	}
+	if spans[1].Status.Description != "boom" {
+		t.Errorf("fail span status description = %q, want %q", spans[1].Status.Description, "boom")
+	}
+	if len(spans[1].Events) == 0 {
+		t.Error("fail span has no recorded error event")
 	}
 }
 
-func TestManagerMetricsOptions(t *testing.T) {
+func TestStatsHandlerFilter(t *testing.T) {
 	tests := []struct {
-		name        string
-		enabled     bool
-		bindAddress string
-		wantBind    string
+		method string
+		want   bool
 	}{
-		{
-			name:     "disabled",
-			enabled:  false,
-			wantBind: "0",
-		},
-		{
-			name:     "enabled with default address",
-			enabled:  true,
-			wantBind: DefaultMetricsBindAddress,
-		},
-		{
-			name:        "enabled with custom address",
-			enabled:     true,
-			bindAddress: ":9090",
-			wantBind:    ":9090",
-		},
+		{"/grpc.health.v1.Health/Check", false},
+		{"/grpc.health.v1.Health/Watch", false},
+		{"/aether.cni.v1.CNIService/AddPod", true},
+		{"/aether.registrar.v1.RegistrarService/WatchEndpoints", true},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts := ManagerMetricsOptions(tt.enabled, tt.bindAddress)
-			if opts.BindAddress != tt.wantBind {
-				t.Errorf("BindAddress = %q, want %q", opts.BindAddress, tt.wantBind)
-			}
-		})
+		if got := notHealthCheck(&stats.RPCTagInfo{FullMethodName: tt.method}); got != tt.want {
+			t.Errorf("notHealthCheck(%q) = %v, want %v", tt.method, got, tt.want)
+		}
+	}
+}
+
+func TestStatsHandlersNonNil(t *testing.T) {
+	if ServerStatsHandler() == nil {
+		t.Error("ServerStatsHandler() = nil")
+	}
+	if ClientStatsHandler() == nil {
+		t.Error("ClientStatsHandler() = nil")
 	}
 }

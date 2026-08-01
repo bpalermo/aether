@@ -3,7 +3,9 @@ package proxy
 import (
 	"testing"
 
-	"github.com/bpalermo/aether/common/constants"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
@@ -30,7 +32,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := buildDefaultOutboundHTTPFilterChain(tt.podName)
+			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "aether.internal", false, nil)
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())
@@ -45,16 +47,22 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 // non-pass-through health_check readiness filter ahead of the router, matched
 // on the shared readiness path probed by the CNI plugin from inside the netns.
 func TestOutboundChainReadinessFilter(t *testing.T) {
-	fc := buildDefaultOutboundHTTPFilterChain("my-pod")
+	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "aether.internal", false, nil)
 	require.Len(t, fc.GetFilters(), 2)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
 
+	assert.False(t, hcm.GetStripAnyHostPort(),
+		"authority :port is a routing selector (FQDN:port → that port's cluster); must NOT be stripped")
+
 	httpFilters := hcm.GetHttpFilters()
-	require.Len(t, httpFilters, 2, "expected health_check + router")
+	require.Len(t, httpFilters, 5, "expected health_check + subset-headers + on_demand + stats + router")
 	assert.Equal(t, httpHealthCheckFilterName, httpFilters[0].GetName())
-	assert.Equal(t, httpRouterFilterName, httpFilters[1].GetName())
+	assert.Equal(t, SubsetHeadersFilterName, httpFilters[1].GetName())
+	assert.Equal(t, httpOnDemandFilterName, httpFilters[2].GetName())
+	assert.Equal(t, statsFilterName, httpFilters[3].GetName())
+	assert.Equal(t, httpRouterFilterName, httpFilters[4].GetName())
 
 	hc := &health_checkv3.HealthCheck{}
 	require.NoError(t, httpFilters[0].GetTypedConfig().UnmarshalTo(hc))
@@ -62,5 +70,34 @@ func TestOutboundChainReadinessFilter(t *testing.T) {
 	assert.Empty(t, hc.GetClusterMinHealthyPercentages(), "pure server-state check, no cluster gating")
 	require.Len(t, hc.GetHeaders(), 1)
 	assert.Equal(t, ":path", hc.GetHeaders()[0].GetName())
-	assert.Equal(t, constants.ProxyReadinessPath, hc.GetHeaders()[0].GetStringMatch().GetExact())
+	assert.Equal(t, meshconst.ProxyReadinessPath, hc.GetHeaders()[0].GetStringMatch().GetExact())
+}
+
+// TestOutboundChainStatsFilter verifies the stats filter (proposals 007/012)
+// sits immediately before the router on the outbound HCM, carrying the pod's
+// source identity in its per-instance filter_config.
+func TestOutboundChainStatsFilter(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "my-pod", ServiceAccount: "checkout"}
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	fc := buildDefaultOutboundHTTPFilterChain(pod, "aether.internal", false, nil)
+	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
+
+	filters := hcm.GetHttpFilters()
+	require.Len(t, filters, 5, "expected health_check + subset + on_demand + stats + router")
+	assert.Equal(t, statsFilterName, filters[3].GetName())
+	assert.Equal(t, httpRouterFilterName, filters[4].GetName())
+
+	// The source identity travels in the filter's TypedStruct config; Envoy
+	// resolves the native C++ factory by the inner proto type.
+	ts := &xdstypev3.TypedStruct{}
+	require.NoError(t, filters[3].GetTypedConfig().UnmarshalTo(ts))
+	assert.Equal(t, statsConfigTypeURL, ts.GetTypeUrl())
+	fields := ts.GetValue().GetFields()
+	assert.Equal(t, "source", fields["reporter"].GetStringValue())
+	assert.Equal(t, "checkout", fields["source_service"].GetStringValue())
+	// source_pod always travels in the config; the C++ filter drops it unless
+	// emit_pod is set (off by default here).
+	assert.Equal(t, "my-pod", fields["source_pod"].GetStringValue())
+	assert.False(t, fields["emit_pod"].GetBoolValue())
 }

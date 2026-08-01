@@ -17,12 +17,24 @@ type Config struct {
 	MetricsEnabled bool
 	// MetricsBindAddress is the address for the metrics HTTP server
 	MetricsBindAddress string
+	// LeaderElection enables controller-runtime leader election so only one
+	// replica is active (used by the aether-controller singleton).
+	LeaderElection bool
+	// LeaderElectionID is the name of the lease resource used for leader election.
+	LeaderElectionID string
 	// OTelEnabled enables the OTel MeterProvider with Prometheus exporter bridge
 	OTelEnabled bool
 	// OTLPEndpoint is the OTLP gRPC collector endpoint (e.g. "localhost:4317"); empty disables OTLP export
 	OTLPEndpoint string
-	// TracingEnabled enables the OTel TracerProvider with OTLP trace export (requires OTLPEndpoint)
-	TracingEnabled bool
-	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0)
+	// LogsEnabled enables the OTel LoggerProvider with OTLP log export, tee'd into
+	// the component's slog logger (requires OTLPEndpoint); stderr logging is unaffected
+	LogsEnabled bool
+	// TraceSampleRate is the head-sampling ratio for traces (0.0–1.0). The
+	// TracerProvider is always installed (for trace_id on logs); this only bounds
+	// what gets exported when TracingExport is set.
 	TraceSampleRate float64
+	// TracingExport attaches the OTLP span exporter; without it the always-on
+	// TracerProvider still gives logs their trace_id but exports no spans (no
+	// trace backend needed)
+	TracingExport bool
 }

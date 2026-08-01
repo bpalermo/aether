@@ -1,0 +1,10 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/controller"]
+  user: 65532 # nonroot
+fileExistenceTests:
+  - name: 'controller'
+    path: '/controller'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'

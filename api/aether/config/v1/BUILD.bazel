@@ -1,0 +1,48 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+load("//bazel/lint:linters.bzl", "buf_test")
+
+# The config proto carries no protoc-gen-dynamo annotations and uses Protobuf
+# Editions 2024 (opaque API). protoc-gen-dynamo (a protoc-gen-star fork) does not
+# understand edition descriptors, so scope this package to the standard Go
+# compiler only and keep gazelle from re-adding //bazel/go:go_dynamo.
+# gazelle:go_proto_compilers @rules_go//proto:go_proto
+
+proto_library(
+    name = "configv1_proto",
+    srcs = [
+        "edge_config.proto",
+        "http_filter.proto",
+        "mesh_config.proto",
+        "secret.proto",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@protobuf//:any_proto",
+        "@protobuf//:duration_proto",
+        "@protobuf//:wrappers_proto",
+        "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
+    ],
+)
+
+go_proto_library(
+    name = "configv1_go_proto",
+    compilers = ["@rules_go//proto:go_proto"],
+    importpath = "github.com/bpalermo/aether/api/aether/config/v1",
+    proto = ":configv1_proto",
+    visibility = ["//visibility:public"],
+    deps = ["@build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate"],
+)
+
+go_library(
+    name = "config",
+    embed = [":configv1_go_proto"],
+    importpath = "github.com/bpalermo/aether/api/aether/config/v1",
+    visibility = ["//visibility:public"],
+)
+
+buf_test(
+    name = "configv1_buf_lint_test",
+    srcs = [":configv1_proto"],
+)

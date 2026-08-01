@@ -1,0 +1,455 @@
+package cache
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+
+	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
+	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// makeDepPod builds a CNIPod with the given service account and declared
+// upstreams annotation.
+func makeDepPod(name, sa, netns, upstreams string) *cniv1.CNIPod {
+	pod := &cniv1.CNIPod{
+		Name:             name,
+		Namespace:        "default",
+		ServiceAccount:   sa,
+		NetworkNamespace: netns,
+	}
+	if upstreams != "" {
+		pod.Annotations = map[string]string{xdsconst.AnnotationConfigUpstreams: upstreams}
+	}
+	return pod
+}
+
+// drainDepSignal consumes a pending dependency-change signal, returning
+// whether one was pending.
+func drainDepSignal(c *SnapshotCache) bool {
+	select {
+	case <-c.DependencyChanges():
+		return true
+	default:
+		return false
+	}
+}
+
+// TestDependencySet_UnionsPodsAndOwnServices verifies the node dependency set
+// is the union of all local pods' declared upstreams plus their own services.
+func TestDependencySet_UnionsPodsAndOwnServices(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+
+	// 020 Part 1: own services are keyed <ns>/<sa>; declared upstreams are the
+	// namespace-qualified keys the annotation now carries.
+	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "default/svc-x, default/svc-y"), "example.org"))
+	require.NoError(t, c.AddPod(ctx, makeDepPod("b-1", "svc-b", "/proc/2/ns/net", "default/svc-y,default/svc-z"), "example.org"))
+
+	deps := c.DependencySet()
+	for _, want := range []string{"default/svc-a", "default/svc-b", "default/svc-x", "default/svc-y", "default/svc-z"} {
+		assert.Contains(t, deps, want)
+	}
+	assert.Len(t, deps, 5)
+}
+
+// TestDependencySet_PodRemovalShrinks verifies a removed pod's exclusive
+// dependencies leave the set while shared ones survive.
+func TestDependencySet_PodRemovalShrinks(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+
+	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "default/svc-x,default/svc-shared"), "example.org"))
+	require.NoError(t, c.AddPod(ctx, makeDepPod("b-1", "svc-b", "/proc/2/ns/net", "default/svc-shared"), "example.org"))
+
+	require.NoError(t, c.RemovePod(ctx, "/proc/1/ns/net"))
+
+	deps := c.DependencySet()
+	assert.NotContains(t, deps, "default/svc-a", "removed pod's own service leaves the set")
+	assert.NotContains(t, deps, "default/svc-x", "removed pod's exclusive upstream leaves the set")
+	assert.Contains(t, deps, "default/svc-shared", "upstream still declared by another pod survives")
+	assert.Contains(t, deps, "default/svc-b")
+}
+
+// TestDependencyChanges_SignalsOnRealChangesOnly verifies the coalesced change
+// signal fires when the effective set changes and stays quiet when it does not.
+func TestDependencyChanges_SignalsOnRealChangesOnly(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+
+	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "svc-x"), "example.org"))
+	assert.True(t, drainDepSignal(c), "first pod must signal a dependency change")
+
+	// A second replica of the same service with identical upstreams changes
+	// nothing in the union: no signal (this is the roll steady-state).
+	require.NoError(t, c.AddPod(ctx, makeDepPod("a-2", "svc-a", "/proc/2/ns/net", "svc-x"), "example.org"))
+	assert.False(t, drainDepSignal(c), "identical replica must not signal")
+
+	// Removing one of two identical replicas changes nothing either.
+	require.NoError(t, c.RemovePod(ctx, "/proc/2/ns/net"))
+	assert.False(t, drainDepSignal(c), "removing a duplicate replica must not signal")
+
+	// Removing the last replica shrinks the set: signal.
+	require.NoError(t, c.RemovePod(ctx, "/proc/1/ns/net"))
+	assert.True(t, drainDepSignal(c), "removing the last contributor must signal")
+}
+
+// TestLoadClustersFromRegistry_ScopesToDependencySet is the headline Phase 1
+// behavior: only services in the node dependency set are distributed; the
+// rest of the registry stays out of the snapshot (clusters, endpoints, and
+// vhosts alike).
+func TestLoadClustersFromRegistry_ScopesToDependencySet(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+
+	// Local pod: own service svc-self, declared upstream svc-dep.
+	require.NoError(t, c.AddPod(ctx, makeDepPod("self-1", "svc-self", "/proc/1/ns/net", "default/svc-dep"), "example.org"))
+
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{
+				"default/svc-self":  {makeEndpoint("10.0.0.1", "cluster-1", "node-1", 8080)},
+				"default/svc-dep":   {makeEndpoint("10.0.0.2", "cluster-1", "node-2", 8080)},
+				"default/svc-other": {makeEndpoint("10.0.0.3", "cluster-1", "node-3", 8080)},
+				"default/svc-more":  {makeEndpoint("10.0.0.4", "cluster-1", "node-4", 8080)},
+			}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	assert.Contains(t, c.clusters, "default/svc-self", "a pod's own service is always in scope")
+	assert.Contains(t, c.clusters, "default/svc-dep", "declared upstreams are in scope")
+	assert.NotContains(t, c.clusters, "default/svc-other", "undeclared services are not distributed")
+	assert.NotContains(t, c.clusters, "default/svc-more", "undeclared services are not distributed")
+}
+
+// TestLoadClustersFromRegistry_EmptyDependencySet verifies a node with no
+// local pods distributes no service clusters at all.
+func TestLoadClustersFromRegistry_EmptyDependencySet(t *testing.T) {
+	c := newTestCache("node-1")
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{
+				"svc-a": {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+			}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", reg))
+	assert.Empty(t, c.clusters)
+}
+
+// TestObserveDependency_ColdPath verifies the ODCDS cold path: observing an
+// out-of-scope service adds it to the dependency set (returning true exactly
+// once), signals a dependency change, and a scoped reload then distributes
+// the service; expiry via PruneObservedDependencies removes it again.
+func TestObserveDependency_ColdPath(t *testing.T) {
+	c := newTestCache("node-1")
+	c.observedTTL = 50 * time.Millisecond
+	c.serviceRetentionGrace = time.Nanosecond // prune immediately on reload
+	ctx := context.Background()
+
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{
+				"svc-cold": {makeEndpoint("10.0.0.5", "cluster-1", "node-2", 8080)},
+			}, nil
+		},
+	}
+
+	// Not distributed: not in the dependency set.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	require.NotContains(t, c.clusters, "svc-cold")
+	drainDepSignal(c)
+
+	// First observation: a miss — added + signaled.
+	assert.True(t, c.ObserveDependency(ctx, "svc-cold"), "first observation is a miss")
+	assert.True(t, drainDepSignal(c), "observation must signal a dependency change")
+	assert.Contains(t, c.DependencySet(), "svc-cold")
+
+	// Re-observation refreshes the TTL without a second miss.
+	assert.False(t, c.ObserveDependency(ctx, "svc-cold"), "known dependency is not a miss")
+
+	// The scoped reload now distributes the cluster.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.Contains(t, c.clusters, "svc-cold")
+
+	// Idle past the TTL: pruned from the set and signaled.
+	time.Sleep(60 * time.Millisecond)
+	drainDepSignal(c)
+	c.PruneObservedDependencies()
+	assert.True(t, drainDepSignal(c), "expiry must signal a dependency change")
+	assert.NotContains(t, c.DependencySet(), "svc-cold")
+}
+
+// TestObserveDependency_EmptyName verifies empty names are rejected.
+func TestObserveDependency_EmptyName(t *testing.T) {
+	c := newTestCache("node-1")
+	assert.False(t, c.ObserveDependency(context.Background(), ""))
+	assert.False(t, drainDepSignal(c))
+}
+
+// TestLoadClustersFromRegistry_SubsetVocabulary verifies provider-defined
+// endpoint metadata keys become the service's subset selectors and the
+// node-wide ECDS subset-headers mapping, with invalid/reserved keys dropped.
+func TestLoadClustersFromRegistry_SubsetVocabulary(t *testing.T) {
+	c := newTestCache("node-1")
+	declareDeps(c, "svc-a")
+	ctx := context.Background()
+
+	ep := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+	ep.Metadata = map[string]string{
+		"version": "v2",
+		"shard":   "s1",
+		"Bad_Key": "x", // invalid shape: dropped
+		"ip":      "y", // reserved: dropped
+	}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"svc-a": {ep}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	// Cluster selectors: ip, pod + derived power set (sorted).
+	entry := c.clusters["svc-a"]
+	sel := entry.cluster.GetLbSubsetConfig().GetSubsetSelectors()
+	require.Len(t, sel, 5)
+	assert.Equal(t, []string{"shard"}, sel[2].GetKeys())
+	assert.Equal(t, []string{"version"}, sel[3].GetKeys())
+	assert.Equal(t, []string{"shard", "version"}, sel[4].GetKeys())
+
+	// Node union published for the shared ECDS mapping.
+	c.subsetMu.RLock()
+	keys := c.subsetHeaderKeys
+	c.subsetMu.RUnlock()
+	assert.Equal(t, []string{"shard", "version"}, keys)
+}
+
+// TestSetNodeLocality_SignalsAndPrioritizes verifies resolving the node
+// locality signals a reload and the rebuilt EDS carries failover priorities.
+func TestSetNodeLocality_SignalsAndPrioritizes(t *testing.T) {
+	c := newTestCache("node-1")
+	declareDeps(c, "svc-a")
+	ctx := context.Background()
+
+	sameZone := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+	sameZone.Locality = &registryv1.ServiceEndpoint_Locality{Region: "r1", Zone: "z1"}
+	otherRegion := makeEndpoint("10.0.0.2", "cluster-1", "node-9", 8080)
+	otherRegion.Locality = &registryv1.ServiceEndpoint_Locality{Region: "r2", Zone: "z1"}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"svc-a": {sameZone, otherRegion}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	drainDepSignal(c)
+
+	// No locality yet: no preference.
+	for _, lle := range c.clusters["svc-a"].loadAssignment.GetEndpoints() {
+		assert.Zero(t, lle.GetPriority())
+	}
+
+	c.SetNodeLocality("r1", "z1")
+	assert.True(t, drainDepSignal(c), "locality resolution must trigger a scoped reload")
+	assert.False(t, func() bool { c.SetNodeLocality("r1", "z1"); return drainDepSignal(c) }(), "unchanged locality must not re-signal")
+
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	prios := map[string]uint32{}
+	for _, lle := range c.clusters["svc-a"].loadAssignment.GetEndpoints() {
+		prios[lle.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress()] = lle.GetPriority()
+	}
+	assert.Equal(t, uint32(0), prios["10.0.0.1"], "same zone is P0")
+	assert.Equal(t, uint32(2), prios["10.0.0.2"], "other region is P2")
+}
+
+// TestSignalIfRetentionExpired covers the steady-state retention bug
+// (2026-06-12): a service leaving the dependency set is retained empty for
+// the grace, but under scoped watches no further events arrive to trigger
+// the pruning reload — its stale vhost then shadows the ODCDS catch-all
+// forever. Time-driven expiry must signal the reload instead.
+func TestSignalIfRetentionExpired(t *testing.T) {
+	c := newTestCache("node-1")
+	c.serviceRetentionGrace = 30 * time.Millisecond
+	declareDeps(c, "svc-gone")
+	ctx := context.Background()
+
+	data := map[string][]*registryv1.ServiceEndpoint{
+		"svc-gone": {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+	}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return data, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	// The service's endpoints vanish while it stays DECLARED (in scope);
+	// one reload retains it for the grace.
+	data = map[string][]*registryv1.ServiceEndpoint{}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	require.Contains(t, c.clusters, "svc-gone", "in-scope absence is retained during grace")
+	drainDepSignal(c)
+
+	// Within the grace: no signal.
+	c.SignalIfRetentionExpired()
+	assert.False(t, drainDepSignal(c), "no signal while inside the grace")
+
+	// Past the grace: the tick signals, and the triggered reload prunes.
+	time.Sleep(40 * time.Millisecond)
+	c.SignalIfRetentionExpired()
+	require.True(t, drainDepSignal(c), "expiry must signal the pruning reload")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.NotContains(t, c.clusters, "svc-gone", "stale retained service pruned")
+
+	// Idempotent: nothing retained, no signal.
+	c.SignalIfRetentionExpired()
+	assert.False(t, drainDepSignal(c))
+}
+
+// TestLoadClustersFromRegistry_DropsOutOfScopeImmediately pins the #167
+// follow-up: a service that LEFT the dependency set is dropped in the same
+// reload — no retention, no stale window — so the next request falls through
+// to the on-demand catch-all instead of a retained empty vhost's 503s.
+func TestLoadClustersFromRegistry_DropsOutOfScopeImmediately(t *testing.T) {
+	c := newTestCache("node-1")
+	c.serviceRetentionGrace = time.Hour // retention must NOT be what drops it
+	declareDeps(c, "svc-moved")
+	ctx := context.Background()
+
+	// Registry keeps serving the endpoints throughout: the service is alive
+	// elsewhere, it just has no consumer/provider on this node anymore.
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{
+				"svc-moved": {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+			}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	require.Contains(t, c.clusters, "svc-moved")
+
+	// The declaring pod leaves: the very next reload drops cluster AND vhost.
+	declareDeps(c)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.NotContains(t, c.clusters, "svc-moved", "out-of-scope service must drop immediately")
+
+	// And the ODCDS path re-warms it as an observed dependency.
+	c.ObserveDependency(ctx, "svc-moved")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.Contains(t, c.clusters, "svc-moved", "observed traffic re-warms the dropped service")
+}
+
+// catalogListerRegistry extends mockRegistry with a service catalog and a
+// per-service RPC lister (the cold-path fill).
+type catalogListerRegistry struct {
+	*mockRegistry
+	known      map[string]bool
+	perService map[string][]*registryv1.ServiceEndpoint
+	rpcCalls   []string
+}
+
+func (c *catalogListerRegistry) HasService(name string) bool { return c.known[name] }
+func (c *catalogListerRegistry) ListEndpoints(_ context.Context, svc string, _ registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
+	c.rpcCalls = append(c.rpcCalls, svc)
+	return c.perService[svc], nil
+}
+
+// TestLoadClustersFromRegistry_RPCFillsColdDependency verifies the first
+// reload after an ODCDS observation builds the cluster by fetching the
+// missing service directly (catalog-gated), without waiting for the
+// re-filtered watch to deliver it — and that ghosts cost no RPC.
+func TestLoadClustersFromRegistry_RPCFillsColdDependency(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+
+	reg := &catalogListerRegistry{
+		mockRegistry: &mockRegistry{
+			listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+				return map[string][]*registryv1.ServiceEndpoint{}, nil // watch cache: nothing yet
+			},
+		},
+		known: map[string]bool{"svc-cold": true},
+		perService: map[string][]*registryv1.ServiceEndpoint{
+			"svc-cold": {makeEndpoint("10.0.0.5", "cluster-1", "node-2", 8080)},
+		},
+	}
+
+	// ODCDS observation, then ONE reload: cluster must exist already.
+	c.ObserveDependency(ctx, "svc-cold")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.Contains(t, c.clusters, "svc-cold", "first reload builds the cold cluster via RPC fill")
+	assert.Equal(t, []string{"svc-cold"}, reg.rpcCalls)
+
+	// A ghost in the dep set (shouldn't happen with the observer gate, but
+	// belt-and-braces): not in catalog -> no RPC, no cluster.
+	reg.rpcCalls = nil
+	c.ObserveDependency(ctx, "svc-ghost")
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	assert.NotContains(t, c.clusters, "svc-ghost")
+	assert.NotContains(t, reg.rpcCalls, "svc-ghost", "catalog gate prevents RPC for ghosts")
+}
+
+// TestLoadClustersFromRegistry_MultiPort verifies multi-port routing (005):
+// a service whose endpoints advertise extra ports yields a default cluster
+// (dual-domain vhost, all endpoints) plus one per-port cluster whose EDS is
+// filtered to pods advertising that port (safe new-port rollout).
+func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
+	c := newTestCache("node-1")
+	c.SetMeshDomain("aether.internal")
+	// Registry keys are namespace-qualified "<ns>/<svc>" (020 Part 1).
+	declareDeps(c, "ns/svc-mp")
+	ctx := context.Background()
+
+	// ep1 serves 8080 (default) + 9090; ep2 serves only 8080 (old version).
+	ep1 := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+	ep1.Ports = []uint32{8080, 9090}
+	ep2 := makeEndpoint("10.0.0.2", "cluster-1", "node-3", 8080)
+	ep2.Ports = []uint32{8080}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"ns/svc-mp": {ep1, ep2}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	// Default cluster: dual-domain vhost, all endpoints. The "<ns>/<svc>" key
+	// renders to the FQDN authority <svc>.<ns>.<meshDomain>.
+	def, ok := c.clusters["ns/svc-mp"]
+	require.True(t, ok)
+	assert.Equal(t, "svc-mp.ns.aether.internal", def.cluster.GetName())
+	assert.ElementsMatch(t, []string{"svc-mp.ns.aether.internal", "svc-mp.ns.aether.internal:8080"}, def.vhost.GetDomains())
+	assert.Len(t, def.loadAssignment.GetEndpoints(), 2, "default cluster carries all endpoints")
+	assert.Equal(t, "8080", def.sni)
+
+	// Per-port :9090 cluster: only ep1 (which advertises 9090).
+	port, ok := c.clusters["svc-mp.ns.aether.internal:9090"]
+	require.True(t, ok, "non-default port gets its own cluster")
+	assert.Equal(t, []string{"svc-mp.ns.aether.internal:9090"}, port.vhost.GetDomains())
+	assert.Equal(t, "9090", port.sni)
+	require.Len(t, port.loadAssignment.GetEndpoints(), 1, "per-port EDS = pods advertising the port")
+	assert.Equal(t, "10.0.0.1",
+		port.loadAssignment.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress())
+	assert.Equal(t, "ns/svc-mp", port.service, "per-port cluster maps back to the service key (SAN/retention)")
+
+	// No spurious :8080 (default) port cluster — the default vhost owns it.
+	_, has8080 := c.clusters["svc-mp.ns.aether.internal:8080"]
+	assert.False(t, has8080, "default port is not a separate cluster")
+}
+
+// TestDependencySet_IncludesGammaRouteTargets verifies a GAMMA route TARGET (an
+// HTTPRoute parentRef Service) is in scope even with no local pod declaring it and
+// no SA-backed pods of its own — so its cap_http vhost builds (proposal 023).
+func TestDependencySet_IncludesGammaRouteTargets(t *testing.T) {
+	c := newTestCache("node-1")
+	// A route target "team-a/echo" routing to a backend "team-a/echo-v1".
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "echo-v1.team-a.example.org", Weight: 1}}}},
+	})
+	deps := c.DependencySet()
+	assert.Contains(t, deps, "team-a/echo", "the route target is always in scope")
+}

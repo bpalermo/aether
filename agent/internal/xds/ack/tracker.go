@@ -12,13 +12,14 @@ package ack
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
+	commonlog "github.com/bpalermo/aether/common/log"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 )
 
@@ -50,7 +51,7 @@ type inflightResponse struct {
 // Tracker observes the delta-xDS streams via server callbacks and lets callers
 // wait until Envoy has acknowledged the presence or removal of a named resource.
 type Tracker struct {
-	log     logr.Logger
+	log     *slog.Logger
 	metrics *trackerMetrics // nil disables instrumentation
 
 	mu       sync.Mutex
@@ -61,13 +62,13 @@ type Tracker struct {
 }
 
 // NewTracker creates an empty Tracker.
-func NewTracker(log logr.Logger) *Tracker {
-	log = log.WithName("xds-ack")
+func NewTracker(log *slog.Logger) *Tracker {
+	log = commonlog.Named(log, "xds-ack")
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the tracker.
 	metrics, err := newTrackerMetrics(otel.Meter(meterName))
 	if err != nil {
-		log.Error(err, "failed to create xds ack metrics; continuing without instrumentation")
+		log.Error("failed to create xds ack metrics; continuing without instrumentation", "error", err)
 	}
 	return &Tracker{
 		log:      log,

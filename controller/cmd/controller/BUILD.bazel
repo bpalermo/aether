@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+
+go_library(
+    name = "controller_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/controller/cmd/controller",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//controller/internal/cmd",
+        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+    ],
+)
+
+go_binary(
+    name = "controller",
+    embed = [":controller_lib"],
+    visibility = ["//visibility:public"],
+    x_defs = {
+        "github.com/bpalermo/aether/controller/internal/cmd.Version": "{STABLE_GIT_VERSION}",
+    },
+)
+
+go_multi_arch_image(
+    name = "controller_image",
+    binary = ":controller",
+    repository = "bpalermo/aether/controller",
+)

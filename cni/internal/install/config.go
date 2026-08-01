@@ -26,6 +26,17 @@ type InstallerConfig struct {
 	// plugin binary pushes traces and metrics to this OTLP gRPC collector.
 	// Empty leaves plugin telemetry disabled.
 	OTLPEndpoint string
+	// CaptureRedirectAllDefault writes capture_redirect_all_default into the netconf
+	// so the CNI plugin makes redirect-all the default for managed pods (proposal
+	// 022, M2-default Step 4), opt-out via the capture.aether.io/redirect-all="false"
+	// annotation. Off by default.
+	CaptureRedirectAllDefault bool
+	// MeshDNSEnabled writes mesh_dns_enabled into the netconf so the CNI plugin
+	// installs the per-pod :53 DNAT (proposal 018, mesh-global FQDN). Off by default.
+	MeshDNSEnabled bool
+	// HostIP is the node IP (downward-API HOST_IP) written into the netconf as the
+	// mesh-DNS DNAT target (the agent's host-local resolver).
+	HostIP string
 }
 
 // NewInstallerConfig creates a new InstallerConfig with default values.

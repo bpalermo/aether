@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 
 	"buf.build/go/protovalidate"
 	"github.com/bpalermo/aether/agent/internal/spire"
@@ -11,16 +13,19 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/cache"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"github.com/bpalermo/aether/common/telemetry"
 	"github.com/bpalermo/aether/common/xds"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -36,14 +41,14 @@ type CNIServer struct {
 	cniv1.UnimplementedCNIServiceServer
 	xds.Server
 
-	log logr.Logger
+	log *slog.Logger
 
 	clusterName string
-	proxyID     string
 	nodeName    string
 	trustDomain string
 	nodeRegion  string
 	nodeZone    string
+	nodeIP      string
 
 	storage  storage.Storage[*cniv1.CNIPod]
 	registry registry.Registry
@@ -76,6 +81,31 @@ type CNIServer struct {
 	// termination watch to observe pod deletionTimestamp transitions. Nil
 	// disables the watch.
 	informers ctrlcache.Informers
+
+	// drainPoolCloseDelay separates the two drain phases (see
+	// schedulePoolClose); overridable in tests.
+	drainPoolCloseDelay time.Duration
+
+	// netnsFailStreaks counts, per container ID, consecutive ghost-sweep passes
+	// whose netns-liveness check failed. A stored pod is classified a
+	// stale-netns ghost only after ghostNetnsFailThreshold consecutive failures
+	// (hysteresis), so a transient fleet-wide stat failure — the 2026-07-19
+	// power-blip signature — cannot mass-prune live pods (#566). Reset the moment
+	// a netns check passes or the pod leaves storage. Accessed only under
+	// lifecycleMu (the sweep holds it across the prune).
+	netnsFailStreaks map[string]int
+
+	// missingStorageStreaks counts, per namespace/name, consecutive ghost-sweep
+	// passes a live mesh pod was found missing from local storage (a lost CNI
+	// ADD). After lostAddEvictThreshold passes the agent evicts the pod to force
+	// sandbox recreation and a fresh CNI ADD (#567). Reset when the pod registers
+	// or disappears. Accessed only under lifecycleMu.
+	missingStorageStreaks map[string]int
+
+	// evictPod evicts a pod via the Kubernetes Eviction API (policy/v1,
+	// PDB-respecting). Overridable in tests (the fake client has no eviction
+	// subresource). Nil disables self-heal eviction.
+	evictPod func(ctx context.Context, namespace, name string) error
 }
 
 var _ xds.ServerCallback = (*CNIServer)(nil)
@@ -83,12 +113,13 @@ var _ xds.ServerCallback = (*CNIServer)(nil)
 // NewCNIServer creates a new CNI gRPC server.
 // The server listens on a Unix domain socket and registers the CNI service with
 // protovalidate middleware for request validation.
-func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDomain string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, log logr.Logger, k8sClient client.Client, informers ctrlcache.Informers, cfg *CNIServerConfig) (*CNIServer, error) {
+func NewCNIServer(clusterName string, nodeName string, trustDomain string, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, log *slog.Logger, k8sClient client.Client, informers ctrlcache.Informers, cfg *CNIServerConfig) (*CNIServer, error) {
 	validator, _ := protovalidate.New()
 
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(protovalidate_middleware.UnaryServerInterceptor(validator)),
-		// No-op until OTel providers are registered (--otel-enabled / --tracing-enabled).
+		// The TracerProvider is always installed, so this records real RPC spans (whose
+		// trace_id flows to logs); spans export only with --trace-export.
 		grpc.StatsHandler(telemetry.ServerStatsHandler()),
 	)
 
@@ -96,25 +127,34 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 	// a registration failure only disables instrumentation, never the server.
 	metrics, err := newCNIMetrics(otel.Meter(meterName))
 	if err != nil {
-		log.Error(err, "failed to create CNI server metrics; continuing without instrumentation")
+		log.Error("failed to create CNI server metrics; continuing without instrumentation", "error", err)
 	}
 
 	cniSrv := &CNIServer{
-		Server:        xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
-		log:           log.WithName("cni"),
-		metrics:       metrics,
-		clusterName:   clusterName,
-		nodeName:      nodeName,
-		proxyID:       proxyID,
-		trustDomain:   trustDomain,
-		storage:       localStorage,
-		registry:      registry,
-		k8sClient:     k8sClient,
-		informers:     informers,
-		snapshotCache: snapshotCache,
-		ackTracker:    ackTracker,
-		spireBridge:   spireBridge,
-		healthClient:  newHealthGatewayClient(cfg.ProxyHealthSocketPath),
+		drainPoolCloseDelay: drainPoolCloseDelay,
+		Server:              xds.NewServer(xds.NewServerConfig(xds.WithUDS(cfg.SocketPath)), log, xds.WithGRPCServer(grpcServer)),
+		log:                 commonlog.Named(log, "cni"),
+		metrics:             metrics,
+		clusterName:         clusterName,
+		nodeName:            nodeName,
+		trustDomain:         trustDomain,
+		storage:             localStorage,
+		registry:            registry,
+		k8sClient:           k8sClient,
+		informers:           informers,
+		snapshotCache:       snapshotCache,
+		ackTracker:          ackTracker,
+		spireBridge:         spireBridge,
+		healthClient:        newHealthGatewayClient(cfg.ProxyHealthSocketPath),
+	}
+	// Self-heal lost-CNI-ADD pods via the Eviction API (#567): PDB-respecting, so
+	// a real deploy's disruption budget still applies. Nil client => no eviction.
+	if k8sClient != nil {
+		cniSrv.evictPod = func(ctx context.Context, namespace, name string) error {
+			return k8sClient.SubResource("eviction").Create(ctx,
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}},
+				&policyv1.Eviction{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}})
+		}
 	}
 
 	cniSrv.AddCallback(cniSrv)
@@ -127,16 +167,22 @@ func NewCNIServer(clusterName string, nodeName string, proxyID string, trustDoma
 // PreListen queries Kubernetes node metadata before the server starts accepting connections.
 // It retrieves the region and zone labels from the node object.
 func (s *CNIServer) PreListen(ctx context.Context) error {
-	s.log.V(2).Info("querying node metadata")
-	region, zone, err := queryNodeMetadata(ctx, s.proxyID, s.k8sClient)
+	s.log.DebugContext(ctx, "querying node metadata")
+	region, zone, nodeIP, err := queryNodeMetadata(ctx, s.nodeName, s.k8sClient)
 	if err != nil {
 		return err
 	}
 
 	s.nodeRegion = region
 	s.nodeZone = zone
+	s.nodeIP = nodeIP
 
-	s.log.V(1).Info("node metadata queried successfully", "region", region, "zone", zone)
+	// Locality-aware failover: the xDS cache assigns EDS priorities relative
+	// to this node's locality (signals a scoped reload — the initial
+	// snapshot may predate this).
+	s.snapshotCache.SetNodeLocality(region, zone)
+
+	s.log.DebugContext(ctx, "node metadata queried successfully", "region", region, "zone", zone, "nodeIP", nodeIP)
 
 	// Delegated liveness: reflect each local pod's app health (from the proxy's
 	// active health check) into the registry so it is marked unhealthy in every
@@ -161,13 +207,23 @@ func (s *CNIServer) PreListen(ctx context.Context) error {
 }
 
 // queryNodeMetadata retrieves the topology.kubernetes.io/region and
-// topology.kubernetes.io/zone labels from a Kubernetes node (empty if absent).
-func queryNodeMetadata(ctx context.Context, proxyID string, client client.Client) (region, zone string, err error) {
+// topology.kubernetes.io/zone labels plus the node's InternalIP from a
+// Kubernetes node (each empty if absent). The InternalIP is the routable dial
+// target advertised on this node's endpoints for cross-cluster consumers whose
+// pod network is not routable (proposal 019 per-node east/west waypoint).
+func queryNodeMetadata(ctx context.Context, nodeName string, client client.Client) (region, zone, nodeIP string, err error) {
 	node := &corev1.Node{}
-	if err := client.Get(ctx, types.NamespacedName{Name: proxyID}, node); err != nil {
-		return "", "", fmt.Errorf("failed to get node: %w", err)
+	if err := client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+		return "", "", "", fmt.Errorf("failed to get node: %w", err)
 	}
 
-	return node.Labels[constants.AnnotationKubernetesNodeTopologyRegion],
-		node.Labels[constants.AnnotationKubernetesNodeTopologyZone], nil
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			nodeIP = addr.Address
+			break
+		}
+	}
+
+	return node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyRegion],
+		node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyZone], nodeIP, nil
 }

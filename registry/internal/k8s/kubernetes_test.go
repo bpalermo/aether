@@ -2,17 +2,23 @@ package k8s
 
 import (
 	"context"
+	"log/slog"
 	"testing"
+	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/common/constants"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
+	"github.com/bpalermo/aether/registry/registrytest"
 )
 
 // newTestRegistry constructs a KubernetesRegistry wired to a fake client built
@@ -28,7 +34,7 @@ func newTestRegistry(clusterName string, objects ...any) *KubernetesRegistry {
 		}
 	}
 	reader := b.Build()
-	return NewKubernetesRegistry(logr.Discard(), reader, Config{ClusterName: clusterName})
+	return NewKubernetesRegistry(slog.New(slog.DiscardHandler), reader, Config{ClusterName: clusterName})
 }
 
 // managedPod returns a running pod with a PodIP and the aether managed label.
@@ -39,7 +45,7 @@ func managedPod(name, namespace, serviceAccount, podIP, nodeName string) *corev1
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				constants.LabelAetherManaged: "true",
+				aetherlabels.LabelAetherManaged: "true",
 			},
 			Annotations: map[string]string{},
 		},
@@ -60,8 +66,8 @@ func topologyNode(name, region, zone string) *corev1.Node {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				constants.AnnotationKubernetesNodeTopologyRegion: region,
-				constants.AnnotationKubernetesNodeTopologyZone:   zone,
+				aetherannotations.AnnotationKubernetesNodeTopologyRegion: region,
+				aetherannotations.AnnotationKubernetesNodeTopologyZone:   zone,
 			},
 		},
 	}
@@ -87,7 +93,7 @@ func TestRegisterEndpoint(t *testing.T) {
 	}{
 		{
 			name:     "no-op returns nil",
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			endpoint: &registryv1.ServiceEndpoint{
 				Ip:          "10.0.0.1",
@@ -99,7 +105,7 @@ func TestRegisterEndpoint(t *testing.T) {
 		},
 		{
 			name:     "nil endpoint returns nil",
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_UNSPECIFIED,
 			endpoint: nil,
 			wantErr:  false,
@@ -166,19 +172,19 @@ func TestUnregisterEndpoints(t *testing.T) {
 	}{
 		{
 			name:        "no-op returns nil for multiple addresses",
-			service:     "my-service",
+			service:     "default/my-service",
 			ipAddresses: []string{"10.0.0.1", "10.0.0.2"},
 			wantErr:     false,
 		},
 		{
 			name:        "no-op returns nil for empty slice",
-			service:     "my-service",
+			service:     "default/my-service",
 			ipAddresses: []string{},
 			wantErr:     false,
 		},
 		{
 			name:        "no-op returns nil for nil slice",
-			service:     "my-service",
+			service:     "default/my-service",
 			ipAddresses: nil,
 			wantErr:     false,
 		},
@@ -213,7 +219,7 @@ func TestListEndpoints(t *testing.T) {
 			name:        "no pods returns empty slice",
 			clusterName: "test-cluster",
 			objects:     nil,
-			service:     "my-service",
+			service:     "default/my-service",
 			protocol:    registryv1.Service_PROTOCOL_HTTP,
 			expected:    nil,
 			wantErr:     false,
@@ -225,7 +231,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -248,7 +254,7 @@ func TestListEndpoints(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:        "pod readiness is derived (parity with cloudmap)",
+			name:        "pod readiness is derived (parity with other backends)",
 			clusterName: "test-cluster",
 			objects: []any{
 				func() *corev1.Pod {
@@ -258,7 +264,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -288,7 +294,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "other-service", "10.0.0.1", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -304,7 +310,7 @@ func TestListEndpoints(t *testing.T) {
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -316,7 +322,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-a", "default", "my-service", "", "node-1"),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -327,12 +333,12 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					delete(p.Labels, constants.LabelAetherManaged)
+					delete(p.Labels, aetherlabels.LabelAetherManaged)
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -343,12 +349,12 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointPort] = "9090"
+					p.Annotations[aetherannotations.AnnotationEndpointPort] = "9090"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -376,12 +382,12 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointWeight] = "512"
+					p.Annotations[aetherannotations.AnnotationEndpointWeight] = "512"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -409,13 +415,13 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationAetherEndpointMetadataPrefix+"version"] = "v2"
-					p.Annotations[constants.AnnotationAetherEndpointMetadataPrefix+"env"] = "production"
+					p.Annotations[aetherannotations.AnnotationAetherEndpointMetadataPrefix+"version"] = "v2"
+					p.Annotations[aetherannotations.AnnotationAetherEndpointMetadataPrefix+"env"] = "production"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -446,12 +452,12 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointHealthCheckMode] = constants.HealthCheckModeEDS
+					p.Annotations[aetherannotations.AnnotationEndpointHealthCheckMode] = aetherannotations.HealthCheckModeEDS
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -480,12 +486,12 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointPort] = "not-a-port"
+					p.Annotations[aetherannotations.AnnotationEndpointPort] = "not-a-port"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			// The pod is skipped (error logged, not propagated), so no endpoints are returned.
 			expected: nil,
@@ -497,12 +503,12 @@ func TestListEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointWeight] = "not-a-weight"
+					p.Annotations[aetherannotations.AnnotationEndpointWeight] = "not-a-weight"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  false,
@@ -514,7 +520,7 @@ func TestListEndpoints(t *testing.T) {
 				// Pod references node-1 but the node is not in the fake client.
 				managedPod("pod-a", "default", "my-service", "10.0.0.1", "node-1"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: nil,
 			wantErr:  true,
@@ -532,7 +538,7 @@ func TestListEndpoints(t *testing.T) {
 					},
 				},
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -563,7 +569,7 @@ func TestListEndpoints(t *testing.T) {
 				managedPod("pod-c", "default", "other-service", "10.0.0.3", "node-1"),
 				topologyNode("node-1", "eu-west-1", "eu-west-1b"),
 			},
-			service:  "my-service",
+			service:  "default/my-service",
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: []*registryv1.ServiceEndpoint{
 				{
@@ -646,7 +652,7 @@ func TestListAllEndpoints(t *testing.T) {
 			},
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {
+				"default/svc-a": {
 					{
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
@@ -678,7 +684,7 @@ func TestListAllEndpoints(t *testing.T) {
 			},
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {
+				"default/svc-a": {
 					{
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
@@ -712,7 +718,7 @@ func TestListAllEndpoints(t *testing.T) {
 						},
 					},
 				},
-				"svc-b": {
+				"default/svc-b": {
 					{
 						Ip:          "10.0.0.2",
 						ClusterName: "test-cluster",
@@ -779,7 +785,7 @@ func TestListAllEndpoints(t *testing.T) {
 			objects: []any{
 				func() *corev1.Pod {
 					p := managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1")
-					p.Annotations[constants.AnnotationEndpointPort] = "99999999"
+					p.Annotations[aetherannotations.AnnotationEndpointPort] = "99999999"
 					return p
 				}(),
 				topologyNode("node-1", "us-east-1", "us-east-1a"),
@@ -809,7 +815,7 @@ func TestListAllEndpoints(t *testing.T) {
 			},
 			protocol: registryv1.Service_PROTOCOL_HTTP,
 			expected: map[string][]*registryv1.ServiceEndpoint{
-				"svc-a": {
+				"default/svc-a": {
 					{
 						Ip:          "10.0.0.1",
 						ClusterName: "test-cluster",
@@ -859,8 +865,249 @@ func TestListAllEndpoints(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
+			// Shared cross-backend contract: keys must be namespace-qualified.
+			registrytest.RequireNamespaceQualifiedKeys(t, got)
 		})
 	}
+}
+
+// TestListAllEndpoints_SameSANamespaceIsolation is the regression guard for the
+// 020 keying bug: two pods sharing a ServiceAccount name across DIFFERENT
+// namespaces must produce TWO distinct "<ns>/<sa>" keys, not collide under the
+// bare SA. The collision merged their endpoint sets into one entry whose ordering
+// then oscillated and churned the agent's xDS snapshot (the MESH-HTTP MeshFrontend
+// flap). Matches the namespace-qualified keying of the CNI/etcd/ddb paths.
+func TestListAllEndpoints_SameSANamespaceIsolation(t *testing.T) {
+	r := newTestRegistry(
+		"c",
+		managedPod("echo-a", "team-a", "echo-v1", "10.0.0.1", "node-1"),
+		managedPod("echo-b", "team-b", "echo-v1", "10.0.0.2", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+
+	got, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "same SA in two namespaces must not collide into one key")
+	require.Len(t, got["team-a/echo-v1"], 1)
+	assert.Equal(t, "10.0.0.1", got["team-a/echo-v1"][0].GetIp())
+	require.Len(t, got["team-b/echo-v1"], 1)
+	assert.Equal(t, "10.0.0.2", got["team-b/echo-v1"][0].GetIp())
+
+	// The single-service read isolates by namespace too (matches by "<ns>/<sa>").
+	epsA, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, epsA, 1)
+	assert.Equal(t, "10.0.0.1", epsA[0].GetIp())
+}
+
+// TestKubernetesRegistry_TCPProtocolReturnsEmpty is the regression guard for the
+// MESH-HTTP RequestHeaderModifier/MeshFrontend 503 bug: the Kubernetes registry
+// derives every endpoint from a managed pod's mesh-inbound (HTTP/h2) listener and
+// has no per-pod TCP service. Returning the same pods for a PROTOCOL_TCP query made
+// the agent's LoadClustersFromRegistry overwrite each service's HTTP cluster+vhost
+// with a vhost-less tcp:true entry, so the CDS cluster and GAMMA cap_http vhost
+// disappeared and captured requests 503'd. A TCP query must yield no endpoints;
+// HTTP and UNSPECIFIED return the managed-pod endpoints.
+func TestKubernetesRegistry_TCPProtocolReturnsEmpty(t *testing.T) {
+	r := newTestRegistry(
+		"c",
+		managedPod("echo-a", "team-a", "echo-v1", "10.0.0.1", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+
+	// HTTP sees the managed pod.
+	httpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, httpAll, 1)
+
+	// UNSPECIFIED is treated as the served (HTTP) protocol too.
+	unspecAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_UNSPECIFIED)
+	require.NoError(t, err)
+	require.Len(t, unspecAll, 1)
+
+	// TCP returns an empty (non-nil) map so the agent's TCP cluster pass does not
+	// clobber the HTTP cluster/vhost entries.
+	tcpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_TCP)
+	require.NoError(t, err)
+	require.NotNil(t, tcpAll)
+	require.Empty(t, tcpAll)
+
+	// Shared cross-backend contract: a service serves HTTP xor TCP, never both.
+	registrytest.RequireProtocolDisjoint(t, httpAll, tcpAll)
+
+	// Single-service TCP read is empty as well.
+	tcpOne, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_TCP)
+	require.NoError(t, err)
+	require.Empty(t, tcpOne)
+
+	httpOne, err := r.ListEndpoints(context.Background(), "team-a/echo-v1", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, httpOne, 1)
+}
+
+// ─── Node-locality cache (issue #541) ────────────────────────────────────────
+
+// nodeReadCounter tracks how many node reads (List/Get) hit the underlying client.
+type nodeReadCounter struct {
+	lists int
+	gets  int
+}
+
+// newCountingRegistry builds a KubernetesRegistry over a fake client whose node
+// reads are counted, returning the registry, the writable client (to mutate the
+// cluster mid-test), and the counter.
+func newCountingRegistry(objects ...client.Object) (*KubernetesRegistry, client.WithWatch, *nodeReadCounter) {
+	counter := &nodeReadCounter{}
+	c := fake.NewClientBuilder().
+		WithObjects(objects...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.NodeList); ok {
+					counter.lists++
+				}
+				return cl.List(ctx, list, opts...)
+			},
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Node); ok {
+					counter.gets++
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	return NewKubernetesRegistry(slog.New(slog.DiscardHandler), c, Config{ClusterName: "test-cluster"}), c, counter
+}
+
+// TestNodeLocalityCache_HitAvoidsNodeReads verifies the perf contract of #541:
+// repeated listings within the TTL resolve node localities from the cache — one
+// node List on the first call, zero node reads afterwards, and never per-node Gets.
+func TestNodeLocalityCache_HitAvoidsNodeReads(t *testing.T) {
+	r, _, counter := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1"),
+		managedPod("pod-b", "default", "svc-b", "10.0.0.2", "node-2"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+		topologyNode("node-2", "us-east-1", "us-east-1b"),
+	)
+
+	first, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	assert.Equal(t, 1, counter.lists, "first listing refreshes the cache with a single node List")
+	assert.Equal(t, 0, counter.gets, "node localities must never be resolved via per-node Gets")
+
+	// Repeated reloads (the hot path) are served entirely from the cache.
+	for range 5 {
+		got, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_HTTP)
+		require.NoError(t, err)
+		assert.Equal(t, first, got, "cached localities must yield identical endpoints")
+	}
+	eps, err := r.ListEndpoints(context.Background(), "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, eps, 1)
+	assert.Equal(t, "us-east-1a", eps[0].GetLocality().GetZone())
+
+	assert.Equal(t, 1, counter.lists, "cache hits must not re-list nodes")
+	assert.Equal(t, 0, counter.gets)
+}
+
+// TestNodeLocalityCache_NodeAddedForcesRefresh verifies that a pod scheduled onto
+// a node the cache has never seen refreshes the cache immediately (no TTL wait)
+// and resolves the new node's locality correctly.
+func TestNodeLocalityCache_NodeAddedForcesRefresh(t *testing.T) {
+	r, c, counter := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+	ctx := context.Background()
+
+	_, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Equal(t, 1, counter.lists)
+
+	// A new node joins and a managed pod lands on it.
+	require.NoError(t, c.Create(ctx, topologyNode("node-2", "eu-west-1", "eu-west-1b")))
+	require.NoError(t, c.Create(ctx, managedPod("pod-b", "default", "svc-a", "10.0.0.2", "node-2")))
+
+	got, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, got["default/svc-a"], 2)
+	byPod := map[string]*registryv1.ServiceEndpoint{}
+	for _, ep := range got["default/svc-a"] {
+		byPod[ep.GetKubernetesMetadata().GetPodName()] = ep
+	}
+	require.Contains(t, byPod, "pod-b")
+	assert.Equal(t, "eu-west-1", byPod["pod-b"].GetLocality().GetRegion())
+	assert.Equal(t, "eu-west-1b", byPod["pod-b"].GetLocality().GetZone())
+	assert.Equal(t, 2, counter.lists, "unknown node must force a cache refresh")
+
+	// The refreshed cache serves subsequent calls without new node reads.
+	_, err = r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Equal(t, 2, counter.lists)
+	assert.Equal(t, 0, counter.gets)
+}
+
+// TestNodeLocalityCache_TTLExpiryRefreshes verifies the staleness bound: a node
+// label change is served stale within the TTL and picked up after it lapses.
+func TestNodeLocalityCache_TTLExpiryRefreshes(t *testing.T) {
+	r, c, counter := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-1"),
+		topologyNode("node-1", "us-east-1", "us-east-1a"),
+	)
+	ctx := context.Background()
+
+	// Deterministic clock.
+	now := time.Now()
+	r.now = func() time.Time { return now }
+
+	first, err := r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	assert.Equal(t, "us-east-1a", first[0].GetLocality().GetZone())
+	require.Equal(t, 1, counter.lists)
+
+	// The node's zone label changes (essentially never happens in practice).
+	var node corev1.Node
+	require.NoError(t, c.Get(ctx, client.ObjectKey{Name: "node-1"}, &node))
+	node.Labels[aetherannotations.AnnotationKubernetesNodeTopologyZone] = "us-east-1z"
+	require.NoError(t, c.Update(ctx, &node))
+
+	// Within the TTL the cached locality is served.
+	stale, err := r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Equal(t, "us-east-1a", stale[0].GetLocality().GetZone())
+	assert.Equal(t, 1, counter.lists)
+
+	// After the TTL lapses the next listing refreshes and observes the change.
+	now = now.Add(nodeLocalityCacheTTL + time.Second)
+	fresh, err := r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	assert.Equal(t, "us-east-1z", fresh[0].GetLocality().GetZone())
+	assert.Equal(t, 2, counter.lists)
+}
+
+// TestNodeLocalityCache_MissingNodeStillErrors pins the pre-cache error contract:
+// a managed pod referencing a node that does not exist fails the listing even
+// though node resolution now goes through the cache, and the failure is not
+// poisoned into the cache (the node appearing later heals the listing).
+func TestNodeLocalityCache_MissingNodeStillErrors(t *testing.T) {
+	r, c, _ := newCountingRegistry(
+		managedPod("pod-a", "default", "svc-a", "10.0.0.1", "node-gone"),
+	)
+	ctx := context.Background()
+
+	_, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.ErrorContains(t, err, "node-gone")
+
+	_, err = r.ListEndpoints(ctx, "default/svc-a", registryv1.Service_PROTOCOL_HTTP)
+	require.ErrorContains(t, err, "node-gone")
+
+	// The node shows up (e.g., registration race): the next listing succeeds.
+	require.NoError(t, c.Create(ctx, topologyNode("node-gone", "us-east-1", "us-east-1a")))
+	got, err := r.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
+	require.NoError(t, err)
+	require.Len(t, got["default/svc-a"], 1)
+	assert.Equal(t, "us-east-1a", got["default/svc-a"][0].GetLocality().GetZone())
 }
 
 // ─── Annotation parsing helpers (unit-level) ─────────────────────────────────
@@ -886,37 +1133,37 @@ func TestGetPortFromAnnotations(t *testing.T) {
 		},
 		{
 			name:        "valid port annotation is parsed",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "9090"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "9090"},
 			expected:    9090,
 			wantErr:     false,
 		},
 		{
 			name:        "minimum port value 1 is valid",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "1"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "1"},
 			expected:    1,
 			wantErr:     false,
 		},
 		{
 			name:        "maximum port value 65535 is valid",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "65535"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "65535"},
 			expected:    65535,
 			wantErr:     false,
 		},
 		{
 			name:        "port value exceeding uint16 max returns error",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "65536"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "65536"},
 			expected:    0,
 			wantErr:     true,
 		},
 		{
 			name:        "non-numeric port annotation returns error",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "not-a-port"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "not-a-port"},
 			expected:    0,
 			wantErr:     true,
 		},
 		{
 			name:        "negative port annotation returns error",
-			annotations: map[string]string{constants.AnnotationEndpointPort: "-1"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointPort: "-1"},
 			expected:    0,
 			wantErr:     true,
 		},
@@ -956,31 +1203,31 @@ func TestGetWeightFromAnnotations(t *testing.T) {
 		},
 		{
 			name:        "valid weight annotation is parsed",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "512"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "512"},
 			expected:    512,
 			wantErr:     false,
 		},
 		{
 			name:        "weight of zero is valid",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "0"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "0"},
 			expected:    0,
 			wantErr:     false,
 		},
 		{
 			name:        "maximum uint32 weight is valid",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "4294967295"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "4294967295"},
 			expected:    4294967295,
 			wantErr:     false,
 		},
 		{
 			name:        "weight exceeding uint32 max returns error",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "4294967296"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "4294967296"},
 			expected:    0,
 			wantErr:     true,
 		},
 		{
 			name:        "non-numeric weight annotation returns error",
-			annotations: map[string]string{constants.AnnotationEndpointWeight: "heavy"},
+			annotations: map[string]string{aetherannotations.AnnotationEndpointWeight: "heavy"},
 			expected:    0,
 			wantErr:     true,
 		},
@@ -1018,15 +1265,15 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 		{
 			name: "non-metadata annotations are ignored",
 			annotations: map[string]string{
-				"some.other.annotation/key":      "value",
-				constants.AnnotationEndpointPort: "8080",
+				"some.other.annotation/key":              "value",
+				aetherannotations.AnnotationEndpointPort: "8080",
 			},
 			expected: map[string]string{},
 		},
 		{
 			name: "single metadata annotation is extracted with key suffix",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
 			},
 			expected: map[string]string{
 				"version": "v2",
@@ -1035,9 +1282,9 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 		{
 			name: "multiple metadata annotations are all extracted",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
-				constants.AnnotationAetherEndpointMetadataPrefix + "env":     "production",
-				constants.AnnotationAetherEndpointMetadataPrefix + "tier":    "backend",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "version": "v2",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "env":     "production",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "tier":    "backend",
 			},
 			expected: map[string]string{
 				"version": "v2",
@@ -1048,16 +1295,16 @@ func TestGetEndpointMetadataFromAnnotations(t *testing.T) {
 		{
 			name: "annotation key equal to prefix alone is not extracted",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix: "value",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix: "value",
 			},
 			expected: map[string]string{},
 		},
 		{
 			name: "metadata annotations mixed with non-metadata annotations extracts only metadata",
 			annotations: map[string]string{
-				constants.AnnotationAetherEndpointMetadataPrefix + "canary": "true",
-				constants.AnnotationEndpointPort:                            "9090",
-				constants.AnnotationEndpointWeight:                          "256",
+				aetherannotations.AnnotationAetherEndpointMetadataPrefix + "canary": "true",
+				aetherannotations.AnnotationEndpointPort:                            "9090",
+				aetherannotations.AnnotationEndpointWeight:                          "256",
 			},
 			expected: map[string]string{
 				"canary": "true",

@@ -1,0 +1,53 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: edgeconfigs.config.aether.io
+  annotations:
+    # Keep the CRD (and the CRs it owns) if this chart is uninstalled.
+    helm.sh/resource-policy: keep
+spec:
+  group: config.aether.io
+  # Namespaced: an EdgeConfig lives beside the Gateway that references it via
+  # spec.infrastructure.parametersRef (or is the chart-shipped fleet default referenced
+  # by the GatewayClass parametersRef).
+  scope: Namespaced
+  names:
+    kind: EdgeConfig
+    listKind: EdgeConfigList
+    plural: edgeconfigs
+    singular: edgeconfig
+    shortNames:
+      - edgecfg
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: |
+            EdgeConfig (aether.config.v1.EdgeConfigSpec, proposal 029) carries the Envoy
+            edge best-practices + HTTP/3 settings for a set of edge Gateways, resolved
+            per instance via the native Gateway API parametersRef chain (GatewayClass
+            default + Gateway infrastructure override, proto.Merge). Every field is
+            optional with a best-practice compiled default. The aether-controller webhook
+            proto-validates the spec; the structural schema is permissive.
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: HTTP3
+          type: string
+          jsonPath: .spec.http3.enabled
+        - name: Accepted
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Accepted")].status
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

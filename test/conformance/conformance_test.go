@@ -1,0 +1,407 @@
+//go:build conformance
+
+// Drop-in runner for the upstream Kubernetes Gateway API conformance suite
+// (sigs.k8s.io/gateway-api/conformance @ v1.5.1) against a live aether cluster.
+//
+// IMPORTANT — this file is NOT compiled as part of the aether Go module. The
+// gateway-api *conformance* package is a SEPARATE Go module whose go.mod carries a
+// `replace sigs.k8s.io/gateway-api => ../`, so it is only buildable from *inside* a
+// gateway-api source checkout — it cannot be consumed as an ordinary dependency
+// (`go get sigs.k8s.io/gateway-api/conformance` fails to resolve the apis/* imports).
+// That is exactly why the prior runner lived in a /tmp gateway-api checkout.
+//
+// So this file is COPIED into a checked-out gateway-api@v1.5.1 tree at CI time
+// (alongside the suite's own conformance_test.go) and run there; the committed
+// `mesh/manifests.yaml` overlay is copied next to it. The `//go:build conformance`
+// tag keeps it out of `go test ./...` / `bazel test //...` in this repo. See
+// .github/workflows/conformance.yaml and docs/proposals/024_conformance-ci.md.
+//
+//   - TestAetherGatewayHTTP: the north-south edge profile. Fully conformant on talos
+//     (43/43, rev21). Runs and GATES in CI (kind, no SPIRE, cleartext backends).
+//   - TestAetherMeshHTTP: the east-west GAMMA profile. Runs in CI (kind, no SPIRE)
+//     via the `mesh-http` job, SOFT (continue-on-error) while the score is driven up.
+//     Uses the committed mesh overlay (mesh/manifests.yaml) which adds the
+//     aether.io/managed namespace label and per-version ServiceAccounts. Capture is
+//     the chart DEFAULT (agent.captureRedirectAllDefault), so the managed-namespace
+//     label alone meshes the echo pods (namespace injection → managed → redirect-all)
+//     — no per-pod annotation needed. With SPIRE off the mesh hop is cleartext (the
+//     inbound listener degrades to a no-mTLS HCM chain).
+//
+// Both tests require a live cluster reachable via the ambient kubeconfig and are
+// SKIPPED unless AETHER_CONFORMANCE=1.
+package conformance_test
+
+import (
+	"context"
+	"embed"
+	"io/fs"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	"sigs.k8s.io/gateway-api/apis/v1alpha2"
+	"sigs.k8s.io/gateway-api/apis/v1alpha3"
+	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	xv1alpha1 "sigs.k8s.io/gateway-api/apisx/v1alpha1"
+	gwconformance "sigs.k8s.io/gateway-api/conformance"
+	confv1 "sigs.k8s.io/gateway-api/conformance/apis/v1"
+	"sigs.k8s.io/gateway-api/conformance/tests"
+	conformanceconfig "sigs.k8s.io/gateway-api/conformance/utils/config"
+	"sigs.k8s.io/gateway-api/conformance/utils/suite"
+	"sigs.k8s.io/gateway-api/pkg/features"
+	"sigs.k8s.io/yaml"
+)
+
+// meshManifests is aether's overlay of the suite's base mesh manifests: the
+// aether.io/managed=true namespace label and per-version ServiceAccounts for the
+// echo Deployments (aether identity = ServiceAccount). The managed-namespace label
+// is enough to mesh the echo pods and capture their real Service ports — redirect-all
+// is the chart default (agent.captureRedirectAllDefault), so namespace injection
+// labels the pods managed and they get redirect-all with no per-pod annotation.
+// Vanilla upstream manifests would not exercise aether's mesh path.
+//
+// It deliberately contains ONLY mesh/manifests.yaml — the base mesh apply the
+// suite does once in Setup. The per-test manifests (tests/mesh/*.yaml, applied by
+// each MeshConformanceTest's Manifests field — e.g. the mesh-frontend HTTPRoute that
+// carries the ResponseHeaderModifier) live ONLY in the upstream gwconformance.Manifests
+// embed and MUST still be reachable. See meshManifestFS / overlayFS below.
+//
+//go:embed mesh/manifests.yaml
+var meshManifests embed.FS
+
+// overlayFS composes the aether mesh overlay over the upstream gateway-api manifest
+// embed: a read for overridePath ("mesh/manifests.yaml") is served from the aether
+// overlay (its managed-namespace label / per-version SAs),
+// and every OTHER path (the per-test tests/mesh/*.yaml the conformance tests apply,
+// plus base/*) falls through to the upstream embed.
+//
+// This MUST be a single composed fs.FS rather than passing both embeds in the suite's
+// ManifestFS slice: the suite's manifest loader (getContentsFromPathOrURL) iterates
+// every fs.FS and CONCATENATES the bytes from each that has the path. With both embeds
+// present, a read of mesh/manifests.yaml would return the aether overlay AND the
+// upstream base mesh manifests glued together — duplicate/conflicting Namespaces,
+// Deployments and Services that fail to apply. The overlay returns exactly one file per
+// path: the aether version for the overridden base, the upstream version for everything
+// else.
+//
+// Without this, ManifestFS = {meshManifests} alone makes every per-test manifest read
+// (tests/mesh/mesh-frontend.yaml, …) hit fs.ErrNotExist, which the loader swallows
+// silently (it `continue`s on not-found) — so the test's HTTPRoute is NEVER applied, no
+// GAMMA rule is projected, the captured request falls to the kube-proxy passthrough, and
+// the assertion (X-Header-Set present, a redirect, a request-header set) "fails" against
+// a route that was never installed. That is precisely why MeshFrontend,
+// MeshHTTPRouteRedirectHostAndStatus and MeshHTTPRouteRequestHeaderModifier failed (the
+// last two in ~0.01s: the first request returns a plain passthrough 200 immediately).
+type overlayFS struct {
+	overridePath string
+	override     fs.FS
+	base         fs.FS
+}
+
+func (o overlayFS) Open(name string) (fs.File, error) {
+	if name == o.overridePath {
+		return o.override.Open(name)
+	}
+	return o.base.Open(name)
+}
+
+func (o overlayFS) ReadFile(name string) ([]byte, error) {
+	if name == o.overridePath {
+		return fs.ReadFile(o.override, name)
+	}
+	return fs.ReadFile(o.base, name)
+}
+
+// meshManifestFS returns the composed manifest filesystem for the MESH-HTTP profile:
+// the aether overlay for mesh/manifests.yaml, the upstream embed for the per-test
+// tests/mesh/*.yaml (and base/*) manifests.
+func meshManifestFS() fs.FS {
+	return overlayFS{
+		overridePath: "mesh/manifests.yaml",
+		override:     meshManifests,
+		base:         &gwconformance.Manifests,
+	}
+}
+
+const (
+	aetherGatewayClassName = "aether"
+	aetherImplVersion      = "0.53.0"
+)
+
+func aetherClients(t *testing.T) (client.Client, *clientset.Clientset, client.Options, *rest.Config) {
+	t.Helper()
+	cfg, err := config.GetConfig()
+	require.NoError(t, err, "error loading Kubernetes config")
+	copts := client.Options{}
+	c, err := client.New(cfg, copts)
+	require.NoError(t, err, "error initializing Kubernetes client")
+	cs, err := clientset.NewForConfig(cfg)
+	require.NoError(t, err, "error initializing clientset")
+
+	require.NoError(t, v1alpha3.Install(c.Scheme()))
+	require.NoError(t, v1alpha2.Install(c.Scheme()))
+	require.NoError(t, v1beta1.Install(c.Scheme()))
+	require.NoError(t, xv1alpha1.Install(c.Scheme()))
+	require.NoError(t, gatewayv1.Install(c.Scheme()))
+	require.NoError(t, apiextensionsv1.AddToScheme(c.Scheme()))
+	return c, cs, copts, cfg
+}
+
+// logGatewayFeatures prints the features the GatewayClass advertises. When
+// SupportedFeatures is left empty the suite re-infers exactly this set from
+// GatewayClass.status.supportedFeatures; logging it makes the run self-documenting.
+func logGatewayFeatures(t *testing.T, c client.Client) {
+	t.Helper()
+	var gc gatewayv1.GatewayClass
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: aetherGatewayClassName}, &gc))
+	var fns []features.FeatureName
+	for _, sf := range gc.Status.SupportedFeatures {
+		fns = append(fns, features.FeatureName(string(sf.Name)))
+	}
+	t.Logf("Supported features for GatewayClass %s: %v", aetherGatewayClassName, fns)
+}
+
+// aetherTimeouts mirrors the talos baseline runner: a long GatewayMustHaveAddress
+// budget (LoadBalancer/MetalLB or cloud-provider-kind convergence is slow) and a
+// generous consistency window for demand-scoped xDS propagation.
+func aetherTimeouts() conformanceconfig.TimeoutConfig {
+	tc := conformanceconfig.DefaultTimeoutConfig()
+	tc.GatewayMustHaveAddress = 180 * time.Second
+	tc.MaxTimeToConsistency = 60 * time.Second
+	tc.RequestTimeout = 10 * time.Second
+	return tc
+}
+
+// aetherMeshTimeouts widens the consistency window for the MESH-HTTP profile. The
+// mesh suite drives requests by `kubectl exec`-ing the echo client INTO the backend
+// pods; aether's redirect-all capture adds ~15-18s of CNI setup latency to a pod's
+// readiness, and the per-test exec retries are bounded by MaxTimeToConsistency. At
+// the default 60s a freshly-applied pod can still be un-Ready when the budget
+// expires → `container not found` → spurious 0-pass (a HARNESS timing artifact, not
+// an aether routing fault). A 5-minute window absorbs scheduling + image pull +
+// CNI redirect-all + mesh xDS warm-up.
+func aetherMeshTimeouts() conformanceconfig.TimeoutConfig {
+	tc := aetherTimeouts()
+	tc.MaxTimeToConsistency = 300 * time.Second
+	return tc
+}
+
+// prewarmNamespaces blocks until every pod in the given namespaces is Ready (or the
+// timeout elapses). It is the belt-and-suspenders complement to aetherMeshTimeouts:
+// the mesh suite applies its backends in Setup, then immediately starts exec'ing the
+// client into them; redirect-all capture makes those pods slow to go Ready, so a pod
+// can be mid-CNI-setup when the first exec fires (`container not found`). Waiting for
+// Ready here — after Setup applies the manifests, before Run drives requests — closes
+// that race deterministically instead of relying on retry budgets alone.
+func prewarmNamespaces(t *testing.T, cs *clientset.Clientset, timeout time.Duration, namespaces ...string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for _, ns := range namespaces {
+		for {
+			pods, err := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+			if err == nil && len(pods.Items) > 0 {
+				allReady := true
+				for i := range pods.Items {
+					p := &pods.Items[i]
+					ready := false
+					for _, cond := range p.Status.Conditions {
+						if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+							ready = true
+							break
+						}
+					}
+					if !ready {
+						allReady = false
+						break
+					}
+				}
+				if allReady {
+					t.Logf("prewarm: all %d pod(s) in %s are Ready", len(pods.Items), ns)
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Logf("prewarm: timed out waiting for pods in %s to be Ready (continuing; the suite's retries may still recover)", ns)
+				break
+			}
+			time.Sleep(3 * time.Second)
+		}
+	}
+}
+
+func aetherImpl() confv1.Implementation {
+	return confv1.Implementation{
+		Organization: "aether",
+		Project:      "aether",
+		URL:          "https://github.com/bpalermo/aether",
+		Version:      aetherImplVersion,
+		Contact:      []string{"bpalermo@pm.me"},
+	}
+}
+
+// cleanup reports whether the suite should tear down its base resources. Set
+// AETHER_NOCLEANUP=1 to leave them in place for post-mortem debugging.
+func cleanup() bool { return os.Getenv("AETHER_NOCLEANUP") == "" }
+
+// reportPath is where the YAML ConformanceReport is written. CI uploads it as an
+// artifact. Override with AETHER_CONFORMANCE_REPORT.
+func reportPath(def string) string {
+	if v := os.Getenv("AETHER_CONFORMANCE_REPORT"); v != "" {
+		return v
+	}
+	return def
+}
+
+func writeReport(t *testing.T, cSuite *suite.ConformanceTestSuite, path string) {
+	t.Helper()
+	report, err := cSuite.Report()
+	require.NoError(t, err)
+	raw, err := yaml.Marshal(report)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+	t.Logf("Conformance report written to %s:\n%s", path, string(raw))
+}
+
+func skipUnlessEnabled(t *testing.T) {
+	t.Helper()
+	if os.Getenv("AETHER_CONFORMANCE") == "" {
+		t.Skip("set AETHER_CONFORMANCE=1 (and point KUBECONFIG at a live aether cluster) to run")
+	}
+}
+
+// TestAetherGatewayHTTP runs the GATEWAY-HTTP (north-south edge) conformance
+// profile. Features are inferred from GatewayClass.status.supportedFeatures
+// (SupportedFeatures left nil + EnableAllSupportedFeatures=false). This is the
+// profile aether is fully conformant on (43/43 on talos, rev21) and the one CI gates.
+func TestAetherGatewayHTTP(t *testing.T) {
+	skipUnlessEnabled(t)
+	c, cs, copts, cfg := aetherClients(t)
+	logGatewayFeatures(t, c)
+
+	opts := suite.ConformanceOptions{
+		// User-configurable knobs live in the embedded ConfigurableOptions since
+		// gateway-api 1.6 (yaml-configurable suite); profiles/features are slices.
+		ConfigurableOptions: suite.ConfigurableOptions{
+			GatewayClassName:     aetherGatewayClassName,
+			AllowCRDsMismatch:    true,
+			CleanupBaseResources: cleanup(),
+			// 1.6 made per-test manifest cleanup OPT-IN; without it earlier tests'
+			// routes persist and shadow later same-match routes (wrong-backend
+			// failures + weight-distribution pollution). Always clean per test.
+			CleanupTestResources:       true,
+			EnableAllSupportedFeatures: false,
+			SupportedFeatures:          nil, // inferred from GatewayClass.status
+			ExemptFeatures:             nil,
+			TimeoutConfig:              aetherTimeouts(),
+			ConformanceProfiles:        []suite.ConformanceProfileName{suite.GatewayHTTPConformanceProfileName},
+			Implementation:             aetherImpl(),
+			ReportOutputPath:           reportPath("gateway-http-report.yaml"),
+		},
+		Client:        c,
+		ClientOptions: copts,
+		Clientset:     cs,
+		RestConfig:    cfg,
+		// NewConformanceTestSuite (unlike the RunConformance helper) does not default
+		// ManifestFS, so set the embedded base manifests explicitly — otherwise the
+		// suite applies no base resources and the conformance namespaces (e.g.
+		// gateway-conformance-web-backend) are never created.
+		ManifestFS: []fs.FS{&gwconformance.Manifests},
+	}
+
+	cSuite, err := suite.NewConformanceTestSuite(opts)
+	require.NoError(t, err)
+	cSuite.Setup(t, tests.ConformanceTests)
+	require.NoError(t, cSuite.Run(t, tests.ConformanceTests))
+	writeReport(t, cSuite, opts.ReportOutputPath)
+}
+
+// meshNamespaces are the conformance namespaces the MESH-HTTP overlay creates. They
+// are pre-warmed (waited Ready) after Setup and before Run so redirect-all capture's
+// CNI latency does not race the suite's first `kubectl exec` into a backend pod.
+var meshNamespaces = []string{
+	"gateway-conformance-mesh",
+	"gateway-conformance-mesh-consumer",
+}
+
+// TestAetherMeshHTTP runs the MESH-HTTP (east-west GAMMA) conformance profile
+// against the committed mesh overlay (the aether.io/managed namespace label and
+// per-version ServiceAccounts; redirect-all is the chart default so the managed
+// label alone meshes the echo pods — see mesh/manifests.yaml). It exercises the
+// mesh data path: the CNI captures the
+// echo client's egress, the agent routes it via the cap_http GAMMA tables to the
+// per-version backends. With SPIRE off the mesh hop is CLEARTEXT (the inbound
+// listener degrades to a no-mTLS HCM chain, symmetric with the cleartext outbound
+// clusters) — the suite asserts routing correctness, not mTLS.
+//
+// Unlike GATEWAY-HTTP, the score is not (yet) 100%: proposal 023 (route-by-Service)
+// makes the route target representable, but feature coverage is still being closed.
+// The CI job runs this soft (continue-on-error); Run failures are recorded in the
+// report rather than failing the test, so an honest per-test score is always emitted.
+func TestAetherMeshHTTP(t *testing.T) {
+	skipUnlessEnabled(t)
+	c, cs, copts, cfg := aetherClients(t)
+
+	// MESH-HTTP core is gated on SupportMesh+SupportHTTPRoute — that alone runs the
+	// load-bearing GAMMA tests (MeshBasic, MeshHTTPRouteSimpleSameNamespace,
+	// MeshHTTPRouteMatching, MeshHTTPRouteWeight, MeshHTTPRouteRequestHeaderModifier,
+	// MeshHTTPRouteRedirectHostAndStatus). The Extended HTTPRoute features aether's
+	// GAMMA reconciler also implements are advertised so their tests run rather than
+	// skip (all are valid v1.5.1 feature constants).
+	meshFeats := []features.FeatureName{
+		features.SupportMesh,
+		features.SupportHTTPRoute,
+		features.SupportHTTPRouteResponseHeaderModification,
+		features.SupportHTTPRouteMethodMatching,
+	}
+
+	opts := suite.ConformanceOptions{
+		ConfigurableOptions: suite.ConfigurableOptions{
+			GatewayClassName:     aetherGatewayClassName,
+			MeshName:             "aether",
+			AllowCRDsMismatch:    true,
+			CleanupBaseResources: cleanup(),
+			// 1.6 made per-test manifest cleanup OPT-IN; without it earlier tests'
+			// routes persist and shadow later same-match routes (wrong-backend
+			// failures + weight-distribution pollution). Always clean per test.
+			CleanupTestResources:       true,
+			EnableAllSupportedFeatures: false,
+			SupportedFeatures:          meshFeats,
+			TimeoutConfig:              aetherMeshTimeouts(),
+			ConformanceProfiles:        []suite.ConformanceProfileName{suite.MeshHTTPConformanceProfileName},
+			Implementation:             aetherImpl(),
+			ReportOutputPath:           reportPath("mesh-http-report.yaml"),
+		},
+		Client:        c,
+		ClientOptions: copts,
+		Clientset:     cs,
+		RestConfig:    cfg,
+		// Use aether's mesh overlay for the base mesh manifests (mesh/manifests.yaml)
+		// while still serving the per-test tests/mesh/*.yaml manifests from the upstream
+		// embed (see meshManifestFS / overlayFS). A bare {meshManifests} would silently
+		// drop every per-test HTTPRoute manifest — the route would never apply.
+		ManifestFS: []fs.FS{meshManifestFS()},
+	}
+
+	cSuite, err := suite.NewConformanceTestSuite(opts)
+	require.NoError(t, err)
+	cSuite.Setup(t, tests.ConformanceTests)
+	// Close the exec-timing race before driving requests: redirect-all capture makes
+	// the just-applied backend pods slow to go Ready (see prewarmNamespaces).
+	prewarmNamespaces(t, cs, 5*time.Minute, meshNamespaces...)
+	// Record but do not fail on a Run error: the per-test outcomes live in the report,
+	// which is always written and uploaded so the real score is reported even when
+	// some tests fail (the job is soft until MESH-HTTP is green).
+	if err := cSuite.Run(t, tests.ConformanceTests); err != nil {
+		t.Logf("MESH-HTTP run returned an error (per-test results are in the report): %v", err)
+	}
+	writeReport(t, cSuite, opts.ReportOutputPath)
+}

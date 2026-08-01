@@ -2,9 +2,9 @@ package hotrestart
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
-	"github.com/go-logr/logr"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -115,7 +115,7 @@ func TestSupervisor_HotRestartRecordsEpoch(t *testing.T) {
 	s := New(Config{
 		EnvoyPath:  "/bin/true", // exits immediately; only the fork matters here
 		ConfigPath: "/dev/null",
-	}, logr.Discard(), m)
+	}, slog.New(slog.DiscardHandler), m)
 
 	if err := s.hotRestart(); err != nil {
 		t.Fatalf("hotRestart() error = %v", err)

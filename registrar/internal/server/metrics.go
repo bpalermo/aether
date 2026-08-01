@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -12,6 +13,37 @@ import (
 // attrEventType labels endpoint-change events by their type (ADDED, UPDATED,
 // REMOVED, FULL_SNAPSHOT). Bounded cardinality: one series per event type.
 const attrEventType = attribute.Key("aether.event.type")
+
+// eventTypeOptions holds the pre-built attribute set for every declared event
+// type, indexed by the enum value. The broadcast fan-out is O(events ×
+// watchers), so building metric.WithAttributes there would allocate on the
+// hottest path in the registrar. Derived from the generated enum table so a new
+// proto value is covered without touching this file.
+var eventTypeOptions = buildEventTypeOptions()
+
+func buildEventTypeOptions() []metric.MeasurementOption {
+	maxValue := int32(0)
+	for v := range registrarv1.WatchEndpointsResponse_EventType_name {
+		if v > maxValue {
+			maxValue = v
+		}
+	}
+	opts := make([]metric.MeasurementOption, maxValue+1)
+	for v, name := range registrarv1.WatchEndpointsResponse_EventType_name {
+		opts[v] = metric.WithAttributes(attrEventType.String(name))
+	}
+	return opts
+}
+
+// eventTypeOption returns the cached attribute set for an event type, falling
+// back to building one for a value outside the generated table (a proto enum
+// carries unknown values through unchanged).
+func eventTypeOption(t registrarv1.WatchEndpointsResponse_EventType) metric.MeasurementOption {
+	if t >= 0 && int(t) < len(eventTypeOptions) && eventTypeOptions[t] != nil {
+		return eventTypeOptions[t]
+	}
+	return metric.WithAttributes(attrEventType.String(t.String()))
+}
 
 // Metrics holds the registrar server's OTel instruments. All methods are
 // nil-receiver-safe so the server runs unchanged when telemetry is disabled
@@ -28,7 +60,12 @@ type Metrics struct {
 	syncDuration    metric.Float64Histogram
 	syncErrors      metric.Int64Counter
 	syncEvents      metric.Int64Counter
+	filteredSubs    metric.Int64Gauge
 	snapshotVersion metric.Int64Gauge
+	wbQueueDepth    metric.Int64Gauge
+	wbFlushFailures metric.Int64Counter
+	wbDrops         metric.Int64Counter
+	wbShields       metric.Int64Counter
 }
 
 // NewMetrics registers the registrar server instruments on the given meter.
@@ -61,9 +98,29 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Endpoint change events detected by the sync loop, by event type")); err != nil {
 		return nil, fmt.Errorf("sync events: %w", err)
 	}
+	if m.filteredSubs, err = meter.Int64Gauge("aether.registrar.watch.filtered_subscribers",
+		metric.WithDescription("Watch streams carrying a service filter (demand-scoped agents)")); err != nil {
+		return nil, fmt.Errorf("filtered subscribers: %w", err)
+	}
 	if m.snapshotVersion, err = meter.Int64Gauge("aether.registrar.snapshot.version",
 		metric.WithDescription("Current endpoint snapshot version (compare with aether.agent.registry.last_version for skew)")); err != nil {
 		return nil, fmt.Errorf("snapshot version: %w", err)
+	}
+	if m.wbQueueDepth, err = meter.Int64Gauge("aether.registrar.writebehind.queue_depth",
+		metric.WithDescription("Pending external-registry writes (snapshot-first ops not yet flushed and observed)")); err != nil {
+		return nil, fmt.Errorf("writebehind queue depth: %w", err)
+	}
+	if m.wbFlushFailures, err = meter.Int64Counter("aether.registrar.writebehind.flush_failures",
+		metric.WithDescription("External-registry write attempts that failed and were rescheduled")); err != nil {
+		return nil, fmt.Errorf("writebehind flush failures: %w", err)
+	}
+	if m.wbDrops, err = meter.Int64Counter("aether.registrar.writebehind.drops",
+		metric.WithDescription("Write-behind ops dropped after exceeding max age (agents' re-assertion/sweep repair these)")); err != nil {
+		return nil, fmt.Errorf("writebehind drops: %w", err)
+	}
+	if m.wbShields, err = meter.Int64Counter("aether.registrar.writebehind.shielded_intents",
+		metric.WithDescription("Pending intents overlaid onto a sync cycle's fetched state (each prevented a snapshot regression)")); err != nil {
+		return nil, fmt.Errorf("writebehind shields: %w", err)
 	}
 
 	return m, nil
@@ -83,11 +140,23 @@ func (m *Metrics) watcherUnsubscribed(ctx context.Context) {
 	m.watchers.Add(ctx, -1)
 }
 
-func (m *Metrics) eventBroadcast(ctx context.Context, eventType string) {
+func (m *Metrics) filteredWatchers(ctx context.Context, n int) {
 	if m == nil {
 		return
 	}
-	m.broadcastEvents.Add(ctx, 1, metric.WithAttributes(attrEventType.String(eventType)))
+	m.filteredSubs.Record(ctx, int64(n))
+}
+
+// eventsBroadcast records a whole fan-out batch: one Add per event type rather
+// than one per enqueued event, so the totals are unchanged while the counter
+// work leaves the per-watcher loop.
+func (m *Metrics) eventsBroadcast(ctx context.Context, counts map[registrarv1.WatchEndpointsResponse_EventType]int64) {
+	if m == nil {
+		return
+	}
+	for eventType, n := range counts {
+		m.broadcastEvents.Add(ctx, n, eventTypeOption(eventType))
+	}
 }
 
 func (m *Metrics) eventDropped(ctx context.Context, eventType string) {
@@ -125,4 +194,32 @@ func (m *Metrics) syncFailed(ctx context.Context, seconds float64) {
 	}
 	m.syncDuration.Record(ctx, seconds)
 	m.syncErrors.Add(ctx, 1)
+}
+
+func (m *Metrics) wbDepth(ctx context.Context, depth int) {
+	if m == nil {
+		return
+	}
+	m.wbQueueDepth.Record(ctx, int64(depth))
+}
+
+func (m *Metrics) wbFlushFailed(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.wbFlushFailures.Add(ctx, 1)
+}
+
+func (m *Metrics) wbDropped(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.wbDrops.Add(ctx, 1)
+}
+
+func (m *Metrics) wbShielded(ctx context.Context, n int) {
+	if m == nil {
+		return
+	}
+	m.wbShields.Add(ctx, int64(n))
 }

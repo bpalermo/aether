@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bpalermo/aether/common/constants"
+	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"golang.org/x/sys/unix"
 )
 
@@ -57,7 +57,7 @@ func newReadinessProber(netnsPath string) *readinessProber {
 			},
 			Timeout: readyProbeRequestTimeout,
 		},
-		url: fmt.Sprintf("http://127.0.0.1:%d%s", constants.ProxyOutboundPort, constants.ProxyReadinessPath),
+		url: fmt.Sprintf("http://127.0.0.1:%d%s", meshconst.ProxyOutboundPort, meshconst.ProxyReadinessPath),
 	}
 }
 

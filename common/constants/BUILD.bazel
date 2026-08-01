@@ -3,12 +3,9 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "constants",
     srcs = [
-        "annotations.go",
         "cni.go",
         "endpoint.go",
-        "labels.go",
         "namespaces.go",
-        "proxy.go",
         "registry.go",
     ],
     importpath = "github.com/bpalermo/aether/common/constants",

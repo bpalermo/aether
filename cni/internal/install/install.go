@@ -152,13 +152,3 @@ func (in *Installer) copyFileAtomic(src, dst string) error {
 
 	return nil
 }
-
-// checkValidCNIConfig returns an error if an invalid CNI configuration is detected
-// - CNIConfName is the name of the primary CNI config file which may or may not contain the Istio CNI config
-// depending on whether Istio owned CNI config is enabled
-// - cniConfigFilepath is the path to the CNI config file that is currently being used. This may be different
-// from the primary CNI config file if using an Istio owned CNI config is enabled. The value is unset on the
-// first call of checkValidCNIConfig
-func checkValidCNIConfig(ctx context.Context, cfg *InstallerConfig, cniConfigFilepath string) error {
-	return nil
-}

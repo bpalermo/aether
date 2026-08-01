@@ -1,0 +1,538 @@
+#!/usr/bin/env bash
+# Local two-REGION e2e for proposal 006 Phase 3 (cross-region etcd replicator).
+#
+# Two kind clusters, each its OWN regional etcd (shared-nothing registry planes),
+# registrars cross-wired with --peer-etcd: each region's leader registrar mirrors
+# its own /aether/v1/regions/<self>/ subtree verbatim into the peer's etcd under
+# an origin-heartbeat lease (P2a mirror loop + P2b lease, PRs #512/#513).
+#
+# Builds on the 019 waypoint harness (e2e/multicluster_waypoint.sh) — same two
+# kinds + shared-trust-domain SPIRE + waypoint data path — but the clusters no
+# longer share an etcd, so the cross-cluster call only works IF replication does:
+# echo(b)'s endpoint reaches a's registrar exclusively through b's mirror into
+# etcd-a.
+#
+# Assertions (verify):
+#   1. visibility  — etcd-a holds mirrored /regions/region-b/ keys and vice versa.
+#   2. data path   — client(a) -> echo.aether-test.<meshDomain>:18081 == 200 over
+#                    the mirror + waypoint (mTLS end-to-end).
+#   3. failover    — scale b's registrar to 0 (replicator leader dies, keepalive
+#                    stops): b's mirror in etcd-a EXPIRES at the lease TTL (~30s)
+#                    with NO peer-side GC, while etcd-b keeps b's origin data; the
+#                    client call then fails (a's EDS dropped b's endpoints).
+#   4. recovery    — scale b's registrar back up: resync re-mirrors under a fresh
+#                    lease and the client call returns 200 again.
+#
+# Usage: e2e/multicluster_replicator.sh {up|test|verify|down}  (bare = up + test)
+#
+# Prereqs: kind, docker, kubectl, helm, bazel. Two kinds + SPIRE are inotify- and
+# resource-heavy; `up` raises fs.inotify.* (needs passwordless sudo).
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLUSTER_A="${CLUSTER_A:-a}"
+CLUSTER_B="${CLUSTER_B:-b}"
+ETCD_IMAGE="${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}"
+KIND_NET="kind"
+NS="aether-system"
+TEST_NS="aether-test"
+TRUST_DOMAIN="aether.internal"
+MESH_DOMAIN="aether.internal"
+TUNNEL_PORT="18009"
+GWAPI_VERSION="v1.6.1"
+SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.28.4}"
+SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.5.0}"
+SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
+IMAGES=(agent mesh-dns cni-install registrar controller)
+# Origin-heartbeat lease TTL is 30s (replicator default); how long verify waits
+# for the mirror to expire after the origin dies (TTL + keepalive/gRPC slack).
+FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-90}"
+
+log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
+die() {
+	printf '\033[1;31m  ✗ %s\033[0m\n' "$*" >&2
+	exit 1
+}
+
+# client_code() dials a MESH DNS NAME, so a bare "curl 000" is ambiguous: it could be
+# routing, or nothing may have resolved the name at all. Dump the resolver's state on
+# failure so the next red run says which, instead of costing a bisect (this suite sat
+# red for three nights over exactly this).
+dump_mesh_dns() {
+	local c
+	for c in "$@"; do
+		printf '\033[1;33m  -- mesh-dns state on %s --\033[0m\n' "$c" >&2
+		kubectl --context "kind-$c" -n "$NS" get pods -l app.kubernetes.io/component=mesh-dns \
+			-o wide 2>&1 | sed 's/^/    /' >&2 || true
+		kubectl --context "kind-$c" -n "$NS" logs -l app.kubernetes.io/component=mesh-dns \
+			--tail=15 --prefix 2>&1 | sed 's/^/    /' >&2 || true
+	done
+}
+
+# Step 3's NEGATIVE assertion — client(a) must STOP reaching echo once region-b's
+# mirror expires from etcd-a — is the only withdrawal assertion in this suite and
+# the only one that flakes (#597). The withdrawal path is WATCH-driven end to end:
+# a's registrar syncs on the etcd watch with the 5s poll as a mere backstop
+# (registrar/internal/server/sync.go, registry/internal/etcd/etcd.go), and the
+# agent pushes xDS off the resulting broadcast. Expected latency is therefore
+# sub-second plus debounce, not the ~30s this assertion budgets — so a failure is
+# two orders of magnitude off the designed path and means a specific hop stalled.
+# Only three can:
+#   (1) a's local etcd watch broke and it fell back to the 5s poll;
+#   (2) a replicator leader-election / mirror-stream gap (the test kills b's
+#       registrar, which is b's replicator leader);
+#   (3) the endpoint outlived the registry — the registrar dropped it (the mirror
+#       provably expired) but the agent's xDS push or Envoy's EDS kept the host.
+# (3) is the consequential one: it would mean cross-cluster failover latency is
+# bounded by something other than the lease, defeating the origin-heartbeat design.
+# Print one section per hop so the next red run NAMES the hop instead of costing a
+# bisect. Cluster b needs no pod dump here: its registrar is deliberately at 0
+# replicas and echo is deliberately still alive — only b's etcd state is evidence.
+dump_failover_state() {
+	local region_b node
+	region_b="$(region_of "$CLUSTER_B")"
+
+	# Registry layer. Re-printed at failure time so the log is self-contained:
+	# etcd-a should hold NO region-b keys (mirror expired), etcd-b should still
+	# hold them all (origin data must persist).
+	printf '\033[1;33m  -- registry: %s keys (etcd-a = expired mirror, etcd-b = live origin) --\033[0m\n' "$region_b" >&2
+	local c
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		printf '    [etcd-%s]\n' "$c" >&2
+		docker exec "$(etcd_name "$c")" etcdctl get --prefix "/aether/v1/regions/$region_b/" \
+			--keys-only 2>&1 | grep -v '^$' | head -20 | sed 's/^/      /' >&2 || true
+	done
+
+	# Registrar layer on 'a' — this is what discriminates (1) from (2). Two greps,
+	# because the chart runs everything with --debug and the per-cycle chatter would
+	# otherwise crowd the rare, decisive lines out of any single tail:
+	#   * "etcd change watch established" (re-logged on every re-establish) and
+	#     "etcd watch error; will re-establish" => (1), the local watch lapsed and
+	#     syncing degraded to the 5s poll backstop;
+	#   * "peer mirror synced; watching" / "peer mirror failed" / lease + leader
+	#     lines => (2), a replicator leader-election or mirror-stream gap.
+	# The second grep shows the sync cadence itself: whether cycles are still
+	# ticking at all, and whether any of them detected the withdrawal.
+	printf '\033[1;33m  -- registrar(%s): watch / lease / leader-election trail --\033[0m\n' "$CLUSTER_A" >&2
+	kubectl --context "kind-$CLUSTER_A" -n "$NS" get pods -l app.kubernetes.io/component=registrar \
+		-o wide 2>&1 | sed 's/^/    /' >&2 || true
+	local rlogs
+	rlogs="$(kubectl --context "kind-$CLUSTER_A" -n "$NS" logs -l app.kubernetes.io/component=registrar \
+		--tail=2000 --prefix 2>/dev/null || true)"
+	printf '%s\n' "$rlogs" |
+		grep -E 'watch established|watch error|change notifications|failed to list endpoints|peer mirror|revision compacted|lease|leader|elect' |
+		tail -30 | sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- registrar(%s): sync cadence (is the loop still ticking?) --\033[0m\n' "$CLUSTER_A" >&2
+	printf '%s\n' "$rlogs" |
+		grep -E 'sync cycle|sync detected changes|initial sync complete|sync loop' |
+		tail -10 | sed 's/^/    /' >&2 || true
+
+	# Agent layer on 'a' — the first half of (3). The agent logs its snapshot
+	# rebuilds and the dependency-set transitions that drop a service's cluster.
+	printf '\033[1;33m  -- agent(%s): snapshot / dependency-set trail --\033[0m\n' "$CLUSTER_A" >&2
+	kubectl --context "kind-$CLUSTER_A" -n "$NS" logs -l app.kubernetes.io/component=agent \
+		-c agent --tail=400 --prefix 2>/dev/null |
+		grep -E 'echo|setting snapshot|dependency set|clusters from registry|watch stream|registry (watch|recovered)' |
+		tail -30 | sed 's/^/    /' >&2 || true
+
+	# The agent and the proxy are both hostNetwork, so the kind NODE container
+	# shares their netns: the agent's metrics (:8080) and Envoy's admin
+	# (127.0.0.1:9901 — loopback-only, unreachable from any pod netns, and both
+	# images are distroless so `kubectl exec ... curl` is impossible) are reachable
+	# with `docker exec <node> curl`, the same shape as the etcdctl dumps above.
+	# kindest/node ships curl. This is the suite's ONLY admin access and it stays a
+	# one-shot failure-path dump: /clusters renders on Envoy's main thread, which is
+	# why nothing in aether scrapes it.
+	node="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" get pod -l app=client \
+		-o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)"
+	if [ -z "$node" ]; then
+		printf '\033[1;33m  -- node-local state: SKIPPED (client pod node unresolved) --\033[0m\n' >&2
+		return
+	fi
+	printf '\033[1;33m  -- agent xDS snapshot metrics (node %s) --\033[0m\n' "$node" >&2
+	docker exec "$node" curl -s --max-time 5 http://127.0.0.1:8080/metrics 2>&1 |
+		grep -E '^aether_agent_(snapshot|upstreams|refresher|xds)' | sed 's/^/    /' >&2 || true
+
+	# Envoy layer — proves or clears (3) outright. Hosts still listed for the echo
+	# cluster means the registry withdrew but the data plane did not.
+	printf '\033[1;33m  -- envoy EDS for echo (admin /clusters, node %s) --\033[0m\n' "$node" >&2
+	local hosts
+	hosts="$(docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
+		grep -i echo | head -40 || true)"
+	if [ -n "$hosts" ]; then
+		printf '%s\n' "$hosts" | sed 's/^/    /' >&2
+		printf '    ^ cause (3): Envoy STILL holds echo hosts after the registry withdrew\n' >&2
+	else
+		printf '    (no echo cluster/host in Envoy — EDS did drop it, so either the stall is\n' >&2
+		printf '     upstream of Envoy, or the 200 rode an already-open upstream connection)\n' >&2
+	fi
+
+	# One post-dump probe: the dump takes seconds, so a call that fails NOW says the
+	# chain merely overran the budget, while one that still returns 200 says it never
+	# withdrew. Diagnostic only — the assertion above has already been decided.
+	printf '\033[1;33m  -- post-dump recheck: client(a) -> echo = %s --\033[0m\n' "$(client_code)" >&2
+}
+
+etcd_name() { echo "aether-etcd-region-$1"; }
+region_of() { echo "region-$1"; }
+
+raise_inotify() {
+	if sudo -n true 2>/dev/null; then
+		sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288 >/dev/null 2>&1 &&
+			ok "inotify limits raised" || echo "  (could not raise inotify limits)"
+	else
+		echo "  (no passwordless sudo; run: sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288)"
+	fi
+}
+
+build_images() {
+	# CI builds the images itself (bazel image_load via RBE) and sets
+	# REPLICATOR_SKIP_BUILD=1 so this step is a no-op — the images are already in
+	# the local docker daemon under ghcr.io/bpalermo/aether/<img>:latest.
+	if [ "${REPLICATOR_SKIP_BUILD:-0}" = "1" ]; then
+		ok "skipping image build (REPLICATOR_SKIP_BUILD=1; images pre-built)"
+		return
+	fi
+	log "building + loading aether images"
+	make -C "$REPO_ROOT" load-all >/dev/null 2>&1 || die "image build (make load-all) failed"
+}
+
+create_clusters() {
+	local i=0
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		if kind get clusters 2>/dev/null | grep -qx "$c"; then
+			ok "kind cluster '$c' already exists"
+		else
+			log "creating kind cluster '$c' (non-overlapping, non-routable pod CIDRs)"
+			local cfg
+			cfg="$(mktemp)"
+			sed -e "s/CLUSTER_NAME/$c/g" \
+				-e "s#POD_SUBNET#10.$((10 + i * 10)).0.0/16#g" \
+				-e "s#SVC_SUBNET#10.$((110 + i * 10)).0.0/16#g" \
+				"$REPO_ROOT/e2e/kind-cluster.yaml" >"$cfg"
+			kind create cluster --config "$cfg" --wait 60s >/dev/null
+			rm -f "$cfg"
+			ok "cluster '$c' ready"
+		fi
+		i=$((i + 1))
+	done
+}
+
+# start_etcds runs ONE etcd per region on the kind docker network — the
+# shared-nothing condition proposal 006 replicates across.
+start_etcds() {
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		local name
+		name="$(etcd_name "$c")"
+		log "starting regional etcd '$name'"
+		docker rm -f "$name" >/dev/null 2>&1 || true
+		docker run -d --name "$name" --network "$KIND_NET" "$ETCD_IMAGE" \
+			etcd --name "$name" --data-dir /tmp/etcd \
+			--listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 >/dev/null
+	done
+	sleep 3
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		local name
+		name="$(etcd_name "$c")"
+		docker exec "$name" etcdctl endpoint health >/dev/null 2>&1 || die "etcd '$name' unhealthy"
+		ok "$name at http://$(etcd_ip "$c"):2379"
+	done
+}
+
+etcd_ip() {
+	docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(etcd_name "$1")"
+}
+
+load_images() {
+	log "loading images into both clusters"
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		for img in "${IMAGES[@]}"; do
+			kind load docker-image "ghcr.io/bpalermo/aether/${img}:latest" --name "$c" >/dev/null 2>&1
+		done
+	done
+	ok "images loaded"
+}
+
+# install_spire deploys spiffe/spire on a cluster with the SHARED upstream CA, so
+# both clusters issue SVIDs under the same trust domain that cross-validate.
+install_spire() {
+	local ctx="kind-$1"
+	log "installing SPIRE on '$1' (trust domain $TRUST_DOMAIN, shared upstream CA)"
+	helm --kube-context "$ctx" repo add spiffe https://spiffe.github.io/helm-charts-hardened/ >/dev/null 2>&1 || true
+	helm --kube-context "$ctx" repo update >/dev/null 2>&1 || true
+	kubectl --context "$ctx" create ns spire-mgmt >/dev/null 2>&1 || true
+	# The shared upstream CA (same bytes in both clusters) is the root of trust.
+	# It lives in e2e/certs which is GITIGNORED — a fresh checkout (CI!) has no
+	# certs, and the old silent "|| true" secret creation let SPIRE hang forever
+	# on the missing mount (every nightly failed this way). Generate the
+	# throwaway CA on demand and fail LOUDLY if the secret can't be created.
+	if [[ ! -f "$REPO_ROOT/e2e/certs/ca.crt" || ! -f "$REPO_ROOT/e2e/certs/ca.key" ]]; then
+		log "e2e/certs missing (fresh checkout); generating throwaway CA"
+		make -C "$REPO_ROOT/e2e" generate-certs >/dev/null
+	fi
+	kubectl --context "$ctx" -n spire-mgmt create secret generic upstream-ca \
+		--from-file=tls.crt="$REPO_ROOT/e2e/certs/ca.crt" \
+		--from-file=tls.key="$REPO_ROOT/e2e/certs/ca.key" \
+		--from-file=bundle.crt="$REPO_ROOT/e2e/certs/ca.crt" \
+		--dry-run=client -o yaml | kubectl --context "$ctx" apply -f - >/dev/null ||
+		die "failed to create upstream-ca secret on '$1'"
+	helm --kube-context "$ctx" upgrade --install spire-crds spiffe/spire-crds \
+		-n spire-mgmt --version "$SPIRE_CRDS_VERSION" --wait --timeout 3m >/dev/null
+	helm --kube-context "$ctx" upgrade --install spire spiffe/spire \
+		-n spire-mgmt --version "$SPIRE_CHART_VERSION" \
+		--set global.spire.trustDomain="$TRUST_DOMAIN" \
+		--set global.spire.clusterName="cluster-$1" \
+		--set "spiffe-oidc-discovery-provider.enabled=false" \
+		--set "spire-server.upstreamAuthority.disk.enabled=true" \
+		--set "spire-server.upstreamAuthority.disk.secret.create=false" \
+		--set "spire-server.upstreamAuthority.disk.secret.name=upstream-ca" \
+		--set "spire-server.upstreamAuthority.disk.secret.namespace=spire-mgmt" \
+		--set "spire-agent.authorizedDelegates[0]=spiffe://$TRUST_DOMAIN/ns/$NS/sa/aether-agent" \
+		--set "spire-agent.sockets.admin.enabled=true" \
+		--set "spire-agent.sockets.admin.mountOnHost=true" \
+		--wait --timeout 6m >/dev/null || die "SPIRE install failed on '$1'"
+	kubectl --context "$ctx" apply -f - >/dev/null <<YAML
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: aether-workloads
+spec:
+  className: $SPIRE_CLASS
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      aether.io/managed: "true"
+YAML
+	ok "SPIRE up on '$1'"
+}
+
+install_crds() {
+	local ctx="kind-$1"
+	kubectl --context "$ctx" apply --server-side -f \
+		"https://github.com/kubernetes-sigs/gateway-api/releases/download/${GWAPI_VERSION}/standard-install.yaml" >/dev/null 2>&1 || true
+}
+
+chart_dir() {
+	local out
+	out="$(mktemp -d)"
+	cp -r "$REPO_ROOT/charts" "$out/"
+	sed -i -e 's/{GIT_COMMIT}/e2e/' -e 's/{STABLE_GIT_VERSION}/0.0.0-e2e/' "$out/charts/crds/Chart.yaml" "$out/charts/aether/Chart.yaml"
+	echo "$out/charts"
+}
+
+# install_aether installs each cluster against ITS OWN regional etcd, with the
+# peer region's etcd as the --peer-etcd replication target (the P2 cross-wiring).
+install_aether() {
+	local charts
+	charts="$(chart_dir)"
+	local img
+	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	local peer
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		[ "$c" = "$CLUSTER_A" ] && peer="$CLUSTER_B" || peer="$CLUSTER_A"
+		log "installing aether on '$c' (region $(region_of "$c"), own etcd, peer-etcd -> $(region_of "$peer"))"
+		helm --kube-context "kind-$c" upgrade --install aether-crds "$charts/crds" -n "$NS" --create-namespace --wait --timeout 2m >/dev/null
+		# shellcheck disable=SC2046
+		helm --kube-context "kind-$c" upgrade --install aether "$charts/aether" -n "$NS" --create-namespace \
+			--set namespace.create=false \
+			--set "clusterName=cluster-$c" \
+			--set "meshDomain=$MESH_DOMAIN" \
+			--set spire.enabled=true \
+			--set spire.trustDomain="$TRUST_DOMAIN" \
+			--set controller.webhook.spire=false \
+			--set edge.enabled=false \
+			--set agent.meshDns=true \
+			--set agent.eastWestWaypoint=true \
+			--set registrar.registryBackend=etcd \
+			--set registrar.enableMCS=true \
+			--set "registrar.region=$(region_of "$c")" \
+			--set "registrar.etcd.endpoints[0]=http://$(etcd_ip "$c"):2379" \
+			--set "registrar.peerEtcd[0]=$(region_of "$peer")=http://$(etcd_ip "$peer"):2379" \
+			$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) $(img cniInstall cni-install) $(img registrar registrar) $(img controller controller) \
+			--timeout 5m >/dev/null || die "aether install failed on '$c'"
+		kubectl --context "kind-$c" -n "$NS" rollout status ds/aether-agent --timeout=180s >/dev/null || true
+		# client_code() resolves echo.<ns>.<mesh-domain>, and since #578 the AGENT no
+		# longer answers that -- the aether-mesh-dns DaemonSet does. Waiting only on
+		# the agent stopped implying "DNS is serving", which is what made this suite
+		# fail with an unexplained curl 000.
+		kubectl --context "kind-$c" -n "$NS" rollout status ds/aether-mesh-dns --timeout=180s >/dev/null || true
+		ok "aether up on '$c'"
+	done
+	rm -rf "$(dirname "$charts")"
+}
+
+deploy_workloads() {
+	log "deploying echo in '$CLUSTER_B' and client in '$CLUSTER_A'"
+	kubectl --context "kind-$CLUSTER_B" create ns "$TEST_NS" >/dev/null 2>&1 || true
+	kubectl --context "kind-$CLUSTER_A" create ns "$TEST_NS" >/dev/null 2>&1 || true
+	kubectl --context "kind-$CLUSTER_B" apply -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: echo, namespace: aether-test}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: echo, namespace: aether-test}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: echo}}
+  template:
+    metadata:
+      labels: {app: echo, aether.io/managed: "true"}
+      annotations: {endpoint.aether.io/port: "8080"}
+    spec:
+      serviceAccountName: echo
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0
+          args: ["-text=hello-from-cluster-b", "-listen=:8080"]
+          ports: [{containerPort: 8080}]
+YAML
+	kubectl --context "kind-$CLUSTER_A" apply -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: client, namespace: aether-test}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: client, namespace: aether-test}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: client}}
+  template:
+    metadata:
+      labels: {app: client, aether.io/managed: "true"}
+      annotations: {config.aether.io/upstreams: "echo.aether-test"}
+    spec:
+      serviceAccountName: client
+      containers:
+        - name: curl
+          image: curlimages/curl:8.11.1
+          command: ["sleep", "infinity"]
+YAML
+	kubectl --context "kind-$CLUSTER_B" -n "$TEST_NS" rollout status deploy/echo --timeout=120s >/dev/null || true
+	kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" rollout status deploy/client --timeout=120s >/dev/null || true
+	ok "workloads deployed"
+}
+
+# mirror_present <cluster-of-etcd> <region-prefix-to-look-for>
+mirror_present() {
+	docker exec "$(etcd_name "$1")" etcdctl get --prefix "/aether/v1/regions/$2/" --keys-only 2>/dev/null | grep -q .
+}
+
+client_code() {
+	# curl -w prints 000 itself on connection failure (then exits nonzero), so
+	# normalize to the last 3 chars instead of appending a second fallback.
+	local out
+	out="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" exec deploy/client -c curl -- \
+		curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "http://echo.$TEST_NS.$MESH_DOMAIN:18081/" 2>/dev/null)" || true
+	printf '%s' "${out:-000}" | tail -c 3
+}
+
+verify() {
+	local region_a region_b
+	region_a="$(region_of "$CLUSTER_A")"
+	region_b="$(region_of "$CLUSTER_B")"
+
+	log "1/4 replication visibility: each region's subtree mirrored into the peer etcd"
+	local i
+	for i in $(seq 1 24); do
+		mirror_present "$CLUSTER_A" "$region_b" && mirror_present "$CLUSTER_B" "$region_a" && break
+		sleep 5
+	done
+	mirror_present "$CLUSTER_A" "$region_b" || die "etcd-a has no mirrored $region_b keys (b's replicator -> etcd-a)"
+	mirror_present "$CLUSTER_B" "$region_a" || die "etcd-b has no mirrored $region_a keys (a's replicator -> etcd-b)"
+	ok "both mirrors present (a sees $region_b, b sees $region_a)"
+
+	log "2/4 data path over the mirror: client(a) -> echo(b) (echo is known to 'a' ONLY via replication)"
+	local code=000
+	for i in 1 2 3 4 5 6; do
+		code="$(client_code)"
+		[ "$code" = "200" ] && break
+		sleep 6
+	done
+	if [ "$code" != "200" ]; then
+		dump_mesh_dns "$CLUSTER_A" "$CLUSTER_B"
+		die "cross-region call returned $code (expected 200) — the target is a MESH DNS NAME, so rule out resolution using the mesh-dns state above before digging into cross-region routing"
+	fi
+	ok "cross-region call succeeded (HTTP 200) over mirror + waypoint"
+
+	log "3/4 failover: kill region $region_b's registrar (replicator leader) -> its mirror in etcd-a must EXPIRE at the lease TTL"
+	kubectl --context "kind-$CLUSTER_B" -n "$NS" scale deploy/aether-registrar --replicas=0 >/dev/null
+	kubectl --context "kind-$CLUSTER_B" -n "$NS" wait --for=delete pod -l app.kubernetes.io/component=registrar --timeout=90s >/dev/null 2>&1 || true
+	local waited=0 gone=0
+	while [ "$waited" -lt "$FAILOVER_TIMEOUT" ]; do
+		if ! mirror_present "$CLUSTER_A" "$region_b"; then
+			gone=1
+			break
+		fi
+		sleep 5
+		waited=$((waited + 5))
+	done
+	[ "$gone" = "1" ] || die "mirrored $region_b keys still in etcd-a after ${FAILOVER_TIMEOUT}s (lease did not lapse)"
+	ok "mirror expired in etcd-a ${waited}s after origin death (origin-heartbeat lease lapse, no peer GC)"
+	mirror_present "$CLUSTER_B" "$region_b" || die "region $region_b's ORIGIN data vanished from its own etcd (must persist)"
+	ok "origin data intact in etcd-b (only the mirror expired)"
+	# a's registrar drops echo from its snapshot -> the client call must fail.
+	# 30s is a deliberately generous budget for a path designed to withdraw in
+	# well under a second; see dump_failover_state() for why it is not widened.
+	for i in 1 2 3 4 5 6; do
+		code="$(client_code)"
+		[ "$code" != "200" ] && break
+		sleep 5
+	done
+	if [ "$code" = "200" ]; then
+		dump_failover_state
+		die "client(a) still reaches echo 30s after the region-b mirror expired — the withdrawal path is WATCH-driven (a's registrar syncs off the etcd watch; the 5s poll is only a backstop), so the designed latency is sub-second plus debounce and 30s is ~2 orders of magnitude off it. Read the sections above in order to name the stalled hop: registry (is the mirror really gone from etcd-a?), registrar (a lapsed/re-establishing etcd watch = degraded to the 5s poll; lease/leader/mirror lines = a replicator leader-election gap), agent (did the snapshot rebuild without echo?), envoy /clusters (hosts still there = the withdrawal never reached the data plane, which would mean cross-cluster failover latency is NOT bounded by the origin-heartbeat lease). Refs #597"
+	fi
+	ok "client(a) -> echo now fails ($code) — a's EDS dropped the dead region"
+
+	log "4/4 recovery: restore region $region_b's registrar -> resync re-mirrors under a fresh lease"
+	kubectl --context "kind-$CLUSTER_B" -n "$NS" scale deploy/aether-registrar --replicas=2 >/dev/null
+	kubectl --context "kind-$CLUSTER_B" -n "$NS" rollout status deploy/aether-registrar --timeout=120s >/dev/null || true
+	for i in $(seq 1 24); do
+		mirror_present "$CLUSTER_A" "$region_b" && break
+		sleep 5
+	done
+	mirror_present "$CLUSTER_A" "$region_b" || die "mirror did not return to etcd-a after registrar recovery"
+	ok "mirror re-established in etcd-a"
+	for i in $(seq 1 12); do
+		code="$(client_code)"
+		[ "$code" = "200" ] && break
+		sleep 6
+	done
+	[ "$code" = "200" ] || die "cross-region call did not recover (last: $code)"
+	ok "cross-region call restored (HTTP 200) — full failover round trip"
+}
+
+down() {
+	log "tearing down"
+	kind delete cluster --name "$CLUSTER_A" >/dev/null 2>&1 || true
+	kind delete cluster --name "$CLUSTER_B" >/dev/null 2>&1 || true
+	docker rm -f "$(etcd_name "$CLUSTER_A")" "$(etcd_name "$CLUSTER_B")" >/dev/null 2>&1 || true
+	ok "clusters + regional etcds removed"
+}
+
+up() {
+	raise_inotify
+	build_images
+	create_clusters
+	start_etcds
+	load_images
+	for c in "$CLUSTER_A" "$CLUSTER_B"; do
+		install_crds "$c"
+		install_spire "$c"
+	done
+	install_aether
+	deploy_workloads
+}
+
+case "${1:-}" in
+up) up ;;
+test) verify ;;
+verify) verify ;;
+down) down ;;
+"") up && sleep 20 && verify ;;
+*) die "usage: $0 {up|test|verify|down}" ;;
+esac

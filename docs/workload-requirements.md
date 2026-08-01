@@ -28,7 +28,7 @@ spec:
         - name: app
           readinessProbe: { httpGet: { path: /healthz, port: 8080 } }
           lifecycle:
-            preStop: { sleep: { seconds: 3 } }   # see "Hitless rolling restarts"
+            preStop: { sleep: { seconds: 10 } }  # see "Hitless rolling restarts"
 ```
 
 - **Service identity**: the registry service name is the pod's
@@ -46,13 +46,127 @@ spec:
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness) |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds`: node-local agent vets the endpoint once and publishes health over EDS (endpoints enter clients pre-warmed). `active`: every client proxy probes the endpoint itself |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata (subset keys) |
+| `config.aether.io/upstreams` | — | Comma-separated services this pod **calls** (see "Declaring upstreams") |
 
 ## Calling other services
 
-Apps reach the mesh through the outbound listener: `http://127.0.0.1:18081`
-with the destination service in the `Host` header (`Host: my-svc` or
-`my-svc.aether.internal`). Every hop is mTLS between workload identities; the
-callee sees the caller's SPIFFE ID in `x-forwarded-client-cert`.
+With transparent capture + mesh DNS (both on by default), apps dial the
+destination by name — `http://<service>.<namespace>.<meshDomain>:18081` (mesh
+DNS) or the generated Kubernetes Service
+`<service>.<namespace>.svc.cluster.local:18081` — and the CNI-programmed
+capture listener routes it. Apps that prefer zero interception assumptions
+can instead address the outbound listener explicitly: `http://127.0.0.1:18081`
+with the mesh FQDN in the `Host` header. Either way every hop is mTLS between
+workload identities; the callee sees the caller's SPIFFE ID in
+`x-forwarded-client-cert`.
+
+**Authorities are FQDN-only, namespace-qualified, and deterministic.**
+`<service>.<namespace>.<mesh-domain>` (default domain `aether.internal`,
+agent `--mesh-domain` / chart `meshDomain`; proposal 020) is the accepted
+mesh form — it is simultaneously the vhost domain, the data-plane cluster
+name, and the on-demand (ODCDS) lookup key, declared or not. The capture path
+also honors the standard `<service>.<namespace>.svc.cluster.local` name. A
+`:port` on the authority is stripped before routing. Anything else — bare
+names (`Host: my-svc`), foreign domains, nested labels — matches no route and
+404s immediately; only authorities under the mesh domain can reach the cold
+path. The SPIFFE trust domain is resolved from each component's own SVID and
+matches the mesh domain by design, so addressing and identity share one
+domain.
+
+**Traffic shaping** (canary weights, header routing, timeouts, gRPC method
+routing, L4 splits/SNI) is standard Gateway API routes parented to the
+*Service* (GAMMA) — see the getting-started guide §10.
+
+### Declaring upstreams
+
+The mesh distributes a service's clusters/endpoints/routes only to nodes that
+need them (demand-scoped distribution, proposal 004). Declare what a pod
+calls:
+
+```yaml
+metadata:
+  annotations:
+    config.aether.io/upstreams: "svc-payments,svc-ledger,svc-audit"
+```
+
+- **Declared upstreams are warm before first use** — the node's proxy carries
+  them the moment the pod lands. Declare everything latency- or
+  correctness-critical. The list is also reviewable architecture
+  documentation, exactly like `minReadySeconds`/`preStop` above.
+- **Undeclared upstreams still work** (cold path): the first request pauses
+  ~one node-local xDS round-trip while the cluster is fetched on demand
+  (ODCDS), then stays warm while used (1h idle TTL). Cold-path calls use the
+  same FQDN authority as everything else. Requests to nonexistent services
+  *under the mesh domain* fail after the 5s on-demand timeout; anything
+  outside the domain 404s immediately at the route table.
+- Every miss increments `aether.agent.upstreams.miss` (and is logged with the
+  service name) — the signal to promote an undeclared dependency to the
+  annotation.
+- A pod's **own** service is always in scope; it never needs declaring.
+
+**Use keepalive (or HTTP/2) connections to the outbound listener.** The mesh
+pools upstream mTLS connections *per downstream connection* (this is what
+keeps one pod's certificate from ever being reused for another pod's
+traffic). A long-lived client connection — an HTTP/1.1 keepalive connection
+or an HTTP/2/gRPC channel, whose multiplexed streams all share one upstream —
+reuses its mTLS connection across requests. Connection-per-request clients
+pay a fresh mTLS handshake per request and each abandoned upstream lingers
+until the 30s idle timeout reclaims it: it works, but it is the expensive
+traffic shape.
+
+## Subset routing and locality
+
+Requests choose *which endpoints* of a service they may land on via headers;
+the mesh prefers *closer* endpoints automatically.
+
+### Pinning (always available)
+
+| Header | Meaning |
+|---|---|
+| `x-aether-ip: 10.42.1.11` | route to exactly that endpoint |
+| `x-aether-pod: my-svc-7f9c4-xv2qp` | route to exactly that pod |
+
+Pin-or-fail: if the target is gone (drained, ejected, never existed) the
+request gets a 503 — it never silently lands on a different pod.
+
+### Provider-defined subsets
+
+Endpoints publish routing dimensions via metadata annotations:
+
+```yaml
+metadata:
+  annotations:
+    metadata.endpoint.aether.io/version: "v2"
+```
+
+Consumers select with `x-aether-subset-<key>` (here
+`x-aether-subset-version: v2`). The vocabulary travels via the control
+plane — consumers declare nothing; any key published by an in-scope service
+is routable from every pod on the node. Selection is strict (NO_FALLBACK):
+asking for a subset that has no endpoints fails rather than spilling onto
+the rest of the service. Keys must be lowercase DNS-label shaped
+(`[a-z0-9-]`); `ip`, `pod`, `cluster`, `namespace` are reserved.
+
+**Multiple subset headers intersect**: a request carrying
+`x-aether-subset-version: v2` and `x-aether-subset-shard: s1` routes only to
+endpoints matching both, or fails. Up to 4 keys per service combine; beyond
+that, extra keys select individually only. **Pin headers are exclusive**:
+`x-aether-ip`/`x-aether-pod` identify a single endpoint by design and never
+combine — mixing a pin with subset headers matches no selector and falls
+back to normal balancing.
+
+Requests without subset headers are balanced across all healthy endpoints,
+unchanged. Note: a *cold* (ODCDS) first request to an undeclared upstream
+routes before that service's vocabulary lands (~ms); declare upstreams whose
+subset routing is correctness-critical.
+
+### Locality-aware failover
+
+Endpoints carry their node's `topology.kubernetes.io/region`/`zone`. Each
+node's proxy routes to same-zone endpoints first (EDS priority 0), spilling
+to same-region (1) and then anywhere (2) only as closer endpoints become
+unhealthy or drain — a zonal roll automatically shifts traffic to the
+region and back. Nodes without topology labels express no preference.
 
 ## Hitless rolling restarts
 
@@ -67,11 +181,19 @@ windows; **without them rolls outrun the mesh and drop requests**:
    health-check pass → liveness promotion → registrar → every client's EDS).
    `minReadySeconds` paces the roll so the previous endpoint is only retired
    after the replacement is mesh-routable.
-2. **`preStop: { sleep: { seconds: 3 } }`** (native sleep action, k8s ≥ 1.30 —
+2. **`preStop: { sleep: { seconds: 10 } }`** (native sleep action, k8s ≥ 1.30 —
    no shell needed in the image) — delays SIGTERM so the app keeps serving
-   while the draining mark propagates (~1s). Apps that serve in-flight
-   requests after SIGTERM for a few seconds don't strictly need it; apps that
-   exit immediately do.
+   through the mesh's two-phase drain. The sleep **sizes the in-flight
+   completion window**: at deletion-requested the endpoint goes DRAINING (no
+   new requests after ~1s), and the mesh closes client connection pools 1s
+   before SIGTERM — established requests have `sleep − 1s` to finish, and the
+   pools close while idle, ahead of the app's exit.
+
+   Measured under full load (2026-06-12): `sleep 10` (9s window) → **0 failed
+   requests per roll**; `sleep 3` (2s window, the supported minimum) → ~1 blip
+   per pod for requests still in flight when the window ends. Use ≥ 10 for
+   zero-loss rolls; longer if requests can run longer than ~9s (the window is
+   capped 2s short of `terminationGracePeriodSeconds`).
 
 Also keep `maxUnavailable: 0` (the mesh never has fewer vetted endpoints than
 replicas) and a real `readinessProbe` (the agent gates endpoint promotion on
@@ -93,8 +215,10 @@ kubectl delete pod / rollout step
   └─ apiserver sets deletionTimestamp          (pod still Running)
        └─ agent marks endpoint DRAINING        (~1s to every client's EDS:
           new requests stop arriving; established connections keep going)
-  └─ kubelet runs preStop sleep (3s), then SIGTERM
-       └─ app finishes in-flight work through the grace period
+       └─ 1s before SIGTERM: agent re-marks UNHEALTHY — clients close their
+          now-idle pools ahead of the app's exit (drain phase 2)
+  └─ kubelet runs preStop sleep, then SIGTERM
+       └─ app finishes any post-SIGTERM work through the grace period
   └─ containers exit; CNI DEL fires
        └─ endpoint removed from the registry; local xDS torn down;
           netns pin released after the drain tail (60s, detached)

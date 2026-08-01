@@ -1,10 +1,14 @@
-syntax = "proto3";
+edition = "2023";
 
 package aether.registrar.v1;
 
+import "api/aether/registry/v1/config.proto";
 import "api/aether/registry/v1/endpoint.proto";
 import "api/aether/registry/v1/service.proto";
 
+// Preserve proto3 implicit field presence so the generated Go/C++ API is
+// unchanged by the edition migration (scalars stay value types, not pointers).
+option features.field_presence = IMPLICIT;
 option go_package = "github.com/bpalermo/aether/api/aether/registrar/v1;registrarv1";
 
 service RegistrarService {
@@ -19,6 +23,13 @@ service RegistrarService {
 
   // ListAllEndpoints returns all endpoints from the registrar's snapshot.
   rpc ListAllEndpoints(ListAllEndpointsRequest) returns (ListAllEndpointsResponse);
+
+  // ListAllConfig returns the clusterset-wide config projections (multi-cluster
+  // config propagation, proposal 026 Option E/C). Agents do NOT read the registry
+  // directly; the spoke registrar surfaces imported projections through this pull.
+  // A push stream (WatchConfig) is a later optimization; the pull is correct and
+  // eventually-consistent (AP), matching the import posture.
+  rpc ListAllConfig(ListAllConfigRequest) returns (ListAllConfigResponse);
 }
 
 message RegisterEndpointRequest {
@@ -40,6 +51,19 @@ message WatchEndpointsRequest {
   string cluster_name = 1;
   string node_name = 2;
   string last_version = 3;
+  // When set, the watch is scoped to filter.services: the initial snapshot
+  // and incremental events are limited to those services (demand-scoped
+  // distribution -- fan-out per endpoint change scales with the service's
+  // consumer count, not the node count). An explicitly set but empty filter
+  // watches nothing (a node with no mesh pods). Unset = full watch.
+  // Agents re-assert their filter on every reconnect; the registrar never
+  // serves less than asked.
+  ServiceFilter filter = 4;
+}
+
+// ServiceFilter scopes a watch to a set of service names.
+message ServiceFilter {
+  repeated string services = 1;
 }
 
 message WatchEndpointsResponse {
@@ -49,6 +73,22 @@ message WatchEndpointsResponse {
     EVENT_TYPE_ENDPOINT_ADDED = 2;
     EVENT_TYPE_ENDPOINT_REMOVED = 3;
     EVENT_TYPE_ENDPOINT_UPDATED = 4;
+    // Sent by the server once the initial full snapshot has been fully
+    // streamed (or immediately when the client was already up-to-date).
+    // Carries the snapshot version; has no service_name/endpoint. Clients use
+    // it to know their cache is complete before deriving config from it.
+    EVENT_TYPE_SNAPSHOT_COMPLETE = 5;
+
+    // Service-catalog events: a service exists while it has at least one
+    // endpoint in the registrar snapshot. Unlike endpoint events, these
+    // BYPASS the watch filter and reach every watcher (they are rare --
+    // deploy-time transitions, not pod churn), giving each agent a full
+    // local index of service names: the on-demand (ODCDS) cold path answers
+    // existence locally instead of stalling on nonexistent services. The
+    // full catalog is replayed as SERVICE_ADDED events on every (re)connect
+    // before SNAPSHOT_COMPLETE. Carries service_name only.
+    EVENT_TYPE_SERVICE_ADDED = 6;
+    EVENT_TYPE_SERVICE_REMOVED = 7;
   }
 
   EventType type = 1;
@@ -69,4 +109,12 @@ message ListAllEndpointsResponse {
 
 message ServiceEndpoints {
   repeated aether.registry.v1.ServiceEndpoint endpoints = 1;
+}
+
+message ListAllConfigRequest {}
+
+message ListAllConfigResponse {
+  // projections is the clusterset-wide set of service config projections, one per
+  // (service, origin cluster). origin_cluster is set authoritatively by the registry.
+  repeated aether.registry.v1.ServiceConfigProjection projections = 1;
 }

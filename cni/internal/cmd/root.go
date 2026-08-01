@@ -11,6 +11,9 @@ import (
 )
 
 var (
+	// The cni-install init container has no request spans, so it stays on logr
+	// (the install package uses the controller-runtime global logger). The base
+	// logger is still the shared slog handler, bridged to logr for the installer.
 	l logr.Logger
 
 	cfg = install.NewInstallerConfig()
@@ -21,7 +24,7 @@ var rootCmd = &cobra.Command{
 	Short:        "Installs the CNI binaries into the current host.",
 	SilenceUsage: true,
 	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-		l = log.NewLogger(cfg.Debug).WithName(cmd.Name())
+		l = logr.FromSlogHandler(log.Named(log.NewLogger(cfg.Debug), cmd.Name()).Handler())
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runInstall(cmd.Context())
@@ -34,6 +37,9 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.CNIBinTargetDir, "cni-bin-target-dir", constants.DefaultHostCNIBinDir, "Directory into which to copy the CNI binaries")
 	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", constants.DefaultHostCNINetDir, "Directory where CNI network configuration files are located")
 	rootCmd.Flags().StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint written into the netconf so the CNI plugin pushes traces and metrics (e.g. collector:4317); empty disables plugin telemetry")
+	rootCmd.Flags().BoolVar(&cfg.CaptureRedirectAllDefault, "capture-redirect-all-default", false, "Write capture_redirect_all_default into the netconf so redirect-all is the default for managed pods (proposal 022, M2-default), opt-out via capture.aether.io/redirect-all=false")
+	rootCmd.Flags().BoolVar(&cfg.MeshDNSEnabled, "mesh-dns", false, "Write mesh_dns_enabled into the netconf so the CNI plugin installs the per-pod :53 DNAT (proposal 018, mesh-global FQDN)")
+	rootCmd.Flags().StringVar(&cfg.HostIP, "host-ip", "", "Node IP written into the netconf as the mesh-DNS DNAT target (the agent's host-local resolver)")
 }
 
 // GetCommand returns the main cobra.Command object for this application

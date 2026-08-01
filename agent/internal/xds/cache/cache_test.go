@@ -2,11 +2,11 @@ package cache
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
 	"github.com/bpalermo/aether/registry"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,6 +14,11 @@ import (
 // mockRegistry implements registry.Registry for testing purposes.
 type mockRegistry struct {
 	listAllEndpointsFunc func(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error)
+	// tcpAware lets a test's listAllEndpointsFunc handle PROTOCOL_TCP itself
+	// (returning per-protocol data). When false (default), the wrapper scopes a
+	// protocol-agnostic callback to HTTP so an HTTP service isn't double-counted
+	// as a TCP service.
+	tcpAware bool
 }
 
 var _ registry.Registry = (*mockRegistry)(nil)
@@ -39,14 +44,36 @@ func (m *mockRegistry) ListEndpoints(_ context.Context, _ string, _ registryv1.S
 
 func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	if m.listAllEndpointsFunc != nil {
-		return m.listAllEndpointsFunc(ctx, protocol)
+		eps, err := m.listAllEndpointsFunc(ctx, protocol)
+		if err != nil {
+			return nil, err
+		}
+		// Most tests register HTTP services and their callbacks ignore the
+		// protocol; LoadClustersFromRegistry now also lists PROTOCOL_TCP. Scope
+		// the default (protocol-agnostic) callbacks to HTTP so an HTTP service
+		// isn't also returned as a (TCP-floor) service. A protocol-aware test
+		// returns its own per-protocol data and is not filtered here.
+		if protocol != registryv1.Service_PROTOCOL_HTTP && !m.tcpAware {
+			return map[string][]*registryv1.ServiceEndpoint{}, nil
+		}
+		return eps, nil
 	}
 	return map[string][]*registryv1.ServiceEndpoint{}, nil
 }
 
 // newTestCache creates a SnapshotCache with a discard logger for tests.
 func newTestCache(nodeName string) *SnapshotCache {
-	return NewSnapshotCache(nodeName, logr.Discard())
+	return NewSnapshotCache(nodeName, slog.New(slog.DiscardHandler))
+}
+
+// declareDeps seeds the node dependency set with the given services, as if a
+// local pod declared them as upstreams (LoadClustersFromRegistry scopes the
+// snapshot to the dependency set).
+func declareDeps(c *SnapshotCache, services ...string) {
+	c.depMu.Lock()
+	c.podDeps["test-netns"] = podDependencies{upstreams: services}
+	c.bumpDepGenLocked()
+	c.depMu.Unlock()
 }
 
 // makeEndpoint builds a minimal ServiceEndpoint for use in table-driven tests.
@@ -90,7 +117,7 @@ func TestNewSnapshotCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewSnapshotCache(tt.nodeName, logr.Discard())
+			c := NewSnapshotCache(tt.nodeName, slog.New(slog.DiscardHandler))
 			require.NotNil(t, c)
 			assert.Equal(t, tt.nodeName, c.nodeName)
 			assert.NotNil(t, c.SnapshotCache)

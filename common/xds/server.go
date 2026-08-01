@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 
-	"github.com/go-logr/logr"
+	commonlog "github.com/bpalermo/aether/common/log"
 	"go.uber.org/atomic"
 	"google.golang.org/grpc"
 )
@@ -17,7 +18,7 @@ import (
 //
 // Server is safe for concurrent use.
 type Server struct {
-	Log logr.Logger
+	Log *slog.Logger
 
 	cfg *ServerConfig
 
@@ -34,9 +35,9 @@ type ServerOption func(*Server)
 
 // NewServer creates a new Server with the given configuration and logger.
 // The server is not started until Start is called.
-func NewServer(cfg *ServerConfig, log logr.Logger, opts ...ServerOption) Server {
+func NewServer(cfg *ServerConfig, log *slog.Logger, opts ...ServerOption) Server {
 	s := Server{
-		Log:       log.WithName("xds"),
+		Log:       commonlog.Named(log, "xds"),
 		cfg:       cfg,
 		liveness:  atomic.NewBool(false),
 		readiness: atomic.NewBool(false),
@@ -68,35 +69,25 @@ func (s *Server) AddCallback(callback ServerCallback) {
 // For Unix domain sockets, it sets appropriate permissions on the socket file.
 // The server will attempt graceful shutdown when the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	s.Log.V(1).Info("starting server", "network", s.cfg.Network, "address", s.cfg.Address)
+	s.Log.DebugContext(ctx, "starting server", "network", s.cfg.Network, "address", s.cfg.Address)
 
 	s.liveness.Store(true)
 
 	if s.callback != nil {
-		s.Log.V(1).Info("invoking pre listen callback")
+		s.Log.DebugContext(ctx, "invoking pre listen callback")
 		if err := s.callback.PreListen(ctx); err != nil {
 			return err
 		}
 	}
 
-	listener, err := net.Listen(s.cfg.Network, s.cfg.Address)
+	listener, err := s.listen(ctx)
 	if err != nil {
-		s.Log.Error(err, "failed to listen", "network", s.cfg.Network, "address", s.cfg.Address)
-		return fmt.Errorf("failed to listen: %w", err)
-	}
-
-	if s.cfg.Network == "unix" {
-		if err := os.Chmod(s.cfg.Address, os.ModePerm); err != nil {
-			if closeErr := listener.Close(); closeErr != nil {
-				s.Log.V(1).Error(closeErr, "failed to close listener during cleanup")
-			}
-			return fmt.Errorf("failed to set socket file permissions: %w", err)
-		}
+		return err
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		s.Log.V(1).Info("starting gRPC server")
+		s.Log.DebugContext(ctx, "starting gRPC server")
 		if serveErr := s.gSrv.Serve(listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
 			errCh <- serveErr
 		}
@@ -107,12 +98,44 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		s.Log.V(1).Info("context cancelled, stopping server")
+		s.Log.DebugContext(ctx, "context cancelled, stopping server")
 		return s.shutdown()
 	case serveErr := <-errCh:
 		return serveErr
-
 	}
+}
+
+// listen prepares the network listener, removing stale unix sockets and setting
+// permissions as needed.
+func (s *Server) listen(ctx context.Context) (net.Listener, error) {
+	if s.cfg.Network == "unix" {
+		// net.Listen("unix", …) fails with EADDRINUSE if the socket file already
+		// exists. Go unlinks it on a graceful Close, but a non-graceful exit
+		// (SIGKILL, OOM, a segfault) leaves it behind — every subsequent restart
+		// would then crash-loop on bind until the file is cleared by hand. Remove a
+		// stale socket first so the agent restarts cleanly however its predecessor
+		// died. Safe in the node-singleton model: only one process binds this path,
+		// and the roll is delete-then-add, so no live listener is ever displaced.
+		if err := os.Remove(s.cfg.Address); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("failed to remove stale socket %s: %w", s.cfg.Address, err)
+		}
+	}
+
+	listener, err := net.Listen(s.cfg.Network, s.cfg.Address)
+	if err != nil {
+		s.Log.ErrorContext(ctx, "failed to listen", "error", err, "network", s.cfg.Network, "address", s.cfg.Address)
+		return nil, fmt.Errorf("failed to listen: %w", err)
+	}
+
+	if s.cfg.Network == "unix" {
+		if err := os.Chmod(s.cfg.Address, os.ModePerm); err != nil {
+			if closeErr := listener.Close(); closeErr != nil {
+				s.Log.ErrorContext(ctx, "failed to close listener during cleanup", "error", closeErr)
+			}
+			return nil, fmt.Errorf("failed to set socket file permissions: %w", err)
+		}
+	}
+	return listener, nil
 }
 
 // NeedLeaderElection returns false so the server runs on all replicas,
@@ -142,10 +165,10 @@ func (s *Server) shutdown() error {
 
 	select {
 	case <-stopped:
-		s.Log.V(1).Info("gRPC server graceful stop completed")
+		s.Log.DebugContext(ctx, "gRPC server graceful stop completed")
 		return nil
 	case <-ctx.Done():
-		s.Log.V(1).Info("gRPC server forced stop due to timeout")
+		s.Log.DebugContext(ctx, "gRPC server forced stop due to timeout")
 		s.gSrv.Stop()
 		return ctx.Err()
 	}

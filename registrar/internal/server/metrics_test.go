@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
 
 	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
-	"github.com/go-logr/logr"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -80,7 +80,9 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 	ctx := context.Background()
 	m.watcherSubscribed(ctx)
 	m.watcherUnsubscribed(ctx)
-	m.eventBroadcast(ctx, "EVENT_TYPE_ENDPOINT_ADDED")
+	m.eventsBroadcast(ctx, map[registrarv1.WatchEndpointsResponse_EventType]int64{
+		registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED: 1,
+	})
 	m.eventDropped(ctx, "EVENT_TYPE_ENDPOINT_ADDED")
 	m.syncCompleted(ctx, 0.1, 1, map[string]int{"EVENT_TYPE_ENDPOINT_ADDED": 1})
 	m.syncFailed(ctx, 0.1)
@@ -89,9 +91,9 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 
 func TestBroadcaster_DropIncrementsCounter(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	b := NewBroadcaster(logr.Discard(), m)
+	b := NewBroadcaster(slog.New(slog.DiscardHandler), m)
 
-	ch := b.Subscribe("slow-watcher")
+	ch := b.Subscribe("slow-watcher", nil)
 	_ = ch // never drained: fills to capacity, then drops
 
 	// Fill the buffer, then overflow by 3.
@@ -115,16 +117,16 @@ func TestBroadcaster_DropIncrementsCounter(t *testing.T) {
 
 func TestBroadcaster_WatcherCountMetric(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	b := NewBroadcaster(logr.Discard(), m)
+	b := NewBroadcaster(slog.New(slog.DiscardHandler), m)
 
-	ch1 := b.Subscribe("a")
-	b.Subscribe("b")
+	ch1 := b.Subscribe("a", nil)
+	b.Subscribe("b", nil)
 	if got := collectSum(t, reader, "aether.registrar.watchers"); got != 2 {
 		t.Errorf("watchers after subscribes = %d, want 2", got)
 	}
 
 	// Reconnect with the same ID: count must not grow.
-	b.Subscribe("a")
+	b.Subscribe("a", nil)
 	if got := collectSum(t, reader, "aether.registrar.watchers"); got != 2 {
 		t.Errorf("watchers after reconnect = %d, want 2", got)
 	}

@@ -15,8 +15,9 @@ func notHealthCheck(info *stats.RPCTagInfo) bool {
 
 // ServerStatsHandler returns a gRPC server stats handler that records OTel
 // spans and RPC metrics through the global providers. It is a no-op until
-// Setup/SetupTracing register real providers, so it is safe (and intended)
-// to install unconditionally on every gRPC server.
+// setup.Setup/setup.SetupTracing (common/telemetry/setup) register real
+// providers, so it is safe (and intended) to install unconditionally on
+// every gRPC server.
 func ServerStatsHandler() stats.Handler {
 	return otelgrpc.NewServerHandler(otelgrpc.WithFilter(notHealthCheck))
 }

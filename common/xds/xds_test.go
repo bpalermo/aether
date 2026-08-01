@@ -2,11 +2,11 @@ package xds
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -26,7 +26,7 @@ func TestNewXdsServer_ReturnsInitializedServer(t *testing.T) {
 			cfg := NewServerConfig()
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 
-			got := NewXdsServer(context.Background(), cfg, cache, nil, logr.Discard())
+			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
 
 			require.NotNil(t, got.cache)
 			assert.Equal(t, cache, got.cache)
@@ -54,7 +54,7 @@ func TestNewXdsServer_WithCallbacks(t *testing.T) {
 			cfg := NewServerConfig()
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 
-			got := NewXdsServer(context.Background(), cfg, cache, tt.callbacks, logr.Discard())
+			got := NewXdsServer(context.Background(), cfg, cache, tt.callbacks, slog.New(slog.DiscardHandler))
 
 			require.NotNil(t, got.xSrv)
 		})
@@ -75,7 +75,7 @@ func TestNewXdsServer_DiscoveryServicesRegistered(t *testing.T) {
 			cfg := NewServerConfig()
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 
-			got := NewXdsServer(context.Background(), cfg, cache, nil, logr.Discard())
+			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
 
 			grpcSrv := got.gSrv
 			require.NotNil(t, grpcSrv)
@@ -124,7 +124,7 @@ func TestNewXdsServer_EmbeddedServerUsesProvidedConfig(t *testing.T) {
 			cfg.Address = tt.address
 
 			cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
-			got := NewXdsServer(context.Background(), cfg, cache, nil, logr.Discard())
+			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
 
 			assert.Equal(t, tt.network, got.cfg.Network)
 			assert.Equal(t, tt.address, got.cfg.Address)
@@ -149,7 +149,7 @@ func TestNewXdsServer_GRPCServerIsDistinctFromBareGRPCServer(t *testing.T) {
 			bare := grpc.NewServer()
 			defer bare.Stop()
 
-			got := NewXdsServer(context.Background(), cfg, cache, nil, logr.Discard())
+			got := NewXdsServer(context.Background(), cfg, cache, nil, slog.New(slog.DiscardHandler))
 			defer got.gSrv.Stop()
 
 			// The gRPC server created by NewXdsServer must not be the bare one.

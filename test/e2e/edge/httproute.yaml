@@ -1,0 +1,72 @@
+# Example Gateway + HTTPRoute for the edge proxy e2e (proposal 018). Apply into
+# the edge's watched namespace (default: the edge pod's own namespace,
+# aether-ingress). Gateway API is the edge's only routing API; the VirtualHost CRD
+# was retired.
+#
+# An HTTPRoute maps one external FQDN (or wildcard) to an ordered list of
+# path-matched rules to mesh services. The internal mesh FQDN
+# (<service>.aether.internal) is deliberately NOT routable from the edge.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: aether-ingress
+spec:
+  # Bind to the GatewayClass the chart renders (edge.gatewayClassName, default
+  # "aether"); the aether edge controller (gateway.aether.io/edge) serves it.
+  gatewayClassName: aether
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.example.com"
+      tls:
+        mode: Terminate
+        # Per-listener downstream cert (SNI-selected, hot-rotated). The Secret is
+        # BYO (cert-manager, kubectl, …); a *.example.com wildcard cert matches.
+        certificateRefs:
+          - kind: Secret
+            name: example-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api
+  namespace: aether-ingress
+spec:
+  parentRefs:
+    - name: edge
+  # External hostnames (Host/SNI) this route serves. Exact FQDN or a
+  # leading-wildcard suffix (*.example.com).
+  hostnames:
+    - api.example.com
+  # Ordered rules — first match wins. Order by specificity (catch-all "/" last).
+  # backendRef.name is the mesh service = its ServiceAccount = the registry key;
+  # the edge dials its pods directly over mTLS. backendRef.port targets a specific
+  # advertised port (multi-port routing, proposal 005).
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /grpc
+      backendRefs:
+        - name: svc-5
+          port: 3001
+    - matches:
+        - path:
+            type: Exact
+            value: /healthz
+      backendRefs:
+        - name: svc-2
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: svc-1
+          port: 8080

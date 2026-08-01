@@ -3,11 +3,12 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,7 +25,9 @@ func (m *mockRegistry) Close() error                       { return nil }
 func (m *mockRegistry) RegisterEndpoint(_ context.Context, _ string, _ registryv1.Service_Protocol, _ *registryv1.ServiceEndpoint) error {
 	return nil
 }
+
 func (m *mockRegistry) UnregisterEndpoint(_ context.Context, _ string, _ string) error { return nil }
+
 func (m *mockRegistry) UnregisterEndpoints(_ context.Context, _ string, _ []string) error {
 	return nil
 }
@@ -44,7 +47,7 @@ func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 // for use in tests. It returns the Syncer, Snapshot, and Broadcaster so tests
 // can inspect post-sync state directly.
 func newTestSyncer(reg *mockRegistry, interval time.Duration) (*Syncer, *Snapshot, *Broadcaster) {
-	log := logr.Discard()
+	log := slog.New(slog.DiscardHandler)
 	snap := NewSnapshot()
 	bc := NewBroadcaster(log, nil)
 	s := NewSyncer(reg, snap, bc, interval, log, nil)
@@ -144,7 +147,7 @@ func TestSyncer_Start_BroadcastsChangesOnSubsequentSync(t *testing.T) {
 	syncer, _, bc := newTestSyncer(reg, 60*time.Millisecond)
 
 	// Subscribe before starting so we catch broadcast events.
-	eventCh := bc.Subscribe("test-watcher")
+	eventCh := bc.Subscribe("test-watcher", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -227,12 +230,21 @@ func TestSyncer_Start_RegistryErrorDoesNotCrash(t *testing.T) {
 // registry error on a periodic (non-initial) sync is handled gracefully, with
 // the snapshot retaining its last known good state.
 func TestSyncer_Start_RegistryErrorOnSubsequentSyncDoesNotCrash(t *testing.T) {
-	callCount := 0
+	// Each sync cycle now lists every protocol (HTTP then TCP). Count cycles by
+	// the HTTP call so the first cycle succeeds (HTTP data + empty TCP) and every
+	// subsequent cycle fails transiently.
+	httpCalls := 0
 
 	reg := &mockRegistry{
-		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-			callCount++
-			if callCount == 1 {
+		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			if protocol == registryv1.Service_PROTOCOL_TCP {
+				if httpCalls <= 1 {
+					return map[string][]*registryv1.ServiceEndpoint{}, nil
+				}
+				return nil, errors.New("transient registry error")
+			}
+			httpCalls++
+			if httpCalls == 1 {
 				return map[string][]*registryv1.ServiceEndpoint{
 					"svc": {{Ip: "10.0.2.1", Port: 8080, Weight: 100}},
 				}, nil
@@ -350,7 +362,7 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 
 	// Let initial sync complete, then subscribe to capture only subsequent events.
 	time.Sleep(50 * time.Millisecond)
-	eventCh := bc.Subscribe("no-change-watcher")
+	eventCh := bc.Subscribe("no-change-watcher", nil)
 
 	// Let at least two more syncs fire.
 	time.Sleep(200 * time.Millisecond)
@@ -362,4 +374,41 @@ func TestSyncer_Start_NoEventsAfterInitialSync(t *testing.T) {
 	// Because the state never changed after the first sync, no events should
 	// have been broadcast to the watcher.
 	assert.Equal(t, 0, len(eventCh), "expected no events when state is unchanged between syncs")
+}
+
+// notifyMockRegistry adds a controllable Changes() channel to mockRegistry to
+// exercise the Syncer's watch-driven (vs poll-driven) path.
+type notifyMockRegistry struct {
+	*mockRegistry
+	ch chan struct{}
+}
+
+func (n *notifyMockRegistry) Changes() <-chan struct{} { return n.ch }
+
+// TestSyncer_ChangeDrivenSync verifies that a ChangeNotifier registry triggers
+// a sync via the watch signal (debounced) well before the poll interval would.
+func TestSyncer_ChangeDrivenSync(t *testing.T) {
+	snap := NewSnapshot()
+	bc := NewBroadcaster(slog.New(slog.DiscardHandler), nil)
+	var calls atomic.Int64
+	base := &mockRegistry{listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+		calls.Add(1)
+		return map[string][]*registryv1.ServiceEndpoint{}, nil
+	}}
+	reg := &notifyMockRegistry{mockRegistry: base, ch: make(chan struct{}, 1)}
+
+	// Long poll interval so any timely sync must come from the change signal.
+	s := NewSyncer(reg, snap, bc, 1*time.Hour, slog.New(slog.DiscardHandler), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Start(ctx) }()
+
+	// Wait for the initial sync.
+	require.Eventually(t, func() bool { return calls.Load() >= 1 }, 2*time.Second, 10*time.Millisecond)
+	before := calls.Load()
+
+	// Fire a change → expect a debounced sync within ~1s, not 1h.
+	reg.ch <- struct{}{}
+	require.Eventually(t, func() bool { return calls.Load() > before }, 2*time.Second, 10*time.Millisecond,
+		"change signal must drive a sync ahead of the poll interval")
 }

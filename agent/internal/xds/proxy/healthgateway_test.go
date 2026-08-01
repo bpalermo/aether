@@ -65,3 +65,11 @@ func TestBuildHealthGatewayListener_Empty(t *testing.T) {
 	require.Len(t, hcm.GetHttpFilters(), 1)
 	assert.Equal(t, httpRouterFilterName, hcm.GetHttpFilters()[0].GetName())
 }
+
+// TestHealthGatewayBypassesOverloadManager verifies the gateway is exempt from
+// overload actions: liveness must report app truth, not proxy state, or an
+// overloaded proxy would flap every local pod's registry health cluster-wide.
+func TestHealthGatewayBypassesOverloadManager(t *testing.T) {
+	l := BuildHealthGatewayListener("/run/aether/health.sock", []string{"health_a"})
+	assert.True(t, l.GetBypassOverloadManager(), "health gateway must bypass overload manager actions")
+}

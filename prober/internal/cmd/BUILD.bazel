@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cmd",
+    srcs = ["root.go"],
+    importpath = "github.com/bpalermo/aether/prober/internal/cmd",
+    visibility = ["//prober:__subpackages__"],
+    deps = [
+        "//prober/internal/prober",
+        "@com_github_spf13_cobra//:cobra",
+        "@io_k8s_sigs_controller_runtime//pkg/log/zap",
+    ],
+)

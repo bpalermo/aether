@@ -61,6 +61,37 @@ type AetherConf struct {
 	// Best-effort: a probe timeout is logged, never fails the CNI operation.
 	ReadinessProbeDisabled bool `json:"readiness_probe_disabled"`
 
+	// CaptureRedirectAllDefault makes redirect-all the DEFAULT for managed pods
+	// (proposal 022, M2-default Step 4 — the "flip"). When true, every non-ignored
+	// pod on the node gets the broad redirect-all capture (ALL outbound non-local
+	// TCP into the capture listener :18001; Envoy's ORIGINAL_DST recovers the real
+	// destination and non-mesh egress passes through in plain TCP) UNLESS it
+	// carries the capture.aether.io/redirect-all="false" opt-out annotation. This
+	// is the Istio-style "capture what the app sends" posture, with zero per-pod
+	// config. When false, redirect-all is per-pod opt-in via the same annotation.
+	//
+	// The scoped mesh-ClusterIP:18081 capture redirect (proposal 018, Phase 3a)
+	// is UNCONDITIONAL (proposal 031) — the Envoy side always carries the capture
+	// listener and the passthrough fallback chain, so this is the single
+	// remaining node-wide capture knob.
+	//
+	// Redirect-all exclusions installed to prevent loops and proxy self-traffic:
+	//   - loopback (127.0.0.0/8) skipped — the :18081 fast-lane is untouched
+	//   - the capture port itself (:18001 TCP) skipped — prevents re-entry
+	//   - established/related connections skipped via conntrack (RELATED,ESTABLISHED)
+	//   - DNS (:53 UDP+TCP) NOT excluded — passes through Envoy if MeshDNSEnabled=false,
+	//     or remains DNAT'd to the mesh-DNS resolver if MeshDNSEnabled=true
+	CaptureRedirectAllDefault bool `json:"capture_redirect_all_default"`
+
+	// MeshDNSEnabled installs, inside each pod's netns, an nft DNAT of outbound DNS
+	// (UDP+TCP :53, non-loopback) -> the node agent's resolver at HostIP:18054
+	// (proposal 018, mesh-global FQDN). Off by default; pairs with the agent's
+	// --mesh-dns.
+	MeshDNSEnabled bool `json:"mesh_dns_enabled"`
+	// HostIP is the node IP the mesh-DNS DNAT targets (the agent's host-local
+	// resolver). Written by cni-install from the downward-API HOST_IP.
+	HostIP string `json:"host_ip,omitempty"`
+
 	// OTLPEndpoint enables OTel telemetry (traces + metrics) pushed to the
 	// given OTLP gRPC collector (host:port, insecure). The plugin binary is
 	// exec'd by the container runtime, so its environment is the runtime's,
