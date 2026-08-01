@@ -292,23 +292,11 @@ func runAgent(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	if err = wireGAMMA(m, snapshotCache); err != nil {
-		return err
-	}
-
-	if err = wireEndpointPolicies(m, snapshotCache); err != nil {
+	if err = wireReconcilers(m, snapshotCache); err != nil {
 		return err
 	}
 
 	wireAuthzAndConfigImport(ctx, m, reg, snapshotCache)
-
-	if err = wireL4Routes(m, snapshotCache); err != nil {
-		return err
-	}
-
-	if err = wireCaptureReconciler(m, snapshotCache); err != nil {
-		return err
-	}
 
 	l.DebugContext(ctx, "waiting for local storage to be ready")
 	if err = localStorage.WaitUntilReady(ctx); err != nil {
@@ -428,6 +416,21 @@ func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.S
 		return nil, fmt.Errorf("failed to add SPIRE bridge: %w", err)
 	}
 	return spireBridge, nil
+}
+
+// wireReconcilers registers the node agent's CR-driven reconcilers (GAMMA,
+// EndpointPolicy, L4 routes, capture) in a fixed order.
+func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if err := wireGAMMA(m, snapshotCache); err != nil {
+		return err
+	}
+	if err := wireEndpointPolicies(m, snapshotCache); err != nil {
+		return err
+	}
+	if err := wireL4Routes(m, snapshotCache); err != nil {
+		return err
+	}
+	return wireCaptureReconciler(m, snapshotCache)
 }
 
 // wireGAMMA registers the GAMMA east-west L7 routing reconciler when --gamma is set
