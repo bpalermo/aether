@@ -13,6 +13,7 @@ proto_library(
     name = "configv1_proto",
     srcs = [
         "edge_config.proto",
+        "endpoint_policy.proto",
         "http_filter.proto",
         "mesh_config.proto",
         "secret.proto",

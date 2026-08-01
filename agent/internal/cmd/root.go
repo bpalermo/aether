@@ -32,6 +32,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/capture"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/configimport"
+	"github.com/bpalermo/aether/agent/internal/endpointpolicy"
 	"github.com/bpalermo/aether/agent/internal/gamma"
 	"github.com/bpalermo/aether/agent/internal/l4route"
 	"github.com/bpalermo/aether/agent/internal/meshdns"
@@ -295,6 +296,10 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
+	if err = wireEndpointPolicies(m, snapshotCache); err != nil {
+		return err
+	}
+
 	wireAuthzAndConfigImport(ctx, m, reg, snapshotCache)
 
 	if err = wireL4Routes(m, snapshotCache); err != nil {
@@ -459,6 +464,34 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	}
 	if err := gammaReconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+	}
+	return nil
+}
+
+// wireEndpointPolicies registers the EndpointPolicy reconciler, which projects
+// service-scoped UDS delivery declarations into the cache (proposal 034 Phase 1b).
+// It is gated on the same operator switch as the annotation path: with
+// --kubelet-pods-dir empty the agent cannot render pipe addresses at all, so the
+// watch would buy nothing. CRD presence is detected by the reconciler itself,
+// which registers no watch (and stays inert) when the CRD is absent.
+func wireEndpointPolicies(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if cfg.KubeletPodsDir == "" {
+		return nil
+	}
+	// The config.aether.io types MUST be in the scheme before the watch is set up —
+	// without them it fails ("no kind is registered") and the manager crash-loops on
+	// cache sync, taking the CNI socket with it. AddToScheme is idempotent, so this
+	// is safe alongside wireGAMMA's registration.
+	if err := configapisv1.AddToScheme(m.GetScheme()); err != nil {
+		return fmt.Errorf("register config.aether.io scheme: %w", err)
+	}
+	reconciler := &endpointpolicy.Reconciler{
+		Client: m.GetClient(),
+		Sink:   snapshotCache,
+		Log:    l,
+	}
+	if err := reconciler.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up EndpointPolicy reconciler: %w", err)
 	}
 	return nil
 }

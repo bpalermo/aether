@@ -27,6 +27,7 @@ import (
 	"github.com/bpalermo/aether/common/manager"
 	"github.com/bpalermo/aether/common/spire"
 	"github.com/bpalermo/aether/controller/internal/edgeconfig"
+	"github.com/bpalermo/aether/controller/internal/endpointpolicy"
 	"github.com/bpalermo/aether/controller/internal/gatewayapi"
 	"github.com/bpalermo/aether/controller/internal/httpfilter"
 	"github.com/bpalermo/aether/controller/internal/meshconfig"
@@ -142,6 +143,7 @@ func runController(ctx context.Context) (retErr error) {
 		crdv1.MeshConfigKind:     &meshconfig.Validator{Log: l},
 		crdv1.EdgeConfigKind:     &edgeconfig.Validator{Log: l},
 		crdv1.HTTPFilterKind:     &httpfilter.Validator{Reader: m.GetAPIReader(), Log: l},
+		crdv1.EndpointPolicyKind: &endpointpolicy.Validator{Log: l},
 		gatewayapi.HTTPRouteKind: &gatewayapi.Validator{Reader: m.GetAPIReader(), Log: l},
 	}).SetupWithManager(m)
 

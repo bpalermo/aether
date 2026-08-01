@@ -46,7 +46,7 @@ spec:
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness) |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds`: node-local agent vets the endpoint once and publishes health over EDS (endpoints enter clients pre-warmed). `active`: every client proxy probes the endpoint itself |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata (subset keys) |
-| `endpoint.aether.io/uds-socket` | — | Deliver to a Unix socket instead of a TCP port (see "Serving on a Unix domain socket") |
+| `endpoint.aether.io/uds-socket` | — | Deliver to a Unix socket instead of a TCP port (see "Serving on a Unix domain socket"); overrides an `EndpointPolicy` on the service |
 | `config.aether.io/upstreams` | — | Comma-separated services this pod **calls** (see "Declaring upstreams") |
 
 ## Serving on a Unix domain socket
@@ -99,6 +99,40 @@ Requirements:
 - **The app creates the socket**, ideally `0600`–`0660`. The proxy runs as root
   and is never blocked by the mode; restrictive modes keep other containers in
   the pod out.
+
+### Declaring it once per service instead (EndpointPolicy)
+
+The same delivery can be declared for a whole service with an `EndpointPolicy`
+CR, so a platform owner can own it separately from the Deployment:
+
+```yaml
+apiVersion: config.aether.io/v1
+kind: EndpointPolicy
+metadata:
+  name: echo-uds
+  namespace: team-a
+spec:
+  targetRef:
+    kind: Service          # core group, same namespace, Service only
+    name: echo
+  udsSocket: s/app.sock    # same <volume>/<file> value as the annotation
+```
+
+Its advantage is *when* mistakes are caught: the admission webhook rejects a
+malformed value — including one that overflows the 107-byte budget — at
+`kubectl apply`, instead of leaving the agent to log an error and fall back.
+
+- **The pod annotation wins.** A pod carrying
+  `endpoint.aether.io/uds-socket` uses its own value; the policy is the
+  service-level default for the pods that do not.
+- **The pod spec still has to match.** The CR cannot see the workload, so a
+  policy naming a volume the pods do not mount is not rejected at apply time —
+  it degrades exactly like a bad annotation (below).
+- **One policy per service.** A second policy targeting the same Service is
+  ignored (the lexicographically smallest policy name wins) and the conflict is
+  logged by the agent.
+- The CRD ships in the `crds` chart, and the agent only reads it when
+  `proxy.udsWorkloads.enabled` is true.
 
 Failure semantics match TCP delivery: until the socket file exists and accepts,
 the delegated-liveness probe fails and the endpoint stays **unpromoted** — no

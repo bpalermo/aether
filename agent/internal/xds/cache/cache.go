@@ -225,6 +225,12 @@ type SnapshotCache struct {
 	// inbound listeners. NOT imported cross-cluster (enforcement is co-located
 	// with the pods). Guarded by depMu.
 	serviceInboundFilters map[string]proxy.ExtensionFilter
+	// udsServicePolicies holds the service-scoped UDS delivery declarations
+	// (proposal 034 Phase 1b) keyed by "<ns>/<svc>": the "<volume>/<file>" socket
+	// a pod of that service is delivered to when it carries no uds-socket
+	// annotation of its own. Fed by the endpointpolicy reconciler; at most one
+	// per service. Guarded by depMu.
+	udsServicePolicies map[string]string
 	// edgeGeo configures the edge geoip filter (proposal 028); nil = no geoip
 	// (the x-geo-* strip is emitted regardless on edge chains). Boot-time.
 	edgeGeo            *proxy.GeoipConfig

@@ -6,6 +6,9 @@ go_library(
         "edgeconfig_deepcopy.go",
         "edgeconfig_jsonshim.go",
         "edgeconfig_types.go",
+        "endpointpolicy_deepcopy.go",
+        "endpointpolicy_jsonshim.go",
+        "endpointpolicy_types.go",
         "httpfilter_deepcopy.go",
         "httpfilter_jsonshim.go",
         "httpfilter_types.go",
@@ -30,6 +33,7 @@ go_test(
     name = "config_test",
     srcs = [
         "edgeconfig_test.go",
+        "endpointpolicy_test.go",
         "httpfilter_test.go",
     ],
     embed = [":config"],

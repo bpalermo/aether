@@ -189,6 +189,107 @@ Permissions: the proxy is `privileged`/root, so connecting is never blocked;
 the *app* should create the socket `0600`–`0660` inside its own volume —
 document in `workload-requirements.md`.
 
+## Phase 1b — Service-scoped CRD attachment (GAMMA policy pattern)
+
+Phase 1 delivers UDS through a pod annotation, which puts the whole contract in
+the workload's `podTemplate`. Phase 1b adds a second, **service-scoped** way to
+declare the same thing — a namespaced `EndpointPolicy` CR attached to a Service
+with the Gateway API policy-attachment shape (GEP-713 direct attachment), the
+same rails `HTTPFilter` rides for the proxy-extension escape hatch (025 M3).
+
+### Why a CRD as well
+
+- **Admission-time validation.** The `<volume>/<file>` value is subject to
+  segment rules *and* a ~16-character budget (the `sun_path` cap minus kubelet's
+  fixed prefix). As an annotation, a violation is discovered by the agent at
+  listener-generation time and reported as an error log on one node, with the
+  pod silently degraded to TCP. As a CR field, the controller's admission
+  webhook rejects it at `kubectl apply`, where the author is standing.
+- **Ownership split.** The annotation lives in the workload spec (app team);
+  the CR is a separate namespaced object a platform owner can author, RBAC, and
+  review independently of the Deployment — the same argument that made
+  `HTTPFilter` a CR rather than a route annotation.
+- **One object per service, not per workload.** A service with several
+  Deployments (canary, per-region) declares delivery once.
+
+### Shape
+
+```yaml
+apiVersion: config.aether.io/v1
+kind: EndpointPolicy
+metadata:
+  name: echo-uds
+  namespace: aether-test
+spec:
+  targetRef:              # same-namespace, core group, kind Service only
+    kind: Service
+    name: echo
+  udsSocket: s/app.sock   # same <volume>/<file> value as the annotation
+```
+
+`targetRef` is the shared `PolicyTargetRef` message `HTTPFilter` already uses.
+Attachment is same-namespace **by construction** (the message carries no
+namespace), matching `ServiceChainFilter`/`ServiceInboundFilter`. The target
+name is matched against the mesh service key `<ns>/<svc>` (020 Part 1), whose
+name component is the workload's ServiceAccount — the same resolution every
+Service-attached policy in the tree uses.
+
+### Precedence
+
+The **pod annotation wins**. The CR is the service-level default; a pod that
+carries `endpoint.aether.io/uds-socket` uses its own value and ignores the
+policy. This is the "most specific wins / local wins" ethos the tree already
+applies to imported-vs-local routes (026) and per-route-vs-chain filters (025).
+Removing the CR reverts the affected pods to TCP delivery on the next
+regeneration; removing the annotation falls back to the CR, if any.
+
+At most one policy per service. Two `EndpointPolicy` objects targeting one
+Service are a config error, not a merge: the lexicographically smallest policy
+name wins and the conflict is logged, mirroring the deterministic tie-break in
+`serviceScopedFilter`. Determinism matters because the losing value would
+otherwise flip with map iteration order and churn the snapshot.
+
+### The drift caveat
+
+The socket carrier is **pod-spec data**: the `emptyDir` volume and the file the
+app creates in it. A CR can name a volume the target service's pods do not
+mount, and nothing in the CRD or the webhook can see that — the policy object
+and the pod template are edited independently, and admission has no pod to
+inspect. This degrades exactly like a bad annotation and no worse: the pipe
+address resolves fine (it is a pure string computation over the pod UID), Envoy
+dials a socket that does not exist, the delegated-liveness probe fails, and the
+endpoint **stays unpromoted**. No traffic is sent anywhere it cannot be served;
+there is no failure mode where a mis-scoped policy blackholes a healthy service.
+Operators diagnose it the same way as the annotation: the health cluster never
+promotes, and the agent log names the socket.
+
+### Not exported cross-cluster
+
+`EndpointPolicy` is **not** a class-1 payload for the 026 config plane and the
+registrar's config-export controller never projects it. UDS delivery is
+node-local by definition: the pipe address is only meaningful to the agent whose
+proxy shares the kubelet pod-volumes hostPath with the pod. A peer cluster's
+pods are reached over mTLS at `pod_ip:18008` and their delivery is their own
+cluster's business — exactly the argument that keeps `SCOPE_INBOUND` filters
+local (027 M3). Nothing about this CR is visible outside the cluster that owns
+the pods.
+
+### Implementation
+
+| Piece | Where |
+|---|---|
+| `EndpointPolicySpec` proto (edition 2024, IMPLICIT presence, buf-validate rules) | `api/aether/config/v1/endpoint_policy.proto` |
+| CRD Go type + deepcopy + protojson shim | `common/apis/config/v1/endpointpolicy_*.go` |
+| CRD manifest (typed OpenAPI schema mirroring the proto rules) | `charts/crds/templates/endpointpolicy.yaml` |
+| Admission validator (segment rules + `sun_path` budget via `udspath.Resolve` with a worst-case 36-byte UID placeholder; targetRef checks) | `controller/internal/endpointpolicy/` |
+| CRD-presence-gated agent reconciler → `map["<ns>/<svc>"]socket` | `agent/internal/endpointpolicy/` |
+| `SetUDSServicePolicies` + annotation-first resolution + per-pod delivery-cluster regeneration | `agent/internal/xds/cache/` |
+
+The webhook's budget check assumes the default `--kubelet-pods-dir`; a
+nonstandard directory shifts the budget in either direction, so the agent still
+fail-closes at resolution time (falling back to TCP) rather than trusting
+admission.
+
 ## Phase 2 — Outbound: apps dialing the mesh via UDS
 
 **Annotation:** `egress.aether.io/socket: <volume-name>/<socket-file>` (a new
@@ -240,6 +341,7 @@ Apps then call `unix:///<in-pod-volume-mount>/<socket-file>` with the same
 |----|-------|----------|
 | 1 | shared plumbing | `CNIPod.uid = 11` + CNI-server population + storage persistence; annotation constants; `udspath` resolver with traversal-rejecting validation + unit tests |
 | 2 | Phase 1 | pipe variants of `app_<pod>_<port>`/`health_<pod>` clusters; per-pod selection in `GenerateListenersFromRegistryPod`; proxy DS chart mount + `proxy.udsWorkloads.enabled` + agent flag + Chart.yaml bump; `workload-requirements.md` section |
+| 2b | Phase 1b | `EndpointPolicy` proto + CRD + admission webhook; CRD-gated agent reconciler; annotation-over-CR precedence in the cache; chart RBAC/webhook rules + Chart.yaml bumps |
 | 3 | Phase 1 e2e | UDS-serving test workload (small Go HTTP server on a socket) + talos-main validation: join, traffic (incl. name-based path and cross-node), delegated-liveness promotion, rolling restart, agent restart (storage replay with persisted UID, API server unreachable) |
 | 4 | Phase 2 spike | checklist above on talos-main |
 | 5 | Phase 2 | `outbound_uds_<pod>` listener + `GenerateOutboundHTTPListener` address parameterization; docs; talos e2e with a `unix://` gRPC client |
