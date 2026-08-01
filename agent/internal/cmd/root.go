@@ -113,6 +113,10 @@ func init() {
 	// Local storage configuration (node proxy only — the edge runs no CNI/storage).
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
 
+	// Kubelet pod-volumes directory (node proxy only — UDS delivery is a per-pod
+	// concern; the edge serves no local workloads).
+	rootCmd.Flags().StringVar(&cfg.KubeletPodsDir, "kubelet-pods-dir", cfg.KubeletPodsDir, "Kubelet pod-volumes directory, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket for UDS delivery (proposal 034). Empty disables UDS delivery: pods annotated endpoint.aether.io/uds-socket fall back to TCP loopback")
+
 	// SPIRE admin socket (node proxy only — delegated identity for many local
 	// workloads; the edge presents a single identity served by SPIRE directly).
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
@@ -343,6 +347,9 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
+	// The host bridge to a workload's Unix socket (proposal 034); empty means the
+	// operator turned UDS delivery off and annotated pods get TCP loopback.
+	snapshotCache.SetKubeletPodsDir(cfg.KubeletPodsDir)
 	// With SPIRE off no SVIDs/SDS exist; the cache builds the per-pod inbound
 	// listener cleartext so the mesh hop stays routable (the outbound clusters
 	// already go cleartext without a node SVID). Production keeps mTLS.

@@ -9,6 +9,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/manager"
+	"github.com/bpalermo/aether/common/udspath"
 )
 
 // DefaultMeshConfigPath is where the chart mounts the MeshConfig ConfigMap.
@@ -37,6 +38,15 @@ type AgentConfig struct {
 
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
+
+	// KubeletPodsDir is kubelet's pod-volumes directory as mounted into the proxy
+	// container (identical host path, so no prefix translation is needed when
+	// rendering Envoy Pipe addresses). It is how the node proxy reaches a
+	// workload's Unix socket for UDS delivery (proposal 034):
+	// <KubeletPodsDir>/<pod-UID>/volumes/kubernetes.io~empty-dir/<volume>/<file>.
+	// The location is distro-dependent; empty disables UDS delivery, and pods
+	// annotated endpoint.aether.io/uds-socket fall back to TCP loopback.
+	KubeletPodsDir string
 
 	// RegistrarAddress is the gRPC address of the in-cluster Registrar service
 	RegistrarAddress string
@@ -174,6 +184,7 @@ func NewAgentConfig() *AgentConfig {
 		GatewayClassName:        "aether",
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		KubeletPodsDir:          udspath.DefaultKubeletPodsDir,
 		MeshDNSSnapshotPath:     constants.DefaultMeshDNSSnapshotPath,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
 		MeshDomain:              meshconst.DefaultMeshDomain,
