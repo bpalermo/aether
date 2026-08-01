@@ -265,6 +265,11 @@ type SnapshotCache struct {
 	depSetTTL    time.Duration
 	depSetExpiry time.Time
 	depSetValid  bool
+	// depDeclaredCount/depObservedCount are the snapshot-shape metric's two
+	// dependency counts, recorded with the depSet memo above (they are functions
+	// of the same inputs and share its validity window). Guarded by depMu.
+	depDeclaredCount int
+	depObservedCount int
 	// effRoutes/effRoutesGen/effRoutesValid memoize serviceRoutesSnapshot
 	// (issue #540): the effective (local ∪ imported) GAMMA rules with
 	// unavailable extension filters stripped. Served while depGen is unchanged

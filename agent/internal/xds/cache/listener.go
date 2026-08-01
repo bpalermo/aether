@@ -57,12 +57,16 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	netns := cniPod.GetNetworkNamespace()
 	c.log.DebugContext(ctx, "adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, c.podExtensionHTTPFilters(cniPod), c.inboundFilterForPod(cniPod))
+	// One node-global extension union for both the pod's HTTP listeners and its
+	// capture listener (see extensionHTTPFilters).
+	extensionFilters := c.podExtensionHTTPFilters(cniPod, c.extensionHTTPFilters())
+
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(cniPod))
 	if err != nil {
 		return err
 	}
 	c.applyWaypointInboundServerNames(inbound, cniPod)
-	capture, err := c.generateCaptureListener(cniPod)
+	capture, err := c.generateCaptureListener(cniPod, extensionFilters)
 	if err != nil {
 		return err
 	}
@@ -311,6 +315,9 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	var errs []error
 	local := make(map[string]string, len(pods))
 
+	// Node-global union, built once for the whole loop (see extensionHTTPFilters).
+	shared := c.extensionHTTPFilters()
+
 	c.listenerMu.Lock()
 	for _, pod := range pods {
 		netns := pod.GetNetworkNamespace()
@@ -326,14 +333,15 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		}
 		c.log.DebugContext(ctx, "generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
-		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, c.podExtensionHTTPFilters(pod), c.inboundFilterForPod(pod))
+		extensionFilters := c.podExtensionHTTPFilters(pod, shared)
+		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(pod))
 		if listenerErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate listeners for pod", "error", listenerErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)
 			continue
 		}
 		c.applyWaypointInboundServerNames(inbound, pod)
-		capture, captureErr := c.generateCaptureListener(pod)
+		capture, captureErr := c.generateCaptureListener(pod, extensionFilters)
 		if captureErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate capture listener for pod", "error", captureErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, captureErr)

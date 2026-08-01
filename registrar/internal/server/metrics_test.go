@@ -80,7 +80,9 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 	ctx := context.Background()
 	m.watcherSubscribed(ctx)
 	m.watcherUnsubscribed(ctx)
-	m.eventBroadcast(ctx, "EVENT_TYPE_ENDPOINT_ADDED")
+	m.eventsBroadcast(ctx, map[registrarv1.WatchEndpointsResponse_EventType]int64{
+		registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED: 1,
+	})
 	m.eventDropped(ctx, "EVENT_TYPE_ENDPOINT_ADDED")
 	m.syncCompleted(ctx, 0.1, 1, map[string]int{"EVENT_TYPE_ENDPOINT_ADDED": 1})
 	m.syncFailed(ctx, 0.1)

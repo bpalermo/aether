@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sort"
 	"sync"
 	"testing"
 
@@ -636,7 +637,7 @@ func TestFullSnapshotEvents(t *testing.T) {
 			s := NewSnapshot()
 			_, _ = s.Replace(tt.seed)
 
-			events, version := s.FullSnapshotEvents()
+			events, version := s.FullSnapshotEvents(nil)
 
 			assert.Equal(t, tt.wantVersion, version)
 			assert.Len(t, events, tt.wantCount)
@@ -649,6 +650,128 @@ func TestFullSnapshotEvents(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFullSnapshotEvents_Filter pins the watch-filter scoping: a demand-scoped
+// watcher's snapshot carries only its own services, a nil filter is the
+// cluster-wide snapshot, and a non-nil empty filter carries nothing.
+func TestFullSnapshotEvents_Filter(t *testing.T) {
+	s := NewSnapshot()
+	_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
+		"svc-a": {registryv1.Service_PROTOCOL_HTTP: {makeEndpoint("10.0.0.1")}},
+		"svc-b": {registryv1.Service_PROTOCOL_HTTP: {makeEndpoint("10.0.0.2")}},
+		"svc-c": {registryv1.Service_PROTOCOL_HTTP: {makeEndpoint("10.0.0.3")}},
+	})
+
+	t.Run("nil filter is unfiltered", func(t *testing.T) {
+		events, _ := s.FullSnapshotEvents(nil)
+		assert.Len(t, events, 3)
+	})
+
+	t.Run("scoped filter keeps only its services", func(t *testing.T) {
+		events, _ := s.FullSnapshotEvents(map[string]struct{}{"svc-a": {}, "svc-c": {}})
+		names := make([]string, 0, len(events))
+		for _, ev := range events {
+			names = append(names, ev.GetServiceName())
+		}
+		sort.Strings(names)
+		assert.Equal(t, []string{"svc-a", "svc-c"}, names)
+	})
+
+	t.Run("unknown service in the filter matches nothing", func(t *testing.T) {
+		events, _ := s.FullSnapshotEvents(map[string]struct{}{"svc-missing": {}})
+		assert.Empty(t, events)
+	})
+
+	t.Run("empty non-nil filter watches nothing", func(t *testing.T) {
+		events, version := s.FullSnapshotEvents(map[string]struct{}{})
+		assert.Empty(t, events)
+		assert.Equal(t, s.Version(), version)
+	})
+}
+
+// TestSnapshot_ServiceCountsStaySynced pins the serviceCounts invariant the
+// catalog transitions depend on: the map mirrors the per-service entry count
+// exactly through Apply and Replace, and never keeps a zero-count key (its key
+// set IS the service catalog).
+func TestSnapshot_ServiceCountsStaySynced(t *testing.T) {
+	assertSynced := func(t *testing.T, s *Snapshot) {
+		t.Helper()
+		want := make(map[string]int)
+		for key := range s.entries {
+			want[key.ServiceName]++
+		}
+		assert.Equal(t, want, s.serviceCounts, "serviceCounts must mirror entries")
+		for svc, n := range s.serviceCounts {
+			assert.Positive(t, n, "service %q must not rest at a zero count", svc)
+		}
+	}
+
+	event := func(t registrarv1.WatchEndpointsResponse_EventType, svc, ip string) *registrarv1.WatchEndpointsResponse {
+		return &registrarv1.WatchEndpointsResponse{
+			Type: t, ServiceName: svc, Protocol: registryv1.Service_PROTOCOL_HTTP,
+			Endpoint: &registryv1.ServiceEndpoint{Ip: ip},
+		}
+	}
+	added := registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED
+	updated := registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED
+	removed := registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED
+
+	s := NewSnapshot()
+
+	// Adds across services and protocols.
+	_, _ = s.Apply([]*registrarv1.WatchEndpointsResponse{
+		event(added, "svc-a", "10.0.0.1"),
+		event(added, "svc-a", "10.0.0.2"),
+		event(added, "svc-b", "10.0.1.1"),
+	})
+	assertSynced(t, s)
+	assert.Equal(t, 2, s.serviceCountLocked("svc-a"))
+
+	// An UPDATED event replacing an existing entry must not double-count; an
+	// UPDATED event for an unseen key behaves as an add.
+	_, tr := s.Apply([]*registrarv1.WatchEndpointsResponse{
+		event(updated, "svc-a", "10.0.0.1"),
+		event(updated, "svc-c", "10.0.2.1"),
+	})
+	assertSynced(t, s)
+	assert.Equal(t, 2, s.serviceCountLocked("svc-a"))
+	require.Len(t, tr, 1, "only the previously-absent service transitions")
+	assert.Equal(t, "svc-c", tr[0].GetServiceName())
+
+	// A removal for an absent key must not decrement.
+	_, _ = s.Apply([]*registrarv1.WatchEndpointsResponse{
+		event(removed, "svc-a", "10.9.9.9"),
+		event(removed, "svc-ghost", "10.9.9.9"),
+	})
+	assertSynced(t, s)
+	assert.Equal(t, 2, s.serviceCountLocked("svc-a"))
+
+	// Draining a service drops its key entirely.
+	_, _ = s.Apply([]*registrarv1.WatchEndpointsResponse{
+		event(removed, "svc-a", "10.0.0.1"),
+		event(removed, "svc-a", "10.0.0.2"),
+	})
+	assertSynced(t, s)
+	assert.NotContains(t, s.serviceCounts, "svc-a")
+	assert.Equal(t, 0, s.serviceCountLocked("svc-a"))
+
+	// Replace rebuilds the counts from scratch.
+	_, _ = s.Replace(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
+		"svc-d": {
+			registryv1.Service_PROTOCOL_HTTP: {makeEndpoint("10.0.3.1"), makeEndpoint("10.0.3.2")},
+			registryv1.Service_PROTOCOL_TCP:  {makeEndpoint("10.0.3.1")},
+		},
+	})
+	assertSynced(t, s)
+	assert.Equal(t, 3, s.serviceCountLocked("svc-d"))
+	assert.Equal(t, []string{"svc-d"}, s.ServiceNames())
+
+	// A service re-added after a full drain transitions again.
+	_, tr = s.Apply([]*registrarv1.WatchEndpointsResponse{event(added, "svc-a", "10.0.0.1")})
+	assertSynced(t, s)
+	require.Len(t, tr, 1)
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, tr[0].GetType())
 }
 
 func TestSnapshotThreadSafety(t *testing.T) {
@@ -687,7 +810,7 @@ func TestSnapshotThreadSafety(t *testing.T) {
 			case 3:
 				s.GetAllWithVersion(registryv1.Service_PROTOCOL_HTTP)
 			case 4:
-				s.FullSnapshotEvents()
+				s.FullSnapshotEvents(nil)
 			}
 		}(i)
 	}

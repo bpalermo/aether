@@ -197,7 +197,7 @@ func (s *RegistrarServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 		return err
 	}
 
-	events, currentVersion := s.snapshot.FullSnapshotEvents()
+	events, currentVersion := s.snapshot.FullSnapshotEvents(filterSet)
 	if req.GetLastVersion() != currentVersion {
 		if err := sendFilteredSnapshot(stream, events, filterSet); err != nil {
 			return err
@@ -245,6 +245,8 @@ func buildWatchFilter(req *registrarv1.WatchEndpointsRequest) ([]string, map[str
 }
 
 // sendFilteredSnapshot sends snapshot events scoped to filterSet (nil = send all).
+// FullSnapshotEvents already applied the same filter; the check is kept as
+// defense in depth so no out-of-scope endpoint can reach a scoped watcher.
 func sendFilteredSnapshot(stream grpc.ServerStreamingServer[registrarv1.WatchEndpointsResponse], events []*registrarv1.WatchEndpointsResponse, filterSet map[string]struct{}) error {
 	for _, event := range events {
 		if filterSet != nil {

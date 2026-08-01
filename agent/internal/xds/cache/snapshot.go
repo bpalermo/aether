@@ -159,10 +159,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		attribute.Int("aether.snapshot.secrets", len(secrets)),
 	)
 
-	c.depMu.RLock()
-	declared := c.declaredCountLocked()
-	observed := c.observedCountLocked()
-	c.depMu.RUnlock()
+	declared, observed := c.dependencyCounts()
 	c.metrics.SnapshotShape(ctx, len(clusters), declared, observed)
 
 	snapshot, err := cachev3.NewSnapshot(v, resources)
