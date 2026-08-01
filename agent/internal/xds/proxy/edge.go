@@ -93,26 +93,6 @@ func EdgeGatewayRouteName(namespace, gatewayName string) string {
 	return fmt.Sprintf("edge_rt_%s_%s", namespace, gatewayName)
 }
 
-// EdgeGatewayListener is the inputs for building one per-Gateway edge listener
-// (proposal 021 Phase 2). The listener binds on InternalPort (the container/pod
-// port the per-Gateway LoadBalancer Service's targetPort points at) and serves
-// only the routes for this Gateway.
-type EdgeGatewayListener struct {
-	// Namespace is the Gateway's namespace.
-	Namespace string
-	// GatewayName is the Gateway's name.
-	GatewayName string
-	// InternalPort is the container port this listener binds. It is uniquely
-	// allocated per (Gateway, listener section) by the port allocator.
-	InternalPort uint32
-	// TLSSecretNames are the SDS cert names to present for downstream TLS on this
-	// listener (empty = plain HTTP). Cert bytes are already in the snapshot Secrets.
-	TLSSecretNames []string
-	// HTTPRedirect when true emits an HTTP→HTTPS 301 redirect (replaces the route
-	// listener for this Gateway's HTTP port).
-	HTTPRedirect bool
-}
-
 // BuildEdgeGatewayHTTPListener builds a per-Gateway plain-HTTP or HTTP→HTTPS
 // redirect listener. Listener name and RDS route config name are unique per
 // Gateway (proposal 021 Phase 2). When httpRedirect is true, the listener emits

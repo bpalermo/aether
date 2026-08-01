@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"fmt"
 	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -112,7 +111,3 @@ func BuildWaypointIngressCluster(fqdn string, podIPs []string) *clusterv3.Cluste
 		},
 	}
 }
-
-// waypointTunnelChainName is exported indirectly via BuildWaypointTunnelChain; a
-// tiny helper kept for symmetry / tests.
-func waypointTunnelChainName(fqdn string) string { return fmt.Sprintf("ew_%s", fqdn) }

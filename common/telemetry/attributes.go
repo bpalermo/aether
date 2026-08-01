@@ -19,12 +19,6 @@ const (
 	AttrPodNamespace = attribute.Key("aether.pod.namespace")
 	// AttrContainerID is the pod sandbox container ID from the CNI invocation.
 	AttrContainerID = attribute.Key("aether.container.id")
-	// AttrNodeName is the Kubernetes node name.
-	AttrNodeName = attribute.Key("aether.node.name")
-	// AttrClusterName is the Kubernetes cluster name.
-	AttrClusterName = attribute.Key("aether.cluster.name")
-	// AttrServiceName is the mesh service name an endpoint belongs to.
-	AttrServiceName = attribute.Key("aether.service.name")
 	// AttrSnapshotVersion is the xDS or registrar snapshot version.
 	AttrSnapshotVersion = attribute.Key("aether.snapshot.version")
 )
