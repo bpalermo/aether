@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "endpointpolicy",
+    srcs = ["webhook.go"],
+    importpath = "github.com/bpalermo/aether/controller/internal/endpointpolicy",
+    visibility = ["//controller:__subpackages__"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
+        "//common/udspath",
+        "@build_buf_go_protovalidate//:protovalidate",
+        "@io_k8s_sigs_controller_runtime//pkg/webhook/admission",
+    ],
+)
+
+go_test(
+    name = "endpointpolicy_test",
+    srcs = ["webhook_test.go"],
+    embed = [":endpointpolicy"],
+    deps = [
+        "//api/aether/config/v1:config",
+        "//common/apis/config/v1:config",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_api//admission/v1:admission",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_sigs_controller_runtime//pkg/webhook/admission",
+    ],
+)

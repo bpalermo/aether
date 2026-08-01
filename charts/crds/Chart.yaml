@@ -3,13 +3,14 @@ name: crds
 description: |
   Aether CustomResourceDefinitions. A standalone chart so the CRDs can be
   installed (and upgraded) ahead of the controllers that use them. Ships the
-  MeshConfig (proposal 015), HTTPFilter (proposal 025), and EdgeConfig
-  (proposal 029) CRDs, all in config.aether.io/v1.
+  MeshConfig (proposal 015), HTTPFilter (proposal 025), EdgeConfig
+  (proposal 029), and EndpointPolicy (proposal 034) CRDs, all in
+  config.aether.io/v1.
   Edge routing uses the Gateway API HTTPRoute (installed out-of-band, standard
   channel); the VirtualHost CRD was retired (proposal 018).
 type: application
 # Stamped at package time when built with `--stamp` (see other charts).
-version: "0.7.1-{GIT_COMMIT}"
+version: "0.8.0-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

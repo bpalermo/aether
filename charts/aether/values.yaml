@@ -278,7 +278,8 @@ proxy:
   # emptyDir socket) and the agent's --kubelet-pods-dir, which authorizes it to
   # render Envoy Pipe addresses. A pod opts in per-workload with
   # endpoint.aether.io/uds-socket: <volume>/<file>; unannotated pods are
-  # completely unaffected.
+  # completely unaffected. It also gates the agent's read access to the
+  # service-scoped EndpointPolicy CRD (Phase 1b), the annotation's alternative.
   #
   # Default true: it is inert until a workload asks for it, and turning it off
   # after the fact silently degrades annotated pods to TCP (nothing listens on

@@ -1,0 +1,52 @@
+edition = "2024";
+
+package aether.config.v1;
+
+import "api/aether/config/v1/http_filter.proto";
+import "buf/validate/validate.proto";
+
+option features.field_presence = IMPLICIT;
+option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+
+// EndpointPolicySpec is the `.spec` of the EndpointPolicy custom resource — the
+// service-scoped way to declare Unix-domain-socket delivery (proposal 034 Phase 1b).
+// It attaches to a Service with the Gateway API policy-attachment shape (GEP-713
+// direct attachment), the same rails HTTPFilter rides.
+//
+// The equivalent pod annotation (endpoint.aether.io/uds-socket) takes precedence:
+// this CR is the service-level default. A policy naming a volume the target's pods
+// do not carry degrades to TCP delivery, leaving the endpoint unpromoted — never a
+// blackhole. NOT exported cross-cluster (proposal 026): delivery is node-local.
+message EndpointPolicySpec {
+  // target_ref names the Service this policy attaches to. Same-namespace by
+  // construction (PolicyTargetRef carries no namespace); the supported target is
+  // group "" (core), kind "Service". The name is matched against the mesh service
+  // key "<ns>/<svc>" (020 Part 1).
+  PolicyTargetRef target_ref = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel = {
+      id: "endpoint_policy.target_ref.kind"
+      message: "targetRef.kind must be Service"
+      expression: "this.kind == 'Service'"
+    },
+    (buf.validate.field).cel = {
+      id: "endpoint_policy.target_ref.group"
+      message: "targetRef.group must be the core group (empty or 'core')"
+      expression: "this.group == '' || this.group == 'core'"
+    }
+  ];
+
+  // uds_socket is "<volume-name>/<socket-file>": the emptyDir volume declared by
+  // the target service's pods and the socket file the app creates inside it.
+  //
+  // The rules here are shape only — exactly one "/", no empty component, a sane
+  // upper bound. The authoritative check is the admission webhook, which runs the
+  // agent's own resolver (common/udspath) so the segment rules AND the 107-byte
+  // AF_UNIX sun_path budget are enforced at apply time. The budget leaves roughly
+  // 16 characters for this whole value under the default kubelet pods directory.
+  string uds_socket = 2 [(buf.validate.field).string = {
+    min_len: 3
+    max_len: 64
+    pattern: "^[^/]+/[^/]+$"
+  }];
+}

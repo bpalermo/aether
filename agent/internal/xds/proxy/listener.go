@@ -68,6 +68,20 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 		return nil, nil, nil, nil, err
 	}
 
+	appClusters, healthCluster = NewAppDeliveryClusters(cniPod, udsSocketPath)
+
+	return inbound, outbound, appClusters, healthCluster, nil
+}
+
+// NewAppDeliveryClusters builds a pod's delivery clusters: one app cluster per
+// served port plus the health-probe cluster. udsSocketPath is the resolved host
+// path of the pod's Unix socket, or "" for TCP loopback delivery.
+//
+// Split out from GenerateListenersFromRegistryPod because delivery can change
+// without the pod changing — a service-scoped EndpointPolicy (proposal 034 Phase
+// 1b) is authored independently of the workload — so these clusters are rebuilt
+// on their own, without regenerating the pod's listeners.
+func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster) {
 	// Delivery address for every per-pod cluster: the pod's netns (loopback) or,
 	// for a UDS workload, the socket's host path.
 	appAddr := AppAddress{Netns: cniPod.GetNetworkNamespace(), Pipe: udsSocketPath}
@@ -90,7 +104,7 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 	isTCP := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointProtocol] == aetherannotations.ProtocolTCP
 	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), appAddr, primary, AppHealthPathFromPod(cniPod), isTCP)
 
-	return inbound, outbound, appClusters, healthCluster, nil
+	return appClusters, healthCluster
 }
 
 // SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the
