@@ -13,6 +13,26 @@ func TestResolve(t *testing.T) {
 	assert.Equal(t, "/var/lib/kubelet/pods/0f52c50e-99cf-4a3c-a5e3-6a1e60e2b5f1/volumes/kubernetes.io~empty-dir/sockets/app.sock", got)
 }
 
+// TestResolve_PathLength pins the AF_UNIX sun_path budget. Envoy rejects a Pipe
+// address over the limit and NACKs the whole CDS update, so resolution must fail
+// first (the caller then degrades that one pod to TCP).
+func TestResolve_PathLength(t *testing.T) {
+	const (
+		podsDir = "/var/lib/kubelet/pods"
+		uid     = "0f52c50e-99cf-4a3c-a5e3-6a1e60e2b5f1"
+	)
+
+	// 107 bytes: the longest address an AF_UNIX sockaddr can carry.
+	atLimit, err := Resolve(podsDir, uid, "sockets/app.sock")
+	require.NoError(t, err)
+	require.Len(t, atLimit, maxPipePathLen)
+
+	// One byte over.
+	_, err = Resolve(podsDir, uid, "sockets/apps.sock")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AF_UNIX limit")
+}
+
 // TestResolve_Rejections pins the fail-closed contract: the annotation is
 // attacker-influenced, so anything that is not exactly <segment>/<segment>
 // must fail, never escape the pod's own emptyDir directory.

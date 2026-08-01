@@ -90,6 +90,14 @@ type SnapshotCache struct {
 	waypointEnabled    bool
 	waypointTunnelPort uint32
 
+	// kubeletPodsDir is kubelet's pod-volumes directory on the host
+	// (--kubelet-pods-dir), through which the proxy reaches a workload's Unix
+	// socket (proposal 034). Empty disables UDS delivery entirely: pods
+	// carrying endpoint.aether.io/uds-socket fall back to TCP loopback. Set
+	// once before the manager starts (SetKubeletPodsDir); read without locking
+	// on every listener build.
+	kubeletPodsDir string
+
 	// emitStatsPod enables per-pod labels (source_pod/destination_pod) on the
 	// aether_stats request counter. Off by default to bound cardinality; set
 	// once before the manager starts (SetEmitStatsPod) and read without locking
@@ -534,6 +542,14 @@ func (c *SnapshotCache) MeshDomain() string {
 func (c *SnapshotCache) SetWaypointConfig(enabled bool, tunnelPort uint32) {
 	c.waypointEnabled = enabled
 	c.waypointTunnelPort = tunnelPort
+}
+
+// SetKubeletPodsDir sets kubelet's pod-volumes directory (--kubelet-pods-dir),
+// the host bridge to a workload's Unix socket (proposal 034). An empty dir is
+// the operator's off switch: annotated pods then get TCP delivery. Must be
+// called before the manager starts; read without locking on every listener build.
+func (c *SnapshotCache) SetKubeletPodsDir(dir string) {
+	c.kubeletPodsDir = dir
 }
 
 // SetEmitStatsPod enables per-pod labels on the aether_stats request counter

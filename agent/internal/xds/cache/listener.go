@@ -10,7 +10,9 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	"github.com/bpalermo/aether/common/serviceref"
+	"github.com/bpalermo/aether/common/udspath"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -53,6 +55,38 @@ func (c *SnapshotCache) applyWaypointInboundServerNames(inbound *listenerv3.List
 	}
 }
 
+// udsSocketPathForPod resolves the pod's endpoint.aether.io/uds-socket
+// annotation to the socket's host path under kubelet's pod-volumes directory
+// (proposal 034 Phase 1). It returns "" — TCP loopback delivery — when the pod
+// is not annotated, when UDS delivery is disabled (--kubelet-pods-dir empty),
+// when the stored record carries no pod UID (written before the UID was
+// persisted), or when the annotation fails validation.
+//
+// Every failure falls back rather than rejecting the pod: falling back is
+// safe-degraded, not a blackhole. A UDS pod has nothing listening on its TCP
+// port, so the delegated-liveness probe fails, the endpoint stays unpromoted,
+// and no traffic is sent to an address that cannot serve it.
+func (c *SnapshotCache) udsSocketPathForPod(ctx context.Context, cniPod *cniv1.CNIPod) string {
+	annotation := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointUDSSocket]
+	if annotation == "" {
+		return ""
+	}
+	if c.kubeletPodsDir == "" {
+		c.log.ErrorContext(ctx, "pod requests UDS delivery but it is disabled (--kubelet-pods-dir is empty); falling back to TCP loopback", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", annotation)
+		return ""
+	}
+	if cniPod.GetUid() == "" {
+		c.log.ErrorContext(ctx, "pod requests UDS delivery but its stored record has no pod UID; falling back to TCP loopback", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", annotation)
+		return ""
+	}
+	path, err := udspath.Resolve(c.kubeletPodsDir, cniPod.GetUid(), annotation)
+	if err != nil {
+		c.log.ErrorContext(ctx, "failed to resolve the pod's UDS socket path; falling back to TCP loopback", "error", err, "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", annotation)
+		return ""
+	}
+	return path
+}
+
 func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
 	netns := cniPod.GetNetworkNamespace()
 	c.log.DebugContext(ctx, "adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
@@ -61,7 +95,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	// capture listener (see extensionHTTPFilters).
 	extensionFilters := c.podExtensionHTTPFilters(cniPod, c.extensionHTTPFilters())
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(cniPod))
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(cniPod), c.udsSocketPathForPod(ctx, cniPod))
 	if err != nil {
 		return err
 	}
@@ -334,7 +368,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		c.log.DebugContext(ctx, "generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
 		extensionFilters := c.podExtensionHTTPFilters(pod, shared)
-		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(pod))
+		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(pod), c.udsSocketPathForPod(ctx, pod))
 		if listenerErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate listeners for pod", "error", listenerErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)

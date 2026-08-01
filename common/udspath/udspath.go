@@ -19,10 +19,26 @@ import (
 	"strings"
 )
 
+// DefaultKubeletPodsDir is kubelet's pod-volumes directory on stock kubeadm and
+// talos nodes; the --kubelet-pods-dir flag overrides it where the distro differs.
+const DefaultKubeletPodsDir = "/var/lib/kubelet/pods"
+
 // emptyDirSegment is the kubelet volume-plugin directory for emptyDir volumes.
 // It is part of the validated contract: only emptyDir volumes carry sockets
 // (CSI/projected volumes are out of scope, see proposal 034).
 const emptyDirSegment = "kubernetes.io~empty-dir"
+
+// maxPipePathLen is the longest pathname an AF_UNIX address can carry:
+// sockaddr_un.sun_path is 108 bytes on Linux and the path is NUL-terminated.
+// The check MUST live here, not at the Envoy boundary: an over-long Pipe
+// address makes Envoy reject the cluster and NACK the whole CDS update, which
+// would take down every cluster in the node's snapshot over one bad
+// annotation. Resolution failing instead degrades that single pod to TCP.
+//
+// The fixed prefix (pods dir + 36-byte UID + volumes/kubernetes.io~empty-dir/)
+// eats ~91 of those bytes with the default dir, so "<volume>/<file>" has a
+// budget of roughly 16 characters — documented in docs/workload-requirements.md.
+const maxPipePathLen = 107
 
 // Resolve maps an endpoint.aether.io/uds-socket annotation value plus the
 // pod's Kubernetes UID onto the socket's host path under kubeletPodsDir.
@@ -44,7 +60,11 @@ func Resolve(kubeletPodsDir, podUID, annotation string) (string, error) {
 	if err := validateSegment("socket file", file); err != nil {
 		return "", err
 	}
-	return filepath.Join(kubeletPodsDir, podUID, "volumes", emptyDirSegment, volume, file), nil
+	path := filepath.Join(kubeletPodsDir, podUID, "volumes", emptyDirSegment, volume, file)
+	if len(path) > maxPipePathLen {
+		return "", fmt.Errorf("socket path %q is %d bytes, over the %d-byte AF_UNIX limit: shorten the volume and/or socket file name", path, len(path), maxPipePathLen)
+	}
+	return path, nil
 }
 
 // validateSegment rejects anything that is not a single, clean, relative path

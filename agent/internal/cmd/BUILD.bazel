@@ -36,6 +36,7 @@ go_library(
         "//common/manager",
         "//common/must",
         "//common/spire",
+        "//common/udspath",
         "//registry",
         "//registry/registrarclient",
         "@com_github_spf13_cobra//:cobra",

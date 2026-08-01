@@ -96,6 +96,14 @@ spec:
             - "--authz-sidecar-failure-mode-allow"
             {{- end }}
             {{- end }}
+            {{- if not .Values.proxy.udsWorkloads.enabled }}
+            # UDS delivery off (proposal 034): with no kubelet pod-volumes mount on
+            # the proxy, the agent must not render Pipe addresses it could never
+            # reach. Empty disables resolution — annotated pods fall back to TCP.
+            # When enabled the flag is omitted: the binary default is the same
+            # /var/lib/kubelet/pods the proxy DaemonSet mounts.
+            - "--kubelet-pods-dir="
+            {{- end }}
             {{- if .Values.agent.eastWestWaypoint }}
             - "--east-west-waypoint"
             {{- end }}
