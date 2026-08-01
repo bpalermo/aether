@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -12,6 +13,37 @@ import (
 // attrEventType labels endpoint-change events by their type (ADDED, UPDATED,
 // REMOVED, FULL_SNAPSHOT). Bounded cardinality: one series per event type.
 const attrEventType = attribute.Key("aether.event.type")
+
+// eventTypeOptions holds the pre-built attribute set for every declared event
+// type, indexed by the enum value. The broadcast fan-out is O(events ×
+// watchers), so building metric.WithAttributes there would allocate on the
+// hottest path in the registrar. Derived from the generated enum table so a new
+// proto value is covered without touching this file.
+var eventTypeOptions = buildEventTypeOptions()
+
+func buildEventTypeOptions() []metric.MeasurementOption {
+	maxValue := int32(0)
+	for v := range registrarv1.WatchEndpointsResponse_EventType_name {
+		if v > maxValue {
+			maxValue = v
+		}
+	}
+	opts := make([]metric.MeasurementOption, maxValue+1)
+	for v, name := range registrarv1.WatchEndpointsResponse_EventType_name {
+		opts[v] = metric.WithAttributes(attrEventType.String(name))
+	}
+	return opts
+}
+
+// eventTypeOption returns the cached attribute set for an event type, falling
+// back to building one for a value outside the generated table (a proto enum
+// carries unknown values through unchanged).
+func eventTypeOption(t registrarv1.WatchEndpointsResponse_EventType) metric.MeasurementOption {
+	if t >= 0 && int(t) < len(eventTypeOptions) && eventTypeOptions[t] != nil {
+		return eventTypeOptions[t]
+	}
+	return metric.WithAttributes(attrEventType.String(t.String()))
+}
 
 // Metrics holds the registrar server's OTel instruments. All methods are
 // nil-receiver-safe so the server runs unchanged when telemetry is disabled
@@ -115,11 +147,16 @@ func (m *Metrics) filteredWatchers(ctx context.Context, n int) {
 	m.filteredSubs.Record(ctx, int64(n))
 }
 
-func (m *Metrics) eventBroadcast(ctx context.Context, eventType string) {
+// eventsBroadcast records a whole fan-out batch: one Add per event type rather
+// than one per enqueued event, so the totals are unchanged while the counter
+// work leaves the per-watcher loop.
+func (m *Metrics) eventsBroadcast(ctx context.Context, counts map[registrarv1.WatchEndpointsResponse_EventType]int64) {
 	if m == nil {
 		return
 	}
-	m.broadcastEvents.Add(ctx, 1, metric.WithAttributes(attrEventType.String(eventType)))
+	for eventType, n := range counts {
+		m.broadcastEvents.Add(ctx, n, eventTypeOption(eventType))
+	}
 }
 
 func (m *Metrics) eventDropped(ctx context.Context, eventType string) {

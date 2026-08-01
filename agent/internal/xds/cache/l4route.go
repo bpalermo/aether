@@ -149,12 +149,14 @@ func (c *SnapshotCache) regenerateAllUDPCaptureListeners() {
 // Called when TCPRoute or TLSRoute rules change: the per-ClusterIP floor chains
 // are embedded in the per-pod capture listener, so they must be regenerated.
 func (c *SnapshotCache) regenerateAllCaptureListeners() {
+	// Node-global union, built once for the whole loop (see extensionHTTPFilters).
+	shared := c.extensionHTTPFilters()
 	c.listenerMu.Lock()
 	for netns, entry := range c.listeners {
 		if entry.cniPod == nil {
 			continue
 		}
-		newCapture, err := c.generateCaptureListener(entry.cniPod)
+		newCapture, err := c.generateCaptureListener(entry.cniPod, c.podExtensionHTTPFilters(entry.cniPod, shared))
 		if err != nil {
 			c.log.Error("failed to regenerate capture listener on L4-route change",
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)

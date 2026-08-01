@@ -32,26 +32,27 @@ type snapshotEntry struct {
 type Snapshot struct {
 	mu      sync.RWMutex
 	entries map[serviceKey]*snapshotEntry
-	version atomic.Uint64
+	// serviceCounts is the per-service endpoint count derived from entries,
+	// maintained incrementally so the 0<->1 catalog transitions cost a map
+	// lookup instead of a full scan per event. INVARIANT: a service is present
+	// here iff it holds at least one entry (a count never rests at 0), so the
+	// key set is exactly the service catalog. Guarded by mu.
+	serviceCounts map[string]int
+	version       atomic.Uint64
 }
 
 // NewSnapshot creates an empty Snapshot starting at version 0.
 func NewSnapshot() *Snapshot {
 	return &Snapshot{
-		entries: make(map[serviceKey]*snapshotEntry),
+		entries:       make(map[serviceKey]*snapshotEntry),
+		serviceCounts: make(map[string]int),
 	}
 }
 
 // serviceCountLocked returns the number of endpoints stored for a service
 // across protocols. Caller must hold mu (read or write).
 func (s *Snapshot) serviceCountLocked(serviceName string) int {
-	n := 0
-	for key := range s.entries {
-		if key.ServiceName == serviceName {
-			n++
-		}
-	}
-	return n
+	return s.serviceCounts[serviceName]
 }
 
 // serviceTransition builds a catalog event (SERVICE_ADDED/SERVICE_REMOVED).
@@ -65,12 +66,8 @@ func (s *Snapshot) ServiceNames() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	set := make(map[string]struct{})
-	for key := range s.entries {
-		set[key.ServiceName] = struct{}{}
-	}
-	names := make([]string, 0, len(set))
-	for name := range set {
+	names := make([]string, 0, len(s.serviceCounts))
+	for name := range s.serviceCounts {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -185,16 +182,22 @@ func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol]
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	oldServices := make(map[string]struct{})
-	for key := range s.entries {
-		oldServices[key.ServiceName] = struct{}{}
+	// The count map's key set is the service catalog (see the invariant on
+	// serviceCounts), so the old catalog is read straight off it.
+	oldServices := make(map[string]struct{}, len(s.serviceCounts))
+	for name := range s.serviceCounts {
+		oldServices[name] = struct{}{}
 	}
 
 	s.entries = make(map[serviceKey]*snapshotEntry)
+	s.serviceCounts = make(map[string]int)
 	for svcName, protocols := range endpoints {
 		for protocol, eps := range protocols {
 			for _, ep := range eps {
 				key := serviceKey{ServiceName: svcName, Protocol: protocol, IP: ep.GetIp()}
+				if _, dup := s.entries[key]; !dup {
+					s.serviceCounts[svcName]++
+				}
 				s.entries[key] = &snapshotEntry{
 					ServiceName: svcName,
 					Protocol:    protocol,
@@ -204,9 +207,9 @@ func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol]
 		}
 	}
 
-	newServices := make(map[string]struct{})
-	for key := range s.entries {
-		newServices[key.ServiceName] = struct{}{}
+	newServices := make(map[string]struct{}, len(s.serviceCounts))
+	for name := range s.serviceCounts {
+		newServices[name] = struct{}{}
 	}
 
 	return s.nextVersion(), computeTransitions(oldServices, newServices)
@@ -262,10 +265,16 @@ func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) (string, 
 		switch event.GetType() {
 		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED, registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_UPDATED:
 			before := s.serviceCountLocked(key.ServiceName)
+			// An UPDATED event replacing an existing entry must not raise the
+			// count: only a key that was absent adds an endpoint.
+			_, existed := s.entries[key]
 			s.entries[key] = &snapshotEntry{
 				ServiceName: event.GetServiceName(),
 				Protocol:    event.GetProtocol(),
 				Endpoint:    event.GetEndpoint(),
+			}
+			if !existed {
+				s.serviceCounts[key.ServiceName]++
 			}
 			if before == 0 {
 				transitions = append(transitions, serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, key.ServiceName))
@@ -273,7 +282,12 @@ func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) (string, 
 		case registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED:
 			if _, existed := s.entries[key]; existed {
 				delete(s.entries, key)
-				if s.serviceCountLocked(key.ServiceName) == 0 {
+				if n := s.serviceCounts[key.ServiceName] - 1; n > 0 {
+					s.serviceCounts[key.ServiceName] = n
+				} else {
+					// Never leave a zero resting in the map: its key set is the
+					// service catalog.
+					delete(s.serviceCounts, key.ServiceName)
 					transitions = append(transitions, serviceTransition(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, key.ServiceName))
 				}
 			}
@@ -285,14 +299,29 @@ func (s *Snapshot) Apply(events []*registrarv1.WatchEndpointsResponse) (string, 
 
 // FullSnapshotEvents returns the current contents of the snapshot as a slice of
 // FULL_SNAPSHOT events. This is used to send the initial state to a new watcher.
-func (s *Snapshot) FullSnapshotEvents() ([]*registrarv1.WatchEndpointsResponse, string) {
+// A non-nil filter scopes the result to those service names (a nil filter is
+// the unfiltered, cluster-wide snapshot): a demand-scoped watcher discards
+// everything outside its filter anyway, so the out-of-scope events are skipped
+// before their protos are ever built.
+func (s *Snapshot) FullSnapshotEvents(filter map[string]struct{}) ([]*registrarv1.WatchEndpointsResponse, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	events := make([]*registrarv1.WatchEndpointsResponse, 0, len(s.entries))
+	// A filtered watcher keeps at most its filter's services; sizing on the
+	// whole snapshot would reserve the very memory the filter exists to avoid.
+	capacity := len(s.entries)
+	if filter != nil {
+		capacity = min(capacity, len(filter))
+	}
+	events := make([]*registrarv1.WatchEndpointsResponse, 0, capacity)
 	version := s.Version()
 
 	for _, entry := range s.entries {
+		if filter != nil {
+			if _, inScope := filter[entry.ServiceName]; !inScope {
+				continue
+			}
+		}
 		events = append(events, &registrarv1.WatchEndpointsResponse{
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT,
 			ServiceName: entry.ServiceName,

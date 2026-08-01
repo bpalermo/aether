@@ -50,7 +50,13 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 
 // generateCaptureListener builds a pod's transparent-capture listener, or returns
 // nil when capture is disabled (so the listenerEntry carries no capture resource).
-func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Resource, error) {
+//
+// extensionFilters is the pod's escape-hatch HCM chain (proposal 025): the node-
+// global union from extensionHTTPFilters, per-pod-adjusted by
+// podExtensionHTTPFilters. It is passed in rather than recomputed here because
+// the union is node-global and every caller in a per-pod loop would otherwise
+// rebuild it once (twice, on the outbound+capture path) per pod.
+func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, extensionFilters []*http_connection_managerv3.HttpFilter) (types.Resource, error) {
 	if !c.captureEnabled {
 		return nil, nil
 	}
@@ -72,13 +78,6 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod) (types.Res
 		}
 	}
 	c.captureMu.RUnlock()
-
-	// Escape-hatch extension filters (proposal 025): the HCM must carry every
-	// allow-listed filter any in-scope route references, default-disabled, so the
-	// route's typed_per_filter_config can re-enable it (per-route config only
-	// overrides a chain filter, never adds one). Union over all GammaRoutes; disabled
-	// entries are inert, so the (broader-than-per-pod) union is harmless.
-	extensionFilters := c.podExtensionHTTPFilters(cniPod)
 
 	l, err := proxy.GenerateCaptureListener(cniPod, meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
@@ -233,12 +232,14 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 
 	// Per-pod capture listeners embed TCP floor chains; regenerate all of them.
 	if c.captureEnabled {
+		// Node-global union, built once for the whole loop (see extensionHTTPFilters).
+		shared := c.extensionHTTPFilters()
 		c.listenerMu.Lock()
 		for netns, entry := range c.listeners {
 			if entry.cniPod == nil {
 				continue
 			}
-			newCapture, err := c.generateCaptureListener(entry.cniPod)
+			newCapture, err := c.generateCaptureListener(entry.cniPod, c.podExtensionHTTPFilters(entry.cniPod, shared))
 			if err != nil {
 				c.log.Error("failed to regenerate capture listener on TCP-services change",
 					"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
@@ -457,7 +458,8 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 // <svc>.<meshDomain> cluster. Scoped to the dependency set so cap_http only references
 // clusters the scoped snapshot carries; unknown authorities hit the 404 default.
 func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
-	deps := c.DependencySet()
+	// Read-only membership tests only, so take the shared memo rather than a copy.
+	deps := c.dependencySetShared()
 	// GAMMA (HTTPRoute/GRPCRoute) rules enrich the captured path too — capture is the
 	// default client path (mesh-DNS), so the same L7 vocabulary the outbound listener
 	// applies must apply here; no rules = passthrough to the service cluster. The
@@ -831,6 +833,11 @@ func applyChainFilter(vh *routev3.VirtualHost, filters map[string]proxy.Extensio
 // Shared by the capture AND outbound HTTP listener builds: typed_per_filter_config —
 // per-route or vhost-level — can only re-enable a filter already in the chain, and
 // both route tables carry GAMMA/chain config, so both HCMs need the union.
+//
+// The result is node-global, so a caller looping over pods computes it ONCE and
+// threads it through podExtensionHTTPFilters. The returned slice is shared by
+// every such pod and must be treated as immutable — appending to it would land
+// one pod's entry in another's chain.
 func (c *SnapshotCache) extensionHTTPFilters() []*http_connection_managerv3.HttpFilter {
 	var allRules []proxy.GammaRoute
 	for _, rules := range c.serviceRoutesSnapshot() {
@@ -875,15 +882,17 @@ func (c *SnapshotCache) SetAuthzSidecar(timeout time.Duration, failureModeAllow 
 }
 
 // podExtensionHTTPFilters returns the extension union for one pod's EGRESS chains:
-// the shared union plus, when the authz sidecar is enabled, a per-pod set_metadata
-// entry (PREPENDED — it must run before ext_authz) carrying the calling workload's
-// identity in aether.source. Egress-only: the inbound chains take the shared union
-// (caller identity there is the verified XFCC, and stamping the destination pod as
-// "source" would mislead policies).
-func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod) []*http_connection_managerv3.HttpFilter {
-	union := c.extensionHTTPFilters()
-	if c.authzSidecar && proxy.HasExtAuthz(union) {
-		union = append([]*http_connection_managerv3.HttpFilter{proxy.SourceMetadataHTTPFilter(cniPod, c.trustDomain)}, union...)
+// the shared union (from extensionHTTPFilters) plus, when the authz sidecar is
+// enabled, a per-pod set_metadata entry (PREPENDED — it must run before ext_authz)
+// carrying the calling workload's identity in aether.source. Egress-only: the
+// inbound chains take the shared union (caller identity there is the verified XFCC,
+// and stamping the destination pod as "source" would mislead policies).
+//
+// shared is never mutated: the prepend allocates a fresh slice, so the caller's
+// node-global union stays valid for the next pod.
+func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod, shared []*http_connection_managerv3.HttpFilter) []*http_connection_managerv3.HttpFilter {
+	if c.authzSidecar && proxy.HasExtAuthz(shared) {
+		return append([]*http_connection_managerv3.HttpFilter{proxy.SourceMetadataHTTPFilter(cniPod, c.trustDomain)}, shared...)
 	}
-	return union
+	return shared
 }
