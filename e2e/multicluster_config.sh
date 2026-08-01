@@ -31,7 +31,7 @@ ETCD_IMAGE="${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}"
 KIND_NET="kind"
 REGION="local"
 NS="aether-system"
-GWAPI_VERSION="v1.5.1"
+GWAPI_VERSION="v1.6.1"
 MCS_VERSION="v0.5.0"
 IMAGES=(agent mesh-dns cni-install registrar controller)
 
