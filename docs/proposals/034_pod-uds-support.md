@@ -1,6 +1,7 @@
 # Proposal 034: UDS Support for Pods
 
-**Status:** Draft — Phase 1 (inbound) not started
+**Status:** Phases 1 + 1b merged (#616/#617/#618); kind e2e in CI, talos
+validation and Phase 2 (outbound) pending
 **Author:** Bruno Palermo
 **Date:** 2026-06-11, revised 2026-08-01 against current main
 **History:** originally numbered 002; renumbered (002 is taken by the merged
@@ -337,14 +338,15 @@ Apps then call `unix:///<in-pod-volume-mount>/<socket-file>` with the same
 
 ## Implementation Plan (PRs)
 
-| PR | Scope | Contents |
-|----|-------|----------|
-| 1 | shared plumbing | `CNIPod.uid = 11` + CNI-server population + storage persistence; annotation constants; `udspath` resolver with traversal-rejecting validation + unit tests |
-| 2 | Phase 1 | pipe variants of `app_<pod>_<port>`/`health_<pod>` clusters; per-pod selection in `GenerateListenersFromRegistryPod`; proxy DS chart mount + `proxy.udsWorkloads.enabled` + agent flag + Chart.yaml bump; `workload-requirements.md` section |
-| 2b | Phase 1b | `EndpointPolicy` proto + CRD + admission webhook; CRD-gated agent reconciler; annotation-over-CR precedence in the cache; chart RBAC/webhook rules + Chart.yaml bumps |
-| 3 | Phase 1 e2e | UDS-serving test workload (small Go HTTP server on a socket) + talos-main validation: join, traffic (incl. name-based path and cross-node), delegated-liveness promotion, rolling restart, agent restart (storage replay with persisted UID, API server unreachable) |
-| 4 | Phase 2 spike | checklist above on talos-main |
-| 5 | Phase 2 | `outbound_uds_<pod>` listener + `GenerateOutboundHTTPListener` address parameterization; docs; talos e2e with a `unix://` gRPC client |
+| PR | Scope | Status | Contents |
+|----|-------|--------|----------|
+| 1 | shared plumbing | merged (#616) | `CNIPod.uid = 11` + CNI-server population + storage persistence; annotation constants; `udspath` resolver with traversal-rejecting validation + unit tests |
+| 2 | Phase 1 | merged (#617) | pipe variants of `app_<pod>_<port>`/`health_<pod>` clusters; per-pod selection in `GenerateListenersFromRegistryPod`; proxy DS chart mount + `proxy.udsWorkloads.enabled` + agent flag + Chart.yaml bump; `workload-requirements.md` section |
+| 2b | Phase 1b | merged (#618) | `EndpointPolicy` proto + CRD + admission webhook; CRD-gated agent reconciler; annotation-over-CR precedence in the cache; chart RBAC/webhook rules + Chart.yaml bumps |
+| 3a | Phase 1 e2e — CI (kind) | this change | UDS-serving test workload (`e2e/udsecho`, a Go HTTP server that binds only a socket and no TCP port, shipped in the nightly `aether-images` artifact) + the `uds` job in `.github/workflows/e2e.yaml` running `e2e/uds.sh`: one kind cluster, SPIRE off, asserting the annotation path, the `EndpointPolicy` path, annotation-over-CR precedence, admission rejection (over-budget socket, non-Service target), and drift — a policy naming a volume the pods don't mount unpromotes only its own service (no CDS NACK) and recovers on delete |
+| 3b | Phase 1 e2e — talos | pending | talos-main validation of what a single-node kind cluster cannot show: cross-node traffic, rolling restart, agent restart (storage replay with the persisted UID, API server unreachable), and the before/after latency capture |
+| 4 | Phase 2 spike | pending | checklist above on talos-main |
+| 5 | Phase 2 | pending | `outbound_uds_<pod>` listener + `GenerateOutboundHTTPListener` address parameterization; docs; talos e2e with a `unix://` gRPC client |
 
 ## Risks / Open Questions
 
