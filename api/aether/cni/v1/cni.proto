@@ -45,4 +45,10 @@ message CNIPod {
   // liveness loop must never re-register it. Local xDS resources stay until the
   // CNI DEL performs final teardown.
   bool terminating = 10;
+
+  // uid is the Kubernetes pod UID, fetched from the API server on CNI ADD and
+  // persisted so listener regeneration from storage can resolve kubelet
+  // pod-volume paths (proposal 034, UDS delivery) without the API server.
+  // Empty on records written before the field existed.
+  string uid = 11;
 }
