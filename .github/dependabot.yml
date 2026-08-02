@@ -1,0 +1,21 @@
+# The website pip lock (website/requirements_lock.txt) is GENERATED wholesale
+# from website/requirements.in via `uv pip compile --universal --generate-hashes`
+# (command recorded in that file). Piecemeal pin edits break hash/constraint
+# consistency — Dependabot's first attempt (#623) bumped a transitive pin past
+# mkdocs-material's own `~=10.2` constraint, producing an uninstallable lock.
+# Dependency bumps happen by editing requirements.in and regenerating.
+#
+# Dependabot PRs also run without repo secrets, so the BuildBuddy-backed CI can
+# never pass on them: every such PR fails the required gate on UNAUTHENTICATED.
+#
+# Security visibility is unaffected: alerts still appear under Security ->
+# Dependabot alerts; they just don't open doomed PRs.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /website
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "*"
