@@ -60,16 +60,80 @@ serverFiles:
       # contents of mesh-dns-alerts.yml
 ```
 
-Then `helm upgrade` the Prometheus release. Verify with:
+`prometheus.yml`'s `rule_files` **already** lists `/etc/config/alerting_rules.yml` — the
+wiring exists, the file was just empty — so populating that key is the only change needed
+to make the rules evaluate.
+
+Do **not** `helm upgrade` by hand: those values are reconciled by Flux (see below).
+
+## Alert delivery (Alertmanager -> Slack + GitHub issue)
+
+**This file is the source of truth for the rules; it is not where they are deployed
+from.** talos-main is GitOps-managed by Flux, so nothing here is applied by hand — the
+rules and the delivery path both live in
+[`bpalermo/k8s-talos-main`](https://github.com/bpalermo/k8s-talos-main):
+
+| what | where |
+|---|---|
+| alert rule groups | `clusters/talos-main/prometheus/values.yaml` → `serverFiles.alerting_rules.yml` |
+| Alertmanager routing + `github-slack` receiver | same file → `alertmanager.config` |
+| Slack webhook URL | SOPS Secret `alertmanager-slack` (ns `prometheus`), mounted as a **file** via `extraSecretMounts` → `global.slack_api_url_file` (Alertmanager cannot interpolate env vars, and `alertmanager.config` renders into a plaintext ConfigMap) |
+| GitHub receiver Deployment | `clusters/talos-main/alertmanager-github-receiver/` |
+| GitHub PAT | SOPS-encrypted `secret.sops.yaml` in that dir (AWS KMS + PGP) |
+
+One receiver, two legs. **Slack (`#alerts`) is the pager**: GitHub issues created with
+your own PAT are self-authored, and GitHub does not notify you about your own actions —
+issues alone reach nobody. **The GitHub issue is the durable record**: a firing alert
+opens an issue on this repo labelled `alert`, and closes it on resolve. Issues are keyed
+on `GroupKey`, and `group_by: [alertname]` makes that stable — so one issue per
+condition listing every firing node, and a flapping alert **reopens** its issue rather
+than opening a new one.
+
+Things that are easy to get wrong, already handled there:
+
+- **There is no `Watchdog` rule, on purpose.** The stock always-firing dead-man's switch
+  was removed together with its `→ "null"` route: nothing *outside* the cluster consumed
+  the heartbeat, so it proved nothing and would file an immortal issue if it ever leaked
+  to a real receiver. (If you re-introduce an always-firing rule, remove rule before
+  route on teardown — the reverse ordering once briefly filed one.) A real dead-man's
+  switch needs an external sink and is still an open item.
+- **`measurementlab/alertmanager-github-receiver` cannot run on talos-main.** It is the
+  receiver everyone cites, but it is published **amd64-only** (neither `latest` nor
+  `v0.11` is a multi-arch index) while every talos-main node is **arm64**. We use
+  `ghcr.io/pfnet-research/alertmanager-to-github`, which ships a genuine multi-arch
+  index, pinned by digest.
+
+Verify what is actually loaded:
 
 ```bash
 kubectl get cm prometheus-server -n prometheus \
   -o go-template='{{index .data "alerting_rules.yml"}}' | head
 ```
 
-Rules appear under **Alerts** in the Prometheus UI once loaded.
+Rules appear under **Alerts** in the Prometheus UI, and `ALERTS{alertstate="firing"}`
+becomes queryable via the Grafana Prometheus datasource.
 
-> **Notification delivery.** Alertmanager is deployed on `talos-main` and routes firing
-> alerts to Slack (`#alerts`) plus auto-closing GitHub issues on `bpalermo/aether`; the
-> routing config lives with the Prometheus HelmRelease in the `bpalermo/k8s-talos-main`
-> GitOps repo and is documented there, not here.
+### Do the collector bump BEFORE enabling these
+
+Prometheus here is **OTLP-receive-only** (all scrape configs disabled,
+`web.enable-otlp-receiver`), so series arrive by push. Under memory pressure the
+otel-collector **sheds gauge exports** -- during the 2026-07-25/26 soak one node
+vanished from `aether_mesh_dns_records` and `snapshot_age_seconds` for a stretch while
+its resolver was provably healthy.
+
+Four of the seven rules key on exactly those gauges (`MeshDNSNoRecords`,
+`MeshDNSNoUpstreams`, `MeshDNSWatcherInactive`, `MeshDNSMetricsAbsent`). With a shedding
+collector a healthy node whose export was dropped is indistinguishable from a broken
+one, and `absent()` fires on the telemetry gap rather than a resolver failure. Enabling
+these before the collector has headroom trains everyone to ignore them within a week.
+
+`MeshDNSSnapshotStale` and `MeshDNSResolutionFailing` are safer -- the latter is
+counter-based, and counters self-heal across a refused export.
+
+### Prove each rule fires before trusting it
+
+Break something deliberately and confirm the expected rule -- and only that rule --
+fires. `MeshDNSResolutionFailing` most of all: its exclusion of `http_error` and
+inclusion of generic `timeout` is reasoned (a hung resolver surfaces as a context
+deadline, while `http_error` is the cross-node backend path) but has never been
+observed firing.
