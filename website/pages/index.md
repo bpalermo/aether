@@ -11,7 +11,7 @@ Written in Go. Routed with the Gateway API. Each node receives only the
 configuration its own pods actually use.
 { .aether-subline }
 
-[Get started →](https://github.com/bpalermo/aether/blob/main/docs/getting-started.md){ .md-button .aether-button }
+[Get started →](docs/getting-started.md){ .md-button .aether-button }
 [Architecture](architecture.md){ .md-button .aether-button }
 
 Apache-2.0 · pre-1.0 · images and charts on GHCR
@@ -50,7 +50,7 @@ Each node receives only the clusters, registry watches, and endpoints its local
 pods actually depend on, declared with the `config.aether.io/upstreams`
 annotation, with on-demand CDS for the cold path. Config size tracks the node's
 footprint, not the size of the mesh.
-[Proposal 004 →](https://github.com/bpalermo/aether/blob/main/docs/proposals/004_demand-scoped-distribution.md)
+[Proposal 004 →](proposals/004-demand-scoped-distribution.md)
 
 </div>
 
@@ -62,7 +62,7 @@ The agent supervises Envoy through a cross-pod hot restart with two-phase
 connection draining. Zero dropped requests across eight-hour soak tests driving
 30-plus rollouts of the data plane, measured by an external prober rather than
 the mesh's own telemetry.
-[Proposal 001 →](https://github.com/bpalermo/aether/blob/main/docs/proposals/001_proxy-hot-restart.md)
+[Proposal 001 →](proposals/001-proxy-hot-restart.md)
 
 </div>
 
@@ -74,12 +74,20 @@ No bespoke routing CRDs. East-west traffic uses GAMMA — `HTTPRoute` and
 `GRPCRoute` parented to a Service — and north-south uses the same API against
 the edge gateway. The GATEWAY-HTTP profile is fully conformant, Core 33/33 and
 Extended 10/10, and conformance is gated in CI.
-[Proposal 018 →](https://github.com/bpalermo/aether/blob/main/docs/proposals/018_gateway-api-gamma.md) ·
-[Proposal 024 →](https://github.com/bpalermo/aether/blob/main/docs/proposals/024_conformance-ci.md)
+[Proposal 018 →](proposals/018-gateway-api-gamma.md) ·
+[Proposal 024 →](proposals/024-conformance-ci.md)
 
 </div>
 
 </div>
+
+## The design record
+
+Every decision above was argued in writing before it was built, and the argument
+is published as it was written — status, dead ends and all. These are the five
+most recent.
+
+<!-- aether:recent-proposals -->
 
 ## Install
 
@@ -109,7 +117,7 @@ helm upgrade --install aether \
 Aether is pre-1.0 and built by one person. It is soak-tested on a real cluster
 and gated on Gateway API conformance in CI, but it has no support commitment.
 Read the
-[proposals](https://github.com/bpalermo/aether/tree/main/docs/proposals) and the
+[proposals](proposals/index.md) and the
 [conformance baselines](https://github.com/bpalermo/aether/tree/main/docs/conformance)
 before you run it.
 

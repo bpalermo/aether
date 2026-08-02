@@ -83,6 +83,12 @@ markdown_extensions:
   - toc:
       permalink: true
       permalink_title: Link to this section
+      # Every page on this site is repository markdown, written to be read on
+      # GitHub first, so its in-page links use GitHub's heading anchors. This
+      # slugifier is the GitHub one: python-markdown's default collapses runs of
+      # whitespace into a single hyphen, which silently breaks a link like
+      # `#tensions--non-goals` (proposal 025) that `strict` would then reject.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
   - pymdownx.highlight:
       anchor_linenums: false
       line_spans: __span
@@ -100,11 +106,29 @@ markdown_extensions:
 extra_css:
   - assets/stylesheets/extra.css
 
+extra_javascript:
+  # Filters the generated proposals index in the page. Vanilla, same-origin, and
+  # inert on every other page.
+  - assets/javascripts/proposals.js
+
 extra:
   generator: false
 
+# Every entry below is a page hooks.py generates from a repository file at build
+# time; there is no committed copy of any of them. The Proposals section is not
+# here at all — hooks.py appends it in on_config from docs/proposals/*.md, so a
+# new proposal file publishes itself.
 nav:
   - Home: index.md
-  # Generated at build time from the repository README by hooks.py — there is no
-  # committed copy.
   - Architecture: architecture.md
+  - Docs:
+      - Getting started: docs/getting-started.md
+      - Workload requirements: docs/workloads.md
+      - Configuration: docs/configuration.md
+      - Charts: docs/charts.md
+      - Observability: docs/observability.md
+      - Registry backends: docs/registry.md
+  - Development:
+      - Runbook: dev/runbook.md
+      - Custom proxy: dev/proxy.md
+      - Repository guide: dev/agents.md

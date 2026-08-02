@@ -363,3 +363,280 @@
   margin: 1.2rem 0;
   padding: 1rem 0.6rem;
 }
+
+/* --------------------------------------------------------------------------
+ * Tables
+ *
+ * docs/configuration.md is a reference page: several of its tables are far
+ * wider than a phone. A wide table scrolls inside its own container and the
+ * page never scrolls sideways — at 375px or at any other width.
+ *
+ * Two containers can be that scroller. Material styles the table itself as an
+ * inline-block with `overflow: auto`, and its JavaScript additionally wraps
+ * each one in .md-typeset__scrollwrap once the page is live. Both are pinned
+ * here, so the guarantee survives a theme upgrade and does not depend on
+ * JavaScript having run.
+ * -------------------------------------------------------------------------- */
+
+.md-typeset__scrollwrap,
+.md-typeset table:not([class]) {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* Belt and braces for the page itself: no descendant may widen the column. */
+.md-content__inner,
+.md-typeset {
+  min-width: 0;
+}
+
+/* A long identifier in a cell wraps rather than setting the table's width. */
+.md-typeset table:not([class]) td,
+.md-typeset table:not([class]) th {
+  overflow-wrap: anywhere;
+}
+
+.md-typeset table:not([class]) code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+@media screen and (max-width: 44.9375em) {
+  .md-typeset table:not([class]) {
+    font-size: 0.6rem;
+  }
+
+  /* Material reserves 5rem per header cell; on a phone that is most of the
+     viewport spent on one column of a six-column table. */
+  .md-typeset table:not([class]) th {
+    min-width: 3.4rem;
+  }
+
+  .md-typeset table:not([class]) td,
+  .md-typeset table:not([class]) th {
+    padding: 0.55em 0.7em;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Status dots
+ *
+ * Five buckets, shown beside — never instead of — the status a proposal states
+ * in its own words. Colour is the only thing the dot carries, so it also has a
+ * title attribute and the label is written out on the filter chips.
+ * -------------------------------------------------------------------------- */
+
+.md-typeset .aether-dot {
+  background: var(--aether-muted);
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  height: 0.42rem;
+  margin-right: 0.34em;
+  vertical-align: 0.04em;
+  width: 0.42rem;
+}
+
+.md-typeset .aether-dot--implemented {
+  background: #7fd18b;
+}
+
+.md-typeset .aether-dot--accepted,
+.md-typeset .aether-dot--proposed {
+  background: #e5b06b;
+}
+
+.md-typeset .aether-dot--design {
+  background: #8fa3bf;
+}
+
+.md-typeset .aether-dot--superseded {
+  background: #6b7686;
+}
+
+/* --------------------------------------------------------------------------
+ * Proposals index
+ * -------------------------------------------------------------------------- */
+
+.md-typeset .aether-filter {
+  border-bottom: 1px solid var(--aether-border);
+  border-top: 1px solid var(--aether-border);
+  margin: 1.6rem 0 1.2rem;
+  padding: 0.9rem 0;
+}
+
+/* Controls that do nothing without JavaScript are not shown; the table below
+   them is complete either way. */
+.md-typeset .aether-filter:not(.is-live) {
+  display: none;
+}
+
+.md-typeset .aether-filter__q {
+  background: var(--aether-surface);
+  border: 1px solid var(--aether-border);
+  border-radius: 2px;
+  color: var(--md-default-fg-color);
+  font-family: inherit;
+  font-size: 0.72rem;
+  padding: 0.44em 0.7em;
+  width: 100%;
+}
+
+.md-typeset .aether-filter__q:focus {
+  border-color: var(--md-accent-fg-color);
+  outline: none;
+}
+
+.md-typeset .aether-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.md-typeset .aether-chip {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--aether-border);
+  border-radius: 2px;
+  color: var(--aether-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-family: inherit;
+  font-size: 0.65rem;
+  gap: 0.1rem;
+  padding: 0.3em 0.6em;
+}
+
+.md-typeset .aether-chip span:last-child {
+  color: var(--md-default-fg-color--lighter);
+  margin-left: 0.35em;
+}
+
+.md-typeset .aether-chip:hover {
+  border-color: var(--md-accent-fg-color);
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .aether-chip.is-on {
+  border-color: var(--md-accent-fg-color);
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .aether-filter__count {
+  color: var(--aether-muted);
+  font-size: 0.62rem;
+  margin: 0.6rem 0 0;
+}
+
+/* The index is a directory, not prose: it gets more width than the 46rem
+   reading column. Browsers without :has() simply keep the reading column. */
+.md-content__inner:has(.aether-proposals) {
+  max-width: 62rem;
+}
+
+/* Material shrink-wraps tables (they are inline-block); this one is the page. */
+.md-typeset .aether-proposals table:not([class]) {
+  font-size: 0.68rem;
+  width: 100%;
+}
+
+.md-typeset .aether-proposals td,
+.md-typeset .aether-proposals th {
+  padding: 0.7em 0.9em;
+  vertical-align: top;
+}
+
+/* Left to itself the browser spends the width on the longest status and wraps
+   every title to one word per line. */
+.md-typeset .aether-proposals th:nth-child(1) {
+  min-width: 0;
+  width: 3rem;
+}
+
+.md-typeset .aether-proposals th:nth-child(2) {
+  width: 32%;
+}
+
+.md-typeset .aether-proposals th:nth-child(4) {
+  min-width: 0;
+  width: 5.6rem;
+}
+
+.md-typeset .aether-proposals td:first-child {
+  font-family: var(--md-code-font);
+  white-space: nowrap;
+}
+
+.md-typeset .aether-proposals td:last-child {
+  color: var(--aether-muted);
+  font-family: var(--md-code-font);
+  white-space: nowrap;
+}
+
+.md-typeset .aether-proposals td:nth-child(3) {
+  color: var(--aether-muted);
+}
+
+/* A superseded proposal stays readable and stays in place; it just stops
+   competing with the record that replaced it. */
+.md-typeset .aether-proposals tbody tr.is-superseded,
+.md-typeset .aether-proposals tbody tr:has(.aether-dot--superseded) {
+  opacity: 0.58;
+}
+
+.md-typeset .aether-proposals tbody tr.is-superseded:hover,
+.md-typeset .aether-proposals tbody tr:has(.aether-dot--superseded):hover {
+  opacity: 1;
+}
+
+/* --------------------------------------------------------------------------
+ * Landing page — recent design records
+ * -------------------------------------------------------------------------- */
+
+.md-typeset .aether-recent {
+  border-top: 1px solid var(--aether-border);
+  margin: 1.2rem 0;
+}
+
+/* Each row is its own paragraph so mkdocs parses (and validates) the link. */
+.md-typeset .aether-recent p {
+  margin: 0;
+}
+
+.md-typeset .aether-recent__all {
+  display: inline-block;
+  font-size: 0.7rem;
+  margin-top: 0.8rem;
+}
+
+.md-typeset a.aether-recent__row {
+  align-items: baseline;
+  border-bottom: 1px solid var(--aether-border);
+  color: var(--md-default-fg-color);
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.55rem 0.1rem;
+  text-decoration: none;
+}
+
+.md-typeset a.aether-recent__row:hover {
+  color: var(--md-accent-fg-color);
+}
+
+.md-typeset .aether-recent__n {
+  color: var(--aether-muted);
+  flex: none;
+  font-family: var(--md-code-font);
+  font-size: 0.68rem;
+}
+
+.md-typeset .aether-recent__t {
+  flex: 1 1 auto;
+  font-size: 0.72rem;
+}
+
+.md-typeset .aether-recent .aether-dot {
+  margin: 0;
+}

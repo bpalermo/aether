@@ -71,14 +71,47 @@ POLYFILL_STUB = "assets/javascripts/resize-observer-polyfill.js"
 
 MERMAID_DEST = "assets/javascripts/mermaid.min.js"
 
+#: One page per section of the information architecture, plus the artefacts that
+#: are easy to lose silently. A section that stops being staged fails the build
+#: instead of quietly disappearing from the site.
 REQUIRED_FILES = (
     "index.html",
     "architecture/index.html",
+    # Docs.
+    "docs/getting-started/index.html",
+    "docs/workloads/index.html",
+    "docs/configuration/index.html",
+    "docs/charts/index.html",
+    "docs/observability/index.html",
+    "docs/registry/index.html",
+    # Development.
+    "dev/runbook/index.html",
+    "dev/proxy/index.html",
+    "dev/agents/index.html",
+    # Proposals: the generated index, one known proposal, and its short link.
+    "proposals/index.html",
+    "proposals/018-gateway-api-gamma/index.html",
+    "proposals/018/index.html",
     "CNAME",
     "robots.txt",
     "sitemap.xml",
+    "search/search_index.json",
     MERMAID_DEST,
 )
+
+#: Terms that must survive into the search index. They come from pages staged in
+#: phase 2/3, so their absence means the search plugin stopped indexing a whole
+#: section — which no link check would catch.
+REQUIRED_SEARCH_TERMS = ("uds-socket", "demand-scoped")
+
+#: Private-notebook syntax. hooks.py neutralises it into a muted parenthetical;
+#: if a literal one ever reaches the HTML, a reader sees raw notebook syntax and
+#: a link to a document that does not exist publicly.
+_WIKI_RE = re.compile(r"\[\[[^\[\]]+\]\]")
+
+#: `[[ ... ]]` is also shell. Code is quoted verbatim on purpose, so the wiki-ref
+#: check looks only at prose.
+_CODE_RE = re.compile(r"<pre\b.*?</pre>|<code\b.*?</code>", re.IGNORECASE | re.DOTALL)
 
 TEXT_SUFFIXES = {".html", ".css", ".js", ".json", ".xml", ".txt", ".svg", ""}
 
@@ -190,6 +223,53 @@ def self_host(site_dir: Path, mermaid: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def verify_proposals(site_dir: Path) -> list[str]:
+    """The proposals series is generated, so check the shape, not a fixed list.
+
+    Every proposal must have a row on the index and a working short link, and the
+    index must be the only place either is written down.
+    """
+    problems: list[str] = []
+    root = site_dir / "proposals"
+    if not root.is_dir():
+        return ["no proposals section was generated"]
+
+    published = sorted(
+        path.parent.name
+        for path in root.glob("*/index.html")
+        if re.fullmatch(r"\d{3}-.+", path.parent.name)
+    )
+    if not published:
+        return ["the proposals section contains no proposal pages"]
+
+    index = (root / "index.html").read_text(encoding="utf-8")
+    for name in published:
+        number = name[:3]
+        if f'href="{name}/"' not in index and f'href="../{name}/"' not in index:
+            problems.append(f"proposal {name} is published but has no row on /proposals/")
+        redirect = root / number / "index.html"
+        if not redirect.is_file():
+            problems.append(f"proposal {name} has no short link at /proposals/{number}/")
+        elif f"url=../{name}/" not in redirect.read_text(encoding="utf-8"):
+            problems.append(f"short link /proposals/{number}/ does not point at {name}")
+
+    if "aether-dot--" not in index:
+        problems.append("the proposals index carries no status badges")
+    return problems
+
+
+def verify_search(site_dir: Path) -> list[str]:
+    index = site_dir / "search" / "search_index.json"
+    if not index.is_file():
+        return ["no search index was generated"]
+    content = index.read_text(encoding="utf-8")
+    return [
+        f"search index does not contain {term!r} — a staged section is not being indexed"
+        for term in REQUIRED_SEARCH_TERMS
+        if term not in content
+    ]
+
+
 def verify(site_dir: Path) -> None:
     problems: list[str] = []
 
@@ -208,6 +288,11 @@ def verify(site_dir: Path) -> None:
             problems.append("landing page has no mermaid block — the architecture diagram is gone")
         if "graph TD" not in html:
             problems.append("landing page mermaid block is not the README architecture graph")
+        if "aether-recent__row" not in html:
+            problems.append("landing page lists no recent proposals — the generated block is gone")
+
+    problems += verify_proposals(site_dir)
+    problems += verify_search(site_dir)
 
     for path in iter_text_files(site_dir):
         try:
@@ -222,6 +307,9 @@ def verify(site_dir: Path) -> None:
             match = _SUBRESOURCE_RE.search(content)
             if match:
                 problems.append(f"external subresource in {relative}: {match.group(0)!r}")
+            wiki = _WIKI_RE.search(_CODE_RE.sub("", content))
+            if wiki:
+                problems.append(f"unneutralised wiki ref in {relative}: {wiki.group(0)!r}")
 
     if problems:
         raise BuildError("site verification failed:\n  - " + "\n  - ".join(problems))
