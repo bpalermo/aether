@@ -31,6 +31,7 @@ func addKnownTypes(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion, &MeshConfig{}, &MeshConfigList{})
 	s.AddKnownTypes(GroupVersion, &HTTPFilter{}, &HTTPFilterList{})
 	s.AddKnownTypes(GroupVersion, &EdgeConfig{}, &EdgeConfigList{})
+	s.AddKnownTypes(GroupVersion, &EndpointPolicy{}, &EndpointPolicyList{})
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
 }

@@ -1,0 +1,49 @@
+# Annotation delivery path: the socket is declared in the pod template, next to
+# the emptyDir it lives in (the two cannot drift). No Service object is written
+# here on purpose: the registrar's mesh-Service generator skips names an
+# existing Service owns — a hand-written one would suppress the mesh VIP and
+# break mesh-DNS resolution for this name.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: uds-echo
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uds-echo
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.annotationPath.replicas }}
+  selector:
+    matchLabels: {app: uds-echo}
+  template:
+    metadata:
+      labels:
+        app: uds-echo
+        aether.io/managed: "true"
+      annotations:
+        endpoint.aether.io/port: "8080"
+        endpoint.aether.io/uds-socket: {{ .Values.socket | quote }}
+    spec:
+      serviceAccountName: uds-echo
+      # fsGroup makes the emptyDir group-writable for the distroless nonroot
+      # user, so the app can create the socket in it.
+      securityContext: {fsGroup: 65532}
+      containers:
+        - name: app
+          image: {{ .Values.image.ref }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--socket=/{{ .Values.socket }}"
+            - "--text=served-by-uds-echo"
+          volumeMounts:
+            - name: {{ (split "/" .Values.socket)._0 }}
+              mountPath: /{{ (split "/" .Values.socket)._0 }}
+      volumes:
+        - name: {{ (split "/" .Values.socket)._0 }}
+          # medium: Memory on purpose: a tmpfs mount created after the proxy
+          # starts, exercising the HostToContainer propagation the chart's
+          # kubelet-pods mount depends on (a plain emptyDir would not).
+          emptyDir: {medium: Memory}

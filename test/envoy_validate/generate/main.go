@@ -33,6 +33,7 @@ func main() {
 	}{
 		{"node_bootstrap.json", envoy_validate.NodeBootstrapJSON},
 		{"node_cleartext_bootstrap.json", envoy_validate.NodeCleartextBootstrapJSON},
+		{"node_uds_bootstrap.json", envoy_validate.NodeUDSBootstrapJSON},
 		{"capture_bootstrap.json", envoy_validate.CaptureBootstrapJSON},
 		{"capture_route_target_bootstrap.json", envoy_validate.CaptureRouteTargetBootstrapJSON},
 		{"edge_bootstrap.json", envoy_validate.EdgeBootstrapJSON},

@@ -1,15 +1,15 @@
-# Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator.
+# Nightly e2e — conformance (GATEWAY-HTTP + MESH-HTTP), waypoint, replicator, uds.
 #
 # Consolidates the former conformance.yaml, waypoint-e2e.yaml, and
 # replicator-e2e.yaml into ONE workflow: a single bazel `build` job builds the
-# four aether images once (RBE) and ships them as a docker-save artifact; the
-# four test jobs run in PARALLEL, bazel-free (kind + kubectl/helm + the
-# artifact). This removes 3× duplicated toolchain setup + image assembly and
-# gives one nightly schedule instead of three staggered ones (parallel jobs on
-# separate runners don't contend).
+# aether images once (RBE) and ships them as a docker-save artifact; the test
+# jobs run in PARALLEL, bazel-free (kind + kubectl/helm + the artifact). This
+# removes duplicated toolchain setup + image assembly and gives one nightly
+# schedule instead of three staggered ones (parallel jobs on separate runners
+# don't contend).
 #
 # Per-job docs live with each job below; they are lifted verbatim from the
-# original workflows (proposals 024, 019, 006 — issues #507/#511). All test
+# original workflows (proposals 024, 019, 006, 034 — issues #507/#511). All test
 # jobs are hard gates; set the `soft` input to bypass for debugging. Use the
 # `only` input to run a subset from workflow_dispatch.
 #
@@ -29,7 +29,7 @@ on:
         description: "Run a single job (debugging)"
         type: choice
         default: all
-        options: [all, gateway-http, mesh-http, waypoint, replicator]
+        options: [all, gateway-http, mesh-http, waypoint, replicator, uds]
   schedule:
     # Nightly at 04:17 UTC (off the hour to avoid contention).
     - cron: "17 4 * * *"
@@ -42,8 +42,11 @@ env:
   GATEWAY_API_VERSION: v1.6.1
 
 jobs:
-  # --- The ONLY bazel job: build the four aether images once, ship as artifact.
+  # --- The ONLY bazel job: build the aether images once, ship as artifact.
   # The custom aether-proxy is a published image (pulled by kind), not built here.
+  # //e2e/udsecho is a TEST workload (a Go server that binds only a Unix socket),
+  # built here so the `uds` job stays bazel-free like its siblings; it is never
+  # pushed to a registry.
   # Wrapped in a retry: bazel repository fetches from GitHub releases (gazelle,
   # rules_multitool tools) intermittently 502 on the CDN — transient.
   build:
@@ -63,7 +66,7 @@ jobs:
           retry() { for n in 1 2 3; do "$@" && return 0; echo "attempt $n failed; retrying in 20s"; sleep 20; done; return 1; }
           for t in //agent/cmd/agent:image_load //agent/cmd/mesh-dns:image_load \
                    //cni/cmd/cni-install:image_load //registrar/cmd/registrar:image_load \
-                   //controller/cmd/controller:image_load; do
+                   //controller/cmd/controller:image_load //e2e/udsecho:image_load; do
             retry bazel run --config=ci --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} "$t"
           done
 
@@ -75,6 +78,7 @@ jobs:
             "${IMAGE_REGISTRY}/cni-install:latest" \
             "${IMAGE_REGISTRY}/registrar:latest" \
             "${IMAGE_REGISTRY}/controller:latest" \
+            "${IMAGE_REGISTRY}/udsecho:latest" \
             -o /tmp/aether-images.tar
 
       - name: Upload images artifact
@@ -509,6 +513,69 @@ jobs:
         if: always()
         run: ./e2e/multicluster_replicator.sh down || true
 
+  # --- Proposal 034 Phases 1 + 1b: UDS delivery to pods.
+  # ONE kind cluster, SPIRE off. Deploys a workload that serves only on a Unix
+  # socket in an emptyDir (//e2e/udsecho — it binds no TCP port, so every 200 is
+  # proof the node proxy dialed the pipe) and asserts both ways of declaring the
+  # socket (pod annotation, EndpointPolicy CR), annotation-over-CR precedence,
+  # webhook/CRD rejection of an unusable policy, and that a policy naming a
+  # volume the pods don't mount degrades only its own service (no CDS NACK) and
+  # recovers on delete. Harness: e2e/uds.sh. The talos half of proposal 034's
+  # PR 3 (agent restart / storage replay, cross-node) is validated separately.
+  uds:
+    needs: build
+    if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'uds'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download images artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: aether-images
+          path: /tmp
+
+      - name: Load images into docker
+        run: docker load -i /tmp/aether-images.tar
+
+      - name: Bring up the UDS environment
+        env:
+          UDS_SKIP_BUILD: "1"
+        run: ./e2e/uds.sh up
+
+      - name: Verify UDS delivery, precedence, admission and drift
+        id: verify
+        continue-on-error: ${{ github.event.inputs.soft == 'true' }}
+        run: ./e2e/uds.sh verify
+
+      - name: Collect diagnostics on failure
+        if: failure() || steps.verify.outcome == 'failure'
+        run: |
+          mkdir -p /tmp/uds-logs
+          kubectl --context kind-uds get pods -A -o wide 2>&1 | tee /tmp/uds-logs/pods.txt || true
+          kind export logs /tmp/uds-logs/kind --name uds || true
+          kubectl --context kind-uds get endpointpolicies -A -o yaml > /tmp/uds-logs/endpointpolicies.yaml 2>&1 || true
+          kubectl --context kind-uds -n aether-test get deploy,pods,svc -o wide > /tmp/uds-logs/workloads.txt 2>&1 || true
+          kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/uds-logs/agent.log 2>&1 || true
+          kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=200 > /tmp/uds-logs/proxy.log 2>&1 || true
+          kubectl --context kind-uds -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/uds-logs/mesh-dns.log 2>&1 || true
+          kubectl --context kind-uds -n aether-system logs deploy/aether-controller --all-containers --tail=200 > /tmp/uds-logs/controller.log 2>&1 || true
+          kubectl --context kind-uds -n aether-test logs -l app=uds-echo --tail=100 > /tmp/uds-logs/uds-echo.log 2>&1 || true
+
+      - name: Upload diagnostics
+        if: failure() || steps.verify.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: uds-e2e-logs
+          path: /tmp/uds-logs
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: ./e2e/uds.sh down || true
+
   # --- Auto-file when the NIGHTLY run fails.
   #
   # This suite sat red for three consecutive nights (07-23..07-25) before anyone
@@ -521,7 +588,7 @@ jobs:
   # rather than filing per night — three duplicate issues is how people learn to
   # ignore them, which is the very failure mode this exists to prevent.
   report-failure:
-    needs: [build, gateway-http, mesh-http, waypoint, replicator]
+    needs: [build, gateway-http, mesh-http, waypoint, replicator, uds]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -538,6 +605,7 @@ jobs:
             mesh-http=${{ needs.mesh-http.result }}
             waypoint=${{ needs.waypoint.result }}
             replicator=${{ needs.replicator.result }}
+            uds=${{ needs.uds.result }}
         run: |
           set -euo pipefail
           title="Nightly e2e failing"

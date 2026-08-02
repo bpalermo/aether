@@ -90,6 +90,14 @@ type SnapshotCache struct {
 	waypointEnabled    bool
 	waypointTunnelPort uint32
 
+	// kubeletPodsDir is kubelet's pod-volumes directory on the host
+	// (--kubelet-pods-dir), through which the proxy reaches a workload's Unix
+	// socket (proposal 034). Empty disables UDS delivery entirely: pods
+	// carrying endpoint.aether.io/uds-socket fall back to TCP loopback. Set
+	// once before the manager starts (SetKubeletPodsDir); read without locking
+	// on every listener build.
+	kubeletPodsDir string
+
 	// emitStatsPod enables per-pod labels (source_pod/destination_pod) on the
 	// aether_stats request counter. Off by default to bound cardinality; set
 	// once before the manager starts (SetEmitStatsPod) and read without locking
@@ -217,6 +225,12 @@ type SnapshotCache struct {
 	// inbound listeners. NOT imported cross-cluster (enforcement is co-located
 	// with the pods). Guarded by depMu.
 	serviceInboundFilters map[string]proxy.ExtensionFilter
+	// udsServicePolicies holds the service-scoped UDS delivery declarations
+	// (proposal 034 Phase 1b) keyed by "<ns>/<svc>": the "<volume>/<file>" socket
+	// a pod of that service is delivered to when it carries no uds-socket
+	// annotation of its own. Fed by the endpointpolicy reconciler; at most one
+	// per service. Guarded by depMu.
+	udsServicePolicies map[string]string
 	// edgeGeo configures the edge geoip filter (proposal 028); nil = no geoip
 	// (the x-geo-* strip is emitted regardless on edge chains). Boot-time.
 	edgeGeo            *proxy.GeoipConfig
@@ -265,6 +279,11 @@ type SnapshotCache struct {
 	depSetTTL    time.Duration
 	depSetExpiry time.Time
 	depSetValid  bool
+	// depDeclaredCount/depObservedCount are the snapshot-shape metric's two
+	// dependency counts, recorded with the depSet memo above (they are functions
+	// of the same inputs and share its validity window). Guarded by depMu.
+	depDeclaredCount int
+	depObservedCount int
 	// effRoutes/effRoutesGen/effRoutesValid memoize serviceRoutesSnapshot
 	// (issue #540): the effective (local ∪ imported) GAMMA rules with
 	// unavailable extension filters stripped. Served while depGen is unchanged
@@ -529,6 +548,14 @@ func (c *SnapshotCache) MeshDomain() string {
 func (c *SnapshotCache) SetWaypointConfig(enabled bool, tunnelPort uint32) {
 	c.waypointEnabled = enabled
 	c.waypointTunnelPort = tunnelPort
+}
+
+// SetKubeletPodsDir sets kubelet's pod-volumes directory (--kubelet-pods-dir),
+// the host bridge to a workload's Unix socket (proposal 034). An empty dir is
+// the operator's off switch: annotated pods then get TCP delivery. Must be
+// called before the manager starts; read without locking on every listener build.
+func (c *SnapshotCache) SetKubeletPodsDir(dir string) {
+	c.kubeletPodsDir = dir
 }
 
 // SetEmitStatsPod enables per-pod labels on the aether_stats request counter

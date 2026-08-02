@@ -1,7 +1,7 @@
 # Edge proxy e2e (talos-main)
 
 Validates the north-south edge gateway (proposal 003): external traffic →
-edge Service → edge Envoy → destination pod's mesh inbound (`pod_ip:15008`,
+edge Service → edge Envoy → destination pod's mesh inbound (`pod_ip:18008`,
 mTLS), with **no node proxy / DaemonSet in the path**.
 
 This is a manual runbook against a live cluster (talos-main); it is not a CI
@@ -23,7 +23,8 @@ edge:
   # Downstream TLS is optional; omit for a plain-HTTP first pass.
   # tls:
   #   enabled: true
-  #   secretName: edge-cert       # a kubernetes.io/tls Secret in the edge namespace
+  # gateway:
+  #   tlsSecretName: edge-cert    # a kubernetes.io/tls Secret in the edge namespace
 ```
 
 The edge Deployment, Service, bootstrap ConfigMap, RBAC and ClusterSPIFFEID
@@ -43,13 +44,13 @@ kubectl get gateways,httproutes -n aether-ingress
 
 ```bash
 # External entrypoint (LoadBalancer IP or NodePort).
-EDGE=$(kubectl get svc -n aether-edge aether-edge -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+EDGE=$(kubectl get svc -n aether-ingress aether-edge -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
 # Host-routed (matches HTTPRoute.spec.hostnames):
 curl -sS -H 'Host: api.example.com' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'   # 200
 
 # The internal mesh FQDN is NOT routable from the edge -> 404:
-curl -sS -H 'Host: svc-1.aether.internal' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'  # 404
+curl -sS -H 'Host: svc-1.aether-test.aether.internal' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'  # 404
 
 # Unmatched authority -> 404 (the edge serves only its exposed set):
 curl -sS -H 'Host: nope.example.com' "http://${EDGE}/" -o /dev/null -w '%{http_code}\n'   # 404
@@ -65,8 +66,8 @@ With `edge.tls.enabled`, use `https://` and the cert's SNI.
   `curl ... | jq '.headers["x-forwarded-client-cert"]'`.
 - **No node proxy in the path.** Schedule the edge on a node and confirm there is
   no agent/proxy DaemonSet pod required for the request to succeed (the edge dials
-  `pod_ip:15008` directly).
-- **Hitless rollout.** `kubectl rollout restart deploy/aether-edge -n aether-edge`
+  `pod_ip:18008` directly).
+- **Hitless rollout.** `kubectl rollout restart deploy/aether-edge -n aether-ingress`
   under a load generator → no failed requests (Service + `/aether/readyz` readiness
   gate).
 - **Live route changes.** `kubectl apply`/`delete` an HTTPRoute → the route

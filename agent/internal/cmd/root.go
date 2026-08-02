@@ -32,6 +32,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/capture"
 	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
 	"github.com/bpalermo/aether/agent/internal/configimport"
+	"github.com/bpalermo/aether/agent/internal/endpointpolicy"
 	"github.com/bpalermo/aether/agent/internal/gamma"
 	"github.com/bpalermo/aether/agent/internal/l4route"
 	"github.com/bpalermo/aether/agent/internal/meshdns"
@@ -113,6 +114,10 @@ func init() {
 	// Local storage configuration (node proxy only — the edge runs no CNI/storage).
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
 
+	// Kubelet pod-volumes directory (node proxy only — UDS delivery is a per-pod
+	// concern; the edge serves no local workloads).
+	rootCmd.Flags().StringVar(&cfg.KubeletPodsDir, "kubelet-pods-dir", cfg.KubeletPodsDir, "Kubelet pod-volumes directory, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket for UDS delivery (proposal 034). Empty disables UDS delivery: pods annotated endpoint.aether.io/uds-socket fall back to TCP loopback")
+
 	// SPIRE admin socket (node proxy only — delegated identity for many local
 	// workloads; the edge presents a single identity served by SPIRE directly).
 	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
@@ -124,8 +129,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
 	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
-	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services and forward the rest to --mesh-dns-upstream (proposal 018, mesh-global FQDN)")
-	rootCmd.Flags().StringSliceVar(&cfg.MeshDNSUpstream, "mesh-dns-upstream", cfg.MeshDNSUpstream, "Upstream resolver(s) (host[:port]) the mesh-DNS filter forwards non-mesh queries to (the cluster kube-dns)")
+	rootCmd.Flags().BoolVar(&cfg.MeshDNS, "mesh-dns", false, "Enable per-pod mesh DNS: answer <svc>.<mesh-domain> from the generated mesh Services (proposal 018, mesh-global FQDN); the mesh-dns daemon (agent/cmd/mesh-dns) owns upstream forwarding")
 	rootCmd.Flags().StringVar(&cfg.MeshDNSSnapshotPath, "mesh-dns-snapshot-path", cfg.MeshDNSSnapshotPath, "Host-persistent file the in-process mesh-DNS resolver persists its last-known record table to and warm-loads at boot, closing the agent-roll cold window (proposal 018, mesh-global FQDN). Defaults under the CNI registry hostPath so it survives a rolling restart; empty disables persistence")
 }
 
@@ -288,19 +292,11 @@ func runAgent(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	if err = wireGAMMA(m, snapshotCache); err != nil {
+	if err = wireReconcilers(m, snapshotCache); err != nil {
 		return err
 	}
 
 	wireAuthzAndConfigImport(ctx, m, reg, snapshotCache)
-
-	if err = wireL4Routes(m, snapshotCache); err != nil {
-		return err
-	}
-
-	if err = wireCaptureReconciler(m, snapshotCache); err != nil {
-		return err
-	}
 
 	l.DebugContext(ctx, "waiting for local storage to be ready")
 	if err = localStorage.WaitUntilReady(ctx); err != nil {
@@ -344,6 +340,9 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache := cache.NewSnapshotCache(cfg.NodeName, l)
 	snapshotCache.SetMeshDomain(cfg.MeshDomain)
 	snapshotCache.SetEmitStatsPod(cfg.EmitStatsPod)
+	// The host bridge to a workload's Unix socket (proposal 034); empty means the
+	// operator turned UDS delivery off and annotated pods get TCP loopback.
+	snapshotCache.SetKubeletPodsDir(cfg.KubeletPodsDir)
 	// With SPIRE off no SVIDs/SDS exist; the cache builds the per-pod inbound
 	// listener cleartext so the mesh hop stays routable (the outbound clusters
 	// already go cleartext without a node SVID). Production keeps mTLS.
@@ -419,6 +418,21 @@ func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.S
 	return spireBridge, nil
 }
 
+// wireReconcilers registers the node agent's CR-driven reconcilers (GAMMA,
+// EndpointPolicy, L4 routes, capture) in a fixed order.
+func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if err := wireGAMMA(m, snapshotCache); err != nil {
+		return err
+	}
+	if err := wireEndpointPolicies(m, snapshotCache); err != nil {
+		return err
+	}
+	if err := wireL4Routes(m, snapshotCache); err != nil {
+		return err
+	}
+	return wireCaptureReconciler(m, snapshotCache)
+}
+
 // wireGAMMA registers the GAMMA east-west L7 routing reconciler when --gamma is set
 // (proposal 018, Phase 2). It installs the required Gateway API and config.aether.io
 // schemes and sets up the reconciler with the manager.
@@ -453,6 +467,34 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	}
 	if err := gammaReconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+	}
+	return nil
+}
+
+// wireEndpointPolicies registers the EndpointPolicy reconciler, which projects
+// service-scoped UDS delivery declarations into the cache (proposal 034 Phase 1b).
+// It is gated on the same operator switch as the annotation path: with
+// --kubelet-pods-dir empty the agent cannot render pipe addresses at all, so the
+// watch would buy nothing. CRD presence is detected by the reconciler itself,
+// which registers no watch (and stays inert) when the CRD is absent.
+func wireEndpointPolicies(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if cfg.KubeletPodsDir == "" {
+		return nil
+	}
+	// The config.aether.io types MUST be in the scheme before the watch is set up —
+	// without them it fails ("no kind is registered") and the manager crash-loops on
+	// cache sync, taking the CNI socket with it. AddToScheme is idempotent, so this
+	// is safe alongside wireGAMMA's registration.
+	if err := configapisv1.AddToScheme(m.GetScheme()); err != nil {
+		return fmt.Errorf("register config.aether.io scheme: %w", err)
+	}
+	reconciler := &endpointpolicy.Reconciler{
+		Client: m.GetClient(),
+		Sink:   snapshotCache,
+		Log:    l,
+	}
+	if err := reconciler.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up EndpointPolicy reconciler: %w", err)
 	}
 	return nil
 }

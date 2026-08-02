@@ -13,9 +13,12 @@ graph TD
         CNI["CNI Plugin<br/><i>netns setup · endpoint registration</i>"]
         Agent["Agent<br/><i>xDS · CNI server · proxy supervisor</i>"]
         Proxy["aether-proxy<br/><i>custom Envoy, hot-restart supervised</i>"]
+        MeshDNS["mesh-dns<br/><i>own DaemonSet · snapshot-fed resolver</i>"]
         SPIRE["SPIRE Agent<br/><i>workload identity</i>"]
 
         Pod == "pod traffic" ==> Proxy
+        Pod -. "DNS :53 (CNI DNAT)" .-> MeshDNS
+        Agent -. "record snapshot (file)" .-> MeshDNS
         CNI -. "register (gRPC/UDS)" .-> Agent
         Agent -. "xDS, demand-scoped<br/>LDS·CDS·EDS·RDS·SDS·ODCDS" .-> Proxy
         Agent -. "Delegated Identity API" .-> SPIRE
@@ -38,17 +41,21 @@ graph TD
 
 **Agent** — Runs on each node via `controller-runtime`. Manages the xDS server, CNI gRPC server, SPIRE bridge, registrar client, and the proxy hot-restart supervisor as runnables. Generates Envoy configuration (listeners, clusters, endpoints, routes) from local pod data and the endpoint cache populated by the Registrar's push stream. Config is **demand-scoped** to each node's dependency set (see below).
 
-**aether-proxy** — A custom Envoy build maintained in a separate sibling Bazel workspace under `proxy/` (pinned to its own Bazel 7.7.1, built from Envoy source) with a compiled-in C++ `aether_stats` extension that records source→destination request metrics. The agent supervises it with cross-pod hot restart for hitless rollouts and two-phase connection draining. See [`proxy/README.md`](proxy/README.md) and proposals [010](docs/proposals/010_custom-proxy-workspace.md) / [012](docs/proposals/012_aether_stats_cpp_extension.md).
+**aether-proxy** — A custom Envoy build maintained in a separate sibling Bazel workspace under `proxy/` (pinned to its own Bazel 8.7.0, built from Envoy source) with a compiled-in C++ `aether_stats` extension that records source→destination request metrics. The agent supervises it with cross-pod hot restart for hitless rollouts and two-phase connection draining. See [`proxy/README.md`](proxy/README.md) and proposals [010](docs/proposals/010_custom-proxy-workspace.md) / [012](docs/proposals/012_aether_stats_cpp_extension.md).
 
 **Demand-scoped distribution** — Each agent generates only the clusters, registry watches, and endpoints its local pods declare a dependency on via the `config.aether.io/upstreams` annotation, with on-demand CDS (ODCDS) serving the cold path. This bounds per-node config to the node's actual footprint and replaces fleet-wide CDS and client-side active health checking. Multi-port and FQDN upstreams are demuxed via SNI with per-port EDS. See proposals [004](docs/proposals/004_demand-scoped-distribution.md) / [005](docs/proposals/005_multi-port-routing.md).
 
+**mesh-dns** — A slim per-node DaemonSet (its own binary and image) that answers `<svc>.<ns>.<meshDomain>` from a record snapshot the agent writes to a host path, and forwards everything else upstream. The CNI DNATs each managed pod's `:53` to it. It is deliberately decoupled from the agent (#578, #583) so an agent roll never gaps pod DNS.
+
 **Gateway API & GAMMA routing** — Routing is expressed with the Kubernetes **Gateway API**. East-west (mesh) traffic uses **GAMMA**: `HTTPRoute`/`GRPCRoute` objects with a `parentRef` to a **Service** enrich that service's outbound/capture routes (canary splits, header/method matches, timeouts, redirects). North-south traffic uses the same API against the edge gateway's `GatewayClass`. Both directions share one projector, **`common/gammaproject`**, which turns a route rule into a `registryv1.GammaRoute` proto; the node agent materializes it locally into Envoy config while the registrar can export it cross-cluster. An **`HTTPFilter`** CRD (proposal 025) is the escape hatch for attaching supported Envoy HTTP filters (ext_authz, RBAC, header-to-metadata) at route, service-wide (`CHAIN`), or destination-side (`INBOUND`) scope.
 
-**Controller** — In-cluster Deployment (leader-elected) that serves the admission webhooks (`MeshConfig`, `HTTPFilter`, `HTTPRoute` validation + a pod-mutating webhook for mesh-domain `ndots` and namespace-based mesh injection) and projects each namespace's `MeshConfig` CR into a ConfigMap the agent and edge mount.
+**Controller** — In-cluster Deployment (leader-elected) that serves the admission webhooks (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`, `HTTPRoute` validation + a pod-mutating webhook for mesh-domain `ndots` and namespace-based mesh injection) and projects each namespace's `MeshConfig` CR into a ConfigMap the agent and edge mount.
 
 **Registrar** — In-cluster Deployment that acts as the sole bridge between agents and the external registry. Receives endpoint registrations from agents, persists them externally, maintains a versioned in-memory snapshot via periodic sync, and streams changes to all agents via gRPC server-streaming. Runs as an active/active Deployment (every replica serves gRPC and syncs; peers converge through the external registry), collapsing per-node external connections down to the registrar tier.
 
 **CNI Plugin** — Implements the CNI spec (Add/Del/Check/GC/Status) to set up each pod's network namespace. Communicates with the agent over a Unix domain socket to register the pod's endpoints on Add and deregister them on Del.
+
+**UDS delivery** — Workloads that serve on a Unix domain socket instead of a TCP port join the mesh with `endpoint.aether.io/uds-socket: <volume>/<file>` (or a service-scoped `EndpointPolicy` CR). The proxy delivers inbound requests to the socket through kubelet's pod-volumes directory; callers are unaffected — the pod is still reached at its pod IP over mTLS. See proposal [034](docs/proposals/034_pod-uds-support.md).
 
 **SPIRE Bridge** — Connects to the SPIRE agent via the Delegated Identity API to obtain X.509 SVIDs and trust bundles. Converts them into Envoy SDS (Secret Discovery Service) resources for automatic mTLS between workloads.
 
@@ -63,8 +70,8 @@ graph TD
 
 ### Prerequisites
 
-- [Bazelisk](https://github.com/bazelbuild/bazelisk) (Bazel 9.0.1)
-- Go 1.26.2
+- [Bazelisk](https://github.com/bazelbuild/bazelisk) (Bazel 9.2.0)
+- Go 1.26.5
 - Docker (or Colima) for container images and integration tests
 
 ### Setup (macOS with Colima)

@@ -1,7 +1,7 @@
 # Gateway API conformance runner
 
 Committed, reproducible driver for the upstream Kubernetes **Gateway API conformance
-suite** (`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against a live aether
+suite** (`sigs.k8s.io/gateway-api/conformance` @ **v1.6.1**) against a live aether
 cluster. This replaces the previously uncommitted one-off that lived in a gateway-api
 checkout (see `docs/conformance/baseline-*.md`). Design + feasibility analysis:
 `docs/proposals/024_conformance-ci.md`.
@@ -10,8 +10,8 @@ checkout (see `docs/conformance/baseline-*.md`). Design + feasibility analysis:
 
 | Test | Profile | Status | Run in CI? |
 |---|---|---|---|
-| `TestAetherGatewayHTTP` | GATEWAY-HTTP (north-south edge) | Fully conformant (43/43, talos rev21) | **Yes — gates** |
-| `TestAetherMeshHTTP` | MESH-HTTP (east-west GAMMA) | **Not conformant** (blocked on proposal 022) | No (reproducible only) |
+| `TestAetherGatewayHTTP` | GATEWAY-HTTP (north-south edge) | Conformant — see the latest `docs/conformance/baseline-*.md` for the run of record | **Yes — gates** |
+| `TestAetherMeshHTTP` | MESH-HTTP (east-west GAMMA) | Conformant — see the latest `docs/conformance/baseline-*.md` | **Yes — gates** |
 
 Both tests **skip** unless `AETHER_CONFORMANCE=1`, because they need a live cluster
 reachable via the ambient kubeconfig.
@@ -23,18 +23,18 @@ aether module** (Gazelle skips it; `go test ./...` / `bazel test //...` ignore i
 gateway-api **conformance suite is a separate Go module** whose `go.mod` has
 `replace sigs.k8s.io/gateway-api => ../` — it is buildable **only from inside a
 gateway-api source checkout** and cannot be consumed as an ordinary dependency
-(`go get sigs.k8s.io/gateway-api/conformance@v1.5.1` fails to resolve the `apis/*`
+(`go get sigs.k8s.io/gateway-api/conformance@v1.6.1` fails to resolve the `apis/*`
 imports). That is why the prior runner lived in a `/tmp` gateway-api checkout, and why
 this committed copy is **copied into a checked-out gateway-api tree at run time**.
 
 ## Run it
 
 Against any aether cluster with the **edge** enabled, the **Gateway API CRDs**
-(standard channel, v1.5.1) installed, and GatewayClass `aether` present:
+(standard channel, v1.6.1) installed, and GatewayClass `aether` present:
 
 ```bash
 # 1. Check out the suite at the pinned version and drop the runner + overlay in.
-git clone --depth 1 --branch v1.5.1 \
+git clone --depth 1 --branch v1.6.1 \
   https://github.com/kubernetes-sigs/gateway-api /tmp/gateway-api
 cp test/conformance/conformance_test.go /tmp/gateway-api/conformance/aether_conformance_test.go
 cp test/conformance/mesh/manifests.yaml /tmp/gateway-api/conformance/mesh/manifests.yaml
@@ -54,8 +54,10 @@ AETHER_CONFORMANCE=1 AETHER_CONFORMANCE_MESH=1 KUBECONFIG=/path/to/kubeconfig \
 Useful env vars: `AETHER_NOCLEANUP=1` (leave base resources for debugging),
 `AETHER_CONFORMANCE_REPORT=/path/report.yaml` (override the report output path).
 
-In CI this is driven by `.github/workflows/conformance.yaml` (kind, no SPIRE,
-GATEWAY-HTTP only), which performs the checkout + copy automatically.
+In CI this is driven by `.github/workflows/e2e.yaml` (kind, no SPIRE), which performs
+the checkout + copy automatically. It has a job per profile — `gateway-http` and
+`mesh-http` — both run nightly and selectable via the workflow's `only` input. (The
+former standalone `conformance.yaml` was consolidated into `e2e.yaml`.)
 
 ## `mesh/manifests.yaml` — the aether mesh overlay
 

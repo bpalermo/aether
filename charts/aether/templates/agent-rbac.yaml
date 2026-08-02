@@ -41,6 +41,15 @@ rules:
     resources: ["httpfilters"]
     verbs: ["list", "get", "watch"]
   {{- end }}
+  {{- if .Values.proxy.udsWorkloads.enabled }}
+  # EndpointPolicy (proposal 034 Phase 1b): the service-scoped UDS delivery CRD.
+  # Read-only, cluster-wide; the reconciler projects it into the node proxy's
+  # per-pod delivery clusters. Only granted when UDS delivery is enabled — the
+  # agent registers no watch otherwise.
+  - apiGroups: ["config.aether.io"]
+    resources: ["endpointpolicies"]
+    verbs: ["list", "get", "watch"]
+  {{- end }}
   # L4 route types (proposal 018, Phase 3b — unconditional since proposal 031,
   # CRD-detected at runtime): watch TCPRoutes/TLSRoutes/UDPRoutes parented to
   # Services cluster-wide.

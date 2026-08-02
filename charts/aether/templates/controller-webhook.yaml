@@ -94,6 +94,15 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["edgeconfigs"]
         scope: "Namespaced"
+      # EndpointPolicy (proposal 034 Phase 1b): reject a UDS socket the data plane
+      # would refuse — bad path segment, or over the AF_UNIX sun_path budget — at
+      # apply time. A missed validation only degrades the service to TCP delivery
+      # (the agent re-resolves fail-closed), so failurePolicy: Ignore is safe here.
+      - apiGroups: ["config.aether.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["endpointpolicies"]
+        scope: "Namespaced"
       - apiGroups: ["gateway.networking.k8s.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]

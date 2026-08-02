@@ -159,11 +159,15 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 	// Collect overflowed watchers under the read lock; closing them requires
 	// the write lock, taken afterwards to avoid lock-upgrade deadlocks.
 	var dropped []droppedWatcher
+	// Tally the enqueued events per type and record them once the read lock is
+	// released: the fan-out is O(events × watchers) and the counter is only
+	// meaningful in aggregate, so the instrument call does not belong inside it.
+	broadcast := make(map[registrarv1.WatchEndpointsResponse_EventType]int64, 4)
 
 	send := func(id string, w *watcher, event *registrarv1.WatchEndpointsResponse) {
 		select {
 		case w.ch <- event:
-			b.metrics.eventBroadcast(context.Background(), event.GetType().String())
+			broadcast[event.GetType()]++
 		default:
 			// This watcher's view has diverged — schedule a force-resync.
 			// The counter is the staleness alarm.
@@ -193,6 +197,10 @@ func (b *Broadcaster) Broadcast(events []*registrarv1.WatchEndpointsResponse) {
 		}
 	}
 	b.mu.RUnlock()
+
+	if len(broadcast) > 0 {
+		b.metrics.eventsBroadcast(context.Background(), broadcast)
+	}
 
 	if len(dropped) > 0 {
 		b.closeDroppedWatchers(dropped)

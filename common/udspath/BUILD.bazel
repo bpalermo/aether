@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "udspath",
+    srcs = ["udspath.go"],
+    importpath = "github.com/bpalermo/aether/common/udspath",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "udspath_test",
+    srcs = ["udspath_test.go"],
+    embed = [":udspath"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

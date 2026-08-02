@@ -48,7 +48,13 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 // cleartext (SPIRE off) builds the inbound listener without a downstream mTLS
 // transport socket — symmetric with the cleartext outbound clusters — so the mesh
 // data path is routable without SPIRE.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+// udsSocketPath, when non-empty, is the host path of the pod's Unix socket
+// (already resolved and validated by the caller, proposal 034 Phase 1): every
+// app cluster and the health-probe cluster dial that pipe instead of loopback.
+// Empty — the default — is TCP delivery. Nothing else changes: the inbound
+// listener stays netns-bound TCP on :18008 and registry/EDS endpoints stay
+// pod_ip:18008, so a UDS pod is indistinguishable from a TCP pod to clients.
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, udsSocketPath string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
 	// Inbound never carries the egress source-metadata entry: the caller identity
 	// on the inbound path is the verified XFCC, and stamping the destination pod
 	// into aether.source would mislead authz policies.
@@ -62,14 +68,32 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 		return nil, nil, nil, nil, err
 	}
 
-	netns := cniPod.GetNetworkNamespace()
+	appClusters, healthCluster = NewAppDeliveryClusters(cniPod, udsSocketPath)
+
+	return inbound, outbound, appClusters, healthCluster, nil
+}
+
+// NewAppDeliveryClusters builds a pod's delivery clusters: one app cluster per
+// served port plus the health-probe cluster. udsSocketPath is the resolved host
+// path of the pod's Unix socket, or "" for TCP loopback delivery.
+//
+// Split out from GenerateListenersFromRegistryPod because delivery can change
+// without the pod changing — a service-scoped EndpointPolicy (proposal 034 Phase
+// 1b) is authored independently of the workload — so these clusters are rebuilt
+// on their own, without regenerating the pod's listeners.
+func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster) {
+	// Delivery address for every per-pod cluster: the pod's netns (loopback) or,
+	// for a UDS workload, the socket's host path.
+	appAddr := AppAddress{Netns: cniPod.GetNetworkNamespace(), Pipe: udsSocketPath}
 	// One app cluster per served port, each bound into the pod's netns at
 	// 127.0.0.1:<port>; the matching inbound SNI chain routes to it. The
 	// per-port app protocol (h1 default, h2 via the "=h2" annotation suffix)
 	// sets the loopback hop's codec — protocol heterogeneity across ports.
+	// UDS pods keep one cluster per declared port too; they all dial the same
+	// socket (protocol multiplexing on it is the app's affair).
 	h2Ports := AppPortProtocols(cniPod)
 	for _, port := range AppPortsFromPod(cniPod) {
-		appClusters = append(appClusters, NewAppCluster(AppClusterName(cniPod, port), netns, port, h2Ports[port]))
+		appClusters = append(appClusters, NewAppCluster(AppClusterName(cniPod, port), appAddr, port, h2Ports[port]))
 	}
 	// Separate, unrouted cluster carrying the active app health check (delegated
 	// liveness) on the primary port; keeping the HC off app_<pod> avoids gating
@@ -78,9 +102,9 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 	// TCP-floor (non-HTTP) services have no HTTP readiness surface: the probe is a
 	// raw TCP connect to the app port instead of an HTTP GET.
 	isTCP := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointProtocol] == aetherannotations.ProtocolTCP
-	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), netns, primary, AppHealthPathFromPod(cniPod), isTCP)
+	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), appAddr, primary, AppHealthPathFromPod(cniPod), isTCP)
 
-	return inbound, outbound, appClusters, healthCluster, nil
+	return appClusters, healthCluster
 }
 
 // SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the

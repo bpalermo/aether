@@ -130,15 +130,75 @@ func AppPortFromPod(cniPod *cniv1.CNIPod) uint16 {
 	return uint16(port)
 }
 
+// AppAddress locates a pod's application from the node proxy. It is one of two
+// shapes: the default TCP loopback inside the pod's network namespace (Netns
+// set, Pipe empty), or a Unix domain socket the app serves on (Pipe set,
+// proposal 034 Phase 1).
+type AppAddress struct {
+	// Netns is the pod's network-namespace path. The upstream connection is
+	// bound into it so 127.0.0.1 reaches the application container and not the
+	// agent. Unused when Pipe is set.
+	Netns string
+	// Pipe, when non-empty, is the socket's HOST path (resolved from the
+	// endpoint.aether.io/uds-socket annotation through kubelet's pod-volumes
+	// directory, common/udspath). Pathname sockets are mount-namespace-scoped,
+	// so the proxy dials it from its own mount namespace; no netns bind exists
+	// or is needed. Every declared port of a UDS pod dials this one socket.
+	Pipe string
+}
+
+// endpoint returns the cluster endpoint address for the app: the pipe when one
+// is set, otherwise loopback on port.
+func (a AppAddress) endpoint(port uint16) *corev3.Address {
+	if a.Pipe != "" {
+		return &corev3.Address{
+			Address: &corev3.Address_Pipe{
+				Pipe: &corev3.Pipe{Path: a.Pipe},
+			},
+		}
+	}
+	return &corev3.Address{
+		Address: &corev3.Address_SocketAddress{
+			SocketAddress: &corev3.SocketAddress{
+				Protocol: corev3.SocketAddress_TCP,
+				Address:  appLoopbackAddress,
+				PortSpecifier: &corev3.SocketAddress_PortValue{
+					PortValue: uint32(port),
+				},
+			},
+		},
+	}
+}
+
+// bindConfig returns the upstream bind config that puts the dial inside the
+// pod's network namespace, or nil for a pipe upstream — an AF_UNIX connect has
+// no source address to bind and the socket is reached through the mount
+// namespace, not the netns.
+func (a AppAddress) bindConfig() *corev3.BindConfig {
+	if a.Pipe != "" {
+		return nil
+	}
+	return &corev3.BindConfig{
+		SourceAddress: &corev3.SocketAddress{
+			Address: appLoopbackAddress,
+			PortSpecifier: &corev3.SocketAddress_PortValue{
+				PortValue: 0,
+			},
+			NetworkNamespaceFilepath: a.Netns,
+		},
+	}
+}
+
 // NewAppCluster builds a STATIC cluster that forwards decrypted inbound traffic
-// to the pod's own application at 127.0.0.1:<port>. The upstream connection is
-// bound into the pod's network namespace so the loopback address reaches the
-// application container, not the agent. This is the only cleartext hop in the
-// mesh: it is intra-pod (Envoy -> app on loopback), never pod-to-pod. When http2
-// is set the loopback hop speaks HTTP/2 (h2c) to the app — a per-port app
-// protocol (multi-port pods may serve h1 on one port and h2/gRPC on another);
-// otherwise HTTP/1.1 is assumed.
-func NewAppCluster(name, netns string, port uint16, http2 bool) *clusterv3.Cluster {
+// to the pod's own application, at 127.0.0.1:<port> bound into the pod's network
+// namespace or — for a UDS workload (addr.Pipe) — at the socket's host path with
+// no netns bind. This is the only cleartext hop in the mesh: it is intra-pod
+// (Envoy -> app), never pod-to-pod. When http2 is set the hop speaks HTTP/2
+// (h2c) to the app — a per-port app protocol (multi-port pods may serve h1 on
+// one port and h2/gRPC on another); otherwise HTTP/1.1 is assumed. port names
+// the app's TCP port and is ignored for a pipe upstream (all of a UDS pod's
+// declared ports dial the same socket).
+func NewAppCluster(name string, addr AppAddress, port uint16, http2 bool) *clusterv3.Cluster {
 	c := &clusterv3.Cluster{
 		Name:                          name,
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
@@ -153,17 +213,7 @@ func NewAppCluster(name, netns string, port uint16, http2 bool) *clusterv3.Clust
 						{
 							HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
 								Endpoint: &endpointv3.Endpoint{
-									Address: &corev3.Address{
-										Address: &corev3.Address_SocketAddress{
-											SocketAddress: &corev3.SocketAddress{
-												Protocol: corev3.SocketAddress_TCP,
-												Address:  appLoopbackAddress,
-												PortSpecifier: &corev3.SocketAddress_PortValue{
-													PortValue: uint32(port),
-												},
-											},
-										},
-									},
+									Address: addr.endpoint(port),
 								},
 							},
 						},
@@ -171,15 +221,7 @@ func NewAppCluster(name, netns string, port uint16, http2 bool) *clusterv3.Clust
 				},
 			},
 		},
-		UpstreamBindConfig: &corev3.BindConfig{
-			SourceAddress: &corev3.SocketAddress{
-				Address: appLoopbackAddress,
-				PortSpecifier: &corev3.SocketAddress_PortValue{
-					PortValue: 0,
-				},
-				NetworkNamespaceFilepath: netns,
-			},
-		},
+		UpstreamBindConfig: addr.bindConfig(),
 		// Collapse every per-pod app cluster into one cluster.app.* stats block
 		// (cardinality round 2): the Envoy->app loopback hop gets node-aggregate
 		// visibility (connect failures, rq totals) at O(1) instead of either
@@ -289,18 +331,21 @@ func NewPassthroughOriginalDstCluster() *clusterv3.Cluster {
 }
 
 // NewAppHealthProbeCluster builds a per-pod cluster that only exists to actively
-// health-check the pod's application at 127.0.0.1:<port> (delegated liveness). It
+// health-check the pod's application at the delivery address (delegated liveness). It
 // is NOT referenced by any route — the agent scrapes its host health from the
 // proxy admin and reflects it into the registry. The active HC must live on this
 // separate cluster, not on app_<pod>: an active HC removes failing/pending hosts
 // from load balancing, which would gate (break) the real delivery path through
 // app_<pod> at startup and whenever the probe fails.
-func NewAppHealthProbeCluster(name, netns string, port uint16, healthPath string, tcp bool) *clusterv3.Cluster {
+func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthPath string, tcp bool) *clusterv3.Cluster {
 	// The active health check probes the app's readiness (delegated liveness):
 	// HTTP/1.1 GET <healthPath> for HTTP/gRPC services, or a raw TCP connect for
 	// non-HTTP (TCP floor) services, which have no HTTP readiness surface. h2 app
 	// ports are still liveness-probed on the primary port, so HTTP probes stay HTTP/1.1.
-	c := NewAppCluster(name, netns, port, false)
+	// Both probes work unchanged over a pipe upstream: the HTTP check keeps its
+	// Host: localhost (HTTP/1.1 requires a Host regardless of transport), and the
+	// connect-only variant degrades to "the socket exists and accepts".
+	c := NewAppCluster(name, addr, port, false)
 	// MUST stay per-pod (clear the inherited collapse): the health_check
 	// filter answers per-pod readiness by reading THIS cluster's
 	// membership_healthy/membership_total gauges (see the 2026-06-11 stats

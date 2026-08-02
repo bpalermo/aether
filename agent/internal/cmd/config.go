@@ -9,6 +9,7 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	meshconst "github.com/bpalermo/aether/common/constants/mesh"
 	"github.com/bpalermo/aether/common/manager"
+	"github.com/bpalermo/aether/common/udspath"
 )
 
 // DefaultMeshConfigPath is where the chart mounts the MeshConfig ConfigMap.
@@ -37,6 +38,15 @@ type AgentConfig struct {
 
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
+
+	// KubeletPodsDir is kubelet's pod-volumes directory as mounted into the proxy
+	// container (identical host path, so no prefix translation is needed when
+	// rendering Envoy Pipe addresses). It is how the node proxy reaches a
+	// workload's Unix socket for UDS delivery (proposal 034):
+	// <KubeletPodsDir>/<pod-UID>/volumes/kubernetes.io~empty-dir/<volume>/<file>.
+	// The location is distro-dependent; empty disables UDS delivery, and pods
+	// annotated endpoint.aether.io/uds-socket fall back to TCP loopback.
+	KubeletPodsDir string
 
 	// RegistrarAddress is the gRPC address of the in-cluster Registrar service
 	RegistrarAddress string
@@ -132,13 +142,10 @@ type AgentConfig struct {
 	EastWestWaypoint bool
 
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
-	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs
-	// and forwards the rest to MeshDNSUpstream. Pairs with the CNI :53 redirect.
-	// Default off.
+	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs.
+	// Upstream forwarding lives in the mesh-dns daemon (agent/cmd/mesh-dns) since the
+	// #578 decouple. Pairs with the CNI :53 redirect. Default off.
 	MeshDNS bool
-	// MeshDNSUpstream is the upstream resolver(s) (host[:port]) the mesh-DNS filter
-	// forwards non-mesh queries to — the cluster kube-dns.
-	MeshDNSUpstream []string
 	// MeshDNSSnapshotPath is the host-persistent file the mesh-DNS resolver writes
 	// its last-known record table to on every reconcile and warm-loads at boot, so a
 	// rolling agent restart answers mesh names from last-known ClusterIPs within ms
@@ -177,6 +184,7 @@ func NewAgentConfig() *AgentConfig {
 		GatewayClassName:        "aether",
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		KubeletPodsDir:          udspath.DefaultKubeletPodsDir,
 		MeshDNSSnapshotPath:     constants.DefaultMeshDNSSnapshotPath,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
 		MeshDomain:              meshconst.DefaultMeshDomain,

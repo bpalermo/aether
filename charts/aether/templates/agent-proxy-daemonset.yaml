@@ -207,6 +207,23 @@ spec:
             - name: authz-socket
               mountPath: /run/aether/authz
             {{- end }}
+            {{- if .Values.proxy.udsWorkloads.enabled }}
+            # Kubelet's pod-volumes directory, mounted at the IDENTICAL host path so
+            # the agent's rendered Envoy Pipe addresses need no prefix translation
+            # (proposal 034). It is how the proxy — in the host mount namespace —
+            # reaches a workload's Unix socket inside its own emptyDir.
+            #
+            # NOT readOnly: connect(2) on an AF_UNIX socket requires write permission
+            # on the socket inode, and a read-only mount fails the connect with EROFS
+            # even for root. (readOnlyRootFilesystem above governs the container
+            # rootfs, not this volume.)
+            #
+            # HostToContainer propagation so emptyDirs with medium: Memory — tmpfs
+            # MOUNTS created after this container starts — become visible.
+            - name: kubelet-pods
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: HostToContainer
+            {{- end }}
         {{- if .Values.proxy.authzSidecar.enabled }}
         # External authorization sidecar (proposal 027): serves
         # envoy.service.auth.v3.Authorization on the shared Unix socket. The proxy's
@@ -285,6 +302,16 @@ spec:
           hostPath:
             path: /run/aether
             type: DirectoryOrCreate
+        {{- if .Values.proxy.udsWorkloads.enabled }}
+        # type: Directory (not DirectoryOrCreate): kubelet owns this directory and
+        # it exists on every node that runs pods. Requiring it surfaces a wrong
+        # --kubelet-pods-dir as a FailedMount instead of silently creating an empty
+        # directory whose sockets would never appear.
+        - name: kubelet-pods
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        {{- end }}
         {{- if .Values.spire.enabled }}
         - name: workload-socket
           csi:

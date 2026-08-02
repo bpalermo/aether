@@ -152,6 +152,32 @@ func (c *SnapshotCache) DependencySet() map[string]struct{} {
 	return out
 }
 
+// dependencySetShared returns the memoized dependency set without DependencySet's
+// defensive copy. The returned map is shared across callers until the next
+// rebuild and must be treated as read-only (the depSet convention, same as
+// effRoutes/routeDomains). For internal read-only consumers on the snapshot
+// path, where the copy is pure overhead.
+func (c *SnapshotCache) dependencySetShared() map[string]struct{} {
+	// Write lock (not RLock): dependencySetLocked may rebuild and store the memo.
+	c.depMu.Lock()
+	defer c.depMu.Unlock()
+	return c.dependencySetLocked()
+}
+
+// dependencyCounts returns the number of distinct declared upstream services and
+// of live observed dependencies, for the snapshot-shape metric. Both are derived
+// from the dependency-set inputs and recorded when the memo is built, so a
+// snapshot rebuild costs a memo validity check instead of two full walks.
+func (c *SnapshotCache) dependencyCounts() (declared, observed int) {
+	c.depMu.Lock()
+	defer c.depMu.Unlock()
+	// Refresh through the memo so the counts obey the same validity rules as the
+	// set itself — including the wall-clock expiry horizon, which is exactly when
+	// the observed count could otherwise go stale.
+	c.dependencySetLocked()
+	return c.depDeclaredCount, c.depObservedCount
+}
+
 // bumpDepGenLocked invalidates the memoized dependency set. EVERY writer of
 // ANY depMu-guarded field must call it after the write (rule of thumb: any
 // write under depMu bumps, even for fields dependencySetLocked does not read
@@ -183,13 +209,19 @@ func (c *SnapshotCache) dependencySetLocked() map[string]struct{} {
 	set := make(map[string]struct{}, len(c.podDeps)*4+len(c.observedDeps)+len(c.staticDeps))
 	c.populateStaticDepsLocked(set)
 	c.populatePodDepsLocked(set)
-	nextExpiry := c.populateObservedDepsLocked(set, now, ttl)
+	nextExpiry, observed := c.populateObservedDepsLocked(set, now, ttl)
 	eff := c.effectiveServiceRoutesLocked()
 	c.populateRouteDepsLocked(set, eff)
 	c.depSet = set
 	c.depSetGen = c.depGen
 	c.depSetTTL = ttl
 	c.depSetExpiry = nextExpiry
+	// The snapshot-shape counts are functions of the same inputs, so they ride
+	// the same memo: while it is valid no declared upstream changed (depGen) and
+	// no observed entry crossed its TTL (depSetExpiry), which is precisely the
+	// condition under which recomputing them would return the same numbers.
+	c.depDeclaredCount = c.declaredCountLocked()
+	c.depObservedCount = observed
 	c.depSetValid = true
 	return set
 }
@@ -236,21 +268,24 @@ func (c *SnapshotCache) populatePodDepsLocked(set map[string]struct{}) {
 }
 
 // populateObservedDepsLocked adds live observed dependencies to set and returns
-// the earliest expiry instant for the memo. Caller must hold depMu for writing.
-func (c *SnapshotCache) populateObservedDepsLocked(set map[string]struct{}, now time.Time, ttl time.Duration) time.Time {
+// the earliest expiry instant for the memo plus how many entries were live.
+// Caller must hold depMu for writing.
+func (c *SnapshotCache) populateObservedDepsLocked(set map[string]struct{}, now time.Time, ttl time.Duration) (time.Time, int) {
 	// Live observed dependencies, tracking the earliest wall-clock instant a
 	// memoized entry expires (an entry is live while now <= last+ttl, so the
 	// memo stays valid through that exact instant and rebuilds after).
 	var nextExpiry time.Time
+	live := 0
 	for svc, last := range c.observedDeps {
 		if now.Sub(last) <= ttl {
 			set[svc] = struct{}{}
+			live++
 			if exp := last.Add(ttl); nextExpiry.IsZero() || exp.Before(nextExpiry) {
 				nextExpiry = exp
 			}
 		}
 	}
-	return nextExpiry
+	return nextExpiry, live
 }
 
 // populateRouteDepsLocked adds GAMMA route targets and their backends (L7 and L4)
@@ -289,22 +324,9 @@ func (c *SnapshotCache) populateRouteDepsLocked(set map[string]struct{}, eff map
 	}
 }
 
-// observedCountLocked returns the number of live observed dependencies.
-// Caller must hold depMu.
-func (c *SnapshotCache) observedCountLocked() int {
-	now := time.Now()
-	ttl := c.observedTTLValue()
-	n := 0
-	for _, last := range c.observedDeps {
-		if now.Sub(last) <= ttl {
-			n++
-		}
-	}
-	return n
-}
-
 // declaredCountLocked returns the number of distinct declared upstream
-// services (excluding own services). Caller must hold depMu.
+// services (excluding own services). Called from the memo rebuild, not per
+// snapshot. Caller must hold depMu.
 func (c *SnapshotCache) declaredCountLocked() int {
 	declared := make(map[string]struct{})
 	for _, deps := range c.podDeps {

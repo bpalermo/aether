@@ -191,51 +191,6 @@ func firstBackendService(refs []gatewayv1.HTTPBackendRef, routeNamespace string,
 	return ""
 }
 
-// firstBackendPort returns the port of the first admissible (same-namespace or
-// granted cross-namespace) backendRef, so the port matches the backend
-// firstBackendService selects.
-func firstBackendPort(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) uint32 {
-	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		if !BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
-			continue
-		}
-		if b.Port != nil {
-			return uint32(*b.Port)
-		}
-	}
-	return 0
-}
-
-// firstBackendNamespace returns the resolved namespace of the first admissible
-// (same-namespace or granted cross-namespace) backendRef. Same-namespace refs
-// default to the route's own namespace when backendRef.Namespace is unset.
-// Matches the selection logic of firstBackendService so they return data for
-// the same ref.
-func firstBackendNamespace(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) string {
-	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		if !BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
-			continue
-		}
-		if b.Namespace != nil && string(*b.Namespace) != "" {
-			return string(*b.Namespace)
-		}
-		return routeNamespace
-	}
-	return routeNamespace
-}
-
 // DerefBackendNamespace returns the backendRef namespace ("" when unset).
 func DerefBackendNamespace(ns *gatewayv1.Namespace) string {
 	if ns == nil {

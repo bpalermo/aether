@@ -6,7 +6,7 @@ A **custom Envoy** build for the Aether data plane, structured after
 > This is a **separate Bazel workspace** from the root `aether` repo. The root
 > `//.bazelignore` lists `proxy`, so `bazel build //...` / Gazelle in the repo
 > root never descend here. It pins its **own** Bazel version
-> (`.bazelversion = 7.7.1`, required by Envoy 1.38's WORKSPACE build) and uses
+> (`.bazelversion = 8.7.0`, required by Envoy 1.39's WORKSPACE build) and uses
 > Envoy's pre-bzlmod dependency macro chain. The two workspaces share only the
 > git repo. See [`docs/proposals/010`](../docs/proposals/010_custom-proxy-workspace.md).
 
@@ -46,9 +46,9 @@ Makefile targets do) to bake the production binary.
 | Path | Purpose |
 |---|---|
 | `WORKSPACE` | `@envoy` + Envoy's macro chain, rules_oci |
-| `.bazelversion` | `7.7.1` (independent of the root repo) |
+| `.bazelversion` | `8.7.0` (independent of the root repo) |
 | `.bazelrc` → `envoy.bazelrc` | build config; selects Envoy's hermetic clang on Linux |
-| `bazel/envoy/repository.bzl` | pinned Envoy **source** (`ENVOY_SHA` = v1.38.0) |
+| `bazel/envoy/repository.bzl` | pinned Envoy **source** (`ENVOY_SHA` = v1.39.0) |
 | `bazel/extension_config/` | the compiled-in Envoy extension set |
 | `bazel/oci/images.bzl` | `distroless/cc` base pull |
 | `BUILD.bazel` | custom `envoy_cc_binary` + `oci_image`/`oci_push`/`oci_load` |
@@ -72,6 +72,6 @@ tree, so there is no separate SDK version to keep in sync.
 ## Status
 
 **Custom Envoy + `aether_stats` C++ extension building on CI** (proposals 010 /
-012). The Envoy source compile requires a Bazel 7.7.1 build host with adequate
+012). The Envoy source compile requires a Bazel 8.7.0 build host with adequate
 RAM and runs on BuildBuddy RBE (amd64) / native arm64 runners; the
 `aether_stats` filter and its `envoy_cc_test` build and pass there.

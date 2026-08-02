@@ -10,7 +10,9 @@ import (
 	"github.com/bpalermo/aether/agent/internal/xds/proxy"
 	"github.com/bpalermo/aether/agent/storage"
 	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	"github.com/bpalermo/aether/common/serviceref"
+	"github.com/bpalermo/aether/common/udspath"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -53,16 +55,66 @@ func (c *SnapshotCache) applyWaypointInboundServerNames(inbound *listenerv3.List
 	}
 }
 
+// udsSocketRequestForPod returns the "<volume>/<file>" socket the pod is to be
+// delivered to, and where it was declared (for logs). The pod annotation is the
+// most specific declaration and wins; an EndpointPolicy attached to the pod's
+// service (proposal 034 Phase 1b) is the service-level default. Empty socket =
+// TCP loopback delivery.
+func (c *SnapshotCache) udsSocketRequestForPod(cniPod *cniv1.CNIPod) (socket, source string) {
+	if annotation := cniPod.GetAnnotations()[aetherannotations.AnnotationEndpointUDSSocket]; annotation != "" {
+		return annotation, "annotation"
+	}
+	if policy := c.udsServicePolicyForPod(cniPod); policy != "" {
+		return policy, "endpointpolicy"
+	}
+	return "", ""
+}
+
+// udsSocketPathForPod resolves the pod's requested socket to its host path under
+// kubelet's pod-volumes directory (proposal 034). It returns "" — TCP loopback
+// delivery — when no socket is requested, when UDS delivery is disabled
+// (--kubelet-pods-dir empty), when the stored record carries no pod UID (written
+// before the UID was persisted), or when the request fails validation.
+//
+// Every failure falls back rather than rejecting the pod: falling back is
+// safe-degraded, not a blackhole. A UDS pod has nothing listening on its TCP
+// port, so the delegated-liveness probe fails, the endpoint stays unpromoted,
+// and no traffic is sent to an address that cannot serve it.
+func (c *SnapshotCache) udsSocketPathForPod(ctx context.Context, cniPod *cniv1.CNIPod) string {
+	socket, source := c.udsSocketRequestForPod(cniPod)
+	if socket == "" {
+		return ""
+	}
+	if c.kubeletPodsDir == "" {
+		c.log.ErrorContext(ctx, "pod requests UDS delivery but it is disabled (--kubelet-pods-dir is empty); falling back to TCP loopback", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", socket, "source", source)
+		return ""
+	}
+	if cniPod.GetUid() == "" {
+		c.log.ErrorContext(ctx, "pod requests UDS delivery but its stored record has no pod UID; falling back to TCP loopback", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", socket, "source", source)
+		return ""
+	}
+	path, err := udspath.Resolve(c.kubeletPodsDir, cniPod.GetUid(), socket)
+	if err != nil {
+		c.log.ErrorContext(ctx, "failed to resolve the pod's UDS socket path; falling back to TCP loopback", "error", err, "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "socket", socket, "source", source)
+		return ""
+	}
+	return path
+}
+
 func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
 	netns := cniPod.GetNetworkNamespace()
 	c.log.DebugContext(ctx, "adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, c.podExtensionHTTPFilters(cniPod), c.inboundFilterForPod(cniPod))
+	// One node-global extension union for both the pod's HTTP listeners and its
+	// capture listener (see extensionHTTPFilters).
+	extensionFilters := c.podExtensionHTTPFilters(cniPod, c.extensionHTTPFilters())
+
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(cniPod), c.udsSocketPathForPod(ctx, cniPod))
 	if err != nil {
 		return err
 	}
 	c.applyWaypointInboundServerNames(inbound, cniPod)
-	capture, err := c.generateCaptureListener(cniPod)
+	capture, err := c.generateCaptureListener(cniPod, extensionFilters)
 	if err != nil {
 		return err
 	}
@@ -311,6 +363,9 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	var errs []error
 	local := make(map[string]string, len(pods))
 
+	// Node-global union, built once for the whole loop (see extensionHTTPFilters).
+	shared := c.extensionHTTPFilters()
+
 	c.listenerMu.Lock()
 	for _, pod := range pods {
 		netns := pod.GetNetworkNamespace()
@@ -326,14 +381,15 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		}
 		c.log.DebugContext(ctx, "generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
-		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, c.podExtensionHTTPFilters(pod), c.inboundFilterForPod(pod))
+		extensionFilters := c.podExtensionHTTPFilters(pod, shared)
+		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(pod), c.udsSocketPathForPod(ctx, pod))
 		if listenerErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate listeners for pod", "error", listenerErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)
 			continue
 		}
 		c.applyWaypointInboundServerNames(inbound, pod)
-		capture, captureErr := c.generateCaptureListener(pod)
+		capture, captureErr := c.generateCaptureListener(pod, extensionFilters)
 		if captureErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate capture listener for pod", "error", captureErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, captureErr)

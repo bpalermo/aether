@@ -42,11 +42,105 @@ spec:
 | Annotation | Default | Meaning |
 |---|---|---|
 | `endpoint.aether.io/port` | `8080` | Application port the mesh routes to |
-| `endpoint.aether.io/weight` | `1` | Load-balancing weight |
+| `endpoint.aether.io/weight` | `1024` | Load-balancing weight |
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness) |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds`: node-local agent vets the endpoint once and publishes health over EDS (endpoints enter clients pre-warmed). `active`: every client proxy probes the endpoint itself |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata (subset keys) |
+| `endpoint.aether.io/uds-socket` | — | Deliver to a Unix socket instead of a TCP port (see "Serving on a Unix domain socket"); overrides an `EndpointPolicy` on the service |
 | `config.aether.io/upstreams` | — | Comma-separated services this pod **calls** (see "Declaring upstreams") |
+
+## Serving on a Unix domain socket
+
+An app that serves on a Unix socket instead of a TCP port joins the mesh with
+`endpoint.aether.io/uds-socket: <volume>/<socket-file>`. The node proxy then
+delivers inbound requests to that socket. Nothing changes for callers: the pod
+is still reached at its pod IP over mTLS and is indistinguishable from a
+TCP-serving pod.
+
+```yaml
+    metadata:
+      labels:
+        aether.io/managed: "true"
+      annotations:
+        endpoint.aether.io/port: "8080"
+        endpoint.aether.io/uds-socket: "uds/app.sock"
+    spec:
+      containers:
+        - name: app
+          volumeMounts:
+            - name: uds                # NO subPath
+              mountPath: /run/app
+      volumes:
+        - name: uds
+          emptyDir: {}                 # emptyDir only
+```
+
+Requirements:
+
+- **`emptyDir` volume, mounted without `subPath`.** The proxy reaches the
+  socket through kubelet's pod-volumes directory on the host
+  (`/var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~empty-dir/<volume>/`);
+  CSI, projected and `hostPath` volumes, and `subPath` mounts, all have a
+  different (or no) host path and are rejected.
+- **The annotation is `<volume>/<socket-file>`** — the volume *name* from the
+  pod spec (not its mount path) and a file directly inside it. Anything else
+  (extra path segments, `..`, absolute paths) is rejected.
+- **Keep both names short.** The full host path must fit an `AF_UNIX` address
+  (107 bytes), and the fixed kubelet prefix consumes ~91 of them, leaving about
+  **16 characters** for `<volume>/<socket-file>` together. A resolution that
+  does not fit is refused (and logged) rather than sent to Envoy, which would
+  reject the cluster.
+- **Ports are still required and still meaningful.** `endpoint.aether.io/port`
+  (and `endpoint.aether.io/ports` for multi-port) name the *service* ports
+  clients dial and drive inbound demux and endpoint registration; the
+  annotation only changes what the proxy dials on delivery. A pod declares one
+  socket and every declared port is delivered to it — multiplexing protocols on
+  the one socket is the app's affair (normal for gRPC).
+- **The app creates the socket**, ideally `0600`–`0660`. The proxy runs as root
+  and is never blocked by the mode; restrictive modes keep other containers in
+  the pod out.
+
+### Declaring it once per service instead (EndpointPolicy)
+
+The same delivery can be declared for a whole service with an `EndpointPolicy`
+CR, so a platform owner can own it separately from the Deployment:
+
+```yaml
+apiVersion: config.aether.io/v1
+kind: EndpointPolicy
+metadata:
+  name: echo-uds
+  namespace: team-a
+spec:
+  targetRef:
+    kind: Service          # core group, same namespace, Service only
+    name: echo
+  udsSocket: s/app.sock    # same <volume>/<file> value as the annotation
+```
+
+Its advantage is *when* mistakes are caught: the admission webhook rejects a
+malformed value — including one that overflows the 107-byte budget — at
+`kubectl apply`, instead of leaving the agent to log an error and fall back.
+
+- **The pod annotation wins.** A pod carrying
+  `endpoint.aether.io/uds-socket` uses its own value; the policy is the
+  service-level default for the pods that do not.
+- **The pod spec still has to match.** The CR cannot see the workload, so a
+  policy naming a volume the pods do not mount is not rejected at apply time —
+  it degrades exactly like a bad annotation (below).
+- **One policy per service.** A second policy targeting the same Service is
+  ignored (the lexicographically smallest policy name wins) and the conflict is
+  logged by the agent.
+- The CRD ships in the `crds` chart, and the agent only reads it when
+  `proxy.udsWorkloads.enabled` is true.
+
+Failure semantics match TCP delivery: until the socket file exists and accepts,
+the delegated-liveness probe fails and the endpoint stays **unpromoted** — no
+traffic is sent to it, exactly as for an app that has not yet bound its port.
+The same applies if the mesh cannot use the socket at all (the annotation does
+not resolve, or the operator disabled `proxy.udsWorkloads`): delivery falls back
+to the TCP port, where nothing is listening, so the endpoint stays unpromoted
+instead of blackholing traffic. The agent logs the reason.
 
 ## Calling other services
 

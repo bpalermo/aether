@@ -2,14 +2,15 @@ apiVersion: v2
 name: aether
 description: |
   Aether service mesh — the whole system in one chart: the node agent (DaemonSet)
-  + per-node Envoy proxy, the in-cluster registrar, and the mesh-config controller
-  (MeshConfig validating webhook + CR→ConfigMap reconciler). System config (OTEL,
-  SPIRE, mesh domain) is set once at the top level. The MeshConfig CRD ships in the
-  separate `crds` chart, which must be installed first. See
-  docs/proposals/015_mesh-config.md.
+  + per-node Envoy proxy + the mesh-dns DaemonSet, the in-cluster registrar, the
+  controller (validating webhooks for MeshConfig, HTTPFilter, EdgeConfig,
+  EndpointPolicy and HTTPRoute, a pod-mutating webhook, and the MeshConfig→ConfigMap
+  reconciler), and the optional north-south edge gateway. System config (OTEL,
+  SPIRE, mesh domain) is set once at the top level. The CRDs ship in the separate
+  `crds` chart, which must be installed first. See docs/proposals/015_mesh-config.md.
 type: application
 # Stamped at package time when built with `--stamp` (see other charts).
-version: "0.88.0"
+version: "0.90.1"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

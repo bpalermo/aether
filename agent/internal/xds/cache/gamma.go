@@ -409,13 +409,16 @@ func equalAny(a, b *anypb.Any) bool {
 // re-enable a filter already present in the chain — a stale chain silently disables
 // the feature (2026-07-05 talos finding: the outbound HCM never carried the union).
 func (c *SnapshotCache) regenerateAllHTTPListeners() {
+	// Node-global union, built once for the whole loop (see extensionHTTPFilters):
+	// the rebuilt union is exactly what this regeneration exists to propagate.
+	shared := c.extensionHTTPFilters()
 	c.listenerMu.Lock()
 	for netns, entry := range c.listeners {
 		if entry.cniPod == nil {
 			continue
 		}
-		extensionFilters := c.podExtensionHTTPFilters(entry.cniPod)
-		newCapture, err := c.generateCaptureListener(entry.cniPod)
+		extensionFilters := c.podExtensionHTTPFilters(entry.cniPod, shared)
+		newCapture, err := c.generateCaptureListener(entry.cniPod, extensionFilters)
 		if err != nil {
 			c.log.Error("failed to regenerate capture listener on extension-union change",
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)

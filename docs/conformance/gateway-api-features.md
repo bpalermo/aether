@@ -42,10 +42,10 @@ e2e-validated on talos (aether 0.41.0).
 | Feature | Status | Notes |
 |---|---|---|
 | GAMMA Mesh profile (parentRef=Service) | Supported | producer routes; consumer (per-namespace) overrides Planned |
-| GAMMA rules on the transparent-capture path | Supported | applies to clients dialing `<svc>.<meshDomain>` (the default path) |
-| East-west L4 on the transparent-capture path | Supported | TCPRoute/TLSRoute/UDPRoute (parentRef=Service) project onto the capture floor; gated behind `--l4-routes` |
-| `ReferenceGrant` (cross-namespace backendRefs) | Supported (admission + status; namespace-blind resolution pending 020 Part 1) | A cross-namespace backendRef (namespace set and != the route's) is admitted only when a `ReferenceGrant` in the backend's namespace has a `from` matching `{group: gateway.networking.k8s.io, kind: <route kind>, namespace: <route ns>}` and a `to` matching `{group: "", kind: Service}` (optionally `name`). Without a grant the route's `ResolvedRefs` is `False`/`RefNotPermitted` and the backend is DROPPED from the data plane (rest of the route still applies). Enforced on edge HTTPRoute/TCPRoute/TLSRoute and east-west GAMMA HTTPRoute/GRPCRoute + L4 TCPRoute/TLSRoute/UDPRoute. CAVEAT: aether's data-plane cluster name is still namespace-free (`<svc>.<meshDomain>`), so a *granted* cross-ns ref resolves by name exactly as today; proper per-namespace resolution lands with proposal 020 Part 1 |
-| MCS `ServiceExport`/`ServiceImport`, `clusterset.local` | Planned | registry-backed (proposal 006), DNS strictly local |
+| GAMMA rules on the transparent-capture path | Supported | applies to clients dialing `<svc>.<ns>.<meshDomain>` (the default path) |
+| East-west L4 on the transparent-capture path | Supported | TCPRoute/TLSRoute/UDPRoute (parentRef=Service) project onto the capture floor; unconditional since proposal 031 (the `--l4-routes` flag was retired), gated only on the route CRDs being installed |
+| `ReferenceGrant` (cross-namespace backendRefs) | Supported (admission + status + per-namespace resolution) | A cross-namespace backendRef (namespace set and != the route's) is admitted only when a `ReferenceGrant` in the backend's namespace has a `from` matching `{group: gateway.networking.k8s.io, kind: <route kind>, namespace: <route ns>}` and a `to` matching `{group: "", kind: Service}` (optionally `name`). Without a grant the route's `ResolvedRefs` is `False`/`RefNotPermitted` and the backend is DROPPED from the data plane (rest of the route still applies). Enforced on edge HTTPRoute/TCPRoute/TLSRoute and east-west GAMMA HTTPRoute/GRPCRoute + L4 TCPRoute/TLSRoute/UDPRoute. The data-plane cluster name is namespace-qualified (`<svc>.<ns>.<meshDomain>`) since the proposal 020 cutover, so a *granted* cross-ns ref resolves to the backend's own namespace |
+| MCS `ServiceExport`/`ServiceImport`, `clusterset.local` | Supported (phase 1) | registry-backed (proposals 018 + 006), DNS strictly local. `registrar.enableMCS=true` exports local `ServiceExport`s to the registry and materializes peer-exported services as `ServiceImport`s + clusterset VIPs. Requires the etcd backend + the MCS-API CRDs |
 
 ## Transport / security
 
@@ -63,13 +63,14 @@ Gateway of its GatewayClass in ANY namespace and publishes the Gateway/Route sta
 conditions and per-listener `attachedRoutes`, which is what the upstream conformance
 suite's `NamespacesMustBeReady` gate requires before any test runs.
 
-Every class-`aether` Gateway also gets `status.addresses` (one `IPAddress` entry =
-the shared edge LoadBalancer IP), so the suite's "wait for at least one IP address in
-status" setup step passes and the GATEWAY-HTTP *traffic* tests run (proposal 021 Phase
-1). The address is resolved at runtime from the edge's own LoadBalancer Service status
-(robust to MetalLB assignment): until the LB IP is assigned the address is omitted
-rather than written empty. All class-`aether` Gateways currently share the one edge
-address; distinct per-Gateway addresses are proposal 021 Phase 2.
+Every class-`aether` Gateway also gets `status.addresses` (one `IPAddress` entry), so
+the suite's "wait for at least one IP address in status" setup step passes and the
+GATEWAY-HTTP *traffic* tests run. Each Gateway gets its **own** LoadBalancer Service
+and therefore its own distinct address (proposal 021 Phase 2, unconditional since 031
+round 2); the shared-address fallback of Phase 1 remains only when the edge Service
+name is unset or port allocation fails. The address is resolved at runtime from the
+Service's status (robust to MetalLB assignment): until the LB IP is assigned the
+address is omitted rather than written empty.
 
 The GatewayClass also publishes a machine-readable `status.supportedFeatures` list so
 the suite skips (rather than fails) the features aether does not implement. The
@@ -85,8 +86,8 @@ that both are implemented on edge + GAMMA HTTPRoute; host redirect carries no se
 flag (host+status is core), and only the 301/302 redirect status codes are implemented
 (the `303`/`307`/`308` status-code features are not advertised). Request mirroring is
 deliberately omitted (not implemented). `ReferenceGrant` is advertised now that
-cross-namespace backendRef admission + status enforcement is implemented (resolution
-stays namespace-blind until proposal 020 Part 1).
+cross-namespace backendRef admission, status enforcement, and namespace-qualified
+resolution (proposal 020) are all implemented.
 
 `GRPCRoute` is **not** advertised on the GatewayClass: aether serves `GRPCRoute` only
 east-west via GAMMA (`parentRef: Service`), which is a mesh feature with no
@@ -96,12 +97,12 @@ gRPC traffic through a Gateway the edge cannot serve (the tests run and fail/tim
 so it is omitted here while GAMMA continues to implement `GRPCRoute` for the mesh
 profile (see "Route types" above).
 
-### Data-plane / addressing gap
+### Data-plane / addressing
 
-The edge data plane is still a single Deployment on a single LoadBalancer address.
-Every class-`aether` Gateway now publishes that shared address in `status.addresses`
-(proposal 021 Phase 1), which unblocks the address-dependent GATEWAY-HTTP traffic
-tests; routes are served through the one shared address (demuxed by listener
-hostname/port). Tests that assert each Gateway has its OWN *distinct* address are not
-yet satisfied — distinct per-Gateway addressing (per-Gateway LoadBalancer Service +
-internal-port demux) is proposal 021 Phase 2.
+Per-Gateway addressing (proposal 021 Phase 2) is implemented and unconditional: each
+class-`aether` Gateway gets its own LoadBalancer Service and its own distinct address,
+published in `status.addresses`, with internal-port demux behind the one edge
+Deployment. This satisfies both the address-dependent GATEWAY-HTTP traffic tests and
+the tests asserting each Gateway has its OWN address. The Phase 1 shared-address
+behavior survives only as the fallback for when the edge Service name is unset or a
+per-Gateway port cannot be allocated.

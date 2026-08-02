@@ -23,7 +23,9 @@ import (
 	"time"
 
 	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
 	"github.com/bpalermo/aether/common/extensionfilter"
+	"github.com/bpalermo/aether/common/udspath"
 
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -116,7 +118,7 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
 	authzEntry := proxy.AuthzSidecarHTTPFilter(200*time.Millisecond, false)
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, []*http_connection_managerv3.HttpFilter{authzEntry}, nil)
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, []*http_connection_managerv3.HttpFilter{authzEntry}, nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod: %w", err)
 	}
@@ -191,7 +193,7 @@ func authzSidecarCluster() *clusterv3.Cluster {
 func buildNodeCleartextBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, true, nil, nil)
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, true, nil, nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("GenerateListenersFromRegistryPod (cleartext): %w", err)
 	}
@@ -200,6 +202,46 @@ func buildNodeCleartextBootstrap() (*bootstrapv3.Bootstrap, error) {
 	svcCluster := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
 
 	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster}
+	staticClusters = append(staticClusters, appClusters...)
+	staticClusters = append(staticClusters, healthCluster)
+
+	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound}), nil
+}
+
+// NodeUDSBootstrapJSON builds the UDS-delivery (proposal 034 Phase 1) node-proxy
+// bootstrap and returns its JSON. It exercises the pipe app clusters (one per
+// declared port, all dialing the same socket, no upstream bind config) and the
+// HTTP/1.1 active health check over a pipe upstream, so stock Envoy proves the
+// pipe delivery config is accepted.
+func NodeUDSBootstrapJSON() ([]byte, error) {
+	bs, err := buildNodeUDSBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+// buildNodeUDSBootstrap builds the node-proxy bootstrap for a multi-port pod
+// whose application is delivered over a Unix socket.
+func buildNodeUDSBootstrap() (*bootstrapv3.Bootstrap, error) {
+	pod := testPod()
+	pod.Annotations = map[string]string{
+		aetherannotations.AnnotationEndpointPort:      "8080",
+		aetherannotations.AnnotationEndpointPorts:     "8080,9090",
+		aetherannotations.AnnotationEndpointUDSSocket: "uds/app.sock",
+	}
+
+	socketPath, err := udspath.Resolve(udspath.DefaultKubeletPodsDir, "11111111-2222-3333-4444-555555555555", "uds/app.sock")
+	if err != nil {
+		return nil, fmt.Errorf("udspath.Resolve: %w", err)
+	}
+
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, nil, nil, socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateListenersFromRegistryPod (uds): %w", err)
+	}
+
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), proxy.NewPassthroughOriginalDstCluster(), newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")}
 	staticClusters = append(staticClusters, appClusters...)
 	staticClusters = append(staticClusters, healthCluster)
 

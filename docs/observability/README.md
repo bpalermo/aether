@@ -66,7 +66,7 @@ to make the rules evaluate.
 
 Do **not** `helm upgrade` by hand: those values are reconciled by Flux (see below).
 
-## Alert delivery (Alertmanager -> GitHub issue)
+## Alert delivery (Alertmanager -> Slack + GitHub issue)
 
 **This file is the source of truth for the rules; it is not where they are deployed
 from.** talos-main is GitOps-managed by Flux, so nothing here is applied by hand — the
@@ -75,22 +75,28 @@ rules and the delivery path both live in
 
 | what | where |
 |---|---|
-| rule group `aether-mesh-dns` | `clusters/talos-main/prometheus/values.yaml` → `serverFiles.alerting_rules.yml` |
-| Alertmanager routing + receiver | same file → `alertmanager.config` |
-| receiver Deployment | `clusters/talos-main/alertmanager-github-receiver/` |
+| alert rule groups | `clusters/talos-main/prometheus/values.yaml` → `serverFiles.alerting_rules.yml` |
+| Alertmanager routing + `github-slack` receiver | same file → `alertmanager.config` |
+| Slack webhook URL | SOPS Secret `alertmanager-slack` (ns `prometheus`), mounted as a **file** via `extraSecretMounts` → `global.slack_api_url_file` (Alertmanager cannot interpolate env vars, and `alertmanager.config` renders into a plaintext ConfigMap) |
+| GitHub receiver Deployment | `clusters/talos-main/alertmanager-github-receiver/` |
 | GitHub PAT | SOPS-encrypted `secret.sops.yaml` in that dir (AWS KMS + PGP) |
 
-A firing alert opens an issue on this repo labelled `alert`, and closes it on resolve.
-Issues are keyed on `GroupKey`, and `group_by: [alertname]` makes that stable — so one
-issue per condition listing every firing node, and a flapping alert **reopens** its issue
-rather than opening a new one.
+One receiver, two legs. **Slack (`#alerts`) is the pager**: GitHub issues created with
+your own PAT are self-authored, and GitHub does not notify you about your own actions —
+issues alone reach nobody. **The GitHub issue is the durable record**: a firing alert
+opens an issue on this repo labelled `alert`, and closes it on resolve. Issues are keyed
+on `GroupKey`, and `group_by: [alertname]` makes that stable — so one issue per
+condition listing every firing node, and a flapping alert **reopens** its issue rather
+than opening a new one.
 
-Two things that are easy to get wrong, both already handled there:
+Things that are easy to get wrong, already handled there:
 
-- **`Watchdog` must never reach the GitHub receiver.** It is a dead-man's switch
-  (`expr: vector(1)`) that fires permanently *by design*. Since `github` is now the
-  default receiver, its `→ "null"` route is load-bearing — without it you get one
-  immortal issue that can never be closed, and you learn to ignore the label.
+- **There is no `Watchdog` rule, on purpose.** The stock always-firing dead-man's switch
+  was removed together with its `→ "null"` route: nothing *outside* the cluster consumed
+  the heartbeat, so it proved nothing and would file an immortal issue if it ever leaked
+  to a real receiver. (If you re-introduce an always-firing rule, remove rule before
+  route on teardown — the reverse ordering once briefly filed one.) A real dead-man's
+  switch needs an external sink and is still an open item.
 - **`measurementlab/alertmanager-github-receiver` cannot run on talos-main.** It is the
   receiver everyone cites, but it is published **amd64-only** (neither `latest` nor
   `v0.11` is a multi-arch index) while every talos-main node is **arm64**. We use

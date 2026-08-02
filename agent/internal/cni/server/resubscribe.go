@@ -18,8 +18,10 @@ import (
 //
 // It waits for the SPIRE bridge to connect (SubscribePod no-ops before then),
 // then re-subscribes every managed stored pod, re-fetching the pod UID from the
-// API server (the UID is needed for the SPIRE k8s:pod-uid selector and is not
-// persisted in storage). Idempotent: SubscribePod no-ops for an
+// API server. The UID is persisted in storage since proposal 034, but the
+// re-fetch stays: records written before the field existed lack it, and the
+// lookup doubles as liveness proof for the pod (deleted-while-down pods fail
+// it and are skipped). Idempotent: SubscribePod no-ops for an
 // already-subscribed network namespace, so racing a concurrent CNI ADD is safe.
 // Pods deleted while the agent was down fail the UID lookup and are skipped;
 // their CNI DEL cleans them up.

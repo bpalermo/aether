@@ -44,7 +44,7 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org", "example.org", false, false, nil, nil)
+			inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(tt.cniPod, "example.org", "example.org", false, false, nil, nil, "")
 
 			if tt.expectedError {
 				require.Error(t, err)
@@ -79,13 +79,13 @@ func TestGenerateListenersFromRegistryPod(t *testing.T) {
 // raw TCP connect for TCP-floor services and an HTTP GET otherwise (proposal 018
 // Phase 3b TCP liveness).
 func TestNewAppHealthProbeCluster_CheckerType(t *testing.T) {
-	httpC := NewAppHealthProbeCluster("health_p", "/var/run/netns/x", 8080, "/-/-/ready", false)
+	httpC := NewAppHealthProbeCluster("health_p", AppAddress{Netns: "/var/run/netns/x"}, 8080, "/-/-/ready", false)
 	require.Len(t, httpC.GetHealthChecks(), 1)
 	require.NotNil(t, httpC.GetHealthChecks()[0].GetHttpHealthCheck(), "HTTP service: HTTP health check")
 	assert.Nil(t, httpC.GetHealthChecks()[0].GetTcpHealthCheck())
 	assert.Equal(t, "/-/-/ready", httpC.GetHealthChecks()[0].GetHttpHealthCheck().GetPath())
 
-	tcpC := NewAppHealthProbeCluster("health_p", "/var/run/netns/x", 9000, "/-/-/ready", true)
+	tcpC := NewAppHealthProbeCluster("health_p", AppAddress{Netns: "/var/run/netns/x"}, 9000, "/-/-/ready", true)
 	require.Len(t, tcpC.GetHealthChecks(), 1)
 	require.NotNil(t, tcpC.GetHealthChecks()[0].GetTcpHealthCheck(), "TCP service: connect-only TCP health check")
 	assert.Nil(t, tcpC.GetHealthChecks()[0].GetHttpHealthCheck())
@@ -166,7 +166,7 @@ func TestPerConnectionBufferLimits(t *testing.T) {
 		Name:             "buf-pod",
 		NetworkNamespace: "/var/run/netns/buf",
 	}
-	inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(pod, "aether.internal", "aether.internal", false, false, nil, nil)
+	inbound, outbound, appClusters, healthCluster, err := GenerateListenersFromRegistryPod(pod, "aether.internal", "aether.internal", false, false, nil, nil, "")
 	require.NotEmpty(t, appClusters)
 	appCluster := appClusters[0]
 	require.NoError(t, err)

@@ -51,6 +51,14 @@ const (
 
 	// AnnotationEndpointPort is the pod annotation key for specifying the service port
 	AnnotationEndpointPort = annotationAetherEndpointPrefix + "port"
+	// AnnotationEndpointUDSSocket is the pod annotation switching app DELIVERY to
+	// a Unix domain socket (proposal 034 Phase 1). Value: "<volume>/<file>", an
+	// emptyDir volume name declared by the pod and the socket file inside it,
+	// resolved to a kubelet pod-volumes host path by common/udspath. Ports stay
+	// required — they keep naming the service ports for inbound demux and EDS;
+	// this annotation only changes what the app_<pod>_<port> clusters dial (all
+	// declared ports dial the same socket).
+	AnnotationEndpointUDSSocket = annotationAetherEndpointPrefix + "uds-socket"
 	// AnnotationEndpointPorts is the pod annotation listing ALL application ports
 	// the pod serves, comma-separated (e.g. "8080,9090"), for multi-port routing
 	// (proposal 005). AnnotationEndpointPort remains the default/primary port;
