@@ -1,0 +1,365 @@
+/*
+ * aethermesh.dev visual language.
+ *
+ * Dark by default. Flat surfaces, hairline borders, one accent used only for
+ * links, active navigation and focus rings — never as a large fill. No
+ * gradients, no shadows, no icons in the feature grid. System fonts only: the
+ * site fetches nothing from a third party, so there are no webfonts to fetch.
+ */
+
+:root {
+  --md-text-font:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* --------------------------------------------------------------------------
+ * Palette — dark (default)
+ * -------------------------------------------------------------------------- */
+
+[data-md-color-scheme="slate"] {
+  --aether-bg: #0b0e14;
+  --aether-surface: #121721;
+  --aether-border: #212a38;
+  --aether-text: #c8d2df;
+  --aether-muted: #7d8a9c;
+  --aether-accent: #59c2c9;
+
+  --md-hue: 215;
+
+  --md-default-bg-color: var(--aether-bg);
+  --md-default-bg-color--light: var(--aether-bg);
+  --md-default-bg-color--lighter: var(--aether-surface);
+  --md-default-bg-color--lightest: var(--aether-surface);
+
+  --md-default-fg-color: var(--aether-text);
+  --md-default-fg-color--light: var(--aether-muted);
+  --md-default-fg-color--lighter: #4d5765;
+  --md-default-fg-color--lightest: var(--aether-border);
+
+  --md-primary-fg-color: var(--aether-bg);
+  --md-primary-fg-color--light: var(--aether-surface);
+  --md-primary-fg-color--dark: var(--aether-bg);
+  --md-primary-bg-color: var(--aether-text);
+  --md-primary-bg-color--light: var(--aether-muted);
+
+  --md-accent-fg-color: var(--aether-accent);
+  --md-accent-fg-color--transparent: rgb(89 194 201 / 10%);
+  --md-accent-bg-color: var(--aether-bg);
+
+  --md-typeset-color: var(--aether-text);
+  --md-typeset-a-color: var(--aether-accent);
+  --md-typeset-mark-color: rgb(89 194 201 / 20%);
+
+  --md-code-bg-color: var(--aether-surface);
+  --md-code-fg-color: var(--aether-text);
+  --md-code-hl-color: rgb(89 194 201 / 12%);
+
+  --md-footer-bg-color: var(--aether-bg);
+  --md-footer-bg-color--dark: var(--aether-bg);
+  --md-footer-fg-color: var(--aether-text);
+  --md-footer-fg-color--light: var(--aether-muted);
+  --md-footer-fg-color--lighter: var(--aether-muted);
+
+  --md-mermaid-font-family: var(--md-text-font), sans-serif;
+  --md-mermaid-bg-color: var(--aether-bg);
+  --md-mermaid-node-bg-color: var(--aether-surface);
+  --md-mermaid-node-fg-color: var(--aether-text);
+  --md-mermaid-label-bg-color: var(--aether-surface);
+  --md-mermaid-label-fg-color: var(--aether-text);
+  --md-mermaid-edge-color: var(--aether-muted);
+}
+
+/* --------------------------------------------------------------------------
+ * Palette — light
+ * -------------------------------------------------------------------------- */
+
+[data-md-color-scheme="default"] {
+  --aether-bg: #ffffff;
+  --aether-surface: #f5f7fa;
+  --aether-border: #e2e7ee;
+  --aether-text: #1a1f27;
+  --aether-muted: #5b6673;
+  --aether-accent: #0f7c86;
+
+  --md-default-bg-color: var(--aether-bg);
+  --md-default-bg-color--light: var(--aether-bg);
+  --md-default-bg-color--lighter: var(--aether-surface);
+  --md-default-bg-color--lightest: var(--aether-surface);
+
+  --md-default-fg-color: var(--aether-text);
+  --md-default-fg-color--light: var(--aether-muted);
+  --md-default-fg-color--lighter: #97a1ad;
+  --md-default-fg-color--lightest: var(--aether-border);
+
+  --md-primary-fg-color: var(--aether-bg);
+  --md-primary-fg-color--light: var(--aether-surface);
+  --md-primary-fg-color--dark: var(--aether-bg);
+  --md-primary-bg-color: var(--aether-text);
+  --md-primary-bg-color--light: var(--aether-muted);
+
+  --md-accent-fg-color: var(--aether-accent);
+  --md-accent-fg-color--transparent: rgb(15 124 134 / 8%);
+  --md-accent-bg-color: var(--aether-bg);
+
+  --md-typeset-color: var(--aether-text);
+  --md-typeset-a-color: var(--aether-accent);
+  --md-typeset-mark-color: rgb(15 124 134 / 16%);
+
+  --md-code-bg-color: var(--aether-surface);
+  --md-code-fg-color: var(--aether-text);
+
+  --md-footer-bg-color: var(--aether-bg);
+  --md-footer-bg-color--dark: var(--aether-bg);
+  --md-footer-fg-color: var(--aether-text);
+  --md-footer-fg-color--light: var(--aether-muted);
+  --md-footer-fg-color--lighter: var(--aether-muted);
+
+  --md-mermaid-font-family: var(--md-text-font), sans-serif;
+  --md-mermaid-bg-color: var(--aether-bg);
+  --md-mermaid-node-bg-color: var(--aether-surface);
+  --md-mermaid-node-fg-color: var(--aether-text);
+  --md-mermaid-label-bg-color: var(--aether-surface);
+  --md-mermaid-label-fg-color: var(--aether-text);
+  --md-mermaid-edge-color: var(--aether-muted);
+}
+
+/* --------------------------------------------------------------------------
+ * Chrome
+ * -------------------------------------------------------------------------- */
+
+.md-header {
+  border-bottom: 1px solid var(--aether-border);
+  box-shadow: none;
+}
+
+.md-header--shadow {
+  box-shadow: none;
+}
+
+.md-tabs {
+  border-bottom: 1px solid var(--aether-border);
+}
+
+.aether-wordmark {
+  font-family: var(--md-code-font);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.aether-wordmark__mesh {
+  color: var(--md-primary-bg-color--light);
+}
+
+.md-footer-meta {
+  border-top: 1px solid var(--aether-border);
+}
+
+.md-copyright {
+  color: var(--aether-muted);
+  font-size: 0.62rem;
+  width: 100%;
+}
+
+.md-copyright__highlight {
+  color: var(--aether-muted);
+}
+
+.md-search__form {
+  background-color: var(--aether-surface);
+  border: 1px solid var(--aether-border);
+  box-shadow: none;
+}
+
+.md-search__form:hover {
+  background-color: var(--aether-surface);
+}
+
+.md-nav__link--active,
+.md-nav__link:focus,
+.md-nav__link:hover {
+  color: var(--md-accent-fg-color);
+}
+
+:focus-visible {
+  outline: 2px solid var(--md-accent-fg-color);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+ * Content column and typography
+ * -------------------------------------------------------------------------- */
+
+.md-content__inner {
+  margin-inline: auto;
+  max-width: 46rem;
+  padding-top: 1.2rem;
+}
+
+.md-typeset {
+  font-size: 0.76rem;
+  line-height: 1.7;
+}
+
+.md-typeset h1 {
+  color: var(--md-default-fg-color);
+  font-size: 1.45rem;
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  line-height: 1.32;
+  margin-bottom: 0.8rem;
+}
+
+.md-typeset h2 {
+  border-top: 1px solid var(--aether-border);
+  font-size: 1rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-top: 2.6rem;
+  padding-top: 1.3rem;
+}
+
+.md-typeset h3 {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.md-typeset a {
+  text-underline-offset: 0.18em;
+}
+
+.md-typeset pre > code,
+.md-typeset code {
+  border-radius: 2px;
+}
+
+.md-typeset .highlight,
+.md-typeset pre {
+  box-shadow: none;
+}
+
+/* --------------------------------------------------------------------------
+ * Landing page
+ * -------------------------------------------------------------------------- */
+
+.aether-hero {
+  padding-bottom: 0.6rem;
+}
+
+.aether-hero h1 {
+  max-width: 30em;
+}
+
+.md-typeset .aether-subline {
+  color: var(--aether-muted);
+  font-size: 0.8rem;
+  margin-bottom: 1.4rem;
+  max-width: 34em;
+}
+
+.md-typeset .aether-fineprint {
+  color: var(--aether-muted);
+  font-size: 0.66rem;
+  margin-top: 1rem;
+}
+
+.md-typeset .aether-caption {
+  color: var(--aether-muted);
+  font-size: 0.68rem;
+}
+
+.md-typeset .md-button.aether-button {
+  background: transparent;
+  border: 1px solid var(--aether-border);
+  border-radius: 2px;
+  color: var(--md-default-fg-color);
+  font-size: 0.7rem;
+  font-weight: 400;
+  margin-right: 0.4rem;
+  padding: 0.44em 1.1em;
+}
+
+.md-typeset .md-button.aether-button:focus,
+.md-typeset .md-button.aether-button:hover {
+  background: transparent;
+  border-color: var(--md-accent-fg-color);
+  color: var(--md-accent-fg-color);
+}
+
+.md-typeset .aether-grid {
+  border-left: 1px solid var(--aether-border);
+  border-top: 1px solid var(--aether-border);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 1.4rem 0;
+}
+
+.md-typeset .aether-grid__cell {
+  border-bottom: 1px solid var(--aether-border);
+  border-right: 1px solid var(--aether-border);
+  padding: 1.1rem 1.2rem;
+}
+
+.md-typeset .aether-grid__cell > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .aether-grid__cell > :last-child {
+  margin-bottom: 0;
+}
+
+.md-typeset .aether-grid__cell p {
+  font-size: 0.72rem;
+}
+
+.md-typeset .aether-grid__cell strong {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 0.35rem;
+}
+
+.md-typeset .aether-note {
+  border-top: 1px solid var(--aether-border);
+  color: var(--aether-muted);
+  font-size: 0.72rem;
+  margin-top: 2.4rem;
+  padding-top: 1.2rem;
+}
+
+.md-typeset .aether-note a {
+  color: var(--aether-muted);
+  text-decoration: underline;
+}
+
+.md-typeset .aether-note a:focus,
+.md-typeset .aether-note a:hover {
+  color: var(--md-accent-fg-color);
+}
+
+.aether-private-note {
+  color: var(--aether-muted);
+}
+
+@media screen and (max-width: 44.9375em) {
+  .md-typeset .aether-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .md-typeset h1 {
+    font-size: 1.2rem;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Diagrams
+ * -------------------------------------------------------------------------- */
+
+.md-typeset .mermaid {
+  background: var(--aether-surface);
+  border: 1px solid var(--aether-border);
+  border-radius: 2px;
+  margin: 1.2rem 0;
+  padding: 1rem 0.6rem;
+}

@@ -103,6 +103,21 @@ publish: push-all
 	@bazel run //charts/agent:agent.push_registry --stamp
 	@bazel run //charts/registrar:registrar.push_registry --stamp
 
+# --- Website (aethermesh.dev; see //website) ---
+# `website` produces bazel-bin/website/site.tar, exactly what the pages workflow
+# deploys. `website-test` is the strict build the `ci` gate runs on PRs.
+.PHONY: website
+website:
+	@bazel build //website:site
+
+.PHONY: website-test
+website-test:
+	@bazel test --test_output=errors //website:all
+
+.PHONY: website-serve
+website-serve:
+	@bazel run //website:mkdocs -- serve -f "$(CURDIR)/website/mkdocs.yml"
+
 # --- Custom proxy (separate Bazel workspace under proxy/; see proposal 010) ---
 # These run inside proxy/ so its own Bazel version (.bazelversion=7.7.1) is used.
 # NOTE: building the proxy compiles Envoy from source (multi-hour); use a warm

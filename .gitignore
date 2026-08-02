@@ -17,6 +17,12 @@
 colima.bazelrc
 user.bazelrc
 
+# Leftovers from a local `bazel run //website:mkdocs -- serve|build`, which runs
+# straight out of the source tree. The Bazel build never writes here (it builds
+# into a scratch dir and emits site.tar).
+/website/site/
+__pycache__/
+
 .volumes
 
 certs

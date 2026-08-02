@@ -4,7 +4,8 @@ A seventh run of the upstream Kubernetes **Gateway API conformance suite**
 (`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now at
 aether **0.50.0 (rev 86)**, image/commit **`ddd3ee4`**. This run measures the
 **3-PR hostname-less routing fix** (#341 / #342 / #343) that was expected to flip
-[rev6](./baseline-2026-06-25-rev6.md)'s uniform-404 traffic wall.
+rev6's uniform-404 traffic wall (rev6 was never written up; the last committed
+predecessor is [rev5](./baseline-2026-06-25-rev5.md)).
 
 In rev6 every traffic test reached the traffic phase and then returned a **uniform
 404** (4080/4080), diagnosed as "the edge resolves backends in *status* but does not

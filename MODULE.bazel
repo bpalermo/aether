@@ -6,6 +6,10 @@ bazel_dep(name = "protobuf", version = "35.1")
 bazel_dep(name = "rules_go", version = "0.62.0")
 bazel_dep(name = "gazelle", version = "0.52.2")
 
+# Hermetic CPython + pip for //website (the aethermesh.dev MkDocs site). This is
+# the only Python in the repo; see the website block at the bottom of this file.
+bazel_dep(name = "rules_python", version = "2.2.0")
+
 # Transitive dependency of rules_img pinned for Bazel 9 compatibility.
 # Older versions (e.g. 0.10.1, pulled in via rules_img → rules_pkg) use the
 # removed `incompatible_use_toolchain_transition` rule() kwarg.
@@ -205,6 +209,42 @@ http_file(
     sha256 = "ee53a4f5375566f15944dc9cb03afb1fc228df38f61737c677f139213215afcf",
     urls = ["https://github.com/envoyproxy/envoy/releases/download/v1.39.0/envoy-1.39.0-linux-aarch_64"],
 )
+
+# ---------------------------------------------------------------------------
+# Website (//website) — aethermesh.dev.
+#
+# Pinned mermaid bundle. Material for MkDocs lazy-loads mermaid from unpkg.com;
+# //website:build_site rewrites that URL to this self-hosted copy and fails the
+# build if the reference it expects to rewrite is gone. aethermesh.dev is a .dev
+# domain (HSTS-preloaded) and issues zero third-party requests.
+#
+# MERMAID_VERSION = "11.16.0"
+# ---------------------------------------------------------------------------
+http_file(
+    name = "mermaid_js",
+    downloaded_file_path = "mermaid.min.js",
+    sha256 = "74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b",
+    urls = ["https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"],
+)
+
+# Hermetic CPython for the site build. Nothing else in the repo is Python, so
+# this toolchain is the default one without contending with anything.
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.12",
+)
+
+# mkdocs + mkdocs-material and their full transitive closure, every version
+# pinned and every wheel hash-checked (see //website:requirements.in for how the
+# lock is regenerated).
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "aether_docs_pip",
+    python_version = "3.12",
+    requirements_lock = "//website:requirements_lock.txt",
+)
+use_repo(pip, "aether_docs_pip")
 
 pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
 

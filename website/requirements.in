@@ -1,0 +1,21 @@
+# Direct dependencies of the aethermesh.dev build. The resolved, hash-pinned
+# closure lives in requirements_lock.txt and is what Bazel actually consumes;
+# this file only records intent.
+#
+# Regenerate the lock (universal: one file valid for every host Bazel may fetch
+# wheels for) after changing anything here:
+#
+#   uv pip compile --universal --python-version 3.12 --generate-hashes \
+#     --no-annotate --no-header \
+#     website/requirements.in -o website/requirements_lock.txt
+#
+# pip-tools works too:
+#
+#   pip-compile --generate-hashes --output-file=website/requirements_lock.txt \
+#     website/requirements.in
+#
+# Then run `bazel test //website:all` — the strict build is the acceptance test
+# for a dependency bump.
+
+mkdocs==1.6.1
+mkdocs-material==9.5.50

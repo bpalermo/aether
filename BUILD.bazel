@@ -1,6 +1,11 @@
 load("@gazelle//:def.bzl", "gazelle")
 
-exports_files([".shellcheckrc"])
+# README.md is an input to //website:site — the architecture page is generated
+# from it at build time so the site can never carry a stale copy.
+exports_files([
+    ".shellcheckrc",
+    "README.md",
+])
 
 # gazelle:prefix github.com/bpalermo/aether
 # gazelle:resolve proto buf/validate/validate.proto @protovalidate//proto/protovalidate/buf/validate:validate_proto

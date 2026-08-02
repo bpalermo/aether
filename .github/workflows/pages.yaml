@@ -1,0 +1,71 @@
+name: pages
+
+# Publishes aethermesh.dev from //website:site.
+#
+# The path filter here is safe (unlike in `ci`, where a skipped required check
+# would block merges forever): correctness is already gated on the pull request,
+# because //website:site_test is an ordinary Bazel test and bazel-diff marks it
+# impacted by any website/** or README.md change. This workflow only deploys what
+# `ci` already proved builds.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "website/**"
+      - "README.md"
+      - ".github/workflows/pages.yaml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Never cancel a deploy in flight — a half-applied Pages deployment is worse than
+# a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      # Local build on purpose: this is one genrule over a few hundred kilobytes
+      # of markdown (~1 min cold), so the BuildBuddy round trip that `ci` and
+      # `publish` need would cost more than it saves.
+      - name: Build the site
+        run: bazel build //website:site
+      - name: Unpack the site
+        run: |
+          mkdir -p _site
+          tar -xf bazel-bin/website/site.tar -C _site
+          test -f _site/index.html
+          test -f _site/architecture/index.html
+          test -f _site/CNAME
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

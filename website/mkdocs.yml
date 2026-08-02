@@ -1,0 +1,110 @@
+# aethermesh.dev — the Aether project site.
+#
+# Built hermetically by Bazel (//website:site). Every asset is served from this
+# origin: aethermesh.dev is a .dev domain (HSTS-preloaded), and a single
+# third-party request is a hard failure, not a slow page. So:
+#
+#   * theme.font is false             -> no Google Fonts
+#   * extra.generator is false        -> no "Made with Material" outbound link
+#   * overrides/partials/source.html  -> drops data-md-component="source",
+#                                        which is what makes Material fetch
+#                                        repository facts from api.github.com
+#   * mermaid is self-hosted          -> //website:build_site rewrites the
+#                                        unpkg.com URL baked into Material's
+#                                        bundle to /assets/javascripts/mermaid.min.js
+#
+# //website:build_site asserts all of the above on the generated output, so a
+# theme bump that reintroduces a CDN reference fails the build.
+
+site_name: aethermesh
+site_url: https://aethermesh.dev/
+site_author: Bruno Palermo
+site_description: >-
+  Aether is a Kubernetes service mesh data plane that runs one Envoy per node
+  instead of one per pod, capturing traffic transparently and mTLS-ing every hop
+  with SPIFFE identities.
+
+repo_url: https://github.com/bpalermo/aether
+repo_name: bpalermo/aether
+edit_uri: edit/main/website/pages/
+
+docs_dir: pages
+site_dir: site
+
+# Fail the build on anything that would produce a dangling link. //website:site
+# and //website:site_test both build with strict = true on top of this.
+strict: true
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+hooks:
+  - hooks.py
+
+theme:
+  name: material
+  custom_dir: overrides
+  language: en
+  # No webfonts. The prose stack and the mono stack are both set in
+  # pages/assets/stylesheets/extra.css.
+  font: false
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - content.action.edit
+    - content.code.copy
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  palette:
+    # Dark is the default; the toggle switches to light.
+    - scheme: slate
+      toggle:
+        icon: material/weather-night
+        name: Switch to light
+    - scheme: default
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark
+
+plugins:
+  - search
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Link to this section
+  - pymdownx.highlight:
+      anchor_linenums: false
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        # Material renders these client-side with mermaid.js. The copy it loads
+        # is self-hosted (see the header comment).
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+extra:
+  generator: false
+
+nav:
+  - Home: index.md
+  # Generated at build time from the repository README by hooks.py — there is no
+  # committed copy.
+  - Architecture: architecture.md
