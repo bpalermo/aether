@@ -1,0 +1,15 @@
+{#-
+  Copy of the Material 9.5 source partial with `data-md-component="source"`
+  removed. That attribute is what makes the theme's bundle fetch repository
+  facts (stars, forks, latest release) from api.github.com on every page load.
+  This site makes no third-party requests, so the link stays and the fetch goes.
+-#}
+<a href="{{ config.repo_url }}" title="{{ lang.t('source') }}" class="md-source">
+  <div class="md-source__icon md-icon">
+    {% set icon = config.theme.icon.repo or "fontawesome/brands/git-alt" %}
+    {% include ".icons/" ~ icon ~ ".svg" %}
+  </div>
+  <div class="md-source__repository">
+    {{ config.repo_name }}
+  </div>
+</a>

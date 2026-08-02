@@ -1,0 +1,116 @@
+# aethermesh.dev — the project site.
+#
+# Hand-written: Gazelle manages Go, not Python.
+#
+# The site is deliberately part of the normal target graph rather than something
+# the Pages workflow builds on its own. //website:site_test is an ordinary test,
+# so bazel-diff marks it impacted whenever website/** or README.md changes and
+# the required `ci` gate runs the strict build on the pull request — a broken
+# link or a reintroduced CDN reference fails review, not production.
+#
+#   bazel test //website:all                  # strict build + third-party audit
+#   bazel build //website:site                # the deployable tar
+#   bazel run  //website:mkdocs -- serve -f "$PWD/website/mkdocs.yml"
+#
+# gazelle:ignore
+
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_python//python/entry_points:py_console_script_binary.bzl", "py_console_script_binary")
+
+package(default_visibility = ["//visibility:private"])
+
+# Everything mkdocs reads, minus the repository files staged in by hooks.py.
+filegroup(
+    name = "sources",
+    srcs = [
+        "hooks.py",
+        "mkdocs.yml",
+    ] + glob([
+        "pages/**",
+        "overrides/**",
+    ]),
+)
+
+PIP_DEPS = [
+    "@aether_docs_pip//mkdocs",
+    "@aether_docs_pip//mkdocs_material",
+    "@aether_docs_pip//pymdown_extensions",
+]
+
+# Self-hosted mermaid: pinned by digest in MODULE.bazel and copied into the site
+# by build_site.py, which also repoints the unpkg.com URL Material bakes into its
+# bundle at this copy. aethermesh.dev makes no third-party requests.
+genrule(
+    name = "mermaid",
+    srcs = ["@mermaid_js//file"],
+    outs = ["mermaid.min.js"],
+    cmd = "cp $< $@",
+)
+
+py_binary(
+    name = "build_site",
+    srcs = ["build_site.py"],
+    legacy_create_init = 0,
+    deps = PIP_DEPS,
+)
+
+# The deployable artifact: a reproducible tar of the site root, untarred by
+# .github/workflows/pages.yaml straight into upload-pages-artifact.
+genrule(
+    name = "site",
+    srcs = [
+        "mkdocs.yml",
+        "mermaid.min.js",
+        "//:README.md",
+        ":sources",
+    ],
+    outs = ["site.tar"],
+    # genrule actions run from the exec root, so the repository root — the tree
+    # hooks.py stages README.md out of — is the working directory.
+    cmd = "$(execpath :build_site)" +
+          " --config $(execpath mkdocs.yml)" +
+          " --repo-root ." +
+          " --mermaid $(execpath mermaid.min.js)" +
+          " --out $@",
+    tools = [":build_site"],
+    visibility = ["//visibility:public"],
+)
+
+# The same strict build, as a test, so it runs on the `ci` gate. Runs locally:
+# every input is a runfile and nothing touches the network.
+py_test(
+    name = "site_test",
+    size = "small",
+    srcs = ["build_site.py"],
+    args = [
+        "--config",
+        "$(rootpath mkdocs.yml)",
+        "--repo-root",
+        ".",
+        "--mermaid",
+        "$(rootpath mermaid.min.js)",
+    ],
+    data = [
+        "mkdocs.yml",
+        "mermaid.min.js",
+        "//:README.md",
+        ":sources",
+    ],
+    legacy_create_init = 0,
+    main = "build_site.py",
+    deps = PIP_DEPS,
+)
+
+# Convenience entry point for a local edit loop:
+#   bazel run //website:mkdocs -- serve -f "$PWD/website/mkdocs.yml"
+# hooks.py finds README.md relative to the config file, so this needs no Bazel
+# inputs and picks up edits live.
+py_console_script_binary(
+    name = "mkdocs",
+    legacy_create_init = 0,
+    pkg = "@aether_docs_pip//mkdocs",
+    deps = [
+        "@aether_docs_pip//mkdocs_material",
+        "@aether_docs_pip//pymdown_extensions",
+    ],
+)
