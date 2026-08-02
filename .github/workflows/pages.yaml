@@ -11,9 +11,16 @@ on:
   push:
     branches:
       - main
+    # Every repository document the site renders, since the site holds no copy
+    # of any of them: a docs or proposal edit *is* a site change. Keep this in
+    # step with //:website_docs and website/hooks.py.
     paths:
       - "website/**"
       - "README.md"
+      - "AGENTS.md"
+      - "docs/**"
+      - "charts/README.md"
+      - "proxy/README.md"
       - ".github/workflows/pages.yaml"
   workflow_dispatch: {}
 
