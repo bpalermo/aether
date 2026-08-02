@@ -14,8 +14,8 @@ chart values and CLI/annotation reference, see
 
 | Tool | Why | Notes |
 |---|---|---|
-| **Bazel** via [Bazelisk](https://github.com/bazelbuild/bazelisk) | build system | The pinned version (`9.0.1`) is read from `.bazelversion`; just run `bazel …` and Bazelisk fetches it. |
-| **Go** 1.26.2 | language toolchain | Managed by `rules_go`; you rarely invoke `go` directly (use `bazel run @rules_go//go …`). |
+| **Bazel** via [Bazelisk](https://github.com/bazelbuild/bazelisk) | build system | The pinned version (`9.2.0`) is read from `.bazelversion`; just run `bazel …` and Bazelisk fetches it. |
+| **Go** 1.26.5 | language toolchain | Managed by `rules_go`; you rarely invoke `go` directly (use `bazel run @rules_go//go …`). |
 | **Docker** (or **Colima** on macOS) | container images + integration tests | Integration tests spin up real etcd / DynamoDB Local via testcontainers-go. |
 | **kubectl**, **Helm 3** (OCI) | deploy / e2e | |
 | **kind** | local multi-cluster e2e | Only needed for `e2e/multicluster_config.sh`. |
@@ -51,7 +51,7 @@ There is no `make build-controller`; build it directly with
 `bazel build //controller/cmd/controller/...`.
 
 > **The `aether-proxy` (custom Envoy) is NOT built here.** It lives in a separate
-> sibling Bazel workspace under `proxy/` (its own `.bazelversion` = 7.7.1) and
+> sibling Bazel workspace under `proxy/` (its own `.bazelversion` = 8.7.0) and
 > compiles Envoy from source (multi-hour; use a warm cache / CI). Build/load it
 > with `make load-proxy-image` only when you need a fresh proxy image. See
 > [`proxy/README.md`](../proxy/README.md) and proposal 010.
@@ -193,8 +193,8 @@ under a **shared trust domain** (shared upstream CA in `e2e/certs/`):
 Aether ships **two** charts, and **install order matters**:
 
 ```
-charts/crds     — the CRDs: MeshConfig + HTTPFilter + EdgeConfig   ← install FIRST
-charts/aether    — the whole system (agent DaemonSet + proxy + registrar + controller)
+charts/crds     — the CRDs: MeshConfig + HTTPFilter + EdgeConfig + EndpointPolicy   ← install FIRST
+charts/aether    — the whole system (agent DaemonSet + proxy + mesh-dns + registrar + controller)
 ```
 
 Install the CRDs before the system chart. **The agent crashes if it starts before
@@ -223,8 +223,11 @@ bazel run //charts/aether:aether.install
 > do **not** use `--reuse-values` (it keeps the stale digest-pinned image). Bump
 > the chart's `version:` on any change to its templates/values (CI enforces this).
 
-There is also a standalone **`prober`** chart (`charts/prober`) — an external
-mesh-availability prober (proposal 013), installed independently.
+There are also two standalone charts, installed independently: **`prober`**
+(`charts/prober`) — the external mesh-availability prober (proposal 013) — and
+**`udsecho`** (`charts/udsecho`) — the UDS validation workloads (proposal 034)
+that exercise both socket-delivery paths (annotation and `EndpointPolicy`) under
+continuous mesh traffic.
 
 See [`charts/README.md`](../charts/README.md) for chart layout, image mirroring,
 and the `--stamp` versioning scheme, and [`getting-started.md`](./getting-started.md)
