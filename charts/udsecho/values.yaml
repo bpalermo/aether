@@ -1,0 +1,38 @@
+# Default values for the udsecho validation chart.
+
+# Namespace the workloads deploy into. Must be mesh-managed territory (the CNI
+# intercepts the pods; the registrar generates their mesh Services). The
+# workload NAMES are deliberately not overridable: the ServiceAccount name IS
+# the mesh service identity (<ns>/<serviceAccount>), and the EndpointPolicy
+# targetRef names the registrar-generated Service — renaming would silently
+# decouple the three.
+namespace: aether-test
+
+image:
+  # Substituted at package time with the digest-pinned reference produced by
+  # //e2e/udsecho:image_push.
+  ref: "{@//e2e/udsecho:image_push}"
+  pullPolicy: IfNotPresent
+
+# The socket, as <volume>/<file> — the same value the annotation and the
+# EndpointPolicy carry. Keep it short: the resolved kubelet path must fit the
+# 107-byte AF_UNIX budget (~15 chars for this value).
+socket: "s/a.sock"
+
+# Annotation delivery path (uds-echo).
+annotationPath:
+  replicas: 2
+
+# EndpointPolicy delivery path (uds-cr-echo + the policy). Disable to test
+# annotation-only.
+policyPath:
+  enabled: true
+  replicas: 2
+
+# Continuous light load on both services (failures-only logging with an OK
+# heartbeat, so `kubectl logs` doubles as the soak error ledger).
+client:
+  enabled: true
+  # Seconds between probe rounds (one request per service per round).
+  interval: 1
+  image: curlimages/curl:8.11.1

@@ -1,0 +1,29 @@
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+
+# udsecho validation chart (published as ghcr.io/bpalermo/aether/charts/udsecho).
+#
+# Publish targets (GitHub Container Registry, OCI):
+#   bazel run //charts/udsecho:udsecho.push           # chart + image
+#   bazel run //charts/udsecho:udsecho.push_registry  # chart only
+# Authenticate first via HELM_REGISTRY_USERNAME / HELM_REGISTRY_PASSWORD.
+helm_chart(
+    name = "udsecho",
+    chart = "Chart.yaml",
+    images = [
+        "//e2e/udsecho:image_push",
+    ],
+    login_url = "ghcr.io",
+    registry_url = "oci://ghcr.io/bpalermo/aether/charts",
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+)
+
+helm_lint_test(
+    name = "udsecho_lint_test",
+    chart = ":udsecho",
+)
+
+helm_template_test(
+    name = "udsecho_template_test",
+    chart = ":udsecho",
+)
