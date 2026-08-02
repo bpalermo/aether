@@ -57,9 +57,22 @@ FORBIDDEN_HOSTS = (
 #: overrides/partials/source.html drops the `data-md-component="source"` marker
 #: that mounts it; repointing the endpoint as well means no future theme change
 #: can quietly revive the call.
+#: The self-hosted replacements must resolve correctly at ANY mount point (the
+#: bpalermo.github.io/aether/ project-pages subpath today, the aethermesh.dev
+#: root later) from ANY page depth. Neither a root-absolute "/assets/..." (404s
+#: on the subpath — how the first deploy shipped a non-rendering diagram) nor a
+#: bare relative "./..." (import() in a classic script resolves against the
+#: DOCUMENT URL, not the script URL — browser-verified) can do that as a string
+#: literal. So the quoted literal is replaced with a runtime EXPRESSION anchored
+#: to the theme bundle's own <script src>, which exists on every page and lives
+#: in the same directory as the self-hosted files. Keys that include quotes are
+#: replaced verbatim (expression injection); bare keys keep their quotes.
+_SELF_HOST_EXPR = (
+    'new URL("./{name}",document.querySelector(\'script[src*="assets/javascripts/bundle"]\').src).href'
+)
 CDN_REWRITES = {
-    "https://unpkg.com/mermaid@11/dist/mermaid.min.js": "/assets/javascripts/mermaid.min.js",
-    "https://unpkg.com/resize-observer-polyfill": "/assets/javascripts/resize-observer-polyfill.js",
+    '"https://unpkg.com/mermaid@11/dist/mermaid.min.js"': _SELF_HOST_EXPR.format(name="mermaid.min.js"),
+    '"https://unpkg.com/resize-observer-polyfill"': _SELF_HOST_EXPR.format(name="resize-observer-polyfill.js"),
     "https://api.github.com/repos/": "/_third-party-disabled/repos/",
     "https://api.github.com/users/": "/_third-party-disabled/users/",
 }
