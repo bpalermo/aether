@@ -51,3 +51,6 @@ jobs:
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/crds:crds.push
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/aether:aether.push
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/prober:prober.push
+          # udsecho: UDS validation workloads (proposal 034 PR 3b) — chart + image
+          # bundle like prober; the chart pins the image digest at package time.
+          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/udsecho:udsecho.push

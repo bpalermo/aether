@@ -1,0 +1,53 @@
+{{- if .Values.client.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: uds-client
+  namespace: {{ .Values.namespace }}
+---
+# Continuous light load on the UDS services through the mesh (qualified names,
+# explicit outbound listener). Logs FAILURES ONLY, plus an OK heartbeat every
+# ~1000 successes so "no failures logged" is distinguishable from "loop wedged"
+# — `kubectl logs` doubles as the soak error ledger.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uds-client
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: uds-client}
+  template:
+    metadata:
+      labels:
+        app: uds-client
+        aether.io/managed: "true"
+      annotations:
+        # Warm the clusters on this node (demand-scoped distribution) instead
+        # of paying an ODCDS round trip on first dial.
+        config.aether.io/upstreams: "uds-echo.{{ .Values.namespace }}{{ if .Values.policyPath.enabled }},uds-cr-echo.{{ .Values.namespace }}{{ end }}"
+    spec:
+      serviceAccountName: uds-client
+      containers:
+        - name: curl
+          image: {{ .Values.client.image }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "uds-client loop start $(date -u +%FT%TZ)"
+              ok=0
+              while true; do
+                for s in uds-echo{{ if .Values.policyPath.enabled }} uds-cr-echo{{ end }}; do
+                  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+                    "http://$s.{{ .Values.namespace }}.aether.internal:18081/" 2>/dev/null || echo 000)
+                  if [ "$code" = "200" ]; then
+                    ok=$((ok+1))
+                    [ $((ok % 1000)) -eq 0 ] && echo "$(date -u +%FT%TZ) OK count=$ok"
+                  else
+                    echo "$(date -u +%FT%TZ) FAIL $s code=$code"
+                  fi
+                done
+                sleep {{ .Values.client.interval }}
+              done
+{{- end }}

@@ -1,0 +1,52 @@
+{{- if .Values.policyPath.enabled }}
+# EndpointPolicy delivery path: identical pod shape, NO uds-socket annotation —
+# delivery comes from the policy, which targets the registrar-generated mesh
+# Service (same name as the ServiceAccount).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: uds-cr-echo
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uds-cr-echo
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.policyPath.replicas }}
+  selector:
+    matchLabels: {app: uds-cr-echo}
+  template:
+    metadata:
+      labels:
+        app: uds-cr-echo
+        aether.io/managed: "true"
+      annotations:
+        endpoint.aether.io/port: "8080"
+    spec:
+      serviceAccountName: uds-cr-echo
+      securityContext: {fsGroup: 65532}
+      containers:
+        - name: app
+          image: {{ .Values.image.ref }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--socket=/{{ .Values.socket }}"
+            - "--text=served-by-uds-cr-echo"
+          volumeMounts:
+            - name: {{ (split "/" .Values.socket)._0 }}
+              mountPath: /{{ (split "/" .Values.socket)._0 }}
+      volumes:
+        - name: {{ (split "/" .Values.socket)._0 }}
+          emptyDir: {medium: Memory}
+---
+apiVersion: config.aether.io/v1
+kind: EndpointPolicy
+metadata:
+  name: uds-cr
+  namespace: {{ .Values.namespace }}
+spec:
+  targetRef: {kind: Service, name: uds-cr-echo}
+  udsSocket: {{ .Values.socket | quote }}
+{{- end }}
