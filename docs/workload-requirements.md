@@ -42,7 +42,7 @@ spec:
 | Annotation | Default | Meaning |
 |---|---|---|
 | `endpoint.aether.io/port` | `8080` | Application port the mesh routes to |
-| `endpoint.aether.io/weight` | `1` | Load-balancing weight |
+| `endpoint.aether.io/weight` | `1024` | Load-balancing weight |
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness) |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds`: node-local agent vets the endpoint once and publishes health over EDS (endpoints enter clients pre-warmed). `active`: every client proxy probes the endpoint itself |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata (subset keys) |

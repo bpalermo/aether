@@ -71,8 +71,9 @@ access-log/tracing policy via the MeshConfig CR.
 | `agent.importConfig` | `false` | Cross-cluster config import (026): poll the registrar for peer-exported GAMMA projections and materialize them (merged with local; local wins). Pairs with `registrar.registryBackend=etcd`. |
 | `agent.eastWestWaypoint` | `false` | East/west waypoint (019): dial **cross-cluster** endpoints at their node's routable IP + the fixed tunnel port `18009` instead of the (unroutable) pod IP; this node's host-network proxy SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared or replicated etcd) + a shared SPIRE trust domain. |
 | `agent.captureRedirectAllDefault` | `true` | Redirect-all as the DEFAULT for managed pods (022 Step 4); opt out per-pod with `capture.aether.io/redirect-all="false"`. `false` = per-pod opt-in via the same annotation set to `"true"`. (Transparent capture itself and the passthrough chain are unconditional since proposal 031.) |
-| `agent.meshDns` | `true` | Per-pod mesh DNS (018): resolve `<svc>.<meshDomain>` from generated mesh Services, forward the rest to `meshDnsUpstream`. |
-| `agent.meshDnsUpstream` | `[]` | Upstream resolver(s) for non-mesh queries. Empty = the agent's own resolv.conf (kube-dns). |
+| `agent.meshDns` | `true` | Per-pod mesh DNS (018). Gates BOTH halves: the agent's in-process resolver (which writes the record snapshot) and the separate `aether-mesh-dns` DaemonSet that serves pods from it. |
+| `agent.meshDnsUpstream` | `[]` | Upstream resolver(s) for non-mesh queries, passed to the **mesh-dns daemon** (`--mesh-dns-upstream`), not the agent. Empty = the daemon's own resolv.conf (kube-dns). |
+| `agent.meshDnsDaemon.image.*` / `.resources` | repo+digest placeholders | The slim `mesh-dns` image, pinned separately from the agent's (#583) — the DaemonSet ships only the `/mesh-dns` binary. Rendered when `agent.meshDns` is true. |
 | `agent.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image; mirror by overriding `repository` alone. |
 | `agent.resources.{requests,limits}` | cpu `200m`, mem `64Mi` | |
 
@@ -93,6 +94,7 @@ access-log/tracing policy via the MeshConfig CR.
 | `proxy.hotRestart.parentShutdownTime` | `15s` | When the previous epoch is terminated (must exceed drainTime). |
 | `proxy.hotRestart.handoffDeadline` / `adminUnresponsiveDeadline` | `0` | Supervisor watchdogs (0 = built-in defaults). |
 | `proxy.hotRestart.shmHostPath` | `/run/aether/shm` | Shared-memory hostPath for cross-pod hot restart. |
+| `proxy.udsWorkloads.enabled` | `true` | UDS delivery (034). Gates the proxy's `/var/lib/kubelet/pods` hostPath mount, the agent's `--kubelet-pods-dir`, and the agent's read access to the `EndpointPolicy` CRD. Inert until a workload asks for it; turning it off later silently degrades annotated pods to TCP (nothing listens, so their endpoints stay unpromoted). |
 | `proxy.overload.enabled` | `true` | Envoy overload-manager graceful-degradation ladder. |
 | `proxy.overload.maxHeapSizeBytes` | `402653184` (384Mi) | Keep at ~75% of `resources.limits.memory`. |
 | `proxy.resources.{requests,limits}` | cpu `500m`, mem `512Mi` | |
@@ -189,6 +191,7 @@ controller's protovalidate webhook, not OpenAPI. All carry
 | `meshconfigs.config.aether.io` | `MeshConfig` (`mc`) | Per-namespace proxy observability overrides (access logs, tracing, per-pod stats). A namespace inherits the control-plane namespace's `MeshConfig` field-by-field unless it sets its own (proposal 015). |
 | `httpfilters.config.aether.io` | `HTTPFilter` (`htf`) | The proxy-extension escape hatch (proposal 025): attach a supported Envoy HTTP filter (ext_authz, RBAC, header-to-metadata) at a chosen scope. |
 | `edgeconfigs.config.aether.io` | `EdgeConfig` | Edge Envoy tuning (proposal 029): best-practices hardening defaults, HTTP/3 (QUIC, ALPN `h3`), timeouts/limits. Attached natively via Gateway API `parametersRef` on the `GatewayClass` (fleet default) or per-`Gateway` (override-wins merge). |
+| `endpointpolicies.config.aether.io` | `EndpointPolicy` | Service-scoped UDS delivery (proposal 034 Phase 1b): `spec.targetRef` (kind=Service, same namespace) + `spec.udsSocket` (`<volume>/<file>`) declares socket delivery for every pod of a service. The per-pod `endpoint.aether.io/uds-socket` annotation wins; one policy per Service (lexicographically smallest name wins). Read by the agent only when `proxy.udsWorkloads.enabled`. |
 
 **`HTTPFilter` scopes** (`spec.scope`, plus the `target_refs` attachment):
 
@@ -223,12 +226,14 @@ Node-agent-specific:
 | Flag | Default | Purpose |
 |---|---|---|
 | `--mounted-registry-dir` | `/host/var/lib/aether/registry` | Local pod-data dir for the CNI plugin. |
+| `--kubelet-pods-dir` | `/var/lib/kubelet/pods` | Kubelet's pod-volumes dir, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket (034). Empty disables UDS delivery: pods annotated `endpoint.aether.io/uds-socket` fall back to TCP loopback. Gated by the chart's `proxy.udsWorkloads.enabled`. |
 | `--spire-admin-socket` | `/tmp/spire-agent/private/admin.sock` | SPIRE admin socket for proxy SVID delegation. |
 | `--gamma` | `true` | GAMMA east-west routing (018); default-on kill switch (031). CRD-detected. |
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |
-| `--mesh-dns` | `false` | Per-pod mesh DNS (018). |
+| `--mesh-dns` | `false` | Per-pod mesh DNS (018): answer `<svc>.<ns>.<mesh-domain>` from the generated mesh Services. Upstream forwarding belongs to the `mesh-dns` daemon, not the agent. |
+| `--mesh-dns-snapshot-path` | `/host/var/lib/aether/registry/mesh-dns/records.json` | Host-persistent record table the in-process resolver writes and warm-loads at boot (and the `mesh-dns` daemon watches). Under the CNI registry hostPath so it survives a rolling restart; empty disables persistence. |
 | `--authz-sidecar` | `false` | Node-local ext_authz sidecar entry (027). |
 | `--authz-sidecar-timeout` | `200ms` | Per-check gRPC timeout. |
 | `--authz-sidecar-failure-mode-allow` | `false` | Fail-open (default: fail-closed). |
@@ -259,6 +264,18 @@ The Envoy hot-restart supervisor (proposal 001): `--envoy-path`
 (repeatable), `--handoff-deadline`/`--admin-unresponsive-deadline` (`0` = defaults),
 `--admin-address` (`127.0.0.1:9901`), `--readiness-check`, `--install-path`,
 `--otlp-endpoint`.
+
+### `mesh-dns` (standalone daemon — its own binary and image)
+
+The `aether-mesh-dns` DaemonSet (#578, #583). It answers `<svc>.<ns>.<mesh-domain>`
+from the snapshot file the agent writes and forwards everything else upstream, so
+agent rolls never gap pod DNS. It does **not** share the agent's flag set:
+`--snapshot-path` (`/host/var/lib/aether/registry/mesh-dns/records.json`),
+`--mesh-domain` (`aether.internal`), `--mesh-dns-upstream` (repeatable,
+`host[:port]`; empty = `/etc/resolv.conf`), `--ready-marker`
+(`/run/aether/mesh-dns.ready`), `--readiness-check`, `--otlp-endpoint`, `--debug`.
+It binds UDP+TCP on the host at port 18054, which the CNI DNATs each managed
+pod's `:53` to.
 
 ### `registrar`
 
@@ -317,6 +334,7 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 | `endpoint.aether.io/health-path` | `/` | Path the agent active-health-checks. |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds` (agent vets + publishes over EDS) or `active` (each client proxy probes). |
 | `endpoint.aether.io/protocol` | `http` | Wire protocol served: `http` or `tcp`. |
+| `endpoint.aether.io/uds-socket` | — | Deliver inbound to a Unix socket (`<volume>/<file>`, `emptyDir` only, no `subPath`) instead of the TCP port (034). Wins over an `EndpointPolicy` on the service; needs `proxy.udsWorkloads.enabled`. |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form metadata → selectable routing subset (e.g. `…/version=v2`). |
 
 ### Config annotations (`config.aether.io/*`)

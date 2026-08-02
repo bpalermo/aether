@@ -100,12 +100,12 @@ can be upgraded independently), then the system chart.
 # Pick the published version (chart version == git commit of the release).
 VERSION=0.x.0-<commit>
 
-# 1) CRDs (MeshConfig, HTTPFilter, EdgeConfig) — install/upgrade first.
+# 1) CRDs (MeshConfig, HTTPFilter, EdgeConfig, EndpointPolicy) — install/upgrade first.
 helm upgrade --install aether-crds \
   oci://ghcr.io/bpalermo/aether/charts/crds \
   --version "$VERSION"
 
-# 2) The system: agent + proxy + registrar + controller.
+# 2) The system: agent + proxy + mesh-dns + registrar + controller.
 helm upgrade --install aether \
   oci://ghcr.io/bpalermo/aether/charts/aether \
   --version "$VERSION" \
@@ -115,7 +115,8 @@ helm upgrade --install aether \
 ```
 
 Resource names derive from the **release** name — installing as `aether` yields
-`aether-agent`, `aether-proxy`, `aether-registrar`, `aether-controller`.
+`aether-agent`, `aether-proxy`, `aether-mesh-dns`, `aether-registrar`,
+`aether-controller`.
 
 > **Upgrade tip:** always pass the **full** values on every `helm upgrade` of the
 > `aether` chart — do **not** use `--reuse-values` (it keeps the stale
@@ -124,7 +125,7 @@ Resource names derive from the **release** name — installing as `aether` yield
 Verify:
 
 ```bash
-kubectl -n aether-system get pods         # agent + proxy per node, registrar ×2, controller
+kubectl -n aether-system get pods         # agent + proxy + mesh-dns per node, registrar ×2, controller
 kubectl -n aether-system get meshconfig   # the seeded "default" MeshConfig CR
 ```
 
@@ -144,12 +145,11 @@ Set once at the top of the `aether` chart's values; every component inherits it.
 | `clusterName` | `talos-main` | Cluster name in registry keys (registrars are per-cluster; names need not be unique across clusters). |
 | `meshDomain` | `aether.internal` | The authority suffix services are addressed under (`<svc>.<ns>.<meshDomain>`). Also defaults the SPIRE trust domain. |
 | `spire.enabled` | `true` | Mesh-wide mTLS switch. |
-| `spire.trustDomain` | `""` (→ `ROOTCA` sentinel) | SPIFFE trust domain authorized for the registrar's mTLS peers. |
-| `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket. |
+| `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket. Every component resolves its own trust domain from its SVID over this socket — there is no `trustDomain` value to configure (retired: it could silently disagree with what SPIRE issues). |
 | `spire.adminSocket.*` | see values | SPIRE agent admin/Delegated-Identity socket the agent uses to mint proxy SVIDs. |
 | `registrar.registryBackend` | `kubernetes` | `kubernetes` \| `dynamodb` \| `etcd`. |
 | `registrar.etcd.endpoints` | `[]` | etcd endpoints when backend is `etcd`. |
-| `registrar.aws.region` / `agent.awsCredentials` | — | DynamoDB backend config. |
+| `registrar.aws.region` / `registrar.aws.roleArn` | `us-east-1` / `""` | DynamoDB backend config (IRSA on the registrar; the agent carries no AWS credentials). |
 | `otel.enabled` / `otel.endpoint` | `false` / `""` | Turn on OTel and point at an OTLP gRPC collector (`host:port`). |
 | `proxy.enabled` | `true` | Deploy the per-node Envoy. Set false to run only the agent. |
 | `edge.enabled` | `false` | Deploy the north-south ingress gateway (see §11). |
@@ -269,6 +269,7 @@ Your service is now addressable mesh-wide as `my-svc.<namespace>.aether.internal
 | `endpoint.aether.io/health-path` | `/` | Path the node-local agent health-checks (delegated liveness). |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds` = agent vets the endpoint and publishes health over EDS (clients get pre-warmed endpoints); `active` = every client proxy probes the endpoint itself. |
 | `metadata.endpoint.aether.io/<key>` | — | Free-form endpoint metadata, usable as routing subsets (§9). |
+| `endpoint.aether.io/uds-socket` | — | Serve on a Unix socket (`<volume>/<file>`) instead of a TCP port — see [workload-requirements.md](./workload-requirements.md#serving-on-a-unix-domain-socket). |
 | `config.aether.io/upstreams` | — | Comma-separated services this pod **calls** (§7). |
 
 ---
@@ -440,14 +441,16 @@ What's supported, all applied **transparently on the capture path** as well as
 the explicit listener (so callers need no changes):
 
 - **`HTTPRoute`** — weighted canary, header/path matching + mutation,
-  redirects, timeouts, mirroring; Mesh conformance profile (MESH-HTTP Core)
-  green.
+  redirects, URL rewrites, timeouts; Mesh conformance profile (MESH-HTTP Core)
+  green. (Request mirroring is *not* implemented.)
 - **`GRPCRoute`** — method-based routing (`<svc>/<method>` matched as a path).
 - **`TCPRoute`** — weighted L4 splits across backends; an explicit `weight: 0`
   drains a backend. (TCPRoute/UDPRoute need the Gateway API *experimental*
   channel CRDs.)
 - **`TLSRoute`** — SNI-based passthrough routing.
-- (`UDPRoute` is accepted but control-plane-only for now.)
+- **`UDPRoute`** — a `udp_proxy` floor to the backend's app UDP port. Note that
+  UDP rides the mesh **in plaintext**: mTLS is a TCP/TLS construct and DTLS is
+  not implemented.
 - **Cross-namespace backends** need a standard `ReferenceGrant`.
 - The parent must be a **registry-backed mesh Service** (one with live
   endpoints) — a selectorless "anchor" Service won't survive reconciliation.
@@ -505,16 +508,16 @@ spec:
 ```
 
 - The edge routes **only** by explicit external hostname on the attached routes.
-  The internal mesh FQDN (`<svc>.<meshDomain>`) is deliberately **not** routable
-  from the edge.
+  The internal mesh FQDN (`<svc>.<ns>.<meshDomain>`) is deliberately **not**
+  routable from the edge.
 - **TLS:** set `edge.tls.enabled=true` and reference a `kubernetes.io/tls` Secret
   per Gateway listener (`spec.listeners[].tls.certificateRefs`, or the chart's
   `edge.gateway.tlsSecretName`). The edge agent serves the cert to Envoy over SDS
   (SNI-selected, hot rotation, no pod roll) and 301-redirects HTTP→HTTPS. Aether
   does **not** issue certs — bring your own (cert-manager, `kubectl`, …).
-- **Addressing:** per-Gateway addressing is on by default
-  (`edge.perGatewayAddressing=true`, proposal 021) — each `Gateway` gets its own
-  LoadBalancer Service and external IP; pin one with `edge.gateway.address`.
+- **Addressing:** per-Gateway addressing is unconditional (proposal 021 Phase 2;
+  the flag and chart value were retired in 031 round 2) — each `Gateway` gets its
+  own LoadBalancer Service and external IP; pin one with `edge.gateway.address`.
 - **GeoIP:** set `edge.geoip.enabled=true` with a MaxMind mmdb Secret to emit
   `x-geo-*` request headers (proposal 028).
 - The edge gets its own SVID straight from SPIRE; with `spire.enabled` the chart

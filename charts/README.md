@@ -5,12 +5,13 @@ Bazel-built Helm charts for Aether, using
 
 | Chart | Path | Deploys |
 | --- | --- | --- |
-| `crds` | [`charts/crds`](./crds) | Aether CustomResourceDefinitions (`MeshConfig`, `HTTPFilter`, `EdgeConfig`). Install **first**; standalone so CRDs can be upgraded independently. |
-| `aether` | [`charts/aether`](./aether) | The whole system: agent DaemonSet (xDS + CNI install) + per-node Envoy proxy, registrar Deployment, and the controller (validating webhooks for `MeshConfig`/`HTTPFilter`/`EdgeConfig`/`HTTPRoute`, a pod-mutating webhook, and the `MeshConfig`→ConfigMap reconciler). Owns the `aether-system` namespace and RBAC. |
+| `crds` | [`charts/crds`](./crds) | Aether CustomResourceDefinitions (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`). Install **first**; standalone so CRDs can be upgraded independently. |
+| `aether` | [`charts/aether`](./aether) | The whole system: agent DaemonSet (xDS + CNI install) + per-node Envoy proxy + the `mesh-dns` DaemonSet, registrar Deployment, the controller (validating webhooks for `MeshConfig`/`HTTPFilter`/`EdgeConfig`/`EndpointPolicy`/`HTTPRoute`, a pod-mutating webhook, and the `MeshConfig`→ConfigMap reconciler), and the optional north-south edge. Owns the `aether-system` namespace and RBAC. |
 | `prober` | [`charts/prober`](./prober) | External mesh-availability prober (proposal 013). |
+| `udsecho` | [`charts/udsecho`](./udsecho) | UDS validation workloads (proposal 034): both socket-delivery paths (annotation + `EndpointPolicy`) under continuous mesh traffic. |
 
-Agent, registrar and controller deploy together as one system from the single
-`aether` chart — system config (OTEL, SPIRE, mesh domain) is set once at the top
+Agent, proxy, mesh-dns, registrar and controller deploy together as one system
+from the single `aether` chart — system config (OTEL, SPIRE, mesh domain) is set once at the top
 level of its `values.yaml` and inherited by every component. The proxy data plane
 can override its own observability at runtime via the `MeshConfig` CR. See
 [`docs/proposals/015_mesh-config.md`](../docs/proposals/015_mesh-config.md).
@@ -42,7 +43,7 @@ substitutes at package time, so packaged charts are pinned to a concrete digest.
 
 | Field | Value | Notes |
 | --- | --- | --- |
-| Chart `version` | e.g. `0.65.0-{GIT_COMMIT}` (aether), `0.6.0-{GIT_COMMIT}` (crds) | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). Bump the chart's `version:` on any change to its templates/values (enforced in CI). |
+| Chart `version` | e.g. `0.8.0-{GIT_COMMIT}` (crds), `0.2.0-{GIT_COMMIT}` (prober) | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). The `aether` chart is the exception: it carries a plain version (e.g. `0.90.1`) with no `{GIT_COMMIT}` suffix. Bump the chart's `version:` on any change to its templates/values (enforced in CI). |
 | Chart `appVersion` | `{STABLE_GIT_VERSION}` | `git describe` value — matches the binaries' embedded `Version`. |
 | Image refs | `repo@sha256:…` | Pinned to the exact built digest (strongest form). |
 
@@ -83,9 +84,9 @@ helm maps it to the dash-separated tag):
 
 ```bash
 helm install aether-crds oci://ghcr.io/bpalermo/aether/charts/crds \
-  --version 0.6.0-<git-commit>
+  --version 0.8.0-<git-commit>
 helm install aether oci://ghcr.io/bpalermo/aether/charts/aether \
-  --version 0.65.0-<git-commit> -n aether-system --create-namespace
+  --version 0.90.1 -n aether-system --create-namespace
 ```
 
 ## Multiple instances & labels
@@ -115,6 +116,7 @@ path namespace:
 | crds chart | `ghcr.io/bpalermo/aether/charts/crds` |
 | aether chart | `ghcr.io/bpalermo/aether/charts/aether` |
 | agent image | `ghcr.io/bpalermo/aether/agent` |
+| mesh-dns image | `ghcr.io/bpalermo/aether/mesh-dns` |
 | registrar image | `ghcr.io/bpalermo/aether/registrar` |
 | controller image | `ghcr.io/bpalermo/aether/controller` |
 | cni-install image | `ghcr.io/bpalermo/aether/cni-install` |

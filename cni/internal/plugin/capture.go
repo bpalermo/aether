@@ -58,13 +58,14 @@ func installCaptureRedirect(netnsPath string, excludePorts []uint16, excludeRang
 // so there is no collision). Both rules share the loopback exclusion so the
 // pod-local explicit fast-lane (127.x:meshPort) is never intercepted.
 //
-// NOTE: the UDP redirect only takes effect when --l4-routes is enabled (the
-// agent only generates the UDP capture listener when UDPRoute backends exist).
-// The nft rule itself is always installed when capture is on — the absence of a
-// bound UDP socket on ProxyCapturePort means redirected packets are silently
-// dropped until the agent creates the listener, which is correct behaviour
-// (UDPRoute without --l4-routes = no listener = datagrams discarded rather than
-// sent to an unexpected destination).
+// NOTE: the UDP redirect only takes effect once a UDPRoute exists (the agent
+// only generates the UDP capture listener when UDPRoute backends exist; L4
+// routing itself is unconditional since proposal 031). The nft rule is always
+// installed when capture is on — the absence of a bound UDP socket on
+// ProxyCapturePort means redirected packets are silently dropped until the
+// agent creates the listener, which is correct behaviour (no UDPRoute = no
+// listener = datagrams discarded rather than sent to an unexpected
+// destination).
 func programCaptureRedirect(excludePorts []uint16, excludeRanges []netip.Prefix, logger *zap.Logger) error {
 	meshPort := uint16(meshconst.ProxyOutboundPort)
 	capturePort := uint16(meshconst.ProxyCapturePort)

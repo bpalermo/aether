@@ -20,17 +20,20 @@ make format-check  # CI-friendly check (fails on drift)
 
 ## Toolchain
 
-- **Bazel:** 9.0.2 (via Bazelisk). Use `bazel` commands directly or via `Makefile`.
-- **Go:** 1.26.2
+- **Bazel:** 9.2.0 (via Bazelisk). Use `bazel` commands directly or via `Makefile`.
+- **Go:** 1.26.5
 - **Container images:** Built with `rules_img`, pushed to distroless (`gcr.io/distroless/static-debian12:nonroot`).
 - **Protobuf:** Uses `buf/validate` for validation, `protoc-gen-dynamo` for DynamoDB marshaling.
 
 ## Architecture
 
-**Three binaries:**
-- `agent/cmd/agent` — Node DaemonSet. Manages xDS server (Envoy), CNI gRPC server, SPIRE bridge via `controller-runtime` Manager.
-- `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (DynamoDB/etcd), maintains endpoint snapshot, streams to agents via gRPC.
+**Binaries:**
+- `agent/cmd/agent` — Node DaemonSet. Manages xDS server (Envoy), CNI gRPC server, SPIRE bridge via `controller-runtime` Manager. Also hosts the `agent edge` and `agent proxy-supervisor` subcommands.
+- `agent/cmd/mesh-dns` — Slim standalone mesh-DNS daemon (own DaemonSet + image). Serves pods from the record snapshot the agent writes.
+- `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (Kubernetes/DynamoDB/etcd), maintains endpoint snapshot, streams to agents via gRPC.
+- `controller/cmd/controller` — In-cluster Deployment (leader-elected). Serves the validating + pod-mutating admission webhooks and the `MeshConfig`→ConfigMap reconciler.
 - `cni/cmd/cni` — CNI plugin binary (Add/Del/Check/GC/Status).
+- `cni/cmd/cni-install` — Init container that installs the CNI plugin binary and config onto the host.
 
 **Key patterns:**
 - gRPC servers use Unix domain sockets for node-local communication.
@@ -54,7 +57,7 @@ make tidy        # Update go.mod dependencies
 
 ## Proto & Codegen
 
-- Proto files in `api/` under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`.
+- Proto files in `api/` under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`, `aether/config/v1/` (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`).
 - DynamoDB marshaling via `protoc-gen-dynamo` (suffix: `pb.dynamo.go`).
 - Run `make gazelle` after proto or import changes.
 

@@ -69,7 +69,7 @@ kubectl get cm prometheus-server -n prometheus \
 
 Rules appear under **Alerts** in the Prometheus UI once loaded.
 
-> **Note — no notification delivery.** There is currently no Alertmanager deployed, so
-> firing alerts are visible in the Prometheus UI but are **not routed anywhere**.
-> Deploying Alertmanager (or moving these to Grafana-managed alert rules with a contact
-> point) is required before they page anyone.
+> **Notification delivery.** Alertmanager is deployed on `talos-main` and routes firing
+> alerts to Slack (`#alerts`) plus auto-closing GitHub issues on `bpalermo/aether`; the
+> routing config lives with the Prometheus HelmRelease in the `bpalermo/k8s-talos-main`
+> GitOps repo and is documented there, not here.

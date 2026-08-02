@@ -214,9 +214,12 @@ Region B: agents → registrar(B) → etcd(B) ──own-prefix mirror──▶ e
 starting point but lacks lease management and origin-filtering, so the
 replicator is a thin purpose-built component (or a registrar mode). This is
 specified in **[proposal 006 — multi-region etcd federation](proposals/006_multi-region-etcd-federation.md)**:
-the region-scoped key schema (Phase 1, buildable now with no behavior change),
-the replicator spec (lease/tombstone/resume/compaction-resync, HA), and a
-region-failover e2e — not yet built.
+the region-scoped key schema (Phase 1), the replicator spec
+(lease/tombstone/resume/compaction-resync, HA), and a region-failover e2e. All of
+it has since **shipped**: the replicator lives in
+`registrar/internal/replicator/` and is wired via the registrar's `--peer-etcd`
+(chart `registrar.peerEtcd`), with the failover path covered nightly by
+`e2e/multicluster_replicator.sh`.
 
 **Net:** etcd is the substrate single- *and* multi-region. DynamoDB global
 tables are an alternative, not a requirement.
@@ -253,8 +256,7 @@ cross-replica propagation eliminated even those.
   *not* required by the multi-region case — we do not adopt a managed store
   solely for global tables. Agents always go through the registrar, never the
   store directly.
-- **Open items:** proposal 006 (multi-region etcd federation — key-schema
-  change + replicator); and `peer-watch` (registrar↔registrar) as the
-  backend-agnostic intra-cluster skew close — lower priority for etcd (Watch
-  already gets it to zero), relevant only if DynamoDB is the production
-  substrate.
+- **Open items:** `peer-watch` (registrar↔registrar) as the backend-agnostic
+  intra-cluster skew close — lower priority for etcd (Watch already gets it to
+  zero), relevant only if DynamoDB is the production substrate. (Proposal 006 —
+  multi-region etcd federation, key schema + replicator — is complete.)
