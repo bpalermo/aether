@@ -7,10 +7,21 @@ live in the repository (``README.md``, ``docs/**``, ``charts/README.md``,
 truth and a stale duplicate can never be committed.
 
 Adding a hand-picked page is one entry in :data:`STATIC_PAGES` plus a ``nav``
-entry in ``mkdocs.yml``. The proposals series needs neither: every
-``docs/proposals/NNN_slug.md`` is discovered, staged, indexed and navigated
-automatically, so dropping a new proposal file into the repository is the whole
-publishing step.
+entry in ``mkdocs.yml``. Three sections need neither, because each is discovered
+and navigated from its own source of truth:
+
+* **Proposals** — every ``docs/proposals/NNN_slug.md`` is discovered, staged,
+  indexed and navigated automatically, so dropping a new proposal file into the
+  repository is the whole publishing step.
+* **Conformance** — ``docs/conformance/gateway-api-features.md`` is the section
+  front page, under a headline block whose numbers are *parsed* out of the newest
+  ``baseline-*.md`` and out of ``.github/workflows/e2e.yaml``; every baseline is
+  staged into a generated archive, newest first. Committing a new baseline
+  publishes it and moves the headline.
+* **API** — the ``/api/`` reference is not read from the repository at all. Bazel
+  runs protoc over each proto package (``//bazel/protodoc``) and passes the
+  rendered markdown in on ``AETHER_API_DOCS``; touching a ``.proto`` rebuilds the
+  page.
 
 The transform does five things:
 
@@ -89,6 +100,48 @@ READ_THROUGH: dict[str, str] = {
 PROPOSALS_DIR = "docs/proposals"
 PROPOSALS_URI = "proposals"
 
+#: Where the conformance record lives, and the section it is published under.
+CONFORMANCE_DIR = "docs/conformance"
+CONFORMANCE_URI = "conformance"
+#: The section front page: the honest supported-features list.
+FEATURES_DOC = f"{CONFORMANCE_DIR}/gateway-api-features.md"
+#: The nightly suite that turned conformance from a measurement into a gate.
+E2E_WORKFLOW = ".github/workflows/e2e.yaml"
+
+#: The generated protobuf reference, one page per proto package.
+API_URI = "api"
+
+#: The proto packages published under ``/api/``, in nav order. The key is the URL
+#: segment and the key ``//website:BUILD`` passes on ``AETHER_API_DOCS``. The
+#: blurb is the only thing on the page not derived from the protos themselves.
+API_PAGES: dict[str, tuple[str, str]] = {
+    "config": (
+        "Config",
+        "The CRD schemas. `MeshConfig`, `HTTPFilter`, `EdgeConfig` and `EndpointPolicy` are "
+        "Kubernetes custom resources, but their `.spec` is not written in Go — it is these "
+        "messages. `common/apis/config/v1` wraps them with the deepcopy and JSON glue "
+        "Kubernetes needs and adds no fields, so what is documented here is exactly what a "
+        "manifest may contain.",
+    ),
+    "registry": (
+        "Registry",
+        "The service registry: what an endpoint is, how a service is keyed, and the route and "
+        "configuration projections that travel between clusters. Written through the "
+        "registrar, read by every node agent.",
+    ),
+    "registrar": (
+        "Registrar",
+        "The gRPC contract between a node agent and its cluster's registrar — the versioned "
+        "endpoint snapshot, the watch stream that fans changes out to agents, and the "
+        "cross-cluster configuration listing.",
+    ),
+    "cni": (
+        "CNI",
+        "The gRPC contract between the CNI plugin and the node agent: what the plugin reports "
+        "about a pod when the container runtime calls ADD, and what it withdraws at DEL.",
+    ),
+}
+
 #: Injected at the top of every proposal. A proposal is a design record, not
 #: documentation: it is published as written, and the reader has to be told that
 #: before they read it as a description of the running system.
@@ -166,6 +219,41 @@ class Proposal:
     superseded_by: str | None = None
 
 
+@dataclass(frozen=True)
+class Baseline:
+    """One ``docs/conformance/baseline-*.md`` conformance run."""
+
+    #: ``2026-06-27``, from the filename.
+    date: str
+    #: ``rev21``, from the filename; empty for the very first run.
+    rev: str
+    #: Sort key: revision number, or 0 for the unrevised first baseline.
+    rev_number: int
+    repo_path: str
+    src_uri: str
+    title: str
+    #: The run's own one-line verdict, from its ``## TL;DR — …`` heading or its
+    #: ``Headline:`` paragraph. Empty when the document states neither.
+    verdict: str
+
+
+@dataclass(frozen=True)
+class ApiPage:
+    """One generated protobuf reference page."""
+
+    #: The key Bazel passes on ``AETHER_API_DOCS``, and the URL segment.
+    key: str
+    title: str
+    #: ``aether.config.v1``, derived from the rendered file paths.
+    proto_package: str
+    #: ``api/aether/config/v1``, likewise.
+    repo_dir: str
+    #: The ``.proto`` files rendered on the page, in the order protoc saw them.
+    proto_files: tuple[str, ...]
+    src_uri: str
+    markdown: str
+
+
 @dataclass
 class Staging:
     """Everything derived from the repository for one build."""
@@ -177,6 +265,10 @@ class Staging:
     #: repository path -> ``##`` section titles to drop.
     drops: dict[str, tuple[str, ...]] = field(default_factory=dict)
     proposals: list[Proposal] = field(default_factory=list)
+    #: Conformance baselines, newest first.
+    baselines: list[Baseline] = field(default_factory=list)
+    #: Generated protobuf reference pages, in :data:`API_PAGES` order.
+    api: list[ApiPage] = field(default_factory=list)
 
 
 #: Rebuilt by :func:`on_config` on every build (``mkdocs serve`` included).
@@ -224,7 +316,226 @@ def _build_staging(config: MkDocsConfig) -> Staging:
             _parse_proposal(number, slug, repo_path, src_uri, _read(config, repo_path), staging)
         )
 
+    # Conformance. The features document is the section front page; every
+    # baseline is an archive page under it, at a URL that never moves.
+    staging.pages[FEATURES_DOC] = f"{CONFORMANCE_URI}/index.md"
+    staging.sources[f"{CONFORMANCE_URI}/index.md"] = FEATURES_DOC
+    for baseline in _baselines(config):
+        staging.pages[baseline.repo_path] = baseline.src_uri
+        staging.sources[baseline.src_uri] = baseline.repo_path
+        staging.baselines.append(baseline)
+    # `/conformance/latest/` republishes whichever baseline is newest, so a link
+    # to "the current run" keeps working. It is a second URL for a document that
+    # already has a permanent one, so it is not registered in `pages`: a
+    # cross-reference between baselines still resolves to the stable archive URL.
+    staging.sources[f"{CONFORMANCE_URI}/latest.md"] = staging.baselines[0].repo_path
+
+    staging.api.extend(_api_pages())
+
     return staging
+
+
+# --------------------------------------------------------------------------- #
+# Conformance
+#
+# Two sources, both parsed, neither restated by hand: the newest baseline is
+# where the numbers come from, and the nightly workflow is where the *gate*
+# comes from. A published claim about conformance that nothing in the repository
+# backs is exactly the failure mode this section exists to avoid, so anything
+# unparseable raises rather than being filled in.
+# --------------------------------------------------------------------------- #
+
+_BASELINE_FILE_RE = re.compile(r"^baseline-(?P<date>\d{4}-\d{2}-\d{2})(?:-rev(?P<rev>\d+))?\.md$")
+
+#: The suite prints one of these per profile per level. This is the only place
+#: the counts are stated machine-readably, so it is the only place they are read.
+_PROFILE_RESULT_RE = re.compile(
+    r"^(?P<profile>GATEWAY-HTTP|MESH-HTTP)\s+(?P<level>core|extended):\s*"
+    r"Passed:\s*(?P<passed>\d+)\s+Failed:\s*(?P<failed>\d+)",
+    re.MULTILINE,
+)
+_SUITE_VERSION_RE = re.compile(r"gateway-api/conformance`?\s*@\s*\*\*(?P<version>v[\d.]+)\*\*")
+_TLDR_RE = re.compile(r"^##\s+TL;DR\s*[—–-]\s*(?P<verdict>.+?)\s*$", re.MULTILINE)
+_HEADLINE_RE = re.compile(
+    r"^(?:\*\*)?Headline(?P<qualifier>[^:*]*)(?:\*\*)?:(?:\*\*)?\s*", re.MULTILINE
+)
+#: rev21's own warning against reading the document as a clean sweep. It is
+#: quoted into the section header, and it is never removed from the page itself.
+_CAVEAT_RE = re.compile(r"Do not read this doc as[^.]*\.", re.DOTALL)
+
+#: `Hard gate (...)` in the nightly e2e workflow: the parenthetical is the job's
+#: own statement of what it enforces.
+_HARD_GATE_RE = re.compile(r"Hard gate \((?P<gate>[^)]*)\)")
+_WORKFLOW_JOB_RE = re.compile(r"^  (?P<job>[a-z0-9][a-z0-9-]*):$", re.MULTILINE)
+_GATEWAY_API_VERSION_RE = re.compile(
+    r"^\s*GATEWAY_API_VERSION:\s*(?P<version>\S+)\s*$", re.MULTILINE
+)
+
+
+def _strip_inline(text: str) -> str:
+    """Bare text for a table cell: links flattened, emphasis and code dropped.
+
+    Unlike :func:`_plain` this keeps ``/`` and ``_``, because the thing being
+    flattened is a score — ``33/33``, ``4 PASS / 3 FAIL`` — and a slash is load
+    bearing.
+    """
+    text = _WIKI_RE.sub(lambda m: m.group("ref"), text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = re.sub(r"[`*]", "", text)
+    return _cell(text)
+
+
+def _paragraph_at(markdown: str, start: int) -> str:
+    """The paragraph beginning at ``start``, unwrapped onto one line."""
+    end = markdown.find("\n\n", start)
+    body = markdown[start:] if end < 0 else markdown[start:end]
+    return " ".join(body.split())
+
+
+#: Every baseline titles itself "Gateway API conformance — <what happened>
+#: (<date>)". The archive is already a table of conformance runs with a date
+#: column, so both ends are noise repeated on every row.
+_BASELINE_TITLE_RE = re.compile(
+    r"^Gateway API conformance\s*[—–:-]\s*|\s*\(\d{4}-\d{2}-\d{2}\)\s*$"
+)
+
+
+def _clean_baseline_title(raw: str) -> str:
+    return _BASELINE_TITLE_RE.sub("", _BASELINE_TITLE_RE.sub("", raw.strip())).strip()
+
+
+def _first_sentence(text: str, limit: int = 180) -> str:
+    """A verdict is one claim. Clip to it, and mark the clip when it is a clip."""
+    match = re.search(r"\.(?:\s|$)", text)
+    if match and match.start() < limit:
+        return text[: match.start() + 1]
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + " …"
+
+
+def _baseline_verdict(markdown: str) -> str:
+    """The run's own headline, preferring the TL;DR heading it usually carries.
+
+    Falls back to the ``Headline:`` paragraph, and then to nothing: a baseline
+    that states no verdict is listed by date and title, not by a verdict this
+    file invented for it.
+    """
+    tldr = _TLDR_RE.search(markdown)
+    if tldr:
+        return _strip_inline(tldr.group("verdict"))
+    headline = _HEADLINE_RE.search(markdown)
+    if headline:
+        qualifier = headline.group("qualifier").strip()
+        body = _first_sentence(_strip_inline(_paragraph_at(markdown, headline.end())))
+        return f"{qualifier.capitalize()}: {body}" if qualifier else body
+    return ""
+
+
+def _baselines(config: MkDocsConfig) -> list[Baseline]:
+    """Every conformance baseline, newest first.
+
+    Newest is decided by the date in the filename and then by the revision
+    number, because a single day carries several revisions — nothing here is
+    pinned to a particular run.
+    """
+    root = _repo_root(config)
+    found: list[Baseline] = []
+    for path in sorted(glob.glob(os.path.join(root, CONFORMANCE_DIR, "baseline-*.md"))):
+        name = os.path.basename(path)
+        match = _BASELINE_FILE_RE.match(name)
+        if match is None:
+            raise RuntimeError(
+                f"{CONFORMANCE_DIR}/{name} is not named baseline-YYYY-MM-DD[-revN].md, so the "
+                "archive cannot order it or give it a stable URL. Rename it, or move it out of "
+                "the conformance directory."
+            )
+        repo_path = f"{CONFORMANCE_DIR}/{name}"
+        markdown = _read(config, repo_path)
+        heading = _H1_RE.search(markdown)
+        if heading is None:
+            raise RuntimeError(f"{repo_path} has no H1; the conformance archive has no title.")
+        rev = match.group("rev") or ""
+        slug = f"{match.group('date')}-rev{rev}" if rev else match.group("date")
+        found.append(
+            Baseline(
+                date=match.group("date"),
+                rev=f"rev{rev}" if rev else "",
+                rev_number=int(rev) if rev else 0,
+                repo_path=repo_path,
+                src_uri=f"{CONFORMANCE_URI}/archive/{slug}.md",
+                title=_clean_baseline_title(heading.group("title")),
+                verdict=_baseline_verdict(markdown),
+            )
+        )
+    if not found:
+        raise RuntimeError(f"no conformance baselines found under {CONFORMANCE_DIR}")
+    return sorted(found, key=lambda b: (b.date, b.rev_number), reverse=True)
+
+
+def _profile_results(markdown: str, repo_path: str) -> dict[tuple[str, str], tuple[int, int]]:
+    """``(profile, level) -> (passed, failed)`` as the suite printed it."""
+    results = {
+        (match.group("profile"), match.group("level")): (
+            int(match.group("passed")),
+            int(match.group("failed")),
+        )
+        for match in _PROFILE_RESULT_RE.finditer(markdown)
+    }
+    for key in (
+        ("GATEWAY-HTTP", "core"),
+        ("GATEWAY-HTTP", "extended"),
+        ("MESH-HTTP", "core"),
+    ):
+        if key not in results:
+            raise RuntimeError(
+                f"{repo_path} carries no verbatim '{key[0]}  {key[1]}: Passed: N  Failed: N' line, "
+                "so the conformance headline has no measured numbers to state. Paste the suite's "
+                "own summary block into the baseline, or the site would have to invent them."
+            )
+    return results
+
+
+def _workflow_gate(workflow: str, job: str) -> str:
+    """The ``Hard gate (...)`` the named job's own documentation claims.
+
+    The comment sits above the job for one job and inside the body for another,
+    so the search region is the job's comment block plus its body — bounded by
+    the *next* job's comment block, or the gate below would be read as this
+    job's.
+    """
+    body_at = workflow.find("\njobs:\n")
+    if body_at < 0:
+        raise RuntimeError(f"{E2E_WORKFLOW} has no `jobs:` block.")
+
+    starts = [
+        (match.group("job"), _comment_block_start(workflow, match.start()))
+        for match in _WORKFLOW_JOB_RE.finditer(workflow, body_at)
+    ]
+    for index, (name, start) in enumerate(starts):
+        if name != job:
+            continue
+        end = starts[index + 1][1] if index + 1 < len(starts) else len(workflow)
+        gates = _HARD_GATE_RE.findall(workflow[start:end])
+        if not gates:
+            raise RuntimeError(
+                f"the `{job}` job in {E2E_WORKFLOW} no longer documents a `Hard gate (...)`. The "
+                "conformance page states what CI enforces on the workflow's own authority; it "
+                "cannot state it if the workflow stopped saying so."
+            )
+        return gates[-1]
+    raise RuntimeError(f"{E2E_WORKFLOW} has no `{job}` job; the conformance page cites it.")
+
+
+def _comment_block_start(text: str, at: int) -> int:
+    """Walk back from ``at`` over the contiguous comment lines above it."""
+    start = at
+    while start > 0:
+        previous = text.rfind("\n", 0, start - 1) + 1
+        if not text[previous:start].lstrip().startswith("#"):
+            break
+        start = previous
+    return start
 
 
 # --------------------------------------------------------------------------- #
@@ -357,16 +668,20 @@ def _banner(src_uri: str) -> str:
     )
 
 
-def _inject_banner(markdown: str, src_uri: str) -> str:
-    """Put the banner immediately after the H1, above the status block."""
-    banner = _banner(src_uri)
+def _inject_after_h1(markdown: str, block: str) -> str:
+    """Put a generated block immediately below the document's own title."""
     lines = markdown.splitlines(keepends=True)
     for index, line in enumerate(lines):
         if line.startswith("# "):
             head = "".join(lines[: index + 1])
             tail = "".join(lines[index + 1 :]).lstrip("\n")
-            return f"{head}\n{banner}\n{tail}"
-    return f"{banner}\n{markdown}"
+            return f"{head}\n{block}\n{tail}"
+    return f"{block}\n{markdown}"
+
+
+def _inject_banner(markdown: str, src_uri: str) -> str:
+    """Put the banner immediately after the H1, above the status block."""
+    return _inject_after_h1(markdown, _banner(src_uri))
 
 
 # --------------------------------------------------------------------------- #
@@ -683,28 +998,352 @@ def _architecture_diagram(config: MkDocsConfig) -> str:
     return match.group(0)
 
 
+def _admonition(title: str, paragraphs: list[str]) -> str:
+    """A Material admonition from wrapped prose paragraphs."""
+    body = "\n\n".join(paragraphs)
+    lines: list[str] = []
+    for paragraph in body.split("\n\n"):
+        lines += textwrap.wrap(paragraph, width=84, break_long_words=False) + [""]
+    return f'!!! info "{title}"\n\n' + "".join(f"    {line}\n".rstrip() + "\n" for line in lines)
+
+
+def _conformance_headline(config: MkDocsConfig, staging: Staging) -> str:
+    """The state-of-conformance block above the supported-features list.
+
+    Every number is read out of the repository: the scores come from the newest
+    baseline's verbatim suite output, and the gates from the nightly workflow's
+    own description of itself. The document that produced the scores is linked
+    next to them, caveat and all, because "Core 33/33" without "and only for the
+    edge profile" is the overclaim this block exists to prevent.
+    """
+    latest = staging.baselines[0]
+    markdown = _read(config, latest.repo_path)
+    results = _profile_results(markdown, latest.repo_path)
+    workflow = _read(config, E2E_WORKFLOW)
+
+    def score(profile: str, level: str) -> str:
+        passed, failed = results[(profile, level)]
+        return f"{passed}/{passed + failed}"
+
+    suite = _SUITE_VERSION_RE.search(markdown)
+    suite_note = f" against the upstream suite at {suite.group('version')}" if suite else ""
+    ci_suite = _GATEWAY_API_VERSION_RE.search(workflow)
+    ci_note = f" at {ci_suite.group('version')}" if ci_suite else ""
+
+    run = f"{latest.rev or 'the first baseline'} ({latest.date})"
+    mesh_passed, mesh_failed = results[("MESH-HTTP", "core")]
+    paragraphs = [
+        f"**GATEWAY-HTTP (north-south) — Core {score('GATEWAY-HTTP', 'core')} and Extended "
+        f"{score('GATEWAY-HTTP', 'extended')}.** Measured on a real cluster{suite_note} by "
+        f"[{run}](latest.md), the newest run in the archive. The same profile runs nightly in "
+        f"CI{ci_note}, where `.github/workflows/e2e.yaml` calls it a "
+        f'"Hard gate ({_workflow_gate(workflow, "gateway-http")})".',
+        "**MESH-HTTP (east-west GAMMA) — a hard CI gate at "
+        f'{_workflow_gate(workflow, "mesh-http")}.** The nightly workflow runs the mesh profile '
+        "through the full capture path on its own cluster, and a regression fails it. The "
+        "committed baselines predate that gate and are not where the mesh profile stands today: "
+        f"{run} still records MESH-HTTP core at {mesh_passed} passed / {mesh_failed} failed, "
+        "blocked at the time on proposal 022.",
+    ]
+
+    caveat = _CAVEAT_RE.search(" ".join(markdown.replace("\n>", "\n").split()))
+    if caveat:
+        paragraphs.append(
+            f"{run} states its own caveat, and it is still the right way to read this page: "
+            f"*{_strip_inline(caveat.group(0))}*"
+        )
+
+    return _admonition("Where conformance stands", paragraphs)
+
+
+def _archive_slug(baseline: Baseline) -> str:
+    return posixpath.basename(baseline.src_uri)[: -len(".md")]
+
+
+def _conformance_archive_markdown(staging: Staging) -> str:
+    """The generated index over every conformance run, newest first.
+
+    Nothing is hand-maintained: the rows, the count and the verdicts all come
+    from the baseline files. Each link is a *markdown* path so that `strict`
+    resolves and validates it, exactly as on the proposals index.
+    """
+    rows = [
+        f"| [{baseline.date}]({_archive_slug(baseline)}.md) "
+        f"| {baseline.rev or '—'} "
+        f"| [{_cell(baseline.title)}]({_archive_slug(baseline)}.md) "
+        f"| {baseline.verdict or '—'} |"
+        for baseline in staging.baselines
+    ]
+    return (
+        # One wide table under one heading; a right-rail table of contents would
+        # hold a single entry and take a third of the width the table wants.
+        "---\n"
+        "hide:\n"
+        "  - toc\n"
+        "---\n"
+        "\n"
+        "# Conformance archive\n"
+        "\n"
+        "Every Gateway API conformance run aether has written up, newest first — "
+        f"{len(staging.baselines)} of them, from the first diagnostic run that could not reach "
+        "the traffic phase at all to the fully conformant one. Each is published as it was "
+        "written, at the score it recorded that day. The verdict column is the run's own "
+        "headline, not a re-reading of it.\n"
+        "\n"
+        "The newest run is also served at [/"
+        f"{CONFORMANCE_URI}/latest/](../latest.md); what CI enforces *today* is on the "
+        "[supported features](../index.md) page.\n"
+        "\n"
+        '<div class="aether-proposals" markdown="1">\n'
+        "\n"
+        "| Date | Revision | Run | Verdict |\n"
+        "|---|---|---|---|\n"
+        f"{chr(10).join(rows)}\n"
+        "\n"
+        "</div>\n"
+    )
+
+
+def _latest_baseline_note(staging: Staging) -> str:
+    """The one generated block on ``/conformance/latest/``."""
+    latest = staging.baselines[0]
+    slug = _archive_slug(latest)
+    return _admonition(
+        "Newest conformance run",
+        [
+            "This page follows whichever run is newest, so it moves. This one is "
+            f"{latest.rev or 'the first baseline'}, and it keeps a URL of its own that never "
+            f"will: [/{CONFORMANCE_URI}/archive/{slug}/](archive/{slug}.md) — cite that one. "
+            f"The [archive](archive/index.md) has all {len(staging.baselines)}."
+        ],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The protobuf reference
+#
+# protoc-gen-doc's markdown is written for a standalone file, not for a page in
+# a themed site: it opens with its own H1 and a table of contents the right rail
+# already renders, closes with the same scalar-type appendix on every page, and
+# links types at anchors that only exist once that appendix is kept. Everything
+# below trims it to a page body. None of it touches the content: names, types
+# and the comments lifted out of the .proto are exactly as protoc rendered them.
+# --------------------------------------------------------------------------- #
+
+#: The first per-file section. Everything above it is the generator's own front
+#: matter — H1, `#top` anchor, table of contents.
+_PROTOC_BODY_START_RE = re.compile(r'^<a name="[^"]+"></a>\n<p align="right">', re.MULTILINE)
+#: "back to top" links, whose target is dropped with the front matter.
+_PROTOC_TOP_LINK_RE = re.compile(r'^<p align="right"><a href="#top">Top</a></p>\n', re.MULTILINE)
+_PROTOC_ANCHOR_RE = re.compile(r'<a name="(?P<id>[^"]+)"\s*/?></a>|<a name="(?P<self>[^"]+)"\s*/>')
+_PROTOC_SCALARS = "\n## Scalar Value Types"
+_PROTO_FILE_HEADING_RE = re.compile(r"^##\s+(?P<path>\S+\.proto)\s*$", re.MULTILINE)
+_ANCHOR_LINK_RE = re.compile(r"\[(?P<text>[^\]]*)\]\(#(?P<anchor>[^)]*)\)")
+_BLANK_RUN_RE = re.compile(r"\n{3,}")
+
+
+def _squash_row(parts: list[str]) -> str:
+    text = ""
+    for part in parts:
+        if part == "<br>":
+            text += "<br>"
+        elif text and not text.endswith("<br>"):
+            text += " " + part
+        else:
+            text += part
+    return text
+
+
+def _join_table_rows(markdown: str) -> str:
+    """Fold a wrapped table row back onto one line.
+
+    A ``.proto`` comment is prose and often several paragraphs; protoc-gen-doc
+    drops it into a table cell with its line breaks intact, which ends the table
+    at the first one. Continuation lines are pulled back into the row and the
+    paragraph breaks become ``<br>``.
+    """
+    out: list[str] = []
+    pending: list[str] | None = None
+    for line in markdown.split("\n"):
+        stripped = line.strip()
+        if pending is None:
+            if line.startswith("|") and not stripped.endswith("|"):
+                pending = [stripped]
+            else:
+                out.append(line)
+            continue
+        if not stripped:
+            pending.append("<br>")
+        else:
+            pending.append(stripped)
+            if stripped.endswith("|"):
+                out.append(_squash_row(pending))
+                pending = None
+    if pending is not None:
+        out.append(_squash_row(pending))
+    return "\n".join(out)
+
+
+def _flatten_dangling_links(markdown: str) -> str:
+    """Turn a link to an anchor this page does not define into plain code.
+
+    Type columns link every field type, including the scalars documented in the
+    dropped appendix and the well-known types no page here renders. Those are
+    dangling anchors, which `strict` is right to reject; the ones that do resolve
+    — a message defined on this page — stay links.
+    """
+    known = {anchor for pair in _PROTOC_ANCHOR_RE.findall(markdown) for anchor in pair if anchor}
+    return _ANCHOR_LINK_RE.sub(
+        lambda m: m.group(0) if m.group("anchor") in known else f"`{m.group('text')}`",
+        markdown,
+    )
+
+
+def _clean_protoc_doc(markdown: str, path: str) -> str:
+    """protoc-gen-doc's markdown, trimmed to something that is a page body."""
+    start = _PROTOC_BODY_START_RE.search(markdown)
+    if start is None:
+        raise RuntimeError(
+            f"{path} does not look like protoc-gen-doc markdown — no per-file section was "
+            "found. The template or the plugin changed; re-check the trimming below before "
+            "publishing the output."
+        )
+    body = markdown[start.start() :]
+    appendix = body.find(_PROTOC_SCALARS)
+    if appendix >= 0:
+        body = body[:appendix]
+    body = _PROTOC_TOP_LINK_RE.sub("", body)
+    body = _join_table_rows(body)
+    body = _flatten_dangling_links(body)
+    # The template pads sections with lines holding a single space, which
+    # markdown reads as content.
+    body = "\n".join(line.rstrip() for line in body.split("\n"))
+    return _BLANK_RUN_RE.sub("\n\n", body).strip() + "\n"
+
+
+def _api_pages() -> list[ApiPage]:
+    """The reference pages Bazel generated for this build, in nav order.
+
+    ``AETHER_API_DOCS`` carries ``key=path`` entries. It is absent under a plain
+    ``mkdocs serve``, where protoc has not run; the section then does not exist
+    at all rather than existing empty, and `//website:build_site` asserts that
+    the real build did produce it.
+    """
+    raw = os.environ.get("AETHER_API_DOCS", "")
+    if not raw:
+        return []
+
+    supplied: dict[str, str] = {}
+    for entry in raw.split(os.pathsep):
+        if not entry:
+            continue
+        key, separator, path = entry.partition("=")
+        if not separator or not path:
+            raise RuntimeError(f"AETHER_API_DOCS entry {entry!r} is not key=path.")
+        supplied[key] = path
+
+    if set(supplied) != set(API_PAGES):
+        raise RuntimeError(
+            "AETHER_API_DOCS does not match the published packages: expected "
+            f"{sorted(API_PAGES)}, got {sorted(supplied)}. Add the proto_doc target to "
+            "//website:API_DOCS and the page to API_PAGES together, or the nav and the "
+            "generator disagree."
+        )
+
+    pages: list[ApiPage] = []
+    for key, (title, _) in API_PAGES.items():
+        path = supplied[key]
+        with open(path, encoding="utf-8") as handle:
+            body = _clean_protoc_doc(handle.read(), path)
+        proto_files = tuple(_PROTO_FILE_HEADING_RE.findall(body))
+        if not proto_files:
+            raise RuntimeError(
+                f"{path} documents no .proto file; /{API_URI}/{key}/ would be empty."
+            )
+        repo_dir = posixpath.dirname(proto_files[0])
+        pages.append(
+            ApiPage(
+                key=key,
+                title=title,
+                # `api/aether/config/v1` is the package `aether.config.v1`; both
+                # come out of the paths protoc itself printed.
+                proto_package=repo_dir.removeprefix(f"{API_URI}/").replace("/", "."),
+                repo_dir=repo_dir,
+                proto_files=proto_files,
+                src_uri=f"{API_URI}/{key}.md",
+                markdown=body,
+            )
+        )
+    return pages
+
+
+def _api_markdown(page: ApiPage) -> str:
+    """One reference page: a generated header, then protoc's own rendering."""
+    _, blurb = API_PAGES[page.key]
+    files = "\n".join(
+        f"- [`{posixpath.basename(path)}`]({BLOB_URL}{path})" for path in page.proto_files
+    )
+    note = _admonition(
+        "Generated from the schema",
+        [
+            f"Rendered by protoc from `{page.repo_dir}/` when this site was built, so it cannot "
+            "drift from the compiled schema — there is no committed copy of this page. Field "
+            "constraints are carried as `buf.validate` options and are **not** shown here; read "
+            "the `.proto` for those.",
+        ],
+    )
+    return (
+        f"# {page.title} API\n"
+        "\n"
+        f"`{page.proto_package}` — {blurb}\n"
+        "\n"
+        f"{files}\n"
+        "\n"
+        f"{note}"
+        "\n"
+        f"{page.markdown}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Hooks
 # --------------------------------------------------------------------------- #
 
 
 def on_config(config: MkDocsConfig) -> MkDocsConfig:
-    """Stage the repository, and extend ``nav`` with the generated proposals.
+    """Stage the repository, and extend ``nav`` with the generated sections.
 
-    The proposals section is appended here rather than written into
-    ``mkdocs.yml`` so that adding ``docs/proposals/099_thing.md`` is the entire
-    publishing step: it then appears in the nav, in the index and at its short
-    link with no edit to the site at all.
+    The three discovered sections are appended here rather than written into
+    ``mkdocs.yml`` so that adding ``docs/proposals/099_thing.md``, committing a
+    new ``docs/conformance/baseline-*.md``, or adding a field to a ``.proto`` is
+    the entire publishing step: each then appears in the nav, in its index and at
+    its stable URL with no edit to the site at all.
     """
     global _staging
     _staging = _build_staging(config)
+
+    conformance: list[dict[str, str]] = [
+        {"Supported features": f"{CONFORMANCE_URI}/index.md"},
+        {"Latest run": f"{CONFORMANCE_URI}/latest.md"},
+        {"Archive": f"{CONFORMANCE_URI}/archive/index.md"},
+    ]
+    conformance += [
+        {f"{baseline.date} {baseline.rev}".strip(): baseline.src_uri}
+        for baseline in _staging.baselines
+    ]
 
     entries: list[dict[str, str]] = [{"All proposals": f"{PROPOSALS_URI}/index.md"}]
     entries += [
         {f"{proposal.number} — {proposal.title}": proposal.src_uri}
         for proposal in sorted(_staging.proposals, key=lambda p: p.number)
     ]
-    config.nav = list(config.nav or []) + [{"Proposals": entries}]
+
+    sections: list[dict[str, object]] = [{"Conformance": conformance}]
+    if _staging.api:
+        sections.append({"API": [{page.title: page.src_uri} for page in _staging.api]})
+    sections.append({"Proposals": entries})
+
+    config.nav = list(config.nav or []) + sections
     return config
 
 
@@ -719,11 +1358,41 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
         )
         if src_uri.startswith(f"{PROPOSALS_URI}/"):
             content = _inject_banner(content, src_uri)
+        elif src_uri == f"{CONFORMANCE_URI}/index.md":
+            content = _inject_after_h1(content, _conformance_headline(config, _staging))
         files.append(File.generated(config, src_uri, content=content))
 
     files.append(
         File.generated(config, f"{PROPOSALS_URI}/index.md", content=_index_markdown(_staging))
     )
+    files.append(
+        File.generated(
+            config,
+            f"{CONFORMANCE_URI}/archive/index.md",
+            content=_conformance_archive_markdown(_staging),
+        )
+    )
+    # `/conformance/latest/` republishes the newest run under a name that does
+    # not move. It is the one page on the site that deliberately has a second
+    # URL; the note says so and points at the permanent one.
+    latest = _staging.baselines[0]
+    latest_uri = f"{CONFORMANCE_URI}/latest.md"
+    files.append(
+        File.generated(
+            config,
+            latest_uri,
+            content=_inject_after_h1(
+                transform(_read(config, latest.repo_path), latest.repo_path, latest_uri, _staging),
+                _latest_baseline_note(_staging),
+            ),
+        )
+    )
+
+    for api_page in _staging.api:
+        files.append(
+            File.generated(config, api_page.src_uri, content=_api_markdown(api_page))
+        )
+
     # Short stable links. Emitted as plain HTML rather than as markdown pages so
     # they stay out of the nav, the search index and the sitemap — and so the
     # site needs no redirect plugin, and therefore no new dependency.
@@ -740,11 +1409,17 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
 
 def on_pre_page(page: Page, config: MkDocsConfig, files: Files) -> Page:
     repo_path = _staging.sources.get(page.file.src_uri)
+    api_page = next((p for p in _staging.api if p.src_uri == page.file.src_uri), None)
     if repo_path:
         page.edit_url = EDIT_URL + repo_path
+    elif api_page is not None:
+        # Nothing to edit on the page: the source is the proto package.
+        page.edit_url = f"{REPO_URL}/tree/main/{api_page.repo_dir}"
     elif page.file.src_uri == f"{PROPOSALS_URI}/index.md":
         # Generated from the directory, so "edit" means the directory listing.
         page.edit_url = f"{REPO_URL}/tree/main/{PROPOSALS_DIR}"
+    elif page.file.src_uri == f"{CONFORMANCE_URI}/archive/index.md":
+        page.edit_url = f"{REPO_URL}/tree/main/{CONFORMANCE_DIR}"
     return page
 
 

@@ -115,9 +115,11 @@ extra:
   generator: false
 
 # Every entry below is a page hooks.py generates from a repository file at build
-# time; there is no committed copy of any of them. The Proposals section is not
-# here at all — hooks.py appends it in on_config from docs/proposals/*.md, so a
-# new proposal file publishes itself.
+# time; there is no committed copy of any of them. Three sections are not here at
+# all — hooks.py appends Conformance, API and Proposals in on_config from
+# docs/conformance/*.md, the protoc output Bazel passes in, and
+# docs/proposals/*.md — so a new baseline, a new field or a new proposal
+# publishes itself.
 nav:
   - Home: index.md
   - Architecture: architecture.md

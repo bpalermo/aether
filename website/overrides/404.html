@@ -1,0 +1,33 @@
+{#-
+  The custom 404. Material lists `404.html` in `static_templates`, so this file
+  is rendered once, to the site root, and GitHub Pages serves it for any path it
+  cannot resolve.
+
+  Links here are absolute (`config.site_url`) rather than relative: this one
+  page is served from arbitrary depths — /docs/typo/, /proposals/999/ — and a
+  relative href resolves against the URL that was *not* found. On a preview
+  deployment under a project-pages subpath, GitHub only serves this page for
+  paths beneath that prefix, and these links lead back to the canonical site,
+  which is the right destination either way.
+-#}
+{% extends "main.html" %}
+
+{% block content %}
+  <h1>Not found</h1>
+  <p>
+    That page does not exist. It may have been renamed, or it may never have
+    existed — links into this site are checked at build time, so a broken one
+    usually came from somewhere else.
+  </p>
+  <p>
+    Try the <a href="{{ config.site_url }}">landing page</a>,
+    the <a href="{{ config.site_url }}docs/getting-started/">documentation</a>,
+    the <a href="{{ config.site_url }}proposals/">design records</a>,
+    or the <a href="{{ config.site_url }}api/config/">API reference</a>.
+  </p>
+  <p>
+    A proposal can always be cited by number alone:
+    <code>{{ config.site_url }}proposals/018/</code> redirects to whatever its
+    full URL is today.
+  </p>
+{% endblock %}

@@ -101,10 +101,22 @@ REQUIRED_FILES = (
     "dev/runbook/index.html",
     "dev/proxy/index.html",
     "dev/agents/index.html",
+    # Conformance: the features front page, the moving "latest" page, and the
+    # generated archive index. Individual baselines are checked by shape below.
+    "conformance/index.html",
+    "conformance/latest/index.html",
+    "conformance/archive/index.html",
+    # The protobuf reference, one page per proto package.
+    "api/config/index.html",
+    "api/registry/index.html",
+    "api/registrar/index.html",
+    "api/cni/index.html",
     # Proposals: the generated index, one known proposal, and its short link.
     "proposals/index.html",
     "proposals/018-gateway-api-gamma/index.html",
     "proposals/018/index.html",
+    # Served by GitHub Pages for any path it cannot resolve.
+    "404.html",
     "CNAME",
     "robots.txt",
     "sitemap.xml",
@@ -113,9 +125,16 @@ REQUIRED_FILES = (
 )
 
 #: Terms that must survive into the search index. They come from pages staged in
-#: phase 2/3, so their absence means the search plugin stopped indexing a whole
-#: section — which no link check would catch.
-REQUIRED_SEARCH_TERMS = ("uds-socket", "demand-scoped")
+#: phase 2/3/4, so their absence means the search plugin stopped indexing a whole
+#: section — which no link check would catch. The last two are a field comment
+#: lifted out of cni.proto and a phrase from the conformance record: they only
+#: reach the index if protoc actually ran and the baselines were actually staged.
+REQUIRED_SEARCH_TERMS = (
+    "uds-socket",
+    "demand-scoped",
+    "uid is the Kubernetes pod UID",
+    "GATEWAY-HTTP",
+)
 
 #: Private-notebook syntax. hooks.py neutralises it into a muted parenthetical;
 #: if a literal one ever reaches the HTML, a reader sees raw notebook syntax and
@@ -153,9 +172,16 @@ class BuildError(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
-def run_mkdocs(config_file: Path, repo_root: Path, site_dir: Path) -> None:
+def run_mkdocs(config_file: Path, repo_root: Path, site_dir: Path, api_docs: list[str]) -> None:
     # Read by website/hooks.py to locate README.md (and, later, docs/).
     os.environ["AETHER_REPO_ROOT"] = str(repo_root)
+    # `key=path` per proto package, rendered by //bazel/protodoc. hooks.py builds
+    # /api/<key>/ out of each; absent under a plain `mkdocs serve`, where protoc
+    # has not run and the section simply does not exist.
+    os.environ["AETHER_API_DOCS"] = os.pathsep.join(
+        f"{key}={Path(path).absolute()}"
+        for key, path in (entry.split("=", 1) for entry in api_docs)
+    )
     os.environ.setdefault("SOURCE_DATE_EPOCH", "0")
     os.environ["TZ"] = "UTC"
 
@@ -271,6 +297,85 @@ def verify_proposals(site_dir: Path) -> list[str]:
     return problems
 
 
+def verify_conformance(site_dir: Path) -> list[str]:
+    """The conformance section states measured numbers, or it is not published.
+
+    The headline block on ``/conformance/`` is parsed out of the newest baseline
+    and out of the nightly workflow, so the failure mode worth guarding is not a
+    missing page — it is a page that quietly lost the numbers, or lost the
+    baseline's own warning against reading it as a clean sweep.
+    """
+    problems: list[str] = []
+    root = site_dir / "conformance"
+    if not root.is_dir():
+        return ["no conformance section was generated"]
+
+    archived = sorted(path.parent.name for path in (root / "archive").glob("*/index.html"))
+    if not archived:
+        return ["the conformance archive contains no baseline pages"]
+
+    index = (root / "archive" / "index.html").read_text(encoding="utf-8")
+    for name in archived:
+        if f'href="{name}/"' not in index:
+            problems.append(f"baseline {name} is published but has no row in the archive index")
+
+    front = (root / "index.html").read_text(encoding="utf-8")
+    for needle, why in (
+        ("Where conformance stands", "the generated headline block is gone"),
+        ("GATEWAY-HTTP", "the headline no longer names the north-south profile"),
+        ("MESH-HTTP", "the headline no longer names the east-west profile"),
+        ("Hard gate", "the headline no longer cites what CI enforces"),
+    ):
+        if needle not in front:
+            problems.append(f"/conformance/ does not mention {needle!r} — {why}")
+
+    # The newest baseline tells the reader not to read it as "everything
+    # passes". Staging is verbatim, so this is really a check that staging did
+    # not start rewriting the documents it publishes.
+    caveat = "Do not read this doc as"
+    if not any(
+        caveat in path.read_text(encoding="utf-8") for path in sorted(root.rglob("index.html"))
+    ):
+        problems.append(
+            f"no conformance page carries the baseline's own {caveat!r} caveat — either the "
+            "newest baseline dropped it or staging is editing the documents"
+        )
+    return problems
+
+
+def verify_api(site_dir: Path) -> list[str]:
+    """The protobuf reference is real field documentation, or it is noise.
+
+    Empty description columns are the specific way this silently breaks: it is
+    what happens when protoc is fed descriptor sets built without source info,
+    and every page still renders, in full, with nothing in it.
+    """
+    problems: list[str] = []
+    root = site_dir / "api"
+    if not root.is_dir():
+        return ["no API reference was generated"]
+
+    for section in ("config", "registry", "registrar", "cni"):
+        page = root / section / "index.html"
+        if not page.is_file():
+            problems.append(f"/api/{section}/ was not generated")
+            continue
+        html = page.read_text(encoding="utf-8")
+        if "Description" not in html:
+            problems.append(f"/api/{section}/ renders no field table")
+        for boilerplate in ("Protocol Documentation", "Scalar Value Types"):
+            if boilerplate in html:
+                problems.append(f"/api/{section}/ still carries the {boilerplate!r} boilerplate")
+
+    cni = root / "cni" / "index.html"
+    if cni.is_file() and "uid is the Kubernetes pod UID" not in cni.read_text(encoding="utf-8"):
+        problems.append(
+            "/api/cni/ carries no field comments — protoc rendered the schema without source "
+            "info, so every description column is empty"
+        )
+    return problems
+
+
 def verify_search(site_dir: Path) -> list[str]:
     index = site_dir / "search" / "search_index.json"
     if not index.is_file():
@@ -305,6 +410,8 @@ def verify(site_dir: Path) -> None:
             problems.append("landing page lists no recent proposals — the generated block is gone")
 
     problems += verify_proposals(site_dir)
+    problems += verify_conformance(site_dir)
+    problems += verify_api(site_dir)
     problems += verify_search(site_dir)
 
     for path in iter_text_files(site_dir):
@@ -368,6 +475,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--config", required=True, help="path to mkdocs.yml")
     parser.add_argument("--repo-root", required=True, help="repository root holding README.md")
     parser.add_argument("--mermaid", required=True, help="path to the pinned mermaid bundle")
+    parser.add_argument(
+        "--api-doc",
+        action="append",
+        default=[],
+        metavar="KEY=PATH",
+        help="a protoc-rendered proto package reference; repeat once per package",
+    )
     parser.add_argument("--out", help="tar to write; defaults to a scratch file")
     args = parser.parse_args(argv)
 
@@ -375,7 +489,12 @@ def main(argv: list[str]) -> int:
     site_dir = Path(scratch) / "site"
     out = Path(args.out).absolute() if args.out else Path(scratch) / "site.tar"
 
-    run_mkdocs(Path(args.config).absolute(), Path(args.repo_root).absolute(), site_dir)
+    run_mkdocs(
+        Path(args.config).absolute(),
+        Path(args.repo_root).absolute(),
+        site_dir,
+        args.api_doc,
+    )
     drop_source_maps(site_dir)
     self_host(site_dir, Path(args.mermaid).absolute())
     verify(site_dir)
