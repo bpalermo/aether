@@ -16,8 +16,47 @@
 
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@rules_python//python/entry_points:py_console_script_binary.bzl", "py_console_script_binary")
+load("//bazel/protodoc:defs.bzl", "proto_doc")
 
 package(default_visibility = ["//visibility:private"])
+
+# /api/ — the protobuf reference, rendered from the proto graph rather than
+# written down. Each entry becomes one page; hooks.py adds the header and the
+# nav entry. Touching any .proto rebuilds its page (and //website:site_test with
+# it), so the published schema cannot drift from the compiled one.
+API_DOCS = {
+    "cni": "//api/aether/cni/v1:cniv1_proto",
+    "config": "//api/aether/config/v1:configv1_proto",
+    "registrar": "//api/aether/registrar/v1:registrarv1_proto",
+    "registry": "//api/aether/registry/v1:registryv1_proto",
+}
+
+[
+    proto_doc(
+        name = "api_doc_" + section,
+        proto = target,
+    )
+    for section, target in API_DOCS.items()
+]
+
+API_DOC_TARGETS = [":api_doc_" + section for section in API_DOCS]
+
+# `--api-doc <section>=<path>` per package, for both the tar and the test. The
+# two flag forms differ only in how a data dependency is spelled: $(execpath)
+# inside a genrule command, $(rootpath) in a test's runfiles.
+API_DOC_EXECPATHS = [
+    "--api-doc %s=$(execpath :api_doc_%s)" % (section, section)
+    for section in API_DOCS
+]
+
+API_DOC_ROOTPATHS = [
+    arg
+    for section in API_DOCS
+    for arg in [
+        "--api-doc",
+        "%s=$(rootpath :api_doc_%s)" % (section, section),
+    ]
+]
 
 # Everything mkdocs reads, minus the repository documents staged in by hooks.py
 # (those are //:website_docs).
@@ -70,7 +109,7 @@ genrule(
         "mermaid.min.js",
         "//:website_docs",
         ":sources",
-    ],
+    ] + API_DOC_TARGETS,
     outs = ["site.tar"],
     # genrule actions run from the exec root, so the repository root — the tree
     # hooks.py stages README.md out of — is the working directory.
@@ -78,6 +117,7 @@ genrule(
           " --config $(execpath mkdocs.yml)" +
           " --repo-root ." +
           " --mermaid $(execpath mermaid.min.js)" +
+          " " + " ".join(API_DOC_EXECPATHS) +
           " --out $@",
     tools = [":build_site"],
     visibility = ["//visibility:public"],
@@ -96,13 +136,13 @@ py_test(
         ".",
         "--mermaid",
         "$(rootpath mermaid.min.js)",
-    ],
+    ] + API_DOC_ROOTPATHS,
     data = [
         "mkdocs.yml",
         "mermaid.min.js",
         "//:website_docs",
         ":sources",
-    ],
+    ] + API_DOC_TARGETS,
     legacy_create_init = 0,
     main = "build_site.py",
     deps = PIP_DEPS,

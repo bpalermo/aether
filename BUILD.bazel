@@ -17,9 +17,15 @@ exports_files([
 # directory cannot be an action input at all — a label to it resolves, but the
 # sandbox never stages it. //website:staged/proxy-README.md is a symlink that
 # reaches it; see the comment there.
+#
+# .github/workflows/e2e.yaml is not a document — it is the nightly conformance
+# suite. The /conformance/ headline states what CI *enforces* on the workflow's
+# own authority ("Hard gate (...)"), parsed from it at build time, so the
+# workflow is a real input: change the gate and the page changes with it.
 filegroup(
     name = "website_docs",
     srcs = [
+        ".github/workflows/e2e.yaml",
         "AGENTS.md",
         "README.md",
         "charts/README.md",

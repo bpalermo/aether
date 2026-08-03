@@ -1,0 +1,43 @@
+{#-
+  Page metadata for links shared outside the site.
+
+  Material's base.html already emits `<meta name="description">` from
+  `page.meta.description` or `config.site_description`; the same value is
+  repeated into the Open Graph and Twitter tags here so a shared link carries a
+  title and a summary instead of a bare URL.
+
+  There is deliberately NO `og:image`. Open Graph consumers want a PNG or JPEG —
+  SVG is not broadly supported — and producing one at build time would mean a
+  rasteriser, which is a new dependency for a site whose whole premise is a
+  hermetic build with no third-party anything. The card artwork exists as
+  `pages/assets/og.svg`; rasterising it and adding `og:image` + `og:image:width`
+  + `og:image:height` is the follow-up, and it needs no change here beyond three
+  more tags.
+
+  `page` is None for static templates (404.html, sitemap.xml), so everything
+  below is guarded.
+-#}
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {%- if page %}
+    {%- set title = page.meta.title if page.meta and page.meta.title else page.title %}
+    {#- Same shape as the document title Material renders: a shared card that
+        says only "Config" identifies nothing. -#}
+    {%- if not page.is_homepage %}
+      {%- set title = title ~ " · " ~ config.site_name %}
+    {%- else %}
+      {%- set title = config.site_name %}
+    {%- endif %}
+    {%- set description = page.meta.description
+        if page.meta and page.meta.description else config.site_description %}
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="{{ config.site_name }}">
+    <meta property="og:title" content="{{ title | striptags }}">
+    <meta property="og:description" content="{{ description | striptags | trim }}">
+    <meta property="og:url" content="{{ page.canonical_url }}">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="{{ title | striptags }}">
+    <meta name="twitter:description" content="{{ description | striptags | trim }}">
+  {%- endif %}
+{% endblock %}

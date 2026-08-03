@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "protodoc_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/aether/bazel/protodoc",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@com_github_pseudomuto_protoc_gen_doc//:protoc-gen-doc",
+        "@com_github_pseudomuto_protokit//:protokit",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/descriptorpb",
+        "@org_golang_google_protobuf//types/pluginpb",
+    ],
+)
+
+go_binary(
+    name = "protodoc",
+    embed = [":protodoc_lib"],
+    visibility = ["//visibility:public"],
+)

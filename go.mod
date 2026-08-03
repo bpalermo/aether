@@ -206,6 +206,11 @@ require (
 )
 
 require (
+	github.com/Masterminds/semver v1.4.2 // indirect
+	github.com/Masterminds/sprig v2.15.0+incompatible // indirect
+	github.com/aokoli/goutils v1.0.1 // indirect
+	github.com/huandu/xstrings v1.0.0 // indirect
+	github.com/imdario/mergo v0.3.4 // indirect
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.0 // indirect
 )
@@ -225,6 +230,8 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.26.0
 	github.com/google/nftables v0.3.0
 	github.com/miekg/dns v1.1.72
+	github.com/pseudomuto/protoc-gen-doc v1.5.1
+	github.com/pseudomuto/protokit v0.3.0
 	github.com/uudashr/gocognit v1.2.1
 	go.etcd.io/etcd/api/v3 v3.7.1
 	go.opentelemetry.io/contrib/bridges/otelslog v0.19.0

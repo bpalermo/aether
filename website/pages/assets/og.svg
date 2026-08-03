@@ -1,0 +1,27 @@
+<!--
+  The social-card artwork, at the 1200x630 Open Graph consumers expect.
+
+  It is NOT referenced by any page. Open Graph wants a PNG or a JPEG — SVG is
+  not broadly supported by the crawlers that render link previews — and
+  rasterising this at build time would mean an image toolchain, which is a new
+  dependency for a site whose premise is a hermetic build that fetches nothing.
+  So `overrides/main.html` ships og:title / og:description / og:url and no
+  og:image, and this file is the checked-in source for the day that changes.
+
+  Colours and type are the site's own: --aether-bg, --aether-text,
+  --aether-accent, --aether-muted from pages/assets/stylesheets/extra.css, and
+  the same system mono stack (no webfonts, here either).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="aethermesh — a Kubernetes service mesh data plane, one Envoy per node">
+  <rect width="1200" height="630" fill="#0b0e14"/>
+  <rect x="0" y="0" width="1200" height="4" fill="#59c2c9"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <text x="96" y="300" font-size="104" letter-spacing="-2">
+      <tspan fill="#c8d2df">aether</tspan><tspan fill="#59c2c9">mesh</tspan>
+    </text>
+    <text x="100" y="372" font-size="34" fill="#c8d2df">One Envoy per node, not per pod.</text>
+    <text x="100" y="424" font-size="26" fill="#7d8a9c">Transparent capture, SPIFFE mTLS on every hop, the Gateway API natively.</text>
+    <text x="100" y="534" font-size="24" fill="#7d8a9c">aethermesh.dev</text>
+  </g>
+  <rect x="96" y="486" width="1008" height="1" fill="#212a38"/>
+</svg>

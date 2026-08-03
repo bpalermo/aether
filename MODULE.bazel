@@ -114,6 +114,8 @@ use_repo(
     "com_github_moby_spdystream",
     "com_github_mxk_go_flowrate",
     "com_github_pquerna_protoc_gen_dynamo",
+    "com_github_pseudomuto_protoc_gen_doc",
+    "com_github_pseudomuto_protokit",
     "com_github_spf13_cobra",
     "com_github_spiffe_go_spiffe_v2",
     "com_github_spiffe_spire_api_sdk",
