@@ -1,6 +1,6 @@
 # Proposal: EdgeConfig — edge best-practices, per-instance, native Gateway API
 
-**Status:** Accepted — 2026-07-06
+**Status:** Implemented — `EdgeConfig` shipped: edge best-practices defaults, per-Gateway `parametersRef` overrides, and HTTP/3 (QUIC) support, with its admission webhook in the controller. (Accepted 2026-07-06.)
 **Relates:** proposal 018 (Gateway API edge), 015 (MeshConfig — the CRD + proto.Merge
 default/override precedent), 028 (geoip — folds onto this config), the Envoy edge
 best-practices doc (envoyproxy.io/docs/.../best_practices/edge).

@@ -1,7 +1,9 @@
 # Proposal 034: UDS Support for Pods
 
-**Status:** Phases 1 + 1b merged (#616/#617/#618); kind e2e in CI, talos
-validation and Phase 2 (outbound) pending
+**Status:** Implemented (Phases 1 + 1b) and production-validated — annotation path (#616/#617)
+and `EndpointPolicy` CRD path (#618) shipped, kind e2e in CI (#619), and both paths validated
+under an 8-hour churn soak on talos-main (2026-08-03; follow-ups tracked in #628/#629).
+Phase 2 (outbound egress socket) remains deferred post-redirect-all.
 **Author:** Bruno Palermo
 **Date:** 2026-06-11, revised 2026-08-01 against current main
 **History:** originally numbered 002; renumbered (002 is taken by the merged

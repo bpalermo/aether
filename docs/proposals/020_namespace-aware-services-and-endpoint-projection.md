@@ -1,6 +1,6 @@
 # Proposal: Namespace-aware services + opt-in non-mesh endpoint projection
 
-**Status:** Design — 2026-06-25
+**Status:** Implemented — the namespace-aware `<ns>/<serviceAccount>` registry-key cutover completed and is the mesh's identity model (registry keys, SVIDs, generated mesh Services). (2026-06-25 design.)
 **Relates:** proposal 006 (origin-partitioned registry key schema — the migration
 pattern this follows), proposal 018 (Gateway API/GAMMA + MCS — the alignment driver),
 proposal 019 (multi-cluster waypoint — bounds cross-cluster non-mesh reachability),

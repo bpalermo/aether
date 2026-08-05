@@ -1,6 +1,6 @@
 # 031 — Reduce the agent's feature-flag surface
 
-Status: Accepted (assessment 2026-07-12)
+Status: Implemented — the assessed flag retirements landed (e.g. `--l4-routes` removed; L4 route types now gate only on their Gateway API CRDs being installed). (Assessment 2026-07-12.)
 
 ## Motivation
 

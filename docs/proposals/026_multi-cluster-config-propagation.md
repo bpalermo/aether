@@ -1,11 +1,13 @@
 # Proposal: Multi-cluster config propagation
 
-**Status:** Accepted — 2026-06-29. **Decision: Option E (control cluster — centralized config
-authority)**, implemented on Option C's export/import channel (the hub is the sole exporter; spokes
-import read-only, no cross-cluster K8s credentials); Option D (producer-waypoint) for class-1
-*enforcement*; Option A (GitOps) for class-2 consumer-local config; Option B rejected. Run the
-control cluster as a pure-management cluster (no mesh workloads). This decides the authority
-topology; the export schema + materializer are the implementation follow-up.
+**Status:** Implemented — **Option E (control cluster — centralized config authority)** shipped on
+Option C's export/import channel: the registrar's leader-elected config-export controller writes
+`ServiceConfigProjection`s to the shared registry, and the agent's `--import-config` materializer
+(with `--control-cluster` restricting trust to one origin; local config wins) imports them —
+validated by a two-kind-cluster e2e. Option D (producer-waypoint) for class-1 *enforcement*;
+Option A (GitOps) for class-2 consumer-local config; Option B rejected. Run the control cluster as
+a pure-management cluster (no mesh workloads). etcd key-ACL hardening is parked as a follow-up.
+(Accepted 2026-06-29.)
 **Relates:** proposal 006 (multi-region etcd federation — the registry bus), proposal 019
 (multicluster node-waypoint — the producer-side enforcement option), proposal 018 (Gateway
 API/GAMMA — the config that needs to propagate), proposal 023 (route-by-Service), proposal 015

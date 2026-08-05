@@ -1,6 +1,6 @@
 # Proposal: Port the aether_stats filter into the proxy build
 
-**Status:** Design — 2026-06-15
+**Status:** Implemented — superseded in direction by proposal 012: the filter rides the custom proxy build as a native C++ extension rather than a bundled dynamic module (this proposal's `envoy --mode validate` harness lives on as `//test/envoy_validate`). (2026-06-15 design.)
 **Author:** Bruno Palermo
 **Follows:** proposal 010 (custom proxy workspace), proposal 007 (telemetry filter)
 

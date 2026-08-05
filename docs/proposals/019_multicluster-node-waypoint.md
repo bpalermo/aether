@@ -1,6 +1,6 @@
 # Proposal: Multi-cluster pod-to-pod via a per-node waypoint (non-routable pod IPs)
 
-**Status:** Design — 2026-06-24
+**Status:** Implemented — the node proxy acts as the per-node E/W gateway behind `--east-west-waypoint` (default off; needs shared etcd + shared SPIRE trust domain), e2e-validated. (2026-06-24 design.)
 **Relates:** proposal 018 (Gateway API/GAMMA — the *connectivity modes* this refines),
 proposal 006 (origin-partitioned per-region registry — the cross-cluster plane),
 proposal 003 (edge proxy — the SNI-passthrough primitive this reuses),

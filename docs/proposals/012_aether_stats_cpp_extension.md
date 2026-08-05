@@ -1,6 +1,6 @@
 # Proposal: aether_stats as a native C++ Envoy extension
 
-**Status:** Design — 2026-06-15
+**Status:** Implemented — `aether_stats` ships as a native C++ extension in the custom proxy workspace (`proxy/source/extensions/filters/http/aether_stats/`), default-on in the mesh. (2026-06-15 design.)
 **Supersedes:** proposal 011 (the Rust dynamic-module port) for the chosen direction
 **Follows:** proposal 007 (telemetry filter), proposal 010 (custom proxy workspace)
 

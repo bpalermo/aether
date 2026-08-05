@@ -1,6 +1,6 @@
 # Proposal: external authorization (ext_authz) via a node-proxy sidecar
 
-**Status:** Accepted — 2026-07-05
+**Status:** Implemented — the node-local ext_authz sidecar (UDS transport, OPA preset) shipped; deployed enabled-but-inert on talos-main. (Accepted 2026-07-05.)
 **Relates:** proposal 025 (proxy-extension escape hatch — the enablement machinery),
 proposal 015 (MeshConfig — the system-config half), proposal 026 (config propagation —
 policy parameters ride the channel), proposal 019 (waypoint — the alternative

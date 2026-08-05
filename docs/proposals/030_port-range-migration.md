@@ -1,6 +1,6 @@
 # 030 — Move the remaining data-plane ports out of Istio's reserved range
 
-Status: Proposed
+Status: Implemented — the data-plane ports moved to 18008/18009/18021; nothing remains in Istio's reserved 15xxx range.
 
 ## Motivation
 
