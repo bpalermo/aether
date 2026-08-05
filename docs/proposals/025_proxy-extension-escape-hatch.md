@@ -1,12 +1,10 @@
 # Proposal: Proxy-extension escape hatch for Gateway API / GAMMA
 
-**Status:** Accepted — 2026-06-29 (**Option C**: ExtensionRef → typed CRD, opaque body, fail-closed
-**in-process proto-validate** — no Envoy binary in the webhook). Implementation tracked as
-milestones M1–M4 (below). The route-rule `ExtensionRef` form (caller-side, cluster-local) is
-unblocked and is v1 (M1–M2); the Service-`targetRef` (policy-attachment) form is **blocked on
-proposal 026** (multi-cluster config propagation, Accepted — Option E) — a service-global
-escape-hatch policy cannot be consistent across clusters until 026's C/E channel or D-enforcement
-lands, so it is deferred to M3+.
+**Status:** Implemented — **Option C** (ExtensionRef → typed `HTTPFilter` CRD, opaque body, fail-closed
+**in-process proto-validate** — no Envoy binary in the webhook) shipped in full and is talos-validated:
+the route-rule `ExtensionRef` form, the Service-`targetRef` (policy-attachment) form (unblocked once
+proposal 026 landed), and CHAIN-scoped filters. `common/extensionfilter` is the single source of truth
+for the allow-list + validation/rendering. (Accepted 2026-06-29.)
 **Relates:** proposal 026 (multi-cluster config propagation — gates the Service-targetRef form),
 proposal 018 (Gateway API/GAMMA), proposal 017 (VirtualHost CRD — the edge escape-hatch
 precedent), proposal 015 (MeshConfig CRD — the policy-attachment precedent), proposal 011 / #396

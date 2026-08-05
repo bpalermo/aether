@@ -1,6 +1,6 @@
 # Proposal: GeoIP at the edge
 
-**Status:** Accepted — 2026-07-06
+**Status:** Implemented — edge GeoIP shipped: `x-geo-*` request enrichment with inbound spoof-strip and route-cache clearing. (Accepted 2026-07-06.)
 **Relates:** proposal 003/017/018 (the edge + Gateway API HTTPRoute — geo-routing
 consumers), #476 RBAC / proposal 027 ext_authz (geo-blocking consumers), proposal
 027 (the preset-sidecar pattern the DB updater follows).

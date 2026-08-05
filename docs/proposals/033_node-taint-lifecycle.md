@@ -1,6 +1,6 @@
 # Proposal: Node-taint lifecycle — re-arm the agent-not-ready taint across reboots and agent outages
 
-**Status:** Accepted — 2026-07-19
+**Status:** Implemented — the taint lifecycle shipped (`agent/internal/node`): the agent-not-ready taint re-arms across reboots and agent outages. (Accepted 2026-07-19.)
 **Relates:** issue #263 / #261 (the startup taint + one-shot removal), proposal 031
 (agent flag-surface reduction — the "no new flags" philosophy this follows).
 **Fixes:** #569. **Non-goal:** container-restart waves on a re-armed node (#567).

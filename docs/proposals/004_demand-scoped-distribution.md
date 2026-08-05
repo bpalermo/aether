@@ -1,6 +1,6 @@
 # Proposal: Demand-Scoped Service Distribution
 
-**Status:** Accepted — cold path = ODCDS; ships as a breaking change (no fallback flag)
+**Status:** Implemented — demand-scoped CDS/watch/health-checking shipped as a breaking change (no fallback flag); cold path = ODCDS, including the capture on-demand catch-all (#288). (2026-06-12 design.)
 **Author:** Bruno Palermo
 **Date:** 2026-06-12
 

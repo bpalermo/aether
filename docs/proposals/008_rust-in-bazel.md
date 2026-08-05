@@ -1,6 +1,6 @@
 # Proposal: Rust in the Bazel build (rules_rust + hermetic_cc_toolchain)
 
-**Status:** Draft — toolchain validated by a smoke target (host + Zig cross, 2026-06-13)
+**Status:** Implemented, then superseded by [proposal 010](010_custom-proxy-workspace.md) — the rules_rust + hermetic_cc toolchain shipped (#177) and carried the proposal-007 Rust dynamic module (#178), but was removed when `aether_stats` moved to a native C++ extension in the custom proxy workspace (proposals 010–012). No Rust remains in the tree. (2026-06-13 design.)
 **Author:** Bruno Palermo
 **Date:** 2026-06-13
 

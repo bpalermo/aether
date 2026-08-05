@@ -1,6 +1,6 @@
 # Proposal: Service-based routing — decoupling the GAMMA route target from ServiceAccount identity
 
-**Status:** Design — 2026-06-28
+**Status:** Implemented — the route-target catalog + real-`ClusterIP:port` capture shipped (GAMMA-on-capture); the versioned-backend shape it exists for is exercised by the MESH-HTTP conformance profile, which is green and a hard CI gate (proposal 024). (2026-06-28 design.)
 **Relates:** proposal 018 (Gateway API/GAMMA), proposal 020 (namespace-aware services
 — the `<ns>/<svc>` registry key + SA-identity model this refines), proposal 022
 (arbitrary-Service interception — captures the *real* Service ClusterIP:port this

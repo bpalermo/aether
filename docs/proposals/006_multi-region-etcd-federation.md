@@ -1,6 +1,6 @@
 # Proposal: multi-region etcd federation (region-scoped registry ownership)
 
-**Status:** Design — 2026-06-20
+**Status:** Implemented — the registrar's `--peer-etcd` replicator (origin-partitioned keys, origin-heartbeat lease) shipped and is exercised by the nightly two-cluster replication e2e gate. (2026-06-20 design.)
 **Relates:** [`docs/registry-backend-evolution.md`](../registry-backend-evolution.md)
 (the multi-region directive this implements), proposal 004 (demand-scoped
 distribution), proposal 000 (in-cluster registrar); [[project_registrar_etcd_vs_ddb]],

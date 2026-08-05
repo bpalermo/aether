@@ -1,6 +1,6 @@
 # Proposal: Hot Restart for the aether-proxy Envoy (Spike)
 
-**Status:** Strategies A and B **validated GREEN on talos-main** (B incl. zero-drop app e2e)
+**Status:** Implemented — the `agent proxy-supervisor` hot-restart supervisor shipped (Strategy B), zero-drop validated on talos-main; follow-on audits merged (#109–#111). (2026-06-09 spike.)
 **Author:** Bruno Palermo
 **Date:** 2026-06-09
 
