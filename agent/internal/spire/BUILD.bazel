@@ -8,7 +8,7 @@ go_library(
         "converter.go",
         "metrics.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/spire",
+    importpath = "aethermesh.dev/agent/internal/spire",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/log",

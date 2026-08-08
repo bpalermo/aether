@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"

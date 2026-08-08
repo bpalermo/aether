@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 
-	"github.com/bpalermo/aether/agent/internal/spire"
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	"github.com/bpalermo/aether/agent/types"
+	"aethermesh.dev/agent/internal/spire"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/types"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )

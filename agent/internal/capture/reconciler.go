@@ -11,10 +11,10 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/common/serviceref"
 
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
-	commonlog "github.com/bpalermo/aether/common/log"
+	aetherlabels "aethermesh.dev/common/constants/labels"
+	commonlog "aethermesh.dev/common/log"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"

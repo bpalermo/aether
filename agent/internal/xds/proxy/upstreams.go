@@ -3,9 +3,9 @@ package proxy
 import (
 	"strings"
 
-	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/serviceref"
+	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	"aethermesh.dev/common/serviceref"
 )
 
 // UpstreamsFromPod returns the upstream services the pod declares it consumes,

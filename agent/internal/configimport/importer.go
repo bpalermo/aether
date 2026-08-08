@@ -11,10 +11,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	commonlog "github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/registry"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	commonlog "aethermesh.dev/common/log"
+	"aethermesh.dev/registry"
 )
 
 // Sink receives the materialized imported routes (the xDS SnapshotCache).

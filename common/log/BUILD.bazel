@@ -7,7 +7,7 @@ go_library(
         "log.go",
         "named.go",
     ],
-    importpath = "github.com/bpalermo/aether/common/log",
+    importpath = "aethermesh.dev/common/log",
     visibility = ["//visibility:public"],
 )
 

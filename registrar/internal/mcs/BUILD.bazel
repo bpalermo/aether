@@ -6,7 +6,7 @@ go_library(
         "export_controller.go",
         "import_generator.go",
     ],
-    importpath = "github.com/bpalermo/aether/registrar/internal/mcs",
+    importpath = "aethermesh.dev/registrar/internal/mcs",
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//common/constants/labels",

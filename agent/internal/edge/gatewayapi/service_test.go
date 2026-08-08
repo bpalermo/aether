@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/edge/portalloc"
-	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/edge/portalloc"
+	"aethermesh.dev/agent/internal/xds/cache"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bpalermo/aether/agent/types"
+	"aethermesh.dev/agent/types"
 	"google.golang.org/protobuf/proto"
 )
 

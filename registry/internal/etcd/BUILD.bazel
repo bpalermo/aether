@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "etcd",
     srcs = ["etcd.go"],
-    importpath = "github.com/bpalermo/aether/registry/internal/etcd",
+    importpath = "aethermesh.dev/registry/internal/etcd",
     visibility = ["//registry:__subpackages__"],
     deps = [
         "//api/aether/registry/v1:registry",

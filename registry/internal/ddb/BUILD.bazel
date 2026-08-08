@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "ddb",
     srcs = ["dynamodb.go"],
-    importpath = "github.com/bpalermo/aether/registry/internal/ddb",
+    importpath = "aethermesh.dev/registry/internal/ddb",
     visibility = ["//registry:__subpackages__"],
     deps = [
         "//api/aether/registry/v1:registry",

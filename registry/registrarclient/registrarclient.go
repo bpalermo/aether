@@ -10,7 +10,7 @@ package registrarclient
 import (
 	"log/slog"
 
-	"github.com/bpalermo/aether/registry/internal/registrar"
+	"aethermesh.dev/registry/internal/registrar"
 )
 
 // Config is the configuration for the registrar registry backend.

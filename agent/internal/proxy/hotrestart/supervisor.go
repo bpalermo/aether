@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	commonlog "github.com/bpalermo/aether/common/log"
+	commonlog "aethermesh.dev/common/log"
 	"github.com/fsnotify/fsnotify"
 )
 

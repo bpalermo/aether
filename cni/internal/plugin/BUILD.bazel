@@ -12,7 +12,7 @@ go_library(
         "readyprobe.go",
         "trace.go",
     ],
-    importpath = "github.com/bpalermo/aether/cni/internal/plugin",
+    importpath = "aethermesh.dev/cni/internal/plugin",
     visibility = ["//cni:__subpackages__"],
     deps = [
         "//api/aether/cni/v1:cni",

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/registry/internal/etcd"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/registry/internal/etcd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcetcd "github.com/testcontainers/testcontainers-go/modules/etcd"

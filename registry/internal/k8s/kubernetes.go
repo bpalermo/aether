@@ -15,12 +15,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
-	commonlog "github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/common/serviceref"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/constants"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
+	aetherlabels "aethermesh.dev/common/constants/labels"
+	commonlog "aethermesh.dev/common/log"
+	"aethermesh.dev/common/serviceref"
 )
 
 // Config holds the configuration for the Kubernetes registry backend.

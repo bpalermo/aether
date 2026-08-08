@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

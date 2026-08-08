@@ -24,8 +24,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
-	commonlog "github.com/bpalermo/aether/common/log"
+	aetherlabels "aethermesh.dev/common/constants/labels"
+	commonlog "aethermesh.dev/common/log"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )

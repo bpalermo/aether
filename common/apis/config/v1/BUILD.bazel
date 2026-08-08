@@ -16,7 +16,7 @@ go_library(
         "meshconfig_jsonshim.go",
         "meshconfig_types.go",
     ],
-    importpath = "github.com/bpalermo/aether/common/apis/config/v1",
+    importpath = "aethermesh.dev/common/apis/config/v1",
     visibility = ["//visibility:public"],
     deps = [
         "//api/aether/config/v1:config",

@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "services",
     srcs = ["generator.go"],
-    importpath = "github.com/bpalermo/aether/registrar/internal/services",
+    importpath = "aethermesh.dev/registrar/internal/services",
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//api/aether/registry/v1:registry",

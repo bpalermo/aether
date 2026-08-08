@@ -4,7 +4,7 @@ load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 go_library(
     name = "registrar_lib",
     srcs = ["main.go"],
-    importpath = "github.com/bpalermo/aether/registrar/cmd/registrar",
+    importpath = "aethermesh.dev/registrar/cmd/registrar",
     visibility = ["//visibility:private"],
     deps = [
         "//registrar/internal/cmd",
@@ -17,7 +17,7 @@ go_binary(
     embed = [":registrar_lib"],
     visibility = ["//visibility:public"],
     x_defs = {
-        "github.com/bpalermo/aether/registrar/internal/cmd.Version": "{STABLE_GIT_VERSION}",
+        "aethermesh.dev/registrar/internal/cmd.Version": "{STABLE_GIT_VERSION}",
     },
 )
 

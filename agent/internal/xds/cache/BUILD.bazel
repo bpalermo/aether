@@ -17,7 +17,7 @@ go_library(
         "udspolicy.go",
         "waypoint.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/xds/cache",
+    importpath = "aethermesh.dev/agent/internal/xds/cache",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/constants",

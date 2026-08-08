@@ -3,7 +3,7 @@
 // and configuration files to the host filesystem before the main agent starts.
 package install
 
-import "github.com/bpalermo/aether/cni/internal/constants"
+import "aethermesh.dev/cni/internal/constants"
 
 // InstallerConfig holds configuration for the CNI plugin installer.
 // It specifies where to find the plugin binary and config files in the container,

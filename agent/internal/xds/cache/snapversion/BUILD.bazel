@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "snapversion",
     srcs = ["snapversion.go"],
-    importpath = "github.com/bpalermo/aether/agent/internal/xds/cache/snapversion",
+    importpath = "aethermesh.dev/agent/internal/xds/cache/snapversion",
     visibility = ["//agent:__subpackages__"],
     deps = ["@org_uber_go_atomic//:atomic"],
 )

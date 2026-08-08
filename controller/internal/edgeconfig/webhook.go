@@ -11,8 +11,8 @@ import (
 	"log/slog"
 
 	"buf.build/go/protovalidate"
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
-	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
+	crdv1 "aethermesh.dev/common/apis/config/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 

@@ -4,7 +4,7 @@ package aether.config.v1;
 
 import "buf/validate/validate.proto";
 
-option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+option go_package = "aethermesh.dev/api/aether/config/v1;configv1";
 
 // MeshConfigSpec is the `.spec` of the MeshConfig custom resource — the proxy
 // data-plane observability override. It is also what the controller projects into

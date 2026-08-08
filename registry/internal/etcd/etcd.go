@@ -23,10 +23,10 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	commonlog "github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/common/serviceref"
-	"github.com/bpalermo/aether/registry/export"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	commonlog "aethermesh.dev/common/log"
+	"aethermesh.dev/common/serviceref"
+	"aethermesh.dev/registry/export"
 )
 
 const (

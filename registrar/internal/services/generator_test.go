@@ -5,11 +5,11 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/common/serviceref"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
-	"github.com/bpalermo/aether/registrar/internal/server"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/registrar/internal/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"

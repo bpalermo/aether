@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
-	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
-	"github.com/bpalermo/aether/common/extensionfilter"
+	configprotov1 "aethermesh.dev/api/aether/config/v1"
+	crdv1 "aethermesh.dev/common/apis/config/v1"
+	"aethermesh.dev/common/extensionfilter"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )

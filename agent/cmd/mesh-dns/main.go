@@ -25,10 +25,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bpalermo/aether/agent/constants"
-	"github.com/bpalermo/aether/agent/internal/meshdns"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
-	"github.com/bpalermo/aether/common/log"
+	"aethermesh.dev/agent/constants"
+	"aethermesh.dev/agent/internal/meshdns"
+	meshconst "aethermesh.dev/common/constants/mesh"
+	"aethermesh.dev/common/log"
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 )

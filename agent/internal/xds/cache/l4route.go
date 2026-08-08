@@ -1,7 +1,7 @@
 package cache
 
 import (
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/proxy"
 )
 
 // SetTCPServiceRoutes replaces the TCPRoute-derived per-service L4 rules

@@ -7,7 +7,7 @@ go_library(
         "grpc.go",
         "span.go",
     ],
-    importpath = "github.com/bpalermo/aether/common/telemetry",
+    importpath = "aethermesh.dev/common/telemetry",
     visibility = ["//visibility:public"],
     deps = [
         "@io_opentelemetry_go_contrib_instrumentation_google_golang_org_grpc_otelgrpc//:otelgrpc",

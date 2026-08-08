@@ -3,6 +3,6 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "labels",
     srcs = ["labels.go"],
-    importpath = "github.com/bpalermo/aether/common/constants/labels",
+    importpath = "aethermesh.dev/common/constants/labels",
     visibility = ["//visibility:public"],
 )

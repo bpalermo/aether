@@ -4,7 +4,7 @@ package cmd
 import (
 	"time"
 
-	"github.com/bpalermo/aether/common/manager"
+	"aethermesh.dev/common/manager"
 )
 
 const (

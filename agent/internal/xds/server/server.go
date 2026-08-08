@@ -8,13 +8,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/bpalermo/aether/agent/constants"
-	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	"github.com/bpalermo/aether/agent/storage"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	commonlog "github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/common/xds"
-	"github.com/bpalermo/aether/registry"
+	"aethermesh.dev/agent/constants"
+	"aethermesh.dev/agent/internal/xds/cache"
+	"aethermesh.dev/agent/storage"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	commonlog "aethermesh.dev/common/log"
+	"aethermesh.dev/common/xds"
+	"aethermesh.dev/registry"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 )
 

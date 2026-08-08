@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	commonlog "github.com/bpalermo/aether/common/log"
+	commonlog "aethermesh.dev/common/log"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"

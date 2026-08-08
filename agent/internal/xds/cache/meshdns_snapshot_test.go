@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/meshdns"
+	"aethermesh.dev/agent/internal/meshdns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

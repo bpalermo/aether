@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/capture"
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/capture"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

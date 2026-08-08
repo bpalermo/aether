@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 )
 
 // ToConfigProjection converts a service's in-memory GAMMA rules to the cross-cluster

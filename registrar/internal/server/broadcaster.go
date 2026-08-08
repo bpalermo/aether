@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"sync"
 
-	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
-	commonlog "github.com/bpalermo/aether/common/log"
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
+	commonlog "aethermesh.dev/common/log"
 )
 
 const (

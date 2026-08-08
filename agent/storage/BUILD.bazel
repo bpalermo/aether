@@ -7,7 +7,7 @@ go_library(
         "mock.go",
         "storage.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/storage",
+    importpath = "aethermesh.dev/agent/storage",
     visibility = ["//visibility:public"],
     deps = [
         "//agent/types",

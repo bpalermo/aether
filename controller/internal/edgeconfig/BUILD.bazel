@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "edgeconfig",
     srcs = ["webhook.go"],
-    importpath = "github.com/bpalermo/aether/controller/internal/edgeconfig",
+    importpath = "aethermesh.dev/controller/internal/edgeconfig",
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//api/aether/config/v1:config",

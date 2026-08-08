@@ -7,7 +7,7 @@ go_library(
         "metrics.go",
         "replicator.go",
     ],
-    importpath = "github.com/bpalermo/aether/registrar/internal/replicator",
+    importpath = "aethermesh.dev/registrar/internal/replicator",
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//common/log",

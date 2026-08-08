@@ -3,8 +3,8 @@ package proxy
 import (
 	"testing"
 
-	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"github.com/stretchr/testify/assert"
 )
 

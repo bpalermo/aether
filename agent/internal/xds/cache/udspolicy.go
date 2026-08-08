@@ -4,9 +4,9 @@ import (
 	"context"
 	"maps"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	"aethermesh.dev/common/serviceref"
 )
 
 // SetUDSServicePolicies replaces the service-scoped UDS delivery map (proposal 034

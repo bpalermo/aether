@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/bpalermo/aether/prober/internal/prober"
+	"aethermesh.dev/prober/internal/prober"
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )

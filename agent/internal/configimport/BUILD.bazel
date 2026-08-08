@@ -6,7 +6,7 @@ go_library(
         "importer.go",
         "metrics.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/configimport",
+    importpath = "aethermesh.dev/agent/internal/configimport",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/xds/proxy",

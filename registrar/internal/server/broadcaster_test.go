@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"testing"
 
-	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

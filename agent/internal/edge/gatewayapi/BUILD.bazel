@@ -9,7 +9,7 @@ go_library(
         "service.go",
         "status.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/edge/gatewayapi",
+    importpath = "aethermesh.dev/agent/internal/edge/gatewayapi",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/edge/gatewayapi/attachment",

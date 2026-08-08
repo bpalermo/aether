@@ -1,4 +1,4 @@
-module github.com/bpalermo/aether
+module aethermesh.dev
 
 go 1.26.5
 

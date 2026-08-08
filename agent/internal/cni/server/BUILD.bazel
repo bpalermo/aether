@@ -13,7 +13,7 @@ go_library(
         "server.go",
         "termination.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/cni/server",
+    importpath = "aethermesh.dev/agent/internal/cni/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/constants",

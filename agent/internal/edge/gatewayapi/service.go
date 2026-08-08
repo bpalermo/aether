@@ -8,9 +8,9 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/bpalermo/aether/agent/internal/edge/portalloc"
-	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"aethermesh.dev/agent/internal/edge/portalloc"
+	"aethermesh.dev/agent/internal/xds/cache"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

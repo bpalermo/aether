@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "nodetaint",
     srcs = ["guard.go"],
-    importpath = "github.com/bpalermo/aether/controller/internal/nodetaint",
+    importpath = "aethermesh.dev/controller/internal/nodetaint",
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//common/constants/labels",

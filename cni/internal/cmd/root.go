@@ -3,9 +3,9 @@ package cmd
 import (
 	"context"
 
-	"github.com/bpalermo/aether/cni/internal/constants"
-	"github.com/bpalermo/aether/cni/internal/install"
-	"github.com/bpalermo/aether/common/log"
+	"aethermesh.dev/cni/internal/constants"
+	"aethermesh.dev/cni/internal/install"
+	"aethermesh.dev/common/log"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 )

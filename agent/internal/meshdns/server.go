@@ -27,10 +27,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bpalermo/aether/common/file"
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/common/file"
+	"aethermesh.dev/common/serviceref"
 
-	commonlog "github.com/bpalermo/aether/common/log"
+	commonlog "aethermesh.dev/common/log"
 	"github.com/miekg/dns"
 	"golang.org/x/sys/unix"
 )

@@ -6,7 +6,7 @@ import "buf/validate/validate.proto";
 import "google/protobuf/any.proto";
 
 option features.field_presence = IMPLICIT;
-option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+option go_package = "aethermesh.dev/api/aether/config/v1;configv1";
 
 // HTTPFilterSpec is the `.spec` of the HTTPFilter custom resource — the
 // proxy-extension escape hatch (proposal 025). An HTTPRoute/GRPCRoute rule references

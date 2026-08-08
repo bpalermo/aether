@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/cache/snapversion"
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	"github.com/bpalermo/aether/common/telemetry"
+	"aethermesh.dev/agent/internal/xds/cache/snapversion"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/common/telemetry"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"

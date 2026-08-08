@@ -14,9 +14,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
-	commonlog "github.com/bpalermo/aether/common/log"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/constants"
+	commonlog "aethermesh.dev/common/log"
 )
 
 // DynamoDBRegistry is a Registry implementation backed by AWS DynamoDB.

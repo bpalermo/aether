@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"strings"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
-	"github.com/bpalermo/aether/common/serviceref"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/constants"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
+	"aethermesh.dev/common/serviceref"
 )
 
 // NewServiceEndpointFromCNIPod creates a ServiceEndpoint from a CNIPod.

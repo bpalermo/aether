@@ -10,7 +10,7 @@ import (
 	geoip_commonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/geoip_providers/common/v3"
 	geoip_maxmindv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/geoip_providers/maxmind/v3"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
+	"aethermesh.dev/agent/internal/xds/config"
 )
 
 // Geo header names — the aether-RESERVED x-geo-* namespace (proposal 028). The edge

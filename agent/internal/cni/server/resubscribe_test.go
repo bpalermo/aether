@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	"github.com/bpalermo/aether/agent/storage"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"aethermesh.dev/agent/internal/xds/cache"
+	"aethermesh.dev/agent/storage"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )

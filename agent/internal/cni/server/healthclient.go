@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/proxy"
 )
 
 // healthGatewayClient probes the proxy's health gateway listener (a Unix

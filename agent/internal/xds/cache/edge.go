@@ -5,11 +5,11 @@ import (
 	"slices"
 	"strconv"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
-	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
-	"github.com/bpalermo/aether/common/serviceref"
+	configv1 "aethermesh.dev/api/aether/config/v1"
+	configapisv1 "aethermesh.dev/common/apis/config/v1"
+	"aethermesh.dev/common/serviceref"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"

@@ -3,8 +3,8 @@ package cache
 import (
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/common/serviceref"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"google.golang.org/protobuf/proto"
 )

@@ -32,7 +32,7 @@ go_library(
         "upstreams.go",
         "waypoint.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/xds/proxy",
+    importpath = "aethermesh.dev/agent/internal/xds/proxy",
     visibility = [
         "//agent:__subpackages__",
         "//test:__subpackages__",  # envoy_validate bootstrap generator

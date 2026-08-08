@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"github.com/google/nftables/expr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
+	aetherlabels "aethermesh.dev/common/constants/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"

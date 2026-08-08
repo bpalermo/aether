@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/proxy/hotrestart"
-	"github.com/bpalermo/aether/common/manager"
+	"aethermesh.dev/agent/internal/proxy/hotrestart"
+	"aethermesh.dev/common/manager"
 	"github.com/spf13/cobra"
 )
 

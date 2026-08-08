@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"google.golang.org/protobuf/types/known/structpb"

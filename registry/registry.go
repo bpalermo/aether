@@ -6,8 +6,8 @@ package registry
 import (
 	"context"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/registry/export"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/registry/export"
 )
 
 // ServiceExport is one cluster's declaration that a mesh service is consumable

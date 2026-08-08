@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "gatewaystatus",
     srcs = ["status.go"],
-    importpath = "github.com/bpalermo/aether/agent/internal/gatewaystatus",
+    importpath = "aethermesh.dev/agent/internal/gatewaystatus",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "@io_k8s_apimachinery//pkg/api/meta",

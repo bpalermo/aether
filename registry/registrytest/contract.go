@@ -9,8 +9,8 @@ package registrytest
 import (
 	"testing"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/serviceref"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/serviceref"
 )
 
 // RequireNamespaceQualifiedKeys asserts the contract that ListAllEndpoints output

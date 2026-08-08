@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/storage"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"aethermesh.dev/agent/storage"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/stretchr/testify/assert"

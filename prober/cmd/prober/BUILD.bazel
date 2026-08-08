@@ -4,7 +4,7 @@ load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 go_library(
     name = "prober_lib",
     srcs = ["main.go"],
-    importpath = "github.com/bpalermo/aether/prober/cmd/prober",
+    importpath = "aethermesh.dev/prober/cmd/prober",
     visibility = ["//visibility:private"],
     deps = [
         "//prober/internal/cmd",
@@ -17,7 +17,7 @@ go_binary(
     embed = [":prober_lib"],
     visibility = ["//visibility:public"],
     x_defs = {
-        "github.com/bpalermo/aether/prober/internal/cmd.Version": "{STABLE_GIT_VERSION}",
+        "aethermesh.dev/prober/internal/cmd.Version": "{STABLE_GIT_VERSION}",
     },
 )
 

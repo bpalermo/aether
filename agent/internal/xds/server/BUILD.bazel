@@ -7,7 +7,7 @@ go_library(
         "refresh.go",
         "server.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/xds/server",
+    importpath = "aethermesh.dev/agent/internal/xds/server",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/constants",

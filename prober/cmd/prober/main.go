@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/bpalermo/aether/prober/internal/cmd"
+	"aethermesh.dev/prober/internal/cmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 

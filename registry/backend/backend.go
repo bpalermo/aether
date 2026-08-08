@@ -12,10 +12,10 @@ import (
 	"log/slog"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/bpalermo/aether/registry"
-	"github.com/bpalermo/aether/registry/internal/ddb"
-	"github.com/bpalermo/aether/registry/internal/etcd"
-	"github.com/bpalermo/aether/registry/internal/k8s"
+	"aethermesh.dev/registry"
+	"aethermesh.dev/registry/internal/ddb"
+	"aethermesh.dev/registry/internal/etcd"
+	"aethermesh.dev/registry/internal/k8s"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 

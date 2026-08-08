@@ -7,8 +7,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
-	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
+	configapisv1 "aethermesh.dev/common/apis/config/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 

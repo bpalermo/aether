@@ -6,7 +6,7 @@ go_library(
         "operations.go",
         "telemetry.go",
     ],
-    importpath = "github.com/bpalermo/aether/cni/internal/telemetry",
+    importpath = "aethermesh.dev/cni/internal/telemetry",
     visibility = ["//cni:__subpackages__"],
     deps = [
         "@io_opentelemetry_go_otel//:otel",

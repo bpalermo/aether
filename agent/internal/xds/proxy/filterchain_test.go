@@ -3,8 +3,8 @@ package proxy
 import (
 	"testing"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"

@@ -8,7 +8,7 @@ import "google/protobuf/duration.proto";
 // Preserve proto3 implicit field presence so the generated Go API is unchanged by
 // the edition migration (scalars stay value types, not pointers).
 option features.field_presence = IMPLICIT;
-option go_package = "github.com/bpalermo/aether/api/aether/registry/v1;registryv1";
+option go_package = "aethermesh.dev/api/aether/registry/v1;registryv1";
 
 // ServiceConfigProjection is the cross-cluster wire form of one service's projected
 // GAMMA config (proposal 026, multi-cluster config propagation — Option E/C). The

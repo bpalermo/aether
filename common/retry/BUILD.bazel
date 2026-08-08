@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "retry",
     srcs = ["retry.go"],
-    importpath = "github.com/bpalermo/aether/common/retry",
+    importpath = "aethermesh.dev/common/retry",
     visibility = ["//visibility:public"],
     deps = [
         "@org_golang_google_grpc//codes",

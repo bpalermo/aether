@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"aethermesh.dev/agent/internal/xds/config"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"

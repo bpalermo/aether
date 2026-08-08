@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"golang.org/x/sys/unix"
 )
 

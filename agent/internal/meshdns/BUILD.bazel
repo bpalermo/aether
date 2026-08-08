@@ -9,7 +9,7 @@ go_library(
         "server.go",
         "telemetry.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/meshdns",
+    importpath = "aethermesh.dev/agent/internal/meshdns",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/file",

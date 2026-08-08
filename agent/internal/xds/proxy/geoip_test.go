@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	geoip_filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/geoip/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"

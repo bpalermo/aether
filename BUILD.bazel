@@ -36,7 +36,7 @@ filegroup(
     visibility = ["//website:__pkg__"],
 )
 
-# gazelle:prefix github.com/bpalermo/aether
+# gazelle:prefix aethermesh.dev
 # gazelle:resolve proto buf/validate/validate.proto @protovalidate//proto/protovalidate/buf/validate:validate_proto
 # gazelle:resolve proto go buf/validate/validate.proto @build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate
 # gazelle:resolve proto proto/dynamo/v1/dynamo.proto @com_github_pquerna_protoc_gen_dynamo//proto/dynamo/v1:v1_proto

@@ -6,7 +6,7 @@ go_library(
         "controller.go",
         "metrics.go",
     ],
-    importpath = "github.com/bpalermo/aether/registrar/internal/configexport",
+    importpath = "aethermesh.dev/registrar/internal/configexport",
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//api/aether/config/v1:config",

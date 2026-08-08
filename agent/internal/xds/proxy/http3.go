@@ -3,8 +3,8 @@ package proxy
 import (
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	"aethermesh.dev/agent/internal/xds/config"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"

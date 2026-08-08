@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	commonlog "github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/registry"
+	"aethermesh.dev/agent/internal/xds/cache"
+	commonlog "aethermesh.dev/common/log"
+	"aethermesh.dev/registry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )

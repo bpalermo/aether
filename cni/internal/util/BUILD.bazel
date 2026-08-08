@@ -6,7 +6,7 @@ go_library(
         "plugin.go",
         "watcher.go",
     ],
-    importpath = "github.com/bpalermo/aether/cni/internal/util",
+    importpath = "aethermesh.dev/cni/internal/util",
     visibility = ["//cni:__subpackages__"],
     deps = [
         "//common/file",

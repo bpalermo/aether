@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/edge/secret"
-	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
+	"aethermesh.dev/agent/internal/edge/secret"
+	"aethermesh.dev/agent/internal/gatewaystatus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/common/telemetry/setup"
+	"aethermesh.dev/common/log"
+	"aethermesh.dev/common/telemetry/setup"
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	ctrl "sigs.k8s.io/controller-runtime"
