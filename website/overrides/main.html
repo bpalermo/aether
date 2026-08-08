@@ -19,15 +19,26 @@
 -#}
 {% extends "base.html" %}
 
-{% block extrahead %}
+{% block site_meta %}
   {#- Vanity Go import path (proposal 035): `go get aethermesh.dev` resolves by
       fetching any path on this host with `?go-get=1` and reading these tags.
-      They sit OUTSIDE the `if page` guard because 404.html — rendered with
-      `page = None` — is the page that answers for package subpaths, and the
-      go tool parses the tags regardless of HTTP status. Exact content is
-      asserted by verify_go_import in build_site.py; change both together. -#}
+      Placement is load-bearing twice over:
+      - OUTSIDE any `if page` guard, because 404.html — rendered with
+        `page = None` — is the page that answers for package subpaths.
+      - In site_meta, the FIRST block of <head>, ahead of `super()`: cmd/go
+        parses the page with a lenient XML decoder that dies at Material's
+        inline palette script (`e<<5` — a raw `<`). The error is forgiven only
+        if a go-import tag was already collected, so the tags must precede
+        every inline script. extrahead (where these first lived) is too late —
+        that shipped as `unrecognized import path ... XML syntax error`.
+      Exact content AND head-position are asserted by verify_go_import in
+      build_site.py; change both together. -#}
   <meta name="go-import" content="aethermesh.dev git https://github.com/bpalermo/aether">
   <meta name="go-source" content="aethermesh.dev https://github.com/bpalermo/aether https://github.com/bpalermo/aether/tree/main{/dir} https://github.com/bpalermo/aether/blob/main{/dir}/{file}#L{line}">
+  {{ super() }}
+{% endblock %}
+
+{% block extrahead %}
   {%- if page %}
     {%- set title = page.meta.title if page.meta and page.meta.title else page.title %}
     {#- Same shape as the document title Material renders: a shared card that

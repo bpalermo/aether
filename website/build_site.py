@@ -390,11 +390,25 @@ def verify_go_import(site_dir: Path) -> list[str]:
         if not page.is_file():
             continue  # already reported as a missing required file
         html = page.read_text(encoding="utf-8")
-        if GO_IMPORT_META not in html:
+        at = html.find(GO_IMPORT_META)
+        if at < 0:
             problems.append(
                 f"{name} lost the go-import meta tag — the vanity module path "
                 "aethermesh.dev stops resolving (proposal 035)"
             )
+        else:
+            # Position matters as much as presence: cmd/go parses with a
+            # lenient XML decoder that aborts at the first raw `<` inside an
+            # inline script (Material's palette bootstrap has one), forgiving
+            # the error only if a go-import tag was already collected. The tag
+            # after the script is exactly how the first deploy shipped broken.
+            script = html.find("<script")
+            if 0 <= script < at:
+                problems.append(
+                    f"{name} emits an inline <script> before the go-import meta — "
+                    "cmd/go's parser dies at the script and never sees the tag "
+                    "(proposal 035)"
+                )
         if 'name="go-source"' not in html:
             problems.append(f"{name} lost the go-source meta tag — pkg.go.dev source links break")
     return problems
