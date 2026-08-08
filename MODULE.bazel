@@ -1,4 +1,9 @@
-module(name = "aether")
+# "aethermesh", not "aether": reserves the identity we'd publish under if this
+# ever lands on the Bazel Central Registry (BCR names are short project
+# identifiers, not domains — the Go module path aethermesh.dev is a separate
+# namespace, see proposal 035). Nothing references the name today (no @aether
+# labels, no external bazel_dep consumers), so this is free to hold.
+module(name = "aethermesh")
 
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "platforms", version = "1.1.0")
