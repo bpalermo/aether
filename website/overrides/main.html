@@ -20,6 +20,14 @@
 {% extends "base.html" %}
 
 {% block extrahead %}
+  {#- Vanity Go import path (proposal 035): `go get aethermesh.dev` resolves by
+      fetching any path on this host with `?go-get=1` and reading these tags.
+      They sit OUTSIDE the `if page` guard because 404.html — rendered with
+      `page = None` — is the page that answers for package subpaths, and the
+      go tool parses the tags regardless of HTTP status. Exact content is
+      asserted by verify_go_import in build_site.py; change both together. -#}
+  <meta name="go-import" content="aethermesh.dev git https://github.com/bpalermo/aether">
+  <meta name="go-source" content="aethermesh.dev https://github.com/bpalermo/aether https://github.com/bpalermo/aether/tree/main{/dir} https://github.com/bpalermo/aether/blob/main{/dir}/{file}#L{line}">
   {%- if page %}
     {%- set title = page.meta.title if page.meta and page.meta.title else page.title %}
     {#- Same shape as the document title Material renders: a shared card that

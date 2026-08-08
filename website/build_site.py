@@ -376,6 +376,30 @@ def verify_api(site_dir: Path) -> list[str]:
     return problems
 
 
+#: The exact go-import tag `go get aethermesh.dev` resolves against (proposal
+#: 035). index.html proves the shared extrahead block still emits it; 404.html
+#: is the page that actually answers for package subpaths, so losing the tag
+#: there breaks `go get` for every new fetch that misses the module proxy cache.
+GO_IMPORT_META = '<meta name="go-import" content="aethermesh.dev git https://github.com/bpalermo/aether">'
+
+
+def verify_go_import(site_dir: Path) -> list[str]:
+    problems: list[str] = []
+    for name in ("index.html", "404.html"):
+        page = site_dir / name
+        if not page.is_file():
+            continue  # already reported as a missing required file
+        html = page.read_text(encoding="utf-8")
+        if GO_IMPORT_META not in html:
+            problems.append(
+                f"{name} lost the go-import meta tag — the vanity module path "
+                "aethermesh.dev stops resolving (proposal 035)"
+            )
+        if 'name="go-source"' not in html:
+            problems.append(f"{name} lost the go-source meta tag — pkg.go.dev source links break")
+    return problems
+
+
 def verify_search(site_dir: Path) -> list[str]:
     index = site_dir / "search" / "search_index.json"
     if not index.is_file():
@@ -412,6 +436,7 @@ def verify(site_dir: Path) -> None:
     problems += verify_proposals(site_dir)
     problems += verify_conformance(site_dir)
     problems += verify_api(site_dir)
+    problems += verify_go_import(site_dir)
     problems += verify_search(site_dir)
 
     for path in iter_text_files(site_dir):
