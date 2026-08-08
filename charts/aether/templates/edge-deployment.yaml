@@ -57,6 +57,22 @@ spec:
         - key: aether.io/agent-not-ready
           operator: Exists
           effect: NoSchedule
+      # Spread the gateway replicas across nodes — two ingress replicas on one
+      # node is a single point of failure behind the LB. Soft (ScheduleAnyway)
+      # so single-node kind e2e still schedules. Override via
+      # edge.topologySpreadConstraints.
+      {{- with .Values.edge.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- else }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "aether.edge.selectorLabels" . | nindent 14 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

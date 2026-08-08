@@ -27,6 +27,29 @@ spec:
         - key: aether.io/agent-not-ready
           operator: Exists
           effect: NoSchedule
+      # Keep the singleton controller off the registrars' node when possible.
+      # Preferred, not required: a small or single-node cluster still schedules.
+      # The controller + both-registrars pile-up on one node is the #629 density
+      # suspect. Override via controller.affinity.
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/part-of
+                      operator: In
+                      values: [aether]
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values: [registrar]
+      {{- end }}
       containers:
         - name: controller
           image: {{ include "aether.image" .Values.controller.image | quote }}
