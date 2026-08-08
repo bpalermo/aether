@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"github.com/bpalermo/aether/agent/internal/xds/config"
+	"aethermesh.dev/agent/internal/xds/config"
 	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"

@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 )
 
 // Edge best-practice defaults (Envoy edge doc; proposal 029). Applied when the

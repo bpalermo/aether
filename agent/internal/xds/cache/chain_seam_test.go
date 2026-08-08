@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"

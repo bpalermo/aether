@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	agentConstans "github.com/bpalermo/aether/agent/constants"
+	agentConstans "aethermesh.dev/agent/constants"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
 )

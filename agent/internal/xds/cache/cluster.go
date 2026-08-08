@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/registry"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/registry"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"

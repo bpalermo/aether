@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/cache"
-	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/registry"
+	"aethermesh.dev/agent/internal/xds/cache"
+	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

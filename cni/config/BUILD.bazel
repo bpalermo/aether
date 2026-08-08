@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "config",
     srcs = ["config.go"],
-    importpath = "github.com/bpalermo/aether/cni/config",
+    importpath = "aethermesh.dev/cni/config",
     visibility = ["//visibility:public"],
     deps = [
         "//agent/constants",

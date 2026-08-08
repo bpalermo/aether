@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"testing"
 
-	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )

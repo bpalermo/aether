@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
-	commonlog "github.com/bpalermo/aether/common/log"
-	"github.com/bpalermo/aether/registry"
+	aetherlabels "aethermesh.dev/common/constants/labels"
+	commonlog "aethermesh.dev/common/log"
+	"aethermesh.dev/registry"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

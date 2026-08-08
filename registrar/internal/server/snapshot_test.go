@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 )
 
 // makeEndpoint returns a minimal ServiceEndpoint with the given IP.

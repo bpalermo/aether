@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
+	aetherlabels "aethermesh.dev/common/constants/labels"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"

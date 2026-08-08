@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
 	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"

@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "log",
     srcs = ["log.go"],
-    importpath = "github.com/bpalermo/aether/cni/internal/log",
+    importpath = "aethermesh.dev/cni/internal/log",
     visibility = ["//cni:__subpackages__"],
     deps = [
         "@in_gopkg_natefinch_lumberjack_v2//:lumberjack_v2",

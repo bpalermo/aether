@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bpalermo/aether/agent/internal/edge/gatewayapi/attachment"
-	"github.com/bpalermo/aether/agent/internal/gatewaystatus"
-	"github.com/bpalermo/aether/common/referencegrant"
+	"aethermesh.dev/agent/internal/edge/gatewayapi/attachment"
+	"aethermesh.dev/agent/internal/gatewaystatus"
+	"aethermesh.dev/common/referencegrant"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

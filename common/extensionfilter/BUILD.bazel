@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "extensionfilter",
     srcs = ["extensionfilter.go"],
-    importpath = "github.com/bpalermo/aether/common/extensionfilter",
+    importpath = "aethermesh.dev/common/extensionfilter",
     visibility = ["//visibility:public"],
     deps = [
         "//api/aether/config/v1:config",

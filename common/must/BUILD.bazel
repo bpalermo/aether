@@ -3,6 +3,6 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "must",
     srcs = ["must.go"],
-    importpath = "github.com/bpalermo/aether/common/must",
+    importpath = "aethermesh.dev/common/must",
     visibility = ["//visibility:public"],
 )

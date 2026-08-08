@@ -3,7 +3,7 @@ package l4route
 import (
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/internal/xds/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

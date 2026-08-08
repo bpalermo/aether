@@ -9,7 +9,7 @@ go_library(
         "setup.go",
         "tracing.go",
     ],
-    importpath = "github.com/bpalermo/aether/common/telemetry/setup",
+    importpath = "aethermesh.dev/common/telemetry/setup",
     visibility = ["//visibility:public"],
     deps = [
         "@io_k8s_sigs_controller_runtime//:controller-runtime",

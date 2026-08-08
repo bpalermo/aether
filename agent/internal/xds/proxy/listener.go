@@ -3,10 +3,10 @@ package proxy
 import (
 	"fmt"
 
-	xdsconst "github.com/bpalermo/aether/agent/internal/xds/xdsconst"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"

@@ -4,12 +4,12 @@ package cmd
 import (
 	"time"
 
-	"github.com/bpalermo/aether/agent/constants"
-	cniServer "github.com/bpalermo/aether/agent/internal/cni/server"
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
-	"github.com/bpalermo/aether/common/manager"
-	"github.com/bpalermo/aether/common/udspath"
+	"aethermesh.dev/agent/constants"
+	cniServer "aethermesh.dev/agent/internal/cni/server"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	meshconst "aethermesh.dev/common/constants/mesh"
+	"aethermesh.dev/common/manager"
+	"aethermesh.dev/common/udspath"
 )
 
 // DefaultMeshConfigPath is where the chart mounts the MeshConfig ConfigMap.

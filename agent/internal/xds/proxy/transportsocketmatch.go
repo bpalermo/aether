@@ -3,7 +3,7 @@ package proxy
 import (
 	"sort"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
+	"aethermesh.dev/agent/internal/xds/config"
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	matcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"

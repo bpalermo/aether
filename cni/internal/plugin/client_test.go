@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

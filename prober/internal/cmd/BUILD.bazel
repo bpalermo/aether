@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "cmd",
     srcs = ["root.go"],
-    importpath = "github.com/bpalermo/aether/prober/internal/cmd",
+    importpath = "aethermesh.dev/prober/internal/cmd",
     visibility = ["//prober:__subpackages__"],
     deps = [
         "//prober/internal/prober",

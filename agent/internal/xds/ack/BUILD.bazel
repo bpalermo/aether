@@ -6,7 +6,7 @@ go_library(
         "metrics.go",
         "tracker.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/xds/ack",
+    importpath = "aethermesh.dev/agent/internal/xds/ack",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/log",

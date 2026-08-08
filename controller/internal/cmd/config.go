@@ -2,9 +2,9 @@
 package cmd
 
 import (
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
-	"github.com/bpalermo/aether/common/manager"
-	"github.com/bpalermo/aether/controller/internal/meshconfig"
+	meshconst "aethermesh.dev/common/constants/mesh"
+	"aethermesh.dev/common/manager"
+	"aethermesh.dev/controller/internal/meshconfig"
 )
 
 // ControllerConfig holds configuration for the aether-controller, which runs the

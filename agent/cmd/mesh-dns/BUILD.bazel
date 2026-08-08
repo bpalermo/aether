@@ -4,7 +4,7 @@ load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 go_library(
     name = "mesh-dns_lib",
     srcs = ["main.go"],
-    importpath = "github.com/bpalermo/aether/agent/cmd/mesh-dns",
+    importpath = "aethermesh.dev/agent/cmd/mesh-dns",
     visibility = ["//visibility:private"],
     deps = [
         "//agent/constants",
@@ -21,7 +21,7 @@ go_binary(
     embed = [":mesh-dns_lib"],
     visibility = ["//visibility:public"],
     x_defs = {
-        "github.com/bpalermo/aether/agent/cmd/mesh-dns.Version": "{STABLE_GIT_VERSION}",
+        "aethermesh.dev/agent/cmd/mesh-dns.Version": "{STABLE_GIT_VERSION}",
     },
 )
 

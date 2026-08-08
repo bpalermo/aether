@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
+	"aethermesh.dev/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"google.golang.org/protobuf/proto"
 )
 

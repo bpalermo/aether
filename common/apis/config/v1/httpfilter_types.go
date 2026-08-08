@@ -1,7 +1,7 @@
 package v1
 
 import (
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

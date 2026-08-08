@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"testing"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
-	configapisv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
+	configapisv1 "aethermesh.dev/common/apis/config/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"

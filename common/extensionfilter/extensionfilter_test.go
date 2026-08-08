@@ -3,7 +3,7 @@ package extensionfilter
 import (
 	"testing"
 
-	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configprotov1 "aethermesh.dev/api/aether/config/v1"
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	header_to_metadatav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"

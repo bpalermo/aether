@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
-	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
+	crdv1 "aethermesh.dev/common/apis/config/v1"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

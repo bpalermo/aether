@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	"github.com/bpalermo/aether/common/retry"
-	"github.com/bpalermo/aether/common/telemetry"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	"aethermesh.dev/common/retry"
+	"aethermesh.dev/common/telemetry"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"

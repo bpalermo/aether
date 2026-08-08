@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/agent/internal/xds/config"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/serviceref"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"

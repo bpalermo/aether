@@ -9,7 +9,7 @@ import (
 	"context"
 	"fmt"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 )
 
 // TLSCert is resolved certificate material. Version is a change token (e.g. the

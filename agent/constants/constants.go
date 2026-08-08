@@ -1,7 +1,7 @@
 // Package constants defines agent-specific constants for socket paths and directory defaults.
 package constants
 
-import "github.com/bpalermo/aether/common/constants"
+import "aethermesh.dev/common/constants"
 
 const (
 	// DefaultHostCNIRegistryDir is the default directory for storing CNI registry data on the host

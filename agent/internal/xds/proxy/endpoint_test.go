@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

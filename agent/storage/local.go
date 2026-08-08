@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/bpalermo/aether/agent/types"
-	"github.com/bpalermo/aether/common/file"
+	"aethermesh.dev/agent/types"
+	"aethermesh.dev/common/file"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )

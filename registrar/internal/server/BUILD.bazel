@@ -10,7 +10,7 @@ go_library(
         "sync.go",
         "writebehind.go",
     ],
-    importpath = "github.com/bpalermo/aether/registrar/internal/server",
+    importpath = "aethermesh.dev/registrar/internal/server",
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//api/aether/registrar/v1:registrar",

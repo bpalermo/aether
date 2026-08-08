@@ -16,7 +16,7 @@ import (
 	"os"
 	"path/filepath"
 
-	envoy_validate "github.com/bpalermo/aether/test/envoy_validate"
+	envoy_validate "aethermesh.dev/test/envoy_validate"
 )
 
 func main() {

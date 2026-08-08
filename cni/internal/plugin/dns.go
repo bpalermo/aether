@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"go.uber.org/zap"

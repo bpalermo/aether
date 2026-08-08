@@ -15,7 +15,7 @@ import (
 	"log/slog"
 	"sync"
 
-	commonlog "github.com/bpalermo/aether/common/log"
+	commonlog "aethermesh.dev/common/log"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"

@@ -7,7 +7,7 @@ go_library(
         "hostnames.go",
         "refs.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/edge/gatewayapi/attachment",
+    importpath = "aethermesh.dev/agent/internal/edge/gatewayapi/attachment",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/referencegrant",

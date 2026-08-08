@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	commonlog "github.com/bpalermo/aether/common/log"
+	commonlog "aethermesh.dev/common/log"
 )
 
 // MeshDNSHeartbeatInterval is how often the last-known mesh-DNS record table is

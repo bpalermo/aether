@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
-	"github.com/bpalermo/aether/registry/export"
+	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/registry/export"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"

@@ -3,7 +3,7 @@ package plugin
 import (
 	"context"
 
-	"github.com/bpalermo/aether/common/telemetry"
+	"aethermesh.dev/common/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )

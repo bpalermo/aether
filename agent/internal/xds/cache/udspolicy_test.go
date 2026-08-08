@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -10,7 +10,7 @@ import (
 	"fmt"
 
 	"buf.build/go/protovalidate"
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"sigs.k8s.io/yaml"
 )

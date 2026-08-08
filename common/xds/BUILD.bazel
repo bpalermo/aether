@@ -9,7 +9,7 @@ go_library(
         "server.go",
         "xds.go",
     ],
-    importpath = "github.com/bpalermo/aether/common/xds",
+    importpath = "aethermesh.dev/common/xds",
     visibility = ["//visibility:public"],
     deps = [
         "//common/log",

@@ -6,7 +6,7 @@ import "api/aether/config/v1/http_filter.proto";
 import "buf/validate/validate.proto";
 
 option features.field_presence = IMPLICIT;
-option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+option go_package = "aethermesh.dev/api/aether/config/v1;configv1";
 
 // EndpointPolicySpec is the `.spec` of the EndpointPolicy custom resource — the
 // service-scoped way to declare Unix-domain-socket delivery (proposal 034 Phase 1b).

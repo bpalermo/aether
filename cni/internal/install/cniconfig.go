@@ -9,10 +9,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bpalermo/aether/agent/constants"
-	"github.com/bpalermo/aether/cni/config"
-	"github.com/bpalermo/aether/cni/internal/util"
-	"github.com/bpalermo/aether/common/file"
+	"aethermesh.dev/agent/constants"
+	"aethermesh.dev/cni/config"
+	"aethermesh.dev/cni/internal/util"
+	"aethermesh.dev/common/file"
 	"github.com/containernetworking/cni/libcni"
 )
 

@@ -5,9 +5,9 @@ import (
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	"aethermesh.dev/agent/internal/xds/config"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"

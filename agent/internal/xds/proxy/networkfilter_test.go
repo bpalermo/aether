@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
+	"aethermesh.dev/agent/internal/xds/config"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	setFilterStatev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/registry"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

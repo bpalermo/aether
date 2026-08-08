@@ -6,7 +6,7 @@ go_library(
         "heartbeat.go",
         "reconciler.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/capture",
+    importpath = "aethermesh.dev/agent/internal/capture",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/constants/labels",

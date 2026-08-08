@@ -3,9 +3,9 @@ package registry
 import (
 	"testing"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

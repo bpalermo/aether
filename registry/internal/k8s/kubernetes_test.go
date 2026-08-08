@@ -14,11 +14,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	"github.com/bpalermo/aether/common/constants"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
-	"github.com/bpalermo/aether/registry/registrytest"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/constants"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
+	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/registry/registrytest"
 )
 
 // newTestRegistry constructs a KubernetesRegistry wired to a fake client built

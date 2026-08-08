@@ -7,7 +7,7 @@ go_library(
         "config.go",
         "install.go",
     ],
-    importpath = "github.com/bpalermo/aether/cni/internal/install",
+    importpath = "aethermesh.dev/cni/internal/install",
     visibility = ["//cni:__subpackages__"],
     deps = [
         "//agent/constants",

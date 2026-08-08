@@ -7,7 +7,7 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/wrappers.proto";
 
 option features.field_presence = EXPLICIT;
-option go_package = "github.com/bpalermo/aether/api/aether/config/v1;configv1";
+option go_package = "aethermesh.dev/api/aether/config/v1;configv1";
 
 // EdgeConfigSpec is the `.spec` of the EdgeConfig custom resource (proposal 029):
 // Envoy edge-hardening + HTTP/3 settings for a set of edge Gateways, resolved via the

@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "spire",
     srcs = ["tls.go"],
-    importpath = "github.com/bpalermo/aether/common/spire",
+    importpath = "aethermesh.dev/common/spire",
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_spiffe_go_spiffe_v2//spiffeid",

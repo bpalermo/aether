@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "gatewayapi",
     srcs = ["webhook.go"],
-    importpath = "github.com/bpalermo/aether/controller/internal/gatewayapi",
+    importpath = "aethermesh.dev/controller/internal/gatewayapi",
     visibility = ["//controller:__subpackages__"],
     deps = [
         "@io_k8s_sigs_controller_runtime//pkg/client",

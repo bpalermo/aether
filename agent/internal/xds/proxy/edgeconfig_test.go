@@ -10,7 +10,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
 )
 
 // nil spec → all best-practice defaults (an empty EdgeConfig still hardens).

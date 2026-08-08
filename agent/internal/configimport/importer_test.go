@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

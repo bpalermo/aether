@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "registrytest",
     srcs = ["contract.go"],
-    importpath = "github.com/bpalermo/aether/registry/registrytest",
+    importpath = "aethermesh.dev/registry/registrytest",
     visibility = ["//visibility:public"],
     deps = [
         "//api/aether/registry/v1:registry",

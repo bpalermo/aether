@@ -6,7 +6,7 @@ go_library(
         "config.go",
         "root.go",
     ],
-    importpath = "github.com/bpalermo/aether/controller/internal/cmd",
+    importpath = "aethermesh.dev/controller/internal/cmd",
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//common/apis/config/v1:config",

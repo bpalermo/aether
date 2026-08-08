@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"

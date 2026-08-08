@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	meshconst "aethermesh.dev/common/constants/mesh"
+	"aethermesh.dev/common/serviceref"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

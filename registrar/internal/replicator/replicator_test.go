@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/registrar/internal/replicator"
+	"aethermesh.dev/registrar/internal/replicator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcetcd "github.com/testcontainers/testcontainers-go/modules/etcd"

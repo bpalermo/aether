@@ -3,8 +3,8 @@ package proxy
 import (
 	"time"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	"aethermesh.dev/agent/internal/xds/config"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	health_checkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	on_demandv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/on_demand/v3"

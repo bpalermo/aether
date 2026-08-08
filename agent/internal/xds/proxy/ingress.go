@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"

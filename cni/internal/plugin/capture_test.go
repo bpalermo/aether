@@ -4,9 +4,9 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/bpalermo/aether/cni/config"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
-	meshconst "github.com/bpalermo/aether/common/constants/mesh"
+	"aethermesh.dev/cni/config"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"github.com/google/nftables/expr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

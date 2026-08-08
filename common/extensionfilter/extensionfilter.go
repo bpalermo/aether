@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"regexp"
 
-	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
+	configprotov1 "aethermesh.dev/api/aether/config/v1"
 	rbac_configv3 "github.com/envoyproxy/go-control-plane/envoy/config/rbac/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"

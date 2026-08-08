@@ -7,7 +7,7 @@ go_library(
         "constants.go",
         "http.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/xds/config",
+    importpath = "aethermesh.dev/agent/internal/xds/config",
     visibility = [
         "//agent:__subpackages__",
         "//test:__subpackages__",  # envoy_validate bootstrap generator

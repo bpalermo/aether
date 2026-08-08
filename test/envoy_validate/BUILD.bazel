@@ -15,7 +15,7 @@ alias(
 go_library(
     name = "envoy_validate",
     srcs = ["builders.go"],
-    importpath = "github.com/bpalermo/aether/test/envoy_validate",
+    importpath = "aethermesh.dev/test/envoy_validate",
     visibility = ["//test/envoy_validate:__subpackages__"],
     deps = [
         "//agent/internal/xds/config",

@@ -6,7 +6,7 @@ go_library(
         "cni.go",
         "registry.go",
     ],
-    importpath = "github.com/bpalermo/aether/registry",
+    importpath = "aethermesh.dev/registry",
     visibility = ["//visibility:public"],
     deps = [
         "//api/aether/cni/v1:cni",

@@ -3,6 +3,6 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "annotations",
     srcs = ["annotations.go"],
-    importpath = "github.com/bpalermo/aether/common/constants/annotations",
+    importpath = "aethermesh.dev/common/constants/annotations",
     visibility = ["//visibility:public"],
 )

@@ -8,7 +8,7 @@ go_library(
         "root.go",
         "supervisor.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/cmd",
+    importpath = "aethermesh.dev/agent/internal/cmd",
     visibility = ["//visibility:public"],
     deps = [
         "//agent/constants",

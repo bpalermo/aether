@@ -3,7 +3,7 @@ package cache
 import (
 	"testing"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/stretchr/testify/assert"

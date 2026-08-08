@@ -4,7 +4,7 @@ load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
 go_library(
     name = "agent_lib",
     srcs = ["main.go"],
-    importpath = "github.com/bpalermo/aether/agent/cmd/agent",
+    importpath = "aethermesh.dev/agent/cmd/agent",
     visibility = ["//visibility:private"],
     deps = [
         "//agent/internal/cmd",
@@ -17,7 +17,7 @@ go_binary(
     embed = [":agent_lib"],
     visibility = ["//visibility:public"],
     x_defs = {
-        "github.com/bpalermo/aether/agent/internal/cmd.Version": "{STABLE_GIT_VERSION}",
+        "aethermesh.dev/agent/internal/cmd.Version": "{STABLE_GIT_VERSION}",
     },
 )
 

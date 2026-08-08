@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	crdv1 "aethermesh.dev/common/apis/config/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	aetherlabels "github.com/bpalermo/aether/common/constants/labels"
+	aetherlabels "aethermesh.dev/common/constants/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"

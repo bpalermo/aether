@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "l4route",
     srcs = ["reconciler.go"],
-    importpath = "github.com/bpalermo/aether/agent/internal/l4route",
+    importpath = "aethermesh.dev/agent/internal/l4route",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/internal/gatewaystatus",

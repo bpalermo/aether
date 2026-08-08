@@ -6,13 +6,13 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bpalermo/aether/common/telemetry"
-	"github.com/bpalermo/aether/registry"
+	"aethermesh.dev/common/telemetry"
+	"aethermesh.dev/registry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
-	registryv1 "github.com/bpalermo/aether/api/aether/registry/v1"
-	commonlog "github.com/bpalermo/aether/common/log"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	commonlog "aethermesh.dev/common/log"
 )
 
 // tracerName identifies this instrumentation scope in trace backends.

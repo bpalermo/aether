@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "prober",
     srcs = ["prober.go"],
-    importpath = "github.com/bpalermo/aether/prober/internal/prober",
+    importpath = "aethermesh.dev/prober/internal/prober",
     visibility = ["//prober:__subpackages__"],
     deps = [
         "@com_github_go_logr_logr//:logr",

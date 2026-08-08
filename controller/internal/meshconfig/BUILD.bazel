@@ -8,7 +8,7 @@ go_library(
         "reconciler.go",
         "webhook.go",
     ],
-    importpath = "github.com/bpalermo/aether/controller/internal/meshconfig",
+    importpath = "aethermesh.dev/controller/internal/meshconfig",
     visibility = ["//controller:__subpackages__"],
     deps = [
         "//api/aether/config/v1:config",

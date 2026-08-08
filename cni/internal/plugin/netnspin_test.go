@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bpalermo/aether/cni/config"
+	"aethermesh.dev/cni/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

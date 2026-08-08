@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/bpalermo/aether/registrar/internal/cmd"
+	"aethermesh.dev/registrar/internal/cmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 

@@ -8,6 +8,6 @@ go_library(
         "namespaces.go",
         "registry.go",
     ],
-    importpath = "github.com/bpalermo/aether/common/constants",
+    importpath = "aethermesh.dev/common/constants",
     visibility = ["//visibility:public"],
 )

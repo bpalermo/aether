@@ -22,10 +22,10 @@ import (
 	"fmt"
 	"time"
 
-	configprotov1 "github.com/bpalermo/aether/api/aether/config/v1"
-	aetherannotations "github.com/bpalermo/aether/common/constants/annotations"
-	"github.com/bpalermo/aether/common/extensionfilter"
-	"github.com/bpalermo/aether/common/udspath"
+	configprotov1 "aethermesh.dev/api/aether/config/v1"
+	aetherannotations "aethermesh.dev/common/constants/annotations"
+	"aethermesh.dev/common/extensionfilter"
+	"aethermesh.dev/common/udspath"
 
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -44,9 +44,9 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"github.com/bpalermo/aether/agent/internal/xds/config"
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"aethermesh.dev/agent/internal/xds/config"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 )
 
 const (

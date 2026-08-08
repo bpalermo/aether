@@ -8,7 +8,7 @@ go_library(
         "logging.go",
         "manager.go",
     ],
-    importpath = "github.com/bpalermo/aether/common/manager",
+    importpath = "aethermesh.dev/common/manager",
     visibility = ["//visibility:public"],
     deps = [
         "//common/log",

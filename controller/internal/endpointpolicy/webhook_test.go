@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	configv1 "github.com/bpalermo/aether/api/aether/config/v1"
-	crdv1 "github.com/bpalermo/aether/common/apis/config/v1"
+	configv1 "aethermesh.dev/api/aether/config/v1"
+	crdv1 "aethermesh.dev/common/apis/config/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"

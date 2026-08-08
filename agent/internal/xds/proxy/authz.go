@@ -3,7 +3,7 @@ package proxy
 import (
 	"time"
 
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"

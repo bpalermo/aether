@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	registrarv1 "github.com/bpalermo/aether/api/aether/registrar/v1"
+	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )

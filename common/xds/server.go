@@ -8,7 +8,7 @@ import (
 	"net"
 	"os"
 
-	commonlog "github.com/bpalermo/aether/common/log"
+	commonlog "aethermesh.dev/common/log"
 	"go.uber.org/atomic"
 	"google.golang.org/grpc"
 )

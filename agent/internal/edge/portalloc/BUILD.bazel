@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "portalloc",
     srcs = ["portalloc.go"],
-    importpath = "github.com/bpalermo/aether/agent/internal/edge/portalloc",
+    importpath = "aethermesh.dev/agent/internal/edge/portalloc",
     visibility = ["//agent:__subpackages__"],
 )
 

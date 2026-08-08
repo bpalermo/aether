@@ -3,8 +3,8 @@ package cache
 import (
 	"sort"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/common/serviceref"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )

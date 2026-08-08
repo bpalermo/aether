@@ -6,7 +6,7 @@ go_library(
         "config.go",
         "root.go",
     ],
-    importpath = "github.com/bpalermo/aether/registrar/internal/cmd",
+    importpath = "aethermesh.dev/registrar/internal/cmd",
     visibility = ["//registrar:__subpackages__"],
     deps = [
         "//common/apis/config/v1:config",

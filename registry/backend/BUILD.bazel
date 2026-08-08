@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "backend",
     srcs = ["backend.go"],
-    importpath = "github.com/bpalermo/aether/registry/backend",
+    importpath = "aethermesh.dev/registry/backend",
     visibility = ["//visibility:public"],
     deps = [
         "//registry",

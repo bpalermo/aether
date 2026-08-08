@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bpalermo/aether/cni/config"
+	"aethermesh.dev/cni/config"
 	"go.uber.org/zap"
 )
 

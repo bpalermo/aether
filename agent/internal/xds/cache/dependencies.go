@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/bpalermo/aether/common/serviceref"
+	"aethermesh.dev/common/serviceref"
 
-	"github.com/bpalermo/aether/agent/internal/xds/proxy"
-	cniv1 "github.com/bpalermo/aether/api/aether/cni/v1"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 )
 
 // defaultObservedTTL is how long an observed (ODCDS-requested) dependency

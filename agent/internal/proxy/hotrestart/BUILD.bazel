@@ -9,7 +9,7 @@ go_library(
         "supervisor.go",
         "telemetry.go",
     ],
-    importpath = "github.com/bpalermo/aether/agent/internal/proxy/hotrestart",
+    importpath = "aethermesh.dev/agent/internal/proxy/hotrestart",
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/log",
