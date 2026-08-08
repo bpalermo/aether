@@ -24,6 +24,22 @@ spec:
         - key: aether.io/agent-not-ready
           operator: Exists
           effect: NoSchedule
+      # Spread the two replicas across nodes. Soft (ScheduleAnyway) on purpose:
+      # single-node kind e2e must still schedule. Both replicas stacking onto
+      # one node made main-worker-01 the density hot spot implicated in
+      # #628/#629. Override via registrar.topologySpreadConstraints.
+      {{- with .Values.registrar.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- else }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "aether.registrar.selectorLabels" . | nindent 14 }}
+      {{- end }}
       containers:
         - name: registrar
           image: {{ include "aether.image" .Values.registrar.image | quote }}

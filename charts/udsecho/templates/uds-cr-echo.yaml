@@ -26,6 +26,13 @@ spec:
         endpoint.aether.io/port: "8080"
     spec:
       serviceAccountName: uds-cr-echo
+      # Soft hostname spread — same rationale as uds-echo (#629 hot spot).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: uds-cr-echo}
       securityContext: {fsGroup: 65532}
       containers:
         - name: app

@@ -28,6 +28,14 @@ spec:
         endpoint.aether.io/uds-socket: {{ .Values.socket | quote }}
     spec:
       serviceAccountName: uds-echo
+      # Soft hostname spread: the whole UDS fleet landed on one node, feeding
+      # the #629 density hot spot. Soft so single-node kind e2e still schedules.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: uds-echo}
       # fsGroup makes the emptyDir group-writable for the distroless nonroot
       # user, so the app can create the socket in it.
       securityContext: {fsGroup: 65532}

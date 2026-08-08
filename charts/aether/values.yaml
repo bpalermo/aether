@@ -348,6 +348,9 @@ edge:
   # Gateway replicas behind the Service; rolled with the standard RollingUpdate
   # + readiness gate (no hot-restart supervisor — nothing node-local to preserve).
   replicaCount: 2
+  # Empty = chart default: a soft hostname spread across the gateway replicas
+  # (maxSkew 1, ScheduleAnyway). Set to replace the default entirely.
+  topologySpreadConstraints: []
   # The edge reuses the agent image (run as `agent edge`) and the proxy image
   # (plain Envoy entrypoint). Override agent.image / proxy.image to mirror.
   # Ports the edge's public-facing listeners bind (north-south). Privileged ports
@@ -478,6 +481,9 @@ registrar:
   # 2 replicas ALWAYS (directive 2026-06-11): exercises the multi-replica
   # write-behind topology permanently.
   replicaCount: 2
+  # Empty = chart default: a soft hostname spread across the replicas
+  # (maxSkew 1, ScheduleAnyway). Set to replace the default entirely.
+  topologySpreadConstraints: []
   resources:
     requests:
       cpu: 100m
@@ -532,6 +538,9 @@ controller:
     pullPolicy: Always
   # Leader election is on; extra replicas are warm standbys.
   replicaCount: 1
+  # Empty = chart default: preferred podAntiAffinity away from the registrars'
+  # node (soft). Set to replace the default entirely.
+  affinity: {}
   # Pod-ndots mutating webhook (proposal 018, mesh-global FQDN): inject dnsConfig
   # ndots (= the mesh-domain label count) into managed pods so a mesh FQDN
   # (<svc>.<meshDomain>) resolves absolute-first, before the cluster.local search
