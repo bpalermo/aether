@@ -9,7 +9,7 @@ description: |
   socket delivery, because the TCP-fallback path finds nothing listening.
 type: application
 # Stamped at package time when built with `--stamp` (see registrar Chart.yaml).
-version: "0.2.0-{GIT_COMMIT}"
+version: "0.2.1-{GIT_COMMIT}"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether
