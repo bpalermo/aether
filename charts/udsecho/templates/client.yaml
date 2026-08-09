@@ -24,9 +24,15 @@ spec:
         app: uds-client
         aether.io/managed: "true"
       annotations:
-        # Warm the clusters on this node (demand-scoped distribution) instead
-        # of paying an ODCDS round trip on first dial.
-        config.aether.io/upstreams: "uds-echo.{{ .Values.namespace }}{{ if .Values.policyPath.enabled }},uds-cr-echo.{{ .Values.namespace }}{{ end }}"
+        # Pin the upstream clusters into the node dependency set (demand-scoped
+        # distribution) instead of riding TTL'd ODCDS-observed membership.
+        # FORMAT MATTERS (#636): a value with no "/" is namespace-qualified with
+        # the POD's namespace — bare "uds-echo" is correct here (same-namespace);
+        # cross-namespace needs "<ns>/<svc>". The original dot-form
+        # "uds-echo.<ns>" parsed to the junk key "<ns>/uds-echo.<ns>", so the
+        # declaration silently never applied and every observed-TTL expiry cut
+        # the client's clusters mid-traffic.
+        config.aether.io/upstreams: "uds-echo{{ if .Values.policyPath.enabled }},uds-cr-echo{{ end }}"
     spec:
       serviceAccountName: uds-client
       containers:
