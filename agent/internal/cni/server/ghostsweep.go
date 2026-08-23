@@ -34,6 +34,11 @@ import (
 //   - Missing: a live local pod whose registration was lost (registry outage
 //     at CNI ADD — AddPod deliberately tolerates that — or registry data
 //     loss) would otherwise never receive traffic.
+//   - Unmeshed: a Running mesh-managed pod that never went through a usable CNI
+//     ADD at all (lost-ADD #567, or the reboot boot race #640 where its only
+//     storage entries reference a dead netns) cannot be repaired in place — the
+//     sweep evicts it (rate-limited, PDB-respecting) so sandbox recreation
+//     re-runs CNI ADD.
 //
 // lifecycleMu serializes the sweep against AddPod/RemovePod/liveness so a
 // registering pod cannot be judged a ghost mid-flight.
@@ -73,15 +78,41 @@ const (
 	// never triggers eviction.
 	lostAddEvictThreshold = 3
 
-	// lostAddEvictPerPass caps evictions per sweep pass per node so a correlated
-	// loss can never evict the world in one tick — recovery stays gradual and
-	// PDB-bounded.
-	lostAddEvictPerPass = 2
+	// sweepEvictPerPass caps self-heal evictions per sweep pass per node — shared
+	// across the lost-ADD (#567) and stale-while-Running (#640) paths — so a
+	// correlated loss can never evict the world in one tick: recovery stays
+	// gradual and PDB-bounded.
+	sweepEvictPerPass = 2
 )
 
-// evictReason is the k8s Event reason recorded on a pod the agent evicts to
-// recover a lost CNI ADD.
-const evictReason = "AetherCNIAddLost"
+// Stale-while-Running self-heal guard (#640, 2026-08-23 power-failure boot
+// race): after a node reboot, kubelet recreates every bound pod's sandbox
+// before cni-install has restored the chained conflist, so the pods come up on
+// the base CNI — Running and Ready per Kubernetes, but with no mesh
+// registration. Storage still holds each pod's PRE-reboot entry (same
+// namespace/name, dead netns), which deadlocks the two existing guards: the
+// #566 cross-check refuses to prune a Running pod, and the #567 missing-storage
+// self-heal never fires because the namespace/name IS in storage. The
+// stale-while-Running classification breaks that deadlock: an entry whose netns
+// has been gone for staleRunningEvictThreshold consecutive passes while the API
+// reports the pod Running with an IP — and no fresher entry covers the pod —
+// proves the pod is running outside the mesh, and the pod is evicted to force a
+// fresh CNI ADD.
+const staleRunningEvictThreshold = 3
+
+// Kubernetes Event reasons recorded on pods the agent evicts to self-heal.
+const (
+	// evictReasonLostAdd marks a pod evicted to recover a lost CNI ADD (#567).
+	evictReasonLostAdd = "AetherCNIAddLost"
+	// evictReasonStaleRegistration marks a pod evicted because its stored
+	// registration references a defunct network namespace while the pod is
+	// Running — the reboot boot-race signature (#640).
+	evictReasonStaleRegistration = "AetherCNIStaleRegistration"
+)
+
+// evictionBudget caps self-heal evictions per sweep pass, shared by every
+// eviction path so their sum stays PDB-friendly and gradual.
+type evictionBudget struct{ remaining int }
 
 // sweptProtocols are the registry protocols the ghost sweep reconciles. Both
 // HTTP and TCP services are owned per node, so a missed deregistration of either
@@ -157,7 +188,7 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// pipeline, so each iteration is traced with the corrections it made.
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "agent.ghost_sweep")
 	var retErr error
-	ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, storedPods := 0, 0, 0, 0, 0, 0
+	ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, staleRunning, storedPods := 0, 0, 0, 0, 0, 0, 0
 	defer func() {
 		span.SetAttributes(
 			attribute.Int("aether.sweep.ghosts_removed", ghostsRemoved),
@@ -165,8 +196,9 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 			attribute.Int("aether.sweep.stale_pruned", stalePruned),
 			attribute.Int("aether.sweep.orphans_pruned", orphansPruned),
 			attribute.Int("aether.sweep.missing_storage", missingStorage),
+			attribute.Int("aether.sweep.stale_running", staleRunning),
 		)
-		s.metrics.sweepCompleted(ctx, ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, storedPods, retErr)
+		s.metrics.sweepCompleted(ctx, ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, staleRunning, storedPods, retErr)
 		telemetry.EndSpan(span, retErr)
 	}()
 
@@ -197,8 +229,15 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	nodePods, nodePodsOK := s.listNodePods(ctx)
 
 	var breakerTripped bool
-	pods, stalePruned, orphansPruned, breakerTripped = s.pruneStaleStoragePods(ctx, pods, nodePods, nodePodsOK)
-	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK, breakerTripped)
+	var staleRunningRipe []staleRunningPod
+	pods, stalePruned, orphansPruned, staleRunning, staleRunningRipe, breakerTripped = s.pruneStaleStoragePods(ctx, pods, nodePods, nodePodsOK)
+
+	// Self-heal evictions share one per-pass budget so the two paths can never
+	// jointly exceed the rate cap. Stale-while-Running goes first: after a node
+	// reboot it is the entire node's population (#640).
+	budget := &evictionBudget{remaining: sweepEvictPerPass}
+	s.evictStaleRunningPods(ctx, staleRunningRipe, breakerTripped, budget)
+	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK, breakerTripped, budget)
 
 	live, terminating := s.classifyPods(pods)
 	ghostsRemoved = s.deregisterGhostEndpoints(ctx, all, live, terminating)
@@ -242,11 +281,20 @@ func (s *CNIServer) listRegistryEndpoints(ctx context.Context) (map[string][]*re
 	return all, nil
 }
 
+// staleRunningPod is a Running Kubernetes pod whose only storage entries
+// reference dead network namespaces (#640) — ripe for self-heal eviction.
+type staleRunningPod struct {
+	kp *corev1.Pod
+	// containerID of the stale storage entry, for streak bookkeeping.
+	containerID string
+}
+
 // pruneStaleStoragePods removes pods from storage whose network namespace is
 // gone or whose Kubernetes pod no longer exists. Returns the surviving pods, the
-// counts of stale and orphaned pods pruned, and whether the mass-delete circuit
-// breaker refused the pass (#566, which the lost-ADD self-heal interlocks on).
-func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) ([]*cniv1.CNIPod, int, int, bool) {
+// counts of stale and orphaned pods pruned, the stale-while-Running detection
+// count and ripe eviction set (#640), and whether the mass-delete circuit
+// breaker refused the pass (#566, which the self-heal evictions interlock on).
+func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) ([]*cniv1.CNIPod, int, int, int, []staleRunningPod, bool) {
 	// Prune storage entries that no longer correspond to a live pod: a missed CNI
 	// DEL left the file behind. Keeping it both re-registers a dead endpoint (the
 	// missing-direction loop would treat it as a live local pod) and makes Envoy
@@ -268,61 +316,119 @@ func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNI
 	// (hysteresis), a pod the API still reports Running is never a ghost regardless
 	// of netns (cross-check), and a pass that would prune too large a fraction is
 	// refused wholesale (mass breaker).
-	candidates := s.classifyPruneCandidates(ctx, pods, nodePods, nodePodsOK)
+	candidates, staleRunningDetected, staleRunningRipe := s.classifyPruneCandidates(ctx, pods, nodePods, nodePodsOK)
 	if s.pruneBreakerTrips(ctx, len(pods), len(candidates)) {
 		// Refuse the whole pass. Keep every pod: truly-gone pods are also gone
 		// from the API, which the orphan cross-check catches once the correlated
 		// netns failure clears, so nothing is leaked permanently.
-		return pods, 0, 0, true
+		return pods, 0, 0, staleRunningDetected, staleRunningRipe, true
 	}
-	return s.applyPrune(ctx, pods, candidates)
+	fresh, stalePruned, orphansPruned := s.applyPrune(ctx, pods, candidates)
+	return fresh, stalePruned, orphansPruned, staleRunningDetected, staleRunningRipe, false
 }
 
-// pruneCandidate marks a stored pod for pruning and why (orphaned = K8s pod gone,
-// which routes the log/metric and bypasses netns hysteresis).
+// pruneCandidate marks a stored pod for pruning and why, routing the log line:
+// orphaned = K8s pod gone (bypasses netns hysteresis; the API is ground truth),
+// superseded = the pod re-registered under a new sandbox and this entry is the
+// old sandbox's leftover (#640).
 type pruneCandidate struct {
-	orphaned bool
+	orphaned   bool
+	superseded bool
 }
 
 // classifyPruneCandidates decides which stored pods this pass would prune,
-// applying the netns-failure hysteresis and the API cross-check. It returns the
-// prune set keyed by container ID and updates the per-pod netns-failure streaks
-// as a side effect (reset on a passing check or an API-confirmed live pod).
-func (s *CNIServer) classifyPruneCandidates(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) map[string]pruneCandidate {
+// applying the netns-failure hysteresis and the API cross-check, and which
+// Running pods are stale-while-Running (#640). It returns the prune set keyed by
+// container ID, the count of pods detected stale-while-Running this pass, and
+// the subset ripe for eviction. It updates the per-pod streaks as a side effect
+// (reset on a passing check or a state change).
+func (s *CNIServer) classifyPruneCandidates(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) (map[string]pruneCandidate, int, []staleRunningPod) {
 	if s.netnsFailStreaks == nil {
 		s.netnsFailStreaks = map[string]int{}
 	}
+	if s.staleRunningStreaks == nil {
+		s.staleRunningStreaks = map[string]int{}
+	}
 	// Drop streaks for container IDs no longer in storage (removed pods) so the
-	// map can't grow unbounded across sweeps.
+	// maps can't grow unbounded across sweeps.
 	s.pruneVanishedNetnsStreaks(pods)
+
+	// Pre-pass: which pods (namespace/name) have at least one entry whose netns
+	// is present? A dead-netns entry for such a pod is superseded — the pod
+	// re-registered under a new sandbox — while a Running pod with ONLY dead
+	// entries is running outside the mesh (#640). One stat per entry; the
+	// classification loop reuses the result.
+	entryNetnsGone := make(map[string]bool, len(pods))
+	liveEntryPods := make(map[string]struct{}, len(pods))
+	for _, p := range pods {
+		netns := p.GetNetworkNamespace()
+		gone := netns != "" && !netnsExists(netns)
+		entryNetnsGone[p.GetContainerId()] = gone
+		if !gone {
+			liveEntryPods[podKey(p.GetNamespace(), p.GetName())] = struct{}{}
+		}
+	}
+
 	candidates := make(map[string]pruneCandidate)
+	staleRunningKeys := make(map[string]struct{})
+	var staleRunningRipe []staleRunningPod
 	for _, p := range pods {
 		id := p.GetContainerId()
 		netns := p.GetNetworkNamespace()
-		netnsGone := netns != "" && !netnsExists(netns)
+		netnsGone := entryNetnsGone[id]
 
 		// Orphaned = the K8s API no longer has this pod on this node. The API is
 		// ground truth, so this prunes immediately (no hysteresis).
 		if nodePodsOK && !podInNode(nodePods, p) {
 			delete(s.netnsFailStreaks, id)
+			delete(s.staleRunningStreaks, id)
 			candidates[id] = pruneCandidate{orphaned: true}
 			continue
 		}
 
 		if !netnsGone {
 			delete(s.netnsFailStreaks, id) // netns present: clear any streak
+			delete(s.staleRunningStreaks, id)
 			continue
 		}
 
 		// API cross-check (#566): a pod the API still reports Running with a live
-		// IP is NOT a ghost, whatever the netns stat says — the incident's exact
-		// false positive. Skip it and do not accrue a failure streak.
+		// IP is NOT a ghost, whatever the netns stat says — never prune the POD.
+		// But the ENTRY is provably wrong after the hysteresis window: a Running
+		// pod's netns cannot stay gone. Which wrong depends on coverage (#640):
+		// a fresher live entry means this one is the old sandbox's leftover
+		// (prune just the entry); no live entry means the pod itself is running
+		// outside the mesh (evict it to force a fresh CNI ADD).
 		if nodePodsOK && podRunningWithIP(nodePods, p) {
+			key := podKey(p.GetNamespace(), p.GetName())
+			if _, covered := liveEntryPods[key]; covered {
+				delete(s.staleRunningStreaks, id)
+				s.netnsFailStreaks[id]++
+				if s.netnsFailStreaks[id] < ghostNetnsFailThreshold {
+					s.log.DebugContext(ctx, "ghost sweep: superseded entry below prune threshold (hysteresis)",
+						"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns,
+						"failures", s.netnsFailStreaks[id], "threshold", ghostNetnsFailThreshold)
+					continue
+				}
+				candidates[id] = pruneCandidate{superseded: true}
+				continue
+			}
+
 			delete(s.netnsFailStreaks, id)
-			s.log.WarnContext(ctx, "ghost sweep: netns check failed but pod is Running per the API; not pruning",
-				"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
+			s.staleRunningStreaks[id]++
+			streak := s.staleRunningStreaks[id]
+			staleRunningKeys[key] = struct{}{}
+			s.log.WarnContext(ctx, "ghost sweep: netns gone but pod is Running per the API with no fresh registration; pod is outside the mesh (#640)",
+				"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns,
+				"consecutive_sweeps", streak, "evict_threshold", staleRunningEvictThreshold)
+			if streak >= staleRunningEvictThreshold {
+				if kp, ok := nodePods[key]; ok {
+					staleRunningRipe = append(staleRunningRipe, staleRunningPod{kp: kp, containerID: id})
+				}
+			}
 			continue
 		}
+		delete(s.staleRunningStreaks, id)
 
 		// Netns-gone hysteresis (#566): only classify as a ghost after N
 		// consecutive failed passes, so a transient stat failure never prunes.
@@ -335,13 +441,13 @@ func (s *CNIServer) classifyPruneCandidates(ctx context.Context, pods []*cniv1.C
 		}
 		candidates[id] = pruneCandidate{orphaned: false}
 	}
-	return candidates
+	return candidates, len(staleRunningKeys), staleRunningRipe
 }
 
-// pruneVanishedNetnsStreaks drops netns-failure streaks for container IDs no
-// longer present in storage, bounding the map to live pods.
+// pruneVanishedNetnsStreaks drops netns-failure and stale-while-Running streaks
+// for container IDs no longer present in storage, bounding the maps to live pods.
 func (s *CNIServer) pruneVanishedNetnsStreaks(pods []*cniv1.CNIPod) {
-	if len(s.netnsFailStreaks) == 0 {
+	if len(s.netnsFailStreaks) == 0 && len(s.staleRunningStreaks) == 0 {
 		return
 	}
 	live := make(map[string]struct{}, len(pods))
@@ -351,6 +457,11 @@ func (s *CNIServer) pruneVanishedNetnsStreaks(pods []*cniv1.CNIPod) {
 	for id := range s.netnsFailStreaks {
 		if _, ok := live[id]; !ok {
 			delete(s.netnsFailStreaks, id)
+		}
+	}
+	for id := range s.staleRunningStreaks {
+		if _, ok := live[id]; !ok {
+			delete(s.staleRunningStreaks, id)
 		}
 	}
 }
@@ -373,8 +484,10 @@ func (s *CNIServer) pruneBreakerTrips(ctx context.Context, storedCount, candidat
 }
 
 // applyPrune removes the classified prune candidates from storage and drops
-// their listeners, returning the surviving pods and the stale/orphan counts.
-func (s *CNIServer) applyPrune(ctx context.Context, pods []*cniv1.CNIPod, candidates map[string]pruneCandidate) ([]*cniv1.CNIPod, int, int, bool) {
+// their listeners, returning the surviving pods and the stale/orphan counts
+// (superseded entries count as stale — they are stale entries whose pod happens
+// to have re-registered).
+func (s *CNIServer) applyPrune(ctx context.Context, pods []*cniv1.CNIPod, candidates map[string]pruneCandidate) ([]*cniv1.CNIPod, int, int) {
 	stalePruned, orphansPruned := 0, 0
 	fresh := pods[:0]
 	for _, p := range pods {
@@ -383,19 +496,20 @@ func (s *CNIServer) applyPrune(ctx context.Context, pods []*cniv1.CNIPod, candid
 			fresh = append(fresh, p)
 			continue
 		}
-		kept, wasOrphaned := s.pruneOnePod(ctx, p, p.GetNetworkNamespace(), cand.orphaned)
+		kept := s.pruneOnePod(ctx, p, p.GetNetworkNamespace(), cand)
 		if kept {
 			fresh = append(fresh, p)
 			continue
 		}
 		delete(s.netnsFailStreaks, p.GetContainerId())
-		if wasOrphaned {
+		delete(s.staleRunningStreaks, p.GetContainerId())
+		if cand.orphaned {
 			orphansPruned++
 		} else {
 			stalePruned++
 		}
 	}
-	return fresh, stalePruned, orphansPruned, false
+	return fresh, stalePruned, orphansPruned
 }
 
 // podRunningWithIP reports whether the API's copy of a stored pod is Running,
@@ -409,27 +523,31 @@ func podRunningWithIP(nodePods map[string]*corev1.Pod, p *cniv1.CNIPod) bool {
 	return kp.Status.Phase == corev1.PodRunning && kp.DeletionTimestamp == nil && kp.Status.PodIP != ""
 }
 
-// pruneOnePod removes a single stale or orphaned pod from storage and drops its
-// listener from the snapshot. Returns (kept=true) if the pod should be retained
-// in the fresh list (storage removal failed), and (orphaned) for log/metric routing.
-func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns string, orphaned bool) (kept bool, wasOrphaned bool) {
+// pruneOnePod removes a single stale, orphaned, or superseded pod entry from
+// storage and drops its listener from the snapshot. Returns kept=true if the
+// entry should be retained in the fresh list (storage removal failed).
+func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns string, cand pruneCandidate) (kept bool) {
 	if err := s.storage.RemoveResource(ctx, types.ContainerID(p.GetContainerId())); err != nil {
 		s.log.ErrorContext(ctx, "ghost sweep: failed to prune pod storage", "pod", p.GetName(), "netns", netns, "error", err)
-		return true, orphaned // keep it; retry next sweep
+		return true // keep it; retry next sweep
 	}
 	if netns != "" {
 		if err := s.snapshotCache.RemovePod(ctx, netns); err != nil {
 			s.log.ErrorContext(ctx, "ghost sweep: failed to drop listener for pruned pod", "pod", p.GetName(), "netns", netns, "error", err)
 		}
 	}
-	if orphaned {
+	switch {
+	case cand.orphaned:
 		s.log.InfoContext(ctx, "ghost sweep: pruned orphaned pod (Kubernetes pod gone; CNI DEL missed, netns pin lingered)",
 			"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
-	} else {
+	case cand.superseded:
+		s.log.InfoContext(ctx, "ghost sweep: pruned superseded entry (pod re-registered under a new sandbox; old entry's CNI DEL was missed)",
+			"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
+	default:
 		s.log.InfoContext(ctx, "ghost sweep: pruned stale pod (network namespace gone; CNI DEL missed)",
 			"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns)
 	}
-	return false, orphaned
+	return false
 }
 
 // reportMissingStoragePods surfaces live mesh-managed K8s pods that have no
@@ -437,7 +555,7 @@ func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns stri
 // consecutive detections, evicts them to force a fresh CNI ADD (#567). Returns
 // the count of such pods found. breakerTripped skips eviction entirely (#566
 // interlock: mass loss means fix the storage cause, not evict the world).
-func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, breakerTripped bool) int {
+func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, breakerTripped bool, budget *evictionBudget) int {
 	// Surface live mesh-managed pods on this node that local storage has no entry
 	// for: a lost CNI ADD (talos worker-01, 2026-06-22: prober-k7vsm running with
 	// no listener). The agent has no CNI data (netns, IPs) to synthesize a
@@ -461,7 +579,6 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 	missing := s.collectMissingStoragePods(stored, nodePods)
 	s.resetVanishedMissingStreaks(missing)
 
-	evictedThisPass := 0
 	for _, kp := range missing {
 		key := podKey(kp.GetNamespace(), kp.GetName())
 		s.missingStorageStreaks[key]++
@@ -473,15 +590,41 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 		if breakerTripped {
 			continue // #566 interlock: never evict while the prune breaker tripped
 		}
-		if streak < lostAddEvictThreshold || evictedThisPass >= lostAddEvictPerPass {
+		if streak < lostAddEvictThreshold || budget.remaining <= 0 {
 			continue
 		}
-		if s.evictLostAddPod(ctx, kp) {
-			evictedThisPass++
+		if s.evictSelfHealPod(ctx, kp, evictReasonLostAdd,
+			"aether agent evicted this pod: CNI ADD was lost (no mesh listener); eviction forces sandbox recreation to re-run CNI ADD",
+			"ghost sweep: evicted lost-ADD pod to force CNI re-ADD") {
+			s.metrics.lostAddEvicted(ctx)
+			budget.remaining--
 			delete(s.missingStorageStreaks, key) // don't re-count until re-detected
 		}
 	}
 	return len(missing)
+}
+
+// evictStaleRunningPods evicts pods whose only storage entries reference dead
+// network namespaces while the API reports them Running (#640 — the post-reboot
+// boot race: the pod is up on the base CNI with no mesh interception, and only a
+// sandbox recreation re-runs CNI ADD). Shares the per-pass budget with the
+// lost-ADD path and honors the #566 breaker interlock.
+func (s *CNIServer) evictStaleRunningPods(ctx context.Context, ripe []staleRunningPod, breakerTripped bool, budget *evictionBudget) {
+	if breakerTripped {
+		return // #566 interlock: correlated netns weirdness; do not evict on it
+	}
+	for _, sr := range ripe {
+		if budget.remaining <= 0 {
+			return
+		}
+		if s.evictSelfHealPod(ctx, sr.kp, evictReasonStaleRegistration,
+			"aether agent evicted this pod: its mesh registration references a defunct network namespace while the pod is Running (node-reboot CNI boot race); eviction forces sandbox recreation to re-run CNI ADD",
+			"ghost sweep: evicted stale-while-Running pod to force CNI re-ADD (#640)") {
+			s.metrics.staleRunningEvicted(ctx)
+			budget.remaining--
+			delete(s.staleRunningStreaks, sr.containerID) // don't re-count until re-detected
+		}
+	}
 }
 
 // collectMissingStoragePods returns this node's live mesh-managed pods (Running,
@@ -520,24 +663,23 @@ func (s *CNIServer) resetVanishedMissingStreaks(missing []*corev1.Pod) {
 	}
 }
 
-// evictLostAddPod evicts a lost-CNI-ADD pod via the Eviction API to force
-// sandbox recreation (and a fresh CNI ADD), recording a k8s Event, a log line,
-// and a metric. Returns true if the eviction request was accepted.
-func (s *CNIServer) evictLostAddPod(ctx context.Context, kp *corev1.Pod) bool {
+// evictSelfHealPod evicts a pod via the Eviction API to force sandbox
+// recreation (and a fresh CNI ADD), recording a k8s Event with the given reason
+// and a log line. Returns true if the eviction request was accepted; the caller
+// records the path-specific metric and consumes budget.
+func (s *CNIServer) evictSelfHealPod(ctx context.Context, kp *corev1.Pod, reason, eventMessage, logMessage string) bool {
 	if s.evictPod == nil {
 		return false
 	}
 	if err := s.evictPod(ctx, kp.GetNamespace(), kp.GetName()); err != nil {
 		// A PDB block (429 TooManyRequests) is expected and benign — the pod stays
-		// in the missing set and eviction is retried on a later pass.
-		s.log.WarnContext(ctx, "ghost sweep: failed to evict lost-ADD pod; will retry",
-			"pod", kp.GetName(), "namespace", kp.GetNamespace(), "error", err)
+		// in the detection set and eviction is retried on a later pass.
+		s.log.WarnContext(ctx, "ghost sweep: failed to evict pod for self-heal; will retry",
+			"pod", kp.GetName(), "namespace", kp.GetNamespace(), "reason", reason, "error", err)
 		return false
 	}
-	s.recordPodEvent(ctx, kp, evictReason,
-		"aether agent evicted this pod: CNI ADD was lost (no mesh listener); eviction forces sandbox recreation to re-run CNI ADD")
-	s.metrics.lostAddEvicted(ctx)
-	s.log.InfoContext(ctx, "ghost sweep: evicted lost-ADD pod to force CNI re-ADD",
+	s.recordPodEvent(ctx, kp, reason, eventMessage)
+	s.log.InfoContext(ctx, logMessage,
 		"pod", kp.GetName(), "namespace", kp.GetNamespace(), "podIP", kp.Status.PodIP)
 	return true
 }
