@@ -374,74 +374,82 @@ func (s *CNIServer) classifyPruneCandidates(ctx context.Context, pods []*cniv1.C
 	var staleRunningRipe []staleRunningPod
 	for _, p := range pods {
 		id := p.GetContainerId()
-		netns := p.GetNetworkNamespace()
-		netnsGone := entryNetnsGone[id]
-
+		switch {
 		// Orphaned = the K8s API no longer has this pod on this node. The API is
 		// ground truth, so this prunes immediately (no hysteresis).
-		if nodePodsOK && !podInNode(nodePods, p) {
+		case nodePodsOK && !podInNode(nodePods, p):
 			delete(s.netnsFailStreaks, id)
 			delete(s.staleRunningStreaks, id)
 			candidates[id] = pruneCandidate{orphaned: true}
-			continue
-		}
 
-		if !netnsGone {
+		case !entryNetnsGone[id]:
 			delete(s.netnsFailStreaks, id) // netns present: clear any streak
 			delete(s.staleRunningStreaks, id)
-			continue
-		}
 
 		// API cross-check (#566): a pod the API still reports Running with a live
 		// IP is NOT a ghost, whatever the netns stat says — never prune the POD.
 		// But the ENTRY is provably wrong after the hysteresis window: a Running
-		// pod's netns cannot stay gone. Which wrong depends on coverage (#640):
-		// a fresher live entry means this one is the old sandbox's leftover
-		// (prune just the entry); no live entry means the pod itself is running
-		// outside the mesh (evict it to force a fresh CNI ADD).
-		if nodePodsOK && podRunningWithIP(nodePods, p) {
-			key := podKey(p.GetNamespace(), p.GetName())
-			if _, covered := liveEntryPods[key]; covered {
-				delete(s.staleRunningStreaks, id)
-				s.netnsFailStreaks[id]++
-				if s.netnsFailStreaks[id] < ghostNetnsFailThreshold {
-					s.log.DebugContext(ctx, "ghost sweep: superseded entry below prune threshold (hysteresis)",
-						"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns,
-						"failures", s.netnsFailStreaks[id], "threshold", ghostNetnsFailThreshold)
-					continue
-				}
-				candidates[id] = pruneCandidate{superseded: true}
-				continue
-			}
-
-			delete(s.netnsFailStreaks, id)
-			s.staleRunningStreaks[id]++
-			streak := s.staleRunningStreaks[id]
-			staleRunningKeys[key] = struct{}{}
-			s.log.WarnContext(ctx, "ghost sweep: netns gone but pod is Running per the API with no fresh registration; pod is outside the mesh (#640)",
-				"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns,
-				"consecutive_sweeps", streak, "evict_threshold", staleRunningEvictThreshold)
-			if streak >= staleRunningEvictThreshold {
-				if kp, ok := nodePods[key]; ok {
-					staleRunningRipe = append(staleRunningRipe, staleRunningPod{kp: kp, containerID: id})
-				}
-			}
-			continue
-		}
-		delete(s.staleRunningStreaks, id)
+		// pod's netns cannot stay gone. See classifyDeadNetnsRunningEntry (#640).
+		case nodePodsOK && podRunningWithIP(nodePods, p):
+			s.classifyDeadNetnsRunningEntry(ctx, p, liveEntryPods, nodePods, candidates, staleRunningKeys, &staleRunningRipe)
 
 		// Netns-gone hysteresis (#566): only classify as a ghost after N
 		// consecutive failed passes, so a transient stat failure never prunes.
-		s.netnsFailStreaks[id]++
-		if s.netnsFailStreaks[id] < ghostNetnsFailThreshold {
-			s.log.DebugContext(ctx, "ghost sweep: netns check failed; below prune threshold (hysteresis)",
-				"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", netns,
-				"failures", s.netnsFailStreaks[id], "threshold", ghostNetnsFailThreshold)
-			continue
+		default:
+			delete(s.staleRunningStreaks, id)
+			if s.accrueNetnsFailStreak(ctx, p, "ghost sweep: netns check failed; below prune threshold (hysteresis)") {
+				candidates[id] = pruneCandidate{orphaned: false}
+			}
 		}
-		candidates[id] = pruneCandidate{orphaned: false}
 	}
 	return candidates, len(staleRunningKeys), staleRunningRipe
+}
+
+// accrueNetnsFailStreak advances an entry's netns-failure streak (#566
+// hysteresis) and reports whether it reached the prune threshold, logging the
+// given below-threshold message otherwise.
+func (s *CNIServer) accrueNetnsFailStreak(ctx context.Context, p *cniv1.CNIPod, belowMsg string) bool {
+	id := p.GetContainerId()
+	s.netnsFailStreaks[id]++
+	if s.netnsFailStreaks[id] >= ghostNetnsFailThreshold {
+		return true
+	}
+	s.log.DebugContext(ctx, belowMsg,
+		"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", p.GetNetworkNamespace(),
+		"failures", s.netnsFailStreaks[id], "threshold", ghostNetnsFailThreshold)
+	return false
+}
+
+// classifyDeadNetnsRunningEntry handles an entry whose netns is gone while the
+// API reports its pod Running with an IP (#640). Which wrong this is depends on
+// coverage: a fresher live entry means this one is the old sandbox's leftover
+// (prune just the entry, via the normal hysteresis); no live entry means the pod
+// itself is running outside the mesh (accrue the stale-while-Running streak and,
+// at threshold, mark the pod ripe for self-heal eviction).
+func (s *CNIServer) classifyDeadNetnsRunningEntry(ctx context.Context, p *cniv1.CNIPod, liveEntryPods map[string]struct{}, nodePods map[string]*corev1.Pod, candidates map[string]pruneCandidate, staleRunningKeys map[string]struct{}, staleRunningRipe *[]staleRunningPod) {
+	id := p.GetContainerId()
+	key := podKey(p.GetNamespace(), p.GetName())
+	if _, covered := liveEntryPods[key]; covered {
+		delete(s.staleRunningStreaks, id)
+		if s.accrueNetnsFailStreak(ctx, p, "ghost sweep: superseded entry below prune threshold (hysteresis)") {
+			candidates[id] = pruneCandidate{superseded: true}
+		}
+		return
+	}
+
+	delete(s.netnsFailStreaks, id)
+	s.staleRunningStreaks[id]++
+	streak := s.staleRunningStreaks[id]
+	staleRunningKeys[key] = struct{}{}
+	s.log.WarnContext(ctx, "ghost sweep: netns gone but pod is Running per the API with no fresh registration; pod is outside the mesh (#640)",
+		"pod", p.GetName(), "namespace", p.GetNamespace(), "netns", p.GetNetworkNamespace(),
+		"consecutive_sweeps", streak, "evict_threshold", staleRunningEvictThreshold)
+	if streak < staleRunningEvictThreshold {
+		return
+	}
+	if kp, ok := nodePods[key]; ok {
+		*staleRunningRipe = append(*staleRunningRipe, staleRunningPod{kp: kp, containerID: id})
+	}
 }
 
 // pruneVanishedNetnsStreaks drops netns-failure and stale-while-Running streaks
