@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"buf.build/go/protovalidate"
 	configv1 "aethermesh.dev/api/aether/config/v1"
 	crdv1 "aethermesh.dev/common/apis/config/v1"
+	"buf.build/go/protovalidate"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 

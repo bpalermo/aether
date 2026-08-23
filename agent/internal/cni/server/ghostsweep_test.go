@@ -489,7 +489,7 @@ func TestSweepEvictsLostAddPodAfterThreshold(t *testing.T) {
 	assert.NotContains(t, s.missingStorageStreaks, podKey("default", "pod-lost"), "streak reset after eviction")
 }
 
-// TestSweepLostAddEvictionRateLimited (#567): at most lostAddEvictPerPass pods
+// TestSweepLostAddEvictionRateLimited (#567): at most sweepEvictPerPass pods
 // are evicted in a single sweep pass even when many are eligible.
 func TestSweepLostAddEvictionRateLimited(t *testing.T) {
 	ctx := context.Background()
@@ -514,8 +514,176 @@ func TestSweepLostAddEvictionRateLimited(t *testing.T) {
 			maxPerPass = evictionsPerPass
 		}
 	}
-	assert.LessOrEqual(t, maxPerPass, lostAddEvictPerPass, "evictions are rate-limited per pass")
+	assert.LessOrEqual(t, maxPerPass, sweepEvictPerPass, "evictions are rate-limited per pass")
 	assert.Positive(t, maxPerPass, "some eviction happened once the threshold was crossed")
+}
+
+// TestSweepEvictsStaleRunningPodAfterThreshold (#640): a stored pod whose netns
+// is gone while the API reports the pod Running with an IP — and no fresher
+// entry covers it — is the reboot boot-race signature: the pod runs outside the
+// mesh. It must never be pruned (the #566 veto), but after
+// staleRunningEvictThreshold consecutive passes it is evicted to force a fresh
+// CNI ADD, and its streak resets.
+func TestSweepEvictsStaleRunningPodAfterThreshold(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false } // pre-reboot netns is gone
+
+	stale := validCNIPod("pod-reboot", "default", "container-old")
+	stale.NetworkNamespace = "/run/aether/netns/pre-reboot"
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-old"), stale))
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-reboot", "default", "10.0.0.1")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	var evicted []string
+	s.evictPod = func(_ context.Context, ns, name string) error {
+		evicted = append(evicted, ns+"/"+name)
+		return nil
+	}
+
+	// Below the threshold: detected and warned, but neither pruned nor evicted.
+	for i := 1; i < staleRunningEvictThreshold; i++ {
+		s.sweepGhostEndpoints(ctx)
+		assert.Empty(t, evicted, "not evicted below threshold (pass %d)", i)
+		_, err := store.GetResource(ctx, types.ContainerID("container-old"))
+		require.NoError(t, err, "Running pod's entry never pruned (pass %d)", i)
+	}
+	// Threshold pass: evicted once; the entry itself is still not pruned (the
+	// orphan path removes it once the pod is actually deleted).
+	s.sweepGhostEndpoints(ctx)
+	assert.Equal(t, []string{"default/pod-reboot"}, evicted, "evicted at the threshold")
+	assert.NotContains(t, s.staleRunningStreaks, "container-old", "streak reset after eviction")
+	_, err := store.GetResource(ctx, types.ContainerID("container-old"))
+	require.NoError(t, err, "entry pruning is left to the orphan path post-deletion")
+}
+
+// TestSweepPrunesSupersededEntry (#640): when a pod re-registered under a new
+// sandbox (a live entry exists for the same namespace/name), its old dead-netns
+// entry is a leftover — pruned after the hysteresis threshold, with no
+// eviction and with the fresh entry untouched.
+func TestSweepPrunesSupersededEntry(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(path string) bool { return path != "/run/aether/netns/old" }
+
+	old := validCNIPod("pod-x", "default", "container-old")
+	old.NetworkNamespace = "/run/aether/netns/old"
+	old.Ips = []string{"10.0.0.5"}
+	fresh := validCNIPod("pod-x", "default", "container-new") // netns present
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-old"), old))
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-new"), fresh))
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-x", "default", "10.0.0.1")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	evictions := 0
+	s.evictPod = func(context.Context, string, string) error { evictions++; return nil }
+
+	for i := 1; i < ghostNetnsFailThreshold; i++ {
+		s.sweepGhostEndpoints(ctx)
+		_, err := store.GetResource(ctx, types.ContainerID("container-old"))
+		require.NoError(t, err, "superseded entry kept below threshold (pass %d)", i)
+	}
+	s.sweepGhostEndpoints(ctx)
+
+	_, err := store.GetResource(ctx, types.ContainerID("container-old"))
+	require.Error(t, err, "superseded entry pruned at the threshold")
+	_, err = store.GetResource(ctx, types.ContainerID("container-new"))
+	require.NoError(t, err, "fresh entry kept")
+	assert.Zero(t, evictions, "a covered pod is never evicted")
+}
+
+// TestSweepStaleRunningEvictionRateLimitedAndBudgetShared (#640): stale-running
+// evictions honor the shared per-pass budget, including jointly with the
+// lost-ADD path — their sum never exceeds sweepEvictPerPass in one pass.
+func TestSweepStaleRunningEvictionRateLimitedAndBudgetShared(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false } // every stored netns is gone (reboot)
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	objs := make([]client.Object, 0, 6)
+	for i := 0; i < 5; i++ {
+		id := "container-" + string(rune('a'+i))
+		name := "pod-" + string(rune('a'+i))
+		p := validCNIPod(name, "default", id)
+		p.NetworkNamespace = "/run/aether/netns/" + id
+		require.NoError(t, store.AddResource(ctx, types.ContainerID(id), p))
+		objs = append(objs, runningK8sPod(name, "default", "10.0.4."+string(rune('0'+i))))
+	}
+	// Plus one lost-ADD pod (no storage entry at all) competing for the budget.
+	objs = append(objs, runningK8sPod("pod-lost", "default", "10.9.9.9"))
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(objs...).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	evictionsPerPass := 0
+	maxPerPass := 0
+	total := 0
+	s.evictPod = func(context.Context, string, string) error { evictionsPerPass++; total++; return nil }
+
+	for i := 0; i < staleRunningEvictThreshold+3; i++ {
+		evictionsPerPass = 0
+		s.sweepGhostEndpoints(ctx)
+		if evictionsPerPass > maxPerPass {
+			maxPerPass = evictionsPerPass
+		}
+	}
+	assert.LessOrEqual(t, maxPerPass, sweepEvictPerPass, "stale-running + lost-ADD evictions share one per-pass budget")
+	assert.Positive(t, total, "evictions happened once the threshold was crossed")
+}
+
+// TestSweepStaleRunningInterlockedOnBreaker (#566 + #640): while the mass-prune
+// breaker trips, stale-running eviction is skipped like every other self-heal.
+func TestSweepStaleRunningInterlockedOnBreaker(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false }
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	objs := make([]client.Object, 0, 11)
+	// Ten pods Running WITHOUT an IP: no cross-check veto, so past hysteresis
+	// they are prune candidates and the mass breaker trips every pass.
+	for i := 0; i < 10; i++ {
+		id := "container-" + string(rune('a'+i))
+		name := "pod-" + string(rune('a'+i))
+		p := validCNIPod(name, "default", id)
+		p.NetworkNamespace = "/run/aether/netns/" + id
+		p.Ips = []string{"10.0.5." + string(rune('0'+i))}
+		require.NoError(t, store.AddResource(ctx, types.ContainerID(id), p))
+		objs = append(objs, runningK8sPod(name, "default", ""))
+	}
+	// One stale-while-Running pod (Running WITH an IP) that would be ripe.
+	stale := validCNIPod("pod-stale-run", "default", "container-stale-run")
+	stale.NetworkNamespace = "/run/aether/netns/stale-run"
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-stale-run"), stale))
+	objs = append(objs, runningK8sPod("pod-stale-run", "default", "10.0.0.1"))
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(objs...).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+
+	evictions := 0
+	s.evictPod = func(context.Context, string, string) error { evictions++; return nil }
+
+	for i := 0; i < ghostNetnsFailThreshold+staleRunningEvictThreshold+2; i++ {
+		s.sweepGhostEndpoints(ctx)
+	}
+	assert.Zero(t, evictions, "stale-running eviction interlocked off while the breaker trips")
 }
 
 // TestSweepLostAddStreakResetsOnRecovery (#567): once a missing pod appears in

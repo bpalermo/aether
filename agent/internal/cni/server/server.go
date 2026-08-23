@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"buf.build/go/protovalidate"
 	"aethermesh.dev/agent/internal/spire"
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache"
@@ -18,6 +17,7 @@ import (
 	"aethermesh.dev/common/telemetry"
 	"aethermesh.dev/common/xds"
 	"aethermesh.dev/registry"
+	"buf.build/go/protovalidate"
 	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
@@ -101,6 +101,15 @@ type CNIServer struct {
 	// sandbox recreation and a fresh CNI ADD (#567). Reset when the pod registers
 	// or disappears. Accessed only under lifecycleMu.
 	missingStorageStreaks map[string]int
+
+	// staleRunningStreaks counts, per container ID, consecutive ghost-sweep
+	// passes a stored entry's netns was gone while the API reported its pod
+	// Running with an IP and no fresher entry covered the pod — the node-reboot
+	// CNI boot race (#640): the pod is up on the base CNI with no mesh
+	// interception. After staleRunningEvictThreshold passes the agent evicts the
+	// pod to force a fresh CNI ADD. Reset on any state change. Accessed only
+	// under lifecycleMu.
+	staleRunningStreaks map[string]int
 
 	// evictPod evicts a pod via the Kubernetes Eviction API (policy/v1,
 	// PDB-respecting). Overridable in tests (the fake client has no eviction

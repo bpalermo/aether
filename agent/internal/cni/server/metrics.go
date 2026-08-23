@@ -24,17 +24,19 @@ const (
 // in the pipeline (a lost CNI DEL, a registration dropped during a registry
 // outage) — these counters turn silently-self-healing bugs into visible ones.
 type cniMetrics struct {
-	ghostsRemoved     metric.Int64Counter
-	missingRegistered metric.Int64Counter
-	stalePruned       metric.Int64Counter
-	orphansPruned     metric.Int64Counter
-	missingStorage    metric.Int64Counter
-	sweepErrors       metric.Int64Counter
-	pruneBreaker      metric.Int64Counter
-	lostAddEvictions  metric.Int64Counter
-	storagePods       metric.Int64Gauge
-	healthTransitions metric.Int64Counter
-	promotionDelay    metric.Float64Histogram
+	ghostsRemoved      metric.Int64Counter
+	missingRegistered  metric.Int64Counter
+	stalePruned        metric.Int64Counter
+	orphansPruned      metric.Int64Counter
+	missingStorage     metric.Int64Counter
+	sweepErrors        metric.Int64Counter
+	pruneBreaker       metric.Int64Counter
+	lostAddEvictions   metric.Int64Counter
+	staleRunningEvicts metric.Int64Counter
+	unmeshedPods       metric.Int64Gauge
+	storagePods        metric.Int64Gauge
+	healthTransitions  metric.Int64Counter
+	promotionDelay     metric.Float64Histogram
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
@@ -59,7 +61,7 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		return nil, fmt.Errorf("orphans pruned: %w", err)
 	}
 	if m.missingStorage, err = meter.Int64Counter("aether.agent.ghost_sweep.missing_storage",
-		metric.WithDescription("Live mesh-managed pods on this node with no local storage entry (lost CNI ADD); the agent cannot self-heal these — the pod must be rolled")); err != nil {
+		metric.WithDescription("Live mesh-managed pods on this node with no local storage entry (lost CNI ADD); self-healed by eviction after the detection threshold (#567)")); err != nil {
 		return nil, fmt.Errorf("missing storage: %w", err)
 	}
 	if m.sweepErrors, err = meter.Int64Counter("aether.agent.ghost_sweep.errors",
@@ -73,6 +75,14 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	if m.lostAddEvictions, err = meter.Int64Counter("aether.agent.ghost_sweep.lost_add_evictions",
 		metric.WithDescription("Pods evicted by the ghost sweep to force a fresh CNI ADD after a lost one left them with no mesh listener")); err != nil {
 		return nil, fmt.Errorf("lost add evictions: %w", err)
+	}
+	if m.staleRunningEvicts, err = meter.Int64Counter("aether.agent.ghost_sweep.stale_running_evictions",
+		metric.WithDescription("Pods evicted by the ghost sweep because their stored registration referenced a defunct network namespace while the pod was Running — the node-reboot CNI boot race (#640)")); err != nil {
+		return nil, fmt.Errorf("stale running evictions: %w", err)
+	}
+	if m.unmeshedPods, err = meter.Int64Gauge("aether.agent.ghost_sweep.unmeshed_pods",
+		metric.WithDescription("Running mesh-managed pods on this node currently outside the mesh: missing from local storage (lost CNI ADD, #567) or covered only by stale dead-netns registrations (reboot boot race, #640); nonzero means traffic to/from these pods bypasses the mesh")); err != nil {
+		return nil, fmt.Errorf("unmeshed pods: %w", err)
 	}
 	if m.storagePods, err = meter.Int64Gauge("aether.agent.storage.pods",
 		metric.WithDescription("Pods currently tracked in the agent's local file storage")); err != nil {
@@ -91,7 +101,7 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	return m, nil
 }
 
-func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, storedPods int, err error) {
+func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, staleRunning, storedPods int, err error) {
 	if m == nil {
 		return
 	}
@@ -114,6 +124,10 @@ func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingR
 	if missingStorage > 0 {
 		m.missingStorage.Add(ctx, int64(missingStorage))
 	}
+	// Recorded every pass, zero included, so the gauge clears the moment the last
+	// unmeshed pod re-registers — it is the alerting signal for "a Running pod is
+	// outside the mesh" (#640).
+	m.unmeshedPods.Record(ctx, int64(missingStorage+staleRunning))
 	m.storagePods.Record(ctx, int64(storedPods))
 }
 
@@ -132,6 +146,15 @@ func (m *cniMetrics) lostAddEvicted(ctx context.Context) {
 		return
 	}
 	m.lostAddEvictions.Add(ctx, 1)
+}
+
+// staleRunningEvicted records a pod evicted because its registration referenced
+// a defunct netns while the pod was Running (#640).
+func (m *cniMetrics) staleRunningEvicted(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.staleRunningEvicts.Add(ctx, 1)
 }
 
 func (m *cniMetrics) healthTransition(ctx context.Context, from, to string) {

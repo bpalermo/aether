@@ -11,11 +11,11 @@ import (
 	"fmt"
 	"log/slog"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"aethermesh.dev/registry"
 	"aethermesh.dev/registry/internal/ddb"
 	"aethermesh.dev/registry/internal/etcd"
 	"aethermesh.dev/registry/internal/k8s"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
