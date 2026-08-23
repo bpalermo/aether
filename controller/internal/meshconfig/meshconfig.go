@@ -9,8 +9,8 @@ package meshconfig
 import (
 	"fmt"
 
-	"buf.build/go/protovalidate"
 	configv1 "aethermesh.dev/api/aether/config/v1"
+	"buf.build/go/protovalidate"
 	"google.golang.org/protobuf/encoding/protojson"
 	"sigs.k8s.io/yaml"
 )
