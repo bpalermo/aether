@@ -1,7 +1,9 @@
 package constants
 
+import "aethermesh.dev/common/constants"
+
 const (
 	DefaultCNIBinDir     = "/opt/cni/bin"
 	DefaultHostCNIBinDir = "/host/opt/cni/bin"
-	DefaultHostCNINetDir = "/host/etc/cni/net.d"
+	DefaultHostCNINetDir = "/host" + constants.CNIDefaultNetDir
 )

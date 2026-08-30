@@ -5,4 +5,5 @@ go_library(
     srcs = ["constants.go"],
     importpath = "aethermesh.dev/cni/internal/constants",
     visibility = ["//cni:__subpackages__"],
+    deps = ["//common/constants"],
 )

@@ -2,10 +2,7 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "util",
-    srcs = [
-        "plugin.go",
-        "watcher.go",
-    ],
+    srcs = ["watcher.go"],
     importpath = "aethermesh.dev/cni/internal/util",
     visibility = ["//cni:__subpackages__"],
     deps = [
