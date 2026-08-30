@@ -83,6 +83,9 @@ spec:
             # Explicit boolean form: the binary default is true (031 kill
             # switch), so agent.gamma=false must be passed through.
             - "--gamma={{ .Values.agent.gamma }}"
+            # Explicit boolean form: the binary default is true (safety net), so
+            # agent.cniConflistReassert=false must be passed through (#645).
+            - "--cni-conflist-reassert={{ .Values.agent.cniConflistReassert }}"
             {{- if .Values.agent.importConfig }}
             - "--import-config"
             {{- end }}
@@ -208,6 +211,14 @@ spec:
             - name: cni-registry-dir
               mountPath: /host/var/lib/aether/registry
               mountPropagation: HostToContainer
+            # Read-WRITE, unlike everything else here: the agent re-asserts
+            # aether's chained entry in the active conflist whenever a competing
+            # writer strips it (#645 — kube-flannel `cp -f`s its ConfigMap
+            # template over 10-flannel.conflist on every flannel pod recreation,
+            # which a Talos bootstrap-manifest re-sync triggers). The cni-install
+            # init container mounts the same dir for the one-shot append.
+            - name: cni-conf-dir
+              mountPath: /host/etc/cni/net.d
             - name: containerd-sock
               mountPath: /run/containerd/containerd.sock
               readOnly: true

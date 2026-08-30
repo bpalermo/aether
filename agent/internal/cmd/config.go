@@ -39,6 +39,18 @@ type AgentConfig struct {
 	// MountedLocalStorageDir is the directory where pod data is stored locally
 	MountedLocalStorageDir string
 
+	// MountedCNINetDir is the host's CNI network-config directory as mounted into
+	// the agent container (read-write). The re-assert loop watches the active
+	// conflist there.
+	MountedCNINetDir string
+
+	// CNIConflistReassert keeps aether's chained plugin entry in the node's active
+	// CNI conflist: the agent watches the CNI config directory and re-appends the
+	// entry whenever a competing writer (kube-flannel's `cp -f` on every pod
+	// recreation, #645) strips it. Default ON — it is a safety net against silent
+	// fleet-wide unmeshing, and it never creates a config of its own.
+	CNIConflistReassert bool
+
 	// KubeletPodsDir is kubelet's pod-volumes directory as mounted into the proxy
 	// container (identical host path, so no prefix translation is needed when
 	// rendering Envoy Pipe addresses). It is how the node proxy reaches a
@@ -184,6 +196,8 @@ func NewAgentConfig() *AgentConfig {
 		GatewayClassName:        "aether",
 		CNIServerConfig:         cniServer.NewCNIServerConfig(),
 		MountedLocalStorageDir:  constants.DefaultHostCNIRegistryDir,
+		MountedCNINetDir:        constants.DefaultHostCNINetDir,
+		CNIConflistReassert:     true,
 		KubeletPodsDir:          udspath.DefaultKubeletPodsDir,
 		MeshDNSSnapshotPath:     constants.DefaultMeshDNSSnapshotPath,
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",

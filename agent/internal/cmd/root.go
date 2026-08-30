@@ -31,6 +31,7 @@ import (
 	"aethermesh.dev/agent/constants"
 	"aethermesh.dev/agent/internal/capture"
 	cniServer "aethermesh.dev/agent/internal/cni/server"
+	"aethermesh.dev/agent/internal/cniconflist"
 	"aethermesh.dev/agent/internal/configimport"
 	"aethermesh.dev/agent/internal/endpointpolicy"
 	"aethermesh.dev/agent/internal/gamma"
@@ -113,6 +114,10 @@ func init() {
 
 	// Local storage configuration (node proxy only — the edge runs no CNI/storage).
 	rootCmd.Flags().StringVar(&cfg.MountedLocalStorageDir, "mounted-registry-dir", constants.DefaultHostCNIRegistryDir, "Directory where pod data is stored locally for the CNI plugin")
+
+	// CNI conflist re-assert (node proxy only — the edge chains no CNI).
+	rootCmd.Flags().StringVar(&cfg.MountedCNINetDir, "mounted-cni-net-dir", cfg.MountedCNINetDir, "Host CNI network-config directory as mounted into the agent (read-write); the conflist re-assert loop watches the active config here")
+	rootCmd.Flags().BoolVar(&cfg.CNIConflistReassert, "cni-conflist-reassert", cfg.CNIConflistReassert, "Keep aether chained in the node's active CNI conflist: watch the CNI config dir and re-append the aether-cni entry whenever a competing writer strips it (issue #645, kube-flannel's cp -f on pod recreation). Default on (safety net); never creates a conflist of its own")
 
 	// Kubelet pod-volumes directory (node proxy only — UDS delivery is a per-pod
 	// concern; the edge serves no local workloads).
@@ -292,6 +297,10 @@ func runAgent(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
+	if err = wireCNIConflistReasserter(m); err != nil {
+		return err
+	}
+
 	if err = wireReconcilers(m, snapshotCache); err != nil {
 		return err
 	}
@@ -399,6 +408,25 @@ func wireMeshDNS(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	snapshotCache.SetMeshDNSSnapshotPath(cfg.MeshDNSSnapshotPath)
 	if err := m.Add(&capture.MeshDNSHeartbeat{Rewriter: snapshotCache, Log: l}); err != nil {
 		return fmt.Errorf("failed to add mesh-DNS snapshot heartbeat: %w", err)
+	}
+	return nil
+}
+
+// wireCNIConflistReasserter registers the CNI conflist re-assert loop (#645):
+// the agent watches the node's CNI config directory and re-appends aether's
+// chained plugin entry whenever a competing writer strips it — on Talos,
+// kube-flannel's init container `cp -f`s its ConfigMap template over the
+// conflist on EVERY flannel pod recreation, which a bootstrap-manifest re-sync
+// triggers, silently unmeshing every pod started afterwards. cni-install appends
+// once per agent pod start; this keeps it appended. Default on (kill switch:
+// --cni-conflist-reassert=false).
+func wireCNIConflistReasserter(m ctrl.Manager) error {
+	if !cfg.CNIConflistReassert {
+		return nil
+	}
+	reasserter := &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l}
+	if err := m.Add(reasserter); err != nil {
+		return fmt.Errorf("failed to add CNI conflist re-asserter: %w", err)
 	}
 	return nil
 }

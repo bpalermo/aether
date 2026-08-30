@@ -68,6 +68,7 @@ access-log/tracing policy via the MeshConfig CR.
 | Key | Default | Purpose |
 |---|---|---|
 | `agent.gamma` | `true` | GAMMA east-west L7 routing (018): watch `HTTPRoute`s **and `GRPCRoute`s** parented to a Service (plus `ReferenceGrant`s and `HTTPFilter` attachments) and apply them on **both** the explicit outbound path and the transparent-capture path. MESH-HTTP Core conformance-green. Safe without the Gateway API CRDs (CRD-detected, degrades with a warning); `false` is a kill switch. |
+| `agent.cniConflistReassert` | `true` | Keep aether chained in the node's active CNI conflist (#645): the agent watches `/etc/cni/net.d` (read-write mount) and re-appends the `aether-cni` entry whenever a competing writer strips it — kube-flannel `cp -f`s its ConfigMap template over `10-flannel.conflist` on every flannel pod recreation, which a Talos bootstrap-manifest re-sync triggers, silently unmeshing every pod started afterwards. Never creates a conflist of its own; `false` is a kill switch. |
 | `agent.importConfig` | `false` | Cross-cluster config import (026): poll the registrar for peer-exported GAMMA projections and materialize them (merged with local; local wins). Pairs with `registrar.registryBackend=etcd`. |
 | `agent.eastWestWaypoint` | `false` | East/west waypoint (019): dial **cross-cluster** endpoints at their node's routable IP + the fixed tunnel port `18009` instead of the (unroutable) pod IP; this node's host-network proxy SNI-forwards inbound tunnel traffic to local pods. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared or replicated etcd) + a shared SPIRE trust domain. |
 | `agent.captureRedirectAllDefault` | `true` | Redirect-all as the DEFAULT for managed pods (022 Step 4); opt out per-pod with `capture.aether.io/redirect-all="false"`. `false` = per-pod opt-in via the same annotation set to `"true"`. (Transparent capture itself and the passthrough chain are unconditional since proposal 031.) |
@@ -229,6 +230,8 @@ Node-agent-specific:
 | `--kubelet-pods-dir` | `/var/lib/kubelet/pods` | Kubelet's pod-volumes dir, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket (034). Empty disables UDS delivery: pods annotated `endpoint.aether.io/uds-socket` fall back to TCP loopback. Gated by the chart's `proxy.udsWorkloads.enabled`. |
 | `--spire-admin-socket` | `/tmp/spire-agent/private/admin.sock` | SPIRE admin socket for proxy SVID delegation. |
 | `--gamma` | `true` | GAMMA east-west routing (018); default-on kill switch (031). CRD-detected. |
+| `--cni-conflist-reassert` | `true` | Re-assert the chained `aether-cni` entry in the node's active CNI conflist whenever a competing writer strips it (#645). Watches `--mounted-cni-net-dir` (fsnotify) plus a 60s re-check; only ever appends to an existing, valid conflist that still carries a primary CNI plugin. |
+| `--mounted-cni-net-dir` | `/host/etc/cni/net.d` | Host CNI config dir as mounted into the agent (read-write) for the re-assert loop. |
 | `--import-config` | `false` | Enable cross-cluster config import (026). |
 | `--control-cluster` | `""` | Trust imported config ONLY from this origin (026 EM3). Empty = federated. |
 | `--east-west-waypoint` | `false` | Per-node east/west waypoint for cross-cluster traffic (019); tunnel port is the fixed constant 18009. |

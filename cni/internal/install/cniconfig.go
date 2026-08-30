@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"aethermesh.dev/agent/constants"
 	"aethermesh.dev/cni/config"
+	"aethermesh.dev/cni/conflist"
 	"aethermesh.dev/cni/internal/util"
 	"aethermesh.dev/common/file"
-	"github.com/containernetworking/cni/libcni"
 )
 
 /*
@@ -47,7 +46,7 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	pluginConfig := config.AetherConf{}
 
 	pluginConfig.Name = "aether"
-	pluginConfig.Type = "aether-cni"
+	pluginConfig.Type = conflist.AetherPluginType
 	pluginConfig.CNIVersion = "0.0.1"
 	pluginConfig.AgentCNIPath = constants.DefaultCNISocketPath
 	pluginConfig.OTLPEndpoint = cfg.OTLPEndpoint
@@ -88,7 +87,7 @@ func writeCNIConfig(ctx context.Context, pluginConfig []byte, cfg *InstallerConf
 	if err != nil {
 		return "", err
 	}
-	pluginConfig, err = insertCNIConfig(pluginConfig, existingCNIConfig)
+	pluginConfig, err = conflist.Insert(pluginConfig, existingCNIConfig)
 	if err != nil {
 		return "", err
 	}
@@ -131,7 +130,7 @@ func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir str
 // name or by discovering the first valid config file in mountedCNINetDir.
 func resolveConfName(ctx context.Context, cniConfName, mountedCNINetDir string, watcher *util.Watcher) (string, error) {
 	for len(cniConfName) == 0 {
-		cniConfNames, err := getConfigFilenames(mountedCNINetDir)
+		cniConfNames, err := conflist.ConfigFilenames(mountedCNINetDir)
 		if err == nil || len(cniConfNames) > 0 {
 			return cniConfNames[0], nil
 		}
@@ -162,89 +161,4 @@ func waitForConfigFile(ctx context.Context, cniConfigFilepath string, watcher *u
 		}
 	}
 	return cniConfigFilepath, nil
-}
-
-// getConfigFilenames follows similar semantics as kubelet
-// Will return all CNI config filenames in the given directory with .conf or .conflist extensions
-// https://github.com/kubernetes/kubernetes/blob/954996e231074dc7429f7be1256a579bedd8344c/pkg/kubelet/dockershim/network/cni/cni.go#L144-L184
-func getConfigFilenames(confDir string) ([]string, error) {
-	files, err := libcni.ConfFiles(confDir, []string{".conf", ".conflist"})
-	switch {
-	case err != nil:
-		return nil, err
-	case len(files) == 0:
-		return nil, fmt.Errorf("no networks found in %s", confDir)
-	}
-
-	sort.Strings(files)
-
-	var validFiles []string
-	for _, confFile := range files {
-		var confList *libcni.NetworkConfigList
-		if strings.HasSuffix(confFile, ".conflist") {
-			confList, err = libcni.ConfListFromFile(confFile)
-			if err != nil {
-				installLog.Error(err, "error loading CNI config list file", "file", confFile)
-				continue
-			}
-		}
-
-		if confList != nil && len(confList.Plugins) == 0 {
-			installLog.Info("CNI config list has no networks, skipping", "name", confList.Name)
-			continue
-		}
-		validFiles = append(validFiles, filepath.Base(confFile))
-	}
-
-	if len(validFiles) == 0 {
-		return nil, fmt.Errorf("no valid networks found in %s", confDir)
-	}
-
-	return validFiles, nil
-}
-
-// insertCNIConfig will append newCNIConfig to existingCNIConfig
-func insertCNIConfig(newCNIConfig, existingCNIConfig []byte) ([]byte, error) {
-	var aetherMap map[string]any
-	err := json.Unmarshal(newCNIConfig, &aetherMap)
-	if err != nil {
-		return nil, fmt.Errorf("error loading Aether CNI config (JSON error): %v", err)
-	}
-
-	var existingMap map[string]any
-	err = json.Unmarshal(existingCNIConfig, &existingMap)
-	if err != nil {
-		return nil, fmt.Errorf("error loading existing CNI config (JSON error): %v", err)
-	}
-
-	delete(aetherMap, "cniVersion")
-
-	var newMap map[string]any
-
-	if _, ok := existingMap["type"]; ok {
-		err := fmt.Errorf("regular CNI config is not supported")
-		installLog.Error(err, "existing CNI config is not a network list file")
-		return nil, err
-	}
-	// Assume it is a network list file
-	newMap = existingMap
-	plugins, err := util.GetPlugins(newMap)
-	if err != nil {
-		return nil, fmt.Errorf("existing CNI config: %v", err)
-	}
-
-	for i, rawPlugin := range plugins {
-		p, err := util.GetPlugin(rawPlugin)
-		if err != nil {
-			return nil, fmt.Errorf("existing CNI plugin: %v", err)
-		}
-		if p["type"] == "aether-cni" {
-			plugins = append(plugins[:i], plugins[i+1:]...)
-			break
-		}
-	}
-
-	newMap["plugins"] = append(plugins, aetherMap)
-
-	return util.MarshalCNIConfig(newMap)
 }

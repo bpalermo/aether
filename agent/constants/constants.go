@@ -7,6 +7,12 @@ const (
 	// DefaultHostCNIRegistryDir is the default directory for storing CNI registry data on the host
 	DefaultHostCNIRegistryDir = "/host" + constants.CNIDefaultRegistryPath
 
+	// DefaultHostCNINetDir is the host's CNI network-config directory as mounted
+	// into the agent container. The agent watches the active conflist there and
+	// re-asserts aether's chained plugin entry whenever a competing writer strips
+	// it (#645). Same mount the cni-install init container uses, but read-write.
+	DefaultHostCNINetDir = "/host" + constants.CNIDefaultNetDir
+
 	// DefaultEdgeRegistryDir is the edge's pod-local (always-empty) registry dir.
 	// The edge has no host CNI mount, so runEdge points its empty local store
 	// here (the node hostPath doesn't exist in the edge pod).

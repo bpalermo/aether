@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "conflist",
+    srcs = ["conflist.go"],
+    importpath = "aethermesh.dev/cni/conflist",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_containernetworking_cni//libcni"],
+)
+
+go_test(
+    name = "conflist_test",
+    srcs = ["conflist_test.go"],
+    embed = [":conflist"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
