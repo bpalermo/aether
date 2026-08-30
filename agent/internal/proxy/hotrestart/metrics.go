@@ -16,6 +16,25 @@ const (
 	attrReady         = attribute.Key("aether.supervisor.ready")
 )
 
+// Admin-probe attribute keys. Both values are from small fixed sets.
+const (
+	attrProbeEndpoint = attribute.Key("aether.supervisor.probe.endpoint")
+	attrProbeResult   = attribute.Key("aether.supervisor.probe.result")
+)
+
+// Admin endpoints the watchdog probes.
+const (
+	probeEndpointReady      = "ready"
+	probeEndpointServerInfo = "server_info"
+)
+
+// Admin probe outcomes.
+const (
+	probeResultLive        = "live"
+	probeResultNotLive     = "not_live"
+	probeResultUnreachable = "unreachable"
+)
+
 // Wedge reasons (watchdog diagnoses).
 const (
 	wedgeHandoffTimeout    = "handoff_timeout"
@@ -47,6 +66,7 @@ type SupervisorMetrics struct {
 	predecessorDetected metric.Int64Gauge
 	drainDuration       metric.Float64Histogram
 	readyTransitions    metric.Int64Counter
+	adminProbes         metric.Int64Counter
 }
 
 // NewSupervisorMetrics registers the supervisor instruments on the given meter.
@@ -93,6 +113,10 @@ func NewSupervisorMetrics(meter metric.Meter) (*SupervisorMetrics, error) {
 	if m.readyTransitions, err = meter.Int64Counter("aether.supervisor.ready_transitions",
 		metric.WithDescription("Readiness marker transitions, by new state")); err != nil {
 		return nil, fmt.Errorf("ready transitions: %w", err)
+	}
+	if m.adminProbes, err = meter.Int64Counter("aether.supervisor.admin_probes",
+		metric.WithDescription("Envoy admin watchdog probes, by endpoint and outcome. The server_info share is the epoch re-verification rate; a steady-state ratio other than ~1:14 against ready means the fast path is not engaging (#646)")); err != nil {
+		return nil, fmt.Errorf("admin probes: %w", err)
 	}
 
 	return m, nil
@@ -163,4 +187,22 @@ func (m *SupervisorMetrics) readyTransition(ready bool) {
 		return
 	}
 	m.readyTransitions.Add(context.Background(), 1, metric.WithAttributes(attrReady.Bool(ready)))
+}
+
+func (m *SupervisorMetrics) adminProbed(endpoint, result string) {
+	if m == nil {
+		return
+	}
+	m.adminProbes.Add(context.Background(), 1, metric.WithAttributes(
+		attrProbeEndpoint.String(endpoint), attrProbeResult.String(result),
+	))
+}
+
+// probeResult maps a probe's liveness answer onto its metric attribute value.
+// Unreachable is reported by the caller, which alone can tell it apart.
+func probeResult(live bool) string {
+	if live {
+		return probeResultLive
+	}
+	return probeResultNotLive
 }

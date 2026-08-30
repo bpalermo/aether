@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,15 +23,83 @@ func newCoordSupervisor(t *testing.T) *Supervisor {
 	return New(Config{StateDir: t.TempDir()}, slog.New(slog.DiscardHandler), nil)
 }
 
+// fakeAdminServer is an Envoy-admin stub implementing both endpoints the
+// supervisor probes, with Envoy's real contract: /server_info returns the
+// server-info JSON, /ready returns the plain-text state with HTTP 200 iff LIVE
+// (503 otherwise). It counts requests per endpoint and accepted connections, so
+// tests can assert both which endpoint was probed and whether the connection
+// was reused.
+type fakeAdminServer struct {
+	srv   *httptest.Server
+	state atomic.Value // string
+	epoch atomic.Int64
+	// hang makes the admin accept connections but never answer — the wedged
+	// main-thread failure mode the watchdogs exist to detect.
+	hang           atomic.Bool
+	serverInfoHits atomic.Int64
+	readyHits      atomic.Int64
+	conns          atomic.Int64
+}
+
+func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
+	t.Helper()
+	f := &fakeAdminServer{}
+	f.set(state, epoch)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/server_info", func(w http.ResponseWriter, r *http.Request) {
+		f.serverInfoHits.Add(1)
+		if f.wedged(r) {
+			return
+		}
+		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d}}`,
+			f.state.Load().(string), f.epoch.Load())
+	})
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		f.readyHits.Add(1)
+		if f.wedged(r) {
+			return
+		}
+		state := f.state.Load().(string)
+		if state != adminLiveState {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		fmt.Fprintf(w, "%s\n", state)
+	})
+
+	f.srv = httptest.NewUnstartedServer(mux)
+	f.srv.Config.ConnState = func(_ net.Conn, cs http.ConnState) {
+		if cs == http.StateNew {
+			f.conns.Add(1)
+		}
+	}
+	f.srv.Start()
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// wedged blocks the handler until the client gives up when hang is set,
+// reproducing an admin whose main thread never answers.
+func (f *fakeAdminServer) wedged(r *http.Request) bool {
+	if !f.hang.Load() {
+		return false
+	}
+	<-r.Context().Done()
+	return true
+}
+
+func (f *fakeAdminServer) set(state string, epoch int) {
+	f.state.Store(state)
+	f.epoch.Store(int64(epoch))
+}
+
+func (f *fakeAdminServer) addr() string { return f.srv.Listener.Addr().String() }
+
 // fakeAdmin starts an Envoy-admin stub that reports the given state and restart
-// epoch on /server_info, and returns its host:port.
+// epoch, and returns its host:port.
 func fakeAdmin(t *testing.T, state string, epoch int) string {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d}}`, state, epoch)
-	}))
-	t.Cleanup(srv.Close)
-	return srv.Listener.Addr().String()
+	return newFakeAdmin(t, state, epoch).addr()
 }
 
 // writeRawState writes the state file directly with a given epoch and heartbeat age.
@@ -155,12 +224,7 @@ func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
 
 	// Mutable admin: starts LIVE at this supervisor's epoch 0, then flips to a
 	// successor answering INITIALIZING at epoch 1.
-	var adminResp atomic.Value
-	adminResp.Store(`{"state":"LIVE","command_line_options":{"restart_epoch":0}}`)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, adminResp.Load().(string))
-	}))
-	defer srv.Close()
+	f := newFakeAdmin(t, "LIVE", 0)
 
 	s := New(Config{
 		EnvoyPath:          stubEnvoy(t, recordPath),
@@ -169,7 +233,7 @@ func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
 		ParentShutdownTime: time.Second,
 		StateDir:           t.TempDir(),
 		ReadyMarkerPath:    marker,
-		AdminAddress:       srv.Listener.Addr().String(),
+		AdminAddress:       f.addr(),
 	}, slog.New(slog.DiscardHandler), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -192,7 +256,7 @@ func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
 
 	// Phase B: a successor binds admin, not yet LIVE. Readiness must be held
 	// while our child (the successor's hot-restart parent) is alive.
-	adminResp.Store(`{"state":"INITIALIZING","command_line_options":{"restart_epoch":1}}`)
+	f.set("INITIALIZING", 1)
 	assert.Never(t, func() bool {
 		_, err := os.Stat(marker)
 		return os.IsNotExist(err)
@@ -224,6 +288,10 @@ func TestHandoffWatchdogFiresWhenSuccessorNeverLive(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte("v0\n"), 0o644))
 	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
 
+	// The "predecessor": admin permanently LIVE at epoch 0, so initStartEpoch
+	// selects epoch 1 — which then never reaches LIVE (the wedge).
+	f := newFakeAdmin(t, "LIVE", 0)
+
 	s := New(Config{
 		EnvoyPath:          stubEnvoy(t, recordPath),
 		ConfigPath:         configPath,
@@ -231,10 +299,8 @@ func TestHandoffWatchdogFiresWhenSuccessorNeverLive(t *testing.T) {
 		ParentShutdownTime: time.Second,
 		StateDir:           t.TempDir(),
 		ReadyMarkerPath:    filepath.Join(t.TempDir(), "ready"),
-		// The "predecessor": admin permanently LIVE at epoch 0, so initStartEpoch
-		// selects epoch 1 — which then never reaches LIVE (the wedge).
-		AdminAddress:    fakeAdmin(t, "LIVE", 0),
-		HandoffDeadline: 1 * time.Second,
+		AdminAddress:       f.addr(),
+		HandoffDeadline:    1 * time.Second,
 	}, slog.New(slog.DiscardHandler), nil)
 	writeRawState(t, s, 0, 0)
 
@@ -250,6 +316,7 @@ func TestHandoffWatchdogFiresWhenSuccessorNeverLive(t *testing.T) {
 	}
 	// It must have attempted the cross-pod successor epoch, not a fresh epoch 0.
 	assert.Equal(t, []string{"1"}, recordedEpochs(t, recordPath))
+	assert.Zero(t, f.readyHits.Load(), "an unverified epoch must never be probed via /ready")
 }
 
 // TestAdminWatchdogFiresWhenAdminUnreachableAfterLive covers the post-LIVE

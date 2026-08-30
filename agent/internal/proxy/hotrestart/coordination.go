@@ -2,9 +2,7 @@ package hotrestart
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -156,8 +154,12 @@ func (s *Supervisor) writeState(epoch int) {
 //     different epoch", which is the normal mid-handoff state) for
 //     AdminUnresponsiveDeadline once some epoch has been LIVE → wedged
 //     post-LIVE (parent died mid stats-merge).
+//
+// The per-tick signal itself comes from adminProber: /server_info while the
+// epoch is unverified, the cheap /ready once it has been confirmed ours (#646).
 func (s *Supervisor) watchLiveness(ctx context.Context) {
 	defer s.clearReady()
+	prober := newAdminProber(s)
 	t := time.NewTicker(readyPollInterval)
 	defer t.Stop()
 	ready := false
@@ -172,7 +174,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			return
 		case <-t.C:
 			epoch := s.currentEpoch()
-			live, reachable := s.adminProbe(ctx, epoch)
+			live, reachable := prober.probe(ctx, epoch)
 			if reachable {
 				unreachableSince = time.Time{}
 			} else if unreachableSince.IsZero() {
@@ -281,35 +283,10 @@ func (s *Supervisor) clearReady() { _ = os.Remove(s.cfg.ReadyMarkerPath) }
 // adminLiveAtEpoch reports whether the Envoy admin (the shared host-netns port)
 // reports state LIVE at the given restart epoch. During a cross-pod handoff the
 // predecessor answers admin at the old epoch until the new Envoy takes over.
+//
+// Deliberately authoritative and unpooled: every caller (initStartEpoch,
+// handleDebounce, handleShutdown) is making an epoch-identity decision.
 func (s *Supervisor) adminLiveAtEpoch(ctx context.Context, epoch int) bool {
-	live, _ := s.adminProbe(ctx, epoch)
+	live, _ := s.adminServerInfo(ctx, epoch)
 	return live
-}
-
-// adminProbe distinguishes "admin answered but is not LIVE at epoch" (reachable,
-// the normal mid-handoff state) from "admin did not answer at all" (connect
-// failure or timeout — a wedged main thread leaves the admin socket bound but
-// never accepting, so requests time out). The admin watchdog keys off reachable.
-func (s *Supervisor) adminProbe(ctx context.Context, epoch int) (live, reachable bool) {
-	ctx, cancel := context.WithTimeout(ctx, readyPollInterval)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.cfg.AdminAddress+"/server_info", nil)
-	if err != nil {
-		return false, false
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, false
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var info struct {
-		State              string `json:"state"`
-		CommandLineOptions struct {
-			RestartEpoch int `json:"restart_epoch"`
-		} `json:"command_line_options"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&info) != nil {
-		return false, true
-	}
-	return info.State == "LIVE" && info.CommandLineOptions.RestartEpoch == epoch, true
 }

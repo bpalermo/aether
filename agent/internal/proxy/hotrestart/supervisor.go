@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -119,6 +120,9 @@ type Config struct {
 	// keeps the old pod until the new one has taken over. Required.
 	ReadyMarkerPath string
 	// AdminAddress is the Envoy admin host:port used for the readiness check.
+	// The supervisor probes it two ways: /ready on a pooled connection for the
+	// per-second liveness watchdog, and /server_info on a fresh connection
+	// whenever the answer must identify the epoch (see adminprobe.go).
 	AdminAddress string
 	// HandoffDeadline overrides defaultHandoffDeadline (0 = default). Must be
 	// comfortably larger than ParentShutdownTime plus worst-case xDS-gated init.
@@ -139,6 +143,11 @@ type Supervisor struct {
 	cfg     Config
 	log     *slog.Logger
 	metrics *SupervisorMetrics // nil disables instrumentation
+
+	// adminAuthoritative / adminFast are the two Envoy-admin probe clients; the
+	// difference between them is a correctness invariant, see newAdminClients.
+	adminAuthoritative *http.Client
+	adminFast          *http.Client
 
 	mu        sync.Mutex
 	children  map[int]*exec.Cmd // keyed by restart epoch
@@ -198,14 +207,17 @@ const readyGateBuffer = 3 * time.Second
 
 // New creates a Supervisor. metrics may be nil to disable instrumentation.
 func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
+	authoritative, fast := newAdminClients()
 	return &Supervisor{
-		cfg:           cfg,
-		log:           commonlog.Named(log, "proxy-supervisor"),
-		metrics:       metrics,
-		children:      make(map[int]*exec.Cmd),
-		childExited:   make(chan childExit, 8),
-		done:          make(chan struct{}),
-		watchdogFired: make(chan error, 1),
+		cfg:                cfg,
+		log:                commonlog.Named(log, "proxy-supervisor"),
+		metrics:            metrics,
+		adminAuthoritative: authoritative,
+		adminFast:          fast,
+		children:           make(map[int]*exec.Cmd),
+		childExited:        make(chan childExit, 8),
+		done:               make(chan struct{}),
+		watchdogFired:      make(chan error, 1),
 	}
 }
 
@@ -215,6 +227,7 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 // hot restart; SIGUSR1 is forwarded to the current child for log reopen.
 func (s *Supervisor) Run(ctx context.Context) error {
 	defer close(s.done)
+	defer s.adminFast.CloseIdleConnections()
 
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGUSR1)
