@@ -121,7 +121,15 @@ func (r *Reasserter) Start(ctx context.Context) error {
 			r.check(ctx)
 		case <-settle.C:
 			r.check(ctx)
-		case event := <-events:
+		case event, ok := <-events:
+			if !ok {
+				// The watcher died (its channels are closed). Drop it — a nil
+				// channel never fires again — and carry on with the periodic
+				// re-check rather than spinning on a closed channel.
+				r.log.WarnContext(ctx, "CNI config directory watch closed; falling back to periodic re-checks only", "dir", r.Dir)
+				events, errs = nil, nil
+				continue
+			}
 			if !isConfigEvent(event) {
 				continue
 			}
@@ -129,7 +137,11 @@ func (r *Reasserter) Start(ctx context.Context) error {
 			// on the channel, so no drain is needed.
 			settle.Stop()
 			settle.Reset(settleDelay)
-		case err := <-errs:
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
 			r.log.WarnContext(ctx, "CNI config directory watch error", "dir", r.Dir, "error", err)
 		}
 	}
