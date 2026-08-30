@@ -108,7 +108,9 @@ data:
     # Bound stats-memory growth (measured 2026-06-11: ~5.1k stats/proxy at
     # 7 pods + 8 services; per-pod clusters/listeners dominate). Nothing
     # scrapes the Envoy admin — delegated liveness rides the health-gateway
-    # listener and the supervisor only polls /server_info. Excluded stats
+    # listener and the supervisor polls /ready every second on a keep-alive
+    # connection and /server_info only while an epoch is unverified (#646).
+    # Excluded stats
     # are null (not rendered, not allocated, increments AND READS are
     # no-ops).
     #

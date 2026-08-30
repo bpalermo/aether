@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -59,6 +60,62 @@ func metricValue(t *testing.T, reader *sdkmetric.ManualReader, name string) (int
 	return 0, false
 }
 
+// metricSumByAttr sums the named counter's data points grouped by the value of
+// one attribute key.
+func metricSumByAttr(t *testing.T, reader *sdkmetric.ManualReader, name string, key attribute.Key) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	byValue := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
+			for _, dp := range data.DataPoints {
+				v, _ := dp.Attributes.Value(key)
+				byValue[v.AsString()] += dp.Value
+			}
+		}
+	}
+	return byValue
+}
+
+// TestAdminProbeMetric checks that each probe helper counts itself against its
+// own endpoint, which is what makes the server_info:ready ratio readable as the
+// re-verification rate (#646).
+func TestAdminProbeMetric(t *testing.T) {
+	m, reader := newTestSupervisorMetrics(t)
+	f := newFakeAdmin(t, "LIVE", 0)
+	s := New(Config{AdminAddress: f.addr()}, slog.New(slog.DiscardHandler), m)
+	t.Cleanup(s.adminFast.CloseIdleConnections)
+
+	if live, _ := s.adminReady(context.Background()); !live {
+		t.Fatal("adminReady() = not live, want live")
+	}
+	if live, _ := s.adminServerInfo(context.Background(), 0); !live {
+		t.Fatal("adminServerInfo() = not live, want live")
+	}
+
+	byEndpoint := metricSumByAttr(t, reader, "aether.supervisor.admin_probes", attrProbeEndpoint)
+	if got := byEndpoint[probeEndpointReady]; got != 1 {
+		t.Errorf("ready probes = %d, want 1", got)
+	}
+	if got := byEndpoint[probeEndpointServerInfo]; got != 1 {
+		t.Errorf("server_info probes = %d, want 1", got)
+	}
+	byResult := metricSumByAttr(t, reader, "aether.supervisor.admin_probes", attrProbeResult)
+	if got := byResult[probeResultLive]; got != 2 {
+		t.Errorf("live probes = %d, want 2", got)
+	}
+}
+
 func TestSupervisorMetrics_NilReceiverSafe(t *testing.T) {
 	var m *SupervisorMetrics
 	m.epochStarted(1)
@@ -69,6 +126,7 @@ func TestSupervisorMetrics_NilReceiverSafe(t *testing.T) {
 	m.predecessorFound(true)
 	m.drainCompleted(1.0)
 	m.readyTransition(true)
+	m.adminProbed(probeEndpointReady, probeResultLive)
 }
 
 func TestSupervisorMetrics_Recording(t *testing.T) {
@@ -85,8 +143,11 @@ func TestSupervisorMetrics_Recording(t *testing.T) {
 	m.drainCompleted(12.0)
 	m.readyTransition(true)
 	m.readyTransition(false)
+	m.adminProbed(probeEndpointReady, probeResultLive)
+	m.adminProbed(probeEndpointServerInfo, probeResultUnreachable)
 
 	want := map[string]int64{
+		"aether.supervisor.admin_probes":         2,
 		"aether.supervisor.epoch":                1, // gauge: last value
 		"aether.supervisor.handoff.duration":     1, // histogram: sample count
 		"aether.supervisor.wedges":               1,
