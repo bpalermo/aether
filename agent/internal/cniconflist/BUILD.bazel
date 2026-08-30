@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cniconflist",
+    srcs = [
+        "metrics.go",
+        "reassert.go",
+    ],
+    importpath = "aethermesh.dev/agent/internal/cniconflist",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//cni/conflist",
+        "//common/file",
+        "//common/log",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel_metric//:metric",
+    ],
+)
+
+go_test(
+    name = "cniconflist_test",
+    srcs = ["reassert_test.go"],
+    embed = [":cniconflist"],
+    deps = [
+        "//cni/conflist",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

@@ -116,6 +116,16 @@ agent:
   # is safe without the CRDs installed. Kill switch — set false to disable the
   # watches (and drop the cluster-wide route RBAC).
   gamma: true
+  # CNI conflist re-assert (#645): the agent watches the node's CNI config dir and
+  # re-appends aether's chained aether-cni entry whenever a competing writer strips
+  # it. kube-flannel's init container `cp -f`s its ConfigMap template over
+  # 10-flannel.conflist on EVERY flannel pod recreation — which a Talos
+  # bootstrap-manifest re-sync (boot, apply-config, k8s upgrade) triggers — silently
+  # unmeshing every pod started afterwards, fleet-wide (incident 2026-08-29).
+  # cni-install appends once per agent pod start; this keeps it appended. Default ON
+  # (safety net); it never creates a conflist of its own. Needs the read-write
+  # /etc/cni/net.d mount on the agent container.
+  cniConflistReassert: true
   # Cross-cluster config import (proposal 026): poll the registrar for GAMMA config
   # projections peer clusters exported and materialize them into the node proxy's
   # routes (merged with local; local wins). Default off; no-op unless the registry
