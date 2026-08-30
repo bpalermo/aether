@@ -154,8 +154,12 @@ func (s *Supervisor) writeState(epoch int) {
 //     different epoch", which is the normal mid-handoff state) for
 //     AdminUnresponsiveDeadline once some epoch has been LIVE → wedged
 //     post-LIVE (parent died mid stats-merge).
+//
+// The per-tick signal itself comes from adminProber: /server_info while the
+// epoch is unverified, the cheap /ready once it has been confirmed ours (#646).
 func (s *Supervisor) watchLiveness(ctx context.Context) {
 	defer s.clearReady()
+	prober := newAdminProber(s)
 	t := time.NewTicker(readyPollInterval)
 	defer t.Stop()
 	ready := false
@@ -170,7 +174,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			return
 		case <-t.C:
 			epoch := s.currentEpoch()
-			live, reachable := s.adminServerInfo(ctx, epoch)
+			live, reachable := prober.probe(ctx, epoch)
 			if reachable {
 				unreachableSince = time.Time{}
 			} else if unreachableSince.IsZero() {

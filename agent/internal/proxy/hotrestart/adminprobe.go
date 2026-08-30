@@ -27,6 +27,13 @@ import (
 // epoch identity rides /server_info on a fresh connection (see newAdminClients
 // and adminProber).
 
+// adminReverifyInterval bounds how long the liveness watchdog may stay on the
+// cheap /ready probe before re-confirming, ON A FRESH CONNECTION, that the
+// Envoy answering this node's admin is still ours at our epoch. Chosen below
+// both ParentShutdownTime (60s — so a cross-pod takeover is still diagnosed
+// while our parent lives) and defaultAdminUnresponsiveDeadline (30s).
+const adminReverifyInterval = 15 * time.Second
+
 const (
 	adminReadyBodyLimit      = 64      // "PRE_INITIALIZING\n" and friends
 	adminServerInfoBodyLimit = 1 << 20 // /server_info is a few KB; cap the unbounded doc
@@ -75,6 +82,68 @@ func newAdminClients() (authoritative, fast *http.Client) {
 		IdleConnTimeout:     adminIdleConnTimeout,
 	}}
 	return authoritative, fast
+}
+
+// adminProber is the liveness watchdog's two-tier probe: it answers each tick
+// with (live, reachable), spending a full /server_info round trip only while
+// the epoch is unverified, and riding the cheap pooled /ready once /server_info
+// has confirmed that the Envoy on this node's admin is ours at our epoch.
+//
+// It is owned exclusively by the watchLiveness goroutine and therefore holds no
+// lock. The Run-goroutine call sites (adminLiveAtEpoch) deliberately bypass it:
+// they need the authoritative answer, every time.
+//
+// Known benign divergence: a cross-pod successor taking over while our child is
+// still alive is invisible to /ready for up to adminReverifyInterval. The
+// readiness outcome is identical either way (both paths HOLD readiness while
+// admin is reachable and our child is tracked), and the heartbeat write is a
+// no-op under writeState's downgrade guard; only the diagnostic log is delayed.
+type adminProber struct {
+	s             *Supervisor
+	verifiedEpoch int       // epochUnverified disables the fast path
+	verifiedAt    time.Time // when /server_info last confirmed it
+}
+
+func newAdminProber(s *Supervisor) *adminProber {
+	return &adminProber{s: s, verifiedEpoch: epochUnverified}
+}
+
+// probe answers one watchdog tick. The invariant it maintains: the pinned
+// /ready connection never survives a re-verification boundary or an ambiguous
+// tick, so no epoch-identity answer can ever come off it.
+func (p *adminProber) probe(ctx context.Context, epoch int) (live, reachable bool) {
+	if p.fastPathValid(epoch) {
+		live, reachable = p.s.adminReady(ctx)
+		if live {
+			return true, true
+		}
+		// Anything but a plain LIVE is ambiguous: resolve it authoritatively
+		// from the next tick, and drop the pinned connection with it.
+		p.invalidate()
+		return false, reachable
+	}
+	// Re-verification must never be answered by a connection pinned to our own
+	// (possibly superseded, possibly draining) process.
+	p.invalidate()
+	live, reachable = p.s.adminServerInfo(ctx, epoch)
+	if live {
+		p.verifiedEpoch, p.verifiedAt = epoch, time.Now()
+	}
+	return live, reachable
+}
+
+// fastPathValid reports whether /ready may stand in for /server_info this tick:
+// the epoch is unchanged since the confirmation, the confirmation is recent,
+// and our child for it is still tracked.
+func (p *adminProber) fastPathValid(epoch int) bool {
+	return p.verifiedEpoch == epoch &&
+		time.Since(p.verifiedAt) < adminReverifyInterval &&
+		p.s.childTracked(epoch)
+}
+
+func (p *adminProber) invalidate() {
+	p.verifiedEpoch = epochUnverified
+	p.s.adminFast.CloseIdleConnections()
 }
 
 // adminReady probes /ready on the pooled fast client: liveness and reachability
