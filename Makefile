@@ -48,7 +48,7 @@ load-agent-image:
 
 .PHONY: push-agent-image
 push-agent-image:
-	@bazel run //agent/cmd/agent:image_push
+	@bazel run --stamp //agent/cmd/agent:image_push
 
 # The slim mesh-DNS daemon (#583) — its own binary AND its own image, so the
 # aether-mesh-dns DaemonSet no longer ships the full agent.
@@ -62,7 +62,7 @@ load-mesh-dns-image:
 
 .PHONY: push-mesh-dns-image
 push-mesh-dns-image:
-	@bazel run //agent/cmd/mesh-dns:image_push
+	@bazel run --stamp //agent/cmd/mesh-dns:image_push
 
 .PHONY: build-cni-install
 build-cni-install:
@@ -74,7 +74,7 @@ load-cni-install-image:
 
 .PHONY: push-cni-install-image
 push-cni-install-image:
-	@bazel run //cni/cmd/cni-install:image_push
+	@bazel run --stamp //cni/cmd/cni-install:image_push
 
 .PHONY: build-registrar
 build-registrar:
@@ -86,13 +86,25 @@ load-registrar-image:
 
 .PHONY: push-registrar-image
 push-registrar-image:
-	@bazel run //registrar/cmd/registrar:image_push
+	@bazel run --stamp //registrar/cmd/registrar:image_push
 
 .PHONY: load-all
 load-all: load-agent-image load-mesh-dns-image load-cni-install-image load-registrar-image
 
+# Every push target passes --stamp: that is what pins each released binary's GNU
+# build-ID to the release commit SHA (#651, //tools/buildid). Without it the
+# images ship the rules_go constant build-ID and profile symbolization silently
+# attributes the new release's samples to the previous release's symbols.
 .PHONY: push-all
 push-all: push-agent-image push-mesh-dns-image push-cni-install-image push-registrar-image
+
+# Print (and assert) the GNU build-ID of every binary that ships in a released
+# image. With --stamp it must equal `git rev-parse HEAD`; the build fails if not.
+.PHONY: check-build-id
+check-build-id:
+	@bazel build --stamp //tools/buildid:release_build_ids
+	@echo "expected build-ID (HEAD): $$(git rev-parse HEAD)"
+	@cat bazel-bin/tools/buildid/release_build_ids.txt
 
 # Publish everything in the order that works: image manifests FIRST, then the
 # charts (chart-only push targets). The combined `:*.push` targets race the

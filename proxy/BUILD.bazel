@@ -13,6 +13,22 @@ AETHER_EXTENSIONS = [
 envoy_cc_binary(
     name = "envoy",
     repository = "@envoy",
+    # stamped = True is Envoy's own build-ID mechanism: it links with
+    # `-Wl,@$(location @envoy//bazel:gnu_build_id.ldscript)`, a generated response
+    # file holding `--build-id=0x<BUILD_SCM_REVISION>` — i.e. the GNU build-ID
+    # becomes the source commit SHA. Without it the hermetic LLVM toolchain
+    # supplies its default (an md5 uuid), which is unique per link but says
+    # nothing about which commit produced the binary, so nothing can key a symbol
+    # upload to a release. aether #651: the eBPF profiler joins samples to symbols
+    # by build-ID alone, so it must be the release commit and nothing else.
+    # BUILD_SCM_REVISION comes from //bazel/get_workspace_status (git rev-parse
+    # HEAD of this repo). It is a *volatile* status variable — Envoy's convention
+    # — which means a long-lived incremental workspace can keep a stale ldscript;
+    # release builds run on fresh CI checkouts, and //integration:build_id_test
+    # asserts the binary carries exactly the id the linker was handed.
+    stamped = True,
+    # //integration:build_id_test reads the linked ELF directly.
+    visibility = ["//integration:__pkg__"],
     deps = AETHER_EXTENSIONS + [
         "@envoy//source/exe:envoy_main_entry_lib",
     ],

@@ -1,0 +1,54 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//tools/buildid:defs.bzl", "build_id_check", "stamp_select")
+
+# `--stamp` is a native Bazel option, so `values` reads it directly — the same
+# config_setting rules_go uses for its own stamping. Everything downstream (the
+# image macro, the release guard) selects on this, so a plain dev build keeps the
+# unmodified go_binary and only release builds pay for the extra copy.
+config_setting(
+    name = "stamp_enabled",
+    values = {"stamp": "true"},
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "buildid_lib",
+    srcs = [
+        "buildid.go",
+        "main.go",
+    ],
+    importpath = "aethermesh.dev/tools/buildid",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "buildid",
+    embed = [":buildid_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "buildid_test",
+    srcs = ["buildid_test.go"],
+    embed = [":buildid_lib"],
+)
+
+# Acceptance guard for #651: fails the build if any binary that ships in a
+# released image lacks a GNU build-ID note, or — under `--stamp`, i.e. the
+# publish workflow — carries anything other than the release commit SHA.
+# Built by `bazel build //...` and explicitly (with --stamp) by the publish
+# workflow, so a regression cannot reach a published image.
+build_id_check(
+    name = "release_build_ids",
+    binaries = [
+        "//agent/cmd/agent:agent_image_stamped_binary",
+        "//agent/cmd/mesh-dns:mesh-dns_image_stamped_binary",
+        "//cni/cmd/cni-install:cni-install_image_stamped_binary",
+        # The CNI plugin the installer drops on the host — a second released ELF
+        # inside the cni-install image.
+        "//cni/cmd/cni-install:cni-install_image_stamped_extra_0",
+        "//controller/cmd/controller:controller_image_stamped_binary",
+        "//registrar/cmd/registrar:registrar_image_stamped_binary",
+    ],
+    stamp = stamp_select(),
+)

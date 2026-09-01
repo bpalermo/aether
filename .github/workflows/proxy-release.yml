@@ -64,6 +64,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # aether #651 acceptance gate, run BEFORE the push so a proxy with the
+      # wrong GNU build-ID can never reach the registry. Two cheap assertions
+      # compose into "the binary's build-ID is this release's commit":
+      #   1. //integration:build_id_test — the linked binary's
+      #      .note.gnu.build-id equals the id the stamped link was handed;
+      #   2. the ldscript the linker was handed says --build-id=0x<github.sha>.
+      # Only the ldscript (one line) is fetched locally; the ~150 MB binary stays
+      # on the executor. The Envoy compile is shared with the push step below.
+      - name: Verify the Envoy GNU build-ID is the release commit
+        working-directory: proxy
+        run: |
+          bazel test \
+            --config=ci \
+            --config=${{ matrix.bazel_config }} \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            //integration:build_id_test
+          bazel build \
+            --config=ci \
+            --config=${{ matrix.bazel_config }} \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            @envoy//bazel:gnu_build_id.ldscript
+          ldscript="$(bazel cquery \
+            --config=ci \
+            --config=${{ matrix.bazel_config }} \
+            --output=files @envoy//bazel:gnu_build_id.ldscript)"
+          echo "linker build-ID argument: $(cat "$ldscript")"
+          grep -qi -- "--build-id=0x${{ github.sha }}" "$ldscript"
+
       - name: Build + push ${{ matrix.arch }} by digest (${{ matrix.bazel_config }})
         # remote_tags=[] and no --tag → oci_push pushes the image by digest only
         # (no tag lingers in the registry). Capture the pushed manifest digest.
