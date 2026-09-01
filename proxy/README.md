@@ -21,8 +21,8 @@ cd proxy
 bazel build //:envoy
 
 # Build + load the custom aether-proxy image into the local Docker daemon.
-# --config=release bakes the optimized, stripped Envoy (plain builds are
-# fastbuild/dev). The Makefile `load-proxy-image` target does this for you.
+# --config=release bakes the optimized Envoy (plain builds are fastbuild/dev).
+# The Makefile `load-proxy-image` target does this for you.
 bazel build --config=release //:image
 bazel run --config=release //:load   # ghcr.io/bpalermo/aether/aether-proxy:latest
 
@@ -32,8 +32,15 @@ bazel test //:image_test
 
 The image is `distroless/cc` base + the custom `//:envoy` binary at
 `/usr/local/bin/envoy`. Plain `bazel build //:image` produces a **fastbuild**
-(unoptimized, unstripped) binary — always pass `--config=release` (CI and the
-Makefile targets do) to bake the production binary.
+(unoptimized) binary — always pass `--config=release` (CI and the Makefile
+targets do) to bake the production binary.
+
+The released binary is **not** fully stripped, on purpose. `--strip=always`
+removes DWARF but keeps `.symtab` (~22 MB, ~944k symbols), which is what lets
+Pyroscope put names on the proxy fleet's native frames — the profiler itself
+symbolizes nothing native (aether #651). `//integration:symtab_test` guards it,
+and `//integration:build_id_test` guards the content-derived GNU build-ID the
+symbol upload is keyed by (#653).
 
 > **`aether_stats` is a compiled-in C++ extension** (proposal 012), built into
 > `//:envoy` via `AETHER_EXTENSIONS` in `BUILD.bazel`. It records
