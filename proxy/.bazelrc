@@ -27,14 +27,26 @@ build:linux --config=clang
 # passes -fuse-ld=lld the same way.
 build --linkopt=-Wl,--build-id=sha1
 
-# Optimized, stripped release build — the binary baked into the proxy image.
-# Plain `bazel build //:image` is fastbuild (dev); image build paths (CI, the
-# Makefile load/push targets, the README) pass --config=release to bake the
-# optimized binary.
+# Optimized release build — the binary baked into the proxy image. Plain
+# `bazel build //:image` is fastbuild (dev); image build paths (CI, the Makefile
+# load/push targets, the README) pass --config=release to bake the optimized
+# binary.
+#
+# `--strip=always` is NOT a full strip, despite the name: Bazel maps it to the
+# linker's `--strip-debug`, so it removes DWARF and KEEPS `.symtab` (~22 MB,
+# ~944k symbols here). DWARF is redundant anyway — envoy.bazelrc sets
+# `--fission=dbg,opt`, which parks it in .dwo files that never enter the image.
+#
+# Keeping the symbol table is deliberate and load-bearing (aether #651): the
+# OpenTelemetry eBPF profiler does not symbolize native frames in-agent, so
+# Pyroscope needs this build's symbols to name the ~1 core of CPU the proxy
+# fleet burns. Do not "finish the job" with `-Wl,-s` / `--strip-all` — it saves
+# ~10 MiB compressed and silently turns every Envoy flamegraph back into hex
+# addresses. //integration:symtab_test fails the build if that happens.
 build:release -c opt
 build:release --strip=always
 
-# Release build: optimized, stripped (used by CI to produce the image binary).
+# Release build: optimized, DWARF-stripped (used by CI to produce the image binary).
 build:ci --config=release
 # BuildBuddy invocation metadata (https://www.buildbuddy.io/docs/guide-metadata).
 # Dynamic metadata (COMMIT_SHA/REPO_URL/BRANCH_NAME) is passed by the CI workflow.

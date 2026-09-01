@@ -22,3 +22,24 @@ sh_test(
     args = ["$(rootpath //:envoy)"],
     data = ["//:envoy"],
 )
+
+# aether #651: assert the shipped Envoy still carries `.symtab`. The eBPF
+# profiler resolves no native frame itself — it emits (build-ID, offset) and
+# Pyroscope's symbolizer needs this build's symbol table to produce names. A
+# build-ID alone is a key to nothing if the symbols are gone.
+#
+# Worth a gate because the regression is silent and the trap is subtle: Bazel's
+# `--strip=always` sounds like it strips everything but passes the linker
+# `--strip-debug`, which drops DWARF and KEEPS `.symtab` (~22 MB, ~944k symbols
+# on this binary — the reason the proxy is symbolizable at all). A future move to
+# a real strip would read as a size win and would quietly cost the fleet its
+# flamegraph names.
+#
+# No extra build cost: //:envoy is already compiled for //:image_test.
+sh_test(
+    name = "symtab_test",
+    size = "small",
+    srcs = ["check_symtab.sh"],
+    args = ["$(rootpath //:envoy)"],
+    data = ["//:envoy"],
+)
