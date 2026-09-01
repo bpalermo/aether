@@ -8,6 +8,25 @@ import %workspace%/envoy.bazelrc
 # applies the :linux config automatically on Linux hosts.
 build:linux --config=clang
 
+# Give the linked Envoy a GNU build-ID derived from its own content (aether
+# #651/#653). This is the only key the Pyroscope symbolizer joins samples to
+# uploaded debuginfo by, so it has to identify *this* ELF and nothing else:
+# `sha1` makes lld hash the linked output, so the id is unique by construction,
+# reproducible for identical inputs, and can never collide with the six Go
+# binaries (which get the same treatment from //tools/buildid).
+#
+# The hermetic toolchain already passes `-Wl,--build-id=md5` earlier on the link
+# command line; lld honours the LAST --build-id, so this line wins and widens the
+# note from a 16-byte md5 to the 20-byte sha1 that debuginfod/Pyroscope tooling
+# and the Go binaries use. (Verified with `bazel aquery 'mnemonic("CppLink",
+# //:envoy)'` — proxy-release.yml asserts the ordering before publishing.)
+#
+# It is a --linkopt rather than `linkopts` on //:envoy because envoy_cc_binary
+# does `if not linkopts: linkopts = _envoy_linkopts()` — passing linkopts to the
+# target would silently drop Envoy's own default link flags. envoy.bazelrc
+# passes -fuse-ld=lld the same way.
+build --linkopt=-Wl,--build-id=sha1
+
 # Optimized, stripped release build — the binary baked into the proxy image.
 # Plain `bazel build //:image` is fastbuild (dev); image build paths (CI, the
 # Makefile load/push targets, the README) pass --config=release to bake the

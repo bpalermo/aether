@@ -91,19 +91,19 @@ push-registrar-image:
 .PHONY: load-all
 load-all: load-agent-image load-mesh-dns-image load-cni-install-image load-registrar-image
 
-# Every push target passes --stamp: that is what pins each released binary's GNU
-# build-ID to the release commit SHA (#651, //tools/buildid). Without it the
-# images ship the rules_go constant build-ID and profile symbolization silently
-# attributes the new release's samples to the previous release's symbols.
+# Every push target passes --stamp so the released artifacts carry the git
+# version information (charts, x_defs). The GNU build-IDs do NOT depend on it:
+# //tools/buildid derives each one from the binary's own content (#651, #653),
+# in every build configuration.
 .PHONY: push-all
 push-all: push-agent-image push-mesh-dns-image push-cni-install-image push-registrar-image
 
 # Print (and assert) the GNU build-ID of every binary that ships in a released
-# image. With --stamp it must equal `git rev-parse HEAD`; the build fails if not.
+# image. Each must hash that binary's own content and no two may be equal — the
+# collision that made Pyroscope symbol upload unsafe (#653).
 .PHONY: check-build-id
 check-build-id:
-	@bazel build --stamp //tools/buildid:release_build_ids
-	@echo "expected build-ID (HEAD): $$(git rev-parse HEAD)"
+	@bazel build //tools/buildid:release_build_ids
 	@cat bazel-bin/tools/buildid/release_build_ids.txt
 
 # Publish everything in the order that works: image manifests FIRST, then the

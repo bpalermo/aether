@@ -2,11 +2,12 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 )
 
 func main() {
@@ -15,8 +16,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
-	case "stamp":
-		err = runStamp(os.Args[2:])
+	case "set":
+		err = runSet(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
 	default:
@@ -30,39 +31,30 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  buildid stamp  -in FILE -out FILE [-status-file FILE]
-  buildid verify [-status-file FILE] -marker FILE FILE...
+  buildid set    -in FILE -out FILE
+  buildid verify [-marker FILE] FILE...
 `)
 	os.Exit(2)
 }
 
-// runStamp copies -in to -out, rewriting the GNU build-ID note to the release
-// commit SHA read from -status-file.
+// runSet copies -in to -out, rewriting the GNU build-ID note to the content hash
+// of the image (see the package comment for the exact definition).
 //
-// Fallbacks, all of which produce a byte-identical copy of the input rather than
-// an error, so that unstamped and non-Go/non-ELF inputs keep building:
-//   - no -status-file (i.e. --nostamp): copy unchanged;
-//   - status file with no resolvable commit SHA: copy unchanged;
-//   - input is not an ELF image (e.g. a Mach-O host build, or a data file
-//     riding in an image layer): copy unchanged.
+// A non-ELF input — a Mach-O host build, or a data file riding in an image
+// layer — is copied unchanged rather than treated as an error, so the rule can
+// be applied uniformly to everything that enters an image.
 //
-// An ELF input that *is* being stamped but carries no build-ID note is a hard
-// error: that would silently ship an unsymbolizable binary.
-func runStamp(args []string) error {
-	fs := flag.NewFlagSet("stamp", flag.ExitOnError)
+// An ELF input that carries no build-ID note at all is a hard error: that would
+// silently ship an unsymbolizable binary.
+func runSet(args []string) error {
+	fs := flag.NewFlagSet("set", flag.ExitOnError)
 	in := fs.String("in", "", "input binary")
 	out := fs.String("out", "", "output binary")
-	statusFile := fs.String("status-file", "", "Bazel stable workspace status file (empty: do not stamp)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *in == "" || *out == "" {
-		return errors.New("stamp: -in and -out are required")
-	}
-
-	commit, err := readCommit(*statusFile)
-	if err != nil {
-		return err
+		return errors.New("set: -in and -out are required")
 	}
 
 	buf, err := os.ReadFile(*in)
@@ -74,31 +66,32 @@ func runStamp(args []string) error {
 		return err
 	}
 
-	switch {
-	case commit == "":
-		fmt.Fprintf(os.Stderr, "buildid: no release commit in the workspace status; leaving %s untouched\n", *in)
-	case !isELF(buf):
-		fmt.Fprintf(os.Stderr, "buildid: %s is not an ELF image; leaving it untouched\n", *in)
-	default:
-		id, err := hex.DecodeString(commit)
-		if err != nil {
-			return fmt.Errorf("decoding commit %q: %w", commit, err)
-		}
-		if err := patch(buf, id); err != nil {
+	if isELF(buf) {
+		if _, err := setContentBuildID(buf); err != nil {
 			return fmt.Errorf("%s: %w", *in, err)
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "buildid: %s is not an ELF image; leaving it untouched\n", *in)
 	}
 
 	return os.WriteFile(*out, buf, info.Mode().Perm())
 }
 
-// runVerify asserts that every named ELF binary carries a GNU build-ID note and,
-// when the build is stamped, that the note equals the release commit SHA. It is
-// the build-time guard for issue #651: wire it into a target that CI builds and
-// a regression can never reach a published image.
+// runVerify is the build-time acceptance guard for #651 and #653. Over the set
+// of binaries that ship in released images it asserts:
+//
+//  1. every one carries a 20-byte GNU build-ID note (#651: no note, no symbols);
+//  2. every note equals the SHA-1 recomputed from that binary's own content —
+//     self-verification, i.e. the ID really does identify *this* ELF and the
+//     `content_build_id` rule actually ran on it;
+//  3. the notes are pairwise distinct (#653: seven released ELFs must not share
+//     one ID, or a symbol upload for one silently resolves all of them).
+//
+// Property 3 follows from 2 for distinct binaries, but is asserted directly
+// because it is the property the Pyroscope workflow depends on and the one the
+// previous, commit-stamped guard actively violated.
 func runVerify(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	statusFile := fs.String("status-file", "", "Bazel stable workspace status file (empty: presence check only)")
 	marker := fs.String("marker", "", "file to write on success")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -108,65 +101,63 @@ func runVerify(args []string) error {
 		return errors.New("verify: no files given")
 	}
 
-	want, err := wantBuildID(*statusFile)
-	if err != nil {
-		return err
-	}
-
 	var report bytes.Buffer
-	var failures int
+	var problems []string
+	ids := map[string][]string{}
 	for _, path := range files {
-		got, err := checkOne(path, want)
+		id, err := checkOne(path)
 		if err != nil {
-			fmt.Fprintf(&report, "%s: %v\n", path, err)
-			failures++
+			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
-		fmt.Fprintf(&report, "%s: %s\n", path, got)
+		fmt.Fprintf(&report, "%s: %s\n", path, id)
+		ids[id] = append(ids[id], path)
 	}
-	if failures > 0 {
-		return fmt.Errorf("%d binary(ies) failed the GNU build-ID check (see #651):\n%s", failures, report.String())
+	problems = append(problems, collisions(ids)...)
+
+	if len(problems) > 0 {
+		return fmt.Errorf("GNU build-ID check failed (see #651, #653):\n  %s", strings.Join(problems, "\n  "))
 	}
 	if *marker != "" {
 		return os.WriteFile(*marker, report.Bytes(), 0o644)
 	}
-	_, err = os.Stdout.Write(report.Bytes())
+	_, err := os.Stdout.Write(report.Bytes())
 	return err
 }
 
-// wantBuildID returns the build-ID every checked binary must carry, or nil when
-// the build is not stamped (presence check only).
-func wantBuildID(statusFile string) ([]byte, error) {
-	commit, err := readCommit(statusFile)
-	if err != nil || commit == "" {
-		return nil, err
-	}
-	want, err := hex.DecodeString(commit)
-	if err != nil {
-		return nil, fmt.Errorf("decoding commit %q: %w", commit, err)
-	}
-	return want, nil
-}
-
-// checkOne returns the hex build-ID of path, or an error describing why it is
-// missing or wrong.
-func checkOne(path string, want []byte) (string, error) {
-	f, err := os.Open(path)
+// checkOne returns the hex build-ID of path after asserting that it equals the
+// hash recomputed from path's own bytes.
+func checkOne(path string) (string, error) {
+	buf, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = f.Close() }()
-
-	got, err := readBuildID(f)
+	if !isELF(buf) {
+		return "", errors.New("not an ELF image")
+	}
+	got, err := readBuildID(bytes.NewReader(buf))
 	if err != nil {
 		return "", err
 	}
-	if want != nil && !bytes.Equal(got, want) {
-		return "", fmt.Errorf("build-ID is %x, want the release commit %x", got, want)
+	want, err := contentBuildID(buf)
+	if err != nil {
+		return "", err
+	}
+	if !bytes.Equal(got, want) {
+		return "", fmt.Errorf("build-ID is %x but its content hashes to %x — the note does not identify this binary", got, want)
 	}
 	return fmt.Sprintf("%x", got), nil
 }
 
-func isELF(buf []byte) bool {
-	return len(buf) >= 4 && bytes.Equal(buf[:4], []byte("\x7fELF"))
+// collisions reports every build-ID claimed by more than one binary.
+func collisions(ids map[string][]string) []string {
+	var out []string
+	for id, paths := range ids {
+		if len(paths) > 1 {
+			sort.Strings(paths)
+			out = append(out, fmt.Sprintf("build-ID %s is shared by %d binaries: %s", id, len(paths), strings.Join(paths, ", ")))
+		}
+	}
+	sort.Strings(out)
+	return out
 }

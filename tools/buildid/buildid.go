@@ -1,43 +1,71 @@
-// Package main implements the GNU build-ID stamping tool used by the Bazel
-// `stamped_build_id` rule (see defs.bzl).
+// Package main implements the GNU build-ID tool used by the Bazel
+// `content_build_id` rule (see defs.bzl).
 //
-// Why this exists: rules_go links every Go binary with `-buildid=redacted` for
-// reproducibility, and since Go 1.24 the Go linker derives the ELF
-// `.note.gnu.build-id` note from that Go build ID by default (`-B gobuildid`).
-// A constant input yields a constant note, so every aether Go binary ever built
-// carries the same GNU build-ID (498919aff001d8366249403a2544fba2d833084f) no
-// matter what code is in it (issue #651). Profilers that join samples to symbols
-// purely by build-ID — the Pyroscope eBPF symbolizer does — then silently
-// symbolize a new release against the previous release's offsets.
+// # Why this exists
 //
-// rules_go does not stamp-expand `gc_linkopts`, so `-B 0x<sha>` cannot be fed to
-// the linker from the workspace status. Instead this tool rewrites the note
-// in place after the link: the note's descriptor is exactly 20 bytes, which is
-// also the width of a git commit SHA-1, so the release commit drops straight in
-// without moving a single byte of the ELF.
+// rules_go links every Go binary with `-buildid=redacted` for reproducibility,
+// and since Go 1.24 the Go linker derives the ELF `.note.gnu.build-id` note from
+// that Go build ID by default (`-B gobuildid`). A constant input yields a
+// constant note, so every aether Go binary ever built carried the same GNU
+// build-ID (498919aff001d8366249403a2544fba2d833084f) no matter what code was in
+// it (issue #651). Profilers that join samples to symbols purely by build-ID —
+// the Pyroscope eBPF symbolizer does — then silently symbolize one binary
+// against another binary's offsets.
+//
+// The first fix (#652) rewrote the note to the release commit SHA. That traded
+// one collision for another: a commit produces *seven* released ELFs, so all
+// seven ended up sharing a single ID (issue #653). A GNU build-ID identifies a
+// *linked object*, not a source revision.
+//
+// # What this tool writes
+//
+// The ID is derived from the binary's own bytes, which is what `ld --build-id=sha1`
+// does natively and what the custom Envoy now gets from the linker:
+//
+//	build_id = SHA-1( image bytes, with the 20-byte build-ID descriptor
+//	                  field replaced by 20 zero bytes )
+//
+// Zeroing the descriptor before hashing is what makes the value well defined:
+// the descriptor is the one field the hash is about to overwrite, so excluding it
+// removes the circular dependency. Three properties follow, and all three are
+// covered by unit tests:
+//
+//   - deterministic — the same image bytes always yield the same ID, so the ID is
+//     remote-cache-friendly and reproducible;
+//   - idempotent — writing the ID changes only the descriptor, which the hash
+//     ignores, so re-running the tool on an already-written binary computes and
+//     writes exactly the same 20 bytes;
+//   - collision-free in practice — two ELFs that differ anywhere outside the
+//     descriptor get different IDs, which is precisely the #653 requirement.
+//
+// Nothing else in the image moves: the descriptor is exactly 20 bytes wide, the
+// same width as a SHA-1 digest, so the note is patched in place.
+//
+// Release traceability does not live in this note. It lives in the `--stamp`
+// x_defs version information and in the image tags; the ELF note is the
+// symbolizer's key and nothing else.
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"crypto/sha1" //nolint:gosec // Not security: SHA-1 is the GNU build-ID convention (`ld --build-id=sha1`) and the note is exactly 20 bytes wide.
 	"debug/elf"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"strings"
 )
 
 const (
 	// buildIDSection is the ELF section holding the GNU build-ID note.
 	buildIDSection = ".note.gnu.build-id"
-	// buildIDLen is the descriptor width the Go linker emits (SHA-1 shaped),
-	// and the width of a git commit SHA-1. They match on purpose: the note is
-	// patched in place, never resized.
-	buildIDLen = 20
+	// buildIDLen is the descriptor width the Go linker emits and the width of a
+	// SHA-1 digest. They match on purpose: the note is patched in place, never
+	// resized.
+	buildIDLen = sha1.Size
 	// noteTypeGNUBuildID is NT_GNU_BUILD_ID.
 	noteTypeGNUBuildID = 3
+	// noteHeaderLen is the fixed part of an ELF note: namesz, descsz, type.
+	noteHeaderLen = 12
 )
 
 // gnuNoteName is the note owner, NUL-terminated as the ELF note format requires.
@@ -60,36 +88,25 @@ func buildIDOffset(r io.ReaderAt) (int64, error) {
 	defer func() { _ = f.Close() }()
 
 	sec := f.Section(buildIDSection)
-	if sec == nil || sec.Type != elf.SHT_NOTE {
-		return 0, errNoBuildIDNote
-	}
-	// SHT_NOBITS sections occupy no file bytes, so there would be nothing to
-	// patch; treat it as absent rather than corrupting the image.
-	if sec.Type == elf.SHT_NOBITS || sec.Size < 12 {
+	if sec == nil || sec.Type != elf.SHT_NOTE || sec.Size < noteHeaderLen {
+		// SHT_NOBITS sections occupy no file bytes, so there would be nothing to
+		// patch; treat anything that is not a real note as absent rather than
+		// corrupting the image.
 		return 0, errNoBuildIDNote
 	}
 
-	hdr := make([]byte, 12)
+	hdr := make([]byte, noteHeaderLen)
 	if _, err := r.ReadAt(hdr, int64(sec.Offset)); err != nil {
 		return 0, fmt.Errorf("reading note header: %w", err)
 	}
 	bo := f.ByteOrder
-	namesz := bo.Uint32(hdr[0:4])
-	descsz := bo.Uint32(hdr[4:8])
-	typ := bo.Uint32(hdr[8:12])
-
-	if typ != noteTypeGNUBuildID {
-		return 0, fmt.Errorf("%s: unexpected note type %d (want %d)", buildIDSection, typ, noteTypeGNUBuildID)
-	}
-	if namesz != uint32(len(gnuNoteName)) {
-		return 0, fmt.Errorf("%s: unexpected note namesz %d (want %d)", buildIDSection, namesz, len(gnuNoteName))
-	}
-	if descsz != buildIDLen {
-		return 0, fmt.Errorf("%s: descriptor is %d bytes, want %d — cannot patch in place", buildIDSection, descsz, buildIDLen)
+	namesz, descsz, typ := bo.Uint32(hdr[0:4]), bo.Uint32(hdr[4:8]), bo.Uint32(hdr[8:12])
+	if err := checkNoteHeader(namesz, descsz, typ); err != nil {
+		return 0, err
 	}
 
 	name := make([]byte, namesz)
-	if _, err := r.ReadAt(name, int64(sec.Offset)+12); err != nil {
+	if _, err := r.ReadAt(name, int64(sec.Offset)+noteHeaderLen); err != nil {
 		return 0, fmt.Errorf("reading note name: %w", err)
 	}
 	if !bytes.Equal(name, gnuNoteName) {
@@ -97,11 +114,25 @@ func buildIDOffset(r io.ReaderAt) (int64, error) {
 	}
 
 	// The name is padded to a 4-byte boundary; "GNU\0" is already 4 bytes.
-	descOff := int64(sec.Offset) + 12 + int64(align4(namesz))
+	descOff := int64(sec.Offset) + noteHeaderLen + int64(align4(namesz))
 	if descOff+buildIDLen > int64(sec.Offset)+int64(sec.Size) {
 		return 0, fmt.Errorf("%s: descriptor runs past the section", buildIDSection)
 	}
 	return descOff, nil
+}
+
+// checkNoteHeader rejects a note that is not a 20-byte NT_GNU_BUILD_ID owned by
+// "GNU" — the only shape this tool can rewrite without moving other bytes.
+func checkNoteHeader(namesz, descsz, typ uint32) error {
+	switch {
+	case typ != noteTypeGNUBuildID:
+		return fmt.Errorf("%s: unexpected note type %d (want %d)", buildIDSection, typ, noteTypeGNUBuildID)
+	case namesz != uint32(len(gnuNoteName)):
+		return fmt.Errorf("%s: unexpected note namesz %d (want %d)", buildIDSection, namesz, len(gnuNoteName))
+	case descsz != buildIDLen:
+		return fmt.Errorf("%s: descriptor is %d bytes, want %d — cannot patch in place", buildIDSection, descsz, buildIDLen)
+	}
+	return nil
 }
 
 func align4(n uint32) uint32 {
@@ -121,73 +152,38 @@ func readBuildID(r io.ReaderAt) ([]byte, error) {
 	return id, nil
 }
 
-// patch rewrites the GNU build-ID descriptor of the ELF image in buf to id.
-func patch(buf []byte, id []byte) error {
-	if len(id) != buildIDLen {
-		return fmt.Errorf("build ID is %d bytes, want %d", len(id), buildIDLen)
+// contentBuildID returns the content-derived build-ID of the ELF image in buf:
+// SHA-1 over the whole image with the build-ID descriptor field zeroed. The
+// image is not modified — the zeroes are fed to the hash in place of the
+// descriptor's current bytes, which is why the result does not depend on
+// whatever ID the image already carries (and hence why writing it is idempotent).
+func contentBuildID(buf []byte) ([]byte, error) {
+	off, err := buildIDOffset(bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	h := sha1.New() //nolint:gosec // See the package comment: build-ID convention, not security.
+	h.Write(buf[:off])
+	h.Write(make([]byte, buildIDLen))
+	h.Write(buf[off+buildIDLen:])
+	return h.Sum(nil), nil
+}
+
+// setContentBuildID rewrites the GNU build-ID descriptor of the ELF image in buf
+// to the image's content hash and returns the value written.
+func setContentBuildID(buf []byte) ([]byte, error) {
+	id, err := contentBuildID(buf)
+	if err != nil {
+		return nil, err
 	}
 	off, err := buildIDOffset(bytes.NewReader(buf))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	copy(buf[off:off+buildIDLen], id)
-	return nil
+	return id, nil
 }
 
-// parseStatus reads a Bazel workspace status file ("KEY value" per line).
-func parseStatus(r io.Reader) map[string]string {
-	out := map[string]string{}
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		key, value, found := strings.Cut(strings.TrimSpace(sc.Text()), " ")
-		if !found || key == "" {
-			continue
-		}
-		out[key] = strings.TrimSpace(value)
-	}
-	return out
-}
-
-// commitFromStatus extracts the release commit SHA from a parsed workspace
-// status map. STABLE_GIT_COMMIT is the dedicated variable; STABLE_GIT_VERSION
-// (`git describe --long --abbrev=40`) is accepted as a fallback so the stamp
-// still resolves if the status script is rolled back. Returns "" when no commit
-// can be resolved — the caller then leaves the binary untouched.
-func commitFromStatus(status map[string]string) string {
-	if sha := status["STABLE_GIT_COMMIT"]; isSHA1(sha) {
-		return sha
-	}
-	// `v0.91.0-12-g<40 hex>[-dirty]` or a bare 40-hex from `--always`.
-	for _, field := range strings.Split(status["STABLE_GIT_VERSION"], "-") {
-		if isSHA1(field) {
-			return field
-		}
-		if len(field) == 41 && field[0] == 'g' && isSHA1(field[1:]) {
-			return field[1:]
-		}
-	}
-	return ""
-}
-
-func isSHA1(s string) bool {
-	if len(s) != 2*buildIDLen {
-		return false
-	}
-	_, err := hex.DecodeString(s)
-	return err == nil
-}
-
-// readCommit resolves the release commit from a workspace status file. An empty
-// path (no stamping requested) yields "".
-func readCommit(path string) (string, error) {
-	if path == "" {
-		return "", nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	return commitFromStatus(parseStatus(f)), nil
+func isELF(buf []byte) bool {
+	return len(buf) >= 4 && bytes.Equal(buf[:4], []byte("\x7fELF"))
 }
