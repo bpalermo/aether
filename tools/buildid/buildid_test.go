@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1" //nolint:gosec // Mirrors the tool: GNU build-ID convention, not security.
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -11,13 +12,12 @@ import (
 	"testing"
 )
 
-const releaseSHA = "c46dd35abc0123456789abcdef0123456789abcd"
-
 // synthELF builds a minimal little-endian ELF64 image carrying a single
-// SHT_NOTE section named .note.gnu.build-id whose descriptor is id. It is a
-// stand-in for a linked Go binary: the stamping tool only ever reads the section
+// SHT_NOTE section named .note.gnu.build-id whose descriptor is id, plus a
+// `filler` payload so that two images can be made to differ outside the note.
+// It is a stand-in for a linked Go binary: the tool only ever reads the section
 // header table and rewrites 20 bytes, so nothing else needs to be real.
-func synthELF(t *testing.T, id []byte) []byte {
+func synthELF(t *testing.T, id []byte, filler ...byte) []byte {
 	t.Helper()
 
 	const (
@@ -42,7 +42,8 @@ func synthELF(t *testing.T, id []byte) []byte {
 
 	noteOff := uint32(ehdrSize)
 	shstrtabOff := noteOff + uint32(len(note))
-	shoff := shstrtabOff + uint32(len(shstrtab))
+	fillerOff := shstrtabOff + uint32(len(shstrtab))
+	shoff := fillerOff + uint32(len(filler))
 
 	shdr := func(name, typ uint32, off, size uint32) []byte {
 		b := make([]byte, 0, shdrSize)
@@ -73,10 +74,20 @@ func synthELF(t *testing.T, id []byte) []byte {
 	img = append(img, ehdr...)
 	img = append(img, note...)
 	img = append(img, shstrtab...)
+	img = append(img, filler...)
 	img = append(img, shdr(0, 0 /*SHT_NULL*/, 0, 0)...)
 	img = append(img, shdr(noteNameOff, 7 /*SHT_NOTE*/, noteOff, uint32(len(note)))...)
 	img = append(img, shdr(1, 3 /*SHT_STRTAB*/, shstrtabOff, uint32(len(shstrtab)))...)
 	return img
+}
+
+func mustSet(t *testing.T, img []byte) []byte {
+	t.Helper()
+	id, err := setContentBuildID(img)
+	if err != nil {
+		t.Fatalf("setContentBuildID: %v", err)
+	}
+	return id
 }
 
 func TestReadBuildID(t *testing.T) {
@@ -90,27 +101,50 @@ func TestReadBuildID(t *testing.T) {
 	}
 }
 
-func TestPatchReplacesOnlyTheDescriptor(t *testing.T) {
-	original := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen))
-	patched := append([]byte(nil), original...)
+// The definition of the ID is load-bearing and documented in the package
+// comment: SHA-1 over the image with the descriptor field replaced by zeroes.
+// Pin it so a refactor cannot quietly change what gets uploaded to Pyroscope.
+func TestContentBuildIDIsSHA1OfTheZeroedImage(t *testing.T) {
+	img := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen), 1, 2, 3, 4)
 
-	want, err := hex.DecodeString(releaseSHA)
+	off, err := buildIDOffset(bytes.NewReader(img))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := patch(patched, want); err != nil {
-		t.Fatalf("patch: %v", err)
-	}
+	zeroed := append([]byte(nil), img...)
+	copy(zeroed[off:off+buildIDLen], make([]byte, buildIDLen))
+	want := sha1.Sum(zeroed) //nolint:gosec // See above.
 
+	got, err := contentBuildID(img)
+	if err != nil {
+		t.Fatalf("contentBuildID: %v", err)
+	}
+	if !bytes.Equal(got, want[:]) {
+		t.Fatalf("contentBuildID = %x, want sha1(zeroed image) = %x", got, want)
+	}
+	// contentBuildID must not disturb the image it hashes.
+	if !bytes.Equal(img, synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen), 1, 2, 3, 4)) {
+		t.Fatal("contentBuildID mutated its input")
+	}
+}
+
+func TestSetContentBuildIDReplacesOnlyTheDescriptor(t *testing.T) {
+	original := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen))
+	patched := append([]byte(nil), original...)
+
+	id := mustSet(t, patched)
+	if len(id) != buildIDLen {
+		t.Fatalf("build ID is %d bytes, want %d", len(id), buildIDLen)
+	}
 	got, err := readBuildID(bytes.NewReader(patched))
 	if err != nil {
-		t.Fatalf("readBuildID after patch: %v", err)
+		t.Fatalf("readBuildID after set: %v", err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("build ID = %x, want %x", got, want)
+	if !bytes.Equal(got, id) {
+		t.Fatalf("note is %x, want the returned id %x", got, id)
 	}
 	if len(patched) != len(original) {
-		t.Fatalf("patch resized the image: %d -> %d", len(original), len(patched))
+		t.Fatalf("set resized the image: %d -> %d", len(original), len(patched))
 	}
 
 	// Exactly the 20 descriptor bytes may differ.
@@ -123,21 +157,54 @@ func TestPatchReplacesOnlyTheDescriptor(t *testing.T) {
 	if differing != buildIDLen {
 		t.Fatalf("%d bytes differ, want exactly %d", differing, buildIDLen)
 	}
+}
 
-	// Patching is idempotent: the same commit yields the same image.
-	again := append([]byte(nil), original...)
-	if err := patch(again, want); err != nil {
-		t.Fatalf("patch (second): %v", err)
+// Deterministic: the same input bytes always produce the same ID (so the ID is
+// reproducible and the remote cache stays warm).
+func TestSetContentBuildIDIsDeterministic(t *testing.T) {
+	a := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen), 7, 7, 7)
+	b := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen), 7, 7, 7)
+	if !bytes.Equal(mustSet(t, a), mustSet(t, b)) {
+		t.Fatal("identical inputs produced different build IDs")
 	}
-	if !bytes.Equal(again, patched) {
-		t.Fatal("patching the same commit twice produced different images")
+	if !bytes.Equal(a, b) {
+		t.Fatal("identical inputs produced different images")
 	}
 }
 
-func TestPatchWrongIDLength(t *testing.T) {
-	img := synthELF(t, bytes.Repeat([]byte{0}, buildIDLen))
-	if err := patch(img, []byte{1, 2, 3}); err == nil {
-		t.Fatal("expected an error for a short build ID")
+// Idempotent: zeroing → hashing → writing, re-run on an already-written binary,
+// yields the identical ID and the identical image. This is what makes the ID
+// self-verifying (`buildid verify` recomputes it from the shipped bytes).
+func TestSetContentBuildIDIsIdempotent(t *testing.T) {
+	img := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen), 9, 9)
+	first := mustSet(t, img)
+	once := append([]byte(nil), img...)
+
+	second := mustSet(t, img)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("re-running changed the id: %x -> %x", first, second)
+	}
+	if !bytes.Equal(once, img) {
+		t.Fatal("re-running changed the image")
+	}
+
+	// The ID is independent of whatever ID the image arrived with.
+	fresh := synthELF(t, bytes.Repeat([]byte{0xff}, buildIDLen), 9, 9)
+	if !bytes.Equal(mustSet(t, fresh), first) {
+		t.Fatal("the id depends on the previous descriptor value")
+	}
+}
+
+// The headline #653 property: binaries that differ anywhere outside the
+// descriptor get different IDs.
+func TestSetContentBuildIDIsPairwiseDistinct(t *testing.T) {
+	seen := map[string]int{}
+	for i := range 8 {
+		img := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen), byte(i))
+		seen[string(mustSet(t, img))]++
+	}
+	if len(seen) != 8 {
+		t.Fatalf("8 distinct images produced %d distinct build IDs: %v", len(seen), seen)
 	}
 }
 
@@ -152,131 +219,83 @@ func TestBuildIDOffsetMissingNote(t *testing.T) {
 	if _, err := readBuildID(bytes.NewReader(img)); !errors.Is(err, errNoBuildIDNote) {
 		t.Fatalf("err = %v, want errNoBuildIDNote", err)
 	}
-}
-
-func TestCommitFromStatus(t *testing.T) {
-	tests := []struct {
-		name   string
-		status string
-		want   string
-	}{
-		{
-			name:   "dedicated variable",
-			status: "STABLE_GIT_VERSION v0.91.0-3-g" + releaseSHA + "\nSTABLE_GIT_COMMIT " + releaseSHA + "\n",
-			want:   releaseSHA,
-		},
-		{
-			name:   "falls back to the describe output",
-			status: "STABLE_GIT_VERSION v0.91.0-3-g" + releaseSHA + "\n",
-			want:   releaseSHA,
-		},
-		{
-			name:   "falls back to a describe --always bare sha",
-			status: "STABLE_GIT_VERSION " + releaseSHA + "\n",
-			want:   releaseSHA,
-		},
-		{
-			name:   "dirty tree still resolves the parent commit",
-			status: "STABLE_GIT_VERSION v0.91.0-3-g" + releaseSHA + "-dirty\n",
-			want:   releaseSHA,
-		},
-		{
-			name:   "no git",
-			status: "STABLE_GIT_VERSION unknown\nSTABLE_GIT_COMMIT unknown\n",
-			want:   "",
-		},
-		{
-			name:   "empty",
-			status: "",
-			want:   "",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := commitFromStatus(parseStatus(strings.NewReader(tc.status))); got != tc.want {
-				t.Fatalf("commitFromStatus = %q, want %q", got, tc.want)
-			}
-		})
+	if _, err := setContentBuildID(img); !errors.Is(err, errNoBuildIDNote) {
+		t.Fatalf("setContentBuildID err = %v, want errNoBuildIDNote", err)
 	}
 }
 
-// writeStatus writes a stable-status.txt naming the release commit.
-func writeStatus(t *testing.T, dir string) string {
+func writeELF(t *testing.T, path string, filler ...byte) {
 	t.Helper()
-	path := filepath.Join(dir, "stable-status.txt")
-	body := "BUILD_EMBED_LABEL \nSTABLE_GIT_COMMIT " + releaseSHA + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	img := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen), filler...)
+	if err := os.WriteFile(path, img, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return path
 }
 
-func TestRunStampAndVerify(t *testing.T) {
+func TestRunSetAndVerify(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "binary")
-	out := filepath.Join(dir, "binary_stamped")
-	if err := os.WriteFile(in, synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	status := writeStatus(t, dir)
+	inA, outA := filepath.Join(dir, "a"), filepath.Join(dir, "a_out")
+	inB, outB := filepath.Join(dir, "b"), filepath.Join(dir, "b_out")
+	writeELF(t, inA, 1)
+	writeELF(t, inB, 2)
 
-	if err := runStamp([]string{"-in", in, "-out", out, "-status-file", status}); err != nil {
-		t.Fatalf("runStamp: %v", err)
+	for _, pair := range [][2]string{{inA, outA}, {inB, outB}} {
+		if err := runSet([]string{"-in", pair[0], "-out", pair[1]}); err != nil {
+			t.Fatalf("runSet(%s): %v", pair[0], err)
+		}
 	}
-	if err := runVerify([]string{"-status-file", status, out}); err != nil {
+
+	if err := runVerify([]string{outA, outB}); err != nil {
 		t.Fatalf("runVerify: %v", err)
 	}
-	// The unstamped input must fail the stamped verification.
-	if err := runVerify([]string{"-status-file", status, in}); err == nil {
-		t.Fatal("expected the unstamped binary to fail verification")
-	}
-	// Without a status file, verification only asserts the note is present.
-	if err := runVerify([]string{in}); err != nil {
-		t.Fatalf("runVerify (presence only): %v", err)
+	// The un-rewritten inputs still carry the linker's constant note, so they
+	// fail self-verification.
+	if err := runVerify([]string{inA, inB}); err == nil {
+		t.Fatal("expected binaries whose note is not their content hash to fail")
 	}
 
-	info, err := os.Stat(out)
+	info, err := os.Stat(outA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("stamped output is not executable: %v", info.Mode())
+		t.Fatalf("output is not executable: %v", info.Mode())
 	}
 }
 
-func TestRunStampWithoutStatusFileCopies(t *testing.T) {
+// Two copies of the same binary share an ID by construction; the guard must
+// still reject the set, because that is exactly the #653 failure mode.
+func TestRunVerifyRejectsSharedBuildIDs(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "binary")
-	out := filepath.Join(dir, "binary_stamped")
-	img := synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen))
-	if err := os.WriteFile(in, img, 0o755); err != nil {
-		t.Fatal(err)
+	one, two := filepath.Join(dir, "one"), filepath.Join(dir, "two")
+	writeELF(t, one, 3)
+	writeELF(t, two, 3)
+	for _, p := range []string{one, two} {
+		if err := runSet([]string{"-in", p, "-out", p}); err != nil {
+			t.Fatalf("runSet: %v", err)
+		}
 	}
 
-	if err := runStamp([]string{"-in", in, "-out", out}); err != nil {
-		t.Fatalf("runStamp: %v", err)
+	err := runVerify([]string{one, two})
+	if err == nil {
+		t.Fatal("expected two identical binaries to fail the distinctness check")
 	}
-	got, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, img) {
-		t.Fatal("an unstamped build must copy the binary byte-for-byte")
+	if !strings.Contains(err.Error(), "is shared by 2 binaries") {
+		t.Fatalf("error does not name the collision: %v", err)
 	}
 }
 
-func TestRunStampNonELFCopies(t *testing.T) {
+func TestRunSetNonELFCopies(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "not-an-elf")
-	out := filepath.Join(dir, "not-an-elf_stamped")
+	out := filepath.Join(dir, "not-an-elf_out")
 	payload := []byte("#!/bin/sh\necho hello\n")
 	if err := os.WriteFile(in, payload, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	status := writeStatus(t, dir)
 
-	if err := runStamp([]string{"-in", in, "-out", out, "-status-file", status}); err != nil {
-		t.Fatalf("runStamp: %v", err)
+	if err := runSet([]string{"-in", in, "-out", out}); err != nil {
+		t.Fatalf("runSet: %v", err)
 	}
 	got, err := os.ReadFile(out)
 	if err != nil {
@@ -289,19 +308,36 @@ func TestRunStampNonELFCopies(t *testing.T) {
 
 func TestRunVerifyWritesMarker(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "binary")
-	if err := os.WriteFile(bin, synthELF(t, bytes.Repeat([]byte{0x49}, buildIDLen)), 0o755); err != nil {
-		t.Fatal(err)
+	one, two := filepath.Join(dir, "one"), filepath.Join(dir, "two")
+	writeELF(t, one, 4)
+	writeELF(t, two, 5)
+	var ids []string
+	for _, p := range []string{one, two} {
+		if err := runSet([]string{"-in", p, "-out", p}); err != nil {
+			t.Fatalf("runSet: %v", err)
+		}
+		buf, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := readBuildID(bytes.NewReader(buf))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, string(id))
 	}
+
 	marker := filepath.Join(dir, "marker.txt")
-	if err := runVerify([]string{"-marker", marker, bin}); err != nil {
+	if err := runVerify([]string{"-marker", marker, one, two}); err != nil {
 		t.Fatalf("runVerify: %v", err)
 	}
 	body, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), strings.Repeat("49", buildIDLen)) {
-		t.Fatalf("marker does not report the build ID: %q", body)
+	for _, id := range ids {
+		if !strings.Contains(string(body), hex.EncodeToString([]byte(id))) {
+			t.Fatalf("marker %q does not report build ID %x", body, id)
+		}
 	}
 }

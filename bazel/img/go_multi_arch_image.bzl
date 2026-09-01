@@ -4,16 +4,18 @@ load("@rules_img//img:image.bzl", "image_index", "image_manifest")
 load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
-load("//tools/buildid:defs.bzl", "stamp_select", "stamped_build_id")
+load("//tools/buildid:defs.bzl", "content_build_id")
 
 def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None):
     """
     Creates a containerized binary from Go sources.
 
-    Every ELF that goes into the image passes through `stamped_build_id` first,
-    which rewrites its GNU build-ID to the release commit SHA under `--stamp`
-    (#651). Dev and PR-CI builds are `--nostamp` and get a byte-identical copy of
-    the plain binary, so `bazel run`/`bazel test` behaviour is unchanged.
+    Every ELF that goes into the image passes through `content_build_id` first,
+    which rewrites its GNU build-ID to a hash of its own bytes (#651, #653) so
+    that no two released binaries share an ID. It is unconditional — a content
+    hash needs no workspace status — so dev, PR-CI and release images all carry
+    correct, self-verifying IDs and `bazel run`/`bazel test` behaviour is
+    unchanged.
 
     Parameters:
         name:  name of the image
@@ -26,28 +28,26 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
     binary_name = binary[1:]
     entrypoint = "/{}".format(binary_name)
 
-    stamped_binary = "{}_stamped_binary".format(name)
-    stamped_build_id(
-        name = stamped_binary,
+    image_binary = "{}_buildid_binary".format(name)
+    content_build_id(
+        name = image_binary,
         binary = binary,
-        stamp = stamp_select(),
         # Public so //tools/buildid:release_build_ids can assert on the exact
         # ELF that ships, not on a rebuild of it.
         visibility = ["//visibility:public"],
     )
 
-    stamped_tars_layer = None
+    image_tars_layer = None
     if tars_layer:
-        stamped_tars_layer = {}
+        image_tars_layer = {}
         for i, path in enumerate(tars_layer.keys()):
-            stamped_extra = "{}_stamped_extra_{}".format(name, i)
-            stamped_build_id(
-                name = stamped_extra,
+            extra = "{}_buildid_extra_{}".format(name, i)
+            content_build_id(
+                name = extra,
                 binary = tars_layer[path],
-                stamp = stamp_select(),
                 visibility = ["//visibility:public"],
             )
-            stamped_tars_layer[path] = ":" + stamped_extra
+            image_tars_layer[path] = ":" + extra
 
     string_flag(
         name = "release_tag",
@@ -57,7 +57,7 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
     image_layer(
         name = "binary_layer",
         srcs = {
-            entrypoint: ":" + stamped_binary,
+            entrypoint: ":" + image_binary,
         },
         default_metadata = file_metadata(
             mode = "0755",
@@ -68,7 +68,7 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
 
     image_layer(
         name = "additional_layer",
-        srcs = stamped_tars_layer,
+        srcs = image_tars_layer,
         default_metadata = file_metadata(
             mode = "0755",
         ),
@@ -79,7 +79,7 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
     image_manifest(
         name = "image_manifest",
         base = base,
-        layers = [":binary_layer", ":additional_layer"] if stamped_tars_layer else [":binary_layer"],
+        layers = [":binary_layer", ":additional_layer"] if image_tars_layer else [":binary_layer"],
         visibility = ["//visibility:private"],
         entrypoint = [entrypoint],
     )

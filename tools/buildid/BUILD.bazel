@@ -1,15 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
-load("//tools/buildid:defs.bzl", "build_id_check", "stamp_select")
-
-# `--stamp` is a native Bazel option, so `values` reads it directly — the same
-# config_setting rules_go uses for its own stamping. Everything downstream (the
-# image macro, the release guard) selects on this, so a plain dev build keeps the
-# unmodified go_binary and only release builds pay for the extra copy.
-config_setting(
-    name = "stamp_enabled",
-    values = {"stamp": "true"},
-    visibility = ["//visibility:public"],
-)
+load("//tools/buildid:defs.bzl", "build_id_check")
 
 go_library(
     name = "buildid_lib",
@@ -33,22 +23,24 @@ go_test(
     embed = [":buildid_lib"],
 )
 
-# Acceptance guard for #651: fails the build if any binary that ships in a
-# released image lacks a GNU build-ID note, or — under `--stamp`, i.e. the
-# publish workflow — carries anything other than the release commit SHA.
-# Built by `bazel build //...` and explicitly (with --stamp) by the publish
-# workflow, so a regression cannot reach a published image.
+# Acceptance guard for #651 and #653 over every binary that ships in a released
+# image. It fails the build if any of them lacks a GNU build-ID note, carries a
+# note that is not the hash of its own content, or shares an ID with another —
+# the collision that made Pyroscope symbol upload unsafe.
+#
+# It needs no `--stamp`: the IDs are content-derived, so the property holds (and
+# is checked) in every build configuration, including PR CI. `bazel build //...`
+# covers it, and publish.yaml re-states it to print the per-binary report.
 build_id_check(
     name = "release_build_ids",
     binaries = [
-        "//agent/cmd/agent:agent_image_stamped_binary",
-        "//agent/cmd/mesh-dns:mesh-dns_image_stamped_binary",
-        "//cni/cmd/cni-install:cni-install_image_stamped_binary",
+        "//agent/cmd/agent:agent_image_buildid_binary",
+        "//agent/cmd/mesh-dns:mesh-dns_image_buildid_binary",
+        "//cni/cmd/cni-install:cni-install_image_buildid_binary",
         # The CNI plugin the installer drops on the host — a second released ELF
         # inside the cni-install image.
-        "//cni/cmd/cni-install:cni-install_image_stamped_extra_0",
-        "//controller/cmd/controller:controller_image_stamped_binary",
-        "//registrar/cmd/registrar:registrar_image_stamped_binary",
+        "//cni/cmd/cni-install:cni-install_image_buildid_extra_0",
+        "//controller/cmd/controller:controller_image_buildid_binary",
+        "//registrar/cmd/registrar:registrar_image_buildid_binary",
     ],
-    stamp = stamp_select(),
 )

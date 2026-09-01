@@ -37,16 +37,18 @@ jobs:
         # hosted executor pool and reuses the cache warmed by PR `ci` builds.
         run: |
           bazel build --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //...
-      # Acceptance guard for #651. Under --stamp, //tools/buildid:release_build_ids
-      # fails the build unless every binary that ships in a released image carries
-      # a GNU build-ID equal to this commit's SHA. It is already covered by the
-      # `//...` build above; this step re-states it so a failure names the cause
-      # and prints the per-binary report the Pyroscope symbol upload is keyed on.
+      # Acceptance guard for #651 and #653. //tools/buildid:release_build_ids
+      # fails the build unless every binary that ships in a released image
+      # carries a GNU build-ID that (a) is present, (b) equals the SHA-1
+      # recomputed from that binary's own bytes, and (c) is shared with no other
+      # released binary. It is already covered by the `//...` build above; this
+      # step re-states it so a failure names the cause and prints the per-binary
+      # report the Pyroscope symbol upload is keyed on.
       - name: Verify released GNU build-IDs
         run: |
           bazel build --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             //tools/buildid:release_build_ids
-          echo "expected build-ID (release commit): ${{ github.sha }}"
+          echo "per-binary GNU build-IDs (content-derived, pairwise distinct):"
           cat bazel-bin/tools/buildid/release_build_ids.txt
       # `*.push` publishes each chart together with the images it references
       # (aether.push -> agent + mesh-dns + cni-install + registrar + controller
