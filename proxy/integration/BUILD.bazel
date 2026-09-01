@@ -2,25 +2,23 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 exports_files(["image.yaml"])
 
-# aether #651: assert the custom Envoy's `.note.gnu.build-id` is present and is
-# exactly the id the stamped link was handed — Envoy's generated
-# gnu_build_id.ldscript, i.e. `--build-id=0x<BUILD_SCM_REVISION>`. Comparing
-# against the ldscript rather than against a second read of the workspace status
-# keeps the test free of stamping races while still proving end-to-end that
-# `envoy_cc_binary(stamped = True)` took effect; the release workflow does the
-# `== github.sha` comparison on top.
+# aether #651/#653: assert the custom Envoy carries a `.note.gnu.build-id` and
+# that it is 20 bytes wide — the SHA-1 shape only `--build-id=sha1` produces
+# (the toolchain default is a 16-byte uuid, `fast` is 8 bytes, and the clang
+# driver emits no note at all unless `--build-id` is passed). That is the
+# content hash lld computes over the linked output, so the proxy can never again
+# share an id with the Go binaries the way the commit stamp made it.
+#
+# The hash is not recomputed here: lld's sha1 build-ID is a tree hash over its
+# output buffer, an internal detail of the linker. That the flag produced the
+# note is asserted at the source instead — proxy-release.yml greps the CppLink
+# action's command line for `--build-id=sha1` before publishing.
 #
 # No extra build cost: //:envoy is already compiled for //:image_test.
 sh_test(
     name = "build_id_test",
     size = "small",
     srcs = ["check_build_id.sh"],
-    args = [
-        "$(rootpath //:envoy)",
-        "$(rootpath @envoy//bazel:gnu_build_id.ldscript)",
-    ],
-    data = [
-        "//:envoy",
-        "@envoy//bazel:gnu_build_id.ldscript",
-    ],
+    args = ["$(rootpath //:envoy)"],
+    data = ["//:envoy"],
 )
