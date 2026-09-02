@@ -1,0 +1,135 @@
+# The soak harness's mesh_dns target.
+#
+# The external prober resolves `echo.<ns>.aether.internal` through the mesh DNS path
+# on every node, so THIS is the workload the mesh_dns SLI tier actually measures. It
+# is deliberately separate from `test/e2e/testdata/echo.yaml`, which is a fixture the
+# CNI e2e tests apply on a single-node kind cluster and must stay minimal.
+#
+# Why it is here at all (2026-09-02): during the aborted soak this service ran as a
+# SINGLE replica pinned by chance to main-worker-01 — the node hosting the whole o11y
+# stack — with a 10m CPU request and no repo-owned definition. When that node
+# saturated, echo starved, and the mesh_dns tier reported ~30% errors fleet-wide
+# (66% on worker-01's own prober). The SLI was measuring one starved pod rather than
+# the mesh. Nothing in either repo defined it, so there was no place to fix it.
+#
+#   kubectl apply -n aether-test -f e2e/soak/echo.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: echo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  labels:
+    # Marks the Service for mesh projection; the agent generates the
+    # <svc>.<ns>.aether.internal record from it, which is what the prober resolves.
+    aether.io/mesh-service: "true"
+  annotations:
+    aether.io/service: echo
+    # The application's own listener. The Service port below is the mesh inbound
+    # port; the proxy forwards to this port inside the pod.
+    aether.io/port: "8080"
+    aether.io/app-protocol: http
+spec:
+  type: ClusterIP
+  selector:
+    app: echo
+  ports:
+    - name: mesh
+      port: 18081
+      targetPort: 18081
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  labels:
+    app: echo
+spec:
+  # THREE replicas, not one. The prober's mesh_dns tier is only a mesh signal if a
+  # single busy node cannot dominate it: with one replica the tier degrades to a
+  # health check of whichever node that pod landed on.
+  replicas: 3
+  # Surge a new Ready pod before terminating the old one so a rollout never leaves
+  # the Service with zero ready endpoints (the source of the transient 503s seen on
+  # echo during the 2026-06-29 redirect-all soak). The mesh drains the terminating
+  # pod via its deletionTimestamp watch.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: echo
+  template:
+    metadata:
+      labels:
+        app: echo
+        # Without this the CNI installs no capture/DNS redirect and the pod is
+        # invisible to the mesh — a harness bug that reads as a mesh outage.
+        aether.io/managed: "true"
+    spec:
+      serviceAccountName: echo
+      # Spread the replicas across nodes. SOFT (ScheduleAnyway): on a single-node
+      # kind cluster, or when a node is cordoned, scheduling must still succeed —
+      # a DoNotSchedule constraint would leave replicas Pending and take the SLI
+      # target down entirely, which is worse than an uneven spread.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: echo
+      # Hold the pod briefly after deletion is requested so endpoint deregistration
+      # (mesh EDS DRAINING) and in-flight requests settle before SIGTERM. Native
+      # sleep preStop (k8s >= 1.29) — the distroless echo-basic image has no shell.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
+          env:
+            - name: HTTP_PORT
+              value: "8080"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 8080
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          # Sized from the soak's actual load, not copied from the e2e fixture's
+          # 10m. Each replica serves its share of the prober's ~50 req/s plus the
+          # k6 load; a 10m request makes the scheduler treat this as free and lets
+          # it be starved first on a busy node, which is exactly what happened.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            privileged: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
