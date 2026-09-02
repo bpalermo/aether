@@ -17,6 +17,13 @@ the very churn being tested. Never grade a soak on mesh self-SLI alone.
 ## Run
 
 ```bash
+# 0. The mesh_dns SLI target. Only needed once (and after any change to it), but
+#    CHECK IT before a run: the prober resolves echo.<ns>.aether.internal on every
+#    node, so if this is a single replica the mesh_dns tier measures that one pod's
+#    node instead of the mesh. See the gotcha below.
+kubectl apply -n aether-test -f e2e/soak/echo.yaml
+kubectl -n aether-test get pods -l app=echo -o wide   # expect 3, on 3 different nodes
+
 # 1. Load the k6 script as a ConfigMap (source of truth is the .js file here).
 kubectl create configmap k6-soak-script -n aether-test \
   --from-file=test.js=e2e/soak/k6-mesh-soak.js \
@@ -70,9 +77,21 @@ Each of these invalidated a real run:
    digest. Use `helm get values <rel> -n <ns> -o yaml > /tmp/v.yaml` then `-f /tmp/v.yaml`.
 6. **k6 needs 1Gi.** At 256Mi runners OOM-restart ~3-5h into the 7h40m run, fragmenting
    the summary.
+7. **`echo` must be multi-replica and spread, or the mesh_dns tier is not a mesh
+   signal.** It is the *only* target of that tier, so its own health is
+   indistinguishable from the mesh's. On 2026-09-02 it was a single replica that
+   happened to sit on the node hosting the entire o11y stack, with a 10m CPU request;
+   when that node saturated, echo starved and mesh_dns reported ~30% errors fleet-wide
+   (66% on the co-located prober) while the mesh itself was fine — and the run was
+   ungradeable. It had no repo-owned definition at all, so there was nowhere to fix
+   it; `e2e/soak/echo.yaml` now owns it with 3 replicas, a soft hostname spread, and
+   honest requests. It is deliberately NOT `test/e2e/testdata/echo.yaml`, which the
+   CNI e2e tests apply on single-node kind and must stay minimal.
 
 ## Files
 
+- `echo.yaml` — the mesh_dns SLI target (3 replicas, soft hostname spread). Apply before
+  a run; it is the workload the mesh_dns tier actually measures.
 - `k6-mesh-soak.js` — load script (constant-arrival-rate, qualified mesh names, no OTLP).
 - `k6-runner.yaml` — the 5-node runner DaemonSet.
 - `churn.sh` — the 30-roll churn driver; takes a build label for the log header.
