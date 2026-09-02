@@ -329,6 +329,13 @@ func setupSpireSource(ctx context.Context) (*commonspire.Source, string, error) 
 	// match the secrets the SPIRE bridge delivers. Peer authorization uses the
 	// mesh domain — addressing (<svc>.<mesh-domain>) and identity
 	// (spiffe://<mesh-domain>/...) are one domain by design, never split.
+	//
+	// This wait is on the startup path, before the manager serves /healthz, so it
+	// is bounded (commonspire.SourceTimeout) and announced: an unattested agent
+	// used to stall here with no log line at all until the liveness probe killed
+	// it (issue #662).
+	l.InfoContext(ctx, "waiting for the SPIRE Workload API to issue this agent's SVID",
+		"socket", cfg.SpireWorkloadSocketPath, "timeout", commonspire.SourceTimeout)
 	spireSource, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
 	if err != nil {
 		return nil, "", err
