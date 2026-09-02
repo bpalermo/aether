@@ -50,8 +50,8 @@ var rootCmd = &cobra.Command{
 	Long:         "Runs the Aether registrar that proxies registry operations, caches endpoints, and streams changes to agents.",
 	SilenceUsage: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) (err error) {
-		l, logShutdown, err = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
-		return err
+		l, logShutdown = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
+		return nil
 	},
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runRegistrar(cmd.Context())
@@ -164,7 +164,7 @@ func bootstrapManager(ctx context.Context) (ctrl.Manager, func(context.Context) 
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, bootstrapOpts...)
+	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, l, bootstrapOpts...)
 	if err != nil {
 		return nil, nil, err
 	}

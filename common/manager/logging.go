@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"aethermesh.dev/common/log"
@@ -28,22 +27,34 @@ func SetupLogging(debug bool, name string) *slog.Logger {
 // ctx passed to the *Context log methods. controller-runtime is wired via the
 // logr→slog bridge over the same handler. The returned shutdown flushes and stops
 // the LoggerProvider; it is nil when OTLP logging is disabled.
-func SetupManagerLogging(ctx context.Context, cfg Config, name, version string) (*slog.Logger, func(context.Context) error, error) {
+//
+// It returns no error by design (issue #662): OTLP log export is best-effort, so
+// a collector that is missing, unreachable or shedding degrades the component to
+// stderr-only logging with a WARN rather than killing the process. Setup runs on
+// a detached, bounded context so it can neither spend the caller's startup budget
+// nor observe a cancellation of the caller's context, and the returned shutdown
+// flushes on its own detached context so the final flush still runs after SIGTERM.
+func SetupManagerLogging(ctx context.Context, cfg Config, name, version string) (*slog.Logger, func(context.Context) error) {
 	if !cfg.LogsEnabled || cfg.OTLPEndpoint == "" {
-		return SetupLogging(cfg.Debug, name), nil, nil
+		return SetupLogging(cfg.Debug, name), nil
 	}
 
-	provider, shutdown, err := setup.SetupLogs(ctx, setup.Config{
+	setupCtx, cancel := setup.DetachedTimeout(ctx, setup.SetupTimeout)
+	defer cancel()
+
+	provider, shutdown, err := setup.SetupLogs(setupCtx, setup.Config{
 		ServiceName:    name,
 		ServiceVersion: version,
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to setup OTel logs: %w", err)
+		l := SetupLogging(cfg.Debug, name)
+		l.WarnContext(ctx, "failed to set up OTel log export; logging to stderr only", "error", err)
+		return l, nil
 	}
 
 	otelHandler := otelslog.NewHandler(name, otelslog.WithLoggerProvider(provider))
 	l := log.Named(log.NewLoggerWithHandler(cfg.Debug, otelHandler), name)
 	ctrl.SetLogger(logr.FromSlogHandler(l.Handler()))
-	return l, shutdown, nil
+	return l, setup.BestEffortShutdown(shutdown)
 }

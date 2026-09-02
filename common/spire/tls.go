@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
@@ -19,15 +20,47 @@ import (
 // Callers own the returned source and must Close it on shutdown.
 type Source = workloadapi.X509Source
 
+// SourceTimeout bounds how long NewSource waits for the Workload API to issue
+// this workload's first SVID.
+//
+// The wait used to be unbounded, which made an unavailable SPIRE agent (or a
+// SPIRE server that cannot attest it) a silent, indefinite stall on the startup
+// path. Every binary here initializes its dependencies BEFORE starting the
+// controller-runtime manager, and the manager is what starts answering /healthz
+// and /readyz — so a stall here is invisible to the process but fatal to it: the
+// chart's liveness probe (10s period, default 3 failures) kills the container
+// after roughly 35s, the signal handler cancels the shared startup context, and
+// the wait aborts with the misleading "context canceled". That is the crash loop
+// in issue #662. Failing fast, below the liveness budget, restarts on an accurate
+// error instead of an opaque probe kill.
+const SourceTimeout = 25 * time.Second
+
 // NewSource connects to the SPIRE Workload API at socketPath and returns an
-// X.509 SVID source that watches for rotations. socketPath may be a filesystem
-// path to the agent UDS (e.g. /run/secrets/workload-spiffe-uds/socket) or a
-// full endpoint address (unix://… / tcp://…).
+// X.509 SVID source that watches for rotations, waiting up to SourceTimeout for
+// the first SVID. socketPath may be a filesystem path to the agent UDS
+// (e.g. /run/secrets/workload-spiffe-uds/socket) or a full endpoint address
+// (unix://… / tcp://…).
 func NewSource(ctx context.Context, socketPath string) (*Source, error) {
+	return NewSourceWithTimeout(ctx, socketPath, SourceTimeout)
+}
+
+// NewSourceWithTimeout is NewSource with an explicit bound on the first-SVID
+// wait. A non-positive timeout waits as long as ctx allows.
+//
+// The bound applies to the initial wait only: go-spiffe derives the rotation
+// watcher's context from context.Background() (workloadapi.newWatcher), so the
+// returned source keeps refreshing SVIDs for its whole lifetime regardless of
+// this timeout. Callers still own the source and must Close it.
+func NewSourceWithTimeout(ctx context.Context, socketPath string, timeout time.Duration) (*Source, error) {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	src, err := workloadapi.NewX509Source(ctx,
 		workloadapi.WithClientOptions(workloadapi.WithAddr(socketAddr(socketPath))))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create SPIRE Workload API source: %w", err)
+		return nil, fmt.Errorf("failed to create SPIRE Workload API source (socket %s): %w", socketPath, err)
 	}
 	return src, nil
 }

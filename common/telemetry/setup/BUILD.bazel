@@ -4,6 +4,7 @@ go_library(
     name = "setup",
     srcs = [
         "healthz.go",
+        "lifecycle.go",
         "logs.go",
         "options.go",
         "setup.go",
@@ -34,6 +35,7 @@ go_library(
 go_test(
     name = "setup_test",
     srcs = [
+        "lifecycle_test.go",
         "logs_test.go",
         "setup_test.go",
         "tracing_test.go",
