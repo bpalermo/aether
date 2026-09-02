@@ -126,7 +126,7 @@ func runEdge(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, func(o *ctrl.Options) {
+	result, err := manager.Bootstrap(ctx, cfg.Config, edgeName, Version, l, func(o *ctrl.Options) {
 		o.Scheme = scheme
 	})
 	if err != nil {

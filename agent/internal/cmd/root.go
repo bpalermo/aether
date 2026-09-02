@@ -95,8 +95,8 @@ var rootCmd = &cobra.Command{
 		}
 		applyMeshConfig(mc)
 
-		l, logShutdown, err = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
-		return err
+		l, logShutdown = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
+		return nil
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runAgent(cmd.Context())
@@ -226,7 +226,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		},
 	}
 
-	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version)
+	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, l)
 	if err != nil {
 		return err
 	}
