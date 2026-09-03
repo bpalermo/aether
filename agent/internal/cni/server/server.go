@@ -111,6 +111,14 @@ type CNIServer struct {
 	// under lifecycleMu.
 	staleRunningStreaks map[string]int
 
+	// pruneBreakerEngaged and pruneBreakerTrippedPasses track the mass-delete
+	// circuit breaker across sweep passes so its ERROR line can be loud on the
+	// transition into (and out of) the tripped state and rate-limited while it
+	// stands (#670: it logged every pass on every node for weeks unnoticed).
+	// Accessed only under lifecycleMu.
+	pruneBreakerEngaged       bool
+	pruneBreakerTrippedPasses int
+
 	// evictPod evicts a pod via the Kubernetes Eviction API (policy/v1,
 	// PDB-respecting). Overridable in tests (the fake client has no eviction
 	// subresource). Nil disables self-heal eviction.
