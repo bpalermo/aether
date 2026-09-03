@@ -534,16 +534,27 @@ func localityPriority(localRegion, localZone string, endpoint *registryv1.Servic
 func ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint *registryv1.ServiceEndpoint, localRegion, localZone string, wp WaypointRewrite) *endpointv3.LocalityLbEndpoints {
 	viaWaypoint := wp.viaWaypoint(endpoint)
 
-	subsetKeys := map[string]string{
-		subsetClusterKey: endpoint.GetClusterName(),
-		subsetIPKey:      endpoint.GetIp(),
+	// Provider-defined subset keys go in FIRST, and reserved system keys are
+	// dropped from them: endpoint metadata comes from the workload's own
+	// metadata.endpoint.aether.io/* annotations (registry.NewServiceEndpointFromCNIPod),
+	// i.e. pod-supplied input, and used to be applied AFTER the built-ins — so a
+	// pod could overwrite the ip/pod/namespace/cluster envoy.lb fields that back
+	// the NO_FALLBACK x-aether-ip / x-aether-pod pins (answering for another
+	// pod), or stamp the waypoint tag and steer the cluster's transport-socket
+	// matcher onto the waypoint SNI (#669). The registration facts the control
+	// plane derives always win now.
+	subsetKeys := make(map[string]string, len(endpoint.GetMetadata())+5)
+	for k, v := range endpoint.GetMetadata() {
+		if _, reserved := reservedSubsetKeys[k]; reserved {
+			continue
+		}
+		subsetKeys[k] = v
 	}
+	subsetKeys[subsetClusterKey] = endpoint.GetClusterName()
+	subsetKeys[subsetIPKey] = endpoint.GetIp()
 	if endpoint.GetKubernetesMetadata() != nil {
 		subsetKeys[subsetPodNamespaceKey] = endpoint.GetKubernetesMetadata().GetNamespace()
 		subsetKeys[subsetPodNameKey] = endpoint.GetKubernetesMetadata().GetPodName()
-	}
-	for k, v := range endpoint.GetMetadata() {
-		subsetKeys[k] = v
 	}
 	if viaWaypoint {
 		// Tag the endpoint so the cluster's transport-socket matcher selects the

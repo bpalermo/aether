@@ -39,13 +39,19 @@ const (
 var subsetKeyPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // reservedSubsetKeys are the built-in envoy.lb keys that cannot be redefined
-// by endpoint metadata annotations: ip/pod have fixed headers, and
-// cluster/namespace are registration facts, not routing dimensions.
+// by endpoint metadata annotations: ip/pod have fixed headers, cluster/namespace
+// are registration facts, not routing dimensions, and waypoint is the system tag
+// the cluster's transport-socket matcher branches on (proposal 019). Endpoint
+// metadata carrying one of these is dropped, both as a subset selector
+// (ValidSubsetKey) and from the endpoint's envoy.lb metadata itself
+// (ServiceLocalityLbEndpointFromRegistryEndpoint) — pod-supplied annotations
+// must not be able to forge a control-plane fact (#669).
 var reservedSubsetKeys = map[string]struct{}{
 	subsetIPKey:           {},
 	subsetPodNameKey:      {},
 	subsetClusterKey:      {},
 	subsetPodNamespaceKey: {},
+	subsetWaypointKey:     {},
 }
 
 // ValidSubsetKey reports whether a provider-defined metadata key may be used

@@ -3,7 +3,6 @@ package proxy
 import (
 	"fmt"
 
-	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	meshconst "aethermesh.dev/common/constants/mesh"
@@ -105,17 +104,6 @@ func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClus
 	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), appAddr, primary, AppHealthPathFromPod(cniPod), isTCP)
 
 	return appClusters, healthCluster
-}
-
-// SpiffeIDFromPod returns the SPIFFE ID for the pod. It first checks the
-// aether.io/spiffe-id annotation. If not set, it constructs the SPIFFE ID
-// from the trust domain, namespace, and service account using the standard
-// SPIRE convention: spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>.
-func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
-	if id, ok := cniPod.GetAnnotations()[xdsconst.AnnotationSpiffeID]; ok && id != "" {
-		return id
-	}
-	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetServiceAccount())
 }
 
 func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {

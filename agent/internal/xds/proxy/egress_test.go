@@ -173,6 +173,50 @@ func TestServiceLocalityLbEndpointFromRegistryEndpoint_EDSMode(t *testing.T) {
 		"EDS-mode endpoints opt out of active health checking and rely on EDS health")
 }
 
+// TestServiceLocalityLbEndpointFromRegistryEndpoint_MetadataCannotForgeBuiltins
+// is the #669 regression: endpoint metadata is pod-supplied (the
+// metadata.endpoint.aether.io/* annotations), so it must never overwrite the
+// built-in envoy.lb keys the control plane derives — ip/pod back the
+// NO_FALLBACK x-aether-ip / x-aether-pod pins, and waypoint steers the
+// cluster's transport-socket matcher.
+func TestServiceLocalityLbEndpointFromRegistryEndpoint_MetadataCannotForgeBuiltins(t *testing.T) {
+	ep := &registryv1.ServiceEndpoint{
+		Ip:          "10.0.0.5",
+		ClusterName: "svc-a",
+		KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{
+			Namespace: "tenant-a",
+			PodName:   "svc-a-1",
+			NodeIp:    "192.168.1.10",
+		},
+		Metadata: map[string]string{
+			subsetIPKey:           "10.9.9.9",
+			subsetPodNameKey:      "payments-0",
+			subsetPodNamespaceKey: "prod",
+			subsetClusterKey:      "other-cluster",
+			subsetWaypointKey:     subsetWaypointValue,
+			"version":             "v2",
+		},
+	}
+
+	lb := ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "", WaypointRewrite{}).
+		GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
+
+	assert.Equal(t, "10.0.0.5", lb[subsetIPKey].GetStringValue(), "pod-supplied metadata must not forge the endpoint IP")
+	assert.Equal(t, "svc-a-1", lb[subsetPodNameKey].GetStringValue(), "pod-supplied metadata must not forge the pod name")
+	assert.Equal(t, "tenant-a", lb[subsetPodNamespaceKey].GetStringValue(), "pod-supplied metadata must not forge the namespace")
+	assert.Equal(t, "svc-a", lb[subsetClusterKey].GetStringValue(), "pod-supplied metadata must not forge the cluster")
+	assert.NotContains(t, lb, subsetWaypointKey, "pod-supplied metadata must not stamp the waypoint tag")
+	// Provider-defined (non-reserved) keys still travel.
+	assert.Equal(t, "v2", lb["version"].GetStringValue())
+
+	// The control plane's own waypoint tag is still stamped when it decides the
+	// endpoint is reached through the node waypoint.
+	wp := WaypointRewrite{Enabled: true, TunnelPort: 18021, LocalCluster: "local"}
+	lb = ServiceLocalityLbEndpointFromRegistryEndpoint(ep, "", "", wp).
+		GetLbEndpoints()[0].GetMetadata().GetFilterMetadata()[envoyFilterMetadataSubsetNamespace].GetFields()
+	assert.Equal(t, subsetWaypointValue, lb[subsetWaypointKey].GetStringValue())
+}
+
 func TestEndpointHealthStatus(t *testing.T) {
 	assert.Equal(t, corev3.HealthStatus_UNHEALTHY,
 		endpointHealthStatus(&registryv1.ServiceEndpoint{Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY}))
