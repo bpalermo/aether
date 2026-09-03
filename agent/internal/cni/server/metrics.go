@@ -37,6 +37,7 @@ type cniMetrics struct {
 	storagePods        metric.Int64Gauge
 	healthTransitions  metric.Int64Counter
 	promotionDelay     metric.Float64Histogram
+	spiffeIDOverrides  metric.Int64Counter
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
@@ -97,8 +98,22 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		metric.WithUnit("s")); err != nil {
 		return nil, fmt.Errorf("promotion delay: %w", err)
 	}
+	if m.spiffeIDOverrides, err = meter.Int64Counter("aether.agent.identity.spiffe_id_override_rejected",
+		metric.WithDescription("Pods carrying the rejected aether.io/spiffe-id annotation, whose mesh identity was derived from the pod's own namespace/ServiceAccount instead (#669); nonzero means someone is trying to choose a workload identity by annotation")); err != nil {
+		return nil, fmt.Errorf("spiffe id overrides: %w", err)
+	}
 
 	return m, nil
+}
+
+// spiffeIDOverrideRejected records one pod whose aether.io/spiffe-id annotation
+// was ignored. Counted per pod-lifecycle event that reads the pod's identity (a
+// CNI ADD, or an agent-restart resubscribe), not per config push.
+func (m *cniMetrics) spiffeIDOverrideRejected(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.spiffeIDOverrides.Add(ctx, 1)
 }
 
 func (m *cniMetrics) sweepCompleted(ctx context.Context, ghostsRemoved, missingRegistered, stalePruned, orphansPruned, missingStorage, staleRunning, storedPods int, err error) {

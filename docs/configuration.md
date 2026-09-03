@@ -361,7 +361,7 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 | edge GatewayClass controller | `gateway.aether.io/edge` | `controllerName` of the edge GatewayClass. |
 | mesh (GAMMA) controller | `gateway.aether.io/mesh` | `controllerName` for Service-parented route status. |
 | Gateway HTTP redirect | `gateway.aether.io/http-redirect: "true"` | Opt a Gateway's plain-HTTP listener into HTTP→HTTPS 301. |
-| workload SPIFFE ID | `aether.io/spiffe-id` | Workload SPIFFE ID (SDS secret name for the pod's TLS cert). |
+| workload SPIFFE ID | `aether.io/spiffe-id` | **Rejected and ignored** (#669). A pod's mesh identity is always `spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>`, derived from the API server. A pod carrying this annotation is logged at WARN and counted by `aether.agent.identity.spiffe_id_override_rejected`. |
 
 ### Always-ignored namespaces
 

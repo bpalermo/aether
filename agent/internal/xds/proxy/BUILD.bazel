@@ -24,6 +24,7 @@ go_library(
         "networkfilter.go",
         "projection.go",
         "route.go",
+        "spiffe.go",
         "stats_filter.go",
         "subset.go",
         "tracing.go",

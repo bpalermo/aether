@@ -14,8 +14,14 @@ const (
 	// round-trip of first-request latency.
 	AnnotationConfigUpstreams = "config.aether.io/upstreams"
 
-	// AnnotationSpiffeID is the pod annotation key for specifying the workload's SPIFFE ID.
-	// When set, this is used as the SDS secret name for the workload's TLS certificate.
+	// AnnotationSpiffeID is a REJECTED pod annotation, retained only so the agent
+	// can detect and report it (#669). It once overrode the workload's SPIFFE ID
+	// — the SDS secret name for the pod's TLS certificate — but pod annotations
+	// are attacker-controlled input on the CNI ADD path, so honouring it let any
+	// principal who can create a pod choose the mesh identity that pod's proxy
+	// config presents. A pod's identity is now derived from the trust domain and
+	// its own namespace/ServiceAccount, always (proxy.SpiffeIDFromPod). Setting
+	// this annotation has no effect beyond a WARN log and a counter.
 	AnnotationSpiffeID = "aether.io/spiffe-id"
 
 	// AnnotationEndpointHealthPath is the pod annotation key for the HTTP path the

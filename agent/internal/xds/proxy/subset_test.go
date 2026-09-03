@@ -15,7 +15,7 @@ import (
 func TestValidSubsetKey(t *testing.T) {
 	for key, want := range map[string]bool{
 		"version": true, "shard-id": true, "v2": true,
-		"ip": false, "pod": false, "cluster": false, "namespace": false, // reserved
+		"ip": false, "pod": false, "cluster": false, "namespace": false, "waypoint": false, // reserved
 		"": false, "-x": false, "x-": false, "UPPER": false, "a.b": false, "a_b": false,
 	} {
 		assert.Equal(t, want, ValidSubsetKey(key), "key %q", key)
