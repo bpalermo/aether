@@ -31,10 +31,12 @@ type cniMetrics struct {
 	missingStorage     metric.Int64Counter
 	sweepErrors        metric.Int64Counter
 	pruneBreaker       metric.Int64Counter
+	pruneBreakerOpen   metric.Int64Gauge
 	lostAddEvictions   metric.Int64Counter
 	staleRunningEvicts metric.Int64Counter
 	unmeshedPods       metric.Int64Gauge
 	storagePods        metric.Int64Gauge
+	staleStoragePods   metric.Int64Gauge
 	healthTransitions  metric.Int64Counter
 	promotionDelay     metric.Float64Histogram
 	spiffeIDOverrides  metric.Int64Counter
@@ -73,6 +75,10 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		metric.WithDescription("Ghost sweep passes whose mass-delete circuit breaker refused to prune (correlated netns-check failure suspected)")); err != nil {
 		return nil, fmt.Errorf("prune breaker: %w", err)
 	}
+	if m.pruneBreakerOpen, err = meter.Int64Gauge("aether.agent.ghost_sweep.prune_breaker_engaged",
+		metric.WithDescription("1 while the ghost sweep's mass-delete circuit breaker is withholding netns-derived pruning on this node, 0 when clear; a standing 1 means stale storage cannot be cleaned and will grow (#670)")); err != nil {
+		return nil, fmt.Errorf("prune breaker engaged: %w", err)
+	}
 	if m.lostAddEvictions, err = meter.Int64Counter("aether.agent.ghost_sweep.lost_add_evictions",
 		metric.WithDescription("Pods evicted by the ghost sweep to force a fresh CNI ADD after a lost one left them with no mesh listener")); err != nil {
 		return nil, fmt.Errorf("lost add evictions: %w", err)
@@ -88,6 +94,10 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	if m.storagePods, err = meter.Int64Gauge("aether.agent.storage.pods",
 		metric.WithDescription("Pods currently tracked in the agent's local file storage")); err != nil {
 		return nil, fmt.Errorf("storage pods: %w", err)
+	}
+	if m.staleStoragePods, err = meter.Int64Gauge("aether.agent.storage.stale_pods",
+		metric.WithDescription("Local storage pod entries this node's Kubernetes pod list does not account for (missed CNI DEL), whether or not they were prunable this pass; against aether.agent.storage.pods this is the direct stale-vs-live ratio (#670)")); err != nil {
+		return nil, fmt.Errorf("stale storage pods: %w", err)
 	}
 	if m.healthTransitions, err = meter.Int64Counter("aether.agent.liveness.health_transitions",
 		metric.WithDescription("Endpoint health transitions reflected into the registry by the liveness loop")); err != nil {
@@ -153,6 +163,33 @@ func (m *cniMetrics) pruneBreakerTripped(ctx context.Context) {
 		return
 	}
 	m.pruneBreaker.Add(ctx, 1)
+}
+
+// pruneBreakerState records whether the mass-delete circuit breaker is engaged
+// (1) or clear (0). Recorded every sweep pass, zero included, so "the breaker is
+// standing open" is a state an alert can match rather than a counter slope
+// somebody has to notice — the counter climbed once a minute on every node of
+// talos-main for weeks and went unremarked (#670).
+func (m *cniMetrics) pruneBreakerState(ctx context.Context, engaged bool) {
+	if m == nil {
+		return
+	}
+	var v int64
+	if engaged {
+		v = 1
+	}
+	m.pruneBreakerOpen.Record(ctx, v)
+}
+
+// staleStorageEntriesObserved records how many storage entries this pass had no
+// Kubernetes pod on this node — the stale backlog as DETECTED, independent of
+// whether it could be pruned. orphans_pruned reads zero both when there is no
+// staleness and when cleanup is blocked; this gauge tells those apart (#670).
+func (m *cniMetrics) staleStorageEntriesObserved(ctx context.Context, stale int) {
+	if m == nil {
+		return
+	}
+	m.staleStoragePods.Record(ctx, int64(stale))
 }
 
 // lostAddEvicted records a pod evicted to force a fresh CNI ADD (#567).
