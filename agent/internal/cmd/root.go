@@ -279,36 +279,8 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	// A node whose conflist has lost the aether entry cannot mesh a NEW pod, but
-	// its agent is otherwise perfectly healthy — so nothing stops the scheduler
-	// putting pods on it, and they come up unmeshed and silent (#667). Reporting
-	// NotReady lets the CONTROLLER's node-taint guard (proposal 033) re-arm the
-	// taint using the signal it already consumes, without making the agent a
-	// node-taint writer — the alternative proposal 033 explicitly rejected.
-	// A nil ChainState (--cni-conflist-reassert=false) makes this a no-op.
-	if err = m.AddReadyzCheck("cni-chained", cniconflist.ReadyChecker(chainStateOf(reasserter))); err != nil {
-		return fmt.Errorf("failed to set up the CNI chaining ready check: %w", err)
-	}
-
-	// Remove the aether startup taint from this node whenever it is present and
-	// this node can actually mesh a pod, so workload pods (which don't tolerate
-	// it) can schedule here. This is a reconciler on this agent's own Node, so it
-	// also drops the taint the controller's node-taint guard re-applies after a
-	// reboot or agent outage (issue #569, gaps G1/G2), not just the one the
-	// kubelet registered at boot. Unconditional (proposal 031): a no-op when the
-	// taint isn't present. Best-effort: NeedLeaderElection=false, never fails
-	// startup.
-	tr := &node.TaintRemover{
-		Client:     m.GetClient(),
-		NodeName:   cfg.NodeName,
-		SocketPath: cfg.CNIServerConfig.SocketPath,
-		Log:        l,
-	}
-	if chain := chainStateOf(reasserter); chain != nil {
-		tr.Chain = chain
-	}
-	if err = tr.SetupWithManager(m); err != nil {
-		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
+	if err = setupNodeGating(m, reasserter); err != nil {
+		return err
 	}
 
 	// Rebuild the cluster/endpoint/route snapshot when the registry reports
@@ -458,6 +430,48 @@ func newCNIConflistReasserter() *cniconflist.Reasserter {
 		return nil
 	}
 	return &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l}
+}
+
+// setupNodeGating wires the two mechanisms that decide whether the scheduler may
+// put pods on this node, both keyed on the same question: can this node actually
+// mesh a NEW pod?
+//
+//   - The readyz check. A node whose conflist has lost the aether entry cannot
+//     mesh a new pod, but its agent is otherwise perfectly healthy — so nothing
+//     stops the scheduler putting pods on it, and they come up unmeshed and
+//     silent (#667). Reporting NotReady lets the CONTROLLER's node-taint guard
+//     (proposal 033) re-arm the taint using the signal it already consumes,
+//     without making the agent a node-taint writer — the alternative proposal 033
+//     explicitly rejected.
+//   - The taint remover. It drops the startup taint once the node CAN mesh a pod,
+//     so workload pods (which don't tolerate it) can schedule here. A reconciler
+//     on this agent's own Node, so it also drops the taint the guard re-applies
+//     after a reboot or agent outage (issue #569, gaps G1/G2), not just the one
+//     the kubelet registered at boot. Unconditional (proposal 031): a no-op when
+//     the taint isn't present. Best-effort: NeedLeaderElection=false, never fails
+//     startup.
+//
+// The two compose: the guard arms the taint, and the remover then refuses to drop
+// it while the node is still unchained. A nil re-asserter
+// (--cni-conflist-reassert=false) reduces both to their pre-#667 behaviour.
+func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter) error {
+	chain := chainStateOf(reasserter)
+
+	if err := m.AddReadyzCheck("cni-chained", cniconflist.ReadyChecker(chain)); err != nil {
+		return fmt.Errorf("failed to set up the CNI chaining ready check: %w", err)
+	}
+
+	tr := &node.TaintRemover{
+		Client:     m.GetClient(),
+		NodeName:   cfg.NodeName,
+		SocketPath: cfg.CNIServerConfig.SocketPath,
+		Log:        l,
+		Chain:      chain,
+	}
+	if err := tr.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
+	}
+	return nil
 }
 
 // chainStateOf adapts the re-asserter to the ChainState interface its consumers

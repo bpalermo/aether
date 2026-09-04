@@ -55,10 +55,7 @@ func TestTaintRemoverKillSwitchIsSocketOnly(t *testing.T) {
 	cfg.CNIConflistReassert = false
 
 	reasserter := newCNIConflistReasserter()
-	tr := &node.TaintRemover{}
-	if chain := chainStateOf(reasserter); chain != nil {
-		tr.Chain = chain
-	}
+	tr := &node.TaintRemover{Chain: chainStateOf(reasserter)}
 
 	// Compared as an interface, not via assert.Nil: the gate's own kill-switch
 	// check is `r.Chain == nil`, so that is the comparison worth asserting.
@@ -76,10 +73,7 @@ func TestTaintRemoverWiresTheReasserter(t *testing.T) {
 	reasserter := newCNIConflistReasserter()
 	require.NotNil(t, reasserter)
 
-	tr := &node.TaintRemover{}
-	if chain := chainStateOf(reasserter); chain != nil {
-		tr.Chain = chain
-	}
+	tr := &node.TaintRemover{Chain: chainStateOf(reasserter)}
 
 	require.NotNil(t, tr.Chain)
 	// A re-asserter that has not run yet reports unknown, which the gate reads as
