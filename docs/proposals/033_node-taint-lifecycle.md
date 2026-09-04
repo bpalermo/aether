@@ -1,6 +1,6 @@
 # Proposal: Node-taint lifecycle — re-arm the agent-not-ready taint across reboots and agent outages
 
-**Status:** Implemented — the taint lifecycle shipped (`agent/internal/node`): the agent-not-ready taint re-arms across reboots and agent outages. (Accepted 2026-07-19.)
+**Status:** Implemented — the taint lifecycle shipped (`agent/internal/node`): the agent-not-ready taint re-arms across reboots and agent outages. (Accepted 2026-07-19.) **Amended 2026-09-04 (#667)** — see [Amendment (#667)](#amendment-667-cni-is-serving-needs-two-conditions-not-one) at the end.
 **Relates:** issue #263 / #261 (the startup taint + one-shot removal), proposal 031
 (agent flag-surface reduction — the "no new flags" philosophy this follows).
 **Fixes:** #569. **Non-goal:** container-restart waves on a re-armed node (#567).
@@ -138,4 +138,46 @@ add-only in practice — the guard only ever appends the taint.
   re-arms on reboot — which is the entire motivation.
 - **A DaemonSet-only remover keyed on kubelet readiness.** k8s's not-ready taints
   (G3) track kubelet Ready, not CNI-serving, so they'd remove the gate too early.
-```
+
+## Amendment (#667): "CNI is serving" needs two conditions, not one
+
+033 shipped with the removal gate asking a single question — does the CNI server's
+Unix socket exist — and reading the answer as "this node can mesh a pod". It cannot.
+The socket being up means a CNI ADD that *reaches* the agent can be **handled**; it
+says nothing about whether one is ever **issued**. Aether is a chained plugin inside
+another CNI's conflist, and a competing writer that strips that entry (kube-flannel's
+`cp -f`, #645) leaves the socket serving an endpoint nothing calls. Pods scheduled
+onto the node then come up **successfully and unmeshed** — working base networking,
+no mTLS, no policy, no telemetry.
+
+Two changes, neither of which reopens a rejected alternative:
+
+- **Removal now requires socket AND chaining.** `TaintRemover` takes an optional
+  `cniconflist.ChainState`; unknown counts as not-chained, because the taint is only
+  ever *held* here and waiting for evidence costs a requeue. This closes the
+  **return**: an agent restarting onto a node whose conflist was stripped while it
+  was away — exactly the state the taint was armed for — used to stat its socket and
+  remove the taint.
+- **The agent reports NotReady when the conflist is unrepairably unchained**, and the
+  guard described above arms the taint off that signal, which it already consumes.
+  This closes the **steady state**, which a remove-only gate structurally cannot: a
+  node that goes unchained while running has nothing to re-arm it.
+
+**The rejection of "agent re-applies its own taint on restart" still stands** and is
+not revisited. The agent remains a taint *remover* only; the single leader-elected
+controller writer is still the only thing that adds one. That is precisely why the
+steady-state fix routes through the agent's readiness rather than through a second
+taint writer.
+
+Teaching the guard about chaining *directly* was also considered and rejected: the
+controller cannot read a node's conflist, so it would need either a metric (coupling
+the alerting path into the control plane — the #662 anti-pattern) or a new Node
+condition. Disproportionate for a signal the guard already has.
+
+Blast radius is worth stating: a systematic false negative would make every agent
+NotReady and the guard would taint the whole fleet. It is bounded by `NoSchedule` (not
+`NoExecute`, per the rejected alternative above — running workloads are untouched), a
+three-re-check-interval dwell before the probe fails, the unrepairable-by-construction
+nature of the state, the `--cni-conflist-reassert=false` kill switch which disables
+both mechanisms, and a 60s re-evaluation that clears it the moment the entry returns.
+Known side effect: a `RollingUpdate` DaemonSet rollout stalls on a NotReady agent.
