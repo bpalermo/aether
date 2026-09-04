@@ -76,6 +76,13 @@ type Reasserter struct {
 	// init container — re-renders and re-appends it at every agent start, so the
 	// cache is primed on the first check of every agent lifetime.
 	entry []byte
+
+	// chainStatePublisher is the lock-free publication of the chaining state to
+	// the rest of the agent (the node taint gate, the readiness check, the ghost
+	// sweep's eviction interlock). Embedded rather than a field so *Reasserter
+	// satisfies ChainState directly; its zero value is a usable "not observed
+	// yet", so a Reasserter that was never Start()ed reports unknown.
+	chainStatePublisher
 }
 
 // Start runs the watch + periodic re-check loop until the context is cancelled.
@@ -184,9 +191,11 @@ func isConfigEvent(event fsnotify.Event) bool {
 }
 
 // check inspects the active conflist and re-appends aether's entry if a
-// competing writer stripped it. It records the chain-present gauge on EVERY
+// competing writer stripped it. It records the chain-present state on EVERY
 // call, zero included, so the gauge is the alerting signal for "this node's
-// pods are being created outside the mesh".
+// pods are being created outside the mesh" — and, through the same record()
+// call, so is the in-process ChainState the taint gate and readiness check read
+// (#667).
 func (r *Reasserter) check(ctx context.Context) {
 	path, data, chain, err := r.readActive()
 	if err != nil {
@@ -194,24 +203,24 @@ func (r *Reasserter) check(ctx context.Context) {
 		// or it is corrupt. Either way aether is not chained and this loop must not
 		// manufacture a config — cni-install and boot ordering own that.
 		r.log.WarnContext(ctx, "no usable CNI conflist to inspect; leaving the directory untouched", "dir", r.Dir, "error", err)
-		r.metrics.chainedState(ctx, false)
+		r.record(ctx, false)
 		return
 	}
 
 	entry, present, err := chain.AetherEntry()
 	if err != nil {
 		r.log.WarnContext(ctx, "failed to read the chained aether entry", "path", path, "error", err)
-		r.metrics.chainedState(ctx, present)
+		r.record(ctx, present)
 		return
 	}
 	if present {
 		// Steady state: refresh the last-known-good entry and record the gauge.
 		r.entry = entry
-		r.metrics.chainedState(ctx, true)
+		r.record(ctx, true)
 		return
 	}
 
-	r.metrics.chainedState(ctx, false)
+	r.record(ctx, false)
 	r.repair(ctx, path, data, chain)
 }
 
@@ -239,7 +248,7 @@ func (r *Reasserter) repair(ctx context.Context, path string, data []byte, chain
 	}
 
 	r.metrics.reasserted(ctx)
-	r.metrics.chainedState(ctx, true)
+	r.record(ctx, true)
 	r.log.InfoContext(ctx, "re-asserted the aether entry in the CNI conflist after a competing writer stripped it", "path", path)
 }
 

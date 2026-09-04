@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"aethermesh.dev/agent/internal/cniconflist"
 	"aethermesh.dev/agent/internal/spire"
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache"
@@ -123,6 +124,35 @@ type CNIServer struct {
 	// PDB-respecting). Overridable in tests (the fake client has no eviction
 	// subresource). Nil disables self-heal eviction.
 	evictPod func(ctx context.Context, namespace, name string) error
+
+	// chain reports whether aether is chained in the node's active CNI conflist,
+	// which is what decides whether self-heal eviction can heal anything at all
+	// (see unchained). Set via SetChainState; nil disables the interlock.
+	chain cniconflist.ChainState
+}
+
+// SetChainState wires the CNI conflist chaining state into the ghost sweep's
+// eviction interlock (#667). A setter rather than a 13th positional constructor
+// argument, deliberately: the re-asserter and the CNI server are built
+// independently in root.go and this is an optional interlock, not a dependency
+// the server needs to exist. Same shape as SnapshotCache.SetMeshDNSSnapshotPath.
+func (s *CNIServer) SetChainState(cs cniconflist.ChainState) { s.chain = cs }
+
+// unchained reports whether this node is known to be UNABLE to mesh a new pod
+// because aether is not chained in its active CNI conflist.
+//
+// It fails OPEN on purpose — nil ChainState (the re-assert loop's kill switch)
+// and not-yet-observed both return false, leaving eviction enabled. This is the
+// opposite of the taint gate's choice, and for a good reason: holding a taint
+// costs a requeue, whereas suppressing eviction here disables the #567/#640
+// self-heal that recovers a node after a reboot. Withholding that on a guess
+// would trade a known-good recovery for an unproven one.
+func (s *CNIServer) unchained() bool {
+	if s.chain == nil {
+		return false
+	}
+	st := s.chain.ChainStatus()
+	return st.Observed && !st.Chained
 }
 
 var _ xds.ServerCallback = (*CNIServer)(nil)

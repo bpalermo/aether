@@ -248,12 +248,21 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	var staleRunningRipe []staleRunningPod
 	pods, stalePruned, orphansPruned, staleRunning, staleRunningRipe, breakerTripped = s.pruneStaleStoragePods(ctx, pods, nodePods, nodePodsOK)
 
+	// Both self-heal paths evict a pod to force its sandbox to be recreated and a
+	// fresh CNI ADD to fire. That only heals anything if a CNI ADD would actually
+	// reach us — while aether is not chained in this node's conflist, the
+	// replacement pod comes up unmeshed too and the sweep just churns the same
+	// workload forever, indefinitely, at 2/node/min (#667). Keep REPORTING (the
+	// unmeshed_pods gauge is the alert signal and must stay truthful); withhold
+	// only the eviction, exactly as the #566 prune breaker does.
+	evictionsBlocked := breakerTripped || s.unchained()
+
 	// Self-heal evictions share one per-pass budget so the two paths can never
 	// jointly exceed the rate cap. Stale-while-Running goes first: after a node
 	// reboot it is the entire node's population (#640).
 	budget := &evictionBudget{remaining: sweepEvictPerPass}
-	s.evictStaleRunningPods(ctx, staleRunningRipe, breakerTripped, budget)
-	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK, breakerTripped, budget)
+	s.evictStaleRunningPods(ctx, staleRunningRipe, evictionsBlocked, budget)
+	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK, evictionsBlocked, budget)
 
 	live, terminating := s.classifyPods(pods)
 	ghostsRemoved = s.deregisterGhostEndpoints(ctx, all, live, terminating)
@@ -660,9 +669,10 @@ func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns stri
 // reportMissingStoragePods surfaces live mesh-managed K8s pods that have no
 // entry in local storage (a lost CNI ADD) and, after lostAddEvictThreshold
 // consecutive detections, evicts them to force a fresh CNI ADD (#567). Returns
-// the count of such pods found. breakerTripped skips eviction entirely (#566
-// interlock: mass loss means fix the storage cause, not evict the world).
-func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, breakerTripped bool, budget *evictionBudget) int {
+// the count of such pods found. evictionsBlocked skips eviction entirely while
+// still reporting: the #566 breaker (mass loss means fix the storage cause, not
+// evict the world) or an unchained conflist (#667, the eviction cannot heal).
+func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, evictionsBlocked bool, budget *evictionBudget) int {
 	// Surface live mesh-managed pods on this node that local storage has no entry
 	// for: a lost CNI ADD (talos worker-01, 2026-06-22: prober-k7vsm running with
 	// no listener). The agent has no CNI data (netns, IPs) to synthesize a
@@ -694,8 +704,8 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 			"pod", kp.GetName(), "namespace", kp.GetNamespace(), "podIP", kp.Status.PodIP,
 			"consecutive_sweeps", streak, "evict_threshold", lostAddEvictThreshold)
 
-		if breakerTripped {
-			continue // #566 interlock: never evict while the prune breaker tripped
+		if evictionsBlocked {
+			continue // #566 breaker tripped, or #667 unchained: eviction is futile
 		}
 		if streak < lostAddEvictThreshold || budget.remaining <= 0 {
 			continue
@@ -715,10 +725,13 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 // network namespaces while the API reports them Running (#640 — the post-reboot
 // boot race: the pod is up on the base CNI with no mesh interception, and only a
 // sandbox recreation re-runs CNI ADD). Shares the per-pass budget with the
-// lost-ADD path and honors the #566 breaker interlock.
-func (s *CNIServer) evictStaleRunningPods(ctx context.Context, ripe []staleRunningPod, breakerTripped bool, budget *evictionBudget) {
-	if breakerTripped {
-		return // #566 interlock: correlated netns weirdness; do not evict on it
+// lost-ADD path and honors both eviction interlocks (#566 breaker, #667
+// unchained conflist).
+func (s *CNIServer) evictStaleRunningPods(ctx context.Context, ripe []staleRunningPod, evictionsBlocked bool, budget *evictionBudget) {
+	if evictionsBlocked {
+		// #566: correlated netns weirdness, do not evict on it. #667: aether is not
+		// chained, so the replacement pod would come up unmeshed too.
+		return
 	}
 	for _, sr := range ripe {
 		if budget.remaining <= 0 {

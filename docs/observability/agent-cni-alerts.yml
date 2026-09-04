@@ -1,0 +1,116 @@
+# Prometheus alerting rules for the node agent's CNI conflist chaining (#667).
+#
+# Aether installs itself as a CHAINED plugin inside another CNI's conflist. Any
+# competing writer that rewrites that file from its own template wins: on Talos,
+# kube-flannel's init container does an unconditional
+#   cp -f /etc/kube-flannel/cni-conf.json /etc/cni/net.d/10-flannel.conflist
+# on EVERY flannel pod recreation, which a bootstrap-manifest re-sync triggers
+# (boot, `talosctl apply-config`, Kubernetes upgrades). That was the 2026-08-29
+# fleet-wide ~2h mesh outage (#645).
+#
+# The agent's re-assert loop (#650) heals a strip in ~2.5s WHILE IT IS RUNNING.
+# These rules are for what it cannot heal: the agent is down, or no known-good
+# entry was ever observed. In that state pods keep being created SUCCESSFULLY and
+# UNMESHED -- base networking works, so nothing looks broken, but there is no
+# mTLS, no policy and no telemetry.
+#
+# Install: merge into the Prometheus helm values under
+#   serverFiles:
+#     alerting_rules.yml:
+#       groups: [...]
+# See README.md in this directory. Deployed from
+# bpalermo/k8s-talos-main -> clusters/talos-main/prometheus/values.yaml, where
+# promtool unit tests (clusters/talos-main/prometheus/rules_test.yaml) run these
+# expressions in CI.
+
+groups:
+  - name: aether-agent
+    rules:
+      # ---------------------------------------------------------------- P1
+      # Per node. ABSENCE IS A FAULT here, not "no news": the gauge is PUSHED by
+      # the agent, so a down agent produces no series rather than a 0.
+      #
+      # This is why the obvious expression is wrong:
+      #     max by (node) (aether_agent_cni_conflist_chained) == 0
+      #       or absent(aether_agent_cni_conflist_chained)
+      # `absent()` over the bare selector is FLEET-WIDE. It returns a single
+      # series with no `node` label and fires only when EVERY agent is silent, so
+      # one node's agent going away produces neither the `== 0` arm nor the
+      # `absent()` arm. It is vacuous for exactly the outage it was written for
+      # (and the label-set mismatch inside the `or` is un-deduplicable in
+      # Alertmanager besides).
+      #
+      # Per-node absence needs an inventory joined with `unless`. The inventory is
+      # aether_mesh_dns_ready because mesh-dns is a SEPARATE DaemonSet, process
+      # and image (#583) carrying the same `node` label -- which is precisely why
+      # it survives the agent outage this rule exists to catch.
+      #
+      # Residual gap, stated plainly: a node where BOTH the agent and mesh-dns are
+      # silent falls out of the inventory and is covered only by the fleet-wide
+      # rule below.
+      #
+      # for: 5m needs at least two failed 60s export windows, so a single check
+      # landing mid-`cp -f` (the file is briefly truncated and parses as garbage)
+      # cannot page. The value is always 1, so the annotations do not use $value.
+      - alert: AetherCNIConflistUnchained
+        expr: >-
+          group by (node) (aether_mesh_dns_ready)
+          unless
+          group by (node) (aether_agent_cni_conflist_chained == 1)
+        for: 5m
+        labels:
+          severity: critical
+          component: aether-agent
+        annotations:
+          summary: "aether is not chained in the CNI conflist on {{ $labels.node }}"
+          description: >-
+            Either the agent reports aether_agent_cni_conflist_chained=0 on
+            {{ $labels.node }} or it is reporting nothing at all. Every pod created on
+            this node from now on comes up OUTSIDE the mesh -- working base
+            networking, no mTLS, no policy, no telemetry. Check
+            `cat /etc/cni/net.d/10-flannel.conflist | jq '.plugins[].type'` on the
+            node for an aether-cni entry, and the agent log for "no known-good entry
+            was ever observed" / "carries no primary CNI plugin". Recovery: delete the
+            agent pod on that node so its cni-install init container re-appends the
+            entry.
+
+      # ---------------------------------------------------------------- P2
+      # The gauge alone under-reports BY CONSTRUCTION: the re-assert loop repairs
+      # in ~2.5s and the OTLP PeriodicReader exports every 60s, so a healed strip
+      # is exported as 1 and is never observed as 0. The counter is the only
+      # evidence it happened at all, and every increment is a window in which pods
+      # on that node were created outside the mesh.
+      - alert: AetherCNIConflistReasserting
+        expr: sum by (node) (increase(aether_agent_cni_conflist_reasserts_total[1h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+          component: aether-agent
+        annotations:
+          summary: "aether's CNI conflist entry was stripped {{ $value | humanize }}x on {{ $labels.node }} in 1h"
+          description: >-
+            A competing CNI writer removed aether's chained entry from the conflist on
+            {{ $labels.node }} and the agent put it back. Self-healed, but each
+            occurrence is a seconds-long window in which new pods on this node were
+            created outside the mesh. Repeating means flannel's manifest is being
+            re-applied (Talos bootstrap re-sync) or another writer owns the file.
+
+      # ---------------------------------------------------------------- P1
+      # The meta-rule, deliberately kept alongside the per-node one: it covers what
+      # the inventory join cannot -- the metric name changed, the OTLP path broke,
+      # or --cni-conflist-reassert was turned off fleet-wide. Same shape and
+      # reasoning as MeshDNSMetricsAbsent.
+      - alert: AetherCNIConflistMetricsAbsent
+        expr: absent(aether_agent_cni_conflist_chained)
+        for: 10m
+        labels:
+          severity: critical
+          component: aether-agent
+        annotations:
+          summary: "aether CNI conflist chaining is unobservable fleet-wide"
+          description: >-
+            No aether_agent_cni_conflist_chained series for 10m. Either every agent is
+            down, the re-assert loop was disabled (--cni-conflist-reassert=false), or
+            the OTLP path/metric name regressed -- in which case
+            AetherCNIConflistUnchained above cannot fire either and the fleet is
+            unguarded against #645.
