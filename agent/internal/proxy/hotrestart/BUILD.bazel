@@ -28,16 +28,22 @@ go_test(
     name = "hotrestart_test",
     srcs = [
         "adminprobe_test.go",
+        "adminreverify_test.go",
         "coordination_test.go",
         "crash_test.go",
         "metrics_test.go",
         "supervisor_test.go",
     ],
+    # The chart's proxy.hotRestart values are an input to the admin re-verify
+    # derivation; TestAdminReverifyMarginHoldsAgainstDeployedChartValues pins
+    # them (#666). Gazelle does not manage `data` — keep this by hand.
+    data = ["//charts/aether:values.yaml"],
     embed = [":hotrestart"],
     deps = [
         "//common/readymarker",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_k8s_sigs_yaml//:yaml",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
