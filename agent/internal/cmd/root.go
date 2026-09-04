@@ -278,6 +278,17 @@ func runAgent(ctx context.Context) (retErr error) {
 	// CNI conflist. It is registered with the manager further down.
 	reasserter := newCNIConflistReasserter()
 
+	// A node whose conflist has lost the aether entry cannot mesh a NEW pod, but
+	// its agent is otherwise perfectly healthy — so nothing stops the scheduler
+	// putting pods on it, and they come up unmeshed and silent (#667). Reporting
+	// NotReady lets the CONTROLLER's node-taint guard (proposal 033) re-arm the
+	// taint using the signal it already consumes, without making the agent a
+	// node-taint writer — the alternative proposal 033 explicitly rejected.
+	// A nil ChainState (--cni-conflist-reassert=false) makes this a no-op.
+	if err = m.AddReadyzCheck("cni-chained", cniconflist.ReadyChecker(chainStateOf(reasserter))); err != nil {
+		return fmt.Errorf("failed to set up the CNI chaining ready check: %w", err)
+	}
+
 	// Remove the aether startup taint from this node whenever it is present and
 	// this node can actually mesh a pod, so workload pods (which don't tolerate
 	// it) can schedule here. This is a reconciler on this agent's own Node, so it
