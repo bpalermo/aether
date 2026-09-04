@@ -1,5 +1,10 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
 
+# The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
+# derives its admin re-verify budget from parentShutdownTime, so the values that
+# ship here are an input to //agent/internal/proxy/hotrestart (#666).
+exports_files(["values.yaml"])
+
 # aether Helm chart (published as ghcr.io/bpalermo/aether/charts/aether).
 #
 # The whole system in one chart: agent + cni-install + per-node proxy, registrar,

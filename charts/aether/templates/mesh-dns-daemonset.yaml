@@ -57,6 +57,13 @@ spec:
             {{- range .Values.agent.meshDnsUpstream }}
             - "--mesh-dns-upstream={{ . }}"
             {{- end }}
+            {{- if not (kindIs "invalid" .Values.agent.meshDnsDaemon.forwardPoolSize) }}
+            {{- /* Explicit nil-check, NOT `with`: 0 is the kill switch that disables
+                   pooling, and `with 0` is falsy — it would render nothing and leave
+                   the pool ON, which is the one failure an operator reaching for the
+                   switch must never hit. Unset renders no arg. */}}
+            - "--forward-pool-size={{ .Values.agent.meshDnsDaemon.forwardPoolSize }}"
+            {{- end }}
             {{- with .Values.otel.endpoint }}
             - "--otlp-endpoint={{ . }}"
             {{- end }}

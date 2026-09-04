@@ -181,6 +181,18 @@ agent:
       digest: "{@//agent/cmd/mesh-dns:image_push.digest}"
       tag: ""
       pullPolicy: Always
+    # Issue #674: the forward path keeps a small pool of already-connected UDP sockets
+    # per upstream instead of dialling one per forwarded query (profiling put the dial
+    # at 20.97% of this daemon's CPU, MORE than the exchange it served). Unset emits no
+    # flag and uses the built-in default of 8; 0 DISABLES pooling and restores the
+    # pre-#674 dial-per-query behaviour.
+    #
+    # This is an ESCAPE HATCH, not a tuning knob. Reuse trades away per-query source-port
+    # randomisation for the socket's lifetime (a jittered 30s / 1000 queries, whichever
+    # comes first); that is safe here because the socket is CONNECTED, so the kernel drops
+    # any datagram not from the upstream's exact address and an off-path attacker cannot
+    # land a spoofed answer at all.
+    forwardPoolSize: null
     # Issue #583: the readiness probe now re-execs the SLIM /mesh-dns binary (only the
     # resolver + snapshot reload + telemetry — no controller-runtime/xDS/CNI/SPIRE), not
     # the full /agent, so the re-exec CPU headroom that inflated these limits is gone.
@@ -248,6 +260,12 @@ proxy:
   hotRestart:
     baseId: 0
     drainTime: 10s
+    # Also the supervisor's admin re-verify budget: the epoch-identity probe
+    # re-confirms on a fresh connection every parentShutdownTime/3 (floor 2s), so a
+    # cross-pod takeover is diagnosed while the draining parent still lives
+    # (proposal 001 lessons 3/6; agent/internal/proxy/hotrestart/adminprobe.go, #666).
+    # Below ~6s the floor takes over and the supervisor logs the lost margin at
+    # startup. Raising it also delays successor-pod readiness by the same amount.
     parentShutdownTime: 15s
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0
