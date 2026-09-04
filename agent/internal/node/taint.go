@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"aethermesh.dev/agent/internal/cniconflist"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -19,10 +20,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// socketRequeue is how long to wait before re-reconciling when the taint is
-// present but the CNI socket isn't serving yet — the reconciler can't watch a
-// Unix socket, so it polls the node until the CNI comes up.
-const socketRequeue = time.Second
+// notReadyRequeue is how long to wait before re-reconciling when the taint is
+// present but this node can't mesh a pod yet — the reconciler can watch neither
+// a Unix socket nor the re-assert loop's in-memory state, so it polls the node
+// until both come good.
+const notReadyRequeue = time.Second
 
 // removeTaint removes every taint with the given key from the node's spec,
 // returning whether any were removed. Pure (no API calls), unit-testable.
@@ -51,9 +53,11 @@ func hasTaint(node *corev1.Node, key string) bool {
 
 // TaintRemover is a controller-runtime reconciler that removes the aether
 // startup taint (aetherlabels.TaintAgentNotReady) from this agent's OWN node
-// whenever the taint is present AND the CNI server is serving — signalled by its
-// Unix socket existing, which means a pod's CNI ADD can now be handled. Workload
-// pods don't tolerate the taint, so they wait until this runs.
+// whenever the taint is present AND this node can actually mesh a NEW pod —
+// which takes two conditions, not one: the CNI server's Unix socket exists, so a
+// CNI ADD can be handled, and aether is chained in the node's active conflist,
+// so a CNI ADD is ever ISSUED to us at all (#667). Workload pods don't tolerate
+// the taint, so they wait until this runs.
 //
 // Unlike the original one-shot remover, it reconciles: the controller's node-taint
 // guard can (re-)apply the taint to a running node after a reboot or an agent
@@ -64,6 +68,14 @@ type TaintRemover struct {
 	NodeName   string
 	SocketPath string
 	Log        *slog.Logger
+
+	// Chain reports whether aether is chained in the node's active CNI conflist.
+	// Optional: a nil Chain skips the chaining condition entirely, which is what
+	// the re-assert loop's kill switch (--cni-conflist-reassert=false) has to
+	// mean. An operator who turned the loop off gets the pre-#667 socket-only
+	// gate, not a node that can never be untainted because nothing is left to
+	// observe the conflist.
+	Chain cniconflist.ChainState
 }
 
 // NeedLeaderElection runs on every agent (the taint is per-node), not just the
@@ -103,11 +115,16 @@ func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (re
 		return reconcile.Result{}, nil // nothing to do
 	}
 
-	if !r.cniServing() {
-		// The taint is present but CNI isn't serving yet — don't remove it (that's
-		// the whole point of the gate). Requeue to re-check once CNI comes up.
-		r.Log.DebugContext(ctx, "startup taint present but CNI not serving; requeueing", "node", r.NodeName)
-		return reconcile.Result{RequeueAfter: socketRequeue}, nil
+	if socket, chained := r.socketServing(), r.chained(); !socket || !chained {
+		// The taint is present but this node can't mesh a pod yet — don't remove it
+		// (that's the whole point of the gate). Requeue to re-check. Both conditions
+		// are logged because they fail for entirely different reasons and have
+		// entirely different recoveries: no socket is a slow start that fixes
+		// itself, not chained is a stripped conflist that only a fresh cni-install
+		// run can fix.
+		r.Log.DebugContext(ctx, "startup taint present but this node cannot mesh a pod; requeueing",
+			"node", r.NodeName, "socket", socket, "chained", chained)
+		return reconcile.Result{RequeueAfter: notReadyRequeue}, nil
 	}
 
 	base := node.DeepCopy()
@@ -122,8 +139,32 @@ func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (re
 	return reconcile.Result{}, nil
 }
 
-// cniServing reports whether the CNI server's Unix socket exists (it's serving).
-func (r *TaintRemover) cniServing() bool {
+// socketServing reports whether the CNI server's Unix socket exists (it's
+// serving), so a CNI ADD that reaches this agent can be handled. The original
+// #569 gate — still necessary, just no longer sufficient.
+func (r *TaintRemover) socketServing() bool {
 	_, err := os.Stat(r.SocketPath)
 	return err == nil
+}
+
+// chained reports whether the re-assert loop has POSITIVELY observed aether in
+// the node's active conflist, which is what decides whether a CNI ADD is ever
+// ISSUED to us at all.
+//
+// Socket-only was not sufficient: a competing writer stripping the entry leaves
+// the socket serving an endpoint nothing calls, and every pod scheduled onto the
+// node then comes up successfully and UNMESHED — working base networking, no
+// mTLS, no policy, no telemetry (#667, the single-node form of #645). An agent
+// restarting onto such a node would stat its socket and cheerfully remove the
+// taint, which is exactly the hole this closes.
+//
+// Unknown counts as not-chained. The taint is only ever HELD here, never added,
+// so waiting for evidence costs a one-second requeue and errs toward not
+// scheduling unmeshed pods.
+func (r *TaintRemover) chained() bool {
+	if r.Chain == nil {
+		return true
+	}
+	s := r.Chain.ChainStatus()
+	return s.Observed && s.Chained
 }

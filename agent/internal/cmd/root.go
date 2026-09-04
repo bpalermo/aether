@@ -273,19 +273,29 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
+	// Construct the conflist re-asserter BEFORE the taint remover: it is the taint
+	// gate's source of truth for whether aether is actually chained in this node's
+	// CNI conflist. It is registered with the manager further down.
+	reasserter := newCNIConflistReasserter()
+
 	// Remove the aether startup taint from this node whenever it is present and
-	// the CNI server is serving, so workload pods (which don't tolerate it) can
-	// schedule here. This is a reconciler on this agent's own Node, so it also
-	// drops the taint the controller's node-taint guard re-applies after a reboot
-	// or agent outage (issue #569, gaps G1/G2), not just the one the kubelet
-	// registered at boot. Unconditional (proposal 031): a no-op when the taint
-	// isn't present. Best-effort: NeedLeaderElection=false, never fails startup.
-	if err = (&node.TaintRemover{
+	// this node can actually mesh a pod, so workload pods (which don't tolerate
+	// it) can schedule here. This is a reconciler on this agent's own Node, so it
+	// also drops the taint the controller's node-taint guard re-applies after a
+	// reboot or agent outage (issue #569, gaps G1/G2), not just the one the
+	// kubelet registered at boot. Unconditional (proposal 031): a no-op when the
+	// taint isn't present. Best-effort: NeedLeaderElection=false, never fails
+	// startup.
+	tr := &node.TaintRemover{
 		Client:     m.GetClient(),
 		NodeName:   cfg.NodeName,
 		SocketPath: cfg.CNIServerConfig.SocketPath,
 		Log:        l,
-	}).SetupWithManager(m); err != nil {
+	}
+	if chain := chainStateOf(reasserter); chain != nil {
+		tr.Chain = chain
+	}
+	if err = tr.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
 	}
 
@@ -297,7 +307,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	if err = wireCNIConflistReasserter(m); err != nil {
+	if err = wireCNIConflistReasserter(m, reasserter); err != nil {
 		return err
 	}
 
@@ -419,19 +429,48 @@ func wireMeshDNS(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	return nil
 }
 
-// wireCNIConflistReasserter registers the CNI conflist re-assert loop (#645):
-// the agent watches the node's CNI config directory and re-appends aether's
-// chained plugin entry whenever a competing writer strips it — on Talos,
-// kube-flannel's init container `cp -f`s its ConfigMap template over the
-// conflist on EVERY flannel pod recreation, which a bootstrap-manifest re-sync
-// triggers, silently unmeshing every pod started afterwards. cni-install appends
-// once per agent pod start; this keeps it appended. Default on (kill switch:
-// --cni-conflist-reassert=false).
-func wireCNIConflistReasserter(m ctrl.Manager) error {
+// newCNIConflistReasserter builds the CNI conflist re-assert loop (#645): the
+// agent watches the node's CNI config directory and re-appends aether's chained
+// plugin entry whenever a competing writer strips it — on Talos, kube-flannel's
+// init container `cp -f`s its ConfigMap template over the conflist on EVERY
+// flannel pod recreation, which a bootstrap-manifest re-sync triggers, silently
+// unmeshing every pod started afterwards. cni-install appends once per agent pod
+// start; this keeps it appended. Default on (kill switch:
+// --cni-conflist-reassert=false), and nil when that switch is off.
+//
+// Split from the registration below because the Reasserter is also the agent's
+// ChainState: the node taint gate and the readiness check both need it in hand
+// before they are constructed (#667).
+func newCNIConflistReasserter() *cniconflist.Reasserter {
 	if !cfg.CNIConflistReassert {
 		return nil
 	}
-	reasserter := &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l}
+	return &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l}
+}
+
+// chainStateOf adapts the re-asserter to the ChainState interface its consumers
+// take, returning a TRULY nil interface when the re-assert loop is switched off.
+//
+// The guard is load-bearing, not defensive. Assigning a nil *Reasserter straight
+// into an interface-typed field yields a NON-nil interface holding a nil
+// pointer, so a consumer's `Chain == nil` check would be false and every
+// ChainStatus() call would land on a nil receiver. Going through here is what
+// makes --cni-conflist-reassert=false actually mean "no chaining condition" —
+// the pre-#667 socket-only taint gate — rather than a node that can never be
+// untainted, or a panic.
+func chainStateOf(r *cniconflist.Reasserter) cniconflist.ChainState {
+	if r == nil {
+		return nil
+	}
+	return r
+}
+
+// wireCNIConflistReasserter registers the re-assert loop with the manager. A nil
+// reasserter (the kill switch) is a no-op.
+func wireCNIConflistReasserter(m ctrl.Manager, reasserter *cniconflist.Reasserter) error {
+	if reasserter == nil {
+		return nil
+	}
 	if err := m.Add(reasserter); err != nil {
 		return fmt.Errorf("failed to add CNI conflist re-asserter: %w", err)
 	}
