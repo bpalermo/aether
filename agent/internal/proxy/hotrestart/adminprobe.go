@@ -3,6 +3,7 @@ package hotrestart
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -27,12 +28,92 @@ import (
 // epoch identity rides /server_info on a fresh connection (see newAdminClients
 // and adminProber).
 
-// adminReverifyInterval bounds how long the liveness watchdog may stay on the
-// cheap /ready probe before re-confirming, ON A FRESH CONNECTION, that the
-// Envoy answering this node's admin is still ours at our epoch. Chosen below
-// both ParentShutdownTime (60s — so a cross-pod takeover is still diagnosed
-// while our parent lives) and defaultAdminUnresponsiveDeadline (30s).
-const adminReverifyInterval = 15 * time.Second
+// The liveness watchdog may ride the cheap pooled /ready only so long before it
+// must re-confirm, ON A FRESH CONNECTION, that the Envoy answering this node's
+// admin is still ours at our epoch. That budget is DERIVED from the effective
+// config rather than hard-coded, because the value it must sit under does not
+// live in this file: --parent-shutdown-time is 15s AS DEPLOYED
+// (charts/aether/values.yaml, proxy.hotRestart.parentShutdownTime), while the CLI
+// default in agent/internal/cmd/supervisor.go is 60s. A constant justified against
+// the flag default was silently equal to the deployed value (#666).
+//
+// Why parent-shutdown-time is the bound: it is exactly how long a draining
+// hot-restart parent lives, and that parent keeps answering LIVE at its OLD epoch
+// over an already-accepted connection for the whole window (proposal 001 lessons 3
+// and 6). Re-verification must land comfortably INSIDE that window so a cross-pod
+// takeover is diagnosed while our parent is still around — not at or after its
+// exit. Dividing by adminReverifyDivisor puts at least two full re-verifications
+// inside the window at worst-case phase alignment. The same divisor is applied to
+// AdminUnresponsiveDeadline, so the identity check can never lag the watchdog that
+// consumes it.
+//
+// Floor: two watchdog ticks. Below that the two-tier prober degenerates into an
+// authoritative /server_info every other tick and #646's saving is gone. Ceiling:
+// 15s, the value this used to be hard-coded at — a longer blind window buys
+// nothing measurable (at 5s the cheap path still covers 4 ticks in 5) and #673
+// shows the supervisor's dominant cost is the readiness re-exec, not this probe.
+//
+// Effective: deployed 15s/30s -> 5s. CLI defaults 60s/30s -> 10s.
+const (
+	adminReverifyDivisor = 3
+	adminReverifyFloor   = 2 * readyPollInterval // two watchdog ticks
+	adminReverifyCeiling = 15 * time.Second
+)
+
+// adminReverifyIntervalFor derives the re-verify budget from the two durations
+// that bound it. A non-positive parentShutdown means "unset, not bounding".
+func adminReverifyIntervalFor(parentShutdown, adminUnresponsive time.Duration) time.Duration {
+	budget := adminUnresponsive
+	if parentShutdown > 0 && parentShutdown < budget {
+		budget = parentShutdown
+	}
+	return min(max(budget/adminReverifyDivisor, adminReverifyFloor), adminReverifyCeiling)
+}
+
+// adminReverifyInterval is the derived budget for this supervisor's effective
+// configuration.
+func (s *Supervisor) adminReverifyInterval() time.Duration {
+	return adminReverifyIntervalFor(s.cfg.ParentShutdownTime, s.adminUnresponsiveDeadline())
+}
+
+// checkAdminReverifyMargin reports the residual case the floor introduces: a
+// parent-shutdown-time so short that even the minimum re-verify interval cannot
+// sit comfortably inside it. Deliberately not fatal — a lost diagnostic margin
+// must never cost the node its data plane.
+func (s *Supervisor) checkAdminReverifyMargin() error {
+	interval := s.adminReverifyInterval()
+	budget := s.adminUnresponsiveDeadline()
+	if pst := s.cfg.ParentShutdownTime; pst > 0 && pst < budget {
+		budget = pst
+	}
+	if interval*adminReverifyDivisor <= budget {
+		return nil
+	}
+	return fmt.Errorf(
+		"derived admin re-verify interval %s (floor %s) does not fit %d times inside the %s budget "+
+			"(parent-shutdown-time %s, admin-unresponsive-deadline %s); raise parent-shutdown-time to at least %s",
+		interval, adminReverifyFloor, adminReverifyDivisor, budget,
+		s.cfg.ParentShutdownTime, s.adminUnresponsiveDeadline(),
+		adminReverifyFloor*adminReverifyDivisor,
+	)
+}
+
+// logAdminReverifyBudget records the derived re-verify interval and its inputs
+// at startup, and flags a lost margin as an ERROR without refusing to start.
+func (s *Supervisor) logAdminReverifyBudget(ctx context.Context) {
+	s.log.InfoContext(
+		ctx, "derived admin re-verify interval",
+		"reverifyInterval", s.adminReverifyInterval(),
+		"parentShutdownTime", s.cfg.ParentShutdownTime,
+		"adminUnresponsiveDeadline", s.adminUnresponsiveDeadline(),
+		"divisor", adminReverifyDivisor,
+	)
+	if err := s.checkAdminReverifyMargin(); err != nil {
+		s.log.ErrorContext(ctx, "admin re-verify interval is not comfortably inside parent-shutdown-time; "+
+			"a cross-pod takeover may not be diagnosed while our hot-restart parent is alive",
+			"error", err)
+	}
+}
 
 const (
 	adminReadyBodyLimit      = 64      // "PRE_INITIALIZING\n" and friends
@@ -94,18 +175,19 @@ func newAdminClients() (authoritative, fast *http.Client) {
 // they need the authoritative answer, every time.
 //
 // Known benign divergence: a cross-pod successor taking over while our child is
-// still alive is invisible to /ready for up to adminReverifyInterval. The
-// readiness outcome is identical either way (both paths HOLD readiness while
+// still alive is invisible to /ready for up to the derived re-verify interval.
+// The readiness outcome is identical either way (both paths HOLD readiness while
 // admin is reachable and our child is tracked), and the heartbeat write is a
 // no-op under writeState's downgrade guard; only the diagnostic log is delayed.
 type adminProber struct {
 	s             *Supervisor
-	verifiedEpoch int       // epochUnverified disables the fast path
-	verifiedAt    time.Time // when /server_info last confirmed it
+	reverify      time.Duration // derived from the effective config; see adminReverifyIntervalFor
+	verifiedEpoch int           // epochUnverified disables the fast path
+	verifiedAt    time.Time     // when /server_info last confirmed it
 }
 
 func newAdminProber(s *Supervisor) *adminProber {
-	return &adminProber{s: s, verifiedEpoch: epochUnverified}
+	return &adminProber{s: s, reverify: s.adminReverifyInterval(), verifiedEpoch: epochUnverified}
 }
 
 // probe answers one watchdog tick. The invariant it maintains: the pinned
@@ -137,7 +219,7 @@ func (p *adminProber) probe(ctx context.Context, epoch int) (live, reachable boo
 // and our child for it is still tracked.
 func (p *adminProber) fastPathValid(epoch int) bool {
 	return p.verifiedEpoch == epoch &&
-		time.Since(p.verifiedAt) < adminReverifyInterval &&
+		time.Since(p.verifiedAt) < p.reverify &&
 		p.s.childTracked(epoch)
 }
 
