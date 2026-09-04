@@ -1,6 +1,6 @@
 # Proposal: Node-taint lifecycle — re-arm the agent-not-ready taint across reboots and agent outages
 
-**Status:** Implemented — the taint lifecycle shipped (`agent/internal/node`): the agent-not-ready taint re-arms across reboots and agent outages. (Accepted 2026-07-19.) **Amended 2026-09-04 (#667)** — see [Amendment (#667)](#amendment-667-cni-is-serving-needs-two-conditions-not-one) at the end.
+**Status:** Implemented — the taint lifecycle shipped (`agent/internal/node`): the agent-not-ready taint re-arms across reboots and agent outages. (Accepted 2026-07-19.) **Amended 2026-09-04 (#667)** — the removal gate now requires CNI conflist chaining as well as the socket; see the Amendment section at the end. (No in-page anchor link here on purpose: the website republishes this Status line verbatim on `/proposals/`, where a `#`-relative link would resolve against the index and break the strict build.)
 **Relates:** issue #263 / #261 (the startup taint + one-shot removal), proposal 031
 (agent flag-surface reduction — the "no new flags" philosophy this follows).
 **Fixes:** #569. **Non-goal:** container-restart waves on a re-armed node (#567).
