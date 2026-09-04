@@ -52,13 +52,14 @@ const resolvConfPath = "/etc/resolv.conf"
 
 // cfg holds the flag-bound configuration for the standalone mesh-DNS resolver.
 var (
-	snapshotPath   string
-	meshDomain     string
-	upstreams      []string
-	debug          bool
-	otlpEndpoint   string
-	readyMarker    string
-	readinessCheck bool
+	snapshotPath    string
+	meshDomain      string
+	upstreams       []string
+	debug           bool
+	otlpEndpoint    string
+	readyMarker     string
+	readinessCheck  bool
+	forwardPoolSize int
 )
 
 func main() {
@@ -103,6 +104,7 @@ func rootCmd() *cobra.Command {
 	f.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for mesh-DNS metrics push (e.g. collector:4317); empty disables telemetry")
 	f.StringVar(&readyMarker, "ready-marker", "/run/aether/mesh-dns.ready", "Pod-local path for the readiness marker written once the resolver's listeners are bound")
 	f.BoolVar(&readinessCheck, "readiness-check", false, "Exit 0 iff the --ready-marker file exists (exec readiness probe mode)")
+	f.IntVar(&forwardPoolSize, "forward-pool-size", meshdns.DefaultForwardPoolSize, "Connected UDP sockets kept open per forward upstream (issue #674); 0 dials a fresh socket per forwarded query")
 
 	return cmd
 }
@@ -140,6 +142,7 @@ func run(ctx context.Context) error {
 		meshDomain, addr, snapshotPath, l,
 		meshdns.WithReusePort(true),
 		meshdns.WithReadyMarker(readyMarker),
+		meshdns.WithForwardPoolSize(forwardPoolSize),
 	)
 	server.SetUpstreams(resolveUpstreams(l, resolvConfPath))
 

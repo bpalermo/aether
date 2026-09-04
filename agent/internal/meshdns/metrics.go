@@ -36,6 +36,9 @@ type resolverState struct {
 	// lastAnswered is the unix second of the last query the resolver actually answered
 	// (real traffic or a self-check); zero until it has answered anything at all.
 	lastAnswered int64
+	// poolConns is the number of connected upstream UDP sockets currently held open by
+	// the forward path's pool (issue #674).
+	poolConns int64
 }
 
 // metrics holds the resolver's OTel instruments. nil-safe: every record method is a
@@ -46,6 +49,12 @@ type metrics struct {
 	reloads    metric.Int64Counter
 	selfChecks metric.Int64Counter
 	truncated  metric.Int64Counter
+	// forwardDials counts sockets OPENED for the forward path, forwardRecycles counts
+	// pooled sockets retired. Together with the pool_open gauge they are how the pool's
+	// whole point is verified in production: dials per forwarded query must collapse
+	// from 1.0 to near zero.
+	forwardDials    metric.Int64Counter
+	forwardRecycles metric.Int64Counter
 }
 
 // newMetrics builds the resolver metrics on the global MeterProvider (a no-op meter
@@ -61,6 +70,10 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 		"In-process handler self-checks run by the wedge watchdog, by result (ok, fail). Consecutive failures remove the pod-local ready marker so the readiness probe flips the pod NotReady")
 	truncated := b.counter("aether.mesh_dns.responses_truncated_total",
 		"Upstream replies that came back truncated (TC=1) over UDP and were re-fetched over TCP")
+	forwardDials := b.counter("aether.mesh_dns.forward_conn_dials_total",
+		"Upstream UDP sockets opened by the forward path, by reason (pool_fill=a pooled slot was empty or its rotation budget was spent, fallback=every pooled slot was busy or the pooled socket had just been retired, so the query dialled its own). Divided by the forwarded query count this is the dials-per-query ratio the socket pool exists to drive from 1.0 to ~0")
+	forwardRecycles := b.counter("aether.mesh_dns.forward_conn_recycles_total",
+		"Pooled upstream sockets retired, by reason (rotated=its 30s/1000-query budget expired or the upstream was reconfigured, error=the exchange on it failed). A sustained non-zero error rate means the upstream is refusing or black-holing datagrams — classically a stale conntrack entry still DNAT'ing the kube-dns ClusterIP at a rolled-away backend pod, which shows only as read timeouts and never as ICMP")
 	reloads := b.counter("aether.mesh_dns.snapshot_reloads_total",
 		"Attempts to read the record snapshot the agent writes, by result (success, missing=file absent, parse_error=corrupt, read_error=I/O failure)")
 	duration := b.histogram("aether.mesh_dns.query.duration",
@@ -80,6 +93,8 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 		"Number of forward upstreams. Zero means every non-mesh query (cluster.local and external) fails")
 	ready := b.intGauge("aether.mesh_dns.ready",
 		"1 once records have ever been populated (mesh misses answer NXDOMAIN), 0 while cold (mesh misses answer SERVFAIL)")
+	poolOpen := b.intGauge("aether.mesh_dns.forward_conn_pool_open",
+		"Connected upstream UDP sockets the forward path currently holds open. At steady state this is flat at the pool size times the number of upstreams; it is zero when pooling is disabled and every forwarded query dials its own socket")
 	lastAnswered := b.floatGauge("aether.mesh_dns.last_answered_timestamp_seconds",
 		"Unix timestamp of the last query the resolver actually answered — real traffic or the self-check watchdog. It stops advancing on a resolver that is bound but blind, which the ready marker alone cannot show")
 
@@ -99,12 +114,13 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 		o.ObserveInt64(watchActive, boolGauge(st.watchActive))
 		o.ObserveInt64(upstreams, st.upstreams)
 		o.ObserveInt64(ready, boolGauge(st.ready))
+		o.ObserveInt64(poolOpen, st.poolConns)
 		if st.lastAnswered > 0 {
 			o.ObserveFloat64(lastAnswered, float64(st.lastAnswered))
 		}
 		return nil
 	}
-	if _, err := b.meter.RegisterCallback(observe, age, writtenAt, records, generation, watchActive, upstreams, ready, lastAnswered); err != nil {
+	if _, err := b.meter.RegisterCallback(observe, age, writtenAt, records, generation, watchActive, upstreams, ready, poolOpen, lastAnswered); err != nil {
 		log.Warn("mesh-DNS metrics disabled: failed to register the gauge callback", "error", err)
 		return nil
 	}
@@ -115,6 +131,9 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 		reloads:    reloads,
 		selfChecks: selfChecks,
 		truncated:  truncated,
+
+		forwardDials:    forwardDials,
+		forwardRecycles: forwardRecycles,
 	}
 }
 
@@ -206,6 +225,24 @@ func (m *metrics) recordTruncated() {
 		return
 	}
 	m.truncated.Add(context.Background(), 1)
+}
+
+// recordForwardDial counts one upstream socket opened by the forward path (see
+// dialReasonPoolFill / dialReasonFallback).
+func (m *metrics) recordForwardDial(reason string) {
+	if m == nil {
+		return
+	}
+	m.forwardDials.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// recordForwardRecycle counts one pooled upstream socket retired (see recycleRotated /
+// recycleError).
+func (m *metrics) recordForwardRecycle(reason string) {
+	if m == nil {
+		return
+	}
+	m.forwardRecycles.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
 // recordReload counts a snapshot read attempt by outcome.
@@ -307,6 +344,26 @@ func queryQType(r *dns.Msg) string {
 	}
 	return qtypeOther
 }
+
+const (
+	// dialReasonPoolFill is a socket opened to fill an empty (or budget-expired)
+	// pool slot. It is the healthy reason: amortised over the slot's whole lifetime.
+	dialReasonPoolFill = "pool_fill"
+	// dialReasonFallback is a query that dialled its own socket because every pooled
+	// slot was busy, or because the slot it took had to retire its socket. This is
+	// exactly the pre-#674 behaviour, which is why the pool can never add latency;
+	// a persistently high share of it means the pool is too small for the load.
+	dialReasonFallback = "fallback"
+)
+
+const (
+	// recycleRotated is a pooled socket retired by its own age/query budget, or
+	// because its upstream was reconfigured away. Expected and continuous.
+	recycleRotated = "rotated"
+	// recycleError is a pooled socket retired because the exchange on it failed.
+	// Sustained non-zero means the upstream is unhealthy.
+	recycleError = "error"
+)
 
 const (
 	// selfCheckOK is a watchdog check whose synthetic query got a sane reply.
