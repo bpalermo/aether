@@ -265,8 +265,40 @@ The Envoy hot-restart supervisor (proposal 001): `--envoy-path`
 `--drain-time` (`45s`), `--parent-shutdown-time` (`60s`), `--watch-config`
 (`true`), `--state-dir` (`/run/aether/hotrestart`), `--ready-marker`, `--envoy-arg`
 (repeatable), `--handoff-deadline`/`--admin-unresponsive-deadline` (`0` = defaults),
-`--admin-address` (`127.0.0.1:9901`), `--readiness-check`, `--install-path`,
-`--otlp-endpoint`.
+`--admin-address` (`127.0.0.1:9901`), `--install-path`,
+`--install-readiness-path`, `--readiness-check` (deprecated), `--otlp-endpoint`.
+
+`--install-path` and `--install-readiness-path` are the initContainer's staging
+mode: the first self-copies this binary to the shared volume as the supervisor,
+the second copies the bundled `/proxy-ready` prober out of the agent image. A
+requested `--install-readiness-path` against an agent image predating #673 is a
+hard failure, so chart/image skew surfaces in the initContainer rather than as a
+pod that can never become Ready.
+
+`--readiness-check` is the pre-#673 exec probe and is deprecated: re-execing this
+67MB binary every 2s per pod spent >=31% of the supervisor container's CPU on Go
+package init alone (which runs before `main()`, so no argv check can avoid it).
+The chart now execs the standalone `proxy-ready` binary below instead. The flag
+still works, so a chart predating #673 keeps a probe against a newer image.
+
+### `proxy-ready` (standalone binary — bundled in the agent image, not run from it)
+
+The `aether-proxy` pod's exec readiness probe (#673). One flag: `--ready-marker`
+(`/var/run/aether-proxy/ready`); exit 0 iff that path stats. It is deliberately
+stdlib-only (~1.7MB vs the agent's 67MB) — it imports nothing but
+`common/readymarker`, and `//agent/cmd/proxy-ready:deps_test` fails the build if
+that ever changes. It ships as an extra layer in the agent image (no second pull:
+the `install-supervisor` initContainer, which already runs that image, copies it
+onto the proxy pod's shared volume at `/opt/aether/proxy-ready`).
+
+The probe stays an **exec** probe on the pod-local marker rather than an
+`httpGet`/`tcpSocket`: the proxy DaemonSet is `hostNetwork: true` with
+`maxSurge: 1`, so predecessor and successor share the host netns for the whole
+handoff and no port-based check is provably pod-local (the reason #582 was closed
+for `mesh-dns`). Envoy's admin endpoint is not an equivalent target either — a
+draining hot-restart parent answers `LIVE` at its old epoch for the entire
+`--parent-shutdown-time-s` window (proposal 001, lesson 6), and the supervisor
+deliberately holds readiness while it is still the serving parent.
 
 ### `mesh-dns` (standalone daemon — its own binary and image)
 

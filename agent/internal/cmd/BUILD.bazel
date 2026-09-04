@@ -37,6 +37,7 @@ go_library(
         "//common/constants/mesh",
         "//common/manager",
         "//common/must",
+        "//common/readymarker",
         "//common/spire",
         "//common/udspath",
         "//registry",
@@ -58,7 +59,10 @@ go_library(
 
 go_test(
     name = "cmd_test",
-    srcs = ["config_test.go"],
+    srcs = [
+        "config_test.go",
+        "supervisor_test.go",
+    ],
     embed = [":cmd"],
     deps = [
         "//agent/internal/cni/server",

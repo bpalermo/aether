@@ -35,6 +35,7 @@ go_test(
     ],
     embed = [":hotrestart"],
     deps = [
+        "//common/readymarker",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_opentelemetry_go_otel//attribute",
