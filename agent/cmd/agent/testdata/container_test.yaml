@@ -8,6 +8,16 @@ fileExistenceTests:
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'
+  # The aether-proxy pod's stdlib-only exec readiness probe (#673). The
+  # install-supervisor initContainer runs this image and copies it onto the proxy
+  # pod's shared volume, so it must be present AND executable here — a missing
+  # one hard-fails that initContainer (which is the intended way chart/image skew
+  # surfaces, rather than a pod that can never become Ready).
+  - name: 'proxy-ready'
+    path: '/proxy-ready'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
   # The slim mesh-DNS daemon now has its OWN image
   # (//agent/cmd/mesh-dns:mesh-dns_image, #583 option B). It was only ever bundled
   # here to avoid standing up a second publish pipeline; assert it is gone so the

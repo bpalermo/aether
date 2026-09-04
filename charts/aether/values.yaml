@@ -240,6 +240,16 @@ cniInstall:
       memory: 32Mi
 
 # Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
+#
+# NOTE — this DaemonSet is COUPLED TO THE AGENT IMAGE, not just the proxy image
+# below. Its install-supervisor initContainer runs `agent.image` and stages two
+# binaries onto the pod's shared volume: the hot-restart supervisor (the agent
+# binary, self-copied) and, since #673, the stdlib-only `/proxy-ready` readiness
+# prober the kubelet execs every 2s. An agent image predating #673 does not carry
+# /proxy-ready, and the initContainer hard-fails rather than starting a pod whose
+# probe could never succeed — chart >= 0.92.0 therefore requires an agent image
+# built from #673 or later. maxUnavailable:0 keeps the previous pods serving
+# through such a skew; the fix is to align the images (or roll the chart back).
 proxy:
   enabled: true
   # External image (built by the //proxy workspace), tag-pinned to the publishing

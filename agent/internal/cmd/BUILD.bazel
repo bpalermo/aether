@@ -37,6 +37,7 @@ go_library(
         "//common/constants/mesh",
         "//common/manager",
         "//common/must",
+        "//common/readymarker",
         "//common/spire",
         "//common/udspath",
         "//registry",
@@ -61,6 +62,7 @@ go_test(
     srcs = [
         "config_test.go",
         "root_test.go",
+        "supervisor_test.go",
     ],
     embed = [":cmd"],
     deps = [

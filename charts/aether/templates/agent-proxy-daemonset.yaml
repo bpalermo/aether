@@ -58,7 +58,20 @@ spec:
         - name: install-supervisor
           image: {{ include "aether.image" .Values.agent.image | quote }}
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
-          args: ["proxy-supervisor", "--install-path=/opt/aether/supervisor"]
+          args:
+            - "proxy-supervisor"
+            - "--install-path=/opt/aether/supervisor"
+            # #673: also stage the tiny stdlib-only readiness prober that ships in
+            # the agent image at /proxy-ready. The probe below used to re-exec the
+            # supervisor — i.e. the whole 67MB agent binary — every 2s per pod,
+            # and Go package init (which runs before main() and so cannot be
+            # short-circuited by argv) was >=31% of this container's CPU.
+            #
+            # This flag hard-fails if the agent image predates #673, which is the
+            # intended way chart/image skew surfaces: the initContainer
+            # CrashLoopBackOffs while maxUnavailable:0 keeps the old pods serving,
+            # instead of a pod that starts and can never become Ready.
+            - "--install-readiness-path=/opt/aether/proxy-ready"
           volumeMounts:
             - name: supervisor-bin
               mountPath: /opt/aether
@@ -149,13 +162,27 @@ spec:
           # Ready only once this pod's Envoy is live at the newest epoch (post
           # handoff), so the DaemonSet (maxUnavailable=0) keeps the old pod until
           # the new one has taken over. The distroless Envoy image has no shell, so
-          # the probe re-execs the supervisor binary.
+          # this is an exec probe.
+          #
+          # It MUST stay an exec probe on the pod-local marker. hostNetwork:true +
+          # maxSurge:1 means the predecessor and successor pods share the host
+          # network namespace for the whole handoff, so no httpGet/tcpSocket check
+          # can be proven pod-local — that is why #582 was closed for the
+          # identically shaped mesh-dns DaemonSet, and why OPA's diagnostic API
+          # below moved onto a per-pod UDS. Probing Envoy admin is not equivalent
+          # either: a draining hot-restart parent answers LIVE at its old epoch for
+          # the entire --parent-shutdown-time-s window (proposal 001, lesson 6) and
+          # the supervisor deliberately HOLDS readiness while it is still the
+          # serving parent.
+          #
+          # #673: the exec'd binary is now the ~1.7MB stdlib-only prober instead of
+          # /opt/aether/supervisor, which IS the 67MB agent binary. Probe TIMINGS
+          # are unchanged on purpose — periodSeconds x failureThreshold is how long
+          # a marker flap is absorbed, and this change must not move that.
           readinessProbe:
             exec:
               command:
-                - "/opt/aether/supervisor"
-                - "proxy-supervisor"
-                - "--readiness-check"
+                - "/opt/aether/proxy-ready"
                 - "--ready-marker=/var/run/aether-proxy/ready"
             initialDelaySeconds: 1
             periodSeconds: 2
