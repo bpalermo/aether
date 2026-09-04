@@ -92,7 +92,7 @@ access-log/tracing policy via the MeshConfig CR.
 | `proxy.jsonLogs` | `true` | Envoy application logs as one JSON object per line. |
 | `proxy.hotRestart.baseId` | `0` | Envoy hot-restart tunables (mechanism is not optional; see proposal 001). |
 | `proxy.hotRestart.drainTime` | `10s` | Graceful connection-close window for the draining epoch. |
-| `proxy.hotRestart.parentShutdownTime` | `15s` | When the previous epoch is terminated (must exceed drainTime). |
+| `proxy.hotRestart.parentShutdownTime` | `15s` | When the previous epoch is terminated (must exceed drainTime). Also the supervisor's admin re-verify budget: the epoch-identity probe re-confirms on a fresh connection every `parentShutdownTime/3` (floor 2s, ceiling 15s), so a cross-pod takeover is diagnosed while the draining parent still lives. Below ~6s the floor takes over and the supervisor logs the lost margin at startup; raising it also delays successor-pod readiness by the same amount. |
 | `proxy.hotRestart.handoffDeadline` / `adminUnresponsiveDeadline` | `0` | Supervisor watchdogs (0 = built-in defaults). |
 | `proxy.hotRestart.shmHostPath` | `/run/aether/shm` | Shared-memory hostPath for cross-pod hot restart. |
 | `proxy.udsWorkloads.enabled` | `true` | UDS delivery (034). Gates the proxy's `/var/lib/kubelet/pods` hostPath mount, the agent's `--kubelet-pods-dir`, and the agent's read access to the `EndpointPolicy` CRD. Inert until a workload asks for it; turning it off later silently degrades annotated pods to TCP (nothing listens, so their endpoints stay unpromoted). |

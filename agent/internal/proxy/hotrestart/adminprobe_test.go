@@ -17,7 +17,11 @@ import (
 // children and no telemetry — enough for the probe helpers.
 func newProbeSupervisor(t *testing.T, f *fakeAdminServer) *Supervisor {
 	t.Helper()
-	s := New(Config{AdminAddress: f.addr(), StateDir: t.TempDir()}, slog.New(slog.DiscardHandler), nil)
+	s := New(Config{
+		AdminAddress:       f.addr(),
+		StateDir:           t.TempDir(),
+		ParentShutdownTime: 15 * time.Second, // the deployed value; derives a 5s re-verify interval
+	}, slog.New(slog.DiscardHandler), nil)
 	// Release the pinned connection before httptest.Server.Close asserts that
 	// no connection is outstanding.
 	t.Cleanup(s.adminFast.CloseIdleConnections)
@@ -58,12 +62,13 @@ func TestAdminProbeUsesReadyOnceEpochVerified(t *testing.T) {
 }
 
 // TestAdminProbeReverifiesOnInterval checks the fast path expires: identity is
-// re-confirmed at least every adminReverifyInterval.
+// re-confirmed at least every derived re-verify interval (see
+// adminReverifyIntervalFor).
 func TestAdminProbeReverifiesOnInterval(t *testing.T) {
 	f := newFakeAdmin(t, "LIVE", 0)
 	_, p := verifiedProber(t, f)
 
-	p.verifiedAt = time.Now().Add(-adminReverifyInterval - time.Second)
+	p.verifiedAt = time.Now().Add(-p.reverify - time.Second)
 	live, reachable := p.probe(context.Background(), 0)
 
 	assert.True(t, live)
@@ -79,7 +84,7 @@ func TestAdminProbeReverificationCatchesSuccessorTakeover(t *testing.T) {
 	f := newFakeAdmin(t, "LIVE", 0)
 	_, p := verifiedProber(t, f)
 
-	p.verifiedAt = time.Now().Add(-adminReverifyInterval - time.Second)
+	p.verifiedAt = time.Now().Add(-p.reverify - time.Second)
 	f.set("LIVE", 1) // a successor took over the shared admin port
 
 	live, reachable := p.probe(context.Background(), 0)

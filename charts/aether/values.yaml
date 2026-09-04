@@ -248,6 +248,12 @@ proxy:
   hotRestart:
     baseId: 0
     drainTime: 10s
+    # Also the supervisor's admin re-verify budget: the epoch-identity probe
+    # re-confirms on a fresh connection every parentShutdownTime/3 (floor 2s), so a
+    # cross-pod takeover is diagnosed while the draining parent still lives
+    # (proposal 001 lessons 3/6; agent/internal/proxy/hotrestart/adminprobe.go, #666).
+    # Below ~6s the floor takes over and the supervisor logs the lost margin at
+    # startup. Raising it also delays successor-pod readiness by the same amount.
     parentShutdownTime: 15s
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0
