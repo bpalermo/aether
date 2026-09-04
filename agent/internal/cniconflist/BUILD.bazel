@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "metrics.go",
         "reassert.go",
+        "state.go",
     ],
     importpath = "aethermesh.dev/agent/internal/cniconflist",
     visibility = ["//agent:__subpackages__"],
@@ -20,7 +21,10 @@ go_library(
 
 go_test(
     name = "cniconflist_test",
-    srcs = ["reassert_test.go"],
+    srcs = [
+        "reassert_test.go",
+        "state_test.go",
+    ],
     embed = [":cniconflist"],
     deps = [
         "//cni/conflist",
