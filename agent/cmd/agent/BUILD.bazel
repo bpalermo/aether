@@ -25,4 +25,14 @@ go_multi_arch_image(
     name = "agent_image",
     binary = ":agent",
     repository = "bpalermo/aether/agent",
+    # The aether-proxy pod's exec readiness probe (#673). It ships here rather
+    # than in its own image because the only thing that ever reads it is the
+    # install-supervisor initContainer, which already runs THIS image and copies
+    # it onto the proxy pod's shared volume — so no second pull per node. (Unlike
+    # //agent/cmd/mesh-dns, which needed its own image because its DaemonSet
+    # *runs* that image on every node.) The whole point of the binary is what it
+    # does NOT link — see //agent/cmd/proxy-ready:deps_test.
+    tars_layer = {
+        "/proxy-ready": "//agent/cmd/proxy-ready:proxy-ready",
+    },
 )
