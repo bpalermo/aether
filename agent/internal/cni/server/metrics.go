@@ -43,77 +43,99 @@ type cniMetrics struct {
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
+//
+// Registration is split by instrument family purely to keep each function under
+// the gocognit threshold: sixteen sequential error-checked registrations in one
+// body score 16 against a limit of 15. There is no behavioural boundary here.
 func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	m := &cniMetrics{}
+	if err := m.registerSweepInstruments(meter); err != nil {
+		return nil, err
+	}
+	if err := m.registerLifecycleInstruments(meter); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// registerSweepInstruments registers the ghost-sweep counters and the prune-breaker gauge.
+func (m *cniMetrics) registerSweepInstruments(meter metric.Meter) error {
 	var err error
 
 	if m.ghostsRemoved, err = meter.Int64Counter("aether.agent.ghost_sweep.ghosts_removed",
 		metric.WithDescription("Registry endpoints deregistered because no live local pod accounts for them (missed CNI DEL)")); err != nil {
-		return nil, fmt.Errorf("ghosts removed: %w", err)
+		return fmt.Errorf("ghosts removed: %w", err)
 	}
 	if m.missingRegistered, err = meter.Int64Counter("aether.agent.ghost_sweep.missing_registered",
 		metric.WithDescription("Live local pods re-registered because the registry was missing them (missed CNI ADD registration)")); err != nil {
-		return nil, fmt.Errorf("missing registered: %w", err)
+		return fmt.Errorf("missing registered: %w", err)
 	}
 	if m.stalePruned, err = meter.Int64Counter("aether.agent.ghost_sweep.stale_pruned",
 		metric.WithDescription("Local storage pod entries pruned because their network namespace no longer exists (missed CNI DEL); keeping them faults Envoy on the dead netns")); err != nil {
-		return nil, fmt.Errorf("stale pruned: %w", err)
+		return fmt.Errorf("stale pruned: %w", err)
 	}
 	if m.orphansPruned, err = meter.Int64Counter("aether.agent.ghost_sweep.orphans_pruned",
 		metric.WithDescription("Local storage pod entries pruned because the Kubernetes pod no longer exists (missed CNI DEL whose netns pin lingered, so the netns check could not catch it)")); err != nil {
-		return nil, fmt.Errorf("orphans pruned: %w", err)
+		return fmt.Errorf("orphans pruned: %w", err)
 	}
 	if m.missingStorage, err = meter.Int64Counter("aether.agent.ghost_sweep.missing_storage",
 		metric.WithDescription("Live mesh-managed pods on this node with no local storage entry (lost CNI ADD); self-healed by eviction after the detection threshold (#567)")); err != nil {
-		return nil, fmt.Errorf("missing storage: %w", err)
+		return fmt.Errorf("missing storage: %w", err)
 	}
 	if m.sweepErrors, err = meter.Int64Counter("aether.agent.ghost_sweep.errors",
 		metric.WithDescription("Ghost sweep cycles that failed before reconciling")); err != nil {
-		return nil, fmt.Errorf("sweep errors: %w", err)
+		return fmt.Errorf("sweep errors: %w", err)
 	}
 	if m.pruneBreaker, err = meter.Int64Counter("aether.agent.ghost_sweep.prune_breaker_tripped",
 		metric.WithDescription("Ghost sweep passes whose mass-delete circuit breaker refused to prune (correlated netns-check failure suspected)")); err != nil {
-		return nil, fmt.Errorf("prune breaker: %w", err)
+		return fmt.Errorf("prune breaker: %w", err)
 	}
 	if m.pruneBreakerOpen, err = meter.Int64Gauge("aether.agent.ghost_sweep.prune_breaker_engaged",
 		metric.WithDescription("1 while the ghost sweep's mass-delete circuit breaker is withholding netns-derived pruning on this node, 0 when clear; a standing 1 means stale storage cannot be cleaned and will grow (#670)")); err != nil {
-		return nil, fmt.Errorf("prune breaker engaged: %w", err)
+		return fmt.Errorf("prune breaker engaged: %w", err)
 	}
 	if m.lostAddEvictions, err = meter.Int64Counter("aether.agent.ghost_sweep.lost_add_evictions",
 		metric.WithDescription("Pods evicted by the ghost sweep to force a fresh CNI ADD after a lost one left them with no mesh listener")); err != nil {
-		return nil, fmt.Errorf("lost add evictions: %w", err)
+		return fmt.Errorf("lost add evictions: %w", err)
 	}
 	if m.staleRunningEvicts, err = meter.Int64Counter("aether.agent.ghost_sweep.stale_running_evictions",
 		metric.WithDescription("Pods evicted by the ghost sweep because their stored registration referenced a defunct network namespace while the pod was Running — the node-reboot CNI boot race (#640)")); err != nil {
-		return nil, fmt.Errorf("stale running evictions: %w", err)
+		return fmt.Errorf("stale running evictions: %w", err)
 	}
+	return nil
+}
+
+// registerLifecycleInstruments registers the unmeshed/storage gauges, the liveness
+// instruments and the identity-override counter.
+func (m *cniMetrics) registerLifecycleInstruments(meter metric.Meter) error {
+	var err error
+
 	if m.unmeshedPods, err = meter.Int64Gauge("aether.agent.ghost_sweep.unmeshed_pods",
 		metric.WithDescription("Running mesh-managed pods on this node currently outside the mesh: missing from local storage (lost CNI ADD, #567) or covered only by stale dead-netns registrations (reboot boot race, #640); nonzero means traffic to/from these pods bypasses the mesh")); err != nil {
-		return nil, fmt.Errorf("unmeshed pods: %w", err)
+		return fmt.Errorf("unmeshed pods: %w", err)
 	}
 	if m.storagePods, err = meter.Int64Gauge("aether.agent.storage.pods",
 		metric.WithDescription("Pods currently tracked in the agent's local file storage")); err != nil {
-		return nil, fmt.Errorf("storage pods: %w", err)
+		return fmt.Errorf("storage pods: %w", err)
 	}
 	if m.staleStoragePods, err = meter.Int64Gauge("aether.agent.storage.stale_pods",
 		metric.WithDescription("Local storage pod entries this node's Kubernetes pod list does not account for (missed CNI DEL), whether or not they were prunable this pass; against aether.agent.storage.pods this is the direct stale-vs-live ratio (#670)")); err != nil {
-		return nil, fmt.Errorf("stale storage pods: %w", err)
+		return fmt.Errorf("stale storage pods: %w", err)
 	}
 	if m.healthTransitions, err = meter.Int64Counter("aether.agent.liveness.health_transitions",
 		metric.WithDescription("Endpoint health transitions reflected into the registry by the liveness loop")); err != nil {
-		return nil, fmt.Errorf("health transitions: %w", err)
+		return fmt.Errorf("health transitions: %w", err)
 	}
 	if m.promotionDelay, err = meter.Float64Histogram("aether.agent.liveness.promotion_delay_seconds",
 		metric.WithDescription("Seconds from the liveness loop first observing a pod's programmed health gateway to promoting it HEALTHY in the registry"),
 		metric.WithUnit("s")); err != nil {
-		return nil, fmt.Errorf("promotion delay: %w", err)
+		return fmt.Errorf("promotion delay: %w", err)
 	}
 	if m.spiffeIDOverrides, err = meter.Int64Counter("aether.agent.identity.spiffe_id_override_rejected",
 		metric.WithDescription("Pods carrying the rejected aether.io/spiffe-id annotation, whose mesh identity was derived from the pod's own namespace/ServiceAccount instead (#669); nonzero means someone is trying to choose a workload identity by annotation")); err != nil {
-		return nil, fmt.Errorf("spiffe id overrides: %w", err)
+		return fmt.Errorf("spiffe id overrides: %w", err)
 	}
-
-	return m, nil
+	return nil
 }
 
 // spiffeIDOverrideRejected records one pod whose aether.io/spiffe-id annotation
