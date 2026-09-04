@@ -238,3 +238,34 @@ for the full install + onboarding walkthrough.
 > hex addresses with no error and no failing test. See
 > [`observability/profiling-symbols.md`](./observability/profiling-symbols.md) for the
 > path table that has to be updated alongside it.
+
+## 8. Troubleshooting
+
+### Forwarded DNS keeps failing after a kube-dns roll
+
+The mesh-DNS forward path keeps a small pool of **connected** UDP sockets per upstream
+(issue #674) rather than dialling one per query. The upstream is a ClusterIP, so
+connecting pins a conntrack entry to **one** kube-dns backend pod; when that pod rolls
+the entry survives pointing at a corpse and datagrams are black-holed with **no ICMP** —
+the socket only ever sees a read timeout.
+
+This self-heals: any exchange error retires the socket, and every socket also expires on
+its own budget (a jittered ~30s, or 1000 queries). Symptoms are therefore a burst of
+`aether_mesh_dns_forward_conn_recycles_total{reason="error"}`, not a sustained outage.
+If it does NOT settle:
+
+```bash
+# Dials per forwarded query -- should be well under 0.01, and is 1.0 when pooling is off.
+sum(rate(aether_mesh_dns_forward_conn_dials_total[5m]))
+  / sum(rate(aether_mesh_dns_queries_total{result="forwarded"}[5m]))
+
+# Open pooled sockets -- flat at pool size x upstreams at steady state.
+aether_mesh_dns_forward_conn_pool_open
+```
+
+To rule the pool out entirely, disable it — `--forward-pool-size=0` restores the exact
+pre-#674 dial-per-query behaviour:
+
+```bash
+helm upgrade ... --set agent.meshDnsDaemon.forwardPoolSize=0
+```
