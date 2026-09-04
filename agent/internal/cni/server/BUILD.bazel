@@ -17,6 +17,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/constants",
+        "//agent/internal/cniconflist",
         "//agent/internal/spire",
         "//agent/internal/xds/ack",
         "//agent/internal/xds/cache",
@@ -67,6 +68,7 @@ go_test(
     embed = [":server"],
     deps = [
         "//agent/constants",
+        "//agent/internal/cniconflist",
         "//agent/internal/spire",
         "//agent/internal/xds/ack",
         "//agent/internal/xds/cache",

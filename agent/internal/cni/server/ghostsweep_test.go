@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/internal/cniconflist"
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/storage"
 	"aethermesh.dev/agent/types"
@@ -922,4 +923,109 @@ func TestSweepLostAddStreakResetsOnRecovery(t *testing.T) {
 	s.sweepGhostEndpoints(ctx)
 	assert.NotContains(t, s.missingStorageStreaks, podKey("default", "pod-x"), "streak reset once the pod registered")
 	assert.Zero(t, evictions, "no eviction after recovery")
+}
+
+// staticChainState is a frozen conflist chaining state for the eviction
+// interlock tests.
+type staticChainState struct{ s cniconflist.ChainStatus }
+
+func (c staticChainState) ChainStatus() cniconflist.ChainStatus { return c.s }
+
+// TestSweepEvictionInterlockedOnUnchainedConflist (#667): self-heal eviction
+// exists to force a fresh CNI ADD by recreating the pod's sandbox. While aether
+// is not chained in this node's conflist no CNI ADD is ever issued to us, so the
+// replacement comes up unmeshed too and the sweep churns the same workload
+// forever at 2/node/min. Reporting must continue — the gauge is the alert
+// signal — and only the eviction is withheld.
+func TestSweepEvictionInterlockedOnUnchainedConflist(t *testing.T) {
+	ctx := context.Background()
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]() // storage empty: the ADD was lost
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-lost", "default", "10.0.0.7")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	s.SetChainState(staticChainState{s: cniconflist.ChainStatus{Observed: true, Chained: false}})
+
+	var evicted []string
+	s.evictPod = func(_ context.Context, ns, name string) error {
+		evicted = append(evicted, ns+"/"+name)
+		return nil
+	}
+
+	// Well past the threshold: still never evicted.
+	passes := lostAddEvictThreshold + 2
+	for range passes {
+		s.sweepGhostEndpoints(ctx)
+	}
+	assert.Empty(t, evicted, "eviction cannot heal an unchained node, so it must be withheld")
+	assert.Equal(t, passes, s.missingStorageStreaks[podKey("default", "pod-lost")],
+		"reporting must continue while eviction is withheld - the gauge is the alert signal")
+
+	// The moment the conflist is repaired the self-heal resumes.
+	s.SetChainState(staticChainState{s: cniconflist.ChainStatus{Observed: true, Chained: true}})
+	s.sweepGhostEndpoints(ctx)
+	assert.Equal(t, []string{"default/pod-lost"}, evicted, "eviction resumes once aether is chained again")
+}
+
+// TestSweepEvictionFailsOpenOnUnknownChainState (#667): unlike the taint gate,
+// this interlock fails OPEN. A nil ChainState (--cni-conflist-reassert=false) or
+// a loop that has not checked yet must not disable the #567/#640 self-heal —
+// that recovery is known to work, and withholding it on a guess trades a
+// known-good repair for nothing.
+func TestSweepEvictionFailsOpenOnUnknownChainState(t *testing.T) {
+	for name, chain := range map[string]cniconflist.ChainState{
+		"nil chain state (re-assert loop off)": nil,
+		"chaining not yet observed":            staticChainState{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+
+			store := storage.NewMockStorage[*cniv1.CNIPod]()
+			reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+			k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-lost", "default", "10.0.0.7")).Build()
+			s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+			s.SetChainState(chain)
+
+			var evicted []string
+			s.evictPod = func(_ context.Context, ns, name string) error {
+				evicted = append(evicted, ns+"/"+name)
+				return nil
+			}
+
+			for range lostAddEvictThreshold {
+				s.sweepGhostEndpoints(ctx)
+			}
+			assert.Equal(t, []string{"default/pod-lost"}, evicted,
+				"self-heal must stay enabled when chaining is unknown")
+		})
+	}
+}
+
+// TestSweepStaleRunningInterlockedOnUnchainedConflist (#667): the same interlock
+// covers the post-reboot stale-while-Running path, which is the one that would
+// otherwise evict a whole node's population against an unchained conflist.
+func TestSweepStaleRunningInterlockedOnUnchainedConflist(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false } // pre-reboot netns is gone
+
+	stale := validCNIPod("pod-reboot", "default", "container-old")
+	stale.NetworkNamespace = "/run/aether/netns/pre-reboot"
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-old"), stale))
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-reboot", "default", "10.0.0.1")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	s.SetChainState(staticChainState{s: cniconflist.ChainStatus{Observed: true, Chained: false}})
+
+	evictions := 0
+	s.evictPod = func(context.Context, string, string) error { evictions++; return nil }
+
+	for range staleRunningEvictThreshold + 2 {
+		s.sweepGhostEndpoints(ctx)
+	}
+	assert.Zero(t, evictions, "stale-while-Running eviction is equally futile on an unchained node")
 }

@@ -269,14 +269,15 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain); err != nil {
+	// Construct the conflist re-asserter BEFORE its consumers: it is the source of
+	// truth for whether aether is actually chained in this node's CNI conflist,
+	// which gates the taint removal, the agent's readiness, and the ghost sweep's
+	// self-heal evictions. It is registered with the manager further down.
+	reasserter := newCNIConflistReasserter()
+
+	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain, chainStateOf(reasserter)); err != nil {
 		return err
 	}
-
-	// Construct the conflist re-asserter BEFORE the taint remover: it is the taint
-	// gate's source of truth for whether aether is actually chained in this node's
-	// CNI conflist. It is registered with the manager further down.
-	reasserter := newCNIConflistReasserter()
 
 	// A node whose conflist has lost the aether entry cannot mesh a NEW pod, but
 	// its agent is otherwise perfectly healthy — so nothing stops the scheduler
@@ -675,7 +676,7 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 // setupCNIServer creates and registers a CNI gRPC server as a runnable with the Manager.
 // The server listens on a Unix domain socket and handles pod registration/deregistration
 // requests from the CNI plugin binary. It stores pod data locally and triggers xDS snapshot updates.
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string, chain cniconflist.ChainState) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
@@ -694,6 +695,11 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 	if err != nil {
 		return err
 	}
+	// A setter rather than a 13th positional argument: the chaining state is an
+	// optional interlock on the ghost sweep's self-heal evictions (#667), not
+	// something the server needs in order to exist. Same shape as
+	// snapshotCache.SetMeshDNSSnapshotPath.
+	cniSrv.SetChainState(chain)
 	if err = m.Add(cniSrv); err != nil {
 		return fmt.Errorf("failed to add CNI server: %w", err)
 	}
