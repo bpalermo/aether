@@ -48,6 +48,12 @@ type Metrics struct {
 	// drop, no ODCDS re-warm — so without this counter a validator cannot tell
 	// a working exemption from a demand set that simply never aged.
 	upstreamsTTLRefreshed metric.Int64Counter
+	// upstreamsRestored counts observed dependencies re-admitted from the
+	// agent's local storage at start (issue #701): the demand a previous agent
+	// on this node had already granted, carried across a full agent+proxy
+	// replacement so the first snapshot serves it. Incremented once per
+	// restart; NOT misses — nothing asked for anything new.
+	upstreamsRestored metric.Int64Counter
 	// bindingMismatch counts local source pods whose outbound clusters are
 	// bound to an SDS client-certificate secret that is NOT that pod's own
 	// SPIFFE ID (issue #638). Non-zero means the node's egress would present a
@@ -97,6 +103,10 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Observed dependencies past the idle TTL kept in the node dependency set because the proxy still holds a live on-demand subscription")); err != nil {
 		return nil, fmt.Errorf("upstreams ttl refreshed: %w", err)
 	}
+	if m.upstreamsRestored, err = meter.Int64Counter("aether.agent.upstreams.restored",
+		metric.WithDescription("Observed dependencies restored from the agent's local storage at start (a replaced agent starting warm)")); err != nil {
+		return nil, fmt.Errorf("upstreams restored: %w", err)
+	}
 	if m.bindingMismatch, err = meter.Int64Counter("aether.agent.identity.outbound_binding_mismatch",
 		metric.WithDescription("Local source pods whose outbound clusters are bound to another workload's SDS client-certificate secret")); err != nil {
 		return nil, fmt.Errorf("outbound binding mismatch: %w", err)
@@ -144,6 +154,17 @@ func (m *Metrics) UpstreamTTLRefreshed(ctx context.Context, n int64) {
 		return
 	}
 	m.upstreamsTTLRefreshed.Add(ctx, n)
+}
+
+// UpstreamsRestored counts n observed dependencies re-admitted from local
+// storage at start (issue #701). Service names are deliberately NOT attributes
+// (unbounded cardinality); the restore log line names them. A no-op for
+// n <= 0 so a cold start records nothing.
+func (m *Metrics) UpstreamsRestored(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.upstreamsRestored.Add(ctx, n)
 }
 
 // Generated records the outcome of one snapshot generation.

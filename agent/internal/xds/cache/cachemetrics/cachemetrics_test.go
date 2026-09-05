@@ -56,6 +56,24 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	m.Generated(context.Background(), 0.01, 1, nil)
 	m.Generated(context.Background(), 0.01, 1, errors.New("boom"))
 	m.UpstreamTTLRefreshed(context.Background(), 3)
+	m.UpstreamsRestored(context.Background(), 3)
+}
+
+// TestCacheMetrics_UpstreamsRestored verifies the restore counter records the
+// restored count and nothing on a cold start.
+func TestCacheMetrics_UpstreamsRestored(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	ctx := context.Background()
+
+	m.UpstreamsRestored(ctx, 0)
+	if _, found := metricValue(t, reader, "aether.agent.upstreams.restored"); found {
+		t.Error("a cold start must record nothing")
+	}
+
+	m.UpstreamsRestored(ctx, 2)
+	if got, _ := metricValue(t, reader, "aether.agent.upstreams.restored"); got != 2 {
+		t.Errorf("restored = %d, want 2", got)
+	}
 }
 
 // TestCacheMetrics_UpstreamTTLRefreshed verifies the in-use exemption counter
