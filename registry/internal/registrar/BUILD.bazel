@@ -28,6 +28,7 @@ go_test(
     srcs = [
         "metrics_test.go",
         "registrar_test.go",
+        "watch_drain_test.go",
         "watch_startup_test.go",
     ],
     embed = [":registrar"],
