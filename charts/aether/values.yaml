@@ -193,12 +193,13 @@ agent:
     # any datagram not from the upstream's exact address and an off-path attacker cannot
     # land a spoofed answer at all.
     forwardPoolSize: null
-    # Issue #583: the readiness probe now re-execs the SLIM /mesh-dns binary (only the
-    # resolver + snapshot reload + telemetry — no controller-runtime/xDS/CNI/SPIRE), not
-    # the full /agent, so the re-exec CPU headroom that inflated these limits is gone.
-    # The resident resolver is ~12-15Mi RSS and a slim-binary stat is single-digit m
-    # (period lengthened to 15s too). These are conservative for the slim footprint;
-    # revisit against live usage if needed.
+    # Issue #583 slimmed the readiness re-exec (the resolver alone, not the full
+    # /agent); issue #683 removed it entirely — the probe execs the stdlib-only
+    # /mesh-dns-ready binary (~1.7Mi, bundled in this same image) rather than
+    # relaunching the 16.9Mi daemon every 15s, which was ~3-4% of this container's
+    # CPU in runc/libcontainer exec and Go package init. The resident resolver is
+    # ~12-15Mi RSS and a stdlib stat is a rounding error. These are conservative for
+    # that footprint; revisit against live usage if needed.
     resources:
       requests:
         cpu: 25m

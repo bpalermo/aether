@@ -308,9 +308,34 @@ agent rolls never gap pod DNS. It does **not** share the agent's flag set:
 `--snapshot-path` (`/host/var/lib/aether/registry/mesh-dns/records.json`),
 `--mesh-domain` (`aether.internal`), `--mesh-dns-upstream` (repeatable,
 `host[:port]`; empty = `/etc/resolv.conf`), `--ready-marker`
-(`/run/aether/mesh-dns.ready`), `--readiness-check`, `--otlp-endpoint`, `--debug`.
+(`/run/aether/mesh-dns.ready`), `--readiness-check` (deprecated),
+`--forward-pool-size` (`8`), `--otlp-endpoint`, `--debug`.
 It binds UDP+TCP on the host at port 18054, which the CNI DNATs each managed
 pod's `:53` to.
+
+`--readiness-check` is the pre-#683 exec probe and is deprecated: re-execing this
+16.9MB daemon every 15s per pod spent ~10 core-seconds per 25 minutes fleet-wide
+(~3-4% of the container's CPU) on container exec and Go package init alone (which
+runs before `main()`, so no argv check can avoid it). The chart execs the
+standalone `mesh-dns-ready` binary below instead. The flag still works, so a
+chart predating #683 keeps a probe against a newer image.
+
+### `mesh-dns-ready` (standalone binary — bundled in the mesh-dns image)
+
+The `aether-mesh-dns` pod's exec readiness probe (#683). One flag:
+`--ready-marker` (`/run/aether/mesh-dns.ready`); exit 0 iff that path stats. It
+is deliberately stdlib-only (~1.7MB vs the daemon's 16.9MB) — it imports nothing
+but `common/readymarker`, and `//agent/cmd/mesh-dns-ready:deps_test` fails the
+build if that ever changes. It ships as an extra layer in the mesh-dns image, the
+image the DaemonSet already runs, so there is no second pull and **no chart/image
+skew is possible**: the prober and the daemon that writes the marker are the same
+artifact.
+
+Like `proxy-ready`, it stays an **exec** probe on the pod-local marker rather
+than an `httpGet`/`tcpSocket`: this DaemonSet is `hostNetwork: true` with
+`maxSurge: 1`, so predecessor and successor share the host netns for the whole
+handoff and a port-based check could be answered by the peer pod's SO_REUSEPORT
+socket. That is precisely what #582 proposed and why it was closed abandoned.
 
 ### `registrar`
 
