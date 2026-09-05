@@ -185,3 +185,51 @@ func TestObservedDependency_UnsubscribeReleasesTheTTLExemption(t *testing.T) {
 	c.PruneObservedDependencies()
 	assert.NotContains(t, c.DependencySet(), service)
 }
+
+// TestRestoreDependency_AnsweredInTheFirstPushAndStillDecays covers the
+// post-restart repair (#682): a fresh cache with an EMPTY dependency set,
+// re-seeded from the clusters the proxy reports it holds, must serve the
+// requested authority in its FIRST snapshot push — no ODCDS round trip, no
+// waiting for a periodic tick. And because a restored entry is an ordinary
+// TTL'd observation rather than a live-subscription pin, an upstream the proxy
+// has stopped using still ages out: the restore repairs demand scoping's blind
+// spot without disabling it.
+func TestRestoreDependency_AnsweredInTheFirstPushAndStillDecays(t *testing.T) {
+	const (
+		service   = "aether-test/echo"
+		fqdn      = "echo.aether-test.aether.internal"
+		authority = fqdn + ":18081"
+	)
+
+	ctx := context.Background()
+	c := newTestCache("node-1")
+	c.SetMeshDomain("aether.internal")
+	c.observedTTL = 30 * time.Millisecond
+
+	reg := &catalogListerRegistry{
+		mockRegistry: &mockRegistry{
+			listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+				return map[string][]*registryv1.ServiceEndpoint{
+					// The production shape: the registry carries the APPLICATION port.
+					service: {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+				}, nil
+			},
+		},
+		known: map[string]bool{service: true},
+	}
+
+	require.Empty(t, c.DependencySet(), "a restarted agent starts with nothing observed")
+	require.True(t, c.RestoreDependency(ctx, service), "the held cluster re-seeds the dependency set")
+
+	// ONE reload, and the authority the proxy is running on is already served.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	first := snapshotClusterNames(t, c)
+	assert.Contains(t, first, authority, "the proxy's held authority must be in the FIRST push after a restart")
+	assert.Contains(t, first, fqdn)
+
+	// Not a pin: the restored entry is still subject to the idle TTL.
+	assert.Empty(t, c.OnDemandServices(), "a restored dependency is an observation, not a live subscription")
+	time.Sleep(40 * time.Millisecond)
+	c.PruneObservedDependencies()
+	assert.NotContains(t, c.DependencySet(), service, "a restored upstream nobody uses still ages out")
+}

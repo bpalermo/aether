@@ -3,6 +3,9 @@ package server
 import (
 	"context"
 	"log/slog"
+	"sort"
+	"strconv"
+	"strings"
 
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -81,6 +84,7 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 	if req.GetTypeUrl() != resourcev3.ClusterType {
 		return nil
 	}
+	o.resumeHeldClusters(streamID, req.GetInitialResourceVersions())
 	for _, name := range req.GetResourceNamesUnsubscribe() {
 		o.cache.UntrackOnDemandCluster(streamID, name)
 	}
@@ -91,6 +95,93 @@ func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.Delta
 		o.observeSubscription(streamID, name)
 	}
 	return nil
+}
+
+// resumeHeldClusters re-seeds the node dependency set from the clusters the
+// proxy reports it already HOLDS — the initial_resource_versions map, which the
+// delta protocol requires on the first request of every stream and which is
+// therefore empty on every subsequent one.
+//
+// This is what makes a fresh agent answer the proxy's live demand in its FIRST
+// push instead of ~15s later (issue #682; see SnapshotCache.RestoreDependency
+// for the full mechanism). The short version: a restarted agent starts with an
+// empty observed-dependency set and drops every ODCDS-acquired upstream from
+// its first snapshot, and a reconnecting Envoy will not re-ask for them — a name
+// it is still "waiting for server" on is in neither initial_resource_versions
+// nor resource_names_subscribe, and its on_demand filter dedupes every later
+// re-subscribe. On talos (rev194, 2026-09-05) that cost 14.05s of 503s on w01
+// and 14.67s on w03, ending only when Envoy's init-fetch timeout reset the
+// subscription state. The held inventory is the proxy telling the agent, in the
+// protocol, which clusters it is still running on; the agent simply has to read
+// it.
+//
+// Restored entries are ordinary TTL'd observations, never live-subscription
+// pins, so an upstream the proxy has stopped using still ages out of the demand
+// set. A held name whose service is gone from the catalog is skipped silently —
+// unlike an on-demand REQUEST, a stale held resource is not a client asking for
+// a ghost, so it is neither logged nor counted as a rejection.
+func (o *onDemandObserver) resumeHeldClusters(streamID int64, held map[string]string) {
+	if len(held) == 0 {
+		return
+	}
+	names := make([]string, 0, len(held))
+	for name := range held {
+		names = append(names, name)
+	}
+	// Deterministic order so the restore is reproducible across runs (map order
+	// is protocol-visible on the push that follows, see #135).
+	sort.Strings(names)
+
+	ctx := context.Background()
+	restored := 0
+	for _, name := range names {
+		service, ok := o.meshServiceKey(name)
+		if !ok {
+			continue
+		}
+		if cat, hasCatalog := o.registry.(registry.ServiceCatalog); hasCatalog && !cat.HasService(service) {
+			continue
+		}
+		if o.cache.RestoreDependency(ctx, service) {
+			restored++
+		}
+	}
+	if restored > 0 {
+		o.log.InfoContext(ctx, "restored node dependency set from the clusters the proxy still holds (fresh delta stream)",
+			"stream", streamID, "services", restored, "held", len(held))
+	}
+}
+
+// meshServiceKey maps a held cluster resource name to its dependency-set service
+// key, accepting ONLY a plain mesh service cluster: "<svc>.<ns>.<meshDomain>"
+// with an optional ":<port>" authority suffix. Everything else the proxy holds
+// is not a demand-set entry — per-pod app_/health_ clusters, the "tcp:" floor
+// clusters (whose service is pinned by captureTCPDeps anyway), the passthrough
+// cluster — and a lenient match would mint bogus keys like "ns/tcp:svc".
+func (o *onDemandObserver) meshServiceKey(name string) (string, bool) {
+	if name == "" || name == "*" || proxy.IsPerPodClusterName(name) {
+		return "", false
+	}
+	meshDomain := o.cache.MeshDomain()
+	service, ok := proxy.ServiceFromClusterName(name, meshDomain)
+	if !ok {
+		return "", false
+	}
+	base := proxy.ServiceClusterName(service, meshDomain)
+	if base == "" {
+		return "", false
+	}
+	if name == base {
+		return service, true
+	}
+	port, isPortSuffixed := strings.CutPrefix(name, base+":")
+	if !isPortSuffixed {
+		return "", false
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return "", false
+	}
+	return service, true
 }
 
 // observeSubscription maps one named delta CDS subscription to its service key,
