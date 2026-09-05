@@ -28,6 +28,13 @@ name: main-post-merge
 # Integration and e2e are not repeated here: `e2e.yaml` already covers `main`
 # pushes, and the integration leg is bounded by the same PR scope this job
 # re-derives.
+#
+# Deliberately NO `concurrency` group (unlike `publish.yaml`/`proxy-release.yml`,
+# serialised in #692). Those race because they write shared mutable state — a
+# registry tag, a rolling branch. This workflow only reads: each run validates its
+# own commit against its own first parent and writes nothing outside its own run.
+# Serialising it would delay the detection it exists to provide, and a queued-run
+# eviction would silently skip a commit's validation.
 on:
   push:
     branches:
