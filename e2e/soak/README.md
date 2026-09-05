@@ -72,7 +72,10 @@ Each of these invalidated a real run:
    plus `kubectl` evidence; do **not** trust `increase[8h]` spanning a gap.
 4. **Watch collector memory.** If the collector saturates it silently sheds prober
    exports and blinds the SLI (it is the same collector the mesh exports to). Sample
-   `kubectl top pods -n o11y` alongside the prober rate.
+   `kubectl top pods -n o11y` alongside the prober rate. A saturated collector used to
+   crash-loop agents too (#662, fixed in #668); that fix is exercised on demand by
+   `e2e/pressure/`, which deliberately induces shedding and must **never** be run
+   during a soak.
 5. **Never `helm --reuse-values`** on aether charts — it silently pins a stale image
    digest. Use `helm get values <rel> -n <ns> -o yaml > /tmp/v.yaml` then `-f /tmp/v.yaml`.
 6. **k6 needs 1Gi.** At 256Mi runners OOM-restart ~3-5h into the 7h40m run, fragmenting
