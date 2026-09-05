@@ -51,7 +51,13 @@ spec:
           imagePullPolicy: {{ .Values.agent.meshDnsDaemon.image.pullPolicy }}
           command: ["/mesh-dns"]
           args:
-            - "--debug={{ .Values.debug }}"
+            {{- /* NOT the global .Values.debug (#684). That is `true` by default and
+                   reached this daemon, so every node shipped a mesh-DNS resolver at
+                   TRACE. mesh-dns is the one component on every managed pod's :53
+                   path, and every record it emits is fanned out to the OTLP log
+                   exporter as well as stderr. It gets its own opt-in switch, default
+                   off; the global toggle deliberately does not reach it. */}}
+            - "--debug={{ .Values.agent.meshDnsDaemon.debug }}"
             - "--mesh-domain={{ .Values.meshDomain }}"
             - "--ready-marker=/run/aether/mesh-dns.ready"
             {{- range .Values.agent.meshDnsUpstream }}

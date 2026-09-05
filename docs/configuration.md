@@ -320,6 +320,15 @@ runs before `main()`, so no argv check can avoid it). The chart execs the
 standalone `mesh-dns-ready` binary below instead. The flag still works, so a
 chart predating #683 keeps a probe against a newer image.
 
+`--debug` only raises the log level (Info to Trace); it gates no feature and no
+data-path behaviour. The mesh-DNS forward path logs **nothing per query** at any
+level — the resolver's only Debug-level call site is the snapshot reload. The
+chart nonetheless defaults it **off** for this daemon (#684) via its own
+`agent.meshDnsDaemon.debug` key: the global `debug: true` deliberately no longer
+reaches mesh-dns, because every record it emits is also fanned out to the OTLP
+log exporter and this is the one component on every managed pod's `:53` path.
+Turn it on for a diagnosis with `--set agent.meshDnsDaemon.debug=true`.
+
 ### `mesh-dns-ready` (standalone binary — bundled in the mesh-dns image)
 
 The `aether-mesh-dns` pod's exec readiness probe (#683). One flag:
