@@ -36,11 +36,33 @@ func snapshotClusterNames(t *testing.T, c *SnapshotCache) map[string]types.Resou
 // The assertion that matters: after the service is dropped from the dependency
 // set, ONE on-demand observation plus ONE reload must put the requested name
 // back in the published snapshot — no stream reset, no second round trip.
+//
+// Both port spellings the catch-all can produce are covered. The second case is
+// the production shape and the follow-up fix: the registry endpoint port is the
+// APPLICATION port (echo: 8080) while the mesh VIP Service — the only thing a
+// client can dial after mesh DNS hands it a portless A record — advertises
+// ProxyOutboundPort (18081). Deriving the alias from endpoints[0].GetPort()
+// alone published ":8080" and left ":18081" unpublished on every node, which is
+// exactly the authority that wedged for 5m10s on 2026-09-05; the first case
+// passed only because its app port happened to equal the dialed port.
 func TestODCDS_DefaultPortAuthorityIsAnsweredInOnePush(t *testing.T) {
+	t.Run("app port is the dialed port", func(t *testing.T) {
+		assertODCDSAuthorityAnsweredInOnePush(t, 18081, "echo.aether-test.aether.internal:18081")
+	})
+	t.Run("mesh Service port differs from the app port", func(t *testing.T) {
+		assertODCDSAuthorityAnsweredInOnePush(t, 8080, "echo.aether-test.aether.internal:18081")
+	})
+}
+
+// assertODCDSAuthorityAnsweredInOnePush warms a service whose endpoints
+// advertise appPort, drops it out of the demand set, then asserts that a single
+// on-demand observation of authority (the delta subscribe the proxy re-issues on
+// the SAME stream) plus a single reload republishes that exact name.
+func assertODCDSAuthorityAnsweredInOnePush(t *testing.T, appPort uint32, authority string) {
+	t.Helper()
 	const (
-		service   = "aether-test/echo"
-		fqdn      = "echo.aether-test.aether.internal"
-		authority = fqdn + ":18081"
+		service = "aether-test/echo"
+		fqdn    = "echo.aether-test.aether.internal"
 	)
 
 	ctx := context.Background()
@@ -53,7 +75,7 @@ func TestODCDS_DefaultPortAuthorityIsAnsweredInOnePush(t *testing.T) {
 		mockRegistry: &mockRegistry{
 			listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 				return map[string][]*registryv1.ServiceEndpoint{
-					service: {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 18081)},
+					service: {makeEndpoint("10.0.0.1", "cluster-1", "node-2", appPort)},
 				}, nil
 			},
 		},
