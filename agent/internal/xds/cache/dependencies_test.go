@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -436,9 +438,63 @@ func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 		port.loadAssignment.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress())
 	assert.Equal(t, "ns/svc-mp", port.service, "per-port cluster maps back to the service key (SAN/retention)")
 
-	// No spurious :8080 (default) port cluster — the default vhost owns it.
-	_, has8080 := c.clusters["svc-mp.ns.aether.internal:8080"]
-	assert.False(t, has8080, "default port is not a separate cluster")
+	// The DEFAULT port also gets a cluster — the cold-path alias (#682). It owns
+	// no vhost (the default entry's vhost already claims the ":8080" domain) and
+	// no load assignment of its own (it shares the bare-service EDS), it exists
+	// purely so the ODCDS catch-all's cluster_header ":authority" resolves for a
+	// client dialing the service on its default port.
+	alias, hasAlias := c.clusters["svc-mp.ns.aether.internal:8080"]
+	require.True(t, hasAlias, "default-port authority must resolve to a cluster (ODCDS cold path)")
+	assert.Equal(t, "svc-mp.ns.aether.internal:8080", alias.cluster.GetName())
+	assert.Equal(t, "ns/svc-mp", alias.cluster.GetEdsClusterConfig().GetServiceName(),
+		"the alias shares the default cluster's bare-service EDS")
+	assert.Nil(t, alias.vhost, "the default entry's vhost already owns the :8080 domain")
+	assert.Nil(t, alias.loadAssignment, "the alias publishes no second load assignment")
+	assert.Equal(t, "ns/svc-mp", alias.service, "the alias maps back to the service key (SAN/retention)")
+	assert.Equal(t, "8080", alias.sni)
+
+	// The MESH port gets an alias too, and it is the one that matters in
+	// production: every mesh VIP Service advertises exactly ProxyOutboundPort,
+	// so ":18081" — not the application port — is the authority a client
+	// resolving through mesh DNS dials, and the name the ODCDS catch-all
+	// requests. It is not in the registry endpoints at all (those carry
+	// application ports), so it must come from the mesh constant.
+	meshAlias, hasMeshAlias := c.clusters[fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)]
+	require.True(t, hasMeshAlias, "the mesh Service port authority must resolve to a cluster (ODCDS cold path)")
+	assert.Equal(t, "ns/svc-mp", meshAlias.cluster.GetEdsClusterConfig().GetServiceName(),
+		"the mesh-port alias shares the default cluster's bare-service EDS")
+	assert.Nil(t, meshAlias.vhost, "the cap_http route domains already own the :18081 spelling")
+	assert.Nil(t, meshAlias.loadAssignment, "the alias publishes no second load assignment")
+	assert.Equal(t, "ns/svc-mp", meshAlias.service)
+}
+
+// TestLoadClustersFromRegistry_MeshPortServedAsRealPort verifies a service that
+// genuinely ADVERTISES the mesh port keeps its real, port-filtered per-port
+// cluster: the whole-service alias must never shadow it.
+func TestLoadClustersFromRegistry_MeshPortServedAsRealPort(t *testing.T) {
+	c := newTestCache("node-1")
+	c.SetMeshDomain("aether.internal")
+	declareDeps(c, "ns/svc-mp")
+	ctx := context.Background()
+
+	// ep1 serves 8080 (default) + the mesh port; ep2 only 8080.
+	ep1 := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+	ep1.Ports = []uint32{8080, meshconst.ProxyOutboundPort}
+	ep2 := makeEndpoint("10.0.0.2", "cluster-1", "node-3", 8080)
+	ep2.Ports = []uint32{8080}
+	reg := &mockRegistry{
+		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			return map[string][]*registryv1.ServiceEndpoint{"ns/svc-mp": {ep1, ep2}}, nil
+		},
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+	real, ok := c.clusters[fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)]
+	require.True(t, ok)
+	require.NotNil(t, real.loadAssignment, "the real per-port cluster keeps its own port-filtered EDS")
+	require.Len(t, real.loadAssignment.GetEndpoints(), 1, "only the pod advertising the port is a member")
+	assert.Equal(t, []string{fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)},
+		real.vhost.GetDomains(), "the real per-port cluster keeps its vhost")
 }
 
 // TestDependencySet_IncludesGammaRouteTargets verifies a GAMMA route TARGET (an

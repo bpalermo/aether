@@ -55,6 +55,11 @@ func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 			continue
 		}
 
+		// Re-report the rejected override on restart: the CNI ADD that first
+		// logged it may be long gone, and a stored pod still carrying the
+		// annotation is still an attempt worth seeing (#669).
+		s.reportRejectedSpiffeIDOverride(ctx, log, pod)
+
 		spiffeID := proxy.SpiffeIDFromPod(pod, s.trustDomain)
 		selectors := spire.PodSelectors(pod.GetNamespace(), pod.GetServiceAccount(), pod.GetName(), string(k8sPod.UID))
 		if err := s.spireBridge.SubscribePod(pod.GetNetworkNamespace(), spiffeID, selectors); err != nil {

@@ -56,17 +56,33 @@ const (
 	// gated by this — the API is ground truth.
 	ghostNetnsFailThreshold = 3
 
-	// pruneBreakerFraction is the fraction of stored pods a single pass may prune
-	// before the mass-delete breaker refuses the whole prune. Correlated
-	// netns-check failure (the incident) trips it; genuine churn does not (truly
-	// gone pods are gone from the API too and the API cross-check keeps a Running
-	// pod out of the prune set regardless of a netns stat failure).
+	// pruneBreakerFraction is the fraction of the NETNS-DERIVED class a single
+	// pass may prune before the mass-delete breaker refuses that half of the
+	// prune. Correlated netns-check failure (the incident) trips it; genuine churn
+	// does not (truly gone pods are gone from the API too and the API cross-check
+	// keeps a Running pod out of the prune set regardless of a netns stat
+	// failure).
+	//
+	// The fraction deliberately excludes API-confirmed orphans, in both numerator
+	// and denominator (#670). Measuring it over the combined set made the breaker
+	// self-reinforcing: once a node's orphan backlog crossed 30% of storage every
+	// pass was refused, so the backlog could only grow. Observed on talos-main
+	// 2026-09-03 — 92 storage records for 39 live pods fleet-wide (57.6% stale;
+	// worker-01 at 66%) with one refusal per sweep pass on every node, standing
+	// for weeks and surviving agent rolls because the staleness lives on disk.
 	pruneBreakerFraction = 0.30
 
 	// pruneBreakerMinPods is the absolute floor below which the fraction breaker
 	// does not apply — on a near-empty node pruning 1 of 2 pods is normal, not a
 	// mass event.
 	pruneBreakerMinPods = 2
+
+	// pruneBreakerRelogPasses rate-limits the breaker's ERROR line while it stays
+	// tripped: loud on the transition into the tripped state, then once every this
+	// many passes (sweeps are 60s apart, so ~30 minutes). Before #670 it logged
+	// every pass on every node for weeks, which read as ordinary sweep chatter and
+	// nobody noticed.
+	pruneBreakerRelogPasses = 30
 )
 
 // Lost-CNI-ADD self-heal guards (#567).
@@ -232,12 +248,21 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	var staleRunningRipe []staleRunningPod
 	pods, stalePruned, orphansPruned, staleRunning, staleRunningRipe, breakerTripped = s.pruneStaleStoragePods(ctx, pods, nodePods, nodePodsOK)
 
+	// Both self-heal paths evict a pod to force its sandbox to be recreated and a
+	// fresh CNI ADD to fire. That only heals anything if a CNI ADD would actually
+	// reach us — while aether is not chained in this node's conflist, the
+	// replacement pod comes up unmeshed too and the sweep just churns the same
+	// workload forever, indefinitely, at 2/node/min (#667). Keep REPORTING (the
+	// unmeshed_pods gauge is the alert signal and must stay truthful); withhold
+	// only the eviction, exactly as the #566 prune breaker does.
+	evictionsBlocked := breakerTripped || s.unchained()
+
 	// Self-heal evictions share one per-pass budget so the two paths can never
 	// jointly exceed the rate cap. Stale-while-Running goes first: after a node
 	// reboot it is the entire node's population (#640).
 	budget := &evictionBudget{remaining: sweepEvictPerPass}
-	s.evictStaleRunningPods(ctx, staleRunningRipe, breakerTripped, budget)
-	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK, breakerTripped, budget)
+	s.evictStaleRunningPods(ctx, staleRunningRipe, evictionsBlocked, budget)
+	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK, evictionsBlocked, budget)
 
 	live, terminating := s.classifyPods(pods)
 	ghostsRemoved = s.deregisterGhostEndpoints(ctx, all, live, terminating)
@@ -293,7 +318,8 @@ type staleRunningPod struct {
 // gone or whose Kubernetes pod no longer exists. Returns the surviving pods, the
 // counts of stale and orphaned pods pruned, the stale-while-Running detection
 // count and ripe eviction set (#640), and whether the mass-delete circuit
-// breaker refused the pass (#566, which the self-heal evictions interlock on).
+// breaker withheld the netns-derived candidates (#566, which the self-heal
+// evictions interlock on).
 func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) ([]*cniv1.CNIPod, int, int, int, []staleRunningPod, bool) {
 	// Prune storage entries that no longer correspond to a live pod: a missed CNI
 	// DEL left the file behind. Keeping it both re-registers a dead endpoint (the
@@ -314,17 +340,65 @@ func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNI
 	// persistent storage with no self-recovery. Three guards now bound that:
 	// netns-only classification needs ghostNetnsFailThreshold consecutive failures
 	// (hysteresis), a pod the API still reports Running is never a ghost regardless
-	// of netns (cross-check), and a pass that would prune too large a fraction is
-	// refused wholesale (mass breaker).
+	// of netns (cross-check), and a pass that would prune too large a fraction of
+	// the netns-derived class is refused (mass breaker).
+	//
+	// The breaker covers the netns-derived class ONLY (#670). An API-confirmed
+	// orphan is ground truth — the node-scoped List says the pod does not exist
+	// here — and cannot be the correlated netns-stat false positive the breaker
+	// guards against, so it prunes whether or not the breaker trips. The real
+	// protection against a bad API read is nodePodsOK: a failed List classifies no
+	// orphan at all, so no pod-absence pruning happens in that pass.
 	candidates, staleRunningDetected, staleRunningRipe := s.classifyPruneCandidates(ctx, pods, nodePods, nodePodsOK)
-	if s.pruneBreakerTrips(ctx, len(pods), len(candidates)) {
-		// Refuse the whole pass. Keep every pod: truly-gone pods are also gone
-		// from the API, which the orphan cross-check catches once the correlated
-		// netns failure clears, so nothing is leaked permanently.
-		return pods, 0, 0, staleRunningDetected, staleRunningRipe, true
+	netnsCandidates, netnsEligible, orphanEntries := pruneCounts(pods, candidates)
+	if nodePodsOK {
+		// Only meaningful when the API answered; a failed List must not be
+		// reported as "zero stale entries".
+		s.metrics.staleStorageEntriesObserved(ctx, orphanEntries)
+	}
+
+	breakerTripped := s.pruneBreakerTrips(ctx, netnsEligible, netnsCandidates)
+	if breakerTripped {
+		// Withhold the netns-derived candidates only. They are the class that can
+		// be a correlated-stat false positive, and truly-gone pods among them are
+		// gone from the API too, so the orphan path reaps them on a later pass.
+		candidates = orphanCandidates(candidates)
 	}
 	fresh, stalePruned, orphansPruned := s.applyPrune(ctx, pods, candidates)
-	return fresh, stalePruned, orphansPruned, staleRunningDetected, staleRunningRipe, false
+	return fresh, stalePruned, orphansPruned, staleRunningDetected, staleRunningRipe, breakerTripped
+}
+
+// pruneCounts summarizes a classified prune set for the circuit breaker (#670):
+// netnsCandidates is the number of candidates the netns check produced
+// (stale-netns and superseded entries), netnsEligible the size of the class they
+// are drawn from — every stored entry the API did not confirm orphaned — and
+// orphanEntries the API-confirmed orphans, which the breaker ignores in both
+// numerator and denominator.
+func pruneCounts(pods []*cniv1.CNIPod, candidates map[string]pruneCandidate) (netnsCandidates, netnsEligible, orphanEntries int) {
+	for _, p := range pods {
+		cand, isCandidate := candidates[p.GetContainerId()]
+		if isCandidate && cand.orphaned {
+			orphanEntries++
+			continue
+		}
+		netnsEligible++
+		if isCandidate {
+			netnsCandidates++
+		}
+	}
+	return netnsCandidates, netnsEligible, orphanEntries
+}
+
+// orphanCandidates narrows a classified prune set to its API-confirmed orphans —
+// what still prunes when the netns circuit breaker trips (#670).
+func orphanCandidates(candidates map[string]pruneCandidate) map[string]pruneCandidate {
+	orphans := make(map[string]pruneCandidate, len(candidates))
+	for id, cand := range candidates {
+		if cand.orphaned {
+			orphans[id] = cand
+		}
+	}
+	return orphans
 }
 
 // pruneCandidate marks a stored pod for pruning and why, routing the log line:
@@ -474,21 +548,55 @@ func (s *CNIServer) pruneVanishedNetnsStreaks(pods []*cniv1.CNIPod) {
 	}
 }
 
-// pruneBreakerTrips reports whether pruning candidateCount of storedCount pods in
-// one pass exceeds the mass-delete circuit breaker (#566). It logs at ERROR and
-// increments a metric when it trips.
-func (s *CNIServer) pruneBreakerTrips(ctx context.Context, storedCount, candidateCount int) bool {
-	if candidateCount <= pruneBreakerMinPods {
+// pruneBreakerTrips reports whether pruning candidateCount netns-derived
+// candidates out of eligibleCount netns-eligible entries in one pass exceeds the
+// mass-delete circuit breaker (#566). API-confirmed orphans are excluded from
+// both counts and prune regardless (#670).
+//
+// The engaged/clear state is recorded every pass: the trip counter alone proved
+// undetectable in practice — it climbed once a minute on every node for weeks and
+// read as ordinary sweep activity.
+func (s *CNIServer) pruneBreakerTrips(ctx context.Context, eligibleCount, candidateCount int) bool {
+	tripped := candidateCount > pruneBreakerMinPods &&
+		float64(candidateCount) > float64(eligibleCount)*pruneBreakerFraction
+	s.metrics.pruneBreakerState(ctx, tripped)
+	if !tripped {
+		s.clearPruneBreaker(ctx)
 		return false
 	}
-	if float64(candidateCount) <= float64(storedCount)*pruneBreakerFraction {
-		return false
-	}
-	s.log.ErrorContext(ctx, "ghost sweep: prune circuit breaker TRIPPED; refusing to prune (correlated netns-check failure suspected — fix storage cause, not mass-delete)",
-		"would_prune", candidateCount, "stored", storedCount,
-		"fraction_limit", pruneBreakerFraction, "min_pods", pruneBreakerMinPods)
 	s.metrics.pruneBreakerTripped(ctx)
+	s.logPruneBreakerTrip(ctx, eligibleCount, candidateCount)
 	return true
+}
+
+// clearPruneBreaker records the tripped -> clear transition once, so the recovery
+// is as visible in the log as the trip was.
+func (s *CNIServer) clearPruneBreaker(ctx context.Context) {
+	if s.pruneBreakerEngaged {
+		s.log.WarnContext(ctx, "ghost sweep: prune circuit breaker CLEARED; netns-derived pruning resumed",
+			"tripped_passes", s.pruneBreakerTrippedPasses)
+		s.pruneBreakerEngaged = false
+	}
+	s.pruneBreakerTrippedPasses = 0
+}
+
+// logPruneBreakerTrip emits the breaker's ERROR line on the transition into the
+// tripped state and then only once every pruneBreakerRelogPasses passes, so a
+// standing trip stays visible without drowning the log (#670).
+func (s *CNIServer) logPruneBreakerTrip(ctx context.Context, eligibleCount, candidateCount int) {
+	first := !s.pruneBreakerEngaged
+	s.pruneBreakerEngaged = true
+	s.pruneBreakerTrippedPasses++
+	if !first && s.pruneBreakerTrippedPasses%pruneBreakerRelogPasses != 1 {
+		s.log.DebugContext(ctx, "ghost sweep: prune circuit breaker still tripped; withholding netns-derived pruning",
+			"would_prune", candidateCount, "netns_eligible", eligibleCount,
+			"consecutive_passes", s.pruneBreakerTrippedPasses)
+		return
+	}
+	s.log.ErrorContext(ctx, "ghost sweep: prune circuit breaker TRIPPED; withholding netns-derived pruning (correlated netns-check failure suspected — fix the storage cause, not mass-delete). API-confirmed orphans still prune (#670)",
+		"first_trip", first, "consecutive_passes", s.pruneBreakerTrippedPasses,
+		"would_prune", candidateCount, "netns_eligible", eligibleCount,
+		"fraction_limit", pruneBreakerFraction, "min_pods", pruneBreakerMinPods)
 }
 
 // applyPrune removes the classified prune candidates from storage and drops
@@ -561,9 +669,10 @@ func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns stri
 // reportMissingStoragePods surfaces live mesh-managed K8s pods that have no
 // entry in local storage (a lost CNI ADD) and, after lostAddEvictThreshold
 // consecutive detections, evicts them to force a fresh CNI ADD (#567). Returns
-// the count of such pods found. breakerTripped skips eviction entirely (#566
-// interlock: mass loss means fix the storage cause, not evict the world).
-func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, breakerTripped bool, budget *evictionBudget) int {
+// the count of such pods found. evictionsBlocked skips eviction entirely while
+// still reporting: the #566 breaker (mass loss means fix the storage cause, not
+// evict the world) or an unchained conflist (#667, the eviction cannot heal).
+func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, evictionsBlocked bool, budget *evictionBudget) int {
 	// Surface live mesh-managed pods on this node that local storage has no entry
 	// for: a lost CNI ADD (talos worker-01, 2026-06-22: prober-k7vsm running with
 	// no listener). The agent has no CNI data (netns, IPs) to synthesize a
@@ -595,8 +704,8 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 			"pod", kp.GetName(), "namespace", kp.GetNamespace(), "podIP", kp.Status.PodIP,
 			"consecutive_sweeps", streak, "evict_threshold", lostAddEvictThreshold)
 
-		if breakerTripped {
-			continue // #566 interlock: never evict while the prune breaker tripped
+		if evictionsBlocked {
+			continue // #566 breaker tripped, or #667 unchained: eviction is futile
 		}
 		if streak < lostAddEvictThreshold || budget.remaining <= 0 {
 			continue
@@ -616,10 +725,13 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 // network namespaces while the API reports them Running (#640 — the post-reboot
 // boot race: the pod is up on the base CNI with no mesh interception, and only a
 // sandbox recreation re-runs CNI ADD). Shares the per-pass budget with the
-// lost-ADD path and honors the #566 breaker interlock.
-func (s *CNIServer) evictStaleRunningPods(ctx context.Context, ripe []staleRunningPod, breakerTripped bool, budget *evictionBudget) {
-	if breakerTripped {
-		return // #566 interlock: correlated netns weirdness; do not evict on it
+// lost-ADD path and honors both eviction interlocks (#566 breaker, #667
+// unchained conflist).
+func (s *CNIServer) evictStaleRunningPods(ctx context.Context, ripe []staleRunningPod, evictionsBlocked bool, budget *evictionBudget) {
+	if evictionsBlocked {
+		// #566: correlated netns weirdness, do not evict on it. #667: aether is not
+		// chained, so the replacement pod would come up unmeshed too.
+		return
 	}
 	for _, sr := range ripe {
 		if budget.remaining <= 0 {

@@ -3,12 +3,14 @@ package cache
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -333,6 +335,8 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 		sni:            strconv.Itoa(int(defaultPort)),
 	}
 
+	c.buildPortAliasesLocked(serviceName, fqdn, defaultPort, sanNamespaces, sortedKeys, buckets)
+
 	// One cluster per non-default advertised port.
 	for port, b := range buckets {
 		portName := proxy.PortClusterName(serviceName, c.meshDomain, port)
@@ -349,6 +353,90 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 			sni:            strconv.Itoa(int(port)),
 		}
 	}
+}
+
+// buildPortAliasesLocked stores the cold-path alias clusters for the ports an
+// ODCDS ":authority" can legitimately carry for a service but that have no
+// per-port cluster of their own: "<fqdn>:<port>". Caller must hold clusterMu.
+//
+// The ODCDS catch-all resolves its cluster from the request :authority
+// (onDemandClusterHeader), and a client addressing a service on a non-80 port
+// sends "<fqdn>:<port>" as the authority. For every NON-default advertised port
+// that name is a real per-port cluster; for the two ports below it was nothing
+// at all, so an on-demand request for them named a cluster the agent could
+// never publish:
+//
+//   - The MESH port (meshconst.ProxyOutboundPort, 18081). This is the port every
+//     mesh VIP Service advertises — the registrar's Service generator writes
+//     exactly one ServicePort, MeshPort, on every generated Service — so it is
+//     the port a client resolving through mesh DNS actually dials, and therefore
+//     the authority the catch-all sees in production. It is NOT in the registry
+//     endpoints at all: registryv1.ServiceEndpoint.port is the APPLICATION port
+//     (endpoint.aether.io/port, projected onto the Service as the aether.io/port
+//     annotation), which for the soak's echo is 8080 while the dialed Service
+//     port is 18081. Deriving the alias from endpoints[0].GetPort() alone
+//     therefore published ":8080" and left ":18081" — the name that actually
+//     wedged for 5m10s on 2026-09-05 — unpublished on every node.
+//   - The DEFAULT/application port, which the default entry's own vhost claims
+//     as a host-match domain, so a client that dials it must find a cluster too.
+//
+// That is not merely a slow cold path, it is a permanent wedge (issue #682):
+// go-control-plane only lists a name in a wildcard delta response's
+// removed_resources if it had previously RETURNED it, so the agent never tells
+// Envoy the name does not exist either. Envoy keeps it in its delta
+// subscription state as "waiting for server" forever and dedupes every later
+// on-demand subscribe for it, so once the service leaves the dependency set and
+// its vhost disappears, no ODCDS request ever reaches the agent again: every
+// request to that authority fails until the ADS stream resets.
+//
+// An alias shares the default cluster's bare-service EDS (same endpoints, same
+// SAN pinning, same SNI) and carries NO vhost of its own: the default entry's
+// vhost already claims the "<fqdn>:<defaultPort>" domain and the capture route
+// domains already claim the mesh-port spelling, and a second vhost with either
+// domain would be a duplicate-domain RDS reject. A port that has a real per-port
+// cluster is skipped — that cluster is the authoritative, port-filtered EDS
+// membership and must not be shadowed by a whole-service alias. Node proxies
+// only: the edge serves an explicit exposed set with no ODCDS catch-all (see
+// BuildEdgeRouteConfiguration).
+func (c *SnapshotCache) buildPortAliasesLocked(serviceName, fqdn string, defaultPort uint32, sanNamespaces, sortedKeys []string, buckets map[uint32]*portBucket) {
+	if c.edge || fqdn == "" {
+		return
+	}
+	for _, port := range aliasAuthorityPorts(defaultPort, buckets) {
+		alias := proxy.PortClusterName(serviceName, c.meshDomain, port)
+		if alias == "" {
+			continue
+		}
+		c.clusters[alias] = clusterEntry{
+			// EDS resource name is the BARE service (not the alias): the alias is the
+			// same endpoint set as the default cluster, so it must not publish a
+			// second, duplicate load assignment.
+			cluster:       proxy.NewServiceCluster(alias, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
+			sanNamespaces: sanNamespaces,
+			service:       serviceName,
+			sni:           strconv.Itoa(int(port)),
+		}
+	}
+}
+
+// aliasAuthorityPorts returns the ports needing an alias cluster: the mesh VIP
+// Service port every client dials through mesh DNS, plus the service's default
+// (application) port, minus any port that already has its own per-port cluster
+// and minus 0 (an endpoint with no port). Deterministic order — the mesh port
+// first — so two rebuilds of the same input write the same entries (map order
+// is protocol-visible, see #135).
+func aliasAuthorityPorts(defaultPort uint32, buckets map[uint32]*portBucket) []uint32 {
+	ports := make([]uint32, 0, 2)
+	for _, p := range [...]uint32{meshconst.ProxyOutboundPort, defaultPort} {
+		if p == 0 || slices.Contains(ports, p) {
+			continue // 0 = unset; already emitted (the default port IS the mesh port)
+		}
+		if _, real := buckets[p]; real {
+			continue // a real per-port cluster owns this name
+		}
+		ports = append(ports, p)
+	}
+	return ports
 }
 
 // portBucket accumulates per-port endpoints for a service.
@@ -498,8 +586,14 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 		}
 		if entry.absentSince.IsZero() {
 			entry.absentSince = now
-			entry.loadAssignment = proxy.NewClusterLoadAssignment(name)
-			entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
+			// The default-port alias publishes no load assignment of its own (it
+			// shares the default cluster's bare-service EDS); synthesizing an empty
+			// one here would emit an orphan CLA under the alias name that nothing
+			// references.
+			if entry.loadAssignment != nil {
+				entry.loadAssignment = proxy.NewClusterLoadAssignment(name)
+				entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
+			}
 			c.log.InfoContext(ctx, "service disappeared from registry; retaining empty cluster/vhost for grace period",
 				"service", name, "grace", c.retentionGrace().String())
 		} else if now.Sub(entry.absentSince) > c.retentionGrace() {

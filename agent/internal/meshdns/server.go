@@ -116,6 +116,16 @@ type Server struct {
 	udpClient *dns.Client
 	tcpClient *dns.Client
 
+	// Forward-path UDP socket pool (issue #674, see forwardpool.go). poolSize is the
+	// per-upstream slot count (0 disables pooling). The registry lives under its OWN
+	// RWMutex and the open-socket count under its own atomic, deliberately NOT s.mu:
+	// s.mu guards the record table and is read by the OTel gauge callback, and no pool
+	// operation may be able to stall either of those.
+	poolMu    sync.RWMutex
+	pools     map[string]*forwardPool
+	poolSize  int
+	poolConns atomic.Int64
+
 	// lastAnswered is the unix second of the most recent query the resolver actually
 	// answered, stamped from the hot path with a single atomic store (no lock) and
 	// exported as aether.mesh_dns.last_answered_timestamp_seconds.
@@ -153,6 +163,15 @@ func WithReadyMarker(path string) Option {
 	return func(s *Server) { s.readyMarker = path }
 }
 
+// WithForwardPoolSize sets how many connected UDP sockets the forward path keeps per
+// upstream (issue #674; default DefaultForwardPoolSize). Zero disables pooling and
+// restores a fresh dial per forwarded query — the escape hatch if pooling ever
+// misbehaves against a particular upstream, at the cost of the ~21% of this daemon's
+// CPU the dial was burning.
+func WithForwardPoolSize(n int) Option {
+	return func(s *Server) { s.poolSize = n }
+}
+
 // NewServer builds the resolver for meshDomain, listening on addr (host:port).
 // snapshotPath, when non-empty, is a host-persistent file the last-known record
 // table is written to on every SetRecords and warm-loaded from at boot (Fix 1):
@@ -172,6 +191,8 @@ func NewServerWithOptions(meshDomain, addr, snapshotPath string, log *slog.Logge
 		udpClient:    newForwardClient(protoUDP),
 		tcpClient:    newForwardClient(protoTCP),
 		records:      map[string]string{},
+		poolSize:     DefaultForwardPoolSize,
+		pools:        map[string]*forwardPool{},
 	}
 	for _, o := range opts {
 		o(s)
@@ -199,17 +220,21 @@ func newForwardClient(proto string) *dns.Client {
 // returning, so the OTel collect callback never holds the lock across an export (and
 // never nests it under a metrics lock).
 func (s *Server) observedState() resolverState {
+	// The atomics are read OUTSIDE s.mu — poolConns in particular is written by the
+	// forward path, which must never share a lock with the record table.
+	st := resolverState{
+		lastAnswered: s.lastAnswered.Load(),
+		poolConns:    s.poolConns.Load(),
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return resolverState{
-		records:      int64(len(s.records)),
-		writtenAt:    s.writtenAt,
-		generation:   s.generation,
-		ready:        s.ready,
-		watchActive:  s.watchActive,
-		upstreams:    int64(len(s.upstreams)),
-		lastAnswered: s.lastAnswered.Load(),
-	}
+	st.records = int64(len(s.records))
+	st.writtenAt = s.writtenAt
+	st.generation = s.generation
+	st.ready = s.ready
+	st.watchActive = s.watchActive
+	st.upstreams = int64(len(s.upstreams))
+	return st
 }
 
 // markAnswered stamps the wall clock of the most recent query the resolver actually
@@ -406,10 +431,28 @@ func WriteSnapshot(path string, records map[string]string, generation uint64) er
 }
 
 // SetUpstreams sets the resolver(s) non-mesh queries are forwarded to (host[:port]).
+//
+// The :53 default is applied HERE, once, rather than per query in forward: the forward
+// path now keys its socket pool by upstream address (issue #674), and a key that is
+// normalised on one side and not the other would silently pool nothing.
 func (s *Server) SetUpstreams(u []string) {
+	addrs := make([]string, 0, len(u))
+	for _, up := range u {
+		addrs = append(addrs, withDefaultDNSPort(up))
+	}
 	s.mu.Lock()
-	s.upstreams = u
+	s.upstreams = addrs
 	s.mu.Unlock()
+	s.setPools(addrs)
+}
+
+// withDefaultDNSPort completes a bare host from --mesh-dns-upstream (or a resolv.conf
+// nameserver line) with the standard :53.
+func withDefaultDNSPort(addr string) string {
+	if !strings.Contains(addr, ":") {
+		return addr + ":53"
+	}
+	return addr
 }
 
 // Start serves UDP + TCP on the host address until the context is cancelled. When
@@ -418,6 +461,9 @@ func (s *Server) SetUpstreams(u []string) {
 // standalone daemon's hitless handoff. Otherwise it uses miekg/dns's own
 // ListenAndServe (the in-agent single-binder path).
 func (s *Server) Start(ctx context.Context) error {
+	// Pooled upstream sockets outlive individual queries, so they are released with the
+	// server rather than with the query that opened them (issue #674).
+	defer s.closeForwardPools()
 	udp, tcp, err := s.buildServers(ctx)
 	if err != nil {
 		return err
@@ -698,11 +744,7 @@ func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) string {
 	ups := s.upstreams
 	s.mu.RUnlock()
 	viaTCP := queryProto(w) == protoTCP
-	for _, up := range ups {
-		addr := up
-		if !strings.Contains(addr, ":") {
-			addr += ":53"
-		}
+	for _, addr := range ups {
 		if resp := s.exchange(r, addr, viaTCP); resp != nil {
 			_ = w.WriteMsg(resp)
 			return resultForwarded
@@ -717,11 +759,16 @@ func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) string {
 // exchange relays r to ONE upstream over the transport the client used, returning nil
 // when that upstream failed (the caller then tries the next). A truncated UDP reply is
 // re-fetched over TCP, the standard recursive-resolver escalation.
+//
+// Only the UDP leg is pooled (issue #674). TCP stays dial-per-query for two reasons: its
+// volume is negligible (TCP-arriving queries plus TC=1 retries), and on a STREAM conn
+// miekg/dns's ExchangeWithConn does not drain mismatched transaction IDs — it returns
+// ErrId — so a late reply left on a pooled TCP socket would poison the next query on it.
 func (s *Server) exchange(r *dns.Msg, addr string, viaTCP bool) *dns.Msg {
 	if viaTCP {
 		return s.exchangeWith(s.tcpClient, r, addr)
 	}
-	resp := s.exchangeWith(s.udpClient, r, addr)
+	resp := s.exchangeUDPPooled(r, addr)
 	if resp == nil || !resp.Truncated {
 		return resp
 	}

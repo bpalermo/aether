@@ -193,8 +193,12 @@ use_repo(buildbuddy, "buildbuddy_toolchain")
 # ---------------------------------------------------------------------------
 # Pinned stock Envoy binary — used by //test/envoy_validate to run
 # "envoy --mode validate" over aether-generated bootstrap configs without
-# building Envoy from source.  Pinned to v1.39.0, matching the custom proxy
-# workspace (proxy/bazel/envoy/repository.bzl ENVOY_SHA).
+# building Envoy from source.  Pinned to v1.39.0.
+#
+# KNOWN SKEW (aether #697): the custom proxy module (proxy/MODULE.bazel) now
+# builds an Envoy `main` dev snapshot, and there is no GitHub release asset for
+# a dev snapshot to pin here. So this gate validates against v1.39.0 semantics
+# until `1.40.0.envoy` publishes; re-pin both together at that point.
 # SHA-256 values from the upstream checksums.txt.asc release asset.
 #
 # ENVOY_VERSION = "1.39.0"

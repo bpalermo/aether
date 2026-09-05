@@ -17,10 +17,12 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//agent/constants",
+        "//agent/internal/cniconflist",
         "//agent/internal/spire",
         "//agent/internal/xds/ack",
         "//agent/internal/xds/cache",
         "//agent/internal/xds/proxy",
+        "//agent/internal/xds/xdsconst",
         "//agent/storage",
         "//agent/types",
         "//api/aether/cni/v1:cni",
@@ -55,6 +57,7 @@ go_test(
     name = "server_test",
     srcs = [
         "ghostsweep_test.go",
+        "identity_test.go",
         "liveness_test.go",
         "metrics_test.go",
         "pod_test.go",
@@ -65,10 +68,12 @@ go_test(
     embed = [":server"],
     deps = [
         "//agent/constants",
+        "//agent/internal/cniconflist",
         "//agent/internal/spire",
         "//agent/internal/xds/ack",
         "//agent/internal/xds/cache",
         "//agent/internal/xds/proxy",
+        "//agent/internal/xds/xdsconst",
         "//agent/storage",
         "//agent/types",
         "//api/aether/cni/v1:cni",

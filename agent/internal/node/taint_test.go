@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"aethermesh.dev/agent/internal/cniconflist"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,7 +79,7 @@ func newRemover(t *testing.T, socketPath string, objs ...client.Object) (*TaintR
 	}, c
 }
 
-// touchSocket creates a file to stand in for the CNI Unix socket (cniServing
+// touchSocket creates a file to stand in for the CNI Unix socket (socketServing
 // only stats the path).
 func touchSocket(t *testing.T) string {
 	t.Helper()
@@ -149,6 +151,84 @@ func TestReconcile(t *testing.T) {
 			NamespacedName: types.NamespacedName{Name: "some-other-node"},
 		})
 		require.NoError(t, err)
+		assert.Zero(t, res.RequeueAfter)
+	})
+}
+
+// fakeChain is a canned ChainState. The real one is the re-assert loop, which
+// needs a live conflist directory and a running goroutine; the gate only ever
+// reads the published snapshot, so a struct is the whole dependency.
+type fakeChain struct{ s cniconflist.ChainStatus }
+
+func (f fakeChain) ChainStatus() cniconflist.ChainStatus { return f.s }
+
+func observed(chained bool) fakeChain {
+	return fakeChain{s: cniconflist.ChainStatus{Observed: true, Chained: chained, Since: time.Now()}}
+}
+
+// TestReconcileChainGate covers the second condition added in #667: the socket
+// existing is not enough, aether must also be chained in the node's conflist or
+// nothing will ever call that socket and every pod scheduled here comes up
+// unmeshed.
+func TestReconcileChainGate(t *testing.T) {
+	t.Run("socket serving + chained -> removed", func(t *testing.T) {
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = observed(true)
+		reconcileNode(t, r)
+		assert.False(t, nodeTaintPresent(t, c))
+	})
+
+	t.Run("socket serving + unchained -> taint kept, requeued", func(t *testing.T) {
+		// H1, the hole this closes: an agent restarting onto a node whose conflist
+		// was stripped while it was away stats its socket, finds it fine, and under
+		// the old gate removed the taint — re-opening the node to pods it cannot
+		// mesh. The re-assert loop repairs synchronously, so "unchained" here means
+		// it already tried and could not.
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = observed(false)
+		res := reconcileNode(t, r)
+		assert.True(t, nodeTaintPresent(t, c), "taint must NOT be removed while aether is unchained")
+		assert.Positive(t, res.RequeueAfter)
+	})
+
+	t.Run("socket serving + chaining not yet observed -> taint kept, requeued", func(t *testing.T) {
+		// Unknown is not chained. This is the boot window, when a node is least
+		// likely to be able to mesh anything; holding the taint costs one requeue.
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = fakeChain{}
+		res := reconcileNode(t, r)
+		assert.True(t, nodeTaintPresent(t, c), "unknown chaining state must not release the node")
+		assert.Positive(t, res.RequeueAfter)
+	})
+
+	t.Run("socket absent + chained -> taint kept, requeued", func(t *testing.T) {
+		// Both conditions are necessary; chaining does not substitute for the socket.
+		missing := filepath.Join(t.TempDir(), "absent.sock")
+		r, c := newRemover(t, missing, nodeWithTaint(testNode, true))
+		r.Chain = observed(true)
+		res := reconcileNode(t, r)
+		assert.True(t, nodeTaintPresent(t, c))
+		assert.Positive(t, res.RequeueAfter)
+	})
+
+	t.Run("nil Chain (kill switch) -> socket-only gate", func(t *testing.T) {
+		// --cni-conflist-reassert=false leaves nothing observing the conflist. That
+		// must mean the pre-#667 behaviour, not a node that can never be untainted.
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = nil
+		reconcileNode(t, r)
+		assert.False(t, nodeTaintPresent(t, c))
+	})
+
+	t.Run("no taint + unchained -> no-op, no requeue", func(t *testing.T) {
+		// The gate is remove-only. On an untainted node Reconcile returns before it
+		// ever consults the chaining state, so an unchained node is NOT re-tainted
+		// here — proposal 033 keeps the agent out of the taint-writing business.
+		// Re-arming is the controller's guard, driven by the readiness check.
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, false))
+		r.Chain = observed(false)
+		res := reconcileNode(t, r)
+		assert.False(t, nodeTaintPresent(t, c))
 		assert.Zero(t, res.RequeueAfter)
 	})
 }

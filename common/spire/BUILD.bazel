@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "spire",
@@ -10,4 +10,10 @@ go_library(
         "@com_github_spiffe_go_spiffe_v2//spiffetls/tlsconfig",
         "@com_github_spiffe_go_spiffe_v2//workloadapi",
     ],
+)
+
+go_test(
+    name = "spire_test",
+    srcs = ["tls_test.go"],
+    embed = [":spire"],
 )

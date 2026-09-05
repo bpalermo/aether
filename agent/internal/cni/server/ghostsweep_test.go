@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"log/slog"
+	"strconv"
+	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/internal/cniconflist"
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/storage"
 	"aethermesh.dev/agent/types"
@@ -686,6 +689,219 @@ func TestSweepStaleRunningInterlockedOnBreaker(t *testing.T) {
 	assert.Zero(t, evictions, "stale-running eviction interlocked off while the breaker trips")
 }
 
+// storeCNIPod adds a stored CNI pod with the given netns and IP, returning it.
+func storeCNIPod(t *testing.T, store *storage.MockStorage[*cniv1.CNIPod], name, id, netns, ip string) *cniv1.CNIPod {
+	t.Helper()
+	p := validCNIPod(name, "default", id)
+	p.NetworkNamespace = netns
+	p.Ips = []string{ip}
+	require.NoError(t, store.AddResource(t.Context(), types.ContainerID(id), p))
+	return p
+}
+
+// TestSweepPrunesMajorityOrphansDespiteBreaker (#670 regression): when most
+// stored entries are orphans per the Kubernetes API, they ARE pruned and the
+// breaker does not engage. Before the fix the fraction counted orphans, so any
+// node whose stale backlog crossed pruneBreakerFraction refused every pass
+// forever and the backlog could only grow — measured on talos-main 2026-09-03 at
+// 92 storage records for 39 live pods (57.6% stale) with one refusal per sweep
+// pass on every node.
+func TestSweepPrunesMajorityOrphansDespiteBreaker(t *testing.T) {
+	ctx := context.Background()
+	// netnsExists stays true (package init): the orphans' netns pins linger, so
+	// only the API cross-check can identify them — the talos-main signature.
+
+	const (
+		orphans   = 7
+		liveCount = 3
+	)
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	objs := make([]client.Object, 0, liveCount)
+	for i := range orphans {
+		n := strconv.Itoa(i)
+		storeCNIPod(t, store, "pod-orphan-"+n, "container-orphan-"+n, "/run/aether/netns/orphan-"+n, "10.0.6."+n)
+	}
+	for i := range liveCount {
+		n := strconv.Itoa(i)
+		ip := "10.0.7." + n
+		storeCNIPod(t, store, "pod-live-"+n, "container-live-"+n, "/run/aether/netns/live-"+n, ip)
+		objs = append(objs, runningK8sPod("pod-live-"+n, "default", ip))
+	}
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(objs...).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	m, reader := newTestCNIMetrics(t)
+	s.metrics = m
+
+	s.sweepGhostEndpoints(ctx)
+
+	all, err := store.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, liveCount, "every API-confirmed orphan pruned in a single pass; live entries kept")
+
+	engaged, found := metricSum(t, reader, "aether.agent.ghost_sweep.prune_breaker_engaged")
+	require.True(t, found, "breaker state recorded every pass")
+	assert.Zero(t, engaged, "API-confirmed orphans never engage the breaker")
+
+	stale, found := metricSum(t, reader, "aether.agent.storage.stale_pods")
+	require.True(t, found, "the stale backlog is exposed directly")
+	assert.EqualValues(t, orphans, stale, "backlog reported as DETECTED, before any pruning")
+}
+
+// TestSweepBreakerStillRefusesCorrelatedNetnsFailure (#566, must survive #670):
+// every stored entry's netns check failing at once — the 2026-07-19 power-blip
+// signature — still engages the breaker and still prunes nothing. The API
+// confirms every pod exists on this node, so there is no orphan to exempt: the
+// #670 carve-out cannot reach this incident.
+func TestSweepBreakerStillRefusesCorrelatedNetnsFailure(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false } // the correlated stat failure
+
+	const n = 10
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	objs := make([]client.Object, 0, n)
+	for i := range n {
+		s := strconv.Itoa(i)
+		storeCNIPod(t, store, "pod-"+s, "container-"+s, "/run/aether/netns/"+s, "10.0.8."+s)
+		// Running WITHOUT an IP: podRunningWithIP does not veto, so these stay
+		// netns-derived prune candidates — but the pod exists, so not orphans.
+		objs = append(objs, runningK8sPod("pod-"+s, "default", ""))
+	}
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(objs...).Build()
+	srv := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	m, reader := newTestCNIMetrics(t)
+	srv.metrics = m
+
+	for range ghostNetnsFailThreshold + 1 {
+		srv.sweepGhostEndpoints(ctx)
+	}
+
+	all, err := store.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, n, "correlated netns failure prunes nothing")
+
+	engaged, found := metricSum(t, reader, "aether.agent.ghost_sweep.prune_breaker_engaged")
+	require.True(t, found)
+	assert.EqualValues(t, 1, engaged, "breaker reads engaged while it withholds pruning")
+	tripped, found := metricSum(t, reader, "aether.agent.ghost_sweep.prune_breaker_tripped")
+	require.True(t, found)
+	assert.Positive(t, tripped)
+	stale, found := metricSum(t, reader, "aether.agent.storage.stale_pods")
+	require.True(t, found)
+	assert.Zero(t, stale, "the API accounts for every entry; nothing is stale")
+}
+
+// TestSweepMixedOrphansAndNetnsStale (#670): the two candidate classes are judged
+// independently in one pass. API-confirmed orphans prune immediately, while the
+// netns-derived candidates stay gated by the fraction computed over their OWN
+// class — 4 of the 10 non-orphan entries here, above pruneBreakerFraction.
+func TestSweepMixedOrphansAndNetnsStale(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	// Only the "stale-" namespaces are gone; orphan and healthy pins linger.
+	netnsExists = func(path string) bool { return !strings.HasPrefix(path, "/run/aether/netns/stale-") }
+
+	const (
+		orphans   = 7
+		netnsGone = 4
+		netnsOK   = 6
+	)
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	objs := make([]client.Object, 0, netnsGone+netnsOK)
+	for i := range orphans {
+		n := strconv.Itoa(i)
+		// Absent from the API -> orphan, netns pin lingering.
+		storeCNIPod(t, store, "pod-orphan-"+n, "container-orphan-"+n, "/run/aether/netns/orphan-"+n, "10.0.9."+n)
+	}
+	for i := range netnsGone {
+		n := strconv.Itoa(i)
+		storeCNIPod(t, store, "pod-stale-"+n, "container-stale-"+n, "/run/aether/netns/stale-"+n, "10.0.10."+n)
+		objs = append(objs, runningK8sPod("pod-stale-"+n, "default", "")) // no IP: no cross-check veto
+	}
+	for i := range netnsOK {
+		n := strconv.Itoa(i)
+		ip := "10.0.11." + n
+		storeCNIPod(t, store, "pod-ok-"+n, "container-ok-"+n, "/run/aether/netns/ok-"+n, ip)
+		objs = append(objs, runningK8sPod("pod-ok-"+n, "default", ip))
+	}
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(objs...).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	m, reader := newTestCNIMetrics(t)
+	s.metrics = m
+
+	// Pass 1 prunes the orphans (no hysteresis); the netns candidates only ripen
+	// at ghostNetnsFailThreshold, and are then withheld by the breaker.
+	for range ghostNetnsFailThreshold + 1 {
+		s.sweepGhostEndpoints(ctx)
+	}
+
+	all, err := store.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, netnsGone+netnsOK, "orphans pruned; netns candidates withheld by the breaker")
+	for i := range orphans {
+		_, err := store.GetResource(ctx, types.ContainerID("container-orphan-"+strconv.Itoa(i)))
+		require.Error(t, err, "orphan %d pruned", i)
+	}
+	for i := range netnsGone {
+		_, err := store.GetResource(ctx, types.ContainerID("container-stale-"+strconv.Itoa(i)))
+		require.NoError(t, err, "netns-stale entry %d gated by its own class's fraction", i)
+	}
+
+	engaged, found := metricSum(t, reader, "aether.agent.ghost_sweep.prune_breaker_engaged")
+	require.True(t, found)
+	assert.EqualValues(t, 1, engaged, "breaker engaged on the netns class alone")
+}
+
+// TestSweepNoPodAbsencePruningWithoutNodePodList (#566/#670 invariant): with no
+// trustworthy node-pod list, NOTHING is pruned by pod absence — this is the guard
+// that makes exempting orphans from the breaker safe, and it must hold whatever
+// else is true of the pass. A failed List must also not be reported as "zero
+// stale entries".
+func TestSweepNoPodAbsencePruningWithoutNodePodList(t *testing.T) {
+	ctx := context.Background()
+	// netnsExists stays true: the netns path contributes no candidates either, so
+	// any prune here could only have come from (absent) pod-existence data.
+
+	const n = 5
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	for i := range n {
+		s := strconv.Itoa(i)
+		storeCNIPod(t, store, "pod-"+s, "container-"+s, "/run/aether/netns/"+s, "10.0.12."+s)
+	}
+
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	// Nil client -> listNodePods returns ok=false, exactly as a failed List does.
+	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	m, reader := newTestCNIMetrics(t)
+	s.metrics = m
+
+	evictions := 0
+	s.evictPod = func(context.Context, string, string) error { evictions++; return nil }
+
+	for range ghostNetnsFailThreshold + lostAddEvictThreshold + 2 {
+		s.sweepGhostEndpoints(ctx)
+	}
+
+	all, err := store.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, n, "no pod-absence pruning without a trustworthy node-pod list")
+	assert.Zero(t, evictions, "no self-heal eviction without a trustworthy node-pod list")
+	assert.Empty(t, s.missingStorageStreaks, "streaks dropped so a list blip never accrues toward eviction")
+
+	_, found := metricSum(t, reader, "aether.agent.storage.stale_pods")
+	assert.False(t, found, "staleness is not claimed when the API did not answer")
+}
+
 // TestSweepLostAddStreakResetsOnRecovery (#567): once a missing pod appears in
 // storage (CNI ADD re-ran) its streak resets, so a later recurrence must again
 // clear the full threshold before another eviction.
@@ -707,4 +923,109 @@ func TestSweepLostAddStreakResetsOnRecovery(t *testing.T) {
 	s.sweepGhostEndpoints(ctx)
 	assert.NotContains(t, s.missingStorageStreaks, podKey("default", "pod-x"), "streak reset once the pod registered")
 	assert.Zero(t, evictions, "no eviction after recovery")
+}
+
+// staticChainState is a frozen conflist chaining state for the eviction
+// interlock tests.
+type staticChainState struct{ s cniconflist.ChainStatus }
+
+func (c staticChainState) ChainStatus() cniconflist.ChainStatus { return c.s }
+
+// TestSweepEvictionInterlockedOnUnchainedConflist (#667): self-heal eviction
+// exists to force a fresh CNI ADD by recreating the pod's sandbox. While aether
+// is not chained in this node's conflist no CNI ADD is ever issued to us, so the
+// replacement comes up unmeshed too and the sweep churns the same workload
+// forever at 2/node/min. Reporting must continue — the gauge is the alert
+// signal — and only the eviction is withheld.
+func TestSweepEvictionInterlockedOnUnchainedConflist(t *testing.T) {
+	ctx := context.Background()
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]() // storage empty: the ADD was lost
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-lost", "default", "10.0.0.7")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	s.SetChainState(staticChainState{s: cniconflist.ChainStatus{Observed: true, Chained: false}})
+
+	var evicted []string
+	s.evictPod = func(_ context.Context, ns, name string) error {
+		evicted = append(evicted, ns+"/"+name)
+		return nil
+	}
+
+	// Well past the threshold: still never evicted.
+	passes := lostAddEvictThreshold + 2
+	for range passes {
+		s.sweepGhostEndpoints(ctx)
+	}
+	assert.Empty(t, evicted, "eviction cannot heal an unchained node, so it must be withheld")
+	assert.Equal(t, passes, s.missingStorageStreaks[podKey("default", "pod-lost")],
+		"reporting must continue while eviction is withheld - the gauge is the alert signal")
+
+	// The moment the conflist is repaired the self-heal resumes.
+	s.SetChainState(staticChainState{s: cniconflist.ChainStatus{Observed: true, Chained: true}})
+	s.sweepGhostEndpoints(ctx)
+	assert.Equal(t, []string{"default/pod-lost"}, evicted, "eviction resumes once aether is chained again")
+}
+
+// TestSweepEvictionFailsOpenOnUnknownChainState (#667): unlike the taint gate,
+// this interlock fails OPEN. A nil ChainState (--cni-conflist-reassert=false) or
+// a loop that has not checked yet must not disable the #567/#640 self-heal —
+// that recovery is known to work, and withholding it on a guess trades a
+// known-good repair for nothing.
+func TestSweepEvictionFailsOpenOnUnknownChainState(t *testing.T) {
+	for name, chain := range map[string]cniconflist.ChainState{
+		"nil chain state (re-assert loop off)": nil,
+		"chaining not yet observed":            staticChainState{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+
+			store := storage.NewMockStorage[*cniv1.CNIPod]()
+			reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+			k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-lost", "default", "10.0.0.7")).Build()
+			s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+			s.SetChainState(chain)
+
+			var evicted []string
+			s.evictPod = func(_ context.Context, ns, name string) error {
+				evicted = append(evicted, ns+"/"+name)
+				return nil
+			}
+
+			for range lostAddEvictThreshold {
+				s.sweepGhostEndpoints(ctx)
+			}
+			assert.Equal(t, []string{"default/pod-lost"}, evicted,
+				"self-heal must stay enabled when chaining is unknown")
+		})
+	}
+}
+
+// TestSweepStaleRunningInterlockedOnUnchainedConflist (#667): the same interlock
+// covers the post-reboot stale-while-Running path, which is the one that would
+// otherwise evict a whole node's population against an unchained conflist.
+func TestSweepStaleRunningInterlockedOnUnchainedConflist(t *testing.T) {
+	ctx := context.Background()
+
+	orig := netnsExists
+	defer func() { netnsExists = orig }()
+	netnsExists = func(string) bool { return false } // pre-reboot netns is gone
+
+	stale := validCNIPod("pod-reboot", "default", "container-old")
+	stale.NetworkNamespace = "/run/aether/netns/pre-reboot"
+
+	store := storage.NewMockStorage[*cniv1.CNIPod]()
+	require.NoError(t, store.AddResource(ctx, types.ContainerID("container-old"), stale))
+	reg := &sweepRegistry{listing: map[string][]*registryv1.ServiceEndpoint{}}
+	k8s := fake.NewClientBuilder().WithObjects(runningK8sPod("pod-reboot", "default", "10.0.0.1")).Build()
+	s := newTestCNIServer(k8s, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+	s.SetChainState(staticChainState{s: cniconflist.ChainStatus{Observed: true, Chained: false}})
+
+	evictions := 0
+	s.evictPod = func(context.Context, string, string) error { evictions++; return nil }
+
+	for range staleRunningEvictThreshold + 2 {
+		s.sweepGhostEndpoints(ctx)
+	}
+	assert.Zero(t, evictions, "stale-while-Running eviction is equally futile on an unchained node")
 }

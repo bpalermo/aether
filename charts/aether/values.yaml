@@ -45,6 +45,11 @@ clusterName: talos-main
 controlCluster: ""
 
 # Enable verbose logging on all components (`--debug`).
+#
+# EXCEPT the mesh-dns daemon since #684: it has its own opt-in
+# `agent.meshDnsDaemon.debug` (default false) and this global toggle does not
+# reach it. It is the one component on every managed pod's :53 path, and
+# defaulting it to TRACE was not a decision anyone made — it inherited it.
 debug: true
 
 # DNS-style domain mesh authorities live under (<service>.<meshDomain>): clients
@@ -181,12 +186,44 @@ agent:
       digest: "{@//agent/cmd/mesh-dns:image_push.digest}"
       tag: ""
       pullPolicy: Always
-    # Issue #583: the readiness probe now re-execs the SLIM /mesh-dns binary (only the
-    # resolver + snapshot reload + telemetry — no controller-runtime/xDS/CNI/SPIRE), not
-    # the full /agent, so the re-exec CPU headroom that inflated these limits is gone.
-    # The resident resolver is ~12-15Mi RSS and a slim-binary stat is single-digit m
-    # (period lengthened to 15s too). These are conservative for the slim footprint;
-    # revisit against live usage if needed.
+    # Issue #674: the forward path keeps a small pool of already-connected UDP sockets
+    # per upstream instead of dialling one per forwarded query (profiling put the dial
+    # at 20.97% of this daemon's CPU, MORE than the exchange it served). Unset emits no
+    # flag and uses the built-in default of 8; 0 DISABLES pooling and restores the
+    # pre-#674 dial-per-query behaviour.
+    #
+    # This is an ESCAPE HATCH, not a tuning knob. Reuse trades away per-query source-port
+    # randomisation for the socket's lifetime (a jittered 30s / 1000 queries, whichever
+    # comes first); that is safe here because the socket is CONNECTED, so the kernel drops
+    # any datagram not from the upstream's exact address and an off-path attacker cannot
+    # land a spoofed answer at all.
+    forwardPoolSize: null
+    # Verbose (TRACE) logging for THIS daemon only. Issue #684: the top-level
+    # `debug` is true by default and used to reach mesh-dns, so every node ran the
+    # resolver at TRACE — on the one component that sits on every managed pod's
+    # :53 path. The global toggle deliberately no longer reaches this daemon;
+    # set this key to turn it on for a diagnosis:
+    #
+    #   helm upgrade ... --set agent.meshDnsDaemon.debug=true
+    #
+    # What it costs, measured rather than assumed: --debug only raises the slog
+    # threshold (Info -> Trace). The mesh-DNS forward path logs NOTHING per query
+    # at any level — the only Debug-level call site in the resolver is the
+    # snapshot reload — so this is not a per-query cost and turning it off is not
+    # the fix for the OTel log-queue CPU in #684 (that is a fixed 1 Hz poll in the
+    # SDK's batch processor, independent of log volume). It is still off by
+    # default: every record that IS emitted is fanned out to the OTLP log exporter
+    # as well as stderr, at Trace that includes each snapshot reload during
+    # rollout churn, and a per-node daemon should not ship debug logging to a
+    # shared collector unless someone asked for it.
+    debug: false
+    # Issue #583 slimmed the readiness re-exec (the resolver alone, not the full
+    # /agent); issue #683 removed it entirely — the probe execs the stdlib-only
+    # /mesh-dns-ready binary (~1.7Mi, bundled in this same image) rather than
+    # relaunching the 16.9Mi daemon every 15s, which was ~3-4% of this container's
+    # CPU in runc/libcontainer exec and Go package init. The resident resolver is
+    # ~12-15Mi RSS and a stdlib stat is a rounding error. These are conservative for
+    # that footprint; revisit against live usage if needed.
     resources:
       requests:
         cpu: 25m
@@ -228,16 +265,26 @@ cniInstall:
       memory: 32Mi
 
 # Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
+#
+# NOTE — this DaemonSet is COUPLED TO THE AGENT IMAGE, not just the proxy image
+# below. Its install-supervisor initContainer runs `agent.image` and stages two
+# binaries onto the pod's shared volume: the hot-restart supervisor (the agent
+# binary, self-copied) and, since #673, the stdlib-only `/proxy-ready` readiness
+# prober the kubelet execs every 2s. An agent image predating #673 does not carry
+# /proxy-ready, and the initContainer hard-fails rather than starting a pod whose
+# probe could never succeed — chart >= 0.92.0 therefore requires an agent image
+# built from #673 or later. maxUnavailable:0 keeps the previous pods serving
+# through such a skew; the fix is to align the images (or roll the chart back).
 proxy:
   enabled: true
   # External image (built by the //proxy workspace), tag-pinned to the publishing
   # commit SHA. Mirror by overriding `repository`.
   image:
     repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: 4212e13aa585add5d3884903e32a3c85cac796c5
+    tag: 51ba12979d545bcde021d81ef9151355db7c6a07
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Envoy v1.39.0 multi-arch index (#534).
-    digest: "sha256:a749fcce573a1d93822dc9f36a6e287e30a01fbaed6eaca8f2aaa30b91a74924"
+    # helper prefers digest over tag. Multi-arch index for 51ba12979d545bcde021d81ef9151355db7c6a07.
+    digest: "sha256:9e401334408d8f87d59d0c409d957553d56938fb373b258eab002d3e655bd8a3"
     pullPolicy: Always
   logLevel: info
   # Emit Envoy's own application logs as one JSON object per line (bootstrap
@@ -248,6 +295,12 @@ proxy:
   hotRestart:
     baseId: 0
     drainTime: 10s
+    # Also the supervisor's admin re-verify budget: the epoch-identity probe
+    # re-confirms on a fresh connection every parentShutdownTime/3 (floor 2s), so a
+    # cross-pod takeover is diagnosed while the draining parent still lives
+    # (proposal 001 lessons 3/6; agent/internal/proxy/hotrestart/adminprobe.go, #666).
+    # Below ~6s the floor takes over and the supervisor logs the lost margin at
+    # startup. Raising it also delays successor-pod readiness by the same amount.
     parentShutdownTime: 15s
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0

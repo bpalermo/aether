@@ -100,7 +100,11 @@ type Config struct {
 	// takes to gracefully close connections.
 	DrainTime time.Duration
 	// ParentShutdownTime maps to Envoy --parent-shutdown-time-s and gates when the
-	// supervisor SIGTERMs the previous epoch. Must exceed DrainTime.
+	// supervisor SIGTERMs the previous epoch. Must exceed DrainTime. It also sets
+	// the admin re-verify budget: the epoch-identity probe re-confirms on a fresh
+	// connection every ParentShutdownTime/adminReverifyDivisor, so a cross-pod
+	// takeover is diagnosed while the draining parent still lives (see
+	// adminprobe.go).
 	ParentShutdownTime time.Duration
 	// ExtraArgs are appended to every Envoy invocation (e.g. -l, --service-cluster,
 	// --service-node, --service-zone, --concurrency). Concurrency must stay constant
@@ -228,6 +232,8 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 func (s *Supervisor) Run(ctx context.Context) error {
 	defer close(s.done)
 	defer s.adminFast.CloseIdleConnections()
+
+	s.logAdminReverifyBudget(ctx)
 
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGUSR1)

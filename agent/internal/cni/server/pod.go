@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
 	"aethermesh.dev/agent/internal/spire"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
 	"aethermesh.dev/agent/types"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
@@ -39,6 +41,24 @@ const unregisterTimeout = 5 * time.Second
 // span itself comes from the otelgrpc stats handler; spans started here break
 // the pod lifecycle down into its API-server / registry / xDS / Envoy steps.
 const tracerName = "aether/agent-cni-server"
+
+// reportRejectedSpiffeIDOverride surfaces a pod carrying the rejected
+// aether.io/spiffe-id annotation: WARN plus a counter, so an attempt to choose a
+// workload identity by annotation is never silent (#669). The pod's mesh
+// identity is always derived from the trust domain and its own
+// namespace/ServiceAccount (proxy.SpiffeIDFromPod); the annotation value is
+// logged for attribution only. No-op for pods without the annotation.
+func (s *CNIServer) reportRejectedSpiffeIDOverride(ctx context.Context, log *slog.Logger, cniPod *cniv1.CNIPod) {
+	requested, present := proxy.SpiffeIDOverrideAnnotation(cniPod)
+	if !present {
+		return
+	}
+	s.metrics.spiffeIDOverrideRejected(ctx)
+	log.WarnContext(ctx, "rejected pod SPIFFE ID override; mesh identity is derived from the pod's namespace and ServiceAccount",
+		"annotation", xdsconst.AnnotationSpiffeID,
+		"requestedSpiffeID", requested,
+		"spiffeID", proxy.SpiffeIDFromPod(cniPod, s.trustDomain))
+}
 
 // startStepSpan starts a child span for one step of a pod lifecycle operation.
 func startStepSpan(ctx context.Context, name string, pod *cniv1.CNIPod) (context.Context, trace.Span) {
@@ -76,6 +96,9 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		log.DebugContext(ctx, "ignoring pod")
 		return &cniv1.AddPodResponse{Result: cniv1.AddPodResponse_RESULT_IGNORED}, nil
 	}
+
+	// A pod-chosen mesh identity is never honoured; make the attempt loud (#669).
+	s.reportRejectedSpiffeIDOverride(ctx, log, cniPod)
 
 	// Store in the local storage. Whether this container was already known
 	// distinguishes a fresh CNI ADD from an idempotent re-add (CNI CHECK).

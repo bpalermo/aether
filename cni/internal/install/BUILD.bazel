@@ -27,6 +27,8 @@ go_test(
     srcs = ["cniconfig_test.go"],
     embed = [":install"],
     deps = [
+        "//cni/conflist",
+        "@com_github_containernetworking_cni//libcni",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

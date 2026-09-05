@@ -1,0 +1,9 @@
+# Marker module: Envoy's BUILD files load
+# @envoy_build_config//:extensions_build_config.bzl, and //MODULE.bazel points
+# @envoy_build_config here via override_repo. This repo is created by
+# local_repository from the ROOT module, so extensions_build_config.bzl resolves
+# @envoy through the ROOT module's repo mapping — no bazel_dep is needed (or
+# possible) here.
+module(
+    name = "envoy_build_config",
+)

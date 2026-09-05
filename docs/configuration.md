@@ -92,7 +92,7 @@ access-log/tracing policy via the MeshConfig CR.
 | `proxy.jsonLogs` | `true` | Envoy application logs as one JSON object per line. |
 | `proxy.hotRestart.baseId` | `0` | Envoy hot-restart tunables (mechanism is not optional; see proposal 001). |
 | `proxy.hotRestart.drainTime` | `10s` | Graceful connection-close window for the draining epoch. |
-| `proxy.hotRestart.parentShutdownTime` | `15s` | When the previous epoch is terminated (must exceed drainTime). |
+| `proxy.hotRestart.parentShutdownTime` | `15s` | When the previous epoch is terminated (must exceed drainTime). Also the supervisor's admin re-verify budget: the epoch-identity probe re-confirms on a fresh connection every `parentShutdownTime/3` (floor 2s, ceiling 15s), so a cross-pod takeover is diagnosed while the draining parent still lives. Below ~6s the floor takes over and the supervisor logs the lost margin at startup; raising it also delays successor-pod readiness by the same amount. |
 | `proxy.hotRestart.handoffDeadline` / `adminUnresponsiveDeadline` | `0` | Supervisor watchdogs (0 = built-in defaults). |
 | `proxy.hotRestart.shmHostPath` | `/run/aether/shm` | Shared-memory hostPath for cross-pod hot restart. |
 | `proxy.udsWorkloads.enabled` | `true` | UDS delivery (034). Gates the proxy's `/var/lib/kubelet/pods` hostPath mount, the agent's `--kubelet-pods-dir`, and the agent's read access to the `EndpointPolicy` CRD. Inert until a workload asks for it; turning it off later silently degrades annotated pods to TCP (nothing listens, so their endpoints stay unpromoted). |
@@ -265,8 +265,40 @@ The Envoy hot-restart supervisor (proposal 001): `--envoy-path`
 `--drain-time` (`45s`), `--parent-shutdown-time` (`60s`), `--watch-config`
 (`true`), `--state-dir` (`/run/aether/hotrestart`), `--ready-marker`, `--envoy-arg`
 (repeatable), `--handoff-deadline`/`--admin-unresponsive-deadline` (`0` = defaults),
-`--admin-address` (`127.0.0.1:9901`), `--readiness-check`, `--install-path`,
-`--otlp-endpoint`.
+`--admin-address` (`127.0.0.1:9901`), `--install-path`,
+`--install-readiness-path`, `--readiness-check` (deprecated), `--otlp-endpoint`.
+
+`--install-path` and `--install-readiness-path` are the initContainer's staging
+mode: the first self-copies this binary to the shared volume as the supervisor,
+the second copies the bundled `/proxy-ready` prober out of the agent image. A
+requested `--install-readiness-path` against an agent image predating #673 is a
+hard failure, so chart/image skew surfaces in the initContainer rather than as a
+pod that can never become Ready.
+
+`--readiness-check` is the pre-#673 exec probe and is deprecated: re-execing this
+67MB binary every 2s per pod spent >=31% of the supervisor container's CPU on Go
+package init alone (which runs before `main()`, so no argv check can avoid it).
+The chart now execs the standalone `proxy-ready` binary below instead. The flag
+still works, so a chart predating #673 keeps a probe against a newer image.
+
+### `proxy-ready` (standalone binary — bundled in the agent image, not run from it)
+
+The `aether-proxy` pod's exec readiness probe (#673). One flag: `--ready-marker`
+(`/var/run/aether-proxy/ready`); exit 0 iff that path stats. It is deliberately
+stdlib-only (~1.7MB vs the agent's 67MB) — it imports nothing but
+`common/readymarker`, and `//agent/cmd/proxy-ready:deps_test` fails the build if
+that ever changes. It ships as an extra layer in the agent image (no second pull:
+the `install-supervisor` initContainer, which already runs that image, copies it
+onto the proxy pod's shared volume at `/opt/aether/proxy-ready`).
+
+The probe stays an **exec** probe on the pod-local marker rather than an
+`httpGet`/`tcpSocket`: the proxy DaemonSet is `hostNetwork: true` with
+`maxSurge: 1`, so predecessor and successor share the host netns for the whole
+handoff and no port-based check is provably pod-local (the reason #582 was closed
+for `mesh-dns`). Envoy's admin endpoint is not an equivalent target either — a
+draining hot-restart parent answers `LIVE` at its old epoch for the entire
+`--parent-shutdown-time-s` window (proposal 001, lesson 6), and the supervisor
+deliberately holds readiness while it is still the serving parent.
 
 ### `mesh-dns` (standalone daemon — its own binary and image)
 
@@ -276,9 +308,43 @@ agent rolls never gap pod DNS. It does **not** share the agent's flag set:
 `--snapshot-path` (`/host/var/lib/aether/registry/mesh-dns/records.json`),
 `--mesh-domain` (`aether.internal`), `--mesh-dns-upstream` (repeatable,
 `host[:port]`; empty = `/etc/resolv.conf`), `--ready-marker`
-(`/run/aether/mesh-dns.ready`), `--readiness-check`, `--otlp-endpoint`, `--debug`.
+(`/run/aether/mesh-dns.ready`), `--readiness-check` (deprecated),
+`--forward-pool-size` (`8`), `--otlp-endpoint`, `--debug`.
 It binds UDP+TCP on the host at port 18054, which the CNI DNATs each managed
 pod's `:53` to.
+
+`--readiness-check` is the pre-#683 exec probe and is deprecated: re-execing this
+16.9MB daemon every 15s per pod spent ~10 core-seconds per 25 minutes fleet-wide
+(~3-4% of the container's CPU) on container exec and Go package init alone (which
+runs before `main()`, so no argv check can avoid it). The chart execs the
+standalone `mesh-dns-ready` binary below instead. The flag still works, so a
+chart predating #683 keeps a probe against a newer image.
+
+`--debug` only raises the log level (Info to Trace); it gates no feature and no
+data-path behaviour. The mesh-DNS forward path logs **nothing per query** at any
+level — the resolver's only Debug-level call site is the snapshot reload. The
+chart nonetheless defaults it **off** for this daemon (#684) via its own
+`agent.meshDnsDaemon.debug` key: the global `debug: true` deliberately no longer
+reaches mesh-dns, because every record it emits is also fanned out to the OTLP
+log exporter and this is the one component on every managed pod's `:53` path.
+Turn it on for a diagnosis with `--set agent.meshDnsDaemon.debug=true`.
+
+### `mesh-dns-ready` (standalone binary — bundled in the mesh-dns image)
+
+The `aether-mesh-dns` pod's exec readiness probe (#683). One flag:
+`--ready-marker` (`/run/aether/mesh-dns.ready`); exit 0 iff that path stats. It
+is deliberately stdlib-only (~1.7MB vs the daemon's 16.9MB) — it imports nothing
+but `common/readymarker`, and `//agent/cmd/mesh-dns-ready:deps_test` fails the
+build if that ever changes. It ships as an extra layer in the mesh-dns image, the
+image the DaemonSet already runs, so there is no second pull and **no chart/image
+skew is possible**: the prober and the daemon that writes the marker are the same
+artifact.
+
+Like `proxy-ready`, it stays an **exec** probe on the pod-local marker rather
+than an `httpGet`/`tcpSocket`: this DaemonSet is `hostNetwork: true` with
+`maxSurge: 1`, so predecessor and successor share the host netns for the whole
+handoff and a port-based check could be answered by the peer pod's SO_REUSEPORT
+socket. That is precisely what #582 proposed and why it was closed abandoned.
 
 ### `registrar`
 
@@ -361,7 +427,7 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 | edge GatewayClass controller | `gateway.aether.io/edge` | `controllerName` of the edge GatewayClass. |
 | mesh (GAMMA) controller | `gateway.aether.io/mesh` | `controllerName` for Service-parented route status. |
 | Gateway HTTP redirect | `gateway.aether.io/http-redirect: "true"` | Opt a Gateway's plain-HTTP listener into HTTP→HTTPS 301. |
-| workload SPIFFE ID | `aether.io/spiffe-id` | Workload SPIFFE ID (SDS secret name for the pod's TLS cert). |
+| workload SPIFFE ID | `aether.io/spiffe-id` | **Rejected and ignored** (#669). A pod's mesh identity is always `spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>`, derived from the API server. A pod carrying this annotation is logged at WARN and counted by `aether.agent.identity.spiffe_id_override_rejected`. |
 
 ### Always-ignored namespaces
 

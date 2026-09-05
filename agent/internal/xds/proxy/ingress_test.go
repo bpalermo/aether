@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	xdstypev3 "github.com/cncf/xds/go/xds/type/v3"
@@ -12,6 +13,7 @@ import (
 	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -77,6 +79,40 @@ func TestNewInboundListener(t *testing.T) {
 	vh := rc.GetVirtualHosts()[0]
 	assert.Equal(t, []string{"*"}, vh.GetDomains())
 	assert.Equal(t, AppClusterName(pod, AppPortFromPod(pod)), vh.GetRoutes()[0].GetRoute().GetCluster())
+}
+
+// TestNewInboundListener_IgnoresSpiffeIDAnnotation is the #669 regression at the
+// config level: the SDS certificate secret every mTLS chain presents is named by
+// the DERIVED identity, so an annotated pod cannot make its inbound listener
+// present (or be validated as) another workload's SVID.
+func TestNewInboundListener_IgnoresSpiffeIDAnnotation(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "pod-a",
+		Namespace:        "tenant-a",
+		ServiceAccount:   "worker",
+		NetworkNamespace: "/var/run/netns/cni-a",
+		Ips:              []string{"10.0.0.1"},
+		Annotations: map[string]string{
+			xdsconst.AnnotationSpiffeID: "spiffe://example.org/ns/prod/sa/payments",
+		},
+	}
+
+	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, l.GetFilterChains())
+	for _, fc := range l.GetFilterChains() {
+		ts := fc.GetTransportSocket()
+		require.NotNil(t, ts, "chain %s must terminate mTLS", fc.GetName())
+		tlsCtx := &tlsv3.DownstreamTlsContext{}
+		require.NoError(t, ts.GetTypedConfig().UnmarshalTo(tlsCtx))
+		certs := tlsCtx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs()
+		require.Len(t, certs, 1)
+		assert.Equal(t, "spiffe://example.org/ns/tenant-a/sa/worker", certs[0].GetName(),
+			"chain %s must present the derived SVID, not the annotated one", fc.GetName())
+		assert.Equal(t, "spiffe://example.org",
+			tlsCtx.GetCommonTlsContext().GetValidationContextSdsSecretConfig().GetName())
+	}
 }
 
 // TestNewInboundListenerCleartext verifies the SPIRE-off inbound listener: a

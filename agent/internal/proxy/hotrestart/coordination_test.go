@@ -14,9 +14,25 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/common/readymarker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// assertReaderAgrees checks that the reader the kubelet actually runs
+// (//agent/cmd/proxy-ready, via readymarker.Check) reaches the same verdict as
+// the os.Stat this test asserts on directly. #673 changed only the reader — the
+// marker write/clear logic in coordination.go is untouched — so the one thing
+// that must be proven is that the two never disagree, at every phase of a
+// handoff.
+func assertReaderAgrees(t *testing.T, marker string, wantReady bool) {
+	t.Helper()
+	_, statErr := os.Stat(marker)
+	checkErr := readymarker.Check(marker)
+	assert.Equal(t, statErr == nil, checkErr == nil,
+		"readymarker.Check must agree with os.Stat (stat: %v, check: %v)", statErr, checkErr)
+	assert.Equal(t, wantReady, checkErr == nil, "unexpected readiness verdict from the probe's reader")
+}
 
 func newCoordSupervisor(t *testing.T) *Supervisor {
 	t.Helper()
@@ -253,6 +269,7 @@ func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
 		_, err := os.Stat(marker)
 		return err == nil
 	}, 10*time.Second, 50*time.Millisecond, "pod never became ready")
+	assertReaderAgrees(t, marker, true)
 
 	// Phase B: a successor binds admin, not yet LIVE. Readiness must be held
 	// while our child (the successor's hot-restart parent) is alive.
@@ -262,6 +279,7 @@ func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
 		return os.IsNotExist(err)
 	}, 3*readyPollInterval+500*time.Millisecond, 100*time.Millisecond,
 		"ready marker dropped mid-handoff while still the serving parent")
+	assertReaderAgrees(t, marker, true)
 
 	// Phase C: the successor's protocol terminates our child (clean exit) ->
 	// nothing left serving here -> readiness clears.
@@ -270,6 +288,7 @@ func TestReadinessHeldWhileServingParentMidHandoff(t *testing.T) {
 		_, err := os.Stat(marker)
 		return os.IsNotExist(err)
 	}, 10*time.Second, 100*time.Millisecond, "ready marker must clear once the child exits")
+	assertReaderAgrees(t, marker, false)
 }
 
 // TestHandoffWatchdogFiresWhenSuccessorNeverLive reproduces the 2026-06-10 e2e

@@ -3,7 +3,7 @@ load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
-# Custom aether Envoy: upstream core extensions (//bazel/extension_config) plus
+# Custom aether Envoy: upstream core extensions (//bazel/build_config) plus
 # our compiled-in C++ extensions.
 AETHER_EXTENSIONS = [
     # aether_stats: source->destination request metrics (proposals 007/012).
@@ -27,7 +27,7 @@ envoy_cc_binary(
     # does `if not linkopts: linkopts = _envoy_linkopts()`, so passing any
     # linkopts *replaces* Envoy's defaults (-pthread, -lrt, -ldl, -z relro/now,
     # --hash-style=gnu, -pie, -Wl,-E). The flag therefore goes on the command
-    # line via --linkopt, exactly as envoy.bazelrc itself passes -fuse-ld=lld.
+    # line via --linkopt, exactly as .bazelrc itself passes -fuse-ld=lld.
     # //integration:build_id_test reads the linked ELF directly.
     visibility = ["//integration:__pkg__"],
     deps = AETHER_EXTENSIONS + [

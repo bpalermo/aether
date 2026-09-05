@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"aethermesh.dev/agent/constants"
@@ -95,8 +96,8 @@ var rootCmd = &cobra.Command{
 		}
 		applyMeshConfig(mc)
 
-		l, logShutdown, err = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
-		return err
+		l, logShutdown = manager.SetupManagerLogging(cmd.Context(), cfg.Config, name, Version)
+		return nil
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runAgent(cmd.Context())
@@ -226,7 +227,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		},
 	}
 
-	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version)
+	result, err := manager.Bootstrap(ctx, cfg.Config, name, Version, l)
 	if err != nil {
 		return err
 	}
@@ -257,6 +258,9 @@ func runAgent(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
+	// Write a still-debounced observed-set change out on the way down, so the
+	// next agent on this node restores what this one was serving (#701).
+	defer snapshotCache.FlushObservedUpstreams()
 
 	ackTracker := ack.NewTracker(l)
 
@@ -269,24 +273,18 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain); err != nil {
+	// Construct the conflist re-asserter BEFORE its consumers: it is the source of
+	// truth for whether aether is actually chained in this node's CNI conflist,
+	// which gates the taint removal, the agent's readiness, and the ghost sweep's
+	// self-heal evictions. It is registered with the manager further down.
+	reasserter := newCNIConflistReasserter()
+
+	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain, chainStateOf(reasserter)); err != nil {
 		return err
 	}
 
-	// Remove the aether startup taint from this node whenever it is present and
-	// the CNI server is serving, so workload pods (which don't tolerate it) can
-	// schedule here. This is a reconciler on this agent's own Node, so it also
-	// drops the taint the controller's node-taint guard re-applies after a reboot
-	// or agent outage (issue #569, gaps G1/G2), not just the one the kubelet
-	// registered at boot. Unconditional (proposal 031): a no-op when the taint
-	// isn't present. Best-effort: NeedLeaderElection=false, never fails startup.
-	if err = (&node.TaintRemover{
-		Client:     m.GetClient(),
-		NodeName:   cfg.NodeName,
-		SocketPath: cfg.CNIServerConfig.SocketPath,
-		Log:        l,
-	}).SetupWithManager(m); err != nil {
-		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
+	if err = setupNodeGating(m, reasserter); err != nil {
+		return err
 	}
 
 	// Rebuild the cluster/endpoint/route snapshot when the registry reports
@@ -297,7 +295,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}
 
-	if err = wireCNIConflistReasserter(m); err != nil {
+	if err = wireCNIConflistReasserter(m, reasserter); err != nil {
 		return err
 	}
 
@@ -329,6 +327,13 @@ func setupSpireSource(ctx context.Context) (*commonspire.Source, string, error) 
 	// match the secrets the SPIRE bridge delivers. Peer authorization uses the
 	// mesh domain — addressing (<svc>.<mesh-domain>) and identity
 	// (spiffe://<mesh-domain>/...) are one domain by design, never split.
+	//
+	// This wait is on the startup path, before the manager serves /healthz, so it
+	// is bounded (commonspire.SourceTimeout) and announced: an unattested agent
+	// used to stall here with no log line at all until the liveness probe killed
+	// it (issue #662).
+	l.InfoContext(ctx, "waiting for the SPIRE Workload API to issue this agent's SVID",
+		"socket", cfg.SpireWorkloadSocketPath, "timeout", commonspire.SourceTimeout)
 	spireSource, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
 	if err != nil {
 		return nil, "", err
@@ -362,6 +367,13 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureEnabled(true)
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
+	// Persist the OBSERVED half of the demand set beside the CNI pod records
+	// and restore it now, before the first snapshot, so a full agent+proxy
+	// replacement (every Helm upgrade) starts warm instead of paying one cold
+	// ODCDS round trip per observed-only upstream (issue #701). The proxy's
+	// held-cluster re-seed (#698) covers agent-only restarts; this covers the
+	// case where the proxy is new too and holds nothing.
+	snapshotCache.EnableObservedUpstreamsStore(ctx, filepath.Join(cfg.MountedLocalStorageDir, cache.ObservedUpstreamsFile))
 
 	if err := wireMeshDNS(m, snapshotCache); err != nil {
 		return nil, err
@@ -412,19 +424,90 @@ func wireMeshDNS(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	return nil
 }
 
-// wireCNIConflistReasserter registers the CNI conflist re-assert loop (#645):
-// the agent watches the node's CNI config directory and re-appends aether's
-// chained plugin entry whenever a competing writer strips it — on Talos,
-// kube-flannel's init container `cp -f`s its ConfigMap template over the
-// conflist on EVERY flannel pod recreation, which a bootstrap-manifest re-sync
-// triggers, silently unmeshing every pod started afterwards. cni-install appends
-// once per agent pod start; this keeps it appended. Default on (kill switch:
-// --cni-conflist-reassert=false).
-func wireCNIConflistReasserter(m ctrl.Manager) error {
+// newCNIConflistReasserter builds the CNI conflist re-assert loop (#645): the
+// agent watches the node's CNI config directory and re-appends aether's chained
+// plugin entry whenever a competing writer strips it — on Talos, kube-flannel's
+// init container `cp -f`s its ConfigMap template over the conflist on EVERY
+// flannel pod recreation, which a bootstrap-manifest re-sync triggers, silently
+// unmeshing every pod started afterwards. cni-install appends once per agent pod
+// start; this keeps it appended. Default on (kill switch:
+// --cni-conflist-reassert=false), and nil when that switch is off.
+//
+// Split from the registration below because the Reasserter is also the agent's
+// ChainState: the node taint gate and the readiness check both need it in hand
+// before they are constructed (#667).
+func newCNIConflistReasserter() *cniconflist.Reasserter {
 	if !cfg.CNIConflistReassert {
 		return nil
 	}
-	reasserter := &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l}
+	return &cniconflist.Reasserter{Dir: cfg.MountedCNINetDir, Log: l}
+}
+
+// setupNodeGating wires the two mechanisms that decide whether the scheduler may
+// put pods on this node, both keyed on the same question: can this node actually
+// mesh a NEW pod?
+//
+//   - The readyz check. A node whose conflist has lost the aether entry cannot
+//     mesh a new pod, but its agent is otherwise perfectly healthy — so nothing
+//     stops the scheduler putting pods on it, and they come up unmeshed and
+//     silent (#667). Reporting NotReady lets the CONTROLLER's node-taint guard
+//     (proposal 033) re-arm the taint using the signal it already consumes,
+//     without making the agent a node-taint writer — the alternative proposal 033
+//     explicitly rejected.
+//   - The taint remover. It drops the startup taint once the node CAN mesh a pod,
+//     so workload pods (which don't tolerate it) can schedule here. A reconciler
+//     on this agent's own Node, so it also drops the taint the guard re-applies
+//     after a reboot or agent outage (issue #569, gaps G1/G2), not just the one
+//     the kubelet registered at boot. Unconditional (proposal 031): a no-op when
+//     the taint isn't present. Best-effort: NeedLeaderElection=false, never fails
+//     startup.
+//
+// The two compose: the guard arms the taint, and the remover then refuses to drop
+// it while the node is still unchained. A nil re-asserter
+// (--cni-conflist-reassert=false) reduces both to their pre-#667 behaviour.
+func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter) error {
+	chain := chainStateOf(reasserter)
+
+	if err := m.AddReadyzCheck("cni-chained", cniconflist.ReadyChecker(chain)); err != nil {
+		return fmt.Errorf("failed to set up the CNI chaining ready check: %w", err)
+	}
+
+	tr := &node.TaintRemover{
+		Client:     m.GetClient(),
+		NodeName:   cfg.NodeName,
+		SocketPath: cfg.CNIServerConfig.SocketPath,
+		Log:        l,
+		Chain:      chain,
+	}
+	if err := tr.SetupWithManager(m); err != nil {
+		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
+	}
+	return nil
+}
+
+// chainStateOf adapts the re-asserter to the ChainState interface its consumers
+// take, returning a TRULY nil interface when the re-assert loop is switched off.
+//
+// The guard is load-bearing, not defensive. Assigning a nil *Reasserter straight
+// into an interface-typed field yields a NON-nil interface holding a nil
+// pointer, so a consumer's `Chain == nil` check would be false and every
+// ChainStatus() call would land on a nil receiver. Going through here is what
+// makes --cni-conflist-reassert=false actually mean "no chaining condition" —
+// the pre-#667 socket-only taint gate — rather than a node that can never be
+// untainted, or a panic.
+func chainStateOf(r *cniconflist.Reasserter) cniconflist.ChainState {
+	if r == nil {
+		return nil
+	}
+	return r
+}
+
+// wireCNIConflistReasserter registers the re-assert loop with the manager. A nil
+// reasserter (the kill switch) is a no-op.
+func wireCNIConflistReasserter(m ctrl.Manager, reasserter *cniconflist.Reasserter) error {
+	if reasserter == nil {
+		return nil
+	}
 	if err := m.Add(reasserter); err != nil {
 		return fmt.Errorf("failed to add CNI conflist re-asserter: %w", err)
 	}
@@ -618,7 +701,7 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 // setupCNIServer creates and registers a CNI gRPC server as a runnable with the Manager.
 // The server listens on a Unix domain socket and handles pod registration/deregistration
 // requests from the CNI plugin binary. It stores pod data locally and triggers xDS snapshot updates.
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string, chain cniconflist.ChainState) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
@@ -637,6 +720,11 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 	if err != nil {
 		return err
 	}
+	// A setter rather than a 13th positional argument: the chaining state is an
+	// optional interlock on the ghost sweep's self-heal evictions (#667), not
+	// something the server needs in order to exist. Same shape as
+	// snapshotCache.SetMeshDNSSnapshotPath.
+	cniSrv.SetChainState(chain)
 	if err = m.Add(cniSrv); err != nil {
 		return fmt.Errorf("failed to add CNI server: %w", err)
 	}

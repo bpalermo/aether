@@ -90,6 +90,29 @@ groups:
             Reloads are erroring ({{ $labels.result }}); the daemon keeps the last good
             table. A parse_error usually means a truncated or corrupt snapshot file.
 
+      # P3. The forward path pools connected UDP sockets per upstream (issue #674)
+      # instead of dialling one per query. A pooled socket is retired on ANY exchange
+      # error, so a sustained error-recycle rate means the upstream is genuinely
+      # failing -- most often a stale conntrack entry still DNAT'ing the kube-dns
+      # ClusterIP at a backend pod that has rolled away, which black-holes datagrams
+      # with NO ICMP and shows only as read timeouts. Resolution still WORKS (each
+      # failure falls back to a cold dial), it just costs a full round of retries, so
+      # this is a low-severity efficiency signal, not an outage.
+      - alert: MeshDNSForwardConnsRecyclingOnError
+        expr: sum by (node) (rate(aether_mesh_dns_forward_conn_recycles_total{reason="error"}[10m])) > 0.5
+        for: 30m
+        labels:
+          severity: info
+          component: mesh-dns
+        annotations:
+          summary: "mesh-DNS keeps retiring failed upstream sockets on {{ $labels.node }}"
+          description: >-
+            Pooled upstream sockets are being retired on exchange errors at
+            {{ $value | humanize }}/s. Check kube-dns health and this node's conntrack
+            table for entries pointing at dead backends; compare against
+            aether_mesh_dns_queries_total{result="forward_error"} to see whether
+            clients are actually losing answers or only paying an extra dial.
+
       # External SLI. Deliberately EXCLUDES http_error: that is the cross-node drain
       # path (a different failure domain), and including it would fire on every proxy
       # roll. Generic `timeout` IS included -- a hung resolver surfaces as a context

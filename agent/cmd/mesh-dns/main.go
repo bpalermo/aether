@@ -4,12 +4,17 @@
 // It is intentionally self-contained: it imports ONLY the meshdns resolver and its
 // direct deps (fsnotify, OTel push telemetry, cobra), and deliberately does NOT pull
 // in the full agent (controller-runtime, go-control-plane/xDS, CNI, SPIRE). That
-// keeps the binary — and its re-exec cost for the pod-local readiness probe — tiny,
-// which is the entire point of #583 (and the CPU-reclaim half of #582): the readiness
-// probe re-execs THIS binary to stat a pod-local marker, and a slim binary makes that
-// cheap. The in-process httpGet probe #582 proposed is unsafe on a host-network +
+// keeps the binary small, which is the entire point of #583 (and the CPU-reclaim half
+// of #582). The in-process httpGet probe #582 proposed is unsafe on a host-network +
 // maxSurge DaemonSet (two pods share the host netns), so the provably-pod-local
-// ready-marker exec probe from #580 is kept — this binary just makes it cheap.
+// ready-marker exec probe from #580 is kept.
+//
+// Since #683 the kubelet no longer execs THIS binary for that probe: slim is not the
+// same as free, and re-launching 16.9MB of cobra + miekg/dns + OTel SDK every 15s per
+// pod still cost ~10 core-seconds per 25 minutes fleet-wide (~3-4% of this daemon's
+// CPU) in runc/libcontainer exec and Go package init. The chart execs the stdlib-only
+// //agent/cmd/mesh-dns-ready binary, which ships in this same image. The marker
+// WRITER below is unchanged; only the reader moved.
 //
 // It has no Kubernetes API access — records come only from the snapshot file the
 // agent writes and this daemon watches via fsnotify.
@@ -52,13 +57,14 @@ const resolvConfPath = "/etc/resolv.conf"
 
 // cfg holds the flag-bound configuration for the standalone mesh-DNS resolver.
 var (
-	snapshotPath   string
-	meshDomain     string
-	upstreams      []string
-	debug          bool
-	otlpEndpoint   string
-	readyMarker    string
-	readinessCheck bool
+	snapshotPath    string
+	meshDomain      string
+	upstreams       []string
+	debug           bool
+	otlpEndpoint    string
+	readyMarker     string
+	readinessCheck  bool
+	forwardPoolSize int
 )
 
 func main() {
@@ -80,9 +86,14 @@ func rootCmd() *cobra.Command {
 			"access — records come only from the file.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// --readiness-check is the exec readiness probe: exit 0 iff this pod's
-			// pod-local ready marker is present (the distroless image has no shell or
-			// cat, so the probe re-execs this slim binary — cheap because it's slim).
+			// --readiness-check is the DEPRECATED (#683) exec readiness probe: exit 0
+			// iff this pod's pod-local ready marker is present. The chart now execs
+			// the stdlib-only /mesh-dns-ready binary from this same image instead —
+			// re-launching this daemon (cobra + miekg/dns + the OTel SDK) every 15s
+			// per pod is package init() the Go runtime runs before main() is entered,
+			// so this branch cannot avoid it however early it returns. Retained so a
+			// chart predating #683 keeps a working probe against a newer image.
+			//
 			// The marker is written only once THIS process has bound its listeners, so
 			// the surge rollout keeps the predecessor until the successor truly serves.
 			if readinessCheck {
@@ -102,7 +113,8 @@ func rootCmd() *cobra.Command {
 	f.BoolVar(&debug, "debug", false, "Enable debug-level logging")
 	f.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for mesh-DNS metrics push (e.g. collector:4317); empty disables telemetry")
 	f.StringVar(&readyMarker, "ready-marker", "/run/aether/mesh-dns.ready", "Pod-local path for the readiness marker written once the resolver's listeners are bound")
-	f.BoolVar(&readinessCheck, "readiness-check", false, "Exit 0 iff the --ready-marker file exists (exec readiness probe mode)")
+	f.BoolVar(&readinessCheck, "readiness-check", false, "DEPRECATED (#683): exit 0 iff the --ready-marker file exists (exec readiness probe mode). Re-execing this 16.9MB daemon every 15s per pod cost ~3-4% of its CPU in container exec and Go package init alone; the chart execs the stdlib-only /mesh-dns-ready prober from this same image instead. Retained so a chart predating #683 keeps a working probe against a newer image")
+	f.IntVar(&forwardPoolSize, "forward-pool-size", meshdns.DefaultForwardPoolSize, "Connected UDP sockets kept open per forward upstream (issue #674); 0 dials a fresh socket per forwarded query")
 
 	return cmd
 }
@@ -140,6 +152,7 @@ func run(ctx context.Context) error {
 		meshDomain, addr, snapshotPath, l,
 		meshdns.WithReusePort(true),
 		meshdns.WithReadyMarker(readyMarker),
+		meshdns.WithForwardPoolSize(forwardPoolSize),
 	)
 	server.SetUpstreams(resolveUpstreams(l, resolvConfPath))
 

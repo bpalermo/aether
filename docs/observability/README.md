@@ -46,6 +46,46 @@ Both matter: the forward path carries the majority of a real workload's lookups 
 almost no organic traffic here, so without the second target a kube-dns or
 upstream-failover regression would be invisible.
 
+## Node agent CNI conflist chaining (`agent-cni-alerts.yml`)
+
+Covers the node agent's presence in the node's **active CNI conflist**. Aether is a
+*chained* plugin inside another CNI's conflist, so any competing writer that rewrites
+that file from its own template silently unchains us — on Talos, kube-flannel's init
+container `cp -f`s its ConfigMap template over `10-flannel.conflist` on every flannel
+pod recreation, which a bootstrap-manifest re-sync triggers. That was the 2026-08-29
+fleet-wide ~2h outage (#645).
+
+| Alert | Severity | Catches |
+|---|---|---|
+| `AetherCNIConflistUnchained` | critical | per node: entry gone and unrepairable, **or the agent reporting nothing at all** |
+| `AetherCNIConflistReasserting` | warning | strips the agent self-healed — invisible to the gauge, visible only in the counter |
+| `AetherCNIConflistMetricsAbsent` | critical | metric renamed, OTLP path broken, or the re-assert loop disabled fleet-wide |
+
+### Why `absent()` is not the per-node answer
+
+The gauge is **pushed by the agent**, so a down agent produces *no series* rather than a
+`0`. `absent()` over the bare selector is **fleet-wide**: it drops the `node` label and
+fires only when *every* agent is silent, so one node's agent going away produces neither
+the `== 0` arm nor the `absent()` arm — vacuous for exactly the outage it would be
+written for.
+
+Per-node absence needs an inventory joined with `unless`. The inventory is
+`aether_mesh_dns_ready`, from the **separate** mesh-dns DaemonSet (#583) carrying the
+same `node` label — which is why it survives the agent outage the rule exists to catch.
+Residual gap, stated plainly: a node where *both* the agent and mesh-dns are silent falls
+out of the inventory and is covered only by the fleet-wide meta-rule.
+
+### Why the counter is a separate rule
+
+The re-assert loop repairs in ~2.5s and the OTLP `PeriodicReader` exports every 60s, so
+a *healed* strip is exported as `1` and **never observed as `0`**. The gauge under-reports
+by construction; `aether_agent_cni_conflist_reasserts_total` is the only evidence the
+strip happened at all.
+
+These expressions have **promtool unit tests** in the GitOps repo
+(`clusters/talos-main/prometheus/rules_test.yaml`, run by CI), including a node whose
+`chained` series is omitted entirely — the case `absent()` misses.
+
 ## Installing
 
 There is **no Prometheus operator** on `talos-main` (no `PrometheusRule` CRD) and the
@@ -58,6 +98,7 @@ serverFiles:
   alerting_rules.yml:
     groups:
       # contents of mesh-dns-alerts.yml
+      # contents of agent-cni-alerts.yml
 ```
 
 `prometheus.yml`'s `rule_files` **already** lists `/etc/config/alerting_rules.yml` — the

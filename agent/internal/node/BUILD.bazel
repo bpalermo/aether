@@ -6,6 +6,7 @@ go_library(
     importpath = "aethermesh.dev/agent/internal/node",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//agent/internal/cniconflist",
         "//common/constants/labels",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/types",
@@ -22,6 +23,7 @@ go_test(
     srcs = ["taint_test.go"],
     embed = [":node"],
     deps = [
+        "//agent/internal/cniconflist",
         "//common/constants/labels",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

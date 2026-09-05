@@ -4,7 +4,9 @@ go_library(
     name = "cniconflist",
     srcs = [
         "metrics.go",
+        "readyz.go",
         "reassert.go",
+        "state.go",
     ],
     importpath = "aethermesh.dev/agent/internal/cniconflist",
     visibility = ["//agent:__subpackages__"],
@@ -13,6 +15,7 @@ go_library(
         "//common/file",
         "//common/log",
         "@com_github_fsnotify_fsnotify//:fsnotify",
+        "@io_k8s_sigs_controller_runtime//pkg/healthz",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_metric//:metric",
     ],
@@ -20,7 +23,11 @@ go_library(
 
 go_test(
     name = "cniconflist_test",
-    srcs = ["reassert_test.go"],
+    srcs = [
+        "readyz_test.go",
+        "reassert_test.go",
+        "state_test.go",
+    ],
     embed = [":cniconflist"],
     deps = [
         "//cni/conflist",

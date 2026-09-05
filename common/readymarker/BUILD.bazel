@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "readymarker",
+    srcs = ["readymarker.go"],
+    importpath = "aethermesh.dev/common/readymarker",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "readymarker_test",
+    srcs = ["readymarker_test.go"],
+    embed = [":readymarker"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

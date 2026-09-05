@@ -188,6 +188,19 @@ type SnapshotCache struct {
 	// service name with the last observation time; entries idle past
 	// observedTTL are pruned.
 	observedDeps map[string]time.Time
+	// onDemandSubs is the node proxy's LIVE on-demand cluster subscriptions,
+	// keyed by delta stream id then by the subscribed cluster name, valued with
+	// the service key that name resolves to. It is the agent's only per-service
+	// "still in use" signal from the data plane (issue #682): Envoy's on_demand
+	// filter subscribes to a cluster name by name when a request needs it and
+	// holds that subscription for the life of the stream, so a service with a
+	// live subscription is one the proxy is still routing to. Observed
+	// dependencies backed by one are exempt from idle expiry — dropping them is
+	// unrecoverable, because Envoy dedupes a re-subscribe for a name it already
+	// believes it is waiting on. Cleared per stream on close, so a proxy or
+	// agent restart rebuilds the pins from real demand and genuinely idle
+	// upstreams age out as before. Guarded by depMu.
+	onDemandSubs map[int64]map[string]string
 	// staticDeps is a fixed dependency set (edge mode): the services the edge
 	// exposes. Unioned into the dependency set so the scoped registry watch
 	// carries exactly the exposed services; updated by SetStaticDependencies
@@ -262,6 +275,22 @@ type SnapshotCache struct {
 	udpServiceRoutes map[string][]proxy.L4Backend
 	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
 	observedTTL time.Duration
+	// observedStorePath is where the observed half of the dependency set is
+	// persisted so a replaced agent starts warm (issue #701); "" disables
+	// persistence. Set once at boot (EnableObservedUpstreamsStore). Guarded by
+	// depMu.
+	observedStorePath string
+	// observedDirty/observedFlushTimer implement the debounced write: a change
+	// to observedDeps sets dirty and arms the timer if it is not already armed;
+	// the flush clears both. Guarded by depMu.
+	observedDirty      bool
+	observedFlushTimer *time.Timer
+	// observedFlushDebounce overrides defaultObservedFlushDebounce when > 0
+	// (test hook).
+	observedFlushDebounce time.Duration
+	// observedWriteMu serializes flushes of the observed set so a slow earlier
+	// write can never land over a newer one. Never held with depMu held.
+	observedWriteMu sync.Mutex
 	// depGen counts mutations of the dependency-set inputs (issue #539): EVERY
 	// writer of ANY depMu-guarded field bumps it via bumpDepGenLocked, even for
 	// fields dependencySetLocked does not read today — over-invalidation costs
@@ -322,6 +351,16 @@ type SnapshotCache struct {
 	// probes, which carry no source-pod filter state); while empty, upstream mTLS
 	// injection is skipped.
 	nodeSpiffeID string
+
+	// bindingMu guards lastBindings. Only generateSnapshot writes it (already
+	// serialized by snapshotMu); the lock keeps the invariant local so a future
+	// caller or a -race test reading the state cannot trip over it.
+	bindingMu sync.Mutex
+	// lastBindings is the previous snapshot's outbound identity-binding table
+	// (issue #638), kept so the binding log is edge-triggered: steady state is
+	// silent and a re-bind produces exactly the lines to grep. See
+	// identitybinding.go.
+	lastBindings bindingState
 
 	// captureEnabled turns on transparent capture (proposal 018, Phase 3a): per-pod
 	// capture listeners + the cap_http route table. Set once before the manager
@@ -492,6 +531,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		localWorkloads:     make(map[string]string),
 		podDeps:            make(map[string]podDependencies),
 		observedDeps:       make(map[string]time.Time),
+		onDemandSubs:       make(map[int64]map[string]string),
 		staticDeps:         make(map[string]struct{}),
 		serviceRoutes:      make(map[string][]proxy.GammaRoute),
 		routeTargetPorts:   make(map[string][]uint32),

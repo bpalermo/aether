@@ -1,0 +1,47 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into :mesh-dns-ready_test.
+# gazelle:exclude deps_test.go
+
+go_library(
+    name = "mesh-dns-ready_lib",
+    srcs = ["main.go"],
+    importpath = "aethermesh.dev/agent/cmd/mesh-dns-ready",
+    visibility = ["//visibility:private"],
+    deps = ["//common/readymarker"],
+)
+
+go_binary(
+    name = "mesh-dns-ready",
+    embed = [":mesh-dns-ready_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "mesh-dns-ready_test",
+    srcs = ["main_test.go"],
+    embed = [":mesh-dns-ready_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# Linkage guard (#683). The whole value of this binary is what it does NOT link:
+# the probe it replaced re-exec'd the 16.9MB mesh-dns daemon every 15s per pod,
+# and container exec plus package init() — which runs before main() and so cannot
+# be skipped by any argv check — was the whole cost. One stray import silently
+# re-acquires it, so it is asserted against the linked ELF that actually ships.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = ["deps_test.go"],
+    data = [":mesh-dns-ready"],
+    embed = [":mesh-dns-ready_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
