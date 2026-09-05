@@ -421,10 +421,20 @@ func (r *RegistrarRegistry) listAllEndpointsFromServer(ctx context.Context, prot
 // was earned on, the token is cleared so the registrar resends the full
 // (re-filtered) snapshot — newly in-scope services were never delivered to
 // the old stream, so resuming by version would silently skip them.
+//
+// A stream the loop itself lost to a filter re-assert or to shutdown is not a
+// failure: it is classified out of the error path (no ERROR, no backoff, no
+// watch_errors count) so the only ERROR here is a registrar that would not
+// serve the stream (issue #700).
 func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 	backoff := initialBackoff
 	lastVersion := ""
 	lastFilterGen := uint64(0)
+	// The process's first stream is opened by Initialize, before the node's
+	// dependency set exists, so it is routinely superseded by the startup
+	// filter assert (issue #700). The marker keeps that expected handoff
+	// distinguishable from a mid-life filter change in the log.
+	firstStream := true
 
 	for {
 		select {
@@ -456,19 +466,19 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 
 		stream, err := r.client.WatchEndpoints(streamCtx, req)
 		if err != nil {
+			// Classify BEFORE cancelling: while the call is in flight the only
+			// thing that cancels streamCtx is SetServiceFilter re-asserting a
+			// changed filter (or the parent context ending) — never this loop.
+			cancelled := streamCtx.Err() != nil
 			streamCancel()
-			r.metrics.streamFailed(ctx)
-			jitter := time.Duration(float64(backoff) * jitterFraction * rand.Float64())
-			wait := backoff + jitter
-			r.log.ErrorContext(ctx, "failed to start watch stream, retrying", "error", err, "backoff", wait)
-			select {
-			case <-ctx.Done():
+			keepWatching := r.recoverStreamOpen(ctx, err, cancelled, firstStream, &backoff)
+			firstStream = false
+			if !keepWatching {
 				return
-			case <-time.After(wait):
 			}
-			backoff = min(backoff*2, maxBackoff)
 			continue
 		}
+		firstStream = false
 
 		// Reset backoff on successful connection.
 		backoff = initialBackoff
@@ -479,6 +489,47 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		lastVersion = r.processStream(ctx, stream, lastVersion)
 		streamCancel()
 	}
+}
+
+// recoverStreamOpen applies the recovery for a watch stream that would not
+// open, and reports whether the loop should keep watching (false = shut down).
+// cancelled says whether the per-stream context was already cancelled when the
+// call returned; firstStream whether this was the process's first stream.
+//
+// Opening a server-streaming RPC blocks in the gRPC picker until the
+// connection is READY, so on a clean start that call is in flight across the
+// whole dial + mTLS handshake — and the agent's startup filter assert lands
+// inside that window (issue #700). Neither that handoff nor a shutdown is a
+// stream failure, so neither takes the error path.
+func (r *RegistrarRegistry) recoverStreamOpen(ctx context.Context, err error, cancelled, firstStream bool, backoff *time.Duration) bool {
+	if ctx.Err() != nil {
+		// Shutting down: the cancellation IS the shutdown.
+		r.log.DebugContext(ctx, "watch stream cancelled by shutdown")
+		return false
+	}
+	if cancelled && status.Code(err) == codes.Canceled {
+		// Expected, not a failure: Initialize opens the unfiltered stream
+		// before the node's dependency set exists, then the agent's xDS
+		// PreListen asserts the demand-scoped filter as soon as the local pod
+		// set is known (agent/internal/xds/server/server.go), cancelling the
+		// in-flight dial. Reconnect immediately with the new filter — backing
+		// off here would only delay the filtered snapshot.
+		r.log.InfoContext(ctx, "watch stream superseded by a service-filter change before it connected; reconnecting",
+			"startup", firstStream)
+		return true
+	}
+
+	r.metrics.streamFailed(ctx)
+	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
+	wait := *backoff + jitter
+	r.log.ErrorContext(ctx, "failed to start watch stream, retrying", "error", err, "backoff", wait)
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+	}
+	*backoff = min(*backoff*2, maxBackoff)
+	return true
 }
 
 // processStream reads events from the stream and updates the local cache.
