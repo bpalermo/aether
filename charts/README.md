@@ -43,7 +43,7 @@ substitutes at package time, so packaged charts are pinned to a concrete digest.
 
 | Field | Value | Notes |
 | --- | --- | --- |
-| Chart `version` | e.g. `0.8.0-{GIT_COMMIT}` (crds), `0.2.0-{GIT_COMMIT}` (prober) | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). The `aether` chart is the exception: it carries a plain version (e.g. `0.90.1`) with no `{GIT_COMMIT}` suffix. Bump the chart's `version:` on any change to its templates/values (enforced in CI). |
+| Chart `version` | e.g. `0.8.0-{GIT_COMMIT}` (crds), `0.2.0-{GIT_COMMIT}` (prober) | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). The `aether` chart is published **twice**: under its plain `Chart.yaml` version (e.g. `0.92.4`, what Flux and the deploy procedure consume) *and* — via `:aether_commit`, whose `Chart.yaml` is derived from the same file — under `0.92.4-{GIT_COMMIT}`, so every commit's chart stays addressable after the mutable bare tag has moved on (#692). Bump the chart's `version:` on any change to its templates/values (enforced in CI). |
 | Chart `appVersion` | `{STABLE_GIT_VERSION}` | `git describe` value — matches the binaries' embedded `Version`. |
 | Image refs | `repo@sha256:…` | Pinned to the exact built digest (strongest form). |
 
@@ -85,8 +85,10 @@ helm maps it to the dash-separated tag):
 ```bash
 helm install aether-crds oci://ghcr.io/bpalermo/aether/charts/crds \
   --version 0.8.0-<git-commit>
+# Prefer the commit-pinned tag; `--version 0.92.4` also resolves, but that tag is
+# mutable and re-pushed by every release.
 helm install aether oci://ghcr.io/bpalermo/aether/charts/aether \
-  --version 0.90.1 -n aether-system --create-namespace
+  --version 0.92.4-<git-commit> -n aether-system --create-namespace
 ```
 
 ## Multiple instances & labels
@@ -130,6 +132,10 @@ bazel run //charts/aether:aether.push
 
 # Push only the chart (skip images):
 bazel run //charts/aether:aether.push_registry
+
+# Push the same chart again under `<version>-<git-commit>` (chart only — the
+# images are already up as digests). CI does both (#692).
+bazel run //charts/aether:aether_commit.push_registry
 ```
 
 The push target performs `helm registry login` automatically when the
