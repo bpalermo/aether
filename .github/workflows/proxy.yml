@@ -1,13 +1,13 @@
 name: proxy
 
-# PR validation for the custom Envoy (//proxy, a separate Bazel workspace, 7.7.1).
+# PR validation for the custom Envoy (//proxy, a separate Bazel workspace).
 # Always triggers on every PR (no path filters) so the `proxy` gate check below
 # always reports — symmetric with the control-plane `ci` workflow. The `changes`
 # job scopes the work: the heavy Envoy compile only runs when proxy/ changes; on
 # a control-plane-only PR the matrix skips and the `proxy` gate reports success.
 # Both legs offload the compile to BuildBuddy RBE (amd64 = x64 pool, arm64 = arm64
-# pool via @llvm_toolchain_aarch64). Does NOT build/push the image — that happens
-# on merge (proxy-release.yml).
+# pool, driven from a native arm64 runner). Does NOT build/push the image — that
+# happens on merge (proxy-release.yml).
 on:
   pull_request:
     branches: [main]
@@ -16,6 +16,14 @@ permissions:
   contents: read
   pull-requests: read
 
+# CARGO_BAZEL_REPIN is still required under WORKSPACE, even though
+# //bazel/extension_config no longer compiles in Envoy's dynamic-modules
+# extensions: @envoy's bazel/dependency_imports_extra.bzl has a top-level
+# `load("@envoy_rust_crate_index//:defs.bzl", ...)`, so WORKSPACE evaluation
+# fetches the crate_universe repo unconditionally, and its recorded lockfile
+# digest does not match Envoy's Cargo.lock. It goes away with bzlmod (#697),
+# where the `crate` extension is only evaluated if something in the build graph
+# needs a repo from it.
 env:
   CARGO_BAZEL_REPIN: "true"
 
@@ -47,12 +55,13 @@ jobs:
           - arch: amd64
             runner: ubuntu-latest
             bazel_config: rbe-buildbuddy-amd64
-          # arm64 offloads the heavy compile to BuildBuddy's arm64 RBE pool via
-          # @llvm_toolchain_aarch64 (exec_arch=aarch64 hermetic clang-18).
-          # The driver runner is ubuntu-latest (x64) — only analysis + coordination
-          # runs locally; the actual compiles execute on BuildBuddy arm64 workers.
+          # arm64 offloads the heavy compile to BuildBuddy's arm64 RBE pool.
+          # The driver MUST be a native arm64 runner: @clang_platform and Envoy's
+          # @llvm_toolchain derive their exec constraints from the driver host's
+          # arch, so an x64 driver produces an x86_64-exec cross toolchain that
+          # cannot satisfy the aarch64 exec platform. Matches proxy-release.yml.
           - arch: arm64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             bazel_config: rbe-buildbuddy-arm64
     runs-on: ${{ matrix.runner }}
     steps:
