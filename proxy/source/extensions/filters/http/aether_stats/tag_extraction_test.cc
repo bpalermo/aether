@@ -43,6 +43,11 @@
 // child gets back must be indistinguishable from the fresh, filter-written
 // counter. The negative test pins the pre-fix behaviour so the difference the
 // propagation makes stays explicit.
+//
+// The file also pins the *other* half of the hot restart contract, which the
+// tag fix does not change and which aether#708 mistook for a regression:
+// counters transfer as DELTAS (`counter.latch()`), so a child's counter value
+// is per-generation by design. See CountersTransferAsDeltasNotAbsoluteValues.
 namespace Envoy {
 namespace Extensions {
 namespace HttpFilters {
@@ -154,15 +159,19 @@ protected:
   // HotRestartingChild::mergeParentStats do — the flat name and its delta, the
   // dynamic spans, and (gated on the runtime guard) the tag metadata.
   //
+  // The delta is `counter.latch()`, not `counter.value()`: the parent ships the
+  // increment pending since its last stats flush, and StatMerger .add()s it.
+  // (The real parent additionally skips counters whose latched value is 0.)
+  //
   // The dynamic spans matter here: the filter interns tag VALUES through a
   // StatNameDynamicPool, so the counter's StatName is a mix of symbolic and
   // dynamic segments. Merging the flat name without the spans would build an
   // all-symbolic StatName, which is a different stat from the one the filter
   // writes — the child would end up with two counters.
-  void mergeIntoChild(Stats::StatMerger& merger, const Stats::Counter& counter,
+  void mergeIntoChild(Stats::StatMerger& merger, Stats::Counter& counter,
                       const std::string& full_name) {
     Protobuf::Map<std::string, uint64_t> counter_deltas;
-    counter_deltas[full_name] = counter.value();
+    counter_deltas[full_name] = counter.latch();
 
     Stats::StatMerger::DynamicsMap dynamics;
     dynamics[full_name] = parent_.store_.symbolTable().getDynamicSpans(counter.statName());
@@ -241,6 +250,66 @@ TEST_F(HotRestartTagPropagationTest, TagsSurviveHotRestartWithoutRegexes) {
   EXPECT_EQ(after_restart->tagExtractedName(), "aether.requests_total");
   EXPECT_EQ(tagsOf(*after_restart), tagsOf(*fresh));
   EXPECT_EQ(after_restart->value(), 2); // 1 merged from the parent + 1 local
+}
+
+// The other half of the hot restart contract, and the one that surprises
+// readers of `aether_requests_total` (aether#708): counters transfer as
+// DELTAS, never as absolute values.
+//
+// HotRestartingParent::exportStatsToChild sends `counter.latch()` — the
+// increment pending since the parent's last stats flush — and
+// StatMerger::mergeCounters `.add()`s it onto the child's counter. The parent
+// has been latching that pending increment away every `stats_flush_interval`
+// for its whole life (5s default; charts/aether sets none), so the child
+// inherits only the residual of the last flush window, not the parent's
+// lifetime total. Combined with an OTLP sink that exports `counter.value()` as
+// CUMULATIVE from *this process's* start, every aether_stats series restarts
+// near zero on each hot restart. That is Envoy behaving correctly, so the rule
+// for consumers is: never read a raw counter value across a roll —
+// rate()/increase() only.
+//
+// If this ever fails because the child inherited the parent's full value,
+// something started shipping absolute counters and the delta-consuming sinks
+// (statsd, metrics_service) are being double-counted.
+TEST_F(HotRestartTagPropagationTest, CountersTransferAsDeltasNotAbsoluteValues) {
+  // The parent serves a long life of traffic (the filter's own .inc(), just
+  // more of it).
+  Stats::CounterSharedPtr fresh = record(parent_);
+  ASSERT_NE(fresh, nullptr);
+  fresh->add(2);
+  ASSERT_EQ(fresh->value(), 3UL);
+
+  // The parent's periodic flush (MetricSnapshotImpl, every
+  // stats_flush_interval) latches the pending increment away. flushMetricsToSinks
+  // even notes that hot restart depends on this latching.
+  EXPECT_EQ(fresh->latch(), 3UL);
+
+  // One more request accrues *after* that flush: this is all the parent still
+  // has pending when the child asks for its stats.
+  fresh->inc();
+  ASSERT_EQ(fresh->value(), 4UL);
+
+  const std::string full_name = fresh->name();
+  Stats::StatMerger merger(child_.store_);
+  mergeIntoChild(merger, *fresh, full_name);
+
+  Stats::CounterSharedPtr merged = TestUtility::findCounter(child_.store_, full_name);
+  ASSERT_NE(merged, nullptr);
+  // The post-latch residual only — NOT the parent's 4.
+  EXPECT_EQ(merged->value(), 1UL);
+  EXPECT_LT(merged->value(), fresh->value());
+
+  // Delta semantics are orthogonal to tag propagation: the labels still survive.
+  EXPECT_EQ(merged->tagExtractedName(), "aether.requests_total");
+  EXPECT_EQ(tagsOf(*merged), tagsOf(*fresh));
+
+  // And the child's own traffic keeps accumulating on that same counter, from
+  // the inherited residual — which is why rate()/increase() over the child's
+  // series is correct even though its absolute value is meaningless.
+  Stats::CounterSharedPtr after_restart = record(child_);
+  ASSERT_NE(after_restart, nullptr);
+  EXPECT_EQ(after_restart.get(), merged.get());
+  EXPECT_EQ(after_restart->value(), 2);
 }
 
 // What the chart regexes used to compensate for: with the propagation disabled
