@@ -29,8 +29,8 @@ metadata:
     app.kubernetes.io/component: pressure-generator
     aether.io/issue: "662"
 spec:
-  parallelism: 2
-  completions: 2
+  parallelism: 3
+  completions: 3
   # Fail closed: one generator pod erroring out ends the whole Job rather than
   # silently retrying with an unknown amount of pressure applied.
   backoffLimit: 0
@@ -114,17 +114,22 @@ spec:
             # spreads over both collector replicas (the Service load-balances per
             # connection) and a stalled export blocks only 1/16th of the pod.
             - --workers=16
-            # 2 records/s/worker x 1MiB x 16 workers x 2 pods = ~64MiB/s aggregate,
-            # ~32MiB/s per replica. The safety margin is deliberate: memory_limiter
-            # checks every 5s with a 512MiB spike allowance, i.e. it tolerates about
-            # 102MiB/s per replica before the *hard* limit can be overshot between
-            # checks. This runs at a third of that, so the collector sheds instead
-            # of OOM-ing. Raise it only with that arithmetic in hand (README).
+            # 3 records/s/worker x 1MiB x 16 workers x 3 pods = ~144MiB/s aggregate,
+            # ~72MiB/s per replica. memory_limiter checks every 5s with a 512MiB
+            # spike allowance, i.e. it tolerates about 102MiB/s per replica before
+            # the *hard* limit can be overshot between checks; this runs at ~70% of
+            # that, so the collector sheds instead of OOM-ing. Raise it only with
+            # that arithmetic in hand (README) — at this rate the Go heap already
+            # peaks within ~4% of run.sh's 95%-of-GOMEMLIMIT abort ceiling.
             #
-            # Validated at this rate over four runs on 2026-09-05: shedding engaged
-            # 1-4 min after apply at a Go heap of 1,077-1,300MiB, peak RSS never
-            # exceeded 1,743MiB on the 2Gi pod, and the collector restarted 0 times.
-            - --rate=2
+            # Why not 2 pods x rate 2 (~32MiB/s per replica): twice on 2026-09-05
+            # it never reached pressure in 300s (peak heap 10% of GOMEMLIMIT, peak
+            # RSS 427-700MiB, 0 refusals) — the exporters drain that fast.
+            #
+            # Validated at THIS rate over four runs on 2026-09-05: shedding engaged
+            # 46s-4min after apply at a Go heap of 1,077-1,486MiB, peak RSS never
+            # exceeded 1,766MiB on the 2Gi pod, and the collector restarted 0 times.
+            - --rate=3
             # Bound each blocked export. The OTLP client retries Unavailable — which
             # is exactly what a shedding collector returns — for up to a minute by
             # default, so without this the flood would collapse to ~1 record/min per

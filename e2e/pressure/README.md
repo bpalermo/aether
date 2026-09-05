@@ -92,9 +92,9 @@ Sizing, from the deployed config (`clusters/talos-main/otel-collector/values.yam
 | hard limit (refuse + forced GC) | 80% of 2Gi = **1638 MiB** |
 | soft limit (shedding begins) | (80−25)% of 2Gi = **1126 MiB** |
 | spike budget per 5s check | 512 MiB ⇒ ~**102 MiB/s per replica** is the OOM-risk frontier |
-| this harness | 2 pods × 16 workers × 2 records/s × 1 MiB ≈ **64 MiB/s**, ~32 MiB/s per replica |
+| this harness | 3 pods × 16 workers × 3 records/s × 1 MiB ≈ **144 MiB/s**, ~72 MiB/s per replica |
 
-A third of the frontier, so the collector *sheds* rather than OOM-kills — shedding is
+About 70% of the frontier (2 pods × rate 2, a third of it, never reached pressure in 300s — twice on 2026-09-05), so the collector *sheds* rather than OOM-kills — shedding is
 `memory_limiter` working correctly, and 09-02 showed it sheds under real saturation too.
 
 ## Measured behaviour (four runs, 2026-09-05) — do not re-derive these
@@ -104,11 +104,11 @@ measured, and what the thresholds in `run.sh` are now built from (#699):
 
 | | observed |
 |---|---|
-| heap at refusal onset | **1,077–1,300 MiB** (≈ the 1,126 MiB soft limit, as designed) |
-| RSS at that same instant | **1,250–1,650 MiB** — GC slack runs RSS **1.15–1.4×** ahead of heap |
-| peak RSS, limiter engaged | **≤ 1,743 MiB** on the 2 Gi pod — the limiter caps it, no OOM |
-| collector restarts | **0**, all four runs |
-| time from Job apply to shedding | 1–4 min |
+| heap at refusal onset | **1,077–1,486 MiB** (≈ the 1,126 MiB soft limit, as designed; the 1,486 run was 90% of `GOMEMLIMIT`, 4% under the abort ceiling) |
+| RSS at that same instant | **1,250–1,766 MiB** — GC slack runs RSS **1.15–1.4×** ahead of heap |
+| peak RSS, limiter engaged | **≤ 1,766 MiB** on the 2 Gi pod — the limiter caps it, no OOM |
+| collector restarts | **0**, all five runs |
+| time from Job apply to shedding | 46 s – 4 min |
 
 The consequence, and the reason runs 2 and 3 died on a false abort: a **fixed RSS ceiling
 of 1,500 MiB sits inside the 1,250–1,650 MiB band in which shedding is already engaged**.
@@ -253,7 +253,7 @@ evidence for a different bug, not this one.
   node under test          main-worker-03
   metrics source           collector | prometheus
   agent pod                aether-agent-xxxxx -> aether-agent-yyyyy (restartCount 0, Ready)
-  collector heap           baseline 5xMiB -> peak 1[12]xxMiB (6x-7x% of the 1638MiB GOMEMLIMIT)
+  collector heap           baseline 5xMiB -> peak 1[1-4]xxMiB (6x-9x% of the 1638MiB GOMEMLIMIT)
   collector RSS            baseline 24xMiB -> peak 1[2-7]xxMiB (1xx% of the 1126MiB soft limit)
   refused (whole run)      log_records +N, metric_points +M          (both > 0)
   refused (restart window) log_records +N', metric_points +M'        (at least one > 0)
@@ -265,7 +265,7 @@ evidence for a different bug, not this one.
 ```
 
 Peak RSS **above** the 1126 MiB soft limit is expected and correct — that is the limiter
-holding the process at its ceiling, not a problem. Peak RSS ≤ 1,743 MiB in all four runs.
+holding the process at its ceiling, not a problem. Peak RSS ≤ 1,766 MiB in all five runs.
 
 Exit codes: **0** PASS · **1** FAIL (the agent misbehaved — #662 is back, keep the logs) ·
 **2** INCONCLUSIVE (pressure never reached, lapsed mid-test, or the safety ceiling aborted the
@@ -287,11 +287,11 @@ full pod log before re-running, because the next run replaces the pod.
 - **Other telemetry is dropped in the same window**: mesh metrics, traces, logs from every
   component. Nothing in the data path depends on them — that is precisely what this test is
   asserting.
-- **The collector must not restart.** Two guards: the flood runs at a third of the rate the
+- **The collector must not restart.** Two guards: the flood runs at ~70% of the rate the
   limiter's spike budget tolerates, and `run.sh` deletes the Job the moment heap crosses 95%
   of `GOMEMLIMIT` (1,556 MiB) or RSS crosses 90% of the pod limit (1,843 MiB). Shedding is the
   designed behaviour; OOM is not, and a restart would also break the measurement (Prometheus
-  series churn). Observed across four runs: peak RSS ≤ 1,743 MiB, **0 restarts**.
+  series churn). Observed across five runs: peak RSS ≤ 1,766 MiB, **0 restarts**.
 - **VictoriaLogs ingests the flood** under `service.name=aether-collector-pressure`. Payloads
   are NUL-filled and compress to nearly nothing; the stream is trivially excluded from queries.
 - **One node's agent restarts.** During its ~10–20s startup that node serves no xDS updates —
@@ -324,9 +324,13 @@ The only cluster changes are the Job (deleted) and one agent pod (recreated by i
 Escalate one knob at a time in `collector-pressure-job.yaml`, re-checking the arithmetic above each time — the
 aggregate must stay well under ~102 MiB/s **per collector replica**:
 
-1. `parallelism`/`completions` 2 → 3 (+50% throughput, better spread over both replicas).
-2. `--rate=2` → `3` (+50%).
-3. `--size=1` → `2` (2 MiB records; halve `--rate` if you do both).
+1. `--rate=3` → `4` (+33%; ~96 MiB/s per replica — at the frontier, do not combine with 2).
+2. `parallelism`/`completions` 3 → 4 with `--rate` back at `3` (~96 MiB/s per replica).
+3. `--size=1` → `2` (2 MiB records; halve `--rate` if you do this).
+
+The default is already ~70% of the frontier and puts the Go heap within ~4% of the 95%
+abort ceiling, so most "pressure not reached" exits are a collector that got more headroom
+(bigger limit, third replica) rather than a rate problem — re-run `--dry-run` first.
 
 If RSS climbs but refusals stay at 0, the exporters are draining as fast as the flood arrives:
 raise `--rate` rather than `--size`. If `refused_log_records` moves but `refused_metric_points`
