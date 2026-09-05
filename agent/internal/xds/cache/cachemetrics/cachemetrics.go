@@ -122,6 +122,16 @@ func New(meter metric.Meter) (*Metrics, error) {
 		return nil, fmt.Errorf("inbound binding mismatch: %w", err)
 	}
 
+	// Seed the two #638 discriminator counters at zero. The OTel SDK exports a
+	// counter only after its first Add, so a counter that is never incremented
+	// (the healthy case for both of these) never appears in Prometheus at all —
+	// and "no series" is indistinguishable from "zero" to a grading query.
+	// Seeding makes a live zero visible and lets increase()/rate() work from
+	// process start. Observed on talos-main rev200: neither series existed.
+	ctx := context.Background()
+	m.bindingMismatch.Add(ctx, 0)
+	m.inboundBindingMismatch.Add(ctx, 0)
+
 	return m, nil
 }
 

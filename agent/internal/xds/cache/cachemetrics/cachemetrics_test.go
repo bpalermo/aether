@@ -129,3 +129,21 @@ func TestCacheMetrics_GeneratedFailure(t *testing.T) {
 		t.Error("version recorded on failure")
 	}
 }
+
+// The #638 discriminator counters must exist (at zero) before anything is ever
+// counted; otherwise their absence in Prometheus reads as a false zero.
+func TestCacheMetrics_IdentityCountersSeededAtZero(t *testing.T) {
+	_, reader := newTestMetrics(t)
+	for _, name := range []string{
+		"aether.agent.identity.outbound_binding_mismatch",
+		"aether.agent.identity.inbound_binding_mismatch",
+	} {
+		v, ok := metricValue(t, reader, name)
+		if !ok {
+			t.Fatalf("%s not exported before first increment", name)
+		}
+		if v != 0 {
+			t.Fatalf("%s = %d, want 0", name, v)
+		}
+	}
+}
