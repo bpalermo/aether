@@ -181,3 +181,21 @@ three-re-check-interval dwell before the probe fails, the unrepairable-by-constr
 nature of the state, the `--cni-conflist-reassert=false` kill switch which disables
 both mechanisms, and a 60s re-evaluation that clears it the moment the entry returns.
 Known side effect: a `RollingUpdate` DaemonSet rollout stalls on a NotReady agent.
+
+**Follow-up (#680): the durable entry closes the priming window.** #667 left one
+state that was safe and visible but genuinely unrepairable: the re-assert loop
+re-appends the entry it *observed*, deliberately, because the netconf carries
+installer-time parameters the agent has no business re-deriving — so a strip landing
+between `cni-install`'s write and the loop's first check left it with nothing cached,
+refusing to repair for the life of the agent **process** (init containers do not re-run
+on a container restart, so only recreating the pod helped). `cni-install` now persists
+the entry it just chained, on its own, to `/etc/cni/net.d/.aether-cni-entry`, and the
+loop primes from that file when — and only when — it has never observed a healthy one.
+An observed entry still always wins: it is proof of what the node actually accepted.
+`cni-install` remains the file's single writer, and the name is chosen so no config
+loader can ever mistake a lone plugin object for a network: every loader selects by
+`filepath.Ext` against `{.conf,.conflist}` (kubelet, us), `{.conf,.conflist,.json}`
+(containerd's go-cni) or `{.conf,.json}` (libcni's deprecated `LoadConf`), and
+`.aether-cni-entry` matches none — a `.json` suffix would **not** have been safe. The
+taint gate and the NotReady path above are unchanged; they simply now fire against a
+state the node can heal by itself, in one check, instead of one that needs an operator.

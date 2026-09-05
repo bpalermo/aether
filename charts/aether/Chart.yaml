@@ -10,7 +10,7 @@ description: |
   `crds` chart, which must be installed first. See docs/proposals/015_mesh-config.md.
 type: application
 # Stamped at package time when built with `--stamp` (see other charts).
-version: "0.92.0"
+version: "0.92.1"
 appVersion: "{STABLE_GIT_VERSION}"
 keywords:
   - aether

@@ -136,14 +136,15 @@ jobs:
           bazel test --config=ci \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
             --target_pattern_file=${{ runner.temp }}/impacted/impacted_unit.txt
-      # #673: the aether-proxy readiness probe must stay a stdlib-only binary —
-      # its entire value is what it does NOT link (package init() runs before
-      # main(), so a heavy import costs every pod every 2s and no argv check can
-      # avoid it). //agent/cmd/proxy-ready:deps_test asserts this on the linked
-      # ELF; this is the build-graph half, which fails on a forbidden dependency
-      # even before the linker drops it as unreachable. Analysis-only and cheap —
-      # the query runs against the cache the build step above just warmed.
-      - name: Guard proxy-ready linkage
+      # #673/#683: the aether-proxy and aether-mesh-dns readiness probes must stay
+      # stdlib-only binaries — their entire value is what they do NOT link
+      # (package init() runs before main(), so a heavy import costs every pod on
+      # every probe and no argv check can avoid it). Each target's :deps_test
+      # asserts this on the linked ELF; this is the build-graph half, which fails
+      # on a forbidden dependency even before the linker drops it as unreachable.
+      # Analysis-only and cheap — the query runs against the cache the build step
+      # above just warmed.
+      - name: Guard readiness-prober linkage
         run: scripts/check-proxy-ready-deps.sh --config=ci
 
   integration:

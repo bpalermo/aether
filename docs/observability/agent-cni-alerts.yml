@@ -70,9 +70,11 @@ groups:
             networking, no mTLS, no policy, no telemetry. Check
             `cat /etc/cni/net.d/10-flannel.conflist | jq '.plugins[].type'` on the
             node for an aether-cni entry, and the agent log for "no known-good entry
-            was ever observed" / "carries no primary CNI plugin". Recovery: delete the
+            could be recovered" / "carries no primary CNI plugin". Recovery: since #680
+            the loop primes from /etc/cni/net.d/.aether-cni-entry and repairs itself, so
+            reaching this state means that file is missing or unusable -- delete the
             agent pod on that node so its cni-install init container re-appends the
-            entry.
+            entry and rewrites the durable copy (see docs/runbook.md).
 
       # ---------------------------------------------------------------- P2
       # The gauge alone under-reports BY CONSTRUCTION: the re-assert loop repairs
