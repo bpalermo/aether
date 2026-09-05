@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,7 +48,7 @@ const podAnnotationsCapability = "io.kubernetes.cri.pod-annotations"
 // same mode (agent/internal/cniconflist).
 const confMode = os.FileMode(0o644)
 
-func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, error) {
+func createCNIConfigFile(ctx context.Context, logger *slog.Logger, cfg *InstallerConfig) (string, error) {
 	pluginConfig := config.AetherConf{}
 
 	pluginConfig.Name = "aether"
@@ -70,16 +71,16 @@ func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, err
 	}
 	marshalledJSON = append(marshalledJSON, "\n"...)
 
-	return writeCNIConfig(ctx, marshalledJSON, cfg)
+	return writeCNIConfig(ctx, logger, marshalledJSON, cfg)
 }
 
 // writeCNIConfig will
 // 1. read in the existing CNI config file from the primary config
 // 2. append the `aether`-specific entry
 // 3. write the combined result back out to the same path, overwriting the original
-func writeCNIConfig(ctx context.Context, pluginConfig []byte, cfg *InstallerConfig) (string, error) {
+func writeCNIConfig(ctx context.Context, logger *slog.Logger, pluginConfig []byte, cfg *InstallerConfig) (string, error) {
 	// get the CNI config file path for the primary CNI config
-	cniConfigFilepath, err := getCNIConfigFilepath(ctx, cfg.CNIConfName, cfg.MountedCNINetDir)
+	cniConfigFilepath, err := getCNIConfigFilepath(ctx, logger, cfg.CNIConfName, cfg.MountedCNINetDir)
 	if err != nil {
 		return "", err
 	}
@@ -98,13 +99,13 @@ func writeCNIConfig(ctx context.Context, pluginConfig []byte, cfg *InstallerConf
 	}
 
 	if err = file.AtomicWrite(cniConfigFilepath, merged, confMode); err != nil {
-		installLog.Error(err, "failed to write CNI config file %v: %v", "filepath", cniConfigFilepath)
+		logger.ErrorContext(ctx, "failed to write CNI config file", "error", err, "filepath", cniConfigFilepath)
 		return cniConfigFilepath, err
 	}
 
-	installLog.Info("Wrote CNI config", "filepath", cniConfigFilepath)
+	logger.InfoContext(ctx, "Wrote CNI config", "filepath", cniConfigFilepath)
 
-	writeDurableEntry(filepath.Dir(cniConfigFilepath), merged)
+	writeDurableEntry(ctx, logger, filepath.Dir(cniConfigFilepath), merged)
 
 	return cniConfigFilepath, nil
 }
@@ -126,19 +127,19 @@ func writeCNIConfig(ctx context.Context, pluginConfig []byte, cfg *InstallerConf
 // pre-merge render, so the durable copy is byte-identical to what is actually
 // chained (Insert drops the entry's own cniVersion: the enclosing conflist owns
 // it) and a re-assert from the file reproduces this install exactly.
-func writeDurableEntry(confDir string, merged []byte) {
+func writeDurableEntry(ctx context.Context, logger *slog.Logger, confDir string, merged []byte) {
 	entry, err := extractAetherEntry(merged)
 	if err != nil {
-		installLog.Error(err, "failed to extract the aether entry from the CNI config just written; the re-assert loop cannot prime from disk")
+		logger.ErrorContext(ctx, "failed to extract the aether entry from the CNI config just written; the re-assert loop cannot prime from disk", "error", err)
 		return
 	}
 
 	path := conflist.EntryPath(confDir)
 	if err := file.AtomicWrite(path, entry, confMode); err != nil {
-		installLog.Error(err, "failed to write the durable aether CNI entry; the re-assert loop cannot prime from disk", "filepath", path)
+		logger.ErrorContext(ctx, "failed to write the durable aether CNI entry; the re-assert loop cannot prime from disk", "error", err, "filepath", path)
 		return
 	}
-	installLog.Info("Wrote the durable aether CNI entry", "filepath", path)
+	logger.InfoContext(ctx, "Wrote the durable aether CNI entry", "filepath", path)
 }
 
 // extractAetherEntry returns the aether plugin entry as it sits in a merged
@@ -160,39 +161,39 @@ func extractAetherEntry(merged []byte) ([]byte, error) {
 
 // getCNIConfigFilepath waits indefinitely for a main CNI config file to exist before returning
 // Or until canceled by parent context
-func getCNIConfigFilepath(ctx context.Context, cniConfName, mountedCNINetDir string) (string, error) {
-	watcher, err := util.CreateFileWatcher(mountedCNINetDir)
+func getCNIConfigFilepath(ctx context.Context, logger *slog.Logger, cniConfName, mountedCNINetDir string) (string, error) {
+	watcher, err := util.CreateFileWatcher(logger, mountedCNINetDir)
 	if err != nil {
 		return "", err
 	}
 	defer watcher.Close()
 
-	cniConfName, err = resolveConfName(ctx, cniConfName, mountedCNINetDir, watcher)
+	cniConfName, err = resolveConfName(ctx, logger, cniConfName, mountedCNINetDir, watcher)
 	if err != nil {
 		return "", err
 	}
 
 	cniConfigFilepath := filepath.Join(mountedCNINetDir, cniConfName)
 
-	cniConfigFilepath, err = waitForConfigFile(ctx, cniConfigFilepath, watcher)
+	cniConfigFilepath, err = waitForConfigFile(ctx, logger, cniConfigFilepath, watcher)
 	if err != nil {
 		return "", err
 	}
 
-	installLog.Info("CNI config file exists, proceeding", "filepath", cniConfigFilepath)
+	logger.InfoContext(ctx, "CNI config file exists, proceeding", "filepath", cniConfigFilepath)
 	return cniConfigFilepath, nil
 }
 
 // resolveConfName waits until a CNI config filename is known, either from the provided
 // name or by discovering the first valid config file in mountedCNINetDir.
-func resolveConfName(ctx context.Context, cniConfName, mountedCNINetDir string, watcher *util.Watcher) (string, error) {
+func resolveConfName(ctx context.Context, logger *slog.Logger, cniConfName, mountedCNINetDir string, watcher *util.Watcher) (string, error) {
 	for len(cniConfName) == 0 {
 		cniConfNames, err := conflist.ConfigFilenames(mountedCNINetDir)
 		if err == nil || len(cniConfNames) > 0 {
 			return cniConfNames[0], nil
 		}
-		installLog.Error(err, "aether CNI is configured as chained plugin, but cannot find existing CNI network config")
-		installLog.Info("waiting for CNI network config file to be written in dir", "dir", mountedCNINetDir)
+		logger.ErrorContext(ctx, "aether CNI is configured as chained plugin, but cannot find existing CNI network config", "error", err)
+		logger.InfoContext(ctx, "waiting for CNI network config file to be written in dir", "dir", mountedCNINetDir)
 		if err := watcher.Wait(ctx); err != nil {
 			return "", err
 		}
@@ -202,16 +203,16 @@ func resolveConfName(ctx context.Context, cniConfName, mountedCNINetDir string, 
 
 // waitForConfigFile waits until the given CNI config filepath exists, following
 // .conf/.conflist alternates as needed.
-func waitForConfigFile(ctx context.Context, cniConfigFilepath string, watcher *util.Watcher) (string, error) {
+func waitForConfigFile(ctx context.Context, logger *slog.Logger, cniConfigFilepath string, watcher *util.Watcher) (string, error) {
 	for !file.Exists(cniConfigFilepath) {
 		if strings.HasSuffix(cniConfigFilepath, ".conf") && file.Exists(cniConfigFilepath+"list") {
-			installLog.Info("file doesn't exist, but %[1]slist does; Using it as the CNI config file instead.", "filepath", cniConfigFilepath)
+			logger.InfoContext(ctx, "file doesn't exist, but %[1]slist does; Using it as the CNI config file instead.", "filepath", cniConfigFilepath)
 			cniConfigFilepath += "list"
 		} else if strings.HasSuffix(cniConfigFilepath, ".conflist") && file.Exists(cniConfigFilepath[:len(cniConfigFilepath)-4]) {
-			installLog.Info("file doesn't exist, but %s does; Using it as the CNI config file instead.", "filepath", cniConfigFilepath, cniConfigFilepath[:len(cniConfigFilepath)-4])
+			logger.InfoContext(ctx, "file doesn't exist, but %s does; Using it as the CNI config file instead.", "filepath", cniConfigFilepath, "alternate", cniConfigFilepath[:len(cniConfigFilepath)-4])
 			cniConfigFilepath = cniConfigFilepath[:len(cniConfigFilepath)-4]
 		} else {
-			installLog.Info("CNI config file %s does not exist. Waiting for file to be written...", cniConfigFilepath)
+			logger.InfoContext(ctx, "CNI config file %s does not exist. Waiting for file to be written...", "filepath", cniConfigFilepath)
 			if err := watcher.Wait(ctx); err != nil {
 				return "", err
 			}
