@@ -191,34 +191,24 @@ buildbuddy.platform(buildbuddy_container_image = "UBUNTU22_04_IMAGE")
 use_repo(buildbuddy, "buildbuddy_toolchain")
 
 # ---------------------------------------------------------------------------
-# Pinned stock Envoy binary — used by //test/envoy_validate to run
-# "envoy --mode validate" over aether-generated bootstrap configs without
-# building Envoy from source.  Pinned to v1.39.0.
+# Envoy binary for //test/envoy_validate ("envoy --mode validate" over
+# aether-generated bootstrap configs).
 #
-# KNOWN SKEW (aether #697): the custom proxy module (proxy/MODULE.bazel) now
-# builds an Envoy `main` dev snapshot, and there is no GitHub release asset for
-# a dev snapshot to pin here. So this gate validates against v1.39.0 semantics
-# until `1.40.0.envoy` publishes; re-pin both together at that point.
-# SHA-256 values from the upstream checksums.txt.asc release asset.
+# NOT a stock Envoy release asset: the deployed proxy is a custom build (see the
+# //proxy workspace) that compiles a large set of upstream extensions out and the
+# C++ aether_stats extension in, so stock Envoy is strictly more permissive than
+# what we ship and the gate would pass configs the real proxy NACKs (#709).
 #
-# ENVOY_VERSION = "1.39.0"
+# Instead the extension below lifts /usr/local/bin/envoy out of the aether-proxy
+# image at the digest //charts/aether:values.yaml pins, so the chart pin is the
+# single source of truth: whatever proxy-release's bump-chart job writes into the
+# chart is what this gate validates against, with no second pin to keep in sync.
 # ---------------------------------------------------------------------------
-http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
-
-http_file(
-    name = "envoy_binary_linux_amd64",
-    downloaded_file_path = "envoy",
-    executable = True,
-    sha256 = "4409dadc87931d8f8676314cbd83071cb65125fb4feac3f6335800580dfa9218",
-    urls = ["https://github.com/envoyproxy/envoy/releases/download/v1.39.0/envoy-1.39.0-linux-x86_64"],
-)
-
-http_file(
-    name = "envoy_binary_linux_arm64",
-    downloaded_file_path = "envoy",
-    executable = True,
-    sha256 = "ee53a4f5375566f15944dc9cb03afb1fc228df38f61737c677f139213215afcf",
-    urls = ["https://github.com/envoyproxy/envoy/releases/download/v1.39.0/envoy-1.39.0-linux-aarch_64"],
+pinned_proxy = use_extension("//bazel/proxy_pin:extensions.bzl", "pinned_proxy")
+use_repo(
+    pinned_proxy,
+    "pinned_envoy_linux_amd64",
+    "pinned_envoy_linux_arm64",
 )
 
 # ---------------------------------------------------------------------------
@@ -231,6 +221,8 @@ http_file(
 #
 # MERMAID_VERSION = "11.16.0"
 # ---------------------------------------------------------------------------
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
 http_file(
     name = "mermaid_js",
     downloaded_file_path = "mermaid.min.js",

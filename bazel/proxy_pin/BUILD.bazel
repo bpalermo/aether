@@ -1,0 +1,3 @@
+# Home of the module extension that resolves the chart-pinned aether-proxy image
+# down to the Envoy binary inside it (see extensions.bzl). Package exists only so
+# MODULE.bazel can `use_extension("//bazel/proxy_pin:extensions.bzl", ...)`.
