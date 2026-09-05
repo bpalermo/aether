@@ -1,6 +1,7 @@
 # The set of Envoy extensions compiled into //:envoy.
 #
-# Until aether #697 this file was a 659-line VERBATIM copy of Envoy v1.38.0's
+# Until aether #697 this file (then //bazel/extension_config) was a 659-line
+# VERBATIM copy of Envoy v1.38.0's
 # source/extensions/extensions_build_config.bzl — a stale snapshot that
 # customised nothing and silently fell two releases behind (it was missing every
 # extension v1.39.0 added). It now loads Envoy's default at the pinned version
@@ -11,6 +12,11 @@
 # (AETHER_EXTENSIONS in //BUILD.bazel), exactly like the upstream filter-cc
 # example's :http_filter_config. This dict is only for extensions that live in
 # @envoy.
+#
+# This directory is its own tiny bzlmod module (`module(name =
+# "envoy_build_config")`); the root //MODULE.bazel instantiates it with
+# local_repository and points Envoy's default @envoy_build_config at it with
+# override_repo. `bazel mod show_repo envoy_build_config` must print this path.
 load(
     "@envoy//source/extensions:extensions_build_config.bzl",
     _CONTRIB_EXTENSION_PACKAGE_VISIBILITY = "CONTRIB_EXTENSION_PACKAGE_VISIBILITY",
@@ -21,12 +27,16 @@ load(
     _MOBILE_PACKAGE_VISIBILITY = "MOBILE_PACKAGE_VISIBILITY",
 )
 
-# Substrings matched against the extension NAME (not the target label). At
-# v1.39.0: 330 upstream extensions - 27 dropped = 303 compiled in.
+# Substrings matched against the extension NAME (not the target label). At the
+# pinned 1.40.0-dev.20260904.13144fb snapshot: 338 upstream extensions
+# - 29 dropped = 309 compiled in. (At v1.39.0 it was 330 - 27 = 303, against the
+# 317 the stale verbatim copy carried.)
 _DROPPED = [
     # wasm: aether emits no wasm filter/runtime/access-logger/stat-sink anywhere
-    # (no `wasm` in charts/, agent/, common/ or api/). Drops 6 entries plus the
-    # v8/wasmtime/wamr/emsdk build behind them.
+    # (no `wasm` in charts/, agent/, common/ or api/). .bazelrc also sets
+    # --@proxy-wasm-cpp-host//bazel:engine=disabled, against which the wasm
+    # extensions cannot be built — so this is required, not an optimisation.
+    # Drops 6 entries plus the v8/wasmtime/wamr/emsdk build behind them.
     "wasm",
     # dynamic modules: superseded for aether by proposal 012 — aether_stats is a
     # compiled-in C++ filter and the Rust dynamic-module approach was dropped,

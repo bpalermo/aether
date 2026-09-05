@@ -1,6 +1,6 @@
 name: proxy
 
-# PR validation for the custom Envoy (//proxy, a separate Bazel workspace).
+# PR validation for the custom Envoy (//proxy, a separate bzlmod module, Bazel 8.7.0).
 # Always triggers on every PR (no path filters) so the `proxy` gate check below
 # always reports — symmetric with the control-plane `ci` workflow. The `changes`
 # job scopes the work: the heavy Envoy compile only runs when proxy/ changes; on
@@ -16,16 +16,13 @@ permissions:
   contents: read
   pull-requests: read
 
-# CARGO_BAZEL_REPIN is still required under WORKSPACE, even though
-# //bazel/extension_config no longer compiles in Envoy's dynamic-modules
-# extensions: @envoy's bazel/dependency_imports_extra.bzl has a top-level
+# No CARGO_BAZEL_REPIN. Under WORKSPACE it was unavoidable — @envoy's
+# bazel/dependency_imports_extra.bzl has a top-level
 # `load("@envoy_rust_crate_index//:defs.bzl", ...)`, so WORKSPACE evaluation
-# fetches the crate_universe repo unconditionally, and its recorded lockfile
-# digest does not match Envoy's Cargo.lock. It goes away with bzlmod (#697),
-# where the `crate` extension is only evaluated if something in the build graph
-# needs a repo from it.
-env:
-  CARGO_BAZEL_REPIN: "true"
+# fetched the crate_universe repo whatever the extension set was. Under bzlmod
+# the `crate` module extension is only evaluated when something in the build
+# graph needs a repo from it, and //bazel/build_config compiles in no
+# dynamic-modules extension, so nothing does.
 
 jobs:
   changes:
@@ -74,13 +71,24 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      # Native (non-RBE) builds compile locally and need the hermetic clang's
-      # libtinfo.so.5 (LLVM 18.1.8 leaks it; ubuntu-24.04 ships only .so.6).
-      # Both arms now use RBE, so this step is never triggered — kept as a
-      # safety net if bb-cache is ever used as a fallback.
-      - name: Setup LLVM runtime libs
-        if: matrix.bazel_config == 'bb-cache'
-        uses: ./.github/actions/setup-llvm-libs
+      # aether #651/#653, mirrored from proxy-release.yml's pre-publish gate.
+      # //integration:build_id_test (in //... below) asserts the linked binary
+      # carries a 20-byte .note.gnu.build-id, but 20 bytes alone does not prove
+      # the id is a content hash — a commit stamp is 20 bytes too, which is what
+      # #653 was. This asserts the width came from --build-id=sha1: the hermetic
+      # toolchain passes --build-id=md5 earlier on the link line and lld honours
+      # the LAST one, so ours must be final. Worth running at PR time and not
+      # only at release since #697 moved the toolchain from LLVM 18 to LLVM 22
+      # and its default --build-id could have changed position. Analysis-only,
+      # so it costs no compile and shares the analysis with the test step below.
+      - name: Verify --build-id=sha1 is the last on the link line
+        run: |
+          bazel aquery \
+            --config=ci \
+            --config=${{ matrix.bazel_config }} \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            'mnemonic("CppLink", //:envoy)' | tee /tmp/envoy-link.txt | grep -- '--build-id'
+          test "$(grep -o -- '--build-id=[a-z0-9]*' /tmp/envoy-link.txt | tail -1)" = "--build-id=sha1"
 
       - name: Test (${{ matrix.arch }}, ${{ matrix.bazel_config }})
         # //... runs //:image_test (compiles Envoy + validates the image structure).

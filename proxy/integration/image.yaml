@@ -11,5 +11,6 @@ metadataTest:
   entrypoint: ["/usr/local/bin/envoy"]
 
 # NOTE: no commandTests — the tar driver can't execute binaries (no container
-# runtime). Building from pinned v1.38.0 source already guarantees the version;
-# these structure checks confirm the binary is baked in + the entrypoint is set.
+# runtime). The Envoy version is guaranteed by the pin in //MODULE.bazel (the
+# `envoy` bazel_dep) rather than probed here; these structure checks confirm the
+# binary is baked in and the entrypoint is set.

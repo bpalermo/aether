@@ -1,6 +1,6 @@
-load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@envoy//bazel:envoy_build_system.bzl", "envoy_cc_library", "envoy_cc_test")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
 
 # aether_stats native C++ HTTP filter (proposal 012). Compiled into the custom
 # Envoy via //:envoy AETHER_EXTENSIONS.
@@ -23,7 +23,7 @@ envoy_cc_library(
     repository = "@envoy",
     deps = [
         ":pkg_cc_proto",
-        "@com_google_absl//absl/strings",
+        "@abseil-cpp//absl/strings",
         "@envoy//envoy/server:factory_context_interface",
         "@envoy//envoy/stats:stats_interface",
         "@envoy//envoy/stream_info:stream_info_interface",
@@ -85,7 +85,7 @@ envoy_cc_test(
     repository = "@envoy",
     deps = [
         ":config",
-        "@com_google_absl//absl/strings",
+        "@abseil-cpp//absl/strings",
         "@envoy//source/common/common:minimal_logger_lib",
         "@envoy//test/integration:http_integration_lib",
         "@envoy//test/test_common:utility_lib",

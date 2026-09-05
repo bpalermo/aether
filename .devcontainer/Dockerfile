@@ -31,8 +31,9 @@ RUN apt-get update \
 # libtinfo.so.5 (llvm/llvm-project#75490), but ubuntu-24.04 ships only
 # libtinfo.so.6 (a .6->.5 symlink fails: clang needs the versioned
 # NCURSES_TINFO_5.0 symbols). Fetch the real ncurses5 .deb from Debian —
-# the same workaround used in CI (.github/actions/setup-llvm-libs) and by
-# Envoy (envoyproxy/envoy#42397). See //bazel/llvm and MODULE.bazel.
+# the same workaround Envoy used (envoyproxy/envoy#42397). See //bazel/llvm and
+# MODULE.bazel. (The proxy build no longer needs it: proxy/ is on the Envoy
+# module's LLVM 22.1.8 toolchain, which does not leak libtinfo.so.5.)
 RUN arch="$(dpkg --print-architecture)" \
     && deb="libtinfo5_6.4-4_${arch}.deb" \
     && curl -fsSLO "http://deb.debian.org/debian/pool/main/n/ncurses/${deb}" \

@@ -16,16 +16,14 @@ on:
 permissions:
   contents: read
 
-# CARGO_BAZEL_REPIN is still required under WORKSPACE, even though
-# //bazel/extension_config no longer compiles in Envoy's dynamic-modules
-# extensions: @envoy's bazel/dependency_imports_extra.bzl has a top-level
+# No CARGO_BAZEL_REPIN. Under WORKSPACE it was unavoidable — @envoy's
+# bazel/dependency_imports_extra.bzl has a top-level
 # `load("@envoy_rust_crate_index//:defs.bzl", ...)`, so WORKSPACE evaluation
-# fetches the crate_universe repo unconditionally, and its recorded lockfile
-# digest does not match Envoy's Cargo.lock. It goes away with bzlmod (#697),
-# where the `crate` extension is only evaluated if something in the build graph
-# needs a repo from it.
+# fetched the crate_universe repo whatever the extension set was. Under bzlmod
+# the `crate` module extension is only evaluated when something in the build
+# graph needs a repo from it, and //bazel/build_config compiles in no
+# dynamic-modules extension, so nothing does.
 env:
-  CARGO_BAZEL_REPIN: "true"
   IMAGE: ghcr.io/bpalermo/aether/aether-proxy
 
 jobs:
@@ -59,12 +57,6 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
-
-      # Both legs now use RBE; this step is never triggered but kept as a
-      # safety net if bb-cache is ever used as a fallback.
-      - name: Setup LLVM runtime libs
-        if: matrix.bazel_config == 'bb-cache'
-        uses: ./.github/actions/setup-llvm-libs
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -133,6 +125,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      # Index (multi-arch manifest list) digest — what bump-chart pins the chart
+      # to. Read back from the registry rather than computed locally: the chart's
+      # `aether.image` helper prefers `digest:` over `tag:`, so this value is
+      # what actually gets deployed.
+      index_digest: ${{ steps.manifest.outputs.index_digest }}
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -149,6 +147,7 @@ jobs:
       # Combine the two per-arch images (by digest) into one multi-arch manifest,
       # tagged with the commit SHA.
       - name: Assemble multi-arch manifest
+        id: manifest
         run: |
           amd64="$(cat digests/digest-amd64/digest.txt)"
           arm64="$(cat digests/digest-arm64/digest.txt)"
@@ -156,6 +155,18 @@ jobs:
             -t "${IMAGE}:${{ github.sha }}" \
             "${IMAGE}@${amd64}" \
             "${IMAGE}@${arm64}"
+          # Read the index digest back from the registry. Do NOT sha256sum
+          # `imagetools inspect --raw` locally: that is the digest of whatever
+          # bytes the CLI chose to print, not necessarily the descriptor the
+          # registry stores.
+          index="$(docker buildx imagetools inspect \
+            --format '{{.Manifest.Digest}}' "${IMAGE}:${{ github.sha }}")"
+          case "$index" in
+            sha256:*) ;;
+            *) echo "::error::unexpected index digest '$index'"; exit 1 ;;
+          esac
+          echo "index_digest=$index" >> "$GITHUB_OUTPUT"
+          echo "index: $index"
 
   # Pin the aether chart to the just-published image (commit-SHA tag) by opening a
   # PR against the protected main branch. peter-evans reuses a single rolling
@@ -174,11 +185,35 @@ jobs:
           ref: main
 
       - name: Pin aether chart to aether-proxy:${{ github.sha }}
+        env:
+          INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
         run: |
-          # The proxy image is repository + tag (see charts/aether/values.yaml);
-          # bump the tag on the line following the aether-proxy repository line.
+          test -n "$INDEX_DIGEST"
+          # charts/aether/values.yaml carries `repository:` + `tag:` + `digest:`
+          # for the proxy image, and `aether.image` (_helpers.tpl) returns
+          # `repository@digest` whenever `digest:` is set. A tag-only bump
+          # therefore changes NOTHING that gets deployed — both lines must move.
+          # (This was a real bug: the chart stayed pinned to the Envoy v1.39.0
+          # index across every proxy release.)
           sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|{n;s|^(\s*tag: ).*|\1'"${{ github.sha }}"'|}' \
             charts/aether/values.yaml
+          sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|,+4{s|^(\s*digest: ).*|\1"'"$INDEX_DIGEST"'"|}' \
+            charts/aether/values.yaml
+          # Keep the adjacent provenance comment honest too.
+          sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|,+4{s|helper prefers digest over tag\..*|helper prefers digest over tag. Multi-arch index for '"${{ github.sha }}"'.|}' \
+            charts/aether/values.yaml
+          grep -A5 'repository: ghcr.io/bpalermo/aether/aether-proxy' charts/aether/values.yaml
+
+      # Any charts/ change must bump the chart version (CI-enforced).
+      - name: Bump chart patch version
+        run: |
+          # The version is quoted in Chart.yaml (`version: "0.92.1"`).
+          cur="$(sed -nE 's|^version: "?([0-9]+\.[0-9]+\.[0-9]+)"?$|\1|p' charts/aether/Chart.yaml)"
+          test -n "$cur"
+          next="$(echo "$cur" | awk -F. '{printf "%s.%s.%s", $1, $2, $3+1}')"
+          sed -i -E "s|^version: \"?${cur}\"?$|version: \"${next}\"|" charts/aether/Chart.yaml
+          echo "chart $cur -> $next"
+          grep -n '^version:' charts/aether/Chart.yaml
 
       - name: Open chart-bump PR
         uses: peter-evans/create-pull-request@v7
@@ -194,4 +229,9 @@ jobs:
           title: "chore(proxy): pin aether chart to aether-proxy:${{ github.sha }}"
           body: |
             Auto-generated by `proxy-release`. Pins the aether chart's proxy image
-            to the multi-arch image published for `${{ github.sha }}`.
+            to the multi-arch image published for `${{ github.sha }}`
+            (`${{ needs.manifest.outputs.index_digest }}`) and bumps the chart
+            patch version.
+
+            `aether.image` prefers `digest:` over `tag:`, so both lines move —
+            a tag-only bump would leave the previously pinned image deployed.
