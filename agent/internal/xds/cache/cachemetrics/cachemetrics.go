@@ -40,6 +40,14 @@ type Metrics struct {
 	// dependency set — each is an undeclared upstream that should be
 	// promoted to a config.aether.io/upstreams annotation.
 	upstreamsMiss metric.Int64Counter
+	// upstreamsTTLRefreshed counts observed dependencies that crossed the idle
+	// TTL but were REFRESHED instead of expired because the node's proxy still
+	// holds a live on-demand subscription for them (issue #682). It is the only
+	// external evidence that the in-use exemption is doing anything: the
+	// exemption's whole effect is that nothing happens — no expiry, no cluster
+	// drop, no ODCDS re-warm — so without this counter a validator cannot tell
+	// a working exemption from a demand set that simply never aged.
+	upstreamsTTLRefreshed metric.Int64Counter
 	// bindingMismatch counts local source pods whose outbound clusters are
 	// bound to an SDS client-certificate secret that is NOT that pod's own
 	// SPIFFE ID (issue #638). Non-zero means the node's egress would present a
@@ -85,6 +93,10 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("ODCDS requests for services outside the node dependency set (undeclared upstreams; promote to annotations)")); err != nil {
 		return nil, fmt.Errorf("upstreams miss: %w", err)
 	}
+	if m.upstreamsTTLRefreshed, err = meter.Int64Counter("aether.agent.upstreams.ttl_refreshed",
+		metric.WithDescription("Observed dependencies past the idle TTL kept in the node dependency set because the proxy still holds a live on-demand subscription")); err != nil {
+		return nil, fmt.Errorf("upstreams ttl refreshed: %w", err)
+	}
 	if m.bindingMismatch, err = meter.Int64Counter("aether.agent.identity.outbound_binding_mismatch",
 		metric.WithDescription("Local source pods whose outbound clusters are bound to another workload's SDS client-certificate secret")); err != nil {
 		return nil, fmt.Errorf("outbound binding mismatch: %w", err)
@@ -121,6 +133,17 @@ func (m *Metrics) UpstreamMiss(ctx context.Context, _ string) {
 		return
 	}
 	m.upstreamsMiss.Add(ctx, 1)
+}
+
+// UpstreamTTLRefreshed counts n observed dependencies exempted from idle expiry
+// in one prune pass by a live on-demand subscription (issue #682). Service names
+// are deliberately NOT attributes (unbounded cardinality). A no-op for n <= 0 so
+// the steady state — nothing near its TTL — records nothing.
+func (m *Metrics) UpstreamTTLRefreshed(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.upstreamsTTLRefreshed.Add(ctx, n)
 }
 
 // Generated records the outcome of one snapshot generation.

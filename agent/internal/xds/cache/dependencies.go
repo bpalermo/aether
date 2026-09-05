@@ -90,20 +90,7 @@ func (c *SnapshotCache) removePodDependencies(netns string) {
 // request arrived on is what keeps the entry alive past the idle TTL while the
 // proxy is still routing to it (issue #682).
 func (c *SnapshotCache) ObserveDependency(ctx context.Context, service string) bool {
-	if service == "" {
-		return false
-	}
-
-	c.depMu.Lock()
-	_, known := c.dependencySetLocked()[service]
-	c.observedDeps[service] = time.Now()
-	// Bump even on a pure timestamp refresh: the memoized expiry horizon
-	// (depSetExpiry) may extend, and a stale horizon would expire this
-	// entry from the served set too early.
-	c.bumpDepGenLocked()
-	c.depMu.Unlock()
-
-	if known {
+	if known, recorded := c.recordObservation(service); !recorded || known {
 		return false
 	}
 
@@ -112,6 +99,65 @@ func (c *SnapshotCache) ObserveDependency(ctx context.Context, service string) b
 	c.metrics.UpstreamMiss(ctx, service)
 	c.signalDependencyChange()
 	return true
+}
+
+// RestoreDependency re-admits a service the node's proxy ALREADY holds a cluster
+// for, as reported in the initial_resource_versions of the first delta request
+// on a fresh xDS stream. Returns true when the dependency is new to this
+// process. Same TTL'd membership as an observation, but it is deliberately NOT a
+// miss: the proxy is not asking for something new, the agent is recovering
+// demand it had already granted.
+//
+// Why this exists (issue #682, the ~20s post-restart echo outage on nodes with
+// no local replica, 2026-09-05 rev194): the observed half of the dependency set
+// is process-local memory, so a restarted agent's first snapshot legitimately
+// drops every ODCDS-acquired upstream, and Envoy 503s (NC) on the next request.
+// The cold path is supposed to repair that in one round trip — except a
+// reconnecting Envoy never re-asks. On a fresh stream Envoy marks every
+// requested resource "waiting for server", and its first request carries
+// initial_resource_versions for the resources it HOLDS plus
+// resource_names_subscribe for names newly added since — which, after
+// markStreamFresh clears the pending-add set, is nothing. A name it is still
+// waiting on appears in NEITHER field, and its on_demand filter dedupes every
+// later re-subscribe for a name already in that state, so no ODCDS request
+// reaches the new agent at all. On talos the outage ended only when Envoy's
+// 15s init-fetch timeout tore that subscription state down and the next request
+// re-subscribed from scratch: 14.05s (w01) / 14.67s (w03) of 503s, ~7 rounds of
+// the 2s on-demand timeout, with the agent logging nothing.
+//
+// The held-resource inventory is the evidence the agent was missing: it is the
+// proxy stating, in the protocol, exactly which clusters it is still running on.
+// Restoring from it re-seeds the demand set in the first request of the stream —
+// before the first snapshot push — so the upstream never leaves the snapshot.
+// Restored entries are plain observations, NOT live-subscription pins: anything
+// the proxy no longer routes to decays on the ordinary idle TTL, so demand
+// scoping still shrinks after a restart.
+func (c *SnapshotCache) RestoreDependency(ctx context.Context, service string) bool {
+	if known, recorded := c.recordObservation(service); !recorded || known {
+		return false
+	}
+
+	c.log.DebugContext(ctx, "restored observed upstream from the proxy's held clusters", "service", service)
+	c.signalDependencyChange()
+	return true
+}
+
+// recordObservation stamps an observation for service, reporting whether the
+// service was already in the dependency set and whether anything was recorded
+// at all (an empty name records nothing).
+func (c *SnapshotCache) recordObservation(service string) (known, recorded bool) {
+	if service == "" {
+		return false, false
+	}
+	c.depMu.Lock()
+	defer c.depMu.Unlock()
+	_, known = c.dependencySetLocked()[service]
+	c.observedDeps[service] = time.Now()
+	// Bump even on a pure timestamp refresh: the memoized expiry horizon
+	// (depSetExpiry) may extend, and a stale horizon would expire this
+	// entry from the served set too early.
+	c.bumpDepGenLocked()
+	return known, true
 }
 
 // TrackOnDemandCluster records a live on-demand (ODCDS) cluster subscription
@@ -222,7 +268,13 @@ func (c *SnapshotCache) PruneObservedDependencies() {
 	c.depMu.Unlock()
 
 	if refreshed > 0 {
-		c.log.Debug("refreshed in-use observed upstreams (live on-demand subscription)", "count", refreshed)
+		// Info, not Debug: this is the only trace the in-use exemption leaves.
+		// Its entire effect is that nothing happens, so at Debug an operator
+		// cannot distinguish a working exemption from a demand set that never
+		// aged (issue #682 deployment validation). It fires at most once per
+		// prune tick, and only when an entry actually crossed its TTL.
+		c.log.Info("refreshed in-use observed upstreams (live on-demand subscription)", "count", refreshed)
+		c.metrics.UpstreamTTLRefreshed(context.Background(), int64(refreshed))
 	}
 	if expired > 0 {
 		c.log.Info("expired observed upstreams from node dependency set", "count", expired)
