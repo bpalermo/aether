@@ -1,14 +1,18 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 # Arch-appropriate Envoy binary, selected at analysis time.
-# The http_file repos are declared in MODULE.bazel pinned to ENVOY_VERSION = 1.38.0
-# (matching the custom proxy workspace).
-# SHA-256 values come from the upstream release checksums.txt.asc.
+#
+# This is the binary the mesh actually deploys, not a stock Envoy release:
+# //bazel/proxy_pin:extensions.bzl extracts /usr/local/bin/envoy from the
+# aether-proxy image at the digest //charts/aether:values.yaml pins. The custom
+# proxy compiles most upstream extensions out, so validating against stock Envoy
+# passes configs the real proxy would NACK (#709). Moving the chart pin moves
+# this gate; there is no version to keep in sync here.
 alias(
     name = "envoy_bin",
     actual = select({
-        "@platforms//cpu:x86_64": "@envoy_binary_linux_amd64//file",
-        "@platforms//cpu:aarch64": "@envoy_binary_linux_arm64//file",
+        "@platforms//cpu:x86_64": "@pinned_envoy_linux_amd64//:envoy",
+        "@platforms//cpu:aarch64": "@pinned_envoy_linux_arm64//:envoy",
     }),
 )
 

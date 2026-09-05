@@ -2,8 +2,11 @@
 // bootstrap configs to catch "Envoy would NACK this" regressions before they
 // reach production.
 //
-// The Envoy binary is provided as a Bazel data dependency (http_file in
-// MODULE.bazel, pinned to ENVOY_VERSION = 1.38.0).  To run the test:
+// The Envoy binary is provided as a Bazel data dependency: //bazel/proxy_pin
+// extracts /usr/local/bin/envoy from the aether-proxy image at the digest
+// //charts/aether:values.yaml pins, so this gate runs the exact binary the mesh
+// deploys (custom build, most upstream extensions compiled out — see #709).
+// To run the test:
 //
 //	bazel test //test/envoy_validate:envoy_validate_test
 //	bazel test //test/envoy_validate:envoy_validate_test --test_output=all
@@ -27,8 +30,8 @@ import (
 
 // envoyBinary returns the path to the Envoy binary from the Bazel runfiles tree.
 //
-// In Bazel 9 bzlmod, http_file repos created via use_repo_rule have a canonical
-// name like "+http_file+<repo-name>" rather than just "<repo-name>".  The repo
+// In Bazel 9 bzlmod, repos created by a module extension have a canonical name
+// like "+pinned_proxy+<repo-name>" rather than just "<repo-name>".  The repo
 // mapping file (runfiles/_repo_mapping or .runfiles.repo_mapping) translates the
 // user-visible name to the canonical name.  This function reads that mapping so
 // the lookup is robust across Bazel versions.
@@ -39,9 +42,9 @@ func envoyBinary(t *testing.T) string {
 	var repoName string
 	switch runtime.GOARCH {
 	case "amd64":
-		repoName = "envoy_binary_linux_amd64"
+		repoName = "pinned_envoy_linux_amd64"
 	case "arm64":
-		repoName = "envoy_binary_linux_arm64"
+		repoName = "pinned_envoy_linux_arm64"
 	default:
 		t.Skipf("envoy binary not available for GOARCH=%s", runtime.GOARCH)
 	}
@@ -60,7 +63,7 @@ func envoyBinary(t *testing.T) string {
 	// We want lines starting with "," (main repo context) mapping our user name.
 	canonical := canonicalRepo(t, runfiles, repoName)
 
-	p := filepath.Join(runfiles, canonical, "file", "envoy")
+	p := filepath.Join(runfiles, canonical, "envoy")
 	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("envoy binary not found at %s: %v\n(RUNFILES_DIR=%s)", p, err, runfiles)
 	}
