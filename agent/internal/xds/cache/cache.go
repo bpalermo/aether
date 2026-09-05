@@ -361,6 +361,11 @@ type SnapshotCache struct {
 	// silent and a re-bind produces exactly the lines to grep. See
 	// identitybinding.go.
 	lastBindings bindingState
+	// lastInboundBindings is the previous snapshot's INBOUND identity-binding
+	// table (issue #638) — the server-certificate counterpart of lastBindings,
+	// and the side ssl_fail_verify_san actually reports on. Guarded by
+	// bindingMu. See inboundidentitybinding.go.
+	lastInboundBindings inboundBindingState
 
 	// captureEnabled turns on transparent capture (proposal 018, Phase 3a): per-pod
 	// capture listeners + the cap_http route table. Set once before the manager

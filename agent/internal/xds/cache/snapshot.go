@@ -176,6 +176,12 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// the ones that changed — steady state is silent, a re-bind is loud. Runs
 	// after SetSnapshot so a logged binding is one Envoy actually received.
 	c.logIdentityBindings(ctx, v)
+	// The inbound counterpart (#638, hypothesis inverted): ssl_fail_verify_san
+	// is the CLIENT rejecting the SERVER's certificate, so the mis-bound
+	// identity in a #638 event belongs to an inbound filter chain of the proxy
+	// that TERMINATED the connection — which #686's client-side check cannot
+	// see.
+	c.logInboundIdentityBindings(ctx, v)
 
 	return nil
 }
