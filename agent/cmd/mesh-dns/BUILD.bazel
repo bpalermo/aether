@@ -35,6 +35,15 @@ go_multi_arch_image(
     name = "mesh-dns_image",
     binary = ":mesh-dns",
     repository = "bpalermo/aether/mesh-dns",
+    # The DaemonSet's exec readiness probe (#683). It ships as an extra layer in
+    # THIS image — the one the DaemonSet already runs on every node — so there is
+    # no second pull, and no chart/image skew is possible: the probe binary and
+    # the daemon that writes the marker are the same artifact. The whole point of
+    # the binary is what it does NOT link (the probe used to re-exec this 16.9MB
+    # daemon every 15s per pod) — see //agent/cmd/mesh-dns-ready:deps_test.
+    tars_layer = {
+        "/mesh-dns-ready": "//agent/cmd/mesh-dns-ready:mesh-dns-ready",
+    },
 )
 
 go_test(

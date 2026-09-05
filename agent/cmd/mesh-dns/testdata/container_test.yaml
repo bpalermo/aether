@@ -3,11 +3,19 @@ metadataTest:
   entrypoint: ["/mesh-dns"]
   user: 65532 # nonroot
 fileExistenceTests:
-  # The slim standalone mesh-DNS binary (#583) — the ONLY thing in this image.
-  # The DaemonSet runs it as its command AND re-execs it for the readiness marker
-  # check, so it must be executable by the (non-root) runtime user.
+  # The slim standalone mesh-DNS binary (#583). The DaemonSet runs it as its
+  # command, so it must be executable by the (non-root) runtime user.
   - name: 'mesh-dns'
     path: '/mesh-dns'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
+  # The stdlib-only exec readiness prober (#683). Since #683 the kubelet execs
+  # THIS instead of re-launching the whole daemon every 15s, so a missing or
+  # non-executable one makes every mesh-dns pod permanently NotReady — which on
+  # a maxSurge:1/maxUnavailable:0 DaemonSet also wedges the rollout.
+  - name: 'mesh-dns-ready'
+    path: '/mesh-dns-ready'
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'

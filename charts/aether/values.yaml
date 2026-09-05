@@ -45,6 +45,11 @@ clusterName: talos-main
 controlCluster: ""
 
 # Enable verbose logging on all components (`--debug`).
+#
+# EXCEPT the mesh-dns daemon since #684: it has its own opt-in
+# `agent.meshDnsDaemon.debug` (default false) and this global toggle does not
+# reach it. It is the one component on every managed pod's :53 path, and
+# defaulting it to TRACE was not a decision anyone made — it inherited it.
 debug: true
 
 # DNS-style domain mesh authorities live under (<service>.<meshDomain>): clients
@@ -193,12 +198,32 @@ agent:
     # any datagram not from the upstream's exact address and an off-path attacker cannot
     # land a spoofed answer at all.
     forwardPoolSize: null
-    # Issue #583: the readiness probe now re-execs the SLIM /mesh-dns binary (only the
-    # resolver + snapshot reload + telemetry — no controller-runtime/xDS/CNI/SPIRE), not
-    # the full /agent, so the re-exec CPU headroom that inflated these limits is gone.
-    # The resident resolver is ~12-15Mi RSS and a slim-binary stat is single-digit m
-    # (period lengthened to 15s too). These are conservative for the slim footprint;
-    # revisit against live usage if needed.
+    # Verbose (TRACE) logging for THIS daemon only. Issue #684: the top-level
+    # `debug` is true by default and used to reach mesh-dns, so every node ran the
+    # resolver at TRACE — on the one component that sits on every managed pod's
+    # :53 path. The global toggle deliberately no longer reaches this daemon;
+    # set this key to turn it on for a diagnosis:
+    #
+    #   helm upgrade ... --set agent.meshDnsDaemon.debug=true
+    #
+    # What it costs, measured rather than assumed: --debug only raises the slog
+    # threshold (Info -> Trace). The mesh-DNS forward path logs NOTHING per query
+    # at any level — the only Debug-level call site in the resolver is the
+    # snapshot reload — so this is not a per-query cost and turning it off is not
+    # the fix for the OTel log-queue CPU in #684 (that is a fixed 1 Hz poll in the
+    # SDK's batch processor, independent of log volume). It is still off by
+    # default: every record that IS emitted is fanned out to the OTLP log exporter
+    # as well as stderr, at Trace that includes each snapshot reload during
+    # rollout churn, and a per-node daemon should not ship debug logging to a
+    # shared collector unless someone asked for it.
+    debug: false
+    # Issue #583 slimmed the readiness re-exec (the resolver alone, not the full
+    # /agent); issue #683 removed it entirely — the probe execs the stdlib-only
+    # /mesh-dns-ready binary (~1.7Mi, bundled in this same image) rather than
+    # relaunching the 16.9Mi daemon every 15s, which was ~3-4% of this container's
+    # CPU in runc/libcontainer exec and Go package init. The resident resolver is
+    # ~12-15Mi RSS and a stdlib stat is a rounding error. These are conservative for
+    # that footprint; revisit against live usage if needed.
     resources:
       requests:
         cpu: 25m
