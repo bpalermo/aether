@@ -95,6 +95,20 @@ Stats::StatNameTagVector tags{{reporter_, reporter_val}, /* … */};
 config_->scope_.counterFromStatNameWithTags(config_->requests_total_, tags).inc();
 ```
 
+> **`aether_requests_total` values are per-Envoy-generation.** This is an Envoy
+> counter, and the node proxy hot-restarts on every config change and every
+> DaemonSet roll. A hot restart transfers gauges absolute but counters as
+> **deltas** (`counter.latch()`, the increment pending since the parent's last
+> `stats_flush_interval` — 5s by default), so the child inherits ≤5s of the
+> parent's traffic, and the OTLP sink exports `counter.value()` as CUMULATIVE
+> from *this process's* start. The series therefore restarts near zero on every
+> roll (measured on talos-main 2026-09-05; plain
+> `envoy_cluster_upstream_cx_total` resets in the same buckets). Since #45674 the
+> **labels** survive natively — only the value is per-generation. Rule for every
+> dashboard, alert and query: **never read a raw counter value; use
+> `rate(...[5m])` / `increase(...[$__range])`**, which are correct across the
+> reset. See aether#708 and proposal 001.
+
 ### Registration + linking
 
 `REGISTER_FACTORY(Factory, NamedHttpFilterConfigFactory)` with name
@@ -144,7 +158,8 @@ config encoding change. The `DynamicModuleConfig` wiring is removed.
 2. **Agent**: switch the generated filter from `dynamic_modules` to
    `aether.filters.http.aether_stats`; delete the Rust module + its wiring.
 3. **Dashboards**: rename `dynamicmodulescustom.aether_requests_total` →
-   `aether.requests_total`.
+   `aether.requests_total`, and express every panel as `rate()`/`increase()` —
+   the counter's value is per-Envoy-generation (see the caveat above).
 
 The net result: full `StreamInfo` access, real response flags with no workaround,
 native stat naming, and a single self-contained Envoy binary.
