@@ -332,7 +332,11 @@ kubectl -n aether-system logs ds/aether-agent --since=10m \
   | grep -E 'outbound identity (binding|bindings changed|mapping)|foreign identity'
 
 # The alarm, in VictoriaLogs (field syntax; never `| stats`, it false-zeroes).
-_stream:{k8s_container_name="agent"} AND "outbound cluster bound to a foreign identity"
+_stream:{service.name="aether-agent"} AND "outbound cluster bound to a foreign identity"
+
+Note: the stream labels on these logs are the dotted OTel resource fields (`service.name`,
+`k8s.pod.name`, `k8s.namespace.name`). A selector on `k8s_container_name` matches nothing and
+returns a FALSE ZERO — control-test any negative by dropping the selector.
 
 # Same, as a counter: zero at steady state, any increase is the #638 defect.
 sum by (k8s_node_name) (aether_agent_identity_outbound_binding_mismatch_total)
