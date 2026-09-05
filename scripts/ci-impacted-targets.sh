@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Computes the Bazel targets impacted by a PR with Tinder/bazel-diff and splits
-# the impacted TEST targets into unit / integration / e2e so CI builds and tests
-# only what changed. Falls back to "everything impacted" on any error or when the
-# base revision is unavailable, so CI never silently under-tests.
+# Computes the Bazel targets impacted by a revision range with Tinder/bazel-diff
+# and splits the impacted TEST targets into unit / integration / e2e so CI builds
+# and tests only what changed. Falls back to "everything impacted" on any error or
+# when the base revision is unavailable, so CI never silently under-tests.
+#
+# The range is whatever the caller passes; nothing here assumes a PR. Two callers:
+#   .github/workflows/ci.yaml   BASE_SHA = the PR's merge-base, HEAD_SHA = PR head
+#   .github/workflows/main.yaml BASE_SHA = HEAD^ (a merge commit's first parent),
+#                               HEAD_SHA = the merge commit — i.e. post-merge
+#                               validation of what a merge added to main (#679)
 #
 # Runs bazel-diff at both the base and head revisions (it git-checkouts them), so
 # the workflow MUST run this from a copy outside the repo tree (e.g. $RUNNER_TEMP)
 # — otherwise the checkout could swap the script file out from under bash.
 #
 # Env:
-#   BASE_SHA        merge-base commit to diff against (empty -> full fallback)
-#   HEAD_SHA        PR head commit (default: current HEAD)
+#   BASE_SHA        base commit to diff against (empty -> full fallback)
+#   HEAD_SHA        head commit to diff (default: current HEAD)
 #   BAZEL_DIFF_JAR  path to bazel-diff_deploy.jar (missing -> full fallback)
 #   OUT_DIR         output dir for the target lists (default: $PWD/.bazel-diff-out)
 #   GITHUB_OUTPUT   if set, has_any/has_unit/has_integration/has_e2e are appended
@@ -60,6 +66,7 @@ SEED="$OUT_DIR/seed.txt"
 cat >"$SEED" <<'EOF'
 .bazelrc
 .github/workflows/ci.yaml
+.github/workflows/main.yaml
 scripts/ci-impacted-targets.sh
 MODULE.bazel
 MODULE.bazel.lock

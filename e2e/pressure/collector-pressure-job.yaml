@@ -1,0 +1,153 @@
+# Collector-pressure load generator for issue #662.
+#
+# Pushes synthetic OTLP *logs* at the shared collector until its memory_limiter
+# crosses the soft threshold and starts refusing data — the exact condition that
+# crash-looped 3 of 5 agents on 2026-09-02, and the branch #668 fixed. run.sh
+# applies this, waits for the shed, restarts one node's agent, and asserts the
+# agent still starts.
+#
+# NEVER apply this by hand during a soak. See README.md.
+#
+# Kill switch (either works, both are safe at any moment):
+#   kubectl -n aether-test delete job aether-collector-pressure
+#   ...or wait: activeDeadlineSeconds terminates the whole Job at 600s no matter what.
+#
+# Why LOGS and not metrics: memory_limiter is one shared process-wide component,
+# so pressure applied through any pipeline makes *every* pipeline refuse — including
+# the metrics pipeline the agents export to. Flooding the logs pipeline therefore
+# reproduces #662's trigger while keeping the flood itself out of Prometheus, which
+# is the plane run.sh measures from. The garbage lands in VictoriaLogs under
+# service.name=aether-collector-pressure (NUL-filled payloads: it compresses to
+# almost nothing).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aether-collector-pressure
+  namespace: aether-test
+  labels:
+    app.kubernetes.io/name: aether-collector-pressure
+    app.kubernetes.io/component: pressure-generator
+    aether.io/issue: "662"
+spec:
+  parallelism: 2
+  completions: 2
+  # Fail closed: one generator pod erroring out ends the whole Job rather than
+  # silently retrying with an unknown amount of pressure applied.
+  backoffLimit: 0
+  # HARD KILL SWITCH. The Job cannot outlive this even if run.sh is killed with
+  # SIGKILL, the workstation loses its network, or the operator walks away.
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        # EXPLICIT mesh opt-out. aether-test is not a managed namespace today, but
+        # the pod-mutating webhook auto-injects every pod in a namespace that is
+        # labelled aether.io/managed=true unless the pod says otherwise. This is a
+        # raw OTLP client aimed at an o11y Service: it must never gain a sidecar
+        # identity, capture rules or ndots injection, or the test would be measuring
+        # the mesh instead of the collector.
+        aether.io/managed: "false"
+        app.kubernetes.io/name: aether-collector-pressure
+        app.kubernetes.io/component: pressure-generator
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      # No priorityClassName on purpose: priority 0 is below platform-critical and
+      # platform-observability, so under node pressure the generator is the first
+      # thing evicted — never the collector, Prometheus or an agent.
+      #
+      # No tolerations on purpose either: the generator must stay off tainted and
+      # control-plane nodes.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            # Spread the generators, so one node's NIC is not the bottleneck that
+            # silently caps the pressure.
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: aether-collector-pressure
+            # Prefer not to sit on a collector replica: CPU contention with the
+            # process under test would confound "collector is shedding" with
+            # "collector is starved".
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaces: ["o11y"]
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: opentelemetry-collector
+      containers:
+        - name: telemetrygen
+          # Pinned to the deployed collector's own version (o11y/otel-collector runs
+          # otel/opentelemetry-collector-contrib:0.159.0). Never :latest — the flag
+          # set below is version-sensitive.
+          image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.159.0
+          args:
+            - logs
+            - --otlp-endpoint=otel-collector.o11y.svc.cluster.local:4317
+            - --otlp-insecure
+            # THE flag that makes this harness work at all. Without it a worker
+            # calls logger.Fatal() on the first refused export — i.e. the generator
+            # would kill itself at the exact instant the collector starts shedding,
+            # releasing the pressure the test needs to hold.
+            - --allow-export-failures
+            # One record per request. Batching (the default, 100 records/request)
+            # would produce ~100MiB requests against the receiver's
+            # max_recv_msg_size_mib: 64, which fails at the gRPC layer BEFORE
+            # memory_limiter sees them — a refusal that proves nothing.
+            - --batch=false
+            # 1MiB of NUL bytes per record. Bytes in flight, not cardinality, are
+            # what move the collector's heap; a constant payload keeps the backend
+            # cost near zero.
+            - --size=1
+            # 16 workers = 16 independent gRPC connections per pod, so the flood
+            # spreads over both collector replicas (the Service load-balances per
+            # connection) and a stalled export blocks only 1/16th of the pod.
+            - --workers=16
+            # 2 records/s/worker x 1MiB x 16 workers x 2 pods = ~64MiB/s aggregate,
+            # ~32MiB/s per replica. The safety margin is deliberate: memory_limiter
+            # checks every 5s with a 512MiB spike allowance, i.e. it tolerates about
+            # 102MiB/s per replica before the *hard* limit can be overshot between
+            # checks. This runs at a third of that, so the collector sheds instead
+            # of OOM-ing. Raise it only with that arithmetic in hand (README).
+            - --rate=2
+            # Bound each blocked export. The OTLP client retries Unavailable — which
+            # is exactly what a shedding collector returns — for up to a minute by
+            # default, so without this the flood would collapse to ~1 record/min per
+            # worker the moment shedding engaged. 5s keeps the pressure sustained.
+            - --timeout=5s
+            # Self-terminate before the Job deadline, so the normal path is a clean
+            # completion rather than a deadline kill.
+            - --duration=9m
+            - --service=aether-collector-pressure
+            - --telemetry-attributes=aether.pressure.issue="662"
+            - --body=aether collector pressure test (issue 662) - synthetic, safe to drop
+          resources:
+            # Small and capped: the generator must never be able to starve a node.
+            # 500m is ample — serialising NUL-filled strings is not the bottleneck.
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault

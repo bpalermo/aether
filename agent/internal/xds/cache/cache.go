@@ -323,6 +323,16 @@ type SnapshotCache struct {
 	// injection is skipped.
 	nodeSpiffeID string
 
+	// bindingMu guards lastBindings. Only generateSnapshot writes it (already
+	// serialized by snapshotMu); the lock keeps the invariant local so a future
+	// caller or a -race test reading the state cannot trip over it.
+	bindingMu sync.Mutex
+	// lastBindings is the previous snapshot's outbound identity-binding table
+	// (issue #638), kept so the binding log is edge-triggered: steady state is
+	// silent and a re-bind produces exactly the lines to grep. See
+	// identitybinding.go.
+	lastBindings bindingState
+
 	// captureEnabled turns on transparent capture (proposal 018, Phase 3a): per-pod
 	// capture listeners + the cap_http route table. Set once before the manager
 	// starts (SetCaptureEnabled); read without locking. Default off.

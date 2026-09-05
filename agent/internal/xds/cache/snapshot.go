@@ -171,5 +171,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to set snapshot: %w", err)
 	}
 
+	// Issue #638 discriminator: name the (source pod → outbound cluster → SDS
+	// client-cert secret) bindings this snapshot just handed Envoy, but only
+	// the ones that changed — steady state is silent, a re-bind is loud. Runs
+	// after SetSnapshot so a logged binding is one Envoy actually received.
+	c.logIdentityBindings(ctx, v)
+
 	return nil
 }

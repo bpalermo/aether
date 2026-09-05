@@ -309,3 +309,37 @@ grep -c aether-cni /etc/cni/net.d/*.conflist
 
 Never hand-write either file: `cni-install` is the durable entry's only writer, and the
 conflist belongs to the primary CNI plus the re-assert loop.
+### Grepping the outbound identity bindings during a soak (issue #638)
+
+`ssl_fail_verify_san` bursts a few tens of seconds into a fresh proxy generation point at
+the node's **netns → SPIFFE ID index** (`localWorkloads`), which is the whole of the
+(source pod → outbound cluster → SDS client-cert secret) binding: every mTLS-injected
+outbound cluster carries one transport-socket match per local identity, *named by* the
+SPIFFE ID whose SDS secret it fetches, plus one matcher mapping each source pod's netns
+to one of those names. The agent logs that binding at **INFO**, `outbound identity
+binding`, only when a `(source pod, cluster)` pair re-binds or is seen for the first time
+— so steady state is silent and a startup re-bind is exactly the handful of lines you
+want. A binding whose bound secret is not the owning pod's own SPIFFE ID additionally
+logs **WARN** `outbound cluster bound to a foreign identity` and increments
+`aether_agent_identity_outbound_binding_mismatch_total`; an identity mapping no pod owns
+any more (a missed CNI DEL) logs WARN `outbound identity mapping has no owning pod`.
+Above 200 changed pairs in one snapshot a single `outbound identity bindings changed`
+summary replaces the per-pair lines, keeping the distinct source→identity transitions.
+
+```bash
+# Every re-bind on one node, around the roll.
+kubectl -n aether-system logs ds/aether-agent --since=10m \
+  | grep -E 'outbound identity (binding|bindings changed|mapping)|foreign identity'
+
+# The alarm, in VictoriaLogs (field syntax; never `| stats`, it false-zeroes).
+_stream:{k8s_container_name="agent"} AND "outbound cluster bound to a foreign identity"
+
+# Same, as a counter: zero at steady state, any increase is the #638 defect.
+sum by (k8s_node_name) (aether_agent_identity_outbound_binding_mismatch_total)
+```
+
+Join the `snapshot_version` on the WARN with the first
+`envoy_cluster_ssl_fail_verify_san_total` sample of the new proxy generation: a WARN at
+(or just before) that timestamp proves the source-side binding was wrong; the absence of
+one over a window that *did* produce SAN failures rules the agent-side index out and
+moves the search to the destination proxy's inbound chain selection.
