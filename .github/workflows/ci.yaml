@@ -104,6 +104,18 @@ jobs:
       - name: Require a Chart.yaml version bump for chart changes
         run: scripts/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
 
+  envoy-api-parity:
+    needs: changes
+    # The agent's xDS bindings (go.mod: go-control-plane/envoy) must track the
+    # Envoy the proxy is built from (proxy/MODULE.bazel: envoy_api). Cheap, and
+    # deliberately unconditional: either side can move on its own.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Require the xDS bindings to match the proxy's Envoy
+        run: scripts/check-envoy-api-parity.sh
+
   # Build every impacted target (compile + lint on BuildBuddy RBE; warms the
   # remote cache the integration/e2e legs reuse) and run the impacted unit tests.
   test:
@@ -230,7 +242,7 @@ jobs:
   # the main branch ruleset.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, test, integration, e2e]
+    needs: [changes, diff, chart-version-bump, envoy-api-parity, test, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled
