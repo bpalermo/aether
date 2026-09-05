@@ -368,7 +368,7 @@ returns a FALSE ZERO — control-test any negative by dropping the selector.
 # Same, as a counter: zero at steady state, any increase is the #638 defect.
 # increase(), never a raw read — the raw value is per-process (an agent restart
 # resets it) and an instant query lands between samples and false-zeroes.
-sum by (k8s_node_name) (increase(aether_agent_identity_outbound_binding_mismatch_total[1h]))
+sum by (node) (increase(aether_agent_identity_outbound_binding_mismatch_total[1h]))
 ```
 
 Join the `snapshot_version` on the WARN with the first
@@ -430,7 +430,7 @@ _stream:{service.name="aether-agent"} AND "inbound chain bound to a foreign iden
 # Zero at steady state; any increase is an agent-side inbound mis-binding.
 # increase(), never a raw read: the value is per-process and an instant query
 # lands between samples and false-zeroes.
-sum by (k8s_node_name) (increase(aether_agent_identity_inbound_binding_mismatch_total[1h]))
+sum by (node) (increase(aether_agent_identity_inbound_binding_mismatch_total[1h]))
 ```
 
 #### The ledger join, with the terminating-node column
