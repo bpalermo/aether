@@ -55,6 +55,25 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	var m *Metrics
 	m.Generated(context.Background(), 0.01, 1, nil)
 	m.Generated(context.Background(), 0.01, 1, errors.New("boom"))
+	m.UpstreamTTLRefreshed(context.Background(), 3)
+}
+
+// TestCacheMetrics_UpstreamTTLRefreshed verifies the in-use exemption counter
+// sums across prune passes and records nothing when no entry was exempted.
+func TestCacheMetrics_UpstreamTTLRefreshed(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	ctx := context.Background()
+
+	m.UpstreamTTLRefreshed(ctx, 0)
+	if _, found := metricValue(t, reader, "aether.agent.upstreams.ttl_refreshed"); found {
+		t.Error("a prune pass that exempted nothing must record nothing")
+	}
+
+	m.UpstreamTTLRefreshed(ctx, 2)
+	m.UpstreamTTLRefreshed(ctx, 3)
+	if got, _ := metricValue(t, reader, "aether.agent.upstreams.ttl_refreshed"); got != 5 {
+		t.Errorf("ttl_refreshed = %d, want 5", got)
+	}
 }
 
 func TestCacheMetrics_GeneratedSuccess(t *testing.T) {

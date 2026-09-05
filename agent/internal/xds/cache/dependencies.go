@@ -268,7 +268,13 @@ func (c *SnapshotCache) PruneObservedDependencies() {
 	c.depMu.Unlock()
 
 	if refreshed > 0 {
-		c.log.Debug("refreshed in-use observed upstreams (live on-demand subscription)", "count", refreshed)
+		// Info, not Debug: this is the only trace the in-use exemption leaves.
+		// Its entire effect is that nothing happens, so at Debug an operator
+		// cannot distinguish a working exemption from a demand set that never
+		// aged (issue #682 deployment validation). It fires at most once per
+		// prune tick, and only when an entry actually crossed its TTL.
+		c.log.Info("refreshed in-use observed upstreams (live on-demand subscription)", "count", refreshed)
+		c.metrics.UpstreamTTLRefreshed(context.Background(), int64(refreshed))
 	}
 	if expired > 0 {
 		c.log.Info("expired observed upstreams from node dependency set", "count", expired)
