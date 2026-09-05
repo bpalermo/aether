@@ -482,7 +482,7 @@ func TestProcessStream_TracksLastVersion(t *testing.T) {
 		err: io.EOF,
 	}
 
-	got := r.processStream(context.Background(), stream, "5")
+	got, _ := r.processStream(context.Background(), stream, "5")
 	assert.Equal(t, "7", got, "lastVersion must advance to the newest event version")
 }
 
@@ -506,7 +506,7 @@ func TestProcessStream_DataLossClearsResumeToken(t *testing.T) {
 		err: status.Error(codes.DataLoss, "watch stream overflowed; reconnect for a full snapshot"),
 	}
 
-	got := r.processStream(context.Background(), stream, "5")
+	got, _ := r.processStream(context.Background(), stream, "5")
 	assert.Equal(t, "", got, "DataLoss must clear the resume token to force a full snapshot")
 }
 
@@ -516,7 +516,7 @@ func TestProcessStream_OtherErrorsKeepResumeToken(t *testing.T) {
 		err: status.Error(codes.Unavailable, "connection reset"),
 	}
 
-	got := r.processStream(context.Background(), stream, "5")
+	got, _ := r.processStream(context.Background(), stream, "5")
 	assert.Equal(t, "5", got, "transient errors must keep the resume token")
 }
 
@@ -554,7 +554,7 @@ func TestSnapshotCompleteClosesReady(t *testing.T) {
 		err: io.EOF,
 	}
 
-	got := r.processStream(context.Background(), stream, "")
+	got, _ := r.processStream(context.Background(), stream, "")
 	assert.Equal(t, "8", got, "marker version must advance the resume token")
 	require.NoError(t, r.WaitReady(context.Background()), "ready must be closed after the marker")
 
@@ -635,7 +635,7 @@ func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
 		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-c", "6"),
 		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_REMOVED, "default/svc-b", "7"),
 	}, err: io.EOF}
-	last := r.processStream(context.Background(), stream, "")
+	last, _ := r.processStream(context.Background(), stream, "")
 	assert.Equal(t, "7", last)
 	assert.True(t, r.HasService("default/svc-a"))
 	assert.False(t, r.HasService("default/svc-b"), "incremental removal applies")
@@ -648,7 +648,7 @@ func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
 		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SERVICE_ADDED, "svc-z", "9"),
 		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "9"),
 	}, err: io.EOF}
-	_ = r.processStream(context.Background(), stream, "7")
+	_, _ = r.processStream(context.Background(), stream, "7")
 	assert.True(t, r.HasService("svc-z"))
 	assert.False(t, r.HasService("default/svc-a"), "swap drops stale catalog entries")
 	assert.False(t, r.HasService("svc-c"))
@@ -658,7 +658,7 @@ func TestServiceCatalog_ReplayAndIncrementals(t *testing.T) {
 	stream = &fakeWatchStream{events: []*registrarv1.WatchEndpointsResponse{
 		ev(registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, "", "9"),
 	}, err: io.EOF}
-	_ = r.processStream(context.Background(), stream, "9")
+	_, _ = r.processStream(context.Background(), stream, "9")
 	assert.True(t, r.HasService("svc-z"), "current client keeps its catalog")
 }
 
