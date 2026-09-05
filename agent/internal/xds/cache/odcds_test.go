@@ -233,3 +233,58 @@ func TestRestoreDependency_AnsweredInTheFirstPushAndStillDecays(t *testing.T) {
 	c.PruneObservedDependencies()
 	assert.NotContains(t, c.DependencySet(), service, "a restored upstream nobody uses still ages out")
 }
+
+// TestRestoreDependency_FromLocalStorage_AnsweredInTheFirstPushWithNoMiss is
+// the #701 counterpart of the test above: the FULL agent+proxy replacement,
+// where the proxy is new too and reports no held clusters, so the only thing
+// that can warm the fresh agent is what the previous agent persisted. A fresh
+// cache over the persisted file must serve the "<fqdn>:18081" authority in its
+// FIRST push — no ODCDS round trip, no miss logged, no miss counted — while the
+// entry stays an ordinary TTL'd observation that still decays.
+func TestRestoreDependency_FromLocalStorage_AnsweredInTheFirstPushWithNoMiss(t *testing.T) {
+	const (
+		service   = "aether-test/echo"
+		fqdn      = "echo.aether-test.aether.internal"
+		authority = fqdn + ":18081"
+	)
+
+	ctx := context.Background()
+	path := storePath(t.TempDir())
+	// What the previous agent left behind: echo observed, most of its hour left.
+	writeStore(t, path, storedEntry(service, time.Now().Add(50*time.Minute)))
+
+	c, rec, reader := newBindingTestCache(t)
+	c.SetMeshDomain("aether.internal")
+	require.Empty(t, c.DependencySet(), "a replaced agent starts with nothing observed in memory")
+	c.EnableObservedUpstreamsStore(ctx, path)
+
+	reg := &catalogListerRegistry{
+		mockRegistry: &mockRegistry{
+			listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+				return map[string][]*registryv1.ServiceEndpoint{
+					service: {makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)},
+				}, nil
+			},
+		},
+		known: map[string]bool{service: true},
+	}
+
+	// ONE reload — the initial snapshot — and the authority is already served.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+	first := snapshotClusterNames(t, c)
+	assert.Contains(t, first, authority, "the persisted upstream must be in the FIRST push of a replaced agent")
+	assert.Contains(t, first, fqdn)
+
+	assert.Empty(t, rec.with("observed undeclared upstream (ODCDS miss); adding to node dependency set"), "no miss logged")
+	assert.EqualValues(t, 0, counterValue(t, reader, "aether.agent.upstreams.miss"), "no miss counted")
+	assert.EqualValues(t, 1, counterValue(t, reader, "aether.agent.upstreams.restored"))
+	require.Len(t, rec.with("restored 1 observed upstreams from local storage"), 1)
+
+	// Still an observation, not a pin, and the persisted deadline is the one
+	// that applies (~50 minutes left, not a fresh hour).
+	assert.Empty(t, c.OnDemandServices())
+	c.depMu.RLock()
+	last := c.observedDeps[service]
+	c.depMu.RUnlock()
+	assert.True(t, last.Add(c.observedTTLValue()).After(time.Now().Add(49*time.Minute)), "the persisted deadline carried over unchanged")
+}

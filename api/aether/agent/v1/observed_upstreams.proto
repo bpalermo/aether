@@ -1,0 +1,42 @@
+edition = "2024";
+
+package aether.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option features.field_presence = IMPLICIT;
+option go_package = "aethermesh.dev/api/aether/agent/v1;agentv1";
+
+// ObservedUpstreams is the node agent's persisted OBSERVED demand set (issue
+// #701): the upstreams this node acquired through the ODCDS cold path rather
+// than a pod's `config.aether.io/upstreams` annotation. The agent writes it to
+// its local storage directory whenever the observed set changes and reads it
+// back once at start, so a fresh agent — even one replaced together with its
+// proxy, which then holds nothing to re-seed from — starts warm instead of
+// paying one ODCDS round trip of 503s per observed-only upstream.
+//
+// It is node-local state, not an API: nothing but the agent on that node reads
+// or writes it, and a missing, corrupt or stale file only costs the cold path
+// it exists to avoid. Live on-demand subscriptions (the idle-TTL exemption)
+// are deliberately NOT persisted — they are per-stream facts the proxy
+// re-establishes from real demand on every reconnect.
+message ObservedUpstreams {
+  // upstreams are the observed entries, one per service, in service-key order.
+  repeated ObservedUpstream upstreams = 1;
+}
+
+// ObservedUpstream is one observed dependency-set entry.
+message ObservedUpstream {
+  // service is the dependency-set key, "<namespace>/<service>".
+  string service = 1;
+
+  // observed_at is when the agent last recorded an observation for the
+  // service (the timestamp the idle TTL counts from). Informational on
+  // restore: expires_at is what carries over.
+  google.protobuf.Timestamp observed_at = 2;
+
+  // expires_at is the idle-TTL deadline exactly as the agent computed it. A
+  // restored entry keeps THIS deadline — the TTL is never reset on restore, so
+  // a stale set cannot outlive its hour by riding across restarts.
+  google.protobuf.Timestamp expires_at = 3;
+}

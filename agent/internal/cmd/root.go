@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"aethermesh.dev/agent/constants"
@@ -257,6 +258,9 @@ func runAgent(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
+	// Write a still-debounced observed-set change out on the way down, so the
+	// next agent on this node restores what this one was serving (#701).
+	defer snapshotCache.FlushObservedUpstreams()
 
 	ackTracker := ack.NewTracker(l)
 
@@ -363,6 +367,13 @@ func configureSnapshotCache(ctx context.Context, m ctrl.Manager) (*cache.Snapsho
 	snapshotCache.SetCaptureEnabled(true)
 	snapshotCache.SetCaptureRedirectAll(true)
 	snapshotCache.SetWaypointConfig(cfg.EastWestWaypoint, proxy.DefaultEastWestTunnelPort)
+	// Persist the OBSERVED half of the demand set beside the CNI pod records
+	// and restore it now, before the first snapshot, so a full agent+proxy
+	// replacement (every Helm upgrade) starts warm instead of paying one cold
+	// ODCDS round trip per observed-only upstream (issue #701). The proxy's
+	// held-cluster re-seed (#698) covers agent-only restarts; this covers the
+	// case where the proxy is new too and holds nothing.
+	snapshotCache.EnableObservedUpstreamsStore(ctx, filepath.Join(cfg.MountedLocalStorageDir, cache.ObservedUpstreamsFile))
 
 	if err := wireMeshDNS(m, snapshotCache); err != nil {
 		return nil, err

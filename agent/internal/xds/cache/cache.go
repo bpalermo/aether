@@ -275,6 +275,22 @@ type SnapshotCache struct {
 	udpServiceRoutes map[string][]proxy.L4Backend
 	// observedTTL overrides defaultObservedTTL when > 0 (test hook).
 	observedTTL time.Duration
+	// observedStorePath is where the observed half of the dependency set is
+	// persisted so a replaced agent starts warm (issue #701); "" disables
+	// persistence. Set once at boot (EnableObservedUpstreamsStore). Guarded by
+	// depMu.
+	observedStorePath string
+	// observedDirty/observedFlushTimer implement the debounced write: a change
+	// to observedDeps sets dirty and arms the timer if it is not already armed;
+	// the flush clears both. Guarded by depMu.
+	observedDirty      bool
+	observedFlushTimer *time.Timer
+	// observedFlushDebounce overrides defaultObservedFlushDebounce when > 0
+	// (test hook).
+	observedFlushDebounce time.Duration
+	// observedWriteMu serializes flushes of the observed set so a slow earlier
+	// write can never land over a newer one. Never held with depMu held.
+	observedWriteMu sync.Mutex
 	// depGen counts mutations of the dependency-set inputs (issue #539): EVERY
 	// writer of ANY depMu-guarded field bumps it via bumpDepGenLocked, even for
 	// fields dependencySetLocked does not read today — over-invalidation costs

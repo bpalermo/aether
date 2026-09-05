@@ -155,8 +155,10 @@ func (c *SnapshotCache) recordObservation(service string) (known, recorded bool)
 	c.observedDeps[service] = time.Now()
 	// Bump even on a pure timestamp refresh: the memoized expiry horizon
 	// (depSetExpiry) may extend, and a stale horizon would expire this
-	// entry from the served set too early.
+	// entry from the served set too early. Persist for the same reason: the
+	// refresh moved the entry's deadline (issue #701).
 	c.bumpDepGenLocked()
+	c.markObservedDirtyLocked()
 	return known, true
 }
 
@@ -264,6 +266,9 @@ func (c *SnapshotCache) PruneObservedDependencies() {
 	expired, refreshed := c.pruneObservedLocked(now, ttl)
 	if expired > 0 || refreshed > 0 {
 		c.bumpDepGenLocked()
+		// Both change the persisted set: an expiry removes its entry, a
+		// refresh moves its deadline (issue #701).
+		c.markObservedDirtyLocked()
 	}
 	c.depMu.Unlock()
 
