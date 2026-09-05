@@ -49,12 +49,21 @@ func newOnDemandObserver(snapshotCache *cache.SnapshotCache, reg registry.Regist
 }
 
 // Callbacks returns the go-control-plane server callbacks feeding this
-// observer (the agent's proxy speaks delta ADS, so only the delta hook is
-// wired).
+// observer (the agent's proxy speaks delta ADS, so only the delta hooks are
+// wired). The stream-closed hook drops that stream's on-demand subscriptions,
+// which are what exempt an in-use upstream from the idle TTL.
 func (o *onDemandObserver) Callbacks() serverv3.Callbacks {
 	return serverv3.CallbackFuncs{
 		StreamDeltaRequestFunc: o.onDeltaRequest,
+		DeltaStreamClosedFunc:  o.onDeltaStreamClosed,
 	}
+}
+
+// onDeltaStreamClosed forgets every on-demand subscription the ended stream
+// held. The reconnecting proxy re-subscribes from real demand; anything nobody
+// asks for again ages out on the observed-dependency idle TTL.
+func (o *onDemandObserver) onDeltaStreamClosed(streamID int64, _ *corev3.Node) {
+	o.cache.CloseOnDemandStream(streamID)
 }
 
 // onDeltaRequest inspects delta CDS subscriptions for on-demand cluster
@@ -64,34 +73,49 @@ func (o *onDemandObserver) Callbacks() serverv3.Callbacks {
 // the raw authority): the suffix is stripped to the bare service name before
 // it enters the dependency set, and names not under the mesh domain — which
 // the route table shouldn't produce — are dropped, never observed.
-func (o *onDemandObserver) onDeltaRequest(_ int64, req *discoveryv3.DeltaDiscoveryRequest) error {
+// A named subscription is also recorded as a LIVE on-demand subscription for
+// the stream: Envoy holds it for the life of the stream, so it is the agent's
+// evidence the upstream is still in use and exempts the observed dependency
+// from the idle TTL (issue #682). An explicit unsubscribe releases it.
+func (o *onDemandObserver) onDeltaRequest(streamID int64, req *discoveryv3.DeltaDiscoveryRequest) error {
 	if req.GetTypeUrl() != resourcev3.ClusterType {
 		return nil
+	}
+	for _, name := range req.GetResourceNamesUnsubscribe() {
+		o.cache.UntrackOnDemandCluster(streamID, name)
 	}
 	for _, name := range req.GetResourceNamesSubscribe() {
 		if name == "*" || name == "" || proxy.IsPerPodClusterName(name) {
 			continue
 		}
-		service, ok := proxy.ServiceFromClusterName(name, o.cache.MeshDomain())
-		if !ok {
-			o.log.Debug("ignoring on-demand subscription outside the mesh domain", "name", name)
-			continue
-		}
-		// Existence gate: the local service catalog (full mesh index, every
-		// agent) rejects nonexistent services here — no dependency-set
-		// pollution, no watch-filter churn, no reload. The paused request
-		// fails at the on_demand timeout; a service registered moments later
-		// is admitted on the client's retry (catalog events propagate in ms).
-		if cat, hasCatalog := o.registry.(registry.ServiceCatalog); hasCatalog && !cat.HasService(service) {
-			o.log.Info("rejecting on-demand request for unknown service", "service", service)
-			if o.rejected != nil {
-				o.rejected.Add(context.Background(), 1)
-			}
-			continue
-		}
-		o.cache.ObserveDependency(context.Background(), service)
+		o.observeSubscription(streamID, name)
 	}
 	return nil
+}
+
+// observeSubscription maps one named delta CDS subscription to its service key,
+// gates it on the catalog and records it as both an observation (the cold-path
+// dependency) and a live on-demand subscription (the in-use signal).
+func (o *onDemandObserver) observeSubscription(streamID int64, name string) {
+	service, ok := proxy.ServiceFromClusterName(name, o.cache.MeshDomain())
+	if !ok {
+		o.log.Debug("ignoring on-demand subscription outside the mesh domain", "name", name)
+		return
+	}
+	// Existence gate: the local service catalog (full mesh index, every
+	// agent) rejects nonexistent services here — no dependency-set
+	// pollution, no watch-filter churn, no reload. The paused request
+	// fails at the on_demand timeout; a service registered moments later
+	// is admitted on the client's retry (catalog events propagate in ms).
+	if cat, hasCatalog := o.registry.(registry.ServiceCatalog); hasCatalog && !cat.HasService(service) {
+		o.log.Info("rejecting on-demand request for unknown service", "service", service)
+		if o.rejected != nil {
+			o.rejected.Add(context.Background(), 1)
+		}
+		return
+	}
+	o.cache.TrackOnDemandCluster(streamID, name, service)
+	o.cache.ObserveDependency(context.Background(), service)
 }
 
 // combinedCallbacks dispatches every go-control-plane server callback to all

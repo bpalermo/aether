@@ -90,3 +90,52 @@ func TestOnDemandObserver_CatalogGate(t *testing.T) {
 	assert.Contains(t, deps, "team-a/svc-real", "catalog hit is observed")
 	assert.NotContains(t, deps, "team-a/svc-ghost", "catalog miss never pollutes the dependency set")
 }
+
+// TestOnDemandObserver_TracksLiveSubscriptionsForTTLExemption verifies the
+// observer records a named CDS subscription as a LIVE on-demand subscription
+// (the observed-use signal that exempts the dependency from the idle TTL,
+// issue #682), keyed by the requested authority — including the
+// "<fqdn>:<port>" spelling the ODCDS catch-all's cluster_header produces — and
+// releases it on unsubscribe and on stream close.
+func TestOnDemandObserver_TracksLiveSubscriptionsForTTLExemption(t *testing.T) {
+	const (
+		service   = "team-a/echo"
+		authority = "echo.team-a.aether.internal:18081"
+	)
+
+	c := cache.NewSnapshotCache("node-1", slog.New(slog.DiscardHandler))
+	o := newOnDemandObserver(c, &mockRegistry{}, slog.New(slog.DiscardHandler))
+	cb := o.Callbacks()
+
+	require.NoError(t, cb.OnStreamDeltaRequest(7, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl:                resourcev3.ClusterType,
+		ResourceNamesSubscribe: []string{authority},
+	}))
+	assert.Contains(t, c.DependencySet(), service, "the :port authority maps to the bare service key")
+	assert.Contains(t, c.OnDemandServices(), service, "a named subscription is recorded as live use")
+
+	// Explicit unsubscribe releases it.
+	require.NoError(t, cb.OnStreamDeltaRequest(7, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl:                  resourcev3.ClusterType,
+		ResourceNamesUnsubscribe: []string{authority},
+	}))
+	assert.NotContains(t, c.OnDemandServices(), service, "unsubscribe releases the exemption")
+
+	// Re-subscribe, then close the stream: the pin dies with the stream.
+	require.NoError(t, cb.OnStreamDeltaRequest(7, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl:                resourcev3.ClusterType,
+		ResourceNamesSubscribe: []string{authority},
+	}))
+	require.Contains(t, c.OnDemandServices(), service)
+	cb.OnDeltaStreamClosed(7, nil)
+	assert.Empty(t, c.OnDemandServices(), "stream close releases every pin it held")
+
+	// A catalog miss is never pinned (it never reaches the dependency set either).
+	reg := &catalogRegistry{mockRegistry: &mockRegistry{}, known: map[string]bool{}}
+	ghostObserver := newOnDemandObserver(c, reg, slog.New(slog.DiscardHandler))
+	require.NoError(t, ghostObserver.onDeltaRequest(8, &discoveryv3.DeltaDiscoveryRequest{
+		TypeUrl:                resourcev3.ClusterType,
+		ResourceNamesSubscribe: []string{"ghost.team-a.aether.internal:9000"},
+	}))
+	assert.Empty(t, c.OnDemandServices(), "a ghost service can never pin a dependency")
+}

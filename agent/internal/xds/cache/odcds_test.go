@@ -86,3 +86,80 @@ func TestODCDS_DefaultPortAuthorityIsAnsweredInOnePush(t *testing.T) {
 		"the just-dropped cluster must be republished under the requested on-demand name in one push")
 	assert.Contains(t, repaired, fqdn)
 }
+
+// TestObservedDependency_LiveOnDemandSubscriptionSurvivesTTL is the #682
+// TTL-under-load regression test.
+//
+// The observed TTL was refreshed only by an ODCDS request, and an ODCDS request
+// only happens on a MISS — once the cluster is warm the service's own vhost
+// carries the traffic and the on_demand filter is never reached again. So a
+// node serving a cross-node upstream continuously dropped it exactly one hour
+// after first asking for it. The node proxy's LIVE on-demand subscription is
+// the use signal that closes the gap: Envoy holds it for the life of the
+// stream, so while it exists the dependency is refreshed, never expired.
+func TestObservedDependency_LiveOnDemandSubscriptionSurvivesTTL(t *testing.T) {
+	const (
+		service   = "aether-test/echo"
+		authority = "echo.aether-test.aether.internal:18081"
+	)
+
+	ctx := context.Background()
+	c := newTestCache("node-1")
+	c.SetMeshDomain("aether.internal")
+	c.observedTTL = 20 * time.Millisecond
+
+	c.ObserveDependency(ctx, service)
+	c.TrackOnDemandCluster(1, authority, service)
+
+	// Continuous use across several TTL windows: the entry never leaves the
+	// dependency set, neither via the periodic prune nor via the read-time
+	// (memoized) wall-clock expiry between prune ticks.
+	for range 4 {
+		time.Sleep(15 * time.Millisecond)
+		assert.Contains(t, c.DependencySet(), service,
+			"an upstream with a live on-demand subscription must stay in scope between prune ticks")
+		c.PruneObservedDependencies()
+		assert.Contains(t, c.DependencySet(), service,
+			"the idle TTL must be refreshed by observed use, not only by an ODCDS miss")
+	}
+
+	// The stream ends (proxy or agent restart): the pins go with it and the
+	// upstream ages out on the idle TTL like any other — demand scoping intact.
+	c.CloseOnDemandStream(1)
+	time.Sleep(30 * time.Millisecond)
+	c.PruneObservedDependencies()
+	assert.NotContains(t, c.DependencySet(), service,
+		"a genuinely idle upstream still expires once no live subscription holds it")
+}
+
+// TestObservedDependency_UnsubscribeReleasesTheTTLExemption verifies an explicit
+// unsubscribe releases the exemption, while a second live subscription for the
+// same service (another authority spelling of it) keeps it.
+func TestObservedDependency_UnsubscribeReleasesTheTTLExemption(t *testing.T) {
+	const (
+		service  = "aether-test/echo"
+		portless = "echo.aether-test.aether.internal"
+		withPort = portless + ":18081"
+	)
+
+	ctx := context.Background()
+	c := newTestCache("node-1")
+	c.SetMeshDomain("aether.internal")
+	c.observedTTL = 20 * time.Millisecond
+
+	c.ObserveDependency(ctx, service)
+	c.TrackOnDemandCluster(1, portless, service)
+	c.TrackOnDemandCluster(1, withPort, service)
+
+	// One spelling released: the other still holds the service in use.
+	c.UntrackOnDemandCluster(1, withPort)
+	time.Sleep(30 * time.Millisecond)
+	c.PruneObservedDependencies()
+	require.Contains(t, c.DependencySet(), service, "a remaining live subscription keeps the exemption")
+
+	// Both released: the service expires on the next tick past the TTL.
+	c.UntrackOnDemandCluster(1, portless)
+	time.Sleep(30 * time.Millisecond)
+	c.PruneObservedDependencies()
+	assert.NotContains(t, c.DependencySet(), service)
+}
