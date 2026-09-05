@@ -1,0 +1,148 @@
+name: main-post-merge
+
+# Post-merge validation of `main` (issue #679).
+#
+# `ci.yaml` validates a PR *head* against that PR's merge-base. That is the right
+# scope for the PR's own change, but it is structurally blind to the combination
+# of two concurrently-open PRs: the combined state does not exist anywhere until
+# the second merge creates it, and until this workflow existed nothing looked at
+# it. (Instance: #671 and #672 each registered CNI metrics against a base that
+# did not contain the other; the squash of the second put `newCNIMetrics` at
+# gocognit 16 against a limit of 15 on `main`, and the violation only surfaced
+# days later on the unrelated PRs #676/#677.)
+#
+# So: on every push to `main`, re-run the same build+lint+unit-test leg `ci.yaml`
+# runs, with the impact set computed as **the merge commit vs its first parent**
+# (`HEAD^`) — i.e. exactly what this merge added to `main`, evaluated against the
+# tree that now exists. `scripts/ci-impacted-targets.sh` falls back to a full
+# `//...` build+test whenever bazel-diff cannot compute the set (no parent,
+# unreachable base, tool failure), so `main` is never silently under-validated.
+#
+# This is a detector, not a preventer: it turns the skew into a red `main` run
+# instead of a mystery failure on a bystander PR. Branch protection's
+# `required_status_checks.strict` (require branches up to date before merging) is
+# what actually prevents the bad merge.
+#
+# Nothing here is a required status check — `ci` (from `ci.yaml`) remains the only
+# one, and this workflow deliberately does not touch the pull_request path.
+# Integration and e2e are not repeated here: `e2e.yaml` already covers `main`
+# pushes, and the integration leg is bounded by the same PR scope this job
+# re-derives.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  # Same bazel-diff analysis as ci.yaml's `diff` job, but based on the merge
+  # commit's first parent instead of a PR merge-base. Analysis only — no
+  # BuildBuddy key needed here.
+  #
+  # No coarse `paths-filter` scoping (unlike ci.yaml): there is no required check
+  # to keep reporting here, and a proxy-only merge naturally yields an empty
+  # impact set, because proxy/ is a sibling Bazel workspace outside `//...`.
+  diff:
+    runs-on: ubuntu-latest
+    outputs:
+      has_any: ${{ steps.impacted.outputs.has_any }}
+      has_unit: ${{ steps.impacted.outputs.has_unit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          # Full history so the first parent is reachable for the diff.
+          fetch-depth: 0
+      - name: Resolve first parent
+        id: base
+        run: |
+          # A merge/squash commit's first parent is the previous tip of main, so
+          # HEAD^..HEAD is precisely what this merge introduced. An empty value
+          # makes the script fall back to a full run (root commit, shallow clone).
+          if base="$(git rev-parse --verify -q 'HEAD^')"; then
+            echo "sha=$base" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::HEAD has no first parent; falling back to a full //... run"
+            echo "sha=" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Download bazel-diff
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/bazel-diff.jar" \
+            https://github.com/Tinder/bazel-diff/releases/download/v26.0.1/bazel-diff_deploy.jar
+      - name: Compute impacted targets
+        id: impacted
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          BAZEL_DIFF_JAR: ${{ runner.temp }}/bazel-diff.jar
+          OUT_DIR: ${{ runner.temp }}/bazel-diff-out
+        run: |
+          # Run from a copy outside the tree: the script git-checkouts the base and
+          # head revisions, which would otherwise swap the script file mid-run.
+          cp scripts/ci-impacted-targets.sh "$RUNNER_TEMP/impacted.sh"
+          bash "$RUNNER_TEMP/impacted.sh"
+      - name: Upload impacted target lists
+        uses: actions/upload-artifact@v7
+        with:
+          name: impacted-targets-main
+          path: ${{ runner.temp }}/bazel-diff-out/impacted_*.txt
+          if-no-files-found: error
+
+  # Byte-for-byte the same legs as ci.yaml's `test` job: build every impacted
+  # target (compile + lint on BuildBuddy RBE), run the impacted unit tests
+  # (--config=ci implies --config=remote, which pins TestRunner to the local
+  # strategy — tests must NOT run remotely), then the proxy-ready linkage guard.
+  test:
+    needs: diff
+    if: needs.diff.outputs.has_any == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+      - name: Download impacted target lists
+        uses: actions/download-artifact@v7
+        with:
+          name: impacted-targets-main
+          path: ${{ runner.temp }}/impacted
+      - name: Build impacted targets
+        run: |
+          bazel build --config=ci \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.ref_name }} \
+            --target_pattern_file=${{ runner.temp }}/impacted/impacted_build.txt
+      - name: Unit tests
+        if: needs.diff.outputs.has_unit == 'true'
+        run: |
+          bazel test --config=ci \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --target_pattern_file=${{ runner.temp }}/impacted/impacted_unit.txt
+      # #673: the aether-proxy readiness probe must stay a stdlib-only binary —
+      # its entire value is what it does NOT link (package init() runs before
+      # main(), so a heavy import costs every pod every 2s and no argv check can
+      # avoid it). //agent/cmd/proxy-ready:deps_test asserts this on the linked
+      # ELF; this is the build-graph half, which fails on a forbidden dependency
+      # even before the linker drops it as unreachable. Analysis-only and cheap —
+      # the query runs against the cache the build step above just warmed.
+      - name: Guard proxy-ready linkage
+        run: scripts/check-proxy-ready-deps.sh --config=ci
