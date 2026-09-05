@@ -4,26 +4,26 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
-	"github.com/go-logr/logr"
 	"github.com/google/renameio/v2"
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-var installLog = ctrl.Log.WithName("installer")
-
+// Installer copies the CNI plugin binaries onto the host and chains the aether
+// entry into the node's CNI conflist.
+//
+// Every line the installer emits goes through its own logger: the package used
+// to log part of the install through controller-runtime's global logger, which
+// nothing in cni/ ever binds, so those records were discarded (issue #696).
 type Installer struct {
 	cfg    *InstallerConfig
-	logger logr.Logger
-}
-
-func init() {
+	logger *slog.Logger
 }
 
 // NewInstaller returns an instance of Installer with the given config
-func NewInstaller(logger logr.Logger, cfg *InstallerConfig) *Installer {
+func NewInstaller(logger *slog.Logger, cfg *InstallerConfig) *Installer {
 	return &Installer{
 		cfg,
 		logger,
@@ -31,13 +31,13 @@ func NewInstaller(logger logr.Logger, cfg *InstallerConfig) *Installer {
 }
 
 func (in *Installer) Run(ctx context.Context) error {
-	in.logger.Info("running CNI installer")
+	in.logger.InfoContext(ctx, "running CNI installer")
 	installedBins, err := in.installAll(ctx)
 	if err != nil {
 		return err
 	}
 
-	in.logger.Info("CNI binaries installed", "binaries", installedBins)
+	in.logger.InfoContext(ctx, "CNI binaries installed", "binaries", installedBins)
 	return nil
 }
 
@@ -53,7 +53,7 @@ func (in *Installer) installAll(ctx context.Context) ([]string, error) {
 	// No kubeconfig is needed: the Aether CNI plugin delegates Kubernetes API
 	// access to the node agent via gRPC over Unix domain socket.
 
-	_, err = createCNIConfigFile(ctx, in.cfg)
+	_, err = createCNIConfigFile(ctx, in.logger, in.cfg)
 	if err != nil {
 		return copiedFiles, fmt.Errorf("create CNI config file: %v", err)
 	}
@@ -108,7 +108,7 @@ func (in *Installer) copyFileAtomic(src, dst string) error {
 	defer func(srcFile *os.File) {
 		err := srcFile.Close()
 		if err != nil {
-			in.logger.Error(err, "failed to close source file")
+			in.logger.Error("failed to close source file", "error", err)
 		}
 	}(srcFile)
 
@@ -126,7 +126,7 @@ func (in *Installer) copyFileAtomic(src, dst string) error {
 	defer func(t *renameio.PendingFile) {
 		err := t.Cleanup()
 		if err != nil {
-			in.logger.Error(err, "failed to cleanup temp file")
+			in.logger.Error("failed to cleanup temp file", "error", err)
 		}
 	}(t)
 

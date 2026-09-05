@@ -202,15 +202,40 @@ the `HTTPFilter` CRD exists** (it watches that type at startup); installing the
 `crds` chart first avoids the race (see #453).
 
 ```bash
+# The commit you intend to deploy (the `publish` run that built it), plus each
+# chart's X.Y.Z from its charts/<name>/Chart.yaml at that commit.
+COMMIT=<full 40-char git sha>
+CRDS_VERSION=<X.Y.Z>-$COMMIT
+AETHER_VERSION=<X.Y.Z>-$COMMIT
+
 # 1) CRDs first
 helm upgrade --install aether-crds oci://ghcr.io/bpalermo/aether/charts/crds \
-  --version "$VERSION"
+  --version "$CRDS_VERSION"
 
-# 2) then the system
+# 2) then the system. Prefer this commit-pinned chart tag over the bare
+#    `--version <X.Y.Z>`: the bare tag is mutable and re-pushed by every publish,
+#    the commit tag never is (#692).
 helm upgrade --install aether oci://ghcr.io/bpalermo/aether/charts/aether \
-  --version "$VERSION" -n aether-system --create-namespace \
+  --version "$AETHER_VERSION" -n aether-system --create-namespace \
   --set clusterName=my-cluster --set meshDomain=aether.internal
+
+# 3) ALWAYS assert what actually landed. The chart's appVersion is the commit
+#    that built it, so this is the only check that catches a chart tag serving
+#    a different build than you asked for — which happened on 2026-09-05, when
+#    two racing publishes wrote the same bare tag and the older build won,
+#    silently deploying a release without #689 in it (#692).
+got="$(helm get metadata -n aether-system aether -o json | jq -r .appVersion)"
+case "$got" in
+  *"$COMMIT"*) echo "deployed $got — OK" ;;
+  *) echo "DEPLOY MISMATCH: appVersion=$got, expected $COMMIT" >&2; exit 1 ;;
+esac
 ```
+
+`appVersion` is the chart's `{STABLE_GIT_VERSION}` — `git describe --tags --always
+--long --dirty --abbrev=40` — so the full sha is embedded in it but may carry a
+`v1.2.3-N-g` prefix or a `-dirty` suffix; hence the substring match rather than
+string equality. If it fails, the chart tag you pulled was built from a different
+commit: re-run that commit's `publish` workflow and upgrade again.
 
 From a checkout, the Bazel install targets do the same in order:
 
@@ -341,7 +366,9 @@ Note: the stream labels on these logs are the dotted OTel resource fields (`serv
 returns a FALSE ZERO — control-test any negative by dropping the selector.
 
 # Same, as a counter: zero at steady state, any increase is the #638 defect.
-sum by (k8s_node_name) (aether_agent_identity_outbound_binding_mismatch_total)
+# increase(), never a raw read — the raw value is per-process (an agent restart
+# resets it) and an instant query lands between samples and false-zeroes.
+sum by (k8s_node_name) (increase(aether_agent_identity_outbound_binding_mismatch_total[1h]))
 ```
 
 Join the `snapshot_version` on the WARN with the first

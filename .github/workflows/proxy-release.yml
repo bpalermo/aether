@@ -16,6 +16,18 @@ on:
 permissions:
   contents: read
 
+# Serialise proxy releases for the same reason as `publish` (#692): the
+# `bump-chart` job rewrites `charts/aether/values.yaml` on top of whatever `main`
+# is at checkout time and force-pushes the single rolling `chore/proxy-image-bump`
+# branch, so two overlapping runs race on that shared branch and the loser's image
+# pin is silently dropped. `cancel-in-progress: false` because each run publishes
+# a distinct, commit-SHA-tagged multi-arch image that nothing else will republish;
+# cancelling one would leave per-arch blobs pushed with no manifest referencing
+# them.
+concurrency:
+  group: proxy-release-main
+  cancel-in-progress: false
+
 # No CARGO_BAZEL_REPIN. Under WORKSPACE it was unavoidable — @envoy's
 # bazel/dependency_imports_extra.bzl has a top-level
 # `load("@envoy_rust_crate_index//:defs.bzl", ...)`, so WORKSPACE evaluation
