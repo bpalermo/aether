@@ -281,10 +281,10 @@ proxy:
   # commit SHA. Mirror by overriding `repository`.
   image:
     repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: 4212e13aa585add5d3884903e32a3c85cac796c5
+    tag: 51ba12979d545bcde021d81ef9151355db7c6a07
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Envoy v1.39.0 multi-arch index (#534).
-    digest: "sha256:a749fcce573a1d93822dc9f36a6e287e30a01fbaed6eaca8f2aaa30b91a74924"
+    # helper prefers digest over tag. Multi-arch index for 51ba12979d545bcde021d81ef9151355db7c6a07.
+    digest: "sha256:9e401334408d8f87d59d0c409d957553d56938fb373b258eab002d3e655bd8a3"
     pullPolicy: Always
   logLevel: info
   # Emit Envoy's own application logs as one JSON object per line (bootstrap
