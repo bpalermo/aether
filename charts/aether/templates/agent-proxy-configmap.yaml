@@ -159,6 +159,30 @@ data:
         # guarded by
         # //source/extensions/filters/http/aether_stats:tag_extraction_test in
         # the proxy workspace.
+      #
+      # ⚠ COUNTER VALUES ARE PER-GENERATION — labels survive a hot restart, the
+      # absolute value does not, and that is by design (aether#708, measured
+      # 2026-09-05).
+      #   * The hot restart parent ships `counter.latch()` — the increment
+      #     PENDING since its last stats flush — and StatMerger `.add()`s it.
+      #     Gauges transfer absolute; counters transfer as DELTAS.
+      #   * The parent has been latching that pending increment away every
+      #     `stats_flush_interval` for its whole life (5s default; deliberately
+      #     unset here), so the child inherits only the last ≤5s of the
+      #     parent's traffic — on talos-main every first post-restart sample
+      #     was < 1 minute of that node's rate.
+      #   * The OTel sink then exports `counter.value()` as CUMULATIVE with
+      #     `start_time_unix_nano` = THIS process's start, i.e. an honest new
+      #     cumulative series per Envoy generation. Plain
+      #     `envoy_cluster_upstream_cx_total` resets in exactly the same
+      #     buckets — this is not aether_stats-specific.
+      # RULE for every dashboard, alert, query and soak script: NEVER read a
+      # raw counter value (no `sum(aether_requests_total)`); always
+      # `rate(...[5m])` / `increase(...[$__range])`, which are correct across
+      # the reset. Making values continuous was rejected: `report_counters_as_
+      # deltas` is sink-wide and the collector runs 2 replicas behind one
+      # Service, so two stateful delta→cumulative converters would each see
+      # half of a series.
       stats_matcher:
         exclusion_list:
           patterns:

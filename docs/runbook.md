@@ -341,7 +341,9 @@ Note: the stream labels on these logs are the dotted OTel resource fields (`serv
 returns a FALSE ZERO — control-test any negative by dropping the selector.
 
 # Same, as a counter: zero at steady state, any increase is the #638 defect.
-sum by (k8s_node_name) (aether_agent_identity_outbound_binding_mismatch_total)
+# increase(), never a raw read — the raw value is per-process (an agent restart
+# resets it) and an instant query lands between samples and false-zeroes.
+sum by (k8s_node_name) (increase(aether_agent_identity_outbound_binding_mismatch_total[1h]))
 ```
 
 Join the `snapshot_version` on the WARN with the first

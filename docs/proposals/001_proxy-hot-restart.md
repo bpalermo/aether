@@ -46,7 +46,7 @@ Keep **one long-lived proxy Pod** whose supervisor is the stable entrypoint, and
 
 - **Pros:** simplest possible — textbook hot restart, no Kubernetes surgery, no surge scheduling.
 - **Cons:** upgrades only the **Envoy binary + bootstrap config**, not the proxy container image (base-layer CVEs, supervisor changes still need a real roll).
-- **Why we spike this first:** it is the minimal proof that the supervisor + hot-restart handoff actually works (epoch increments, zero dropped connections, stat continuity). The binary-delivery-without-pod-replacement mechanism (a host-local push of a versioned binary that the supervisor watches) is **production-A** and is *not* part of the spike — the spike triggers the handoff via a watched bootstrap-config change / SIGHUP, which exercises the identical code path.
+- **Why we spike this first:** it is the minimal proof that the supervisor + hot-restart handoff actually works (epoch increments, zero dropped connections, dip-free stat *rates* across the handoff). The binary-delivery-without-pod-replacement mechanism (a host-local push of a versioned binary that the supervisor watches) is **production-A** and is *not* part of the spike — the spike triggers the handoff via a watched bootstrap-config change / SIGHUP, which exercises the identical code path.
 
 ### Spike packaging (A)
 
@@ -82,10 +82,27 @@ node, before:   [old Pod: supervisor → envoy epoch 5]   serving, listeners bou
 4. envoy(6) pulls listen-socket FDs + stats from envoy(5), starts listening, signals envoy(5) to drain.
 5. new Pod becomes Ready (readiness gate fires only after handoff completes).
 6. DaemonSet, seeing new Ready, deletes old Pod; old supervisor SIGTERMs envoy(5) after drain, exits 0.
-node, after:    [new Pod: supervisor → envoy epoch 6]   no dropped connection, stats carried over
+node, after:    [new Pod: supervisor → envoy epoch 6]   no dropped connection, listen FDs + gauges carried over
 ```
 
-- **Pros:** real container-image upgrade, zero dropped connections, stat continuity, **native rollout, no standing extra cost**.
+> **What "carried over" means for stats.** Listen-socket FDs and **gauges**
+> transfer with their absolute values. **Counters do not**: the parent ships
+> `counter.latch()` — the increment *pending since its last stats flush* — and
+> `StatMerger::mergeCounters` `.add()`s that delta onto the child's counter.
+> Since the parent has been latching every `stats_flush_interval` (5s default;
+> `charts/aether` sets none) for its whole life, the child inherits only the
+> last ≤5s of traffic. Measured on talos-main 2026-09-05 across one
+> `rollout restart ds/aether-proxy`: per node `139047→683`, `266735→1559`,
+> `131812→339`, `259710→379`, `266301→1147`, each then resuming at its exact
+> prior slope — every first post-restart sample is **< 1 minute of that node's
+> traffic**, i.e. delta semantics exactly (a merge that was *not* running would
+> floor at 0 with no residual). Plain `envoy_cluster_upstream_cx_total` resets
+> in the same buckets, so this is generic Envoy behaviour, not `aether_stats`.
+> With a cumulative OTLP exporter each Envoy generation is an honest new
+> cumulative series: **never read a raw counter across a roll — `rate()` /
+> `increase()` only** (aether#708).
+
+- **Pros:** real container-image upgrade, zero dropped connections, delta-preserving stats handoff, **native rollout, no standing extra cost**.
 - **Cons / spike-must-prove:**
   - **Admin port handoff** — both Envoys want `127.0.0.1:9901` in host netns; Envoy passes the admin listener FD via the same transfer, but verify.
   - **Epoch edge case** — if the predecessor is gone (reboot/crash), the file says `5` but no epoch-5 process exists; starting at `6` hangs waiting for a parent. The supervisor must probe for a live predecessor and **reset to epoch 0** when absent.
@@ -126,7 +143,7 @@ C is the end state once an Istio-grade proxy-upgrade operator is justified — n
 
 ## Validation (talos-main)
 
-- **Stats proof:** after a trigger, `server.hot_restart_generation` / `server.hot_restarts` increments and counters carry over (`curl :9901/stats`).
+- **Stats proof:** after a trigger, `server.hot_restart_generation` / `server.hot_restarts` increments, gauges carry over with their absolute values, and counters carry over **as deltas only** — the child starts from the parent's post-flush residual (≤ one `stats_flush_interval` of traffic), not its lifetime total (`curl :9901/stats`). Assert *rate* continuity (`sum(rate(aether_requests_total[5m]))` shows no dip and no spike through the roll), never value monotonicity.
 - **Zero-drop proof:** hold a long-lived streaming request through the mesh across a triggered restart; assert no reset. Re-run the mesh e2e (200 + XFCC URI SAN) against epoch *N+1*.
 - **Binary-upgrade proof (A):** swap the Envoy binary on the shared volume and trigger; new epoch serves, old drains.
 - **Image-upgrade proof (B):** roll the DaemonSet image with `maxSurge=1`; confirm overlap + handoff + zero drop.
@@ -174,4 +191,4 @@ Production binary-delivery for A, the Strategy C operator, agent→supervisor RP
 
 ## Exit Criteria → Decision
 
-**A is GREEN** if a triggered hot restart shows an incremented `hot_restart_generation`, zero dropped in-flight connections, and stat continuity on talos-main. That unblocks building **B**, whose own exit criterion is a connection-preserving DaemonSet image roll. Go/no-go on the whole effort: does bootstrap-change + image-upgrade continuity justify the supervisor (A) and the surge/coordination machinery (B)?
+**A is GREEN** if a triggered hot restart shows an incremented `hot_restart_generation`, zero dropped in-flight connections, and *rate* continuity of the stats on talos-main (gauges carry over absolute; counters carry over as deltas, so the criterion is a dip-free `rate()`/`increase()` across the handoff, not an unbroken counter value — see the note under Strategy B). That unblocks building **B**, whose own exit criterion is a connection-preserving DaemonSet image roll. Go/no-go on the whole effort: does bootstrap-change + image-upgrade continuity justify the supervisor (A) and the surge/coordination machinery (B)?
