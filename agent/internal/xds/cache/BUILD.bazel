@@ -73,6 +73,7 @@ go_test(
         "listener_test.go",
         "meshdns_snapshot_test.go",
         "mtls_cache_test.go",
+        "odcds_test.go",
         "outbound_mtls_test.go",
         "races_test.go",
         "route_memo_test.go",

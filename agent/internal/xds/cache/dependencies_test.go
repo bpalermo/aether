@@ -436,9 +436,20 @@ func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 		port.loadAssignment.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress())
 	assert.Equal(t, "ns/svc-mp", port.service, "per-port cluster maps back to the service key (SAN/retention)")
 
-	// No spurious :8080 (default) port cluster — the default vhost owns it.
-	_, has8080 := c.clusters["svc-mp.ns.aether.internal:8080"]
-	assert.False(t, has8080, "default port is not a separate cluster")
+	// The DEFAULT port also gets a cluster — the cold-path alias (#682). It owns
+	// no vhost (the default entry's vhost already claims the ":8080" domain) and
+	// no load assignment of its own (it shares the bare-service EDS), it exists
+	// purely so the ODCDS catch-all's cluster_header ":authority" resolves for a
+	// client dialing the service on its default port.
+	alias, hasAlias := c.clusters["svc-mp.ns.aether.internal:8080"]
+	require.True(t, hasAlias, "default-port authority must resolve to a cluster (ODCDS cold path)")
+	assert.Equal(t, "svc-mp.ns.aether.internal:8080", alias.cluster.GetName())
+	assert.Equal(t, "ns/svc-mp", alias.cluster.GetEdsClusterConfig().GetServiceName(),
+		"the alias shares the default cluster's bare-service EDS")
+	assert.Nil(t, alias.vhost, "the default entry's vhost already owns the :8080 domain")
+	assert.Nil(t, alias.loadAssignment, "the alias publishes no second load assignment")
+	assert.Equal(t, "ns/svc-mp", alias.service, "the alias maps back to the service key (SAN/retention)")
+	assert.Equal(t, "8080", alias.sni)
 }
 
 // TestDependencySet_IncludesGammaRouteTargets verifies a GAMMA route TARGET (an

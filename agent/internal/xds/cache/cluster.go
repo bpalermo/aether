@@ -333,6 +333,8 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 		sni:            strconv.Itoa(int(defaultPort)),
 	}
 
+	c.buildDefaultPortAliasLocked(serviceName, fqdn, defaultPort, sanNamespaces, sortedKeys)
+
 	// One cluster per non-default advertised port.
 	for port, b := range buckets {
 		portName := proxy.PortClusterName(serviceName, c.meshDomain, port)
@@ -348,6 +350,53 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 			service:        serviceName,
 			sni:            strconv.Itoa(int(port)),
 		}
+	}
+}
+
+// buildDefaultPortAliasLocked stores the cold-path alias cluster for a service's
+// DEFAULT port: "<fqdn>:<defaultPort>". Caller must hold clusterMu.
+//
+// The ODCDS catch-all resolves its cluster from the request :authority
+// (onDemandClusterHeader), and a client addressing a service on a non-80 port
+// sends "<fqdn>:<port>" as the authority. For every NON-default port that name
+// is a real per-port cluster; for the default port it was nothing at all — the
+// portless "<fqdn>" cluster carries the traffic and buildHTTPEndpointBuckets
+// deliberately skips the default port. So an on-demand request for a
+// default-port authority named a cluster the agent could never publish.
+//
+// That is not merely a slow cold path, it is a permanent wedge (issue #682):
+// go-control-plane only lists a name in a wildcard delta response's
+// removed_resources if it had previously RETURNED it, so the agent never tells
+// Envoy the name does not exist either. Envoy keeps it in its delta
+// subscription state as "waiting for server" forever and dedupes every later
+// on-demand subscribe for it, so once the service leaves the dependency set and
+// its vhost disappears, no ODCDS request ever reaches the agent again: every
+// request to that authority fails until the ADS stream resets.
+//
+// The alias fixes the name gap at the source — every mesh authority the
+// catch-all can produce for an in-scope service now resolves to a real cluster,
+// and an ODCDS miss is answered by the very next snapshot push. It shares the
+// default cluster's bare-service EDS (same endpoints, same SAN pinning, same
+// SNI) and carries NO vhost of its own: the default entry's vhost already
+// claims the "<fqdn>:<port>" domain, and a second vhost with that domain would
+// be a duplicate-domain RDS reject. Node proxies only — the edge serves an
+// explicit exposed set with no ODCDS catch-all (see BuildEdgeRouteConfiguration).
+func (c *SnapshotCache) buildDefaultPortAliasLocked(serviceName, fqdn string, defaultPort uint32, sanNamespaces, sortedKeys []string) {
+	if c.edge || fqdn == "" {
+		return
+	}
+	alias := proxy.PortClusterName(serviceName, c.meshDomain, defaultPort)
+	if alias == "" {
+		return
+	}
+	c.clusters[alias] = clusterEntry{
+		// EDS resource name is the BARE service (not the alias): the alias is the
+		// same endpoint set as the default cluster, so it must not publish a
+		// second, duplicate load assignment.
+		cluster:       proxy.NewServiceCluster(alias, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
+		sanNamespaces: sanNamespaces,
+		service:       serviceName,
+		sni:           strconv.Itoa(int(defaultPort)),
 	}
 }
 
@@ -498,8 +547,14 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 		}
 		if entry.absentSince.IsZero() {
 			entry.absentSince = now
-			entry.loadAssignment = proxy.NewClusterLoadAssignment(name)
-			entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
+			// The default-port alias publishes no load assignment of its own (it
+			// shares the default cluster's bare-service EDS); synthesizing an empty
+			// one here would emit an orphan CLA under the alias name that nothing
+			// references.
+			if entry.loadAssignment != nil {
+				entry.loadAssignment = proxy.NewClusterLoadAssignment(name)
+				entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
+			}
 			c.log.InfoContext(ctx, "service disappeared from registry; retaining empty cluster/vhost for grace period",
 				"service", name, "grace", c.retentionGrace().String())
 		} else if now.Sub(entry.absentSince) > c.retentionGrace() {
