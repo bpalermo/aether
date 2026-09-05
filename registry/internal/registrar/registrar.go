@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,21 @@ const (
 	maxBackoff = 30 * time.Second
 	// jitterFraction is the fraction of backoff to randomize (0.0–1.0).
 	jitterFraction = 0.2
+	// goawayNoErrorDetail is how grpc-go renders a server-initiated, graceful
+	// HTTP/2 GOAWAY in the status message of the Unavailable error the stream
+	// dies with. From google.golang.org/grpc/internal/transport/http2_client.go:
+	//
+	//	status.Newf(codes.Unavailable, "closing transport due to: %v, received prior goaway: %v", err, goAwayDebugMessage)
+	//	goAwayDebugMessage = fmt.Sprintf("code: %s", f.ErrCode)          // no debug data
+	//	goAwayDebugMessage = fmt.Sprintf("code: %s, debug data: %q", …)  // with debug data
+	//
+	// grpc-go exposes the GOAWAY code nowhere structurally — the status carries
+	// no details, and internal/transport is not importable — so matching this
+	// substring on the status message is the discriminator. grpc-go's own
+	// test/goaway_test.go asserts against the same literal, and the unit test
+	// in this package pins it against real grpc-go output rather than a
+	// hand-written string.
+	goawayNoErrorDetail = "received prior goaway: code: NO_ERROR"
 )
 
 // Config holds configuration for connecting to the Registrar service.
@@ -486,8 +502,12 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		r.log.DebugContext(ctx, "watch stream connected", "filtered", services != nil, "filterServices", len(services))
 		r.signalReconnect()
 
-		lastVersion = r.processStream(ctx, stream, lastVersion)
+		var failure error
+		lastVersion, failure = r.processStream(ctx, stream, lastVersion)
 		streamCancel()
+		if failure != nil && !r.failStream(ctx, "watch stream disconnected, retrying", failure, &backoff) {
+			return
+		}
 	}
 }
 
@@ -519,10 +539,18 @@ func (r *RegistrarRegistry) recoverStreamOpen(ctx context.Context, err error, ca
 		return true
 	}
 
+	return r.failStream(ctx, "failed to start watch stream, retrying", err, backoff)
+}
+
+// failStream applies the failure path shared by both stream-loss shapes: count
+// the failure, log it at ERROR, then sleep the current backoff with jitter and
+// double it for the next attempt. It reports whether the loop should keep
+// watching (false = the context ended while waiting, i.e. shutdown).
+func (r *RegistrarRegistry) failStream(ctx context.Context, msg string, err error, backoff *time.Duration) bool {
 	r.metrics.streamFailed(ctx)
 	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
 	wait := *backoff + jitter
-	r.log.ErrorContext(ctx, "failed to start watch stream, retrying", "error", err, "backoff", wait)
+	r.log.ErrorContext(ctx, msg, "error", err, "backoff", wait)
 	select {
 	case <-ctx.Done():
 		return false
@@ -532,9 +560,24 @@ func (r *RegistrarRegistry) recoverStreamOpen(ctx context.Context, err error, ca
 	return true
 }
 
+// isServerDrainGoaway reports whether err is an established stream ending
+// because the server drained itself: a graceful, server-initiated GOAWAY with
+// NO_ERROR, which is exactly what a registrar Deployment roll produces
+// (GracefulStop on SIGTERM). The agent reconnects to a surviving replica
+// immediately, so this is a handoff, not a failure (issue #718).
+func isServerDrainGoaway(err error) bool {
+	if status.Code(err) != codes.Unavailable {
+		return false
+	}
+	return strings.Contains(status.Convert(err).Message(), goawayNoErrorDetail)
+}
+
 // processStream reads events from the stream and updates the local cache.
-// It returns the last version seen, for use as a resume token.
-func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string) string {
+// It returns the last version seen, for use as a resume token, and the error
+// the stream ended with when that end was a genuine failure (nil when it was
+// an expected end: EOF, our own shutdown or filter re-assert, a forced resync,
+// or a server drain — see handleStreamError).
+func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string) (string, error) {
 	snapshotCleared := false
 	// Catalog replay: SERVICE_ADDED events before SNAPSHOT_COMPLETE rebuild
 	// the service set, swapped in at the marker — but only when the server
@@ -567,27 +610,42 @@ func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv
 	}
 }
 
-// handleStreamError classifies a stream.Recv error and returns the appropriate resume token.
-func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, lastVersion string) string {
-	// DataLoss means the registrar force-resynced this watcher (its
-	// event buffer overflowed). Resuming from lastVersion could skip
-	// the missed events — batches share a version, so lastVersion may
-	// match the current version while events were still dropped. Clear
-	// the resume token so the reconnect receives a full snapshot.
-	if status.Code(err) == codes.DataLoss {
+// handleStreamError classifies a stream.Recv error and returns the appropriate
+// resume token plus the error to fail on — nil for every end that is not a
+// failure, so the caller neither logs at ERROR, nor counts watch_errors, nor
+// pays the reconnect backoff.
+func (r *RegistrarRegistry) handleStreamError(ctx context.Context, err error, lastVersion string) (string, error) {
+	switch {
+	case status.Code(err) == codes.DataLoss:
+		// DataLoss means the registrar force-resynced this watcher (its
+		// event buffer overflowed). Resuming from lastVersion could skip
+		// the missed events — batches share a version, so lastVersion may
+		// match the current version while events were still dropped. Clear
+		// the resume token so the reconnect receives a full snapshot.
 		r.log.InfoContext(ctx, "registrar forced a resync; requesting full snapshot on reconnect")
-		return ""
-	}
-	if status.Code(err) == codes.Canceled && ctx.Err() == nil {
+		return "", nil
+
+	case status.Code(err) == codes.Canceled && ctx.Err() == nil:
 		// The stream was cancelled locally (SetServiceFilter
 		// re-asserting a changed filter), not a registrar failure.
 		r.log.DebugContext(ctx, "watch stream ended for filter re-assertion")
-		return lastVersion
+		return lastVersion, nil
+
+	case err == io.EOF || ctx.Err() != nil:
+		// A clean end of stream, or our own shutdown: the cancellation IS
+		// the shutdown (kept quiet by #712).
+		return lastVersion, nil
+
+	case isServerDrainGoaway(err):
+		// The registrar is draining for a roll and sent a graceful GOAWAY;
+		// the surviving replica is already there. Announce the handoff, but
+		// reconnect straight away: no ERROR, no watch_errors, no backoff
+		// (issue #718).
+		r.log.InfoContext(ctx, "watch stream closed by server drain; reconnecting", "server_drain", true, "error", err)
+		return lastVersion, nil
 	}
-	if err != io.EOF && ctx.Err() == nil {
-		r.log.ErrorContext(ctx, "watch stream disconnected", "error", err)
-	}
-	return lastVersion
+
+	return lastVersion, err
 }
 
 // handleCatalogEvent processes SERVICE_ADDED, SERVICE_REMOVED, and SNAPSHOT_COMPLETE

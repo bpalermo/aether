@@ -59,6 +59,12 @@ type Metrics struct {
 	// SPIFFE ID (issue #638). Non-zero means the node's egress would present a
 	// co-located workload's SVID on that pod's behalf.
 	bindingMismatch metric.Int64Counter
+	// inboundBindingMismatch counts local pods whose INBOUND filter chains are
+	// bound to an SDS server-certificate secret that is NOT that pod's own
+	// SPIFFE ID (issue #638). Non-zero means the node would TERMINATE mesh mTLS
+	// for that pod while presenting a co-located workload's SVID — which is
+	// exactly what a caller's ssl_fail_verify_san rejects.
+	inboundBindingMismatch metric.Int64Counter
 }
 
 // New registers the snapshot instruments on the given meter.
@@ -111,6 +117,20 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Local source pods whose outbound clusters are bound to another workload's SDS client-certificate secret")); err != nil {
 		return nil, fmt.Errorf("outbound binding mismatch: %w", err)
 	}
+	if m.inboundBindingMismatch, err = meter.Int64Counter("aether.agent.identity.inbound_binding_mismatch",
+		metric.WithDescription("Inbound filter chains bound to another workload's SDS server-certificate secret")); err != nil {
+		return nil, fmt.Errorf("inbound binding mismatch: %w", err)
+	}
+
+	// Seed the two #638 discriminator counters at zero. The OTel SDK exports a
+	// counter only after its first Add, so a counter that is never incremented
+	// (the healthy case for both of these) never appears in Prometheus at all —
+	// and "no series" is indistinguishable from "zero" to a grading query.
+	// Seeding makes a live zero visible and lets increase()/rate() work from
+	// process start. Observed on talos-main rev200: neither series existed.
+	ctx := context.Background()
+	m.bindingMismatch.Add(ctx, 0)
+	m.inboundBindingMismatch.Add(ctx, 0)
 
 	return m, nil
 }
@@ -124,6 +144,18 @@ func (m *Metrics) OutboundBindingMismatch(ctx context.Context, n int64) {
 		return
 	}
 	m.bindingMismatch.Add(ctx, n)
+}
+
+// InboundBindingMismatch counts n inbound filter chains found bound to a
+// foreign server certificate in one snapshot generation (issue #638). The pod
+// and the two SPIFFE IDs are deliberately NOT attributes (unbounded
+// cardinality); they are logged at WARN instead. A no-op for n <= 0 so the
+// steady state records nothing.
+func (m *Metrics) InboundBindingMismatch(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.inboundBindingMismatch.Add(ctx, n)
 }
 
 // SnapshotShape records per-snapshot size gauges.
