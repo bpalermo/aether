@@ -2,7 +2,7 @@ name: proxy-release
 
 # Post-merge release for the custom Envoy (//proxy): build per arch — both legs
 # offload the Envoy compile to BuildBuddy RBE (amd64 = x64 pool, arm64 = arm64
-# pool via @llvm_toolchain_aarch64). Push each arch by DIGEST (no per-arch tags),
+# pool, driven from a native arm64 runner). Push each arch by DIGEST (no per-arch tags),
 # then assemble one multi-arch manifest tagged with the commit SHA.
 # `bazel run //:push` runs the pusher locally, so the arm64 leg keeps a native
 # ubuntu-24.04-arm runner (RBE compiles the binary, runner executes the pusher).
@@ -16,6 +16,14 @@ on:
 permissions:
   contents: read
 
+# CARGO_BAZEL_REPIN is still required under WORKSPACE, even though
+# //bazel/extension_config no longer compiles in Envoy's dynamic-modules
+# extensions: @envoy's bazel/dependency_imports_extra.bzl has a top-level
+# `load("@envoy_rust_crate_index//:defs.bzl", ...)`, so WORKSPACE evaluation
+# fetches the crate_universe repo unconditionally, and its recorded lockfile
+# digest does not match Envoy's Cargo.lock. It goes away with bzlmod (#697),
+# where the `crate` extension is only evaluated if something in the build graph
+# needs a repo from it.
 env:
   CARGO_BAZEL_REPIN: "true"
   IMAGE: ghcr.io/bpalermo/aether/aether-proxy
@@ -30,10 +38,11 @@ jobs:
           - arch: amd64
             runner: ubuntu-latest
             bazel_config: rbe-buildbuddy-amd64
-          # arm64 offloads the heavy compile to BuildBuddy's arm64 RBE pool via
-          # @llvm_toolchain_aarch64. Keeps ubuntu-24.04-arm runner so that
-          # `bazel run //:push` executes the oci_push tool natively (the pusher
-          # binary is built for arm64 by RBE and needs an arm64 runner to run it).
+          # arm64 offloads the heavy compile to BuildBuddy's arm64 RBE pool. The
+          # ubuntu-24.04-arm runner is required twice over: @clang_platform /
+          # @llvm_toolchain derive their exec constraints from the driver's arch,
+          # and `bazel run //:push` executes the oci_push tool natively (the
+          # pusher is built for arm64 by RBE and needs an arm64 runner).
           - arch: arm64
             runner: ubuntu-24.04-arm
             bazel_config: rbe-buildbuddy-arm64
