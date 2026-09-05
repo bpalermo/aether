@@ -97,9 +97,9 @@ Sizing, from the deployed config (`clusters/talos-main/otel-collector/values.yam
 About 70% of the frontier (2 pods × rate 2, a third of it, never reached pressure in 300s — twice on 2026-09-05), so the collector *sheds* rather than OOM-kills — shedding is
 `memory_limiter` working correctly, and 09-02 showed it sheds under real saturation too.
 
-## Measured behaviour (four runs, 2026-09-05) — do not re-derive these
+## Measured behaviour (five runs, 2026-09-05) — do not re-derive these
 
-`memory_limiter` triggers on the **Go heap**, not on RSS. What the four runs actually
+`memory_limiter` triggers on the **Go heap**, not on RSS. What the five runs actually
 measured, and what the thresholds in `run.sh` are now built from (#699):
 
 | | observed |
