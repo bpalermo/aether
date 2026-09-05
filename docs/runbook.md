@@ -376,3 +376,113 @@ Join the `snapshot_version` on the WARN with the first
 (or just before) that timestamp proves the source-side binding was wrong; the absence of
 one over a window that *did* produce SAN failures rules the agent-side index out and
 moves the search to the destination proxy's inbound chain selection.
+
+### Attributing an `ssl_fail_verify_san` event to the TERMINATING node (issue #638, inbound side)
+
+**The inversion.** Envoy's `default_validator.cc:332` message
+`verify cert failed: SAN matcher, certificate SANs are [...]` prints the SANs of the
+certificate being *validated* — the one the **peer** presented. So
+`envoy_cluster_ssl_fail_verify_san_total` is a **client-side** counter about the
+**server's** certificate, and every #638 ledger join that read it as "the restarting
+proxy presented X as its client identity" had it backwards. The wrong identity belongs to
+a **server** certificate: the inbound filter chain → SDS server-secret binding of
+whichever proxy **terminated** the connection. For same-node traffic that is the
+restarting proxy itself, which is the observed "node-wide constant per time slice" shape.
+The outbound discriminator above watches the client side and structurally cannot fire for
+this.
+
+**The inbound discriminator.** On every snapshot the agent reads each local pod's inbound
+listener back out of the snapshot it just handed Envoy, extracts each filter chain's
+`DownstreamTlsContext.tls_certificate_sds_secret_configs[0].name`, and compares it with
+the SPIFFE ID of the pod that listener entry belongs to:
+
+- **INFO `inbound identity binding`** — `chain` (`<listener>/<chain>`), `pod`,
+  `pod_spiffe_id`, `secret` (the server certificate the chain will present),
+  `previous_secret` (empty on a first bind), `secret_served`, `snapshot_version`. Emitted
+  only on a first bind or a change; steady state is silent.
+- **WARN `inbound chain bound to a foreign identity`** + counter
+  `aether_agent_identity_inbound_binding_mismatch_total` — the chain would terminate mesh
+  mTLS for its pod while presenting **another workload's** SVID.
+- **WARN `inbound chain references a secret absent from the snapshot`** — the chain
+  reached Envoy before its own SVID did (the other candidate mechanism). Reported, not
+  counted.
+- Above 200 changed chains in one snapshot a single `inbound identity bindings changed`
+  summary replaces the per-chain lines.
+
+The binding holds **by construction** inside `proxy.NewInboundListener` (the chain's
+secret name and the chain's own name both come from the same `CNIPod`). That is the
+point: **if the counter stays 0 through a #638 event while the INFO lines show the chains
+re-binding correctly, the mis-binding is not in the agent's snapshot — it is in Envoy's
+SDS/secret lifecycle across the hot restart**, and the agent-side line of enquiry closes.
+A non-zero counter names the pod, both identities and the snapshot version.
+
+```bash
+kubectl -n aether-system logs ds/aether-agent --since=10m \
+  | grep -E 'inbound identity (binding|bindings changed)|inbound chain '
+```
+
+```
+# VictoriaLogs (field syntax; never `| stats`, it false-zeroes).
+_stream:{service.name="aether-agent"} AND "inbound chain bound to a foreign identity"
+```
+
+```promql
+# Zero at steady state; any increase is an agent-side inbound mis-binding.
+# increase(), never a raw read: the value is per-process and an instant query
+# lands between samples and false-zeroes.
+sum by (k8s_node_name) (increase(aether_agent_identity_inbound_binding_mismatch_total[1h]))
+```
+
+#### The ledger join, with the terminating-node column
+
+The join that has been missing: each failing request must be attributed to the node whose
+proxy **served** it, then compared with the node whose proxy was restarting.
+
+1. **Pull the events.** Field syntax only — a bare phrase search or `| stats` returns a
+   documented FALSE ZERO. Control-test every negative by dropping the reason field (normal
+   200s must come back).
+
+   ```
+   _stream:{service.name="aether-proxy"}
+     AND log_name:aether_access_logs
+     AND upstream_transport_failure_reason:"CERTIFICATE_VERIFY_FAILED"
+   ```
+
+   The identity in `certificate SANs are [spiffe://…]` on these lines is the **server's**.
+   Keep `upstream_host`, `upstream_cluster`, `pod_name`/`pod_namespace` (the local pod this
+   hop serves — the *client* side here), `response_flags` and the timestamp.
+
+2. **`upstream_host` → pod → node.** `upstream_host` is `<pod IP>:18008`. Resolve the IP
+   to its pod and that pod's node:
+
+   ```bash
+   kubectl get pods -A -o wide --field-selector status.phase=Running \
+     | awk '$7=="<upstream-ip>" {print $1, $2, $8}'   # ns name node
+   ```
+
+   For an IP that is already gone, use the agent-side record on each node
+   (`aether_agent_storage_pods` is the per-node count; the entries themselves are the
+   agent's protojson store) or the pod-IP index in the run record. **That node is the
+   terminating node** — its proxy holds the inbound listener whose chain presented the
+   certificate the client rejected.
+
+3. **Compare with the restarting node.** The proxy generation boundary per node:
+
+   ```promql
+   max_over_time(envoy_server_hot_restart_epoch[8h])          # step, per node
+   max_over_time(envoy_cluster_ssl_fail_verify_san_total[8h]) # never an instant query
+   ```
+
+   `max_over_time` is mandatory — the series ages out with the proxy generation and an
+   instant query at grade time returns **no series at all** (that trap has produced two
+   premature "zero" readings on this issue).
+
+4. **Read the verdict.**
+   - Terminating node **==** the restarting node → same-node termination by the restarting
+     proxy. Grep that node's agent for the WARNs above in the same window; a hit localises
+     the defect to the agent's snapshot, a miss to Envoy's SDS lifecycle.
+   - Terminating node **!=** the restarting node → the server was a remote proxy that
+     itself shows no counter (the counter is client-side). Grep *that* node's agent log.
+   - Terminating nodes **scattered across many nodes** for one presented identity → the
+     identity was not bound per-server, and `upstream_host` is not the TLS-terminating
+     peer; record it and re-open the transport path.
