@@ -42,6 +42,11 @@ import (
 // redirect-all opt-in annotation from there (proposal 022, M2a).
 const podAnnotationsCapability = "io.kubernetes.cri.pod-annotations"
 
+// confMode is the mode both the conflist and the durable aether entry beside it
+// are written with. The agent's re-assert loop writes the conflist back with the
+// same mode (agent/internal/cniconflist).
+const confMode = os.FileMode(0o644)
+
 func createCNIConfigFile(ctx context.Context, cfg *InstallerConfig) (string, error) {
 	pluginConfig := config.AetherConf{}
 
@@ -87,18 +92,70 @@ func writeCNIConfig(ctx context.Context, pluginConfig []byte, cfg *InstallerConf
 	if err != nil {
 		return "", err
 	}
-	pluginConfig, err = conflist.Insert(pluginConfig, existingCNIConfig)
+	merged, err := conflist.Insert(pluginConfig, existingCNIConfig)
 	if err != nil {
 		return "", err
 	}
 
-	if err = file.AtomicWrite(cniConfigFilepath, pluginConfig, os.FileMode(0o644)); err != nil {
+	if err = file.AtomicWrite(cniConfigFilepath, merged, confMode); err != nil {
 		installLog.Error(err, "failed to write CNI config file %v: %v", "filepath", cniConfigFilepath)
 		return cniConfigFilepath, err
 	}
 
 	installLog.Info("Wrote CNI config", "filepath", cniConfigFilepath)
+
+	writeDurableEntry(filepath.Dir(cniConfigFilepath), merged)
+
 	return cniConfigFilepath, nil
+}
+
+// writeDurableEntry persists the rendered aether plugin entry, on its own, next
+// to the conflist it was just chained into, so the agent's re-assert loop can
+// prime a known-good entry it never got to observe (issue #680): a competing
+// writer stripping the conflist between this install and the loop's first check
+// used to leave that loop with nothing to re-append for the life of the agent
+// PROCESS, unrepairable until the pod itself was recreated.
+//
+// cni-install is the file's only writer, and it writes it unconditionally — the
+// agent's --cni-conflist-reassert kill switch governs the loop, not the
+// artifact. A failure here is logged and swallowed: the entry is chained on disk
+// either way, and losing a safety net must never fail the install that just
+// meshed the node.
+//
+// The entry is read back out of the MERGED conflist rather than from the
+// pre-merge render, so the durable copy is byte-identical to what is actually
+// chained (Insert drops the entry's own cniVersion: the enclosing conflist owns
+// it) and a re-assert from the file reproduces this install exactly.
+func writeDurableEntry(confDir string, merged []byte) {
+	entry, err := extractAetherEntry(merged)
+	if err != nil {
+		installLog.Error(err, "failed to extract the aether entry from the CNI config just written; the re-assert loop cannot prime from disk")
+		return
+	}
+
+	path := conflist.EntryPath(confDir)
+	if err := file.AtomicWrite(path, entry, confMode); err != nil {
+		installLog.Error(err, "failed to write the durable aether CNI entry; the re-assert loop cannot prime from disk", "filepath", path)
+		return
+	}
+	installLog.Info("Wrote the durable aether CNI entry", "filepath", path)
+}
+
+// extractAetherEntry returns the aether plugin entry as it sits in a merged
+// conflist.
+func extractAetherEntry(merged []byte) ([]byte, error) {
+	chain, err := conflist.Parse(merged)
+	if err != nil {
+		return nil, err
+	}
+	entry, present, err := chain.AetherEntry()
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return nil, fmt.Errorf("no %q entry in the CNI config just written", conflist.AetherPluginType)
+	}
+	return entry, nil
 }
 
 // getCNIConfigFilepath waits indefinitely for a main CNI config file to exist before returning

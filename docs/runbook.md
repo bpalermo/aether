@@ -270,6 +270,45 @@ pre-#674 dial-per-query behaviour:
 helm upgrade ... --set agent.meshDnsDaemon.forwardPoolSize=0
 ```
 
+### The agent reports an unrepairable conflist
+
+Symptom: `AetherCNIConflistUnchained` fires for a node, the agent there is NotReady and
+the startup taint is held (proposal 033, #667), and the agent logs
+
+```
+aether is not chained in the active CNI conflist and no known-good entry could be
+recovered; cni-install must run
+```
+
+Aether is a **chained** plugin in another CNI's conflist, so this node issues no CNI ADD
+to the agent at all: every pod that starts on it comes up unmeshed. The re-assert loop
+re-appends the entry it last **observed**, and this message means it has none — the
+strip landed before its first check (the priming window, #680).
+
+Check the durable entry `cni-install` leaves beside the conflist; the loop primes from it
+and repairs within a check (~2.5s) when it is present and valid:
+
+```bash
+# On the node (talosctl, or a debug pod with /etc/cni/net.d mounted):
+ls -la /etc/cni/net.d/                     # .aether-cni-entry must be there
+cat /etc/cni/net.d/.aether-cni-entry       # one JSON object, "type": "aether-cni"
+grep -c aether-cni /etc/cni/net.d/*.conflist
+```
+
+- **Present and valid, agent still refusing** — look for
+  `primed known-good entry from durable file` in the agent log. Its absence with the
+  file present means the agent is reading a different directory: compare its
+  `--mounted-cni-net-dir` (log line `CNI conflist re-assert loop started dir=…`) with
+  where `cni-install` wrote.
+- **Missing** — the node predates #680, or `cni-install` failed to write it (search the
+  init container's log for `failed to write the durable aether CNI entry`). Recreate the
+  agent **pod** on that node (`kubectl -n aether delete pod aether-agent-…`): only the
+  init container renders the entry, so restarting the container is not enough.
+- **Present but garbage** — the agent logs `the durable aether entry is unusable` and
+  ignores it, by design; recreate the agent pod to have `cni-install` rewrite it.
+
+Never hand-write either file: `cni-install` is the durable entry's only writer, and the
+conflist belongs to the primary CNI plus the re-assert loop.
 ### Grepping the outbound identity bindings during a soak (issue #638)
 
 `ssl_fail_verify_san` bursts a few tens of seconds into a fresh proxy generation point at

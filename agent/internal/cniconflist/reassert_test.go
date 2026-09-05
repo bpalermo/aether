@@ -1,6 +1,7 @@
 package cniconflist
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -256,6 +257,129 @@ func TestStartConverges(t *testing.T) {
 		t.Fatal("Start did not return after context cancellation")
 	}
 }
+
+// TestPrimeFromDurableEntry covers the priming window of issue #680: a competing
+// writer strips the conflist between cni-install's write and this loop's first
+// check, so there is nothing healthy to observe and the durable copy cni-install
+// left behind is the only known-good entry left on the node.
+func TestPrimeFromDurableEntry(t *testing.T) {
+	ctx := context.Background()
+
+	// durableEntry is what cni-install persists: the entry as it sits in the
+	// conflist it chained (Insert drops the entry's own cniVersion).
+	const durableEntry = `{"name":"aether","type":"aether-cni","agentCNIPath":"/run/aether/cni.sock"}`
+
+	// liveEntry is deliberately distinguishable from the durable one, so a test
+	// can tell which source a repair came from.
+	const liveEntry = `{"name":"aether","type":"aether-cni","agentCNIPath":"/run/aether/observed.sock"}`
+
+	writeDurable := func(t *testing.T, dir, content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(conflist.EntryPath(dir), []byte(content), 0o644))
+	}
+
+	t.Run("an unchained conflist is repaired from the durable entry", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeConf(t, dir, confName, []byte(flannelOnly))
+		writeDurable(t, dir, durableEntry)
+
+		var logs logCapture
+		r := newReasserter(dir)
+		r.log = logs.logger()
+		require.Empty(t, r.entry, "nothing was ever observed: this is the priming window")
+
+		r.check(ctx)
+
+		assert.True(t, isChained(t, path), "the durable entry must repair the conflist")
+		assert.Equal(t, []string{"flannel", "portmap", "aether-cni"}, pluginTypes(t, mustRead(t, path)))
+		assert.True(t, r.ChainStatus().Observed)
+		assert.True(t, r.ChainStatus().Chained, "the repair must publish a chained state")
+		assert.Contains(t, logs.String(), "primed known-good entry from durable file")
+
+		// Priming lasts for the rest of the process: a second strip is repaired
+		// without the durable file being there at all.
+		require.NoError(t, os.Remove(conflist.EntryPath(dir)))
+		writeConf(t, dir, confName, []byte(flannelOnly))
+		r.check(ctx)
+		assert.True(t, isChained(t, path), "the primed entry survives the durable file going away")
+	})
+
+	t.Run("no durable entry keeps the fail-closed path", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeConf(t, dir, confName, []byte(flannelOnly))
+
+		var logs logCapture
+		r := newReasserter(dir)
+		r.log = logs.logger()
+		r.check(ctx)
+
+		assert.Equal(t, flannelOnly, string(mustRead(t, path)), "the conflist must not have been rewritten")
+		assert.Empty(t, r.entry)
+		assert.True(t, r.ChainStatus().Observed)
+		assert.False(t, r.ChainStatus().Chained)
+		assert.Contains(t, logs.String(), "no durable aether entry on disk to prime from")
+		assert.Contains(t, logs.String(), "no known-good entry could be recovered")
+	})
+
+	t.Run("a garbage durable entry is ignored and logged", func(t *testing.T) {
+		for _, garbage := range []string{`{not json`, ``, `{"name":"cbr0","type":"flannel"}`, `[{"type":"aether-cni"}]`} {
+			dir := t.TempDir()
+			path := writeConf(t, dir, confName, []byte(flannelOnly))
+			writeDurable(t, dir, garbage)
+
+			var logs logCapture
+			r := newReasserter(dir)
+			r.log = logs.logger()
+			r.check(ctx)
+
+			assert.Equal(t, flannelOnly, string(mustRead(t, path)), "a garbage durable entry must never be chained (%q)", garbage)
+			assert.Empty(t, r.entry)
+			assert.False(t, r.ChainStatus().Chained)
+			assert.Contains(t, logs.String(), "level=WARN", "an ignored durable entry must be logged loudly (%q)", garbage)
+			assert.Contains(t, logs.String(), "the durable aether entry is unusable")
+		}
+	})
+
+	t.Run("an observed entry wins over the durable one", func(t *testing.T) {
+		dir := t.TempDir()
+		live, err := conflist.Insert([]byte(liveEntry), []byte(flannelOnly))
+		require.NoError(t, err)
+		path := writeConf(t, dir, confName, live)
+		writeDurable(t, dir, durableEntry)
+
+		r := newReasserter(dir)
+		r.check(ctx)
+		require.Contains(t, string(r.entry), "observed.sock", "a healthy check must prime from what the node actually accepted")
+
+		// The competing writer strips it: the repair must use the OBSERVED entry.
+		// The durable file is a last resort, never a second source of truth.
+		writeConf(t, dir, confName, []byte(flannelOnly))
+		r.check(ctx)
+
+		repaired := string(mustRead(t, path))
+		assert.Contains(t, repaired, "observed.sock")
+		assert.NotContains(t, repaired, "/run/aether/cni.sock", "the durable entry must not have been consulted")
+		assert.Equal(t, string(live), repaired)
+	})
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
+}
+
+// logCapture is a slog sink a test can assert on.
+type logCapture struct {
+	buf bytes.Buffer
+}
+
+func (c *logCapture) logger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(&c.buf, nil))
+}
+
+func (c *logCapture) String() string { return c.buf.String() }
 
 func TestStartWithoutConflistDir(t *testing.T) {
 	// A dir that cannot be watched degrades to periodic re-checks and must not

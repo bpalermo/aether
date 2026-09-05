@@ -20,6 +20,8 @@ package cniconflist
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -75,6 +77,11 @@ type Reasserter struct {
 	// the agent has no business re-deriving, and cni-install — the agent pod's own
 	// init container — re-renders and re-appends it at every agent start, so the
 	// cache is primed on the first check of every agent lifetime.
+	//
+	// When even that first check comes too late (the strip landed inside the
+	// priming window, #680), prime recovers the entry from the durable copy
+	// cni-install wrote beside the conflist. Still the installer's render, never
+	// the agent's.
 	entry []byte
 
 	// chainStatePublisher is the lock-free publication of the chaining state to
@@ -233,7 +240,10 @@ func (r *Reasserter) repair(ctx context.Context, path string, data []byte, chain
 		return
 	}
 	if len(r.entry) == 0 {
-		r.log.WarnContext(ctx, "aether is not chained in the active CNI conflist and no known-good entry was ever observed; cni-install must run", "path", path)
+		r.prime(ctx)
+	}
+	if len(r.entry) == 0 {
+		r.log.WarnContext(ctx, "aether is not chained in the active CNI conflist and no known-good entry could be recovered; cni-install must run", "path", path)
 		return
 	}
 
@@ -250,6 +260,39 @@ func (r *Reasserter) repair(ctx context.Context, path string, data []byte, chain
 	r.metrics.reasserted(ctx)
 	r.record(ctx, true)
 	r.log.InfoContext(ctx, "re-asserted the aether entry in the CNI conflist after a competing writer stripped it", "path", path)
+}
+
+// prime recovers the last-known-good entry from the durable copy cni-install
+// leaves beside the conflist (conflist.EntryFilename), closing the priming
+// window of issue #680: a competing writer that strips the conflist BETWEEN
+// cni-install's write and this loop's first check leaves nothing to observe, and
+// before this the loop stayed unable to repair for the life of the agent
+// process — the entry only came back with a new pod, since init containers do
+// not re-run on a container restart.
+//
+// It is only ever consulted when no entry has been observed: an observed entry
+// is proof of what the node actually accepted and always wins. The agent never
+// writes this file.
+func (r *Reasserter) prime(ctx context.Context) {
+	path := conflist.EntryPath(r.Dir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			r.log.WarnContext(ctx, "no durable aether entry on disk to prime from", "path", path)
+			return
+		}
+		r.log.WarnContext(ctx, "failed to read the durable aether entry", "path", path, "error", err)
+		return
+	}
+
+	entry, err := conflist.ParseEntry(data)
+	if err != nil {
+		r.log.WarnContext(ctx, "the durable aether entry is unusable; ignoring it", "path", path, "error", err)
+		return
+	}
+
+	r.entry = entry
+	r.log.InfoContext(ctx, "primed known-good entry from durable file", "path", path)
 }
 
 // readActive resolves, reads and parses the conflist kubelet is actually using
