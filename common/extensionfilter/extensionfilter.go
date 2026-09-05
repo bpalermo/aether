@@ -26,7 +26,7 @@ import (
 
 // allowed maps each allow-listed Envoy HTTP filter name to a builder for an EMPTY
 // default config of the filter's HCM type. The set is the filters the aether proxy
-// build actually compiles in (proxy/bazel/extension_config/extensions_build_config.bzl):
+// build actually compiles in (proxy/bazel/build_config/extensions_build_config.bzl):
 // a payload for any other filter would proto-validate yet NACK at runtime, so the
 // webhook rejects it. The default config is behaviour-neutral — carried only on the
 // default-disabled HCM chain entry (the per-route typed_per_filter_config supplies the

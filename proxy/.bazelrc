@@ -1,52 +1,193 @@
-# Keep envoy.bazelrc up-to-date by running:
-#   curl -sSL https://raw.githubusercontent.com/envoyproxy/envoy/v1.39.0/.bazelrc > envoy.bazelrc
-import %workspace%/envoy.bazelrc
-
-# Build the custom Envoy with Envoy's hermetic LLVM toolchain (clang + libc++ via
-# @toolchains_llvm / @clang_platform) — no local clang needed. --config=clang is
-# defined in envoy.bazelrc; --enable_platform_specific_config (also from there)
-# applies the :linux config automatically on Linux hosts.
-build:linux --config=clang
-
-# Give the linked Envoy a GNU build-ID derived from its own content (aether
-# #651/#653). This is the only key the Pyroscope symbolizer joins samples to
-# uploaded debuginfo by, so it has to identify *this* ELF and nothing else:
-# `sha1` makes lld hash the linked output, so the id is unique by construction,
-# reproducible for identical inputs, and can never collide with the six Go
-# binaries (which get the same treatment from //tools/buildid).
+# aether-proxy build configuration.
 #
-# The hermetic toolchain already passes `-Wl,--build-id=md5` earlier on the link
-# command line; lld honours the LAST --build-id, so this line wins and widens the
-# note from a 16-byte md5 to the 20-byte sha1 that debuginfod/Pyroscope tooling
-# and the Go binaries use. (Verified with `bazel aquery 'mnemonic("CppLink",
-# //:envoy)'` — proxy-release.yml asserts the ordering before publishing.)
+# Sections marked UPSTREAM are tracked against envoyproxy/examples/filter-cc's
+# .bazelrc (the downstream-build template) plus the parts of Envoy's own .bazelrc
+# that a downstream build still needs. Re-diff both on an Envoy bump:
+#   curl -sSL https://raw.githubusercontent.com/envoyproxy/examples/main/filter-cc/.bazelrc
+#   gh api "repos/envoyproxy/envoy/contents/.bazelrc?ref=<pinned sha>" --jq .content | base64 -d
+# Sections marked AETHER are ours; keep them when re-syncing.
 #
-# It is a --linkopt rather than `linkopts` on //:envoy because envoy_cc_binary
-# does `if not linkopts: linkopts = _envoy_linkopts()` — passing linkopts to the
-# target would silently drop Envoy's own default link flags. envoy.bazelrc
-# passes -fuse-ld=lld the same way.
+# There is no envoy.bazelrc any more: before #697 this file `import`ed a 21 KB
+# vendored copy of Envoy v1.39.0's own .bazelrc, ~300 lines of which (asan/tsan/
+# msan/fuzz/coverage/docker/gcc/macos) a downstream build never uses.
+
+#############################################################################
+# UPSTREAM: bzlmod + registries
+#############################################################################
+
+common --enable_bzlmod
+common --noenable_workspace
+common --@envoy//bazel:enable_bzlmod=True
+
+# The registry commit and the envoy/envoy_api versions in MODULE.bazel are ONE
+# pin. The envoy bazel-registry keeps a single rolling dev snapshot per module and
+# DELETES the previous version directory on every bump, so an unpinned registry
+# breaks the build the next time upstream publishes. bed06c78 is the newest commit
+# at which envoy@1.40.0-dev.20260904.13144fb.envoy and its full transitive
+# .envoy-suffixed closure all resolve (HEAD does not: it bumped thrift and
+# protoc-gen-validate without updating envoy's registry MODULE.bazel). See
+# README.md "Envoy version bumps" for the recipe that finds the next such commit.
+common --registry=https://bcr.bazel.build/
+common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/bed06c78cb1ea901164f4d248c3e5167f720e068
+
+#############################################################################
+# UPSTREAM: global
+#############################################################################
+
+startup --host_jvm_args=-Xmx3g
+startup --host_jvm_args="-DBAZEL_TRACK_SOURCE_DIRECTORIES=1"
+
+common --color=yes
+common --noincompatible_disallow_empty_glob
+common --noincompatible_disallow_ctx_resolve_tools
+common --legacy_external_runfiles
+common --incompatible_allow_tags_propagation
+common --repo_env=ANDROID_HOME=
+
+build --incompatible_strict_action_env
+build --java_runtime_version=remotejdk_11
+build --tool_java_runtime_version=remotejdk_11
+build --java_language_version=11
+build --tool_java_language_version=11
+build --extra_toolchains=@envoy//bazel:envoy_java_toolchain_definition
+# silence absl logspam.
+build --copt=-DABSL_MIN_LOG_LEVEL=4
+build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+build --copt=-Wno-deprecated-declarations
+build --copt=-Wno-nullability-completeness
+build --per_file_copt=external/cel-cpp.*,.*/filters/common/expr/.*,.*/matching/.*cel.*@-Wno-nullability-completeness
+build --define envoy_mobile_listener=enabled
+build --experimental_repository_downloader_retries=2
+build --experimental_cc_static_library
+build --enable_platform_specific_config
+build --incompatible_merge_fixed_and_default_shell_env
+build --incompatible_config_setting_private_default_visibility
+build --incompatible_enforce_config_setting_visibility
+# We already have absl in the build; tell googletest to use it for backtrace.
+build --define absl=1
+# A workaround for slow ICU download (kept from Envoy's .bazelrc).
+build --http_timeout_scaling=6.0
+build --test_summary=terse
+
+test --test_verbose_timeout_warnings
+test --experimental_ui_max_stdouterr_bytes=11712829 #default 1048576
+
+#############################################################################
+# UPSTREAM: module wiring that WORKSPACE macros used to do
+#############################################################################
+
+build --@googleurl//build_config:system_icu=0
+
+# Protobuf
+common --@protobuf//bazel/flags:prefer_prebuilt_protoc=true
+common --incompatible_enable_proto_toolchain_resolution
+
+# No wasm engine — see bazel/build_config/extensions_build_config.bzl, which drops
+# every wasm extension. The two MUST agree.
+common --@proxy-wasm-cpp-host//bazel:engine=disabled
+
+build --@quiche//:quic_base_impl_lib=@envoy//source/common/quic/platform:quic_base_impl_lib
+build --@quiche//:quiche_export_impl_lib=@envoy//source/common/quic/platform:quiche_export_impl_lib
+build --@quiche//:quiche_flags_impl_lib=@envoy//source/common/quic/platform:quiche_flags_impl_lib
+build --@quiche//:quiche_logging_impl_lib=@envoy//source/common/quic/platform:quiche_logging_impl_lib
+build --@quiche//:quiche_lower_case_string_impl_lib=@envoy//source/common/quic/platform:quiche_lower_case_string_impl_lib
+build --@quiche//:quiche_mem_slice_impl_lib=@envoy//source/common/quic/platform:quiche_mem_slice_impl_lib
+build --@quiche//:quiche_platform_iovec_impl_lib=@envoy//source/common/quic/platform:quiche_platform_iovec_impl_lib
+build --@quiche//:quiche_stack_trace_impl_lib=@envoy//source/common/quic/platform:quiche_stack_trace_impl_lib
+build --@quiche//:quiche_time_utils_impl_lib=@envoy//source/common/quic/platform:quiche_time_utils_impl_lib
+
+common --@rules_python//python/config_settings:bootstrap_impl=script
+build --incompatible_default_to_explicit_init_py
+
+build --@rules_rust//rust/settings:extra_exec_rustc_flags=-Clink-self-contained=no
+
+#############################################################################
+# UPSTREAM: linux codegen (from Envoy's own .bazelrc `build:linux` block — NOT in
+# the filter-cc template, but load-bearing here)
+#############################################################################
+
+# --fission=dbg,opt is what parks DWARF in .dwo files that never enter the image;
+# the `--strip=always` / .symtab story below depends on it (aether #651).
+build:linux --copt=-fdebug-types-section
+build:linux --copt=-fPIC
+build:linux --cxxopt=-fsized-deallocation --host_cxxopt=-fsized-deallocation
+build:linux --conlyopt=-fexceptions
+build:linux --fission=dbg,opt
+build:linux --features=per_object_debug_info
+
+#############################################################################
+# UPSTREAM: hermetic clang toolchain (toolchains_llvm 1.9.0.envoy, LLVM 22.1.8)
+#############################################################################
+
+common:clang-common --linkopt=-fuse-ld=lld
+common:clang-common --@toolchains_llvm//toolchain/config:compiler-rt=false
+common:clang-common --@toolchains_llvm//toolchain/config:libunwind=false
+
+common:libc++ --action_env=CXXFLAGS=-stdlib=libc++
+common:libc++ --action_env=LDFLAGS="-stdlib=libc++ -fuse-ld=lld"
+common:libc++ --action_env=BAZEL_CXXOPTS=-stdlib=libc++
+common:libc++ --action_env=BAZEL_LINKLIBS=-l%:libc++.a:-l%:libc++abi.a
+common:libc++ --action_env=BAZEL_LINKOPTS=-lm:-pthread
+common:libc++ --define force_libcpp=enabled
+common:libc++ --@envoy//bazel:libc++=true
+
+common:clang --config=clang-common
+common:clang --config=libc++
+common:clang --host_platform=@clang_platform
+common:clang --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# @clang_platform is an arch_alias resolved from the DRIVER host's arch, so this
+# line is also what makes a native-arm64 driver produce an aarch64-EXEC toolchain.
+# That is why the arm64 CI leg runs on ubuntu-24.04-arm — see .github/workflows/.
+common --config=clang
+
+#############################################################################
+# AETHER: build-ID (#651/#653)
+#############################################################################
+
+# Give the linked Envoy a GNU build-ID derived from its own content. This is the
+# only key the Pyroscope symbolizer joins samples to uploaded debuginfo by, so it
+# has to identify *this* ELF and nothing else: `sha1` makes lld hash the linked
+# output, so the id is unique by construction, reproducible for identical inputs,
+# and can never collide with the six Go binaries (//tools/buildid).
+#
+# The hermetic toolchain passes `-Wl,--build-id=md5` earlier on the link command
+# line; lld honours the LAST --build-id, so this line wins and widens the note from
+# a 16-byte md5 to the 20-byte sha1 debuginfod/Pyroscope tooling uses.
+# proxy-release.yml asserts the ordering with `bazel aquery` before publishing.
+#
+# It is a --linkopt rather than `linkopts` on //:envoy because envoy_cc_binary does
+# `if not linkopts: linkopts = _envoy_linkopts()` — passing linkopts to the target
+# would silently drop Envoy's own default link flags (bazel/envoy_binary.bzl).
 build --linkopt=-Wl,--build-id=sha1
+
+#############################################################################
+# AETHER: stamping + jobs
+#############################################################################
+
+build --jobs=HOST_CPUS-1
+build --workspace_status_command="bash bazel/get_workspace_status"
+
+#############################################################################
+# AETHER: release / ci
+#############################################################################
 
 # Optimized release build — the binary baked into the proxy image. Plain
 # `bazel build //:image` is fastbuild (dev); image build paths (CI, the Makefile
-# load/push targets, the README) pass --config=release to bake the optimized
-# binary.
+# load/push targets, the README) pass --config=release.
 #
 # `--strip=always` is NOT a full strip, despite the name: Bazel maps it to the
 # linker's `--strip-debug`, so it removes DWARF and KEEPS `.symtab` (~22 MB,
-# ~944k symbols here). DWARF is redundant anyway — envoy.bazelrc sets
-# `--fission=dbg,opt`, which parks it in .dwo files that never enter the image.
+# ~944k symbols here). DWARF is redundant anyway — `--fission=dbg,opt` (above)
+# parks it in .dwo files that never enter the image.
 #
 # Keeping the symbol table is deliberate and load-bearing (aether #651): the
 # OpenTelemetry eBPF profiler does not symbolize native frames in-agent, so
-# Pyroscope needs this build's symbols to name the ~1 core of CPU the proxy
-# fleet burns. Do not "finish the job" with `-Wl,-s` / `--strip-all` — it saves
-# ~10 MiB compressed and silently turns every Envoy flamegraph back into hex
-# addresses. //integration:symtab_test fails the build if that happens.
+# Pyroscope needs this build's symbols. Do not "finish the job" with `-Wl,-s` /
+# `--strip-all`. //integration:symtab_test fails the build if that happens.
 build:release -c opt
 build:release --strip=always
 
-# Release build: optimized, DWARF-stripped (used by CI to produce the image binary).
 build:ci --config=release
 # BuildBuddy invocation metadata (https://www.buildbuddy.io/docs/guide-metadata).
 # Dynamic metadata (COMMIT_SHA/REPO_URL/BRANCH_NAME) is passed by the CI workflow.
@@ -57,19 +198,11 @@ common:ci --noshow_progress
 common:ci --noshow_loading_progress
 common:ci --test_output=errors
 
-# BuildBuddy remote CACHE (not execution) — used by CI. The build runs locally on
-# the CI runner with the hermetic `--config=clang` toolchain (from build:linux);
-# BuildBuddy stores + serves compiled action results, so warm builds are fast.
-# Invoke with `--config=bb-cache`. CI builds multi-arch natively on per-arch
-# runners (amd64 + arm64) — no cross-compile, no RBE executor pool needed.
-# (For local dev, prefer `--config=rbe-buildbuddy` below to offload the heavy
-# Envoy compile to BuildBuddy executors.)
-#
-# NOTE: not Envoy's `--config=remote-cache` — at v1.38.0 that's Envoy's own
-# EngFlow cache (mordenite.cluster.engflow.com), not BuildBuddy.
-#
-# Auth is a secret, so it lives in user.bazelrc (gitignored) / the CI
-# --remote_header, one line:
+#############################################################################
+# AETHER: BuildBuddy remote cache (no execution)
+#############################################################################
+
+# Auth is a secret: user.bazelrc (gitignored) / CI --remote_header, one line:
 #   build:bb-cache --remote_header=x-buildbuddy-api-key=YOUR_ORG_API_KEY
 build:bb-cache --remote_cache=grpcs://remote.buildbuddy.io
 build:bb-cache --bes_backend=grpcs://remote.buildbuddy.io
@@ -86,16 +219,16 @@ build:bb-cache --noslim_profile
 build:bb-cache --experimental_profile_include_target_label
 build:bb-cache --experimental_profile_include_primary_output
 
-# BuildBuddy Remote Build Execution (RBE) — offload the heavy Envoy compile to
-# BuildBuddy executors (executor + cache + BES). Pick an arch overlay:
-#   --config=rbe-buildbuddy-amd64   (x64 pool)
-#   --config=rbe-buildbuddy-arm64   (arm64 pool — see caveat below)
+#############################################################################
+# AETHER: BuildBuddy RBE
+#############################################################################
+
+# `rbe-buildbuddy` is the shared BASE (no platform). Pick an arch overlay:
+#   --config=rbe-buildbuddy-amd64   (x64 pool;   x64 driver)
+#   --config=rbe-buildbuddy-arm64   (arm64 pool; MUST run on an arm64 driver)
 #
-# `rbe-buildbuddy` is the shared BASE (common executor/cache/BES flags, NO
-# platform); the overlays add only the host/exec platform via `--config` chaining.
-# Don't pass `--config=rbe-buildbuddy` on its own — it has no platform. Reuses
-# Envoy's hermetic `--config=clang`; @clang_platform sets dockerNetwork "standard"
-# (an EngFlow value BuildBuddy rejects) — the platforms below override it to "off".
+# @clang_platform sets dockerNetwork "standard" (an EngFlow value BuildBuddy
+# rejects) — //bazel/platforms overrides it to "off".
 #
 # Auth goes on the base so both overlays inherit it (gitignored user.bazelrc):
 #   build:rbe-buildbuddy --remote_header=x-buildbuddy-api-key=KEY
@@ -124,20 +257,16 @@ build:rbe-buildbuddy-amd64 --extra_execution_platforms=//bazel/platforms:rbe_bui
 # the DRIVER host's arch (envoy_toolshed's arch_alias reads ctx.os.arch, and
 # toolchains_llvm reads rctx.os.arch), so this overlay is only valid from an
 # aarch64 driver — i.e. a native arm64 runner. Both proxy.yml and
-# proxy-release.yml therefore run the arm64 leg on `ubuntu-24.04-arm`.
+# proxy-release.yml run the arm64 leg on `ubuntu-24.04-arm`.
 #
-# The WORKSPACE-era @llvm_toolchain_aarch64 (a second llvm_toolchain with
-# exec_arch=aarch64, which let an x64 driver drive the arm64 pool) is gone, and
-# so are the two @envoy source patches it required — those existed only to build
-# Envoy's dynamic-modules extensions, which //bazel/extension_config no longer
-# compiles in.
-#
-# --modify_execution_info=Genrule=-local strips the "local" execution
-# requirement from genrules so they run on the remote arm64 executor rather than
-# on the driver. Kept: it is proven on this pool, and a genrule that resolves an
-# arm64 $(PYTHON3) but executes on the driver is a failure mode worth not
-# re-litigating on a cold multi-hour build.
+# --modify_execution_info=Genrule=-local strips the "local" execution requirement
+# from genrules so they run on the remote arm64 executor rather than on the
+# driver. Kept from the WORKSPACE era: it is proven on this pool, and a genrule
+# that resolves an arm64 $(PYTHON3) but executes on the driver is a failure mode
+# worth not re-litigating on a cold multi-hour build.
 build:rbe-buildbuddy-arm64 --config=rbe-buildbuddy
 build:rbe-buildbuddy-arm64 --host_platform=//bazel/platforms:rbe_buildbuddy_arm64
 build:rbe-buildbuddy-arm64 --extra_execution_platforms=//bazel/platforms:rbe_buildbuddy_arm64
 build:rbe-buildbuddy-arm64 --modify_execution_info=Genrule=-local
+
+try-import %workspace%/user.bazelrc

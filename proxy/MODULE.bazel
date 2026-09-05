@@ -1,0 +1,145 @@
+# aether-proxy: a custom Envoy build, as a bzlmod module.
+#
+# Still a SEPARATE Bazel workspace from the root aether module (listed in the
+# root //.bazelignore). Build it explicitly: `cd proxy && bazel build //:image`.
+# Modeled on envoyproxy/examples/filter-cc @ main (the upstream downstream-build
+# template) — see docs/proposals/010.
+#
+# ENVOY PIN: the `envoy`/`envoy_api` versions below and the
+# `--registry=…/bazel-registry/<commit>` line in .bazelrc are ONE pin and must
+# move together. The envoy bazel-registry keeps exactly one version per module
+# and DELETES the old directory on every bump, so an unpinned (or mismatched)
+# registry commit makes this module unresolvable. See README.md "Envoy bumps".
+module(
+    name = "aether_proxy",
+    version = "0.0.0",
+)
+
+####################################################################################
+# Envoy
+####################################################################################
+
+bazel_dep(name = "envoy", version = "1.40.0-dev.20260904.13144fb.envoy")
+bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260904.13144fb.envoy")
+
+####################################################################################
+# Direct deps of //:BUILD.bazel, //integration and //source/...
+####################################################################################
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_cc", version = "0.2.22")
+
+# pkg_tar (//:envoy_tar).
+bazel_dep(name = "rules_pkg", version = "1.1.0")
+
+# sh_test (//integration:build_id_test, //integration:symtab_test).
+bazel_dep(name = "rules_shell", version = "0.8.0")
+
+# NO repo_name aliases. Envoy main renamed its apparent repos to @abseil-cpp /
+# @protobuf, and the WORKSPACE-era @com_google_absl / @com_google_protobuf names
+# cannot be kept here even though apparent names are per-module: .bazelrc's
+# `--@protobuf//bazel/flags:prefer_prebuilt_protoc` resolves in the ROOT module's
+# repo mapping, so an alias makes that flag unloadable. The labels in
+# //source/extensions/filters/http/aether_stats/BUILD use the upstream names.
+bazel_dep(name = "abseil-cpp", version = "20260107.1")
+bazel_dep(name = "protobuf", version = "35.1.bcr.envoy")
+
+####################################################################################
+# Deps referenced only by build-setting flags in .bazelrc.
+#
+# A `--@foo//...` flag on the command line is resolved in the ROOT module's repo
+# mapping, so every flag target below needs a direct bazel_dep here even though no
+# BUILD file of ours mentions it. This is why the filter-cc template carries them.
+####################################################################################
+
+bazel_dep(name = "googleurl", version = "0.0.0-221103-dd4080f.envoy")
+bazel_dep(name = "proxy-wasm-cpp-host", version = "0.0.0-260704-f2db56a.envoy")
+bazel_dep(name = "quiche", version = "0.0.0-260824-0140828.envoy")
+bazel_dep(name = "rules_python", version = "2.2.0")
+bazel_dep(name = "rules_rust", version = "0.69.0.envoy")
+bazel_dep(name = "toolchains_llvm", version = "1.9.0.envoy")
+
+####################################################################################
+# Packaging (replaces //bazel:repositories.bzl and //bazel/oci:images.bzl)
+####################################################################################
+
+bazel_dep(name = "rules_oci", version = "2.2.7")
+bazel_dep(name = "container_structure_test", version = "1.22.1")
+
+####################################################################################
+# Tests
+####################################################################################
+
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2", dev_dependency = True)
+
+####################################################################################
+# Toolchains
+####################################################################################
+
+# @clang_platform — the host platform --config=clang selects. arch_alias resolves
+# it from the DRIVER host's arch, so an arm64 build needs an arm64 driver runner
+# (see .bazelrc, --config=rbe-buildbuddy-arm64, and .github/workflows/proxy.yml).
+envoy_toolchains_ext = use_extension("@envoy//bazel:extensions.bzl", "envoy_toolchains_extension")
+use_repo(envoy_toolchains_ext, "clang_platform")
+
+# rules_python only honours is_default from the ROOT module, so the default Python
+# toolchain has to be declared here even though only @envoy's tooling uses it.
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.12",
+)
+use_repo(
+    python,
+    "python_3_12",
+    python = "python_versions",
+)
+
+####################################################################################
+# Compiled-in Envoy extension set
+####################################################################################
+
+# //bazel/build_config is a local module (module(name = "envoy_build_config")) that
+# Envoy's own BUILD files load extensions_build_config.bzl from. override_repo
+# points Envoy's default @envoy_build_config at ours.
+build_config = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
+
+build_config(
+    name = "aether_envoy_build_config",
+    path = "bazel/build_config",
+)
+
+envoy_build_config_ext = use_extension("@envoy//bazel:extensions.bzl", "envoy_build_config_ext")
+
+override_repo(
+    envoy_build_config_ext,
+    envoy_build_config = "aether_envoy_build_config",
+)
+
+####################################################################################
+# Container base
+####################################################################################
+
+# distroless/cc ships libstdc++ + libgcc_s + glibc, which the Envoy binary needs at
+# runtime (the upstream Envoy distroless image is built on distroless/base and lacks
+# libgcc_s, so the binary's unwinder fails to load there). Digest carried over from
+# the root MODULE.bazel @distroless_cc pin.
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "distroless_cc",
+    digest = "sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985",
+    image = "gcr.io/distroless/cc-debian12",
+    # The index lists arm64 as arm64/v8 (the variant must be matched exactly).
+    platforms = [
+        "linux/amd64",
+        "linux/arm64/v8",
+    ],
+)
+use_repo(
+    oci,
+    "distroless_cc",
+    # The per-platform repos the extension reports as direct deps; Bazel warns
+    # (and may fail) without them. `bazel mod tidy` adds exactly these.
+    "distroless_cc_linux_amd64",
+    "distroless_cc_linux_arm64_v8",
+)
