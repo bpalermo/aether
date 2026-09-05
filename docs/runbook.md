@@ -233,9 +233,11 @@ See [`charts/README.md`](../charts/README.md) for chart layout, image mirroring,
 and the `--stamp` versioning scheme, and [`getting-started.md`](./getting-started.md)
 for the full install + onboarding walkthrough.
 
-> Moving or renaming a binary **inside** an image (the Bazel image rules, `proxy/`, or
-> `cni/cmd/cni-install/`) breaks profile symbolisation, silently — flame graphs decay to
-> hex addresses with no error and no failing test. See
+> Moving or renaming a binary **inside** an image — the Bazel image rules, a `tars_layer`
+> entry (`/proxy-ready`, `/mesh-dns-ready`, `/opt/cni/bin/aether-cni`), or `proxy/` —
+> breaks profile symbolisation, silently: flame graphs decay to hex addresses with no
+> error and no failing test. **Adding** a binary to an image is the same trap; it profiles
+> as hex until it is listed. See
 > [`observability/profiling-symbols.md`](./observability/profiling-symbols.md) for the
 > path table that has to be updated alongside it.
 
