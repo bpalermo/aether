@@ -10,6 +10,19 @@ permissions:
   contents: read
   packages: write
 
+# Serialise publishes (#692). Every run pushes the *same* mutable chart tags
+# (`charts/aether:<Chart.yaml version>` in particular, which does not change per
+# commit), so two runs overlapping — a publish takes ~4 minutes, merges can be
+# closer than that — race on the registry and the loser is whichever finishes
+# first, not the older commit. On 2026-09-05 the older of two runs (77a7d45) won
+# over the newer (95b158e) and a deploy silently shipped without #689.
+# `cancel-in-progress: false` because a publish is not a redundant check to be
+# superseded: cancelling one mid-push would leave the images pushed and the chart
+# not (or the chart pushed against a half-published image set).
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
+
 env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
 
@@ -63,6 +76,11 @@ jobs:
         run: |
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/crds:crds.push
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/aether:aether.push
+          # …and the same chart again under `charts/aether:<version>-<full sha>`
+          # (#692). The bare `<version>` tag above does not change per commit, so
+          # it alone cannot tell you which commit is deployed; this one can never
+          # be reused. Chart only — the images were just pushed by digest above.
+          bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/aether:aether_commit.push_registry
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/prober:prober.push
           # udsecho: UDS validation workloads (proposal 034 PR 3b) — chart + image
           # bundle like prober; the chart pins the image digest at package time.

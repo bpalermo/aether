@@ -20,6 +20,16 @@ events we want an SLO for:
 - mid-flight resets when the source proxy is itself the component restarting,
 - anything that produces no HTTP response → no access-log/stat.
 
+On top of that bias, the metric's **values are per-Envoy-generation**: a hot
+restart transfers counters as *deltas* (`counter.latch()`, the increment pending
+since the parent's last 5s stats flush), and the OTLP sink exports each process's
+counter as CUMULATIVE from its own start — so `aether_requests_total` restarts
+near zero on every proxy roll, exactly the events a churn soak is grading. This
+is by design, not a defect (aether#708, proposal 001); any read of it must be
+`rate()`/`increase()`, never a raw value. The prober's own
+`aether_probe_requests_total` lives in a separate, non-hot-restarting process and
+has no such discontinuity — one more reason it, not `aether_stats`, is the SLI.
+
 The self-reported number is thus **biased high precisely during hot-restarts and
 rollouts**. The 2026-06-17 soak quantified it: a single-source run saw **~501,502**
 client failures during churn while the mesh metric recorded **9** (0.0018%). This
@@ -225,8 +235,10 @@ supervisor metrics = **when/where** churn happened.
 
 Reproduce the soak: enable the prober (liveness tier), run a proxy hot-restart
 (`kubectl rollout restart ds/aether-proxy`) and confirm the prober records
-`connection_error` on the rolling node while `aether_requests_total` shows ~0 infra
-failures — i.e., the prober sees what the mesh cannot. Confirm per-node attribution
+`connection_error` on the rolling node while
+`sum(increase(aether_requests_total{response_flags!="-"}[5m]))` shows ~0 infra
+failures (`increase()`, not a raw read — the counter restarts per Envoy
+generation across exactly this roll) — i.e., the prober sees what the mesh cannot. Confirm per-node attribution
 (only the rolling node's prober dips) and steady-state ~100%. With the reachability
 tier enabled, a service deploy should dip reachability (EDS/propagation) while
 liveness stays flat.

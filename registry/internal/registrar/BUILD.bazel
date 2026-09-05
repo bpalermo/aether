@@ -28,6 +28,7 @@ go_test(
     srcs = [
         "metrics_test.go",
         "registrar_test.go",
+        "watch_startup_test.go",
     ],
     embed = [":registrar"],
     deps = [
@@ -37,7 +38,10 @@ go_test(
         "@com_github_stretchr_testify//require",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+        "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
+        "@org_golang_google_grpc//test/bufconn",
     ],
 )

@@ -97,8 +97,11 @@ Aether ships **two** charts. Install the CRDs first (they are standalone so they
 can be upgraded independently), then the system chart.
 
 ```bash
-# Pick the published version (chart version == git commit of the release).
-VERSION=0.x.0-<commit>
+# Pick the published version. Every chart is published under a commit-pinned tag
+# `<X.Y.Z>-<full git sha>` — use it, not the `aether` chart's bare `<X.Y.Z>` tag,
+# which is mutable and re-pushed by every release (#692).
+COMMIT=<full 40-char git sha>
+VERSION=0.x.0-$COMMIT
 
 # 1) CRDs (MeshConfig, HTTPFilter, EdgeConfig, EndpointPolicy) — install/upgrade first.
 helm upgrade --install aether-crds \
@@ -125,6 +128,15 @@ Resource names derive from the **release** name — installing as `aether` yield
 Verify:
 
 ```bash
+# What actually landed — the chart's appVersion is the commit that built it.
+# Never skip this: a chart tag can serve a different build than you asked for
+# (#692), and this is the only check that catches it.
+got="$(helm get metadata -n aether-system aether -o json | jq -r .appVersion)"
+case "$got" in
+  *"$COMMIT"*) echo "deployed $got — OK" ;;
+  *) echo "DEPLOY MISMATCH: appVersion=$got, expected $COMMIT" >&2; exit 1 ;;
+esac
+
 kubectl -n aether-system get pods         # agent + proxy + mesh-dns per node, registrar ×2, controller
 kubectl -n aether-system get meshconfig   # the seeded "default" MeshConfig CR
 ```
