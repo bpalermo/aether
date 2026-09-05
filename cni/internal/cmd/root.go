@@ -2,19 +2,20 @@ package cmd
 
 import (
 	"context"
+	"log/slog"
 
 	"aethermesh.dev/cni/internal/constants"
 	"aethermesh.dev/cni/internal/install"
 	"aethermesh.dev/common/log"
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 )
 
 var (
-	// The cni-install init container has no request spans, so it stays on logr
-	// (the install package uses the controller-runtime global logger). The base
-	// logger is still the shared slog handler, bridged to logr for the installer.
-	l logr.Logger
+	// l is the shared slog logger every line of the install goes through, handed
+	// to the installer explicitly. Nothing in cni/ binds controller-runtime's
+	// global logger, so a package-level ctrl.Log anywhere under the installer is
+	// silently discarded (issue #696).
+	l *slog.Logger
 
 	cfg = install.NewInstallerConfig()
 )
@@ -24,7 +25,7 @@ var rootCmd = &cobra.Command{
 	Short:        "Installs the CNI binaries into the current host.",
 	SilenceUsage: true,
 	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-		l = logr.FromSlogHandler(log.Named(log.NewLogger(cfg.Debug), cmd.Name()).Handler())
+		l = log.Named(log.NewLogger(cfg.Debug), cmd.Name())
 	},
 	RunE: func(cmd *cobra.Command, _ []string) (err error) {
 		return runInstall(cmd.Context())
@@ -48,7 +49,7 @@ func GetCommand() *cobra.Command {
 }
 
 func runInstall(ctx context.Context) error {
-	l.Info("installing CNI binaries")
+	l.InfoContext(ctx, "installing CNI binaries")
 	installer := install.NewInstaller(l, cfg)
 	return installer.Run(ctx)
 }
