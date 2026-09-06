@@ -131,6 +131,16 @@ type Server struct {
 	// exported as aether.mesh_dns.last_answered_timestamp_seconds.
 	lastAnswered atomic.Int64
 
+	// Lame-duck handoff (issue #729, see lameduck.go). instanceID is this process's
+	// random identity stamp, served at instanceQName and compared against what the
+	// SO_REUSEPORT group answers so the predecessor can tell the successor apart from
+	// itself. lameDuckMax bounds the post-SIGTERM window (0 disables it) and
+	// lameDuckAbort cuts it short on a second termination signal. All three are set
+	// once at construction and only read afterwards, so they need no lock.
+	instanceID    string
+	lameDuckMax   time.Duration
+	lameDuckAbort <-chan struct{}
+
 	mu          sync.RWMutex
 	records     map[string]string // "<ns>/<svc>" -> A-record IP
 	ready       bool              // records have been populated at least once
@@ -193,6 +203,7 @@ func NewServerWithOptions(meshDomain, addr, snapshotPath string, log *slog.Logge
 		records:      map[string]string{},
 		poolSize:     DefaultForwardPoolSize,
 		pools:        map[string]*forwardPool{},
+		instanceID:   newInstanceID(),
 	}
 	for _, o := range opts {
 		o(s)
@@ -487,15 +498,32 @@ func (s *Server) Start(ctx context.Context) error {
 		go func() { errc <- udp.ListenAndServe() }()
 		go func() { errc <- tcp.ListenAndServe() }()
 	}
-	s.log.InfoContext(ctx, "mesh DNS resolver listening", "addr", s.addr, "reusePort", s.reusePort)
+	s.log.InfoContext(ctx, "mesh DNS resolver listening",
+		"addr", s.addr, "reusePort", s.reusePort, "instance", s.instanceID)
 	select {
 	case <-ctx.Done():
-		_ = udp.Shutdown()
-		_ = tcp.Shutdown()
-		return nil
+		return s.shutdown(ctx, stopWatchdog, udp, tcp)
 	case err := <-errc:
 		return err
 	}
+}
+
+// shutdown is Start's termination path: run the lame-duck window (issue #729) and only
+// then close the listeners.
+//
+// The ORDER is the whole fix. Closing first is what #726 diagnosed: the kernel had
+// already queued datagrams to this SO_REUSEPORT socket, and close() discards them
+// silently, costing every client that singleflights by name a full retransmit timeout.
+func (s *Server) shutdown(ctx context.Context, stopWatchdog func(), udp, tcp *dns.Server) error {
+	// The wedge watchdog's only lever is the ready marker, which the lame duck is
+	// about to remove deliberately. Left running, a passing self-check would restore
+	// it and re-advertise a pod that is on its way out.
+	stopWatchdog()
+	s.runLameDuck(ctx)
+	_ = udp.Shutdown()
+	_ = tcp.Shutdown()
+	s.log.Info("listener closed", "addr", s.addr, "instance", s.instanceID)
+	return nil
 }
 
 // writeReadyMarker creates (truncating) the pod-local ready-marker file. A
@@ -598,7 +626,8 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 // reporting that it CANNOT answer, and a resolver stuck emitting them is not healthy.
 func answeredResult(result string) bool {
 	return result == resultAnswered || result == resultNoData ||
-		result == resultNXDomain || result == resultForwarded
+		result == resultNXDomain || result == resultForwarded ||
+		result == resultInstance
 }
 
 // queryProto reports the transport a query ARRIVED on, read from the writer's remote
@@ -617,6 +646,12 @@ func queryProto(w dns.ResponseWriter) string {
 func (s *Server) serve(w dns.ResponseWriter, r *dns.Msg) string {
 	if len(r.Question) == 1 {
 		q := r.Question[0]
+		// The identity name sits UNDER the mesh domain, so it must be matched before
+		// isMeshName or it would be answered as an ordinary (permanently missing)
+		// mesh record and the handoff probe would never see a stamp.
+		if s.isInstanceName(q.Name) {
+			return s.serveInstance(w, r, q)
+		}
 		if s.isMeshName(q.Name) {
 			return s.serveMesh(w, r, q)
 		}

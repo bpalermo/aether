@@ -4,6 +4,7 @@ go_library(
     name = "meshdns",
     srcs = [
         "forwardpool.go",
+        "lameduck.go",
         "metrics.go",
         "resolvconf.go",
         "selfcheck.go",
@@ -36,6 +37,7 @@ go_test(
     name = "meshdns_test",
     srcs = [
         "forwardpool_test.go",
+        "lameduck_test.go",
         "metrics_test.go",
         "resolvconf_test.go",
         "selfcheck_test.go",

@@ -23,6 +23,19 @@ var queryDurationBuckets = []float64{
 	0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 }
 
+// lameDuckDurationBuckets are the explicit histogram boundaries (SECONDS) for
+// aether.mesh_dns.lame_duck.duration.
+//
+// They are seconds-oriented on purpose. #732 (fixed in #733) was the prober's duration
+// histogram recording seconds against OTel's DEFAULT boundaries (5, 10, 25, ... — tuned
+// for milliseconds): every value below 5s landed in the first bucket, so the #726
+// validation could not tell a 2s stall from a 2ms success. The interesting range here is
+// "the successor answered within a few hundred ms" up to the 10s default
+// --lame-duck-max, so the boundaries have to resolve exactly that.
+var lameDuckDurationBuckets = []float64{
+	0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 30,
+}
+
 // resolverState is the point-in-time Server state the observable gauges export. It is
 // a plain value copied out from under the Server's RWMutex (see Server.observedState)
 // so the OTel collect callback never holds a resolver lock while exporting.
@@ -55,6 +68,10 @@ type metrics struct {
 	// from 1.0 to near zero.
 	forwardDials    metric.Int64Counter
 	forwardRecycles metric.Int64Counter
+	// lameDuckExits / lameDuckDuration record the post-SIGTERM handoff window
+	// (issue #729): why it ended and how long the predecessor kept serving.
+	lameDuckExits    metric.Int64Counter
+	lameDuckDuration metric.Float64Histogram
 }
 
 // newMetrics builds the resolver metrics on the global MeterProvider (a no-op meter
@@ -77,7 +94,11 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 	reloads := b.counter("aether.mesh_dns.snapshot_reloads_total",
 		"Attempts to read the record snapshot the agent writes, by result (success, missing=file absent, parse_error=corrupt, read_error=I/O failure)")
 	duration := b.histogram("aether.mesh_dns.query.duration",
-		"End-to-end time to handle a DNS query, by result")
+		"End-to-end time to handle a DNS query, by result", queryDurationBuckets)
+	lameDuckExits := b.counter("aether.mesh_dns.lame_duck.exits",
+		"Post-SIGTERM lame-duck windows that ended, by reason (successor=a DIFFERENT instance answered on this listener's SO_REUSEPORT address, so the handoff drained instead of dropping the queued datagrams; deadline=--lame-duck-max elapsed with no successor, which is normal for a scale-down and a failed surge otherwise; signal=a second termination signal cut the window short) and by instance (this process's lame-duck identity stamp, exactly one value per mesh-DNS generation, issue #736 — it makes each generation its own series so sum by (node)(increase(aether_mesh_dns_lame_duck_exits_total[30m])) counts every roll in the window instead of reading ~0, and it joins to the `instance=` field on this process's `lame duck started` / `successor observed` log lines). On a healthy DaemonSet roll every node must show successor")
+	lameDuckDuration := b.histogram("aether.mesh_dns.lame_duck.duration",
+		"Seconds the resolver kept serving after SIGTERM before closing its listeners, by exit reason and by the same per-generation instance stamp as aether.mesh_dns.lame_duck.exits (its _count is a counter and would otherwise reset with every generation, issue #736)", lameDuckDurationBuckets)
 
 	age := b.floatGauge("aether.mesh_dns.snapshot_age_seconds",
 		"Seconds since the agent stamped the record snapshot. Grows without bound when the writing agent crashes, loses RBAC, or its capture reconciler wedges — the resolver then serves a frozen table and NXDOMAINs new services authoritatively")
@@ -134,6 +155,9 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 
 		forwardDials:    forwardDials,
 		forwardRecycles: forwardRecycles,
+
+		lameDuckExits:    lameDuckExits,
+		lameDuckDuration: lameDuckDuration,
 	}
 }
 
@@ -150,11 +174,15 @@ func (b *meterBuilder) counter(name, desc string) metric.Int64Counter {
 	return i
 }
 
-func (b *meterBuilder) histogram(name, desc string) metric.Float64Histogram {
+// histogram builds a seconds-unit histogram with EXPLICIT boundaries. The boundaries
+// are a required parameter rather than a package default: OTel's implicit set is
+// milliseconds-oriented, and silently recording seconds against it is exactly the
+// resolution loss #732/#733 swept out of the rest of the repo.
+func (b *meterBuilder) histogram(name, desc string, buckets []float64) metric.Float64Histogram {
 	i, err := b.meter.Float64Histogram(name,
 		metric.WithDescription(desc),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(queryDurationBuckets...))
+		metric.WithExplicitBucketBoundaries(buckets...))
 	b.latch(err)
 	return i
 }
@@ -245,6 +273,35 @@ func (m *metrics) recordForwardRecycle(reason string) {
 	m.forwardRecycles.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
+// recordLameDuck records one completed lame-duck window: the exit reason on the counter
+// and, with the same attributes, how long the predecessor kept serving. Both carry
+// reason so "we always run to the deadline" (a successor that never answers) is
+// distinguishable from "we hand off in 400ms" without joining two metrics.
+//
+// Both also carry `instance`, this process's lame-duck identity stamp (lameduck.go), and
+// that attribute is what makes the counter READABLE across a rollout (issue #736). A
+// lame-duck exit happens once per process, at the end of its life: with only {node,
+// reason} every generation increments a fresh process-local counter to 1, Prometheus
+// sees the same series go 1 -> 1 -> 1, which is not a counter reset, and increase() over
+// a window spanning several rolls reports ~0. The stamp is minted once per process and
+// never reused, so each generation is its own series, every one of them a genuine 0 -> 1
+// rise that increase() sums. Cardinality is one series per generation per node — bounded
+// by how often the DaemonSet rolls, and the series age out with the generation.
+//
+// The reason attribute stays a CLOSED set (successor|deadline|signal); instance is the
+// only unbounded-in-time dimension, and deliberately so.
+func (m *metrics) recordLameDuck(instance, reason string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("reason", reason),
+		attribute.String("instance", instance),
+	)
+	m.lameDuckExits.Add(context.Background(), 1, attrs)
+	m.lameDuckDuration.Record(context.Background(), d.Seconds(), attrs)
+}
+
 // recordReload counts a snapshot read attempt by outcome.
 func (m *metrics) recordReload(result string) {
 	if m == nil {
@@ -273,6 +330,12 @@ const (
 	// populated (warm-start snapshot empty + no reconcile yet); answered SERVFAIL
 	// so the client retries instead of caching a negative answer.
 	resultCold = "cold"
+	// resultInstance is a query for the reserved instance-identity name
+	// (_instance._aether.<meshDomain>, issue #729): the TXT stamp that lets a
+	// departing predecessor recognise its successor in the SO_REUSEPORT group. A
+	// handful per roll; a steady stream of them means something other than the lame
+	// duck is polling it.
+	resultInstance = "instance_id"
 )
 
 const (

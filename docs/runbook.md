@@ -333,6 +333,68 @@ pre-#674 dial-per-query behaviour:
 helm upgrade ... --set agent.meshDnsDaemon.forwardPoolSize=0
 ```
 
+### Grading the mesh-DNS lame-duck handoff across a roll
+
+On SIGTERM the resolver keeps serving until it has PROVEN a successor is answering on
+the shared SO_REUSEPORT address, and only then closes its sockets (issue #729). Every
+window ends with exactly one exit, counted by `reason`:
+
+| `reason` | meaning |
+| --- | --- |
+| `successor` | a DIFFERENT instance answered on our listen address — the handoff drained. **This is what a healthy DaemonSet roll must show on every node.** |
+| `deadline` | `--lame-duck-max` elapsed with no successor. Expected on a scale-down or node drain; on a roll it means the successor never came up, and the queued datagrams were dropped as they were before #729. |
+| `signal` | a second termination signal cut the window short. |
+
+The exit is a **once-per-process event**, so the counter carries an `instance` attribute
+— this process's 64-bit lame-duck identity stamp, exactly one value per mesh-DNS
+generation (issue #736). Without it every successor restarts the same `{node,reason}`
+series at 1, Prometheus never sees a reset, and `increase()` over a window spanning
+several rolls reads ~0 (the #729 validation had to count 50 exits from raw per-roll
+snapshots). With it each generation is its own series and a genuine 0 → 1 rise:
+
+```promql
+# Exits per node over the last 30m. After two rolls this is 2 per node -- it counts
+# every generation, which the pre-#736 series could not.
+sum by (node) (increase(aether_mesh_dns_lame_duck_exits_total[30m]))
+
+# The only breakdown that matters: everything must be reason="successor".
+sum by (node, reason) (increase(aether_mesh_dns_lame_duck_exits_total[30m]))
+
+# How long each generation held its sockets open, p95 (10s is --lame-duck-max,
+# i.e. a window that ran to its deadline).
+histogram_quantile(0.95,
+  sum by (le) (rate(aether_mesh_dns_lame_duck_duration_seconds_bucket[30m])))
+```
+
+> **Sample count.** A generation records its exit and then dies, so its series is
+> exported by the shutdown flush and usually carries a **single** sample. `rate()` and
+> `increase()` need two samples in the range to produce anything for a series, so if a
+> window you know had rolls still comes back empty, count the series instead — each one
+> tops out at exactly 1, so this is exact regardless of how many samples landed:
+>
+> ```promql
+> # Rolls per node, sample-count independent.
+> sum by (node) (max_over_time(aether_mesh_dns_lame_duck_exits_total[30m]))
+> sum by (node, reason) (max_over_time(aether_mesh_dns_lame_duck_exits_total[30m]))
+> ```
+>
+> `max_over_time` is also what survives the series ageing out with its generation — the
+> same trap that produced two premature "zero" readings on #638.
+
+`instance` is also the join key back to the logs: the same stamp appears as `instance=`
+on that generation's `lame duck started` and `successor observed` lines (and as
+`successor=` on the *predecessor's* line, naming the generation that replaced it), so a
+suspicious series resolves to one pod's window.
+
+```
+_stream:{service.name="aether-mesh-dns"} AND instance:"<stamp>"
+```
+
+Cardinality is one series per generation per node — bounded by how often the DaemonSet
+rolls, and the series age out with the generation. That ageing-out is why an **instant**
+query is never the right read here: minutes after a roll the generation's series is
+gone, and the instant read returns nothing at all rather than the exit it recorded.
+
 ### The agent reports an unrepairable conflist
 
 Symptom: `AetherCNIConflistUnchained` fires for a node, the agent there is NotReady and
