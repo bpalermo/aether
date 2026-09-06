@@ -96,9 +96,9 @@ func newMetrics(state func() resolverState, log *slog.Logger) *metrics {
 	duration := b.histogram("aether.mesh_dns.query.duration",
 		"End-to-end time to handle a DNS query, by result", queryDurationBuckets)
 	lameDuckExits := b.counter("aether.mesh_dns.lame_duck.exits",
-		"Post-SIGTERM lame-duck windows that ended, by reason (successor=a DIFFERENT instance answered on this listener's SO_REUSEPORT address, so the handoff drained instead of dropping the queued datagrams; deadline=--lame-duck-max elapsed with no successor, which is normal for a scale-down and a failed surge otherwise; signal=a second termination signal cut the window short). On a healthy DaemonSet roll every node must show successor")
+		"Post-SIGTERM lame-duck windows that ended, by reason (successor=a DIFFERENT instance answered on this listener's SO_REUSEPORT address, so the handoff drained instead of dropping the queued datagrams; deadline=--lame-duck-max elapsed with no successor, which is normal for a scale-down and a failed surge otherwise; signal=a second termination signal cut the window short) and by instance (this process's lame-duck identity stamp, exactly one value per mesh-DNS generation, issue #736 — it makes each generation its own series so sum by (node)(increase(aether_mesh_dns_lame_duck_exits_total[30m])) counts every roll in the window instead of reading ~0, and it joins to the `instance=` field on this process's `lame duck started` / `successor observed` log lines). On a healthy DaemonSet roll every node must show successor")
 	lameDuckDuration := b.histogram("aether.mesh_dns.lame_duck.duration",
-		"Seconds the resolver kept serving after SIGTERM before closing its listeners, by exit reason", lameDuckDurationBuckets)
+		"Seconds the resolver kept serving after SIGTERM before closing its listeners, by exit reason and by the same per-generation instance stamp as aether.mesh_dns.lame_duck.exits (its _count is a counter and would otherwise reset with every generation, issue #736)", lameDuckDurationBuckets)
 
 	age := b.floatGauge("aether.mesh_dns.snapshot_age_seconds",
 		"Seconds since the agent stamped the record snapshot. Grows without bound when the writing agent crashes, loses RBAC, or its capture reconciler wedges — the resolver then serves a frozen table and NXDOMAINs new services authoritatively")
@@ -274,14 +274,30 @@ func (m *metrics) recordForwardRecycle(reason string) {
 }
 
 // recordLameDuck records one completed lame-duck window: the exit reason on the counter
-// and, with the same reason attribute, how long the predecessor kept serving. Both carry
+// and, with the same attributes, how long the predecessor kept serving. Both carry
 // reason so "we always run to the deadline" (a successor that never answers) is
 // distinguishable from "we hand off in 400ms" without joining two metrics.
-func (m *metrics) recordLameDuck(reason string, d time.Duration) {
+//
+// Both also carry `instance`, this process's lame-duck identity stamp (lameduck.go), and
+// that attribute is what makes the counter READABLE across a rollout (issue #736). A
+// lame-duck exit happens once per process, at the end of its life: with only {node,
+// reason} every generation increments a fresh process-local counter to 1, Prometheus
+// sees the same series go 1 -> 1 -> 1, which is not a counter reset, and increase() over
+// a window spanning several rolls reports ~0. The stamp is minted once per process and
+// never reused, so each generation is its own series, every one of them a genuine 0 -> 1
+// rise that increase() sums. Cardinality is one series per generation per node — bounded
+// by how often the DaemonSet rolls, and the series age out with the generation.
+//
+// The reason attribute stays a CLOSED set (successor|deadline|signal); instance is the
+// only unbounded-in-time dimension, and deliberately so.
+func (m *metrics) recordLameDuck(instance, reason string, d time.Duration) {
 	if m == nil {
 		return
 	}
-	attrs := metric.WithAttributes(attribute.String("reason", reason))
+	attrs := metric.WithAttributes(
+		attribute.String("reason", reason),
+		attribute.String("instance", instance),
+	)
 	m.lameDuckExits.Add(context.Background(), 1, attrs)
 	m.lameDuckDuration.Record(context.Background(), d.Seconds(), attrs)
 }
