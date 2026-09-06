@@ -21,6 +21,14 @@ type metrics struct {
 	syncSecs  metric.Float64Histogram
 }
 
+// syncDurationBuckets are the explicit boundaries, in SECONDS, for
+// aether.replicator.sync.duration. The OTel defaults are millisecond-oriented
+// (0, 5, 10, ... 10000): against a seconds-valued duration every range-sync would land
+// in the "<= 5 s" first bucket and the quantiles would read flat (#732).
+var syncDurationBuckets = []float64{
+	0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60,
+}
+
 // newMetrics builds the instruments on the global MeterProvider (a no-op
 // meter until a provider is installed). Returns nil on registration error
 // (methods are nil-safe).
@@ -46,7 +54,8 @@ func newMetrics() *metrics {
 	}
 	if m.syncSecs, err = meter.Float64Histogram("aether.replicator.sync.duration",
 		metric.WithUnit("s"),
-		metric.WithDescription("Full range-sync duration")); err != nil {
+		metric.WithDescription("Full range-sync duration"),
+		metric.WithExplicitBucketBoundaries(syncDurationBuckets...)); err != nil {
 		return nil
 	}
 	return m

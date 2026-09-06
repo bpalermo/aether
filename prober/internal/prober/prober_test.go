@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 var traceparentRe = regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-00$`)
@@ -155,4 +158,84 @@ func TestNewTargets(t *testing.T) {
 	if want := "svc-1.aether.internal"; p.targets[1].authority != want {
 		t.Fatalf("reachability authority = %q, want %q", p.targets[1].authority, want)
 	}
+}
+
+// TestDurationHistogramBuckets pins the seconds-oriented boundaries of
+// aether_probe_request_duration_seconds (#732). Without them the SDK falls back to its
+// millisecond-oriented defaults (0, 5, 10, ... 10000), whose first bucket is "<= 5 s":
+// a 2 ms probe and a timed-out 2 s probe then land in the same bucket and every derived
+// quantile reads flat. The assertion is made against the EXPORTED data point, so it
+// covers the option actually reaching the SDK, not just the package variable.
+func TestDurationHistogramBuckets(t *testing.T) {
+	ctx := context.Background()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(ctx) })
+
+	h, err := newDurationHistogram(mp.Meter(telemetryServiceName))
+	if err != nil {
+		t.Fatalf("newDurationHistogram: %v", err)
+	}
+	h.Record(ctx, 0.002) // a healthy sub-10 ms probe
+	h.Record(ctx, 2.0)   // a probe that burned the full 2 s budget
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	m := findMetric(t, &rm, "aether_probe_request_duration_seconds")
+	if m.Unit != "s" {
+		t.Fatalf("unit = %q, want %q", m.Unit, "s")
+	}
+	hist, ok := m.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("aggregation = %T, want metricdata.Histogram[float64]", m.Data)
+	}
+	if len(hist.DataPoints) != 1 {
+		t.Fatalf("data points = %d, want 1", len(hist.DataPoints))
+	}
+	dp := hist.DataPoints[0]
+
+	want := []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 5}
+	if !slices.Equal(dp.Bounds, want) {
+		t.Fatalf("exported bounds = %v, want %v", dp.Bounds, want)
+	}
+	// The whole point of the fix: the 2 s observation must NOT be in le=1.5 and must be
+	// in le=2. Under the OTel defaults both cumulative counts would have been 2.
+	if got := cumulativeAt(t, dp, 1.5); got != 1 {
+		t.Fatalf("le=1.5 cumulative count = %d, want 1 (only the 2 ms probe)", got)
+	}
+	if got := cumulativeAt(t, dp, 2); got != 2 {
+		t.Fatalf("le=2 cumulative count = %d, want 2 (the 2 s probe lands here)", got)
+	}
+}
+
+// findMetric returns the named metric from a collected ResourceMetrics.
+func findMetric(t *testing.T, rm *metricdata.ResourceMetrics, name string) metricdata.Metrics {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == name {
+				return m
+			}
+		}
+	}
+	t.Fatalf("metric %q not exported", name)
+	return metricdata.Metrics{}
+}
+
+// cumulativeAt returns the Prometheus-style cumulative count for the le=bound bucket,
+// i.e. the number of observations <= bound. OTel exports per-bucket counts, so this
+// sums every bucket up to and including the one that bound closes.
+func cumulativeAt(t *testing.T, dp metricdata.HistogramDataPoint[float64], bound float64) uint64 {
+	t.Helper()
+	idx := slices.Index(dp.Bounds, bound)
+	if idx < 0 {
+		t.Fatalf("bound %v is not one of the exported boundaries %v", bound, dp.Bounds)
+	}
+	var total uint64
+	for _, c := range dp.BucketCounts[:idx+1] {
+		total += c
+	}
+	return total
 }

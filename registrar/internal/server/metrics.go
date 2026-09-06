@@ -68,6 +68,15 @@ type Metrics struct {
 	wbShields       metric.Int64Counter
 }
 
+// syncDurationBuckets are the explicit boundaries, in SECONDS, for
+// aether.registrar.sync.duration. The OTel defaults are millisecond-oriented
+// (0, 5, 10, ... 10000), so a seconds-valued sync duration would collapse into the
+// "<= 5 s" first bucket and the quantiles would read flat (#732). A sync cycle runs
+// every 5 s and is normally a few milliseconds of registry list plus diff.
+var syncDurationBuckets = []float64{
+	0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60,
+}
+
 // NewMetrics registers the registrar server instruments on the given meter.
 func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	m := &Metrics{}
@@ -87,7 +96,8 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 	if m.syncDuration, err = meter.Float64Histogram("aether.registrar.sync.duration",
 		metric.WithDescription("Duration of a registry sync cycle"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(syncDurationBuckets...)); err != nil {
 		return nil, fmt.Errorf("sync duration: %w", err)
 	}
 	if m.syncErrors, err = meter.Int64Counter("aether.registrar.sync.errors",

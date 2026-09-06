@@ -105,6 +105,15 @@ func (m *cniMetrics) registerSweepInstruments(meter metric.Meter) error {
 	return nil
 }
 
+// promotionDelayBuckets are the explicit boundaries, in SECONDS, for
+// aether.agent.liveness.promotion_delay_seconds. The OTel defaults are
+// millisecond-oriented (0, 5, 10, ... 10000), which would put every promotion into the
+// "<= 5 s" first bucket (#732). The liveness loop ticks every livenessInterval (5 s), so
+// the interesting range is one tick to a couple of minutes.
+var promotionDelayBuckets = []float64{
+	0.5, 1, 2.5, 5, 7.5, 10, 15, 20, 30, 45, 60, 90, 120, 300,
+}
+
 // registerLifecycleInstruments registers the unmeshed/storage gauges, the liveness
 // instruments and the identity-override counter.
 func (m *cniMetrics) registerLifecycleInstruments(meter metric.Meter) error {
@@ -128,7 +137,8 @@ func (m *cniMetrics) registerLifecycleInstruments(meter metric.Meter) error {
 	}
 	if m.promotionDelay, err = meter.Float64Histogram("aether.agent.liveness.promotion_delay_seconds",
 		metric.WithDescription("Seconds from the liveness loop first observing a pod's programmed health gateway to promoting it HEALTHY in the registry"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(promotionDelayBuckets...)); err != nil {
 		return fmt.Errorf("promotion delay: %w", err)
 	}
 	if m.spiffeIDOverrides, err = meter.Int64Counter("aether.agent.identity.spiffe_id_override_rejected",

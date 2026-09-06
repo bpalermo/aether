@@ -148,6 +148,10 @@ Emitted through the existing OTel → `otel-collector` → Prometheus pipeline:
 - `aether_probe_requests_total{tier, target, result}` — counter
   (`tier` = `liveness` | `reachability`).
 - `aether_probe_request_duration_seconds{tier, target}` — histogram (optional).
+  Its boundaries are set EXPLICITLY, in seconds (0.001 … 1, 1.5, 2, 2.5, 5): the OTel
+  SDK's defaults are millisecond-oriented, so a seconds-valued duration would put every
+  observation — a 2 ms probe and a timed-out 2 s one alike — in the same `le="5"`
+  bucket and flatten every derived quantile (#732).
 
 Per-node de-collapse via `OTEL_RESOURCE_ATTRIBUTES=k8s.node.name=$(NODE_NAME)`
 (downward API) + the collector `transform/promote` already in place (à la PR #210).
