@@ -55,10 +55,29 @@ probe:
 telemetry:
   otlpEndpoint: ""
 
+# The prober MEASURES mesh latency, so it must never be the thing adding it, and a CPU
+# limit is exactly that thing: the limit is a CFS quota, and once a 100 ms period's
+# quota is gone the runnable goroutine sleeps to the next period boundary — probe
+# latency comes out quantised in ~100 ms steps no matter how fast the mesh answered.
+#
+# At the previous 50m limit that was not a theoretical risk, it was the dominant term in
+# the SLI (issue #735). Measured on talos-main: the container was throttled in 81–90% of
+# ALL CFS periods on every one of the five nodes, and the mesh_dns tier's p50 read 179 ms
+# against a source-proxy `duration` of 29 ms for the very same requests — roughly 150 ms
+# of the published SLI was the prober's own quota. Even the liveness tier, a local
+# direct_response an unthrottled client measures at ~1 ms, read 9 ms p50 / 317 ms p99.
+#
+# The tier that costs the CPU is mesh_dns: it resolves and dials on EVERY probe by
+# design (that is the SLI), and ~39% of the process's CPU goes to
+# net.(*Resolver).tryOneName plus http.(*Transport).dialConn.
+#
+# Hence: a request that reflects real demand, and NO CPU limit. The workload is
+# open-loop and rate-bounded (probe.rate × number of targets) so it cannot run away.
+# The memory limit stays — it also feeds GOMEMLIMIT. Re-add limits.cpu here only with a
+# quota that cannot bind (>= 1), never a fraction of a core.
 resources:
   requests:
-    cpu: 10m
+    cpu: 100m
     memory: 32Mi
   limits:
-    cpu: 50m
     memory: 64Mi
