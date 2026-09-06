@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 )
@@ -67,6 +68,41 @@ func TestClassifyErr(t *testing.T) {
 		err := fmt.Errorf("dial tcp 10.0.0.1:18081: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")})
 		if got := classifyErr(context.Background(), err); got != resultConnectionError {
 			t.Fatalf("got %q, want %q", got, resultConnectionError)
+		}
+	})
+
+	// The subtests above all pass a live context, which is precisely why the
+	// misordering in #726 survived: in production the probe's own 2s deadline has
+	// ALWAYS expired by the time a 5s resolver retransmit surfaces, so ctx.Err() is
+	// DeadlineExceeded on every real dns_timeout. These pin the expired-context case.
+	t.Run("DNS timeout with an ALREADY-EXPIRED probe context -> dns_timeout", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("test setup: want an expired context, got %v", ctx.Err())
+		}
+		// What Go hands back when the probe deadline cancels a lookup in flight.
+		err := fmt.Errorf("dial: %w", &net.DNSError{Err: "i/o timeout", Name: "echo.aether-test.aether.internal", IsTimeout: true})
+		if got := classifyErr(ctx, err); got != resultDNSTimeout {
+			t.Fatalf("a resolution stall must be attributed to DNS even once the probe deadline has expired: got %q, want %q", got, resultDNSTimeout)
+		}
+	})
+	t.Run("DNS nxdomain with an ALREADY-EXPIRED probe context -> dns_nxdomain", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		err := fmt.Errorf("dial: %w", &net.DNSError{Err: "no such host", Name: "bogus.aether.internal", IsNotFound: true})
+		if got := classifyErr(ctx, err); got != resultDNSNXDomain {
+			t.Fatalf("got %q, want %q", got, resultDNSNXDomain)
+		}
+	})
+	t.Run("connect stall with an expired probe context stays timeout", func(t *testing.T) {
+		// The other side of the reorder: a deadline that lands AFTER resolution carries
+		// no *net.DNSError, so it must still be a transport timeout, never a dns_* class.
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		err := fmt.Errorf("dial tcp 10.107.111.199:18081: %w", &net.OpError{Op: "dial", Err: context.DeadlineExceeded})
+		if got := classifyErr(ctx, err); got != resultTimeout {
+			t.Fatalf("got %q, want %q", got, resultTimeout)
 		}
 	})
 }

@@ -310,13 +310,22 @@ func notSampledTraceparent() string {
 // regression is an unambiguous, independently alertable signal — never folded into
 // connection_error. A connect failure AFTER successful resolution stays
 // connection_error.
+//
+// Resolution is classified FIRST, ahead of the probe's own deadline. This ordering
+// is load-bearing, not stylistic (issue #726). The per-probe budget (Config.Timeout,
+// 2s) is SHORTER than the stock resolv.conf retransmit timeout (5s), so a lookup that
+// loses a datagram always blows the probe deadline before the resolver retries. With
+// the deadline tested first, ctx.Err() was ALWAYS context.DeadlineExceeded by the time
+// the error came back and dns_timeout was structurally unreachable for exactly the
+// failure it exists to name: three separate investigations read "dns_* is zero" as
+// "DNS is healthy" when it only ever meant "DNS never failed FAST".
+//
+// The reorder is safe because *net.DNSError is produced only by resolution — Go
+// returns one (with IsTimeout set) when the context deadline cancels a lookup in
+// flight, and a plain OpError with no DNSError inside when the deadline lands on a
+// post-resolution connect. So the DNS branch catches resolution stalls and nothing
+// else; connect stalls still fall through to resultTimeout below.
 func classifyErr(ctx context.Context, err error) string {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
-		return resultTimeout
-	}
-	// A DNS failure is checked before the generic net.Error timeout branch: a
-	// *net.DNSError also satisfies net.Error, and a resolution timeout must surface
-	// as dns_timeout (not the transport timeout) so the mesh-DNS signal is distinct.
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
 		switch {
@@ -327,6 +336,9 @@ func classifyErr(ctx context.Context, err error) string {
 		default:
 			return resultDNSError
 		}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return resultTimeout
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
