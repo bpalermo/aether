@@ -115,8 +115,12 @@ groups:
 
       # External SLI. Deliberately EXCLUDES http_error: that is the cross-node drain
       # path (a different failure domain), and including it would fire on every proxy
-      # roll. Generic `timeout` IS included -- a hung resolver surfaces as a context
-      # deadline, not as dns_timeout.
+      # roll. Generic `timeout` IS still included as a belt-and-braces catch: a
+      # resolution stall that outlives the probe's own deadline now classifies as
+      # dns_timeout (issue #726 -- the prober used to test ctx.Err() ahead of the
+      # *net.DNSError branch, which made dns_timeout structurally unreachable and made
+      # "dns_* is zero" read as "DNS is healthy" when it only meant "DNS never failed
+      # FAST"), but a connect-side hang still lands in `timeout`.
       - alert: MeshDNSResolutionFailing
         expr: |
           sum by (node, target) (
