@@ -75,7 +75,7 @@ forgot the TRIPLE's proxy. The set of rolls has not changed, only the tally.
 | 360 | svc-1 — the last roll of any kind | | | |
 | **360 → 450** | **NO-ROLL WINDOW** — nothing is rolled for 90 minutes | | | |
 | 450 | **SHRINK** — `svc-5` scaled to 0 for 90s, then restored | | | |
-| ~452 | `churn driver complete` (k6 runs 7h40m, so both land under load) | | | |
+| ~452 | `churn driver complete` (k6 runs 8h30m: both land under load AND the runners cannot self-restart inside the graded T0+8h window) | | | |
 
 \* = 30 minutes after that proxy roll an age-matched RSS sample is taken in the
 background (`sample-proxy-rss.sh --at-age 1800`), for #628. Six samples per run.

@@ -48,7 +48,7 @@ spec:
               mountPath: /soak
           resources:
             # k6 accumulates metric samples in memory for the end-of-run summary, so
-            # a 7h40m run outgrows a small limit: at 256Mi every runner OOM-restarted
+            # an 8h30m run outgrows a small limit: at 256Mi every runner OOM-restarted
             # ~3-5h in (07-23 and 07-24 soaks), fragmenting the run and losing the
             # http_req_failed summary. 1Gi comfortably covers the full 8h.
             requests:

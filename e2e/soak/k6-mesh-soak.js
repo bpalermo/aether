@@ -6,7 +6,7 @@ export const options = {
     mesh_soak: {
       executor: 'constant-arrival-rate',
       rate: 60, timeUnit: '1s',
-      duration: '7h40m',
+      duration: '8h30m',
       preAllocatedVUs: 60, maxVUs: 180,
     },
   },
