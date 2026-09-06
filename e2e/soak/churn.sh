@@ -35,7 +35,7 @@
 #   360   NO-ROLL WINDOW BEGIN       nothing is rolled for 90 minutes
 #   450   NO-ROLL WINDOW END
 #   450   SHRINK                     svc-5 -> 0 replicas for 90s, then restored
-#   ~452  churn driver complete      (k6 runs 7h40m, so both land under load)
+#   ~452  churn driver complete      (k6 runs 8h30m: both land under load AND the runners cannot self-restart inside the graded T0+8h window)
 #
 #   * = 30 minutes later an age-matched proxy RSS sample is taken in the
 #       background (sample-proxy-rss.sh --at-age 1800), for #628.
