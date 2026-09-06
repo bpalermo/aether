@@ -16,14 +16,15 @@ on:
 permissions:
   contents: read
 
-# Serialise proxy releases for the same reason as `publish` (#692): the
-# `bump-chart` job rewrites `charts/aether/values.yaml` on top of whatever `main`
-# is at checkout time and force-pushes the single rolling `chore/proxy-image-bump`
-# branch, so two overlapping runs race on that shared branch and the loser's image
-# pin is silently dropped. `cancel-in-progress: false` because each run publishes
-# a distinct, commit-SHA-tagged multi-arch image that nothing else will republish;
-# cancelling one would leave per-arch blobs pushed with no manifest referencing
-# them.
+# Serialise proxy releases for the same reason as `publish` (#692): `bump-chart`
+# rewrites `charts/aether/values.yaml` and bumps `Chart.yaml` on top of whatever
+# `main` is at checkout time, so two overlapping runs would compute the *same*
+# next chart version off the same base and the second PR to merge would land a
+# duplicate version (and, before #703's per-release branches, would also have
+# clobbered the first run's pin on the shared branch).
+# `cancel-in-progress: false` because each run publishes a distinct,
+# commit-SHA-tagged multi-arch image that nothing else will republish; cancelling
+# one would leave per-arch blobs pushed with no manifest referencing them.
 concurrency:
   group: proxy-release-main
   cancel-in-progress: false
@@ -180,16 +181,44 @@ jobs:
           echo "index_digest=$index" >> "$GITHUB_OUTPUT"
           echo "index: $index"
 
-  # Pin the aether chart to the just-published image (commit-SHA tag) by opening a
-  # PR against the protected main branch. peter-evans reuses a single rolling
-  # branch, so repeat releases update the same PR; if the chart is already pinned
-  # to this SHA there's no diff and no PR.
+  # Pin the aether chart to the just-published image (commit-SHA tag).
+  #
+  # This job deliberately does NOT open the PR (#703). Two independent walls make
+  # an automated PR impossible here:
+  #   * "Allow GitHub Actions to create and approve pull requests" is off, so
+  #     `GITHUB_TOKEN` cannot create a PR at all — every proxy release used to end
+  #     red here with `GitHub Actions is not permitted to create or approve pull
+  #     requests`;
+  #   * turning that setting on would not help. GitHub's recursion guard means a
+  #     PR opened by `GITHUB_TOKEN` fires no `pull_request` events, so the `ci` +
+  #     `proxy` checks the `main` ruleset requires would never report — and the
+  #     ruleset has no bypass actors, so the PR would be permanently unmergeable.
+  #     Pushing straight to `main` is blocked by the same ruleset. There is no PAT
+  #     and there will not be one.
+  # A PR *opened by a human* on a branch a bot pushed does fire `pull_request`
+  # normally, because the event is attributed to whoever opens the PR and not to
+  # whoever pushed the branch. So this job pushes the branch and hands off: a step
+  # summary plus a comment on the rolling "proxy releases pending chart pin"
+  # issue, both carrying the exact `gh pr create` one-liner. That is one command
+  # per proxy release, alongside the talos deploy which is manual anyway — and it
+  # costs no credential, no ruleset bypass and no repository setting change.
+  #
+  # The branch is per-release (`chore/proxy-image-bump-<short sha>`) rather than a
+  # single rolling one: a later `GITHUB_TOKEN` push onto a branch that already has
+  # an open PR fires no `pull_request: synchronize` either, so the new head would
+  # carry no checks and the PR would be stuck (recoverable only by close/reopen).
+  # A fresh branch per release makes every PR a fresh `opened` event. Superseded
+  # `chore/proxy-image-bump-*` PRs are closed by hand.
   bump-chart:
     needs: manifest
     runs-on: ubuntu-latest
     permissions:
+      # contents: write to push the branch; issues: write for the hand-off
+      # comment. No pull-requests: write — this job cannot and must not open PRs.
       contents: write
-      pull-requests: write
+      issues: write
+    env:
+      TRACKING_ISSUE_TITLE: proxy releases pending chart pin
     steps:
       - name: Checkout main
         uses: actions/checkout@v6
@@ -197,8 +226,10 @@ jobs:
           ref: main
 
       - name: Pin aether chart to aether-proxy:${{ github.sha }}
+        id: pin
         env:
           INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
+          SHA: ${{ github.sha }}
         run: |
           test -n "$INDEX_DIGEST"
           # charts/aether/values.yaml carries `repository:` + `tag:` + `digest:`
@@ -215,9 +246,20 @@ jobs:
           sed -i -E '\|repository: ghcr\.io/bpalermo/aether/aether-proxy|,+4{s|helper prefers digest over tag\..*|helper prefers digest over tag. Multi-arch index for '"${{ github.sha }}"'.|}' \
             charts/aether/values.yaml
           grep -A5 'repository: ghcr.io/bpalermo/aether/aether-proxy' charts/aether/values.yaml
+          # A re-run of an already-pinned sha (or a release whose proxy bits did
+          # not change the published index) leaves no diff: skip the branch, the
+          # chart bump and the hand-off rather than pushing an empty commit.
+          if git diff --quiet -- charts/aether/values.yaml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "chart is already pinned to $SHA / $INDEX_DIGEST — nothing to do"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # Any charts/ change must bump the chart version (CI-enforced).
       - name: Bump chart patch version
+        id: chart
+        if: steps.pin.outputs.changed == 'true'
         run: |
           # The version is quoted in Chart.yaml (`version: "0.92.1"`).
           cur="$(sed -nE 's|^version: "?([0-9]+\.[0-9]+\.[0-9]+)"?$|\1|p' charts/aether/Chart.yaml)"
@@ -226,24 +268,162 @@ jobs:
           sed -i -E "s|^version: \"?${cur}\"?$|version: \"${next}\"|" charts/aether/Chart.yaml
           echo "chart $cur -> $next"
           grep -n '^version:' charts/aether/Chart.yaml
+          {
+            echo "from=$cur"
+            echo "to=$next"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Open chart-bump PR
-        uses: peter-evans/create-pull-request@v7
-        with:
-          # Default GITHUB_TOKEN works, but PRs it opens don't trigger CI (GitHub
-          # recursion guard). If main requires status checks to merge, set a PAT
-          # secret CHART_BUMP_PAT so the PR runs CI.
-          token: ${{ secrets.CHART_BUMP_PAT || secrets.GITHUB_TOKEN }}
-          base: main
-          branch: chore/proxy-image-bump
-          delete-branch: true
-          commit-message: "chore(proxy): pin aether chart to aether-proxy:${{ github.sha }}"
-          title: "chore(proxy): pin aether chart to aether-proxy:${{ github.sha }}"
-          body: |
-            Auto-generated by `proxy-release`. Pins the aether chart's proxy image
-            to the multi-arch image published for `${{ github.sha }}`
-            (`${{ needs.manifest.outputs.index_digest }}`) and bumps the chart
-            patch version.
+      - name: Commit and push the chart-pin branch
+        id: push
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          short="${SHA:0:7}"
+          branch="chore/proxy-image-bump-${short}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add charts/aether/values.yaml charts/aether/Chart.yaml
+          git commit \
+            -m "chore(proxy): pin aether chart to aether-proxy:${SHA}" \
+            -m "Pushed by the proxy-release run for ${SHA}. Moves both tag: and digest: (aether.image prefers digest over tag) and bumps the chart patch version. A human opens the PR so ci + proxy actually run (#703)."
+          # `--force-with-lease` with no value resolves the expected head through
+          # the remote's *configured* fetch refspec. actions/checkout clones
+          # single-branch (main only), so no other branch has a mapping and the
+          # push is rejected as `stale info` even immediately after fetching it.
+          # Pass the lease explicitly instead: the fetched head when the branch
+          # already exists, the empty string ("must not exist") when it does not.
+          lease=""
+          if git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" 2>/dev/null; then
+            lease="$(git rev-parse "refs/remotes/origin/${branch}")"
+          fi
+          git push --force-with-lease="${branch}:${lease}" origin "HEAD:refs/heads/${branch}"
+          {
+            echo "branch=$branch"
+            echo "short=$short"
+          } >> "$GITHUB_OUTPUT"
 
-            `aether.image` prefers `digest:` over `tag:`, so both lines move —
-            a tag-only bump would leave the previously pinned image deployed.
+      # The hand-off: everything a human needs to turn the pushed branch into a
+      # PR, written twice — to the run summary (for whoever is looking at the run)
+      # and to the rolling tracking issue (the notification channel: a bot comment
+      # on an issue the owner subscribes to does notify).
+      - name: Hand off the chart-pin branch
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+          CHART_FROM: ${{ steps.chart.outputs.from }}
+          CHART_TO: ${{ steps.chart.outputs.to }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="chore(proxy): pin aether chart to aether-proxy:${SHA}"
+          body="$RUNNER_TEMP/pr-body.md"
+          handoff="$RUNNER_TEMP/handoff.md"
+          # Quoted heredoc + __PLACEHOLDERS__: the body is markdown full of
+          # backticks, which an expanding heredoc would run as command
+          # substitutions.
+          cat > "$body" <<'PRBODY'
+          Auto-generated by the `proxy-release` run for `__SHA__` (__RUN_URL__).
+
+          Pins the aether chart's proxy image to the multi-arch index published for
+          that commit, and bumps the chart patch version.
+
+          | | |
+          |---|---|
+          | image | `ghcr.io/bpalermo/aether/aether-proxy:__SHA__` |
+          | index digest | `__DIGEST__` |
+          | chart version | `__CHART_FROM__` -> `__CHART_TO__` |
+
+          `aether.image` (`charts/aether/templates/_helpers.tpl`) prefers `digest:`
+          over `tag:`, so both lines move — a tag-only bump would leave the
+          previously pinned image deployed (#703, #705). The `proxy-pin` CI job
+          re-checks that `tag:`, `digest:` and the registry agree.
+
+          The branch was pushed by the workflow and this PR opened by hand on
+          purpose: a PR opened by `GITHUB_TOKEN` fires no `pull_request` events, so
+          the required `ci` + `proxy` checks would never report and the `main`
+          ruleset (no bypass actors) could never be satisfied (#703).
+
+          If an older `chore/proxy-image-bump-*` PR is still open, this one
+          supersedes it — close the older one.
+
+          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          PRBODY
+          sed -i \
+            -e "s|__SHA__|${SHA}|g" \
+            -e "s|__DIGEST__|${INDEX_DIGEST}|g" \
+            -e "s|__CHART_FROM__|${CHART_FROM}|g" \
+            -e "s|__CHART_TO__|${CHART_TO}|g" \
+            -e "s|__BRANCH__|${BRANCH}|g" \
+            -e "s|__RUN_URL__|${RUN_URL}|g" \
+            "$body"
+
+          {
+            echo "## Chart pin ready for \`aether-proxy:${SHA}\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| image | \`ghcr.io/bpalermo/aether/aether-proxy:${SHA}\` |"
+            echo "| index digest | \`${INDEX_DIGEST}\` |"
+            echo "| chart version | \`${CHART_FROM}\` -> \`${CHART_TO}\` |"
+            echo "| branch | \`${BRANCH}\` |"
+            echo "| release run | ${RUN_URL} |"
+            echo
+            echo "\`proxy-release\` pushed the branch but cannot open the PR (#703)."
+            echo "Run this from a checkout (bash — it uses process substitution):"
+            echo
+            echo '```sh'
+            echo "gh pr create --base main --head ${BRANCH} --title \"${title}\" --body-file <(cat <<'PRBODY'"
+            cat "$body"
+            echo "PRBODY"
+            echo ")"
+            echo '```'
+          } > "$handoff"
+
+          cat "$handoff" >> "$GITHUB_STEP_SUMMARY"
+
+          # One rolling tracking issue, exact-title matched (the search is fuzzy,
+          # the select is not). Created on first use.
+          num="$(gh issue list --state open --limit 100 \
+            --search "\"${TRACKING_ISSUE_TITLE}\" in:title" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TRACKING_ISSUE_TITLE}\")] | .[0].number // empty")"
+          if [ -z "$num" ]; then
+            issue_body="$RUNNER_TEMP/issue-body.md"
+            cat > "$issue_body" <<'ISSUEBODY'
+          Rolling tracker for the `proxy-release` -> chart-pin hand-off (#703).
+
+          Every `proxy-release` run publishes a commit-SHA-tagged multi-arch
+          `aether-proxy` image, pins `charts/aether/values.yaml` to it and pushes
+          the result to `chore/proxy-image-bump-<short sha>`. It cannot open the PR
+          itself: `GITHUB_TOKEN` may not create PRs here, and a PR it created would
+          get no `pull_request` runs, hence none of the `ci` + `proxy` checks the
+          `main` ruleset requires.
+
+          So each run comments here with the exact `gh pr create` one-liner. Run it,
+          let `ci` + `proxy` go green, squash-merge, then deploy and assert
+          `appVersion` (docs/runbook.md §7). Close any superseded
+          `chore/proxy-image-bump-*` PR.
+          ISSUEBODY
+            url="$(gh issue create --title "${TRACKING_ISSUE_TITLE}" --body-file "$issue_body")"
+            num="${url##*/}"
+            echo "created tracking issue #${num}: ${url}"
+          fi
+          gh issue comment "$num" --body-file "$handoff"
+          echo "commented on tracking issue #${num}"
+
+      - name: Chart already pinned to this sha
+        if: steps.pin.outputs.changed != 'true'
+        env:
+          SHA: ${{ github.sha }}
+          INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
+        run: |
+          {
+            echo "## Chart already pinned to \`aether-proxy:${SHA}\`"
+            echo
+            echo "\`charts/aether/values.yaml\` needed no change (index \`${INDEX_DIGEST}\`)."
+            echo "No branch pushed, no chart bump, no hand-off comment."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -237,6 +237,17 @@ esac
 string equality. If it fails, the chart tag you pulled was built from a different
 commit: re-run that commit's `publish` workflow and upgrade again.
 
+**After a proxy release, open the PR the workflow pushed.** `proxy-release`
+publishes the image, pins `charts/aether/values.yaml` (`tag:` *and* `digest:`)
+and pushes `chore/proxy-image-bump-<short sha>`, but it cannot open the PR:
+`GITHUB_TOKEN` may not create PRs here, and one it created would get no
+`pull_request` runs, so the required `ci` + `proxy` checks would never report
+(#703). Copy the `gh pr create` one-liner from the run summary — the same block
+is posted to the rolling **proxy releases pending chart pin** issue — open the
+PR, let `ci` + `proxy` go green, squash-merge, and close any superseded
+`chore/proxy-image-bump-*` PR. Only then is there a `publish` run whose
+commit-suffixed chart tag (`<X.Y.Z>-<full sha>`, above) carries the new proxy.
+
 From a checkout, the Bazel install targets do the same in order:
 
 ```bash

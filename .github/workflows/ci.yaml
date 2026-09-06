@@ -116,6 +116,149 @@ jobs:
       - name: Require the xDS bindings to match the proxy's Envoy
         run: scripts/check-envoy-api-parity.sh
 
+  # The chart's aether-proxy pin has three parts that must agree: `tag:`,
+  # `digest:`, and what the registry actually serves under that tag. Two shipped
+  # bugs were exactly this class and both were invisible until a deploy: #648 (a
+  # hand-pin whose digest came from a different build) and #705 (proxy-release
+  # moved only `tag:`, and `aether.image` prefers `digest:`, so every proxy
+  # release silently kept deploying the Envoy v1.39.0 index). Deliberately
+  # unconditional — no `if`, no path filter: the pin can rot without
+  # values.yaml changing (tags are mutable), //bazel/proxy_pin reads these same
+  # lines to pick the binary //test/envoy_validate runs, and a required check
+  # that skips is a required check that never reports.
+  proxy-pin:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # ghcr.io/bpalermo/aether/aether-proxy is a PUBLIC package — anonymous pull
+      # works and nothing below logs in. Declared for the day it is made private
+      # (then a docker/login-action step is needed too, as //bazel/proxy_pin says).
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup helm
+        uses: azure/setup-helm@v4
+      - name: Assert the aether-proxy pin agrees with the registry and the chart
+        run: |
+          values=charts/aether/values.yaml
+
+          # Parse exactly the way bazel/proxy_pin/extensions.bzl does, so the two
+          # can never disagree about what the pin is: the first `repository:`
+          # whose last path segment is `aether-proxy`, then `tag:` / `digest:`
+          # inside that same mapping — indentation >= the repository key's, with
+          # blank and comment-only lines not ending the block.
+          scalar() {
+            raw="${1%%#*}"
+            raw="$(printf '%s' "$raw" | sed -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')"
+            case "$raw" in
+              \"*\") raw="${raw#\"}" ; raw="${raw%\"}" ;;
+              \'*\') raw="${raw#\'}" ; raw="${raw%\'}" ;;
+            esac
+            printf '%s' "$raw"
+          }
+
+          repository=""
+          tag=""
+          digest=""
+          in_block=0
+          key_indent=0
+          while IFS= read -r line; do
+            stripped="${line#"${line%%[![:space:]]*}"}"
+            indent=$((${#line} - ${#stripped}))
+            if [ "$in_block" -eq 0 ]; then
+              case "$stripped" in
+                repository:*)
+                  candidate="$(scalar "${stripped#repository:}")"
+                  if [ "${candidate##*/}" = "aether-proxy" ]; then
+                    repository="$candidate"
+                    key_indent="$indent"
+                    in_block=1
+                  fi
+                  ;;
+              esac
+              continue
+            fi
+            if [ -z "$stripped" ]; then
+              continue
+            fi
+            case "$stripped" in
+              \#*) continue ;;
+            esac
+            if [ "$indent" -lt "$key_indent" ]; then
+              break
+            fi
+            case "$stripped" in
+              tag:*) tag="$(scalar "${stripped#tag:}")" ;;
+              digest:*)
+                digest="$(scalar "${stripped#digest:}")"
+                break
+                ;;
+            esac
+          done < "$values"
+
+          fail=0
+          if [ -z "$repository" ]; then
+            echo "::error file=${values}::no aether-proxy image pin found. Expected a line \`repository: <registry>/<path>/aether-proxy\` — the same contract bazel/proxy_pin/extensions.bzl parses."
+            fail=1
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error file=${values}::the aether-proxy image mapping has no \`tag:\`. proxy-release pins tag AND digest together (#703)."
+            fail=1
+          fi
+          if [ -z "$digest" ]; then
+            echo "::error file=${values}::the aether-proxy image mapping has no \`digest:\`. aether.image prefers digest over tag, so a tag-only pin deploys whatever the OLD digest was (#705)."
+            fail=1
+          elif ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error file=${values}::the aether-proxy \`digest:\` is \"${digest}\", which is not a sha256:<64 hex chars> reference."
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "chart pin: ${repository}"
+          echo "  tag:    ${tag}"
+          echo "  digest: ${digest}"
+
+          # (1) registry: the tag must resolve to exactly the pinned digest.
+          registry_digest=""
+          if ! registry_digest="$(docker buildx imagetools inspect "${repository}:${tag}" \
+            --format '{{.Manifest.Digest}}' 2> "$RUNNER_TEMP/imagetools.err")"; then
+            echo "::error file=${values}::could not resolve ${repository}:${tag} in the registry. aether-proxy is a public package, so this is not an auth problem — the tag does not exist (a hand-typed sha, or a proxy-release that never published):"
+            sed 's|^|  |' "$RUNNER_TEMP/imagetools.err"
+            fail=1
+          fi
+          if [ -z "$registry_digest" ]; then
+            :
+          elif [ "$registry_digest" = "$digest" ]; then
+            echo "registry: ${repository}:${tag} -> ${registry_digest} (agrees with digest:)"
+          else
+            echo "::error file=${values}::\`tag:\` and \`digest:\` disagree with the registry — ${repository}:${tag} resolves to ${registry_digest}, but \`digest:\` pins ${digest}. Both lines must come from the same build; move them together (#648, #703)."
+            fail=1
+          fi
+
+          # (2) + (3) the chart must actually deploy repository@digest. This is
+          # the assertion that catches a stale or missing digest, because
+          # aether.image falls back to the tag and nothing else would notice.
+          helm template aether charts/aether > "$RUNNER_TEMP/rendered.yaml"
+          if grep -qF "\"${repository}@${digest}\"" "$RUNNER_TEMP/rendered.yaml"; then
+            echo "helm: proxy container renders ${repository}@${digest}"
+          else
+            echo "::error file=${values}::helm template does not render the proxy container as ${repository}@${digest}. Rendered aether-proxy references:"
+            grep -n "$repository" "$RUNNER_TEMP/rendered.yaml" || echo "  (none at all)"
+            fail=1
+          fi
+          if grep -qF "\"${repository}:${tag}\"" "$RUNNER_TEMP/rendered.yaml"; then
+            echo "::error file=${values}::helm template renders the proxy container by TAG (${repository}:${tag}). aether.image must resolve to ${repository}@${digest} — a tag reference is mutable and is exactly the #705 bug."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "aether-proxy pin is consistent: values.yaml tag + digest, the registry, and the rendered chart all agree."
+
   # Build every impacted target (compile + lint on BuildBuddy RBE; warms the
   # remote cache the integration/e2e legs reuse) and run the impacted unit tests.
   test:
@@ -242,7 +385,7 @@ jobs:
   # the main branch ruleset.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, envoy-api-parity, test, integration, e2e]
+    needs: [changes, diff, chart-version-bump, envoy-api-parity, proxy-pin, test, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled
