@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -329,6 +330,59 @@ func TestLameDuckHandsOffToACoBoundSuccessor(t *testing.T) {
 		"the lame duck must stop reporting ready the moment it starts")
 }
 
+// TestLameDuckExitsCarryThePerGenerationInstance is issue #736: the exit is a
+// once-per-process event, so with only {node,reason} every generation increments a
+// fresh process-local counter to 1 and Prometheus sees the same series go 1 -> 1 -> 1 —
+// which is not a reset, so increase() over a multi-roll window reports ~0. The instance
+// stamp makes each generation its own series, and each one a genuine 0 -> 1 rise.
+//
+// Both instruments are asserted: the histogram's _count is a counter too, with exactly
+// the same defect when it is not per-generation.
+func TestLameDuckExitsCarryThePerGenerationInstance(t *testing.T) {
+	reader := installManualReader(t)
+
+	// Two generations of the same resolver on one node: a predecessor and the successor
+	// that later exits for the SAME reason. The abort channel is pre-closed so each
+	// window ends at once through the real runLameDuck path — what is under test is the
+	// wiring from the server's stamp onto the instruments, not the state machine.
+	for _, id := range []string{"gen-a", "gen-b"} {
+		abort := make(chan struct{})
+		close(abort)
+		s := NewServerWithOptions("aether.internal", "127.0.0.1:0", "", slog.New(slog.DiscardHandler),
+			WithInstanceID(id), WithLameDuck(5*time.Second), WithLameDuckAbort(abort))
+		s.runLameDuck(context.Background())
+	}
+
+	want := map[lameDuckSeries]int64{
+		{reason: lameDuckSignal, instance: "gen-a"}: 1,
+		{reason: lameDuckSignal, instance: "gen-b"}: 1,
+	}
+	assert.Equal(t, want, lameDuckExitSeries(t, reader, "aether.mesh_dns.lame_duck.exits"),
+		"two generations exiting for the same reason must be two SERIES, not one series stuck at 1")
+	assert.Equal(t, want, lameDuckExitSeries(t, reader, "aether.mesh_dns.lame_duck.duration"),
+		"the duration histogram's _count resets per generation too, so it carries the same stamp")
+}
+
+// TestLameDuckExitInstanceIsTheServersStamp: the attribute must be THIS process's
+// identity stamp — the same 16 hex characters the `lame duck started` / `successor
+// observed` log lines carry as instance=, which is what makes the metric joinable to
+// the logs of the generation that emitted it.
+func TestLameDuckExitInstanceIsTheServersStamp(t *testing.T) {
+	reader := installManualReader(t)
+	abort := make(chan struct{})
+	close(abort)
+	// No WithInstanceID: the production path, a randomly minted stamp.
+	s := NewServerWithOptions("aether.internal", "127.0.0.1:0", "", slog.New(slog.DiscardHandler),
+		WithLameDuck(5*time.Second), WithLameDuckAbort(abort))
+	require.Len(t, s.instanceID, 16)
+
+	s.runLameDuck(context.Background())
+
+	assert.Equal(t, map[lameDuckSeries]int64{
+		{reason: lameDuckSignal, instance: s.instanceID}: 1,
+	}, lameDuckExitSeries(t, reader, "aether.mesh_dns.lame_duck.exits"))
+}
+
 // installManualReader points the global MeterProvider at a manual reader for the test.
 func installManualReader(t *testing.T) *sdkmetric.ManualReader {
 	t.Helper()
@@ -339,27 +393,73 @@ func installManualReader(t *testing.T) *sdkmetric.ManualReader {
 	return reader
 }
 
-// lameDuckExitCounts collects aether.mesh_dns.lame_duck.exits as reason -> count.
+// lameDuckSeries identifies one exported time series of the lame-duck instruments: the
+// closed reason plus the per-generation instance stamp (#736).
+type lameDuckSeries struct {
+	reason   string
+	instance string
+}
+
+// lameDuckExitCounts collects aether.mesh_dns.lame_duck.exits as reason -> count,
+// summed across generations.
 func lameDuckExitCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	counts := map[string]int64{}
+	for series, v := range lameDuckExitSeries(t, reader, "aether.mesh_dns.lame_duck.exits") {
+		counts[series.reason] += v
+	}
+	return counts
+}
+
+// lameDuckExitSeries collects one lame-duck instrument as {reason,instance} -> count.
+// For the counter that is the summed value; for the duration histogram it is the bucket
+// count — the number that carries the same per-generation reset problem.
+func lameDuckExitSeries(t *testing.T, reader *sdkmetric.ManualReader, name string) map[lameDuckSeries]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
-	counts := map[string]int64{}
+	out := map[lameDuckSeries]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "aether.mesh_dns.lame_duck.exits" {
+			if m.Name != name {
 				continue
 			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "lame_duck.exits should be an int64 sum")
-			for _, dp := range sum.DataPoints {
-				v, ok := dp.Attributes.Value("reason")
-				require.True(t, ok, "every exit must carry a reason")
-				counts[v.Emit()] += dp.Value
-			}
+			collectLameDuckSeries(t, name, m.Data, out)
 		}
 	}
-	return counts
+	return out
+}
+
+// collectLameDuckSeries folds one instrument's data points into out.
+func collectLameDuckSeries(t *testing.T, name string, data metricdata.Aggregation, out map[lameDuckSeries]int64) {
+	t.Helper()
+	switch d := data.(type) {
+	case metricdata.Sum[int64]:
+		for _, dp := range d.DataPoints {
+			out[lameDuckSeriesOf(t, dp.Attributes)] += dp.Value
+		}
+	case metricdata.Histogram[float64]:
+		for _, dp := range d.DataPoints {
+			out[lameDuckSeriesOf(t, dp.Attributes)] += int64(dp.Count)
+		}
+	default:
+		t.Fatalf("%s has unexpected aggregation %T", name, data)
+	}
+}
+
+// lameDuckSeriesOf reads the identifying attributes off one exported data point. It
+// also pins the reason set CLOSED: anything outside successor|deadline|signal is a new
+// unbounded dimension, and it fails here rather than in Prometheus.
+func lameDuckSeriesOf(t *testing.T, attrs attribute.Set) lameDuckSeries {
+	t.Helper()
+	reason, ok := attrs.Value("reason")
+	require.True(t, ok, "every exit must carry a reason")
+	require.Contains(t, []string{lameDuckSuccessor, lameDuckDeadline, lameDuckSignal}, reason.Emit(),
+		"the reason attribute set must stay closed")
+	instance, ok := attrs.Value("instance")
+	require.True(t, ok, "every exit must carry its per-generation instance stamp (#736)")
+	require.NotEmpty(t, instance.Emit())
+	return lameDuckSeries{reason: reason.Emit(), instance: instance.Emit()}
 }
 
 // reusablePort picks a loopback port both servers can co-bind. It is chosen by binding

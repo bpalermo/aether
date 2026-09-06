@@ -328,5 +328,8 @@ func (s *Server) runLameDuck(ctx context.Context) {
 	// Detached from the shutdown context: it is already cancelled, and every probe
 	// issued under it would fail instantly.
 	out := d.run(context.WithoutCancel(ctx))
-	s.metrics.recordLameDuck(out.reason, out.duration)
+	// The instance stamp goes on the metric too (issue #736): the exit is a
+	// once-per-process event, so without a per-generation attribute every successor
+	// restarts the same {node,reason} series at 1 and increase() across a roll reads ~0.
+	s.metrics.recordLameDuck(s.instanceID, out.reason, out.duration)
 }
