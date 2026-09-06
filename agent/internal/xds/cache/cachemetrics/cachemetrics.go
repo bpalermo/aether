@@ -67,6 +67,15 @@ type Metrics struct {
 	inboundBindingMismatch metric.Int64Counter
 }
 
+// snapshotDurationBuckets are the explicit boundaries, in SECONDS, for
+// aether.agent.snapshot.duration. The OTel default boundaries are millisecond-oriented
+// (0, 5, 10, ... 10000), so a seconds-valued duration would collapse into the "<= 5 s"
+// first bucket and the quantiles would read flat (#732). A snapshot build is
+// sub-millisecond on a small node and tens of milliseconds on a dense one.
+var snapshotDurationBuckets = []float64{
+	0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+}
+
 // New registers the snapshot instruments on the given meter.
 func New(meter metric.Meter) (*Metrics, error) {
 	m := &Metrics{}
@@ -82,7 +91,8 @@ func New(meter metric.Meter) (*Metrics, error) {
 	}
 	if m.duration, err = meter.Float64Histogram("aether.agent.snapshot.duration",
 		metric.WithDescription("Duration of an xDS snapshot generation"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(snapshotDurationBuckets...)); err != nil {
 		return nil, fmt.Errorf("duration: %w", err)
 	}
 	if m.version, err = meter.Int64Gauge("aether.agent.snapshot.version",

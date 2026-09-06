@@ -88,6 +88,29 @@ type target struct {
 	authority string
 }
 
+// probeDurationBuckets are the explicit histogram boundaries, in SECONDS, for
+// aether_probe_request_duration_seconds. They must be set explicitly: the OTel SDK's
+// default boundaries (0, 5, 10, 25, ... 10000) are tuned for values expressed in
+// MILLISECONDS, so against a seconds-valued duration the first bucket is "<= 5 s" and a
+// healthy 2 ms probe is indistinguishable from a timed-out 2 s one — every observation
+// lands in the first bucket and the derived quantiles are flat (#732).
+//
+// The ladder separates the four regimes that actually matter: healthy sub-10 ms probes,
+// the 1 s resolver retransmit (#728), the 2 s probe budget (Config.Timeout) and the 5 s
+// legacy resolver retransmit.
+var probeDurationBuckets = []float64{
+	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 5,
+}
+
+// newDurationHistogram builds the probe duration histogram. It is a named function so a
+// test can assert the boundaries that actually reach the SDK.
+func newDurationHistogram(meter metric.Meter) (metric.Float64Histogram, error) {
+	return meter.Float64Histogram("aether_probe_request_duration_seconds",
+		metric.WithDescription("Synthetic mesh probe duration."),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(probeDurationBuckets...))
+}
+
 // Prober samples the mesh data plane and records results to OTel.
 type Prober struct {
 	cfg      Config
@@ -110,8 +133,7 @@ func New(ctx context.Context, cfg Config, log logr.Logger, version string) (*Pro
 	if err != nil {
 		return nil, fmt.Errorf("probe counter: %w", err)
 	}
-	duration, err := meter.Float64Histogram("aether_probe_request_duration_seconds",
-		metric.WithDescription("Synthetic mesh probe duration."), metric.WithUnit("s"))
+	duration, err := newDurationHistogram(meter)
 	if err != nil {
 		return nil, fmt.Errorf("probe histogram: %w", err)
 	}

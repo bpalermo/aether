@@ -21,5 +21,9 @@ go_test(
     name = "prober_test",
     srcs = ["prober_test.go"],
     embed = [":prober"],
-    deps = ["@com_github_go_logr_logr//:logr"],
+    deps = [
+        "@com_github_go_logr_logr//:logr",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+    ],
 )
