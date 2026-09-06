@@ -29,6 +29,18 @@ spec:
         {{- include "aether.meshDns.labels" . | nindent 8 }}
     spec:
       hostNetwork: true
+      # Derived from --lame-duck-max, never set independently (issue #729). On SIGTERM
+      # the resolver stops reporting ready but KEEPS SERVING its SO_REUSEPORT socket
+      # until it observes the successor answering on the same address, so the datagrams
+      # the kernel already queued to it are drained instead of discarded by close().
+      # If the grace period expired first the kubelet would SIGKILL mid-window, which is
+      # exactly the abrupt close the window exists to avoid — so it is lame-duck-max
+      # plus a 5s margin for the close, the final metric flush and process exit.
+      #
+      # There is deliberately NO preStop hook: the process handles SIGTERM itself, and a
+      # preStop sleep would only add a fixed delay in FRONT of a window that already
+      # ends as soon as the successor is proven to be serving.
+      terminationGracePeriodSeconds: {{ add (include "aether.meshDns.lameDuckSeconds" .Values.agent.meshDnsDaemon.lameDuckMax | int) 5 }}
       # Resolve the default upstream from the node's resolv.conf (kube-dns);
       # ClusterFirst is ignored for hostNetwork pods.
       dnsPolicy: ClusterFirstWithHostNet
@@ -69,6 +81,13 @@ spec:
                    the pool ON, which is the one failure an operator reaching for the
                    switch must never hit. Unset renders no arg. */}}
             - "--forward-pool-size={{ .Values.agent.meshDnsDaemon.forwardPoolSize }}"
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.agent.meshDnsDaemon.lameDuckMax) }}
+            {{- /* Same explicit nil-check as forwardPoolSize, and for the same reason:
+                   "0s" is the kill switch that restores the pre-#729 close-on-SIGTERM
+                   behaviour, and a `with` would render nothing and leave the window ON.
+                   terminationGracePeriodSeconds above is derived from this same key. */}}
+            - "--lame-duck-max={{ .Values.agent.meshDnsDaemon.lameDuckMax }}"
             {{- end }}
             {{- with .Values.otel.endpoint }}
             - "--otlp-endpoint={{ . }}"
@@ -123,6 +142,14 @@ spec:
             # ships in THIS image (same layer set as the daemon), so there is no
             # chart/image skew to sequence: /mesh-dns --readiness-check is retained but
             # deprecated for a chart older than this one.
+            #
+            # Since #729 the marker is also removed the moment SIGTERM starts the
+            # lame-duck window, so this probe reports the pod NotReady while it is
+            # still answering. That is honest — the pod IS leaving — and it costs
+            # nothing: readiness does not steer datagrams here. For a hostNetwork
+            # SO_REUSEPORT listener the KERNEL picks which co-bound socket receives
+            # each datagram, and it neither knows nor cares what the kubelet thinks of
+            # the pod. That is the whole reason the socket must stay open.
             #
             # Timings are deliberately UNCHANGED. periodSeconds x failureThreshold is
             # the marker-flap absorption window (the self-check clears the marker when
