@@ -90,6 +90,37 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ . | quote }}
 {{- end }}
 {{- end -}}
+{{/*
+aether.meshDns.lameDuckSeconds converts agent.meshDnsDaemon.lameDuckMax (a Go duration
+string, e.g. "10s") to whole seconds, so terminationGracePeriodSeconds can be DERIVED
+from it rather than hand-maintained alongside it (issue #729). A grace period shorter
+than the lame-duck ceiling means the kubelet SIGKILLs mid-window — which is precisely
+the abrupt socket close the window exists to avoid — so the two must never drift.
+Accepts h/m/s/ms suffixes and a bare number (read as seconds); "ms" is rounded UP so a
+sub-second window still gets a non-zero budget.
+
+An UNSET (null) value renders no flag, so the binary falls back to its own
+DefaultLameDuckMax — and the grace period must follow it there, not to zero, or the
+kubelet would SIGKILL 5s into a 10s window. Keep this literal in step with
+meshdns.DefaultLameDuckMax.
+*/}}
+{{- define "aether.meshDns.lameDuckSeconds" -}}
+{{- $v := . | toString | trim | lower -}}
+{{- if or (kindIs "invalid" .) (eq $v "") -}}
+{{- 10 -}}
+{{- else -}}
+{{- $n := regexFind "^[0-9]+" $v | default "0" | atoi -}}
+{{- if hasSuffix "ms" $v -}}
+{{- div (add $n 999) 1000 -}}
+{{- else if hasSuffix "h" $v -}}
+{{- mul $n 3600 -}}
+{{- else if hasSuffix "m" $v -}}
+{{- mul $n 60 -}}
+{{- else -}}
+{{- $n -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 
 {{/* ------------------------------------------------------------------ proxy */}}
 {{- define "aether.proxy.fullname" -}}{{- "aether-proxy" -}}{{- end -}}

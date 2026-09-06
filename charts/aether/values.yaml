@@ -198,6 +198,30 @@ agent:
     # any datagram not from the upstream's exact address and an off-path attacker cannot
     # land a spoofed answer at all.
     forwardPoolSize: null
+    # Issue #729: how long the resolver keeps SERVING after SIGTERM before it closes
+    # its SO_REUSEPORT listeners.
+    #
+    # The problem it fixes (#726 Phase 1): on a roll (maxSurge:1/maxUnavailable:0) the
+    # DaemonSet controller deletes the predecessor the instant the successor passes its
+    # first readiness probe, and the predecessor used to close its socket immediately.
+    # Every datagram the kernel had already steered into that socket's queue was
+    # discarded — one lost DNS query per roll, and because Go's resolver singleflights
+    # by name, one lost query stalls every concurrent lookup of that name for a full
+    # retransmit timeout (5s before #728, ~1s after).
+    #
+    # With a window, the predecessor instead: stops reporting ready, keeps answering,
+    # and closes as soon as it observes a DIFFERENT instance answering on the same
+    # address (it asks the reuseport group for a TXT identity stamp — a reply carrying
+    # someone else's stamp proves the successor is both in the group and serving).
+    # This ceiling therefore only bites when NO successor appears: a scale-down, a node
+    # drain, or a surge that failed. Watch aether_mesh_dns_lame_duck_exits_total{reason}
+    # — a healthy roll is `successor` on every node.
+    #
+    # terminationGracePeriodSeconds on the DaemonSet is DERIVED from this value (+5s),
+    # so raising it cannot silently leave the kubelet SIGKILLing mid-window. Set "0s"
+    # to disable the window entirely and restore the pre-#729 close-on-SIGTERM
+    # behaviour. Not a tuning knob: the window ends on evidence, not on the clock.
+    lameDuckMax: "10s"
     # Verbose (TRACE) logging for THIS daemon only. Issue #684: the top-level
     # `debug` is true by default and used to reach mesh-dns, so every node ran the
     # resolver at TRACE — on the one component that sits on every managed pod's
