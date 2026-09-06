@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,4 +242,124 @@ func cumulativeAt(t *testing.T, dp metricdata.HistogramDataPoint[float64], bound
 		total += c
 	}
 	return total
+}
+
+// TestTierClients pins which transport each tier probes with (#735). The mesh_dns tier
+// MUST NOT reuse connections: Go resolves a name only when it dials, so a pooled
+// connection would keep the tier reporting success straight through a mesh-DNS outage —
+// the exact blind spot the tier exists to close (#574). The other tiers dial a fixed
+// address and have nothing to re-resolve, so they keep the pool.
+func TestTierClients(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ReachabilityTargets = []string{"svc-1"}
+	cfg.MeshDNSTargets = []string{"echo.aether-test.aether.internal:18081"}
+	p, err := New(context.Background(), cfg, logr.Discard(), "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if transportOf(t, p.client).DisableKeepAlives {
+		t.Fatalf("shared client DisableKeepAlives = true, want false")
+	}
+	if !transportOf(t, p.dnsClient).DisableKeepAlives {
+		t.Fatalf("mesh_dns client DisableKeepAlives = false, want true")
+	}
+	for _, tgt := range p.targets {
+		if tgt.client == nil {
+			t.Fatalf("target %s/%s has no client", tgt.tier, tgt.name)
+		}
+		want := tgt.tier == tierMeshDNS
+		if got := transportOf(t, tgt.client).DisableKeepAlives; got != want {
+			t.Fatalf("target %s/%s DisableKeepAlives = %v, want %v", tgt.tier, tgt.name, got, want)
+		}
+	}
+}
+
+func transportOf(t *testing.T, c *http.Client) *http.Transport {
+	t.Helper()
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport = %T, want *http.Transport", c.Transport)
+	}
+	return tr
+}
+
+// TestProbeConnectionReuse is the behavioural half of TestTierClients: what the wire
+// actually does over repeated probes against a server that answers WITH A BODY.
+//
+// The body matters. Before #735 probe() closed resp.Body without draining it, and Go's
+// transport destroys rather than pools a connection whose body never reached EOF, so
+// every tier was connect-per-probe — invisibly, because the liveness tier's
+// direct_response carries no body and pooled anyway. On this mesh a new connection is
+// not free: the node proxy's clusters set connection_pool_per_downstream_connection, so
+// each one costs a fresh upstream mTLS handshake.
+func TestProbeConnectionReuse(t *testing.T) {
+	const probes = 4
+	for _, tc := range []struct {
+		name     string
+		tier     string
+		wantConn int
+	}{
+		{"keep-alive tier reuses one connection", tierLiveness, 1},
+		{"mesh_dns tier dials every probe", tierMeshDNS, probes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			conns := make(map[net.Conn]struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// A non-empty body is the whole point: an empty one pools regardless.
+				_, _ = io.WriteString(w, `{"echo":"body that must be drained"}`)
+			}))
+			srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
+				if state != http.StateNew {
+					return
+				}
+				mu.Lock()
+				conns[c] = struct{}{}
+				mu.Unlock()
+			}
+			t.Cleanup(srv.Close)
+
+			cfg := DefaultConfig()
+			cfg.Egress = strings.TrimPrefix(srv.URL, "http://")
+			cfg.LivenessPath = "/"
+			cfg.MeshDNSTargets = []string{cfg.Egress}
+			p, err := New(context.Background(), cfg, logr.Discard(), "test")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			tgt := findTarget(t, p, tc.tier)
+			for range probes {
+				p.probe(context.Background(), tgt)
+			}
+
+			mu.Lock()
+			got := len(conns)
+			mu.Unlock()
+			if got != tc.wantConn {
+				t.Fatalf("server saw %d connections over %d probes, want %d", got, probes, tc.wantConn)
+			}
+		})
+	}
+}
+
+// TestDrainBody pins drainBody itself: it must leave the body at EOF, which is the
+// precondition Go's transport checks before pooling a connection.
+func TestDrainBody(t *testing.T) {
+	body := io.NopCloser(strings.NewReader("a body the probe never reads"))
+	drainBody(body)
+	n, err := body.Read(make([]byte, 1))
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("after drainBody: read %d bytes, err %v; want 0, io.EOF", n, err)
+	}
+}
+
+func findTarget(t *testing.T, p *Prober, tier string) target {
+	t.Helper()
+	for _, tgt := range p.targets {
+		if tgt.tier == tier {
+			return tgt
+		}
+	}
+	t.Fatalf("no %s target among %d targets", tier, len(p.targets))
+	return target{}
 }

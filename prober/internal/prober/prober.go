@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -40,6 +41,12 @@ const (
 	// defaultMeshDNSPort is appended to a mesh_dns target that omits a port so the
 	// probe still dials the local mesh egress listener after resolving the name.
 	defaultMeshDNSPort = "18081"
+
+	// maxDrainBytes caps the response body drain (see drainBody). Every probe target
+	// answers with a local reply or a small echo document, so the cap is only there so
+	// a misrouted probe onto a streaming endpoint can't make the prober the thing that
+	// hangs — the probe's own deadline still governs.
+	maxDrainBytes = 64 << 10
 
 	resultSuccess         = "success"
 	resultHTTPError       = "http_error"
@@ -86,6 +93,10 @@ type target struct {
 	name      string // metric "target" label
 	url       string
 	authority string
+	// client is the HTTP client this tier probes with. The liveness and reachability
+	// tiers share the keep-alive client; the mesh_dns tier gets the no-keep-alive one
+	// so it resolves and dials on every probe (see Prober.dnsClient).
+	client *http.Client
 }
 
 // probeDurationBuckets are the explicit histogram boundaries, in SECONDS, for
@@ -113,13 +124,35 @@ func newDurationHistogram(meter metric.Meter) (metric.Float64Histogram, error) {
 
 // Prober samples the mesh data plane and records results to OTel.
 type Prober struct {
-	cfg      Config
-	log      logr.Logger
-	client   *http.Client
-	provider *sdkmetric.MeterProvider // nil when telemetry is disabled
-	counter  metric.Int64Counter
-	duration metric.Float64Histogram
-	targets  []target
+	cfg       Config
+	log       logr.Logger
+	client    *http.Client
+	dnsClient *http.Client
+	provider  *sdkmetric.MeterProvider // nil when telemetry is disabled
+	counter   metric.Int64Counter
+	duration  metric.Float64Histogram
+	targets   []target
+}
+
+// newClient builds a probe client. Redirects are never followed: a probe measures the
+// hop it dialled, not wherever that hop points.
+//
+// keepAlive=false disables connection reuse outright, which is how the mesh_dns tier
+// guarantees the property it exists to measure: Go resolves a name only when it dials,
+// so a reused connection would silently stop exercising mesh DNS. That guarantee used
+// to be accidental — the tier's upstream answers with a body, and probe() closed the
+// body without draining it, which is itself enough to make Go destroy the connection.
+// It is now stated, so it survives an upstream that answers with no body (as the
+// liveness route's direct_response does) and it no longer depends on the drain.
+func newClient(keepAlive bool) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = !keepAlive
+	return &http.Client{
+		// No client.Timeout: the per-probe deadline is a context so we can tell
+		// timeout from connection error.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport:     tr,
+	}
 }
 
 // New builds a Prober.
@@ -140,11 +173,8 @@ func New(ctx context.Context, cfg Config, log logr.Logger, version string) (*Pro
 
 	p := &Prober{
 		cfg: cfg, log: log, counter: counter, duration: duration, provider: provider,
-		client: &http.Client{
-			// No client.Timeout: the per-probe deadline is a context so we can tell
-			// timeout from connection error. Don't follow redirects.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		client:    newClient(true),
+		dnsClient: newClient(false),
 	}
 
 	// Liveness tier (always): hit the proxy's egress local-reply route. No upstream
@@ -154,6 +184,7 @@ func New(ctx context.Context, cfg Config, log logr.Logger, version string) (*Pro
 		name:      "egress",
 		url:       "http://" + cfg.Egress + cfg.LivenessPath,
 		authority: cfg.LivenessAuthority,
+		client:    p.client,
 	})
 	// Reachability tier (optional): full round-trip to an echo upstream.
 	for _, svc := range cfg.ReachabilityTargets {
@@ -162,6 +193,7 @@ func New(ctx context.Context, cfg Config, log logr.Logger, version string) (*Pro
 			name:      svc,
 			url:       "http://" + cfg.Egress + "/",
 			authority: svc + "." + cfg.MeshDomain,
+			client:    p.client,
 		})
 	}
 	// Mesh-DNS tier (optional): unlike the tiers above, the URL is the REAL
@@ -177,6 +209,12 @@ func New(ctx context.Context, cfg Config, log logr.Logger, version string) (*Pro
 			url:  "http://" + withDefaultPort(fqdn, defaultMeshDNSPort) + "/",
 			// authority intentionally left empty: do NOT override the Host, so the
 			// transport actually resolves and connects to the real name.
+			//
+			// dnsClient, not client: keep-alives are off so every probe dials, and
+			// therefore every probe resolves. That IS the SLI (issue #574) — a tier
+			// that reused a connection would keep reporting success straight through
+			// a mesh-DNS outage.
+			client: p.dnsClient,
 		})
 	}
 	return p, nil
@@ -297,18 +335,34 @@ func (p *Prober) probe(ctx context.Context, t target) {
 	// tracing equivalent for the direct_response liveness route).
 	req.Header.Set("traceparent", notSampledTraceparent())
 	start := time.Now()
-	resp, err := p.client.Do(req)
+	resp, err := t.client.Do(req)
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		p.record(t, classifyErr(rctx, err), elapsed)
 		return
 	}
-	_ = resp.Body.Close()
+	drainBody(resp.Body)
 	if resp.StatusCode == http.StatusOK {
 		p.record(t, resultSuccess, elapsed)
 		return
 	}
 	p.record(t, resultHTTPError, elapsed)
+}
+
+// drainBody reads the rest of the response body before closing it. Closing a body that
+// has not reached EOF makes Go's transport DESTROY the connection instead of returning
+// it to the idle pool, so a bare Close() silently converts every keep-alive tier into a
+// connect-per-probe tier: the reachability tier is documented as reusing the fixed
+// egress, and on this mesh a new connection costs a full upstream mTLS handshake
+// (the node proxy's clusters set connection_pool_per_downstream_connection, by design).
+// The liveness tier only escaped because its direct_response carries no body at all.
+//
+// The drain deliberately happens AFTER the caller has stopped the clock: the probe
+// measures time-to-response-headers, which is what Client.Do returns on, and reading a
+// small already-buffered body must not be folded into the SLI.
+func drainBody(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrainBytes))
+	_ = body.Close()
 }
 
 // notSampledTraceparent builds a W3C traceparent with the sampled flag clear
