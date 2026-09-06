@@ -181,45 +181,123 @@ jobs:
           echo "index_digest=$index" >> "$GITHUB_OUTPUT"
           echo "index: $index"
 
-  # Pin the aether chart to the just-published image (commit-SHA tag).
+  # Pin the aether chart to the just-published image (commit-SHA tag) and, when a
+  # release token is available, open the pin PR and hand the merge to GitHub
+  # (#727). Two modes, decided per run by the "Resolve release token" step:
   #
-  # This job deliberately does NOT open the PR (#703). Two independent walls make
-  # an automated PR impossible here:
-  #   * "Allow GitHub Actions to create and approve pull requests" is off, so
-  #     `GITHUB_TOKEN` cannot create a PR at all — every proxy release used to end
-  #     red here with `GitHub Actions is not permitted to create or approve pull
-  #     requests`;
-  #   * turning that setting on would not help. GitHub's recursion guard means a
-  #     PR opened by `GITHUB_TOKEN` fires no `pull_request` events, so the `ci` +
-  #     `proxy` checks the `main` ruleset requires would never report — and the
-  #     ruleset has no bypass actors, so the PR would be permanently unmergeable.
-  #     Pushing straight to `main` is blocked by the same ruleset. There is no PAT
-  #     and there will not be one.
-  # A PR *opened by a human* on a branch a bot pushed does fire `pull_request`
-  # normally, because the event is attributed to whoever opens the PR and not to
-  # whoever pushed the branch. So this job pushes the branch and hands off: a step
-  # summary plus a comment on the rolling "proxy releases pending chart pin"
-  # issue, both carrying the exact `gh pr create` one-liner. That is one command
-  # per proxy release, alongside the talos deploy which is manual anyway — and it
-  # costs no credential, no ruleset bypass and no repository setting change.
+  #   auto   `RELEASE_PAT` (fine-grained: Contents RW + Pull requests RW, this
+  #          repo only) is present and the API accepts it. The branch is pushed
+  #          with that token, the PR is opened with it — a PR opened by a *user*
+  #          token fires `pull_request` normally, so `ci` + `proxy` actually run —
+  #          and `gh pr merge --auto --squash` lets GitHub merge it the moment the
+  #          `main` ruleset is satisfied. Any superseded `chore/proxy-image-bump-*`
+  #          PR is closed and its branch deleted.
   #
-  # The branch is per-release (`chore/proxy-image-bump-<short sha>`) rather than a
-  # single rolling one: a later `GITHUB_TOKEN` push onto a branch that already has
-  # an open PR fires no `pull_request: synchronize` either, so the new head would
-  # carry no checks and the PR would be stuck (recoverable only by close/reopen).
-  # A fresh branch per release makes every PR a fresh `opened` event. Superseded
-  # `chore/proxy-image-bump-*` PRs are closed by hand.
+  #   manual no token, an expired/rejected one, or a `gh pr create` that failed:
+  #          exactly #703's behaviour. The branch is pushed with `GITHUB_TOKEN`
+  #          and a human runs the `gh pr create` one-liner from the run summary /
+  #          the rolling #724 comment. A missing or dead token degrades the run,
+  #          it never fails it.
+  #
+  # Why a token at all (#703): "Allow GitHub Actions to create and approve pull
+  # requests" is off, so `GITHUB_TOKEN` cannot create a PR here — and turning it
+  # on would not help, because GitHub's recursion guard means a PR opened by
+  # `GITHUB_TOKEN` fires no `pull_request` events, so the required `ci` + `proxy`
+  # checks would never report and the `main` ruleset (no bypass actors) could
+  # never be satisfied. Pushing straight to `main` is blocked by the same ruleset.
+  # A PR opened by a user token is an ordinary PR and gets ordinary checks; the
+  # ruleset still gates the merge, so this job can merge nothing that is not green.
+  #
+  # Why `environment: release` (#727 addendum): `RELEASE_PAT` is an *environment*
+  # secret of `release`, whose deployment-branch policy names `main` only. GitHub
+  # injects environment secrets only into jobs that declare the environment, and
+  # refuses to start such a job from any other ref — so a `pull_request` run, or a
+  # run of this workflow as edited on a branch, can never read the token. (The
+  # residual is inherent to any post-merge secret: a workflow change that lands on
+  # `main` runs with it afterwards.)
+  #
+  # The branch stays per-release (`chore/proxy-image-bump-<short sha>`) rather than
+  # one rolling branch: in manual mode a later `GITHUB_TOKEN` push onto a branch
+  # that already has an open PR fires no `pull_request: synchronize` either, so the
+  # new head would carry no checks and the PR would be stuck.
   bump-chart:
     needs: manifest
     runs-on: ubuntu-latest
+    # Scopes `RELEASE_PAT` (an environment secret) to runs on `main` — see above.
+    environment: release
     permissions:
-      # contents: write to push the branch; issues: write for the hand-off
-      # comment. No pull-requests: write — this job cannot and must not open PRs.
+      # contents: write to push the branch in manual mode; issues: write for the
+      # #724 record, which is always written with GITHUB_TOKEN (the fine-grained
+      # RELEASE_PAT deliberately has no Issues permission). No pull-requests:
+      # write — GITHUB_TOKEN neither can nor should open PRs here; the PAT does.
       contents: write
       issues: write
     env:
       TRACKING_ISSUE_TITLE: proxy releases pending chart pin
     steps:
+      # Decide the mode before anything else, so every later step can branch on
+      # it, and report the token's remaining life (the rotation reminder).
+      - name: Resolve release token
+        id: token
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          # The token is NEVER echoed. Actions already masks a secret's value;
+          # `add-mask` it again defensively so anything derived from it in a
+          # future edit is masked from the first line.
+          mode=manual
+          reason=""
+          expiry=""
+          if [ -z "${RELEASE_PAT:-}" ]; then
+            reason="no \`RELEASE_PAT\` in the \`release\` environment"
+            echo "::notice::RELEASE_PAT is not configured — falling back to the manual hand-off (#703)"
+          else
+            echo "::add-mask::$RELEASE_PAT"
+            # Two probes: `gh auth status` (the token parses and gh accepts it)
+            # and `gh api user` (the API accepts it *now* — a revoked or expired
+            # token fails only here).
+            if GH_TOKEN="$RELEASE_PAT" gh auth status >/dev/null 2>&1 &&
+              GH_TOKEN="$RELEASE_PAT" gh api user >/dev/null 2>&1; then
+              mode=auto
+            else
+              reason="\`RELEASE_PAT\` was rejected by the API (revoked, expired or out of scope)"
+              echo "::warning::RELEASE_PAT was rejected by the GitHub API — falling back to the manual hand-off (#703)"
+            fi
+            # Expiry sentinel. GitHub reports a fine-grained token's expiry in a
+            # response header; a HEAD request never echoes the Authorization
+            # header back, so nothing leaks.
+            exp="$(curl -sSI -H "Authorization: Bearer $RELEASE_PAT" https://api.github.com/user |
+              tr -d '\r' |
+              sed -nE 's/^[Gg]ithub-[Aa]uthentication-[Tt]oken-[Ee]xpiration:[[:space:]]*//p' |
+              head -1)"
+            if [ -z "$exp" ]; then
+              expiry="expiry not reported by the API (no expiration set, or not a fine-grained token)"
+            elif ! exp_epoch="$(date -u -d "$exp" +%s 2>/dev/null)"; then
+              expiry="expiry unparseable (\`$exp\`)"
+              echo "::warning::could not parse the token expiry header '$exp'"
+            else
+              iso="$(date -u -d "$exp" +%Y-%m-%d)"
+              days=$(( (exp_epoch - $(date -u +%s)) / 86400 ))
+              if [ "$days" -lt 0 ]; then
+                mode=manual
+                reason="\`RELEASE_PAT\` expired on \`$iso\`"
+                expiry="rotate the \`release\` environment secret (docs/runbook.md §7)"
+                echo "::error::RELEASE_PAT expired on ${iso} — falling back to the manual hand-off; rotate it (docs/runbook.md §7)"
+              elif [ "$days" -lt 30 ]; then
+                expiry="**expires in ${days} day(s)** (\`$iso\`) — rotate the \`release\` environment secret (docs/runbook.md §7)"
+                echo "::warning::RELEASE_PAT expires in ${days} day(s) (${iso}) — rotate it (docs/runbook.md §7)"
+              else
+                expiry="expires in ${days} days (\`$iso\`)"
+              fi
+            fi
+          fi
+          {
+            echo "mode=$mode"
+            echo "reason=$reason"
+            echo "expiry=$expiry"
+          } >> "$GITHUB_OUTPUT"
+          echo "release token mode: ${mode}${reason:+ (${reason})}"
+
       - name: Checkout main
         uses: actions/checkout@v6
         with:
@@ -277,6 +355,8 @@ jobs:
         id: push
         if: steps.pin.outputs.changed == 'true'
         env:
+          MODE: ${{ steps.token.outputs.mode }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
           SHA: ${{ github.sha }}
         run: |
           short="${SHA:0:7}"
@@ -286,7 +366,16 @@ jobs:
           git add charts/aether/values.yaml charts/aether/Chart.yaml
           git commit \
             -m "chore(proxy): pin aether chart to aether-proxy:${SHA}" \
-            -m "Pushed by the proxy-release run for ${SHA}. Moves both tag: and digest: (aether.image prefers digest over tag) and bumps the chart patch version. A human opens the PR so ci + proxy actually run (#703)."
+            -m "Pushed by the proxy-release run for ${SHA}. Moves both tag: and digest: (aether.image prefers digest over tag) and bumps the chart patch version."
+          # In auto mode the branch is pushed with RELEASE_PAT, so branch and PR
+          # are attributed to the token's owner and the PR behaves like any human
+          # PR. In manual mode the push keeps actions/checkout's GITHUB_TOKEN
+          # credentials (#703 behaviour).
+          if [ "$MODE" = "auto" ]; then
+            echo "::add-mask::$RELEASE_PAT"
+            git remote set-url origin \
+              "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
           # `--force-with-lease` with no value resolves the expected head through
           # the remote's *configured* fetch refspec. actions/checkout clones
           # single-branch (main only), so no other branch has a mapping and the
@@ -298,30 +387,30 @@ jobs:
             lease="$(git rev-parse "refs/remotes/origin/${branch}")"
           fi
           git push --force-with-lease="${branch}:${lease}" origin "HEAD:refs/heads/${branch}"
+          # Drop the credentialed URL again: nothing after this pushes, and the
+          # `gh` calls below carry their token explicitly.
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
           {
             echo "branch=$branch"
             echo "short=$short"
           } >> "$GITHUB_OUTPUT"
 
-      # The hand-off: everything a human needs to turn the pushed branch into a
-      # PR, written twice — to the run summary (for whoever is looking at the run)
-      # and to the rolling tracking issue (the notification channel: a bot comment
-      # on an issue the owner subscribes to does notify).
-      - name: Hand off the chart-pin branch
+      # One PR body, written once and used by whichever mode runs: `gh pr create`
+      # in auto mode, the copy-paste one-liner in manual mode. Only the paragraph
+      # explaining who opens the PR differs between the two.
+      - name: Compose the chart-pin PR body
+        id: body
         if: steps.pin.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+          MODE: ${{ steps.token.outputs.mode }}
           SHA: ${{ github.sha }}
           INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
-          BRANCH: ${{ steps.push.outputs.branch }}
           CHART_FROM: ${{ steps.chart.outputs.from }}
           CHART_TO: ${{ steps.chart.outputs.to }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          title="chore(proxy): pin aether chart to aether-proxy:${SHA}"
           body="$RUNNER_TEMP/pr-body.md"
-          handoff="$RUNNER_TEMP/handoff.md"
+          prov="$RUNNER_TEMP/provenance.md"
           # Quoted heredoc + __PLACEHOLDERS__: the body is markdown full of
           # backticks, which an expanding heredoc would run as command
           # substitutions.
@@ -342,6 +431,25 @@ jobs:
           previously pinned image deployed (#703, #705). The `proxy-pin` CI job
           re-checks that `tag:`, `digest:` and the registry agree.
 
+          __PROVENANCE__
+
+          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          PRBODY
+          if [ "$MODE" = "auto" ]; then
+            cat > "$prov" <<'AUTOPROV'
+          Opened by the `proxy-release` workflow with the `RELEASE_PAT` fine-grained
+          token (#727). A PR opened by a *user* token fires `pull_request` normally,
+          so `ci` + `proxy` run and report — unlike one opened by `GITHUB_TOKEN`,
+          which GitHub's recursion guard leaves without checks and therefore
+          permanently unmergeable under the `main` ruleset (#703). Auto-merge
+          (squash) is armed: GitHub merges this the moment the required checks pass,
+          and the ruleset — which has no bypass actors — is still the only gate.
+
+          Any older `chore/proxy-image-bump-*` PR is superseded and was closed by
+          the same run.
+          AUTOPROV
+          else
+            cat > "$prov" <<'MANUALPROV'
           The branch was pushed by the workflow and this PR opened by hand on
           purpose: a PR opened by `GITHUB_TOKEN` fires no `pull_request` events, so
           the required `ci` + `proxy` checks would never report and the `main`
@@ -349,18 +457,172 @@ jobs:
 
           If an older `chore/proxy-image-bump-*` PR is still open, this one
           supersedes it — close the older one.
-
-          🤖 Generated with [Claude Code](https://claude.com/claude-code)
-          PRBODY
+          MANUALPROV
+          fi
+          awk -v f="$prov" '/__PROVENANCE__/ {while ((getline line < f) > 0) print line; next} {print}' \
+            "$body" > "$body.tmp"
+          mv "$body.tmp" "$body"
           sed -i \
             -e "s|__SHA__|${SHA}|g" \
             -e "s|__DIGEST__|${INDEX_DIGEST}|g" \
             -e "s|__CHART_FROM__|${CHART_FROM}|g" \
             -e "s|__CHART_TO__|${CHART_TO}|g" \
-            -e "s|__BRANCH__|${BRANCH}|g" \
             -e "s|__RUN_URL__|${RUN_URL}|g" \
             "$body"
+          echo "title=chore(proxy): pin aether chart to aether-proxy:${SHA}" >> "$GITHUB_OUTPUT"
 
+      # The rolling audit thread (#724), resolved once and reused by both modes.
+      # It is always written with GITHUB_TOKEN: RELEASE_PAT has no Issues
+      # permission, and widening it just to comment would be the wrong trade.
+      - name: Resolve the tracking issue
+        id: issue
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # One rolling tracking issue, exact-title matched (the search is fuzzy,
+          # the select is not). Created on first use.
+          num="$(gh issue list --state open --limit 100 \
+            --search "\"${TRACKING_ISSUE_TITLE}\" in:title" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TRACKING_ISSUE_TITLE}\")] | .[0].number // empty")"
+          if [ -z "$num" ]; then
+            issue_body="$RUNNER_TEMP/issue-body.md"
+            cat > "$issue_body" <<'ISSUEBODY'
+          Rolling tracker for the `proxy-release` -> chart-pin flow (#703, #727).
+
+          Every `proxy-release` run publishes a commit-SHA-tagged multi-arch
+          `aether-proxy` image, pins `charts/aether/values.yaml` to it and pushes
+          the result to `chore/proxy-image-bump-<short sha>`.
+
+          With the `RELEASE_PAT` fine-grained token present it also opens the PR and
+          arms auto-merge, and comments here with the PR and the token's remaining
+          life. Without it (missing, expired, rejected) it falls back to the #703
+          hand-off and the comment carries the exact `gh pr create` one-liner to run
+          by hand.
+
+          Either way: let `ci` + `proxy` go green, squash-merge, then deploy and
+          assert `appVersion` (docs/runbook.md §7).
+          ISSUEBODY
+            url="$(gh issue create --title "${TRACKING_ISSUE_TITLE}" --body-file "$issue_body")"
+            num="${url##*/}"
+            echo "created tracking issue #${num}: ${url}"
+          fi
+          echo "number=$num" >> "$GITHUB_OUTPUT"
+
+      # AUTO MODE. Opens the PR with the PAT, arms auto-merge, closes superseded
+      # pin PRs. Every failure here is a warning, never a failure: `opened=false`
+      # makes the manual hand-off step below run instead, so a bad token costs a
+      # human one command and nothing else.
+      - name: Open the chart-pin PR and arm auto-merge
+        id: pr
+        if: steps.pin.outputs.changed == 'true' && steps.token.outputs.mode == 'auto'
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+          ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+          TITLE: ${{ steps.body.outputs.title }}
+          CHART_FROM: ${{ steps.chart.outputs.from }}
+          CHART_TO: ${{ steps.chart.outputs.to }}
+          EXPIRY: ${{ steps.token.outputs.expiry }}
+          ISSUE: ${{ steps.issue.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          echo "::add-mask::$RELEASE_PAT"
+          if ! url="$(GH_TOKEN="$RELEASE_PAT" gh pr create \
+            --base main --head "$BRANCH" \
+            --title "$TITLE" \
+            --body-file "$RUNNER_TEMP/pr-body.md" | tail -1)"; then
+            echo "::warning::gh pr create failed with RELEASE_PAT — falling back to the manual hand-off (#703)"
+            echo "opened=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          num="${url##*/}"
+          echo "opened PR #${num}: ${url}"
+
+          # Hand the merge to GitHub. The ruleset still decides *when*: auto-merge
+          # fires only once every required check is green and the branch is current
+          # (`main-post-merge` keeps it current — #727).
+          automerge="armed (squash)"
+          if ! GH_TOKEN="$RELEASE_PAT" gh pr merge "$num" --auto --squash; then
+            automerge="**could not be armed** — merge by hand once green"
+            echo "::warning::could not arm auto-merge on #${num} — merge it by hand once green"
+          fi
+
+          # Close the pin PRs this release supersedes. Two guards, so this can only
+          # ever touch PRs the release flow itself produced: the head branch
+          # pattern AND the body marker.
+          closed=""
+          # shellcheck disable=SC2016  # the backticks are jq string literals
+          others="$(GH_TOKEN="$RELEASE_PAT" gh pr list --state open --limit 100 \
+            --json number,headRefName,body \
+            --jq '.[] | select(.headRefName | startswith("chore/proxy-image-bump-"))
+                      | select(.body | contains("Auto-generated by the `proxy-release` run"))
+                      | .number')"
+          for other in $others; do
+            [ "$other" = "$num" ] && continue
+            if GH_TOKEN="$RELEASE_PAT" gh pr close "$other" \
+              --comment "superseded by #${num}" --delete-branch; then
+              closed="${closed:+${closed}, }#${other}"
+              echo "closed superseded PR #${other}"
+            else
+              echo "::warning::could not close superseded PR #${other}"
+            fi
+          done
+
+          record="$RUNNER_TEMP/record.md"
+          {
+            echo "## Chart pin auto-opened for \`aether-proxy:${SHA}\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| image | \`ghcr.io/bpalermo/aether/aether-proxy:${SHA}\` |"
+            echo "| index digest | \`${INDEX_DIGEST}\` |"
+            echo "| chart version | \`${CHART_FROM}\` -> \`${CHART_TO}\` |"
+            echo "| branch | \`${BRANCH}\` |"
+            echo "| pull request | ${url} |"
+            echo "| auto-merge | ${automerge} |"
+            echo "| superseded | ${closed:-none} |"
+            echo "| release run | ${RUN_URL} |"
+            echo "| release token | ${EXPIRY:-expiry unknown} |"
+            echo
+            echo "Opened by \`proxy-release\` with the \`RELEASE_PAT\` fine-grained token (#727)."
+            echo "\`ci\` + \`proxy\` run on it like any PR; GitHub squash-merges it as soon as the"
+            echo "\`main\` ruleset is satisfied. Nothing to do here — the deploy stays manual"
+            echo "(\`docs/runbook.md\` §7: commit-suffixed chart tag + the \`appVersion\` assert)."
+          } > "$record"
+          cat "$record" >> "$GITHUB_STEP_SUMMARY"
+          GH_TOKEN="$ISSUE_TOKEN" gh issue comment "$ISSUE" --body-file "$record"
+          echo "commented on tracking issue #${ISSUE}"
+          echo "opened=true" >> "$GITHUB_OUTPUT"
+
+      # MANUAL MODE (#703): no usable token, or the PR could not be opened.
+      # Everything a human needs to turn the pushed branch into a PR, written
+      # twice — to the run summary (for whoever is looking at the run) and to the
+      # rolling tracking issue (the notification channel: a bot comment on an
+      # issue the owner subscribes to does notify).
+      - name: Hand off the chart-pin branch
+        if: steps.pin.outputs.changed == 'true' && steps.pr.outputs.opened != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+          TITLE: ${{ steps.body.outputs.title }}
+          CHART_FROM: ${{ steps.chart.outputs.from }}
+          CHART_TO: ${{ steps.chart.outputs.to }}
+          REASON: ${{ steps.token.outputs.reason }}
+          EXPIRY: ${{ steps.token.outputs.expiry }}
+          ISSUE: ${{ steps.issue.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$RUNNER_TEMP/pr-body.md"
+          handoff="$RUNNER_TEMP/handoff.md"
           {
             echo "## Chart pin ready for \`aether-proxy:${SHA}\`"
             echo
@@ -371,12 +633,14 @@ jobs:
             echo "| chart version | \`${CHART_FROM}\` -> \`${CHART_TO}\` |"
             echo "| branch | \`${BRANCH}\` |"
             echo "| release run | ${RUN_URL} |"
+            echo "| release token | ${REASON:-unusable}${EXPIRY:+ — ${EXPIRY}} |"
             echo
-            echo "\`proxy-release\` pushed the branch but cannot open the PR (#703)."
-            echo "Run this from a checkout (bash — it uses process substitution):"
+            echo "The PR was not opened automatically (#727), so this release falls back to"
+            echo "the #703 hand-off. Run this from a checkout (bash — it uses process"
+            echo "substitution):"
             echo
             echo '```sh'
-            echo "gh pr create --base main --head ${BRANCH} --title \"${title}\" --body-file <(cat <<'PRBODY'"
+            echo "gh pr create --base main --head ${BRANCH} --title \"${TITLE}\" --body-file <(cat <<'PRBODY'"
             cat "$body"
             echo "PRBODY"
             echo ")"
@@ -384,36 +648,8 @@ jobs:
           } > "$handoff"
 
           cat "$handoff" >> "$GITHUB_STEP_SUMMARY"
-
-          # One rolling tracking issue, exact-title matched (the search is fuzzy,
-          # the select is not). Created on first use.
-          num="$(gh issue list --state open --limit 100 \
-            --search "\"${TRACKING_ISSUE_TITLE}\" in:title" \
-            --json number,title \
-            --jq "[.[] | select(.title == \"${TRACKING_ISSUE_TITLE}\")] | .[0].number // empty")"
-          if [ -z "$num" ]; then
-            issue_body="$RUNNER_TEMP/issue-body.md"
-            cat > "$issue_body" <<'ISSUEBODY'
-          Rolling tracker for the `proxy-release` -> chart-pin hand-off (#703).
-
-          Every `proxy-release` run publishes a commit-SHA-tagged multi-arch
-          `aether-proxy` image, pins `charts/aether/values.yaml` to it and pushes
-          the result to `chore/proxy-image-bump-<short sha>`. It cannot open the PR
-          itself: `GITHUB_TOKEN` may not create PRs here, and a PR it created would
-          get no `pull_request` runs, hence none of the `ci` + `proxy` checks the
-          `main` ruleset requires.
-
-          So each run comments here with the exact `gh pr create` one-liner. Run it,
-          let `ci` + `proxy` go green, squash-merge, then deploy and assert
-          `appVersion` (docs/runbook.md §7). Close any superseded
-          `chore/proxy-image-bump-*` PR.
-          ISSUEBODY
-            url="$(gh issue create --title "${TRACKING_ISSUE_TITLE}" --body-file "$issue_body")"
-            num="${url##*/}"
-            echo "created tracking issue #${num}: ${url}"
-          fi
-          gh issue comment "$num" --body-file "$handoff"
-          echo "commented on tracking issue #${num}"
+          gh issue comment "$ISSUE" --body-file "$handoff"
+          echo "commented on tracking issue #${ISSUE}"
 
       - name: Chart already pinned to this sha
         if: steps.pin.outputs.changed != 'true'

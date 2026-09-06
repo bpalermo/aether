@@ -237,16 +237,41 @@ esac
 string equality. If it fails, the chart tag you pulled was built from a different
 commit: re-run that commit's `publish` workflow and upgrade again.
 
-**After a proxy release, open the PR the workflow pushed.** `proxy-release`
-publishes the image, pins `charts/aether/values.yaml` (`tag:` *and* `digest:`)
-and pushes `chore/proxy-image-bump-<short sha>`, but it cannot open the PR:
-`GITHUB_TOKEN` may not create PRs here, and one it created would get no
-`pull_request` runs, so the required `ci` + `proxy` checks would never report
-(#703). Copy the `gh pr create` one-liner from the run summary — the same block
-is posted to the rolling **proxy releases pending chart pin** issue — open the
-PR, let `ci` + `proxy` go green, squash-merge, and close any superseded
-`chore/proxy-image-bump-*` PR. Only then is there a `publish` run whose
-commit-suffixed chart tag (`<X.Y.Z>-<full sha>`, above) carries the new proxy.
+**After a proxy release, normally there is nothing to do.** `proxy-release`
+publishes the image, pins `charts/aether/values.yaml` (`tag:` *and* `digest:`),
+pushes `chore/proxy-image-bump-<short sha>`, opens the pin PR with the
+`RELEASE_PAT` fine-grained token and arms `--auto --squash` (#727). GitHub merges
+it the moment `ci` + `proxy` are green — the `main` ruleset is still the only
+gate, and it has no bypass actors. Any superseded `chore/proxy-image-bump-*` PR
+is closed and its branch deleted by the same run; `main-post-merge` updates the
+pin PR's branch whenever another merge leaves it `BEHIND` (auto-merge does not do
+that by itself). Watch the rolling **proxy releases pending chart pin** issue
+(#724): every release comments there with the PR, the digest, the chart version,
+the run link and the token's remaining life. The **deploy stays manual** — after
+the pin merges, take that commit's `publish` run and use the commit-suffixed
+chart tag (`<X.Y.Z>-<full sha>`, above) with the `appVersion` assert.
+
+**Manual fallback.** When #724 says the token is missing, expired or rejected,
+the run degrades to #703's hand-off instead of failing: the branch is pushed with
+`GITHUB_TOKEN` and both the run summary and the #724 comment carry the exact
+`gh pr create` one-liner (its `| release token |` row says which of the three it
+was). Run it from a checkout, let `ci` + `proxy` go green, squash-merge, close
+any superseded `chore/proxy-image-bump-*` PR. A PR opened by `GITHUB_TOKEN`
+itself is never an option: GitHub's recursion guard means it fires no
+`pull_request` events, so the required checks would never report.
+
+**Rotating `RELEASE_PAT`.** The workflow warns 30 days ahead — a `::warning::` on
+the release run and the `| release token |` row on #724 — and, once expired,
+falls back to the manual hand-off. To rotate: Settings → Developer settings →
+Fine-grained tokens → new token, resource owner `bpalermo`, **only** the
+`bpalermo/aether` repository, repository permissions **Contents: Read and write**
++ **Pull requests: Read and write** and nothing else (no Workflows, no
+Administration, no Actions; `Metadata: Read` is implied), maximum expiration.
+Then Settings → Environments → `release` → replace the **environment** secret
+`RELEASE_PAT` with it. It must stay an environment secret of `release`, whose
+deployment-branch policy names `main` only: that is what keeps a `pull_request`
+run, or a run of a workflow edited on a branch, from ever reading it. The next
+`proxy-release` run reports the new expiry on #724.
 
 From a checkout, the Bazel install targets do the same in order:
 
