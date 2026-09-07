@@ -615,6 +615,23 @@ Before #740 each of these exited with `failed to create SPIRE Workload API sourc
 (the controller: `failed to open SPIRE Workload API source`) and crash-looped. Seeing
 that error at all now means an OLD image.
 
+**Expected side effects while an agent holds xDS (#743).** The hold keeps the xDS socket
+closed so Envoy keeps its last configuration; from Prometheus that is
+`envoy_control_plane_connected_state == 0` with `envoy_server_live == 1` on that node, and
+`EnvoyControlPlaneDisconnected` fires for the duration. It resolves by itself when the
+identity lands (`identity acquired; generating the initial snapshot held=…`). A firing
+`EnvoyControlPlaneDisconnected` with `aether_agent_spire_svid_ready == 0` on the same node
+is this case, not a broken agent. Attestation-to-Ready is bounded by the wait loop's 30 s
+backoff cap; the node taint is armed ~30 s after NotReady and stays until readiness returns.
+
+**Reproducing the SPIRE-outage path on purpose.** Scaling `spire-server` to 0 alone does
+not reproduce it (the node's spire-agent serves from cache; measured: 0 prober delta).
+Delete that node's spire-agent pod and then its aether-agent pod. For a fleet test, do not
+use `kubectl rollout restart ds/aether-agent`: the DaemonSet is `maxUnavailable: 1`, so the
+rollout stalls as soon as the first replaced agent goes NotReady — delete the agent pods
+instead. Keep each window under 10 minutes (SVID TTL 4 h) and recover with
+`kubectl -n spire-server scale statefulset spire-server --replicas=1`.
+
 ### Grepping the outbound identity bindings during a soak (issue #638)
 
 `ssl_fail_verify_san` bursts a few tens of seconds into a fresh proxy generation point at
