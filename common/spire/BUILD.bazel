@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "spire",
     srcs = [
+        "handshake.go",
         "metrics.go",
         "peer.go",
         "tls.go",
@@ -19,12 +20,15 @@ go_library(
         "@com_github_spiffe_go_spiffe_v2//workloadapi",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_metric//:metric",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
     ],
 )
 
 go_test(
     name = "spire_test",
     srcs = [
+        "handshake_test.go",
         "identity_test.go",
         "peer_test.go",
         "tls_test.go",

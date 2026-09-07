@@ -300,6 +300,10 @@ func runAgent(ctx context.Context) (retErr error) {
 	// endpoint changes, so services registered after startup become routable
 	// without restarting the agent. No-op if the registry can't notify.
 	refresher := xdsServer.NewRegistryRefresher(cfg.ClusterName, cfg.NodeName, snapshotCache, reg, l)
+	// Same gate the xDS server holds on: it lets a reload that fails the mTLS
+	// handshake say WHOSE identity was missing — ours, the connection's
+	// catch-up right after ours arrived, or the registrar's (#740 PR 5).
+	refresher.SetIdentityGate(identityGateOf(spireSource))
 	if err = m.Add(refresher); err != nil {
 		return fmt.Errorf("failed to add registry refresher: %w", err)
 	}

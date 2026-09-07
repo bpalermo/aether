@@ -33,6 +33,7 @@ go_test(
         "watch_identity_test.go",
         "watch_identity_wake_test.go",
         "watch_peer_identity_test.go",
+        "watch_reconnect_test.go",
         "watch_startup_test.go",
     ],
     embed = [":registrar"],
