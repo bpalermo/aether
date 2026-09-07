@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "config.go",
         "edge.go",
+        "readiness.go",
         "root.go",
         "supervisor.go",
     ],
@@ -36,6 +37,7 @@ go_library(
         "//common/apis/config/v1:config",
         "//common/config",
         "//common/constants/mesh",
+        "//common/log",
         "//common/manager",
         "//common/must",
         "//common/readymarker",
@@ -65,6 +67,7 @@ go_test(
     srcs = [
         "config_test.go",
         "edge_identity_test.go",
+        "readiness_test.go",
         "root_test.go",
         "spire_identity_test.go",
         "supervisor_test.go",

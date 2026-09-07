@@ -30,6 +30,7 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "identity_hold_test.go",
         "odcds_test.go",
         "refresh_test.go",
         "server_integration_test.go",

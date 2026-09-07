@@ -100,11 +100,16 @@ spire:
   # controller, registrar or edge replica leaves its Service's endpoints (the
   # webhooks are failurePolicy: Ignore, so admission fails open meanwhile).
   #
-  # NOTE: spire-server AND spire-agent must tolerate aether.io/agent-not-ready
-  # (:NoSchedule). Past this dwell an identity-less node reports NotReady, and the
-  # controller's node-taint guard re-arms that taint 30s later — a SPIRE that
-  # cannot be rescheduled onto the very nodes it has to attest cannot recover the
-  # cluster on its own.
+  # REQUIRED: spire-server, spire-agent AND the SPIFFE CSI driver MUST tolerate
+  # aether.io/agent-not-ready (:NoSchedule). Past this dwell an identity-less node
+  # reports NotReady, the controller's node-taint guard re-arms that taint 30s
+  # later, and — since #740 — the agent's own taint remover HOLDS it until every
+  # readiness gate passes, which for an identity-less node means until SPIRE
+  # recovers. That is the point (nothing new should be scheduled onto a node that
+  # cannot give it an identity), but it also means a SPIRE that does not tolerate
+  # the taint cannot be rescheduled onto the very nodes it has to attest: the
+  # outage would fence out its own cure. On talos-main these tolerations were
+  # applied in k8s-talos-main #45 (2026-09-07).
   waitWarnAfter: 2m
 
 # Proxy MeshConfig — the controller seeds and projects the singleton MeshConfig CR

@@ -54,10 +54,12 @@ func hasTaint(node *corev1.Node, key string) bool {
 // TaintRemover is a controller-runtime reconciler that removes the aether
 // startup taint (aetherlabels.TaintAgentNotReady) from this agent's OWN node
 // whenever the taint is present AND this node can actually mesh a NEW pod —
-// which takes two conditions, not one: the CNI server's Unix socket exists, so a
-// CNI ADD can be handled, and aether is chained in the node's active conflist,
-// so a CNI ADD is ever ISSUED to us at all (#667). Workload pods don't tolerate
-// the taint, so they wait until this runs.
+// which takes three conditions, not one: the CNI server's Unix socket exists, so
+// a CNI ADD can be handled; aether is chained in the node's active conflist, so
+// a CNI ADD is ever ISSUED to us at all (#667); and this agent's own readiness
+// passes, which is where every other such condition is already computed — today
+// the CNI chaining check and the SPIRE identity gate (#740). Workload pods don't
+// tolerate the taint, so they wait until this runs.
 //
 // Unlike the original one-shot remover, it reconciles: the controller's node-taint
 // guard can (re-)apply the taint to a running node after a reboot or an agent
@@ -76,6 +78,19 @@ type TaintRemover struct {
 	// gate, not a node that can never be untainted because nothing is left to
 	// observe the conflist.
 	Chain cniconflist.ChainState
+
+	// Ready reports this agent's own readiness — the SAME aggregate the kubelet
+	// reads from /readyz — returning nil when every check passes. Optional: a nil
+	// Ready keeps the socket+chained gate alone.
+	//
+	// It exists because removing this taint is a claim that the node can mesh a
+	// new pod, and readiness is where that claim is computed. Gating on a subset
+	// of it made the escalation a no-op: on 2026-09-07 the controller's guard
+	// armed the taint because this agent had no SVID, and this remover — which
+	// could only see the socket and the conflist — dropped it ~50ms later, eight
+	// times in a row (issue #740, finding 2). Two controllers fighting is not a
+	// gate. Reading the same verdict the guard reacted to makes them agree.
+	Ready func() error
 }
 
 // NeedLeaderElection runs on every agent (the taint is per-node), not just the
@@ -96,10 +111,11 @@ func (r *TaintRemover) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Reconcile removes the startup taint from this agent's node when it is present
-// and the CNI socket is serving. When the taint is present but CNI isn't up yet,
-// it requeues (the reconciler can't watch a Unix socket) rather than blocking a
-// worker. Best-effort: a patch failure is retried by controller-runtime, never
-// surfaced as a startup failure.
+// and this node can mesh a pod: the CNI socket is serving, aether is chained,
+// and this agent's own readiness passes. When any of those is not yet true it
+// requeues (the reconciler can watch neither a Unix socket nor a readiness
+// checker) rather than blocking a worker. Best-effort: a patch failure is
+// retried by controller-runtime, never surfaced as a startup failure.
 func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	if req.Name != r.NodeName {
 		return reconcile.Result{}, nil
@@ -115,15 +131,17 @@ func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (re
 		return reconcile.Result{}, nil // nothing to do
 	}
 
-	if socket, chained := r.socketServing(), r.chained(); !socket || !chained {
+	socket, chained, notReady := r.socketServing(), r.chained(), r.notReady()
+	if !socket || !chained || notReady != nil {
 		// The taint is present but this node can't mesh a pod yet — don't remove it
-		// (that's the whole point of the gate). Requeue to re-check. Both conditions
-		// are logged because they fail for entirely different reasons and have
-		// entirely different recoveries: no socket is a slow start that fixes
+		// (that's the whole point of the gate). Requeue to re-check. Every
+		// condition is logged because they fail for entirely different reasons and
+		// have entirely different recoveries: no socket is a slow start that fixes
 		// itself, not chained is a stripped conflist that only a fresh cni-install
-		// run can fix.
+		// run can fix, and a failing readyz names its own reason (an absent SVID
+		// resolves when SPIRE does).
 		r.Log.DebugContext(ctx, "startup taint present but this node cannot mesh a pod; requeueing",
-			"node", r.NodeName, "socket", socket, "chained", chained)
+			"node", r.NodeName, "socket", socket, "chained", chained, "readyz", readyzReason(notReady))
 		return reconcile.Result{RequeueAfter: notReadyRequeue}, nil
 	}
 
@@ -145,6 +163,23 @@ func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (re
 func (r *TaintRemover) socketServing() bool {
 	_, err := os.Stat(r.SocketPath)
 	return err == nil
+}
+
+// notReady returns this agent's readiness failure, or nil when it is ready (or
+// when no readiness aggregate was wired).
+func (r *TaintRemover) notReady() error {
+	if r.Ready == nil {
+		return nil
+	}
+	return r.Ready()
+}
+
+// readyzReason renders a readiness verdict for the log: "ok" or the reason.
+func readyzReason(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	return err.Error()
 }
 
 // chained reports whether the re-assert loop has POSITIVELY observed aether in

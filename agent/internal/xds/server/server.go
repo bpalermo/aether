@@ -37,7 +37,33 @@ type AgentXdsServer struct {
 	registry registry.Registry
 
 	cache *cache.SnapshotCache
+
+	// identity gates the first snapshot on this agent holding a mesh identity.
+	// Optional: nil means "no identity to wait for" (--spire-enabled=false, and
+	// the edge, whose source is still created synchronously).
+	identity IdentityGate
 }
+
+// IdentityGate is the mesh identity as the xDS server needs to see it: is it
+// here yet, and a channel to wait on until it is. commonspire.WaitingSource
+// implements it.
+type IdentityGate interface {
+	// HasSVID reports whether this workload's identity (SVID and trust bundle)
+	// is complete.
+	HasSVID() bool
+	// Ready returns a channel closed when that identity first arrives. It is
+	// closed, not sent on, so any number of waiters may select on it.
+	Ready() <-chan struct{}
+}
+
+// SetIdentityGate makes the initial snapshot wait for this agent's mesh
+// identity. A setter rather than another positional argument to
+// NewAgentXdsServer, for the same reason CNIServer.SetChainState is one: the
+// gate is an interlock on WHEN the server may first serve, not something it
+// needs in order to exist, and the edge builds the same server without one.
+//
+// Pass a nil gate (or never call this) to keep the pre-#740 behaviour.
+func (s *AgentXdsServer) SetIdentityGate(gate IdentityGate) { s.identity = gate }
 
 // NewAgentXdsServer creates a new AgentXdsServer.
 // It initializes an xDS server with a snapshot cache and registers itself as a callback
@@ -90,7 +116,20 @@ func (s *AgentXdsServer) NeedLeaderElection() bool { return false }
 // PreListen generates the initial Envoy snapshot from local pod storage and the service registry.
 // It creates listeners, clusters, endpoints, and routes, then sets the snapshot in the cache
 // before the server starts accepting xDS client connections.
+//
+// It first HOLDS until this agent has a mesh identity (see holdForIdentity):
+// the whole point of the local-only fallback below is to survive a registrar
+// blip, and without an SVID there is no such thing as a registrar blip — every
+// handshake fails, so the fallback would fire on every restart and publish a
+// snapshot with no cross-node endpoints at all.
 func (s *AgentXdsServer) PreListen(ctx context.Context) error {
+	if !s.holdForIdentity(ctx) {
+		// Shutting down before identity arrived. Return nil rather than an error:
+		// the manager is already stopping and a SPIRE outage must never be the
+		// reason a shutdown is reported as a failure.
+		return nil
+	}
+
 	s.log.DebugContext(ctx, "generating initial snapshot")
 
 	if err := s.cache.LoadListenersFromStorage(ctx, s.storage, s.trustDomain); err != nil {
@@ -130,6 +169,61 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// identityHoldLogInterval is how often the identity hold re-announces itself.
+// Frequent enough that an operator watching the log sees it is a hold and not a
+// hang, sparse enough that a long SPIRE outage does not fill the log — the
+// authoritative per-attempt ladder (including the escalation to WARN) belongs
+// to the identity source's own logger, not to this one.
+const identityHoldLogInterval = 15 * time.Second
+
+// holdForIdentity blocks until this agent holds a mesh identity, reporting
+// whether it got one (false = ctx ended first). With no gate wired, or with the
+// identity already in hand, it returns immediately.
+//
+// This is the difference between a restart during a SPIRE outage costing
+// nothing and costing the node its data path (issue #740, finding 1). Envoy
+// keeps serving the last configuration it was given whenever its management
+// server is unreachable, which is exactly why the crash loop this replaced was
+// survivable: a dying agent published nothing. A LIVING agent that opens the
+// xDS socket and pushes what it can does the one thing the crash loop never
+// did — it REPLACES a complete snapshot with a local-only one. On main-worker-03
+// on 2026-09-07 that evicted every cross-node endpoint and failed ~95% of the
+// node's mesh probes for the whole 6m41s outage (+5,083 errors), on a node whose
+// Envoy had been serving fine a second earlier.
+//
+// So while identity is pending the agent programs everything else and simply
+// does not open the socket. Envoy keeps its config, the node keeps working, and
+// the readiness gate plus the node taint (past their dwell) stop NEW pods from
+// landing on a node that cannot give them an identity — which is the honest
+// signal, since a new pod is precisely what this state cannot serve.
+//
+// Mid-life is already correct and is deliberately left alone: once a snapshot
+// has been published the cache keeps it, so a registrar that goes away later
+// costs nothing — the refresher retries in the background and Envoy holds the
+// last good config.
+func (s *AgentXdsServer) holdForIdentity(ctx context.Context) bool {
+	if s.identity == nil || s.identity.HasSVID() {
+		return true
+	}
+
+	started := time.Now()
+	s.log.InfoContext(ctx, "holding xDS until this agent has an SVID; Envoy keeps its current configuration", "elapsed", time.Duration(0).String())
+
+	ticker := time.NewTicker(identityHoldLogInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.identity.Ready():
+			s.log.InfoContext(ctx, "identity acquired; generating the initial snapshot", "held", time.Since(started).Round(time.Millisecond).String())
+			return true
+		case <-ticker.C:
+			s.log.InfoContext(ctx, "holding xDS until this agent has an SVID; Envoy keeps its current configuration", "elapsed", time.Since(started).Round(time.Second).String())
+		}
+	}
 }
 
 // registryReadyTimeout bounds how long PreListen waits for the registry watch
