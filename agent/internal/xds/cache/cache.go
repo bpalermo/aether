@@ -17,6 +17,7 @@
 package cache
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -661,8 +662,8 @@ func (c *SnapshotCache) SetEdgeHTTPRedirect(enabled bool) {
 // SetEdgeIdentity records the edge proxy's single SVID name and trust domain so
 // the edge service clusters' upstream mTLS presents that identity and validates
 // the trust-domain bundle (served by SPIRE over the spire_agent SDS cluster).
-// The node proxy sets these via the SPIRE bridge instead. Must be called before
-// the manager starts.
+// The node proxy sets these via the SPIRE bridge instead. It is the pre-start
+// seed; UpdateEdgeIdentity is the after-start form.
 func (c *SnapshotCache) SetEdgeIdentity(spiffeID, trustDomain string) {
 	c.localMu.Lock()
 	c.nodeSpiffeID = spiffeID
@@ -672,6 +673,32 @@ func (c *SnapshotCache) SetEdgeIdentity(spiffeID, trustDomain string) {
 	// Rebuild the cached mTLS-injected clusters (usually a no-op here: the
 	// identity is set before the manager starts, ahead of any registry load).
 	c.recomputeMTLSClusters()
+}
+
+// UpdateEdgeIdentity is SetEdgeIdentity for an identity that arrives AFTER the
+// manager has started, which is the normal case once the edge stops blocking
+// startup on SPIRE (issue #740): it records the identity, rebuilds the cached
+// mTLS-injected clusters, and pushes a new snapshot so the edge Envoy picks the
+// change up on the next CDS update instead of on a restart. Unchanged input is a
+// no-op, so it is safe to call on every SVID rotation.
+//
+// It is the edge's counterpart to SetNodeIdentity, which does the same for the
+// node proxy when the SPIRE bridge delivers the node SVID.
+func (c *SnapshotCache) UpdateEdgeIdentity(ctx context.Context, spiffeID, trustDomain string) error {
+	c.localMu.Lock()
+	unchanged := c.nodeSpiffeID == spiffeID && c.trustDomain == trustDomain
+	if !unchanged {
+		c.nodeSpiffeID = spiffeID
+		c.trustDomain = trustDomain
+	}
+	c.localMu.Unlock()
+	if unchanged {
+		return nil
+	}
+
+	c.recomputeMTLSClusters()
+
+	return c.generateSnapshot(ctx)
 }
 
 // SetRegistry stores the service registry for use in HasRegistryService.

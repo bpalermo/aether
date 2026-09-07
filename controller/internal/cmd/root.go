@@ -38,12 +38,24 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const name = "aether-controller"
+
+// spireComponent namespaces this binary's SPIRE identity-wait metrics
+// (aether.controller.spire.wait_seconds and friends).
+const spireComponent = "controller"
+
+// readyzAdder is the one thing wireSpireReadiness needs from the manager. A
+// narrow interface rather than ctrl.Manager keeps the readiness table testable
+// without an apiserver.
+type readyzAdder interface {
+	AddReadyzCheck(name string, check healthz.Checker) error
+}
 
 // Version is set at build time via -ldflags (Bazel x_defs).
 var Version = "dev"
@@ -119,6 +131,10 @@ func runController(ctx context.Context) (retErr error) {
 
 	m := result.Manager
 
+	if err = wireSpireReadiness(m, spireSource); err != nil {
+		return err
+	}
+
 	// The controller's own namespace holds the canonical (fallback) MeshConfig that
 	// other namespaces inherit from unless they set their own.
 	fallbackNamespace := currentNamespace()
@@ -168,10 +184,26 @@ func runController(ctx context.Context) (retErr error) {
 }
 
 // buildControllerBootstrapOpts builds the manager scheme and SPIRE webhook options.
-// When SPIRE is enabled, it opens the Workload API source and configures the webhook
-// to serve with an X.509 SVID; otherwise the default Helm-provisioned cert is used.
-// The caller is responsible for closing the returned spireSource.
-func buildControllerBootstrapOpts(ctx context.Context) (*spire.Source, []func(*ctrl.Options), error) {
+// When SPIRE is enabled it starts acquiring the Workload API source in the
+// background and configures the webhook to serve with the X.509 SVID; otherwise
+// the default Helm-provisioned cert is used. The caller is responsible for closing
+// the returned spireSource.
+//
+// This is the EARLIEST SPIRE call site of the four (issue #740): it runs before
+// manager.Bootstrap, because the webhook server is built from the options it
+// returns. It used to be a blocking, fatal 25s wait for the first SVID, which made
+// a cold boot — SPIRE server and controller starting together — exit the process
+// with "failed to open SPIRE Workload API source: context deadline exceeded" and
+// crash-loop until SPIRE won the race.
+//
+// Nothing here needs the SVID at construction time: WebhookServerCert installs
+// tls.Config.GetCertificate, which is consulted per HANDSHAKE, so a source that is
+// still waiting fails individual TLS handshakes instead of the process. Both
+// webhook configurations are failurePolicy: Ignore, so the apiserver fails OPEN
+// for the duration — admission proceeds unvalidated and un-mutated, which is what
+// it already did while the container was crash-looping, only now the controller is
+// alive to start serving the moment the SVID lands.
+func buildControllerBootstrapOpts(ctx context.Context) (*spire.WaitingSource, []func(*ctrl.Options), error) {
 	// Manager scheme = client-go built-ins + the typed MeshConfig CRD, so the
 	// reconciler and webhook work against the typed object (no unstructured).
 	scheme := runtime.NewScheme()
@@ -196,17 +228,38 @@ func buildControllerBootstrapOpts(ctx context.Context) (*spire.Source, []func(*c
 	if !cfg.SpireEnabled {
 		return nil, bootstrapOpts, nil
 	}
-	src, srcErr := spire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-	if srcErr != nil {
-		return nil, nil, fmt.Errorf("failed to open SPIRE Workload API source: %w", srcErr)
-	}
+	src := spire.NewWaitingSource(cfg.SpireWorkloadSocketPath, cfg.SpireWaitWarnAfter, l, spire.WithComponent(spireComponent))
+	// There is no manager to register the runnable with yet — the manager is built
+	// FROM these options — so the acquisition runs on the command context, which
+	// SIGTERM cancels exactly as it does the manager's.
+	go func() { _ = src.Start(ctx) }()
 	bootstrapOpts = append(bootstrapOpts, func(o *ctrl.Options) {
 		o.WebhookServer = webhook.NewServer(webhook.Options{
 			TLSOpts: []func(*tls.Config){spire.WebhookServerCert(src)},
 		})
 	})
-	l.InfoContext(ctx, "webhook serving with SPIRE SVID", "socket", cfg.SpireWorkloadSocketPath)
+	l.InfoContext(ctx, "webhook will serve with the SPIRE SVID; startup does not wait for SPIRE",
+		"socket", cfg.SpireWorkloadSocketPath, "warnAfter", cfg.SpireWaitWarnAfter)
 	return src, bootstrapOpts, nil
+}
+
+// wireSpireReadiness registers the identity half of the controller's readiness
+// (issue #740). It is load-bearing here in a way it is not for a DaemonSet: the
+// controller is behind a Service, so NotReady removes this replica from the
+// webhook Service's endpoints — the apiserver stops routing admission to a replica
+// that cannot complete a TLS handshake and (failurePolicy: Ignore) fails open
+// immediately instead of waiting out its 10s webhook timeout on every request.
+//
+// The dwell is commonspire.NotReadyDwell, the same 2m the agent uses, for the same
+// reason: a routine cold boot must not produce NotReady churn.
+func wireSpireReadiness(m readyzAdder, src *spire.WaitingSource) error {
+	if src == nil {
+		return nil // --spire-enabled=false: no identity to wait for, no check
+	}
+	if err := m.AddReadyzCheck(spire.ReadyCheckName, spire.ReadyChecker(src)); err != nil {
+		return fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
+	}
+	return nil
 }
 
 // wireNodeTaintGuard registers the leader-elected node-taint guard, which
@@ -231,8 +284,12 @@ func wireNodeTaintGuard(m ctrl.Manager, agentNamespace string) error {
 // In SPIRE mode the webhook presents an SVID, so the apiserver must trust the
 // SPIRE CA: keep the ValidatingWebhookConfiguration caBundle in sync with the
 // rotating trust bundle.
-func wireCABundleInjector(m ctrl.Manager, spireSource *spire.Source) error {
-	if !cfg.SpireEnabled {
+//
+// The source may not hold an SVID yet (issue #740). The injector handles that by
+// deferring: it logs the first attempt at INFO and injects on the Updated() wake
+// that WaitingSource fires the moment the SVID lands.
+func wireCABundleInjector(m ctrl.Manager, spireSource *spire.WaitingSource) error {
+	if !cfg.SpireEnabled || spireSource == nil {
 		return nil
 	}
 	injector := &meshconfig.CABundleInjector{

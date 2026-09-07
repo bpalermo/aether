@@ -93,17 +93,48 @@ type WaitingSource struct {
 	src *Source
 }
 
+// DefaultComponent is the component name a WaitingSource is namespaced under
+// when the caller passes no WithComponent: the node agent, which is where the
+// wait shipped first (#741) and whose metric names are already on dashboards.
+const DefaultComponent = "agent"
+
+// WaitOption customises a WaitingSource. It exists so the four binaries that
+// wait for an SVID share one implementation and one set of log lines while
+// still reporting under their own names.
+type WaitOption func(*waitOptions)
+
+type waitOptions struct {
+	component string
+}
+
+// WithComponent names the binary doing the waiting ("agent", "controller",
+// "registrar", "edge"). It selects the metric namespace —
+// aether.<component>.spire.wait_seconds and friends — so a wait can be attributed
+// to the workload that is stuck without the instruments being redefined per
+// binary. An empty name keeps DefaultComponent.
+func WithComponent(component string) WaitOption {
+	return func(o *waitOptions) {
+		if component != "" {
+			o.component = component
+		}
+	}
+}
+
 // NewWaitingSource returns a WaitingSource for the Workload API at socketPath.
 // warnAfter is how long the wait stays at INFO before escalating to WARN (and
 // the readiness dwell); a non-positive value means DefaultWaitWarnAfter.
 // Nothing is dialled until Start runs.
-func NewWaitingSource(socketPath string, warnAfter time.Duration, log *slog.Logger) *WaitingSource {
+func NewWaitingSource(socketPath string, warnAfter time.Duration, log *slog.Logger, opts ...WaitOption) *WaitingSource {
 	if warnAfter <= 0 {
 		warnAfter = DefaultWaitWarnAfter
 	}
+	o := &waitOptions{component: DefaultComponent}
+	for _, opt := range opts {
+		opt(o)
+	}
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled); a
 	// registration failure only disables instrumentation, never the wait.
-	metrics, err := newWaitMetrics(otel.Meter(waitMeterName))
+	metrics, err := newWaitMetrics(otel.Meter(waitMeterName), o.component)
 	if err != nil {
 		log.Error("failed to create SPIRE wait metrics; continuing without instrumentation", "error", err)
 	}
@@ -324,6 +355,11 @@ func (w *WaitingSource) source() (*Source, error) {
 // genuine outage still escalates to NotReady, which is what an operator wants:
 // no new pods scheduled onto a node that cannot give them an identity.
 const NotReadyDwell = DefaultWaitWarnAfter
+
+// ReadyCheckName is the /readyz check name every binary registers its identity
+// gate under, so `readyz?verbose` reads the same on an agent, the controller, the
+// registrar and the edge — and one runbook line covers all four.
+const ReadyCheckName = "spire-svid"
 
 // ReadyChecker returns a readiness check (assignable to controller-runtime's
 // healthz.Checker) that fails once this workload has been waiting for its first
