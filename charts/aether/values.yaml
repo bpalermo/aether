@@ -93,12 +93,19 @@ spire:
     mountPath: /run/spire/admin-sockets
     socketName: admin.sock
   # How long a component may wait for SPIRE to issue its first SVID before the
-  # waiting log line escalates from INFO to WARN. It is ALSO the dwell before the
-  # spire-svid readiness check reports NotReady, on all four components (issue
-  # #740): startup no longer dies when the Workload API is not serving yet, it
-  # waits and keeps /healthz and /readyz answering. Past the dwell an identity-less
-  # controller, registrar or edge replica leaves its Service's endpoints (the
-  # webhooks are failurePolicy: Ignore, so admission fails open meanwhile).
+  # waiting log line escalates from INFO to WARN. Startup no longer dies when the
+  # Workload API is not serving yet (issue #740): it waits and keeps /healthz and
+  # /readyz answering.
+  #
+  # It is ALSO the dwell before the spire-svid readiness check reports NotReady —
+  # but ON THE AGENT ONLY (#740 PR 4). The controller, registrar and edge take NO
+  # dwell: they are Deployments behind Services, so NotReady removes one replica
+  # from one endpoint set, which is exactly the right handling of a pod that
+  # cannot complete an mTLS handshake, and they go NotReady the instant they are
+  # known to lack an identity. (Before PR 4 a registrar Pod could be Ready — and
+  # therefore dialled — with no SVID; see the rev210 roll, 2026-09-07.) The agent
+  # keeps a dwell because NotReady on the DaemonSet is what arms the node taint,
+  # a fleet-level action a brief SPIRE hiccup must not trigger.
   #
   # REQUIRED: spire-server, spire-agent AND the SPIFFE CSI driver MUST tolerate
   # aether.io/agent-not-ready (:NoSchedule). Past this dwell an identity-less node

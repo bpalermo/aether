@@ -4,6 +4,7 @@ go_library(
     name = "spire",
     srcs = [
         "metrics.go",
+        "peer.go",
         "tls.go",
         "waiting.go",
     ],
@@ -25,6 +26,7 @@ go_test(
     name = "spire_test",
     srcs = [
         "identity_test.go",
+        "peer_test.go",
         "tls_test.go",
         "waiting_test.go",
     ],
@@ -39,5 +41,7 @@ go_test(
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
     ],
 )

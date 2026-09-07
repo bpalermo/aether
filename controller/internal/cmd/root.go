@@ -250,13 +250,17 @@ func buildControllerBootstrapOpts(ctx context.Context) (*spire.WaitingSource, []
 // that cannot complete a TLS handshake and (failurePolicy: Ignore) fails open
 // immediately instead of waiting out its 10s webhook timeout on every request.
 //
-// The dwell is commonspire.NotReadyDwell, the same 2m the agent uses, for the same
-// reason: a routine cold boot must not produce NotReady churn.
+// There is NO dwell (commonspire.ServiceNotReadyDwell, #740 PR 4). The agent's 2m
+// dwell is not about tolerating a cold boot for its own sake — it exists because
+// NotReady on the agent DaemonSet is what arms the node taint, and a taint is a
+// fleet-level action a 40s SPIRE hiccup must not trigger. Leaving a Service's
+// endpoints has no such blast radius: it is the exact, local, immediately
+// reversible handling of a replica that cannot complete a TLS handshake.
 func wireSpireReadiness(m readyzAdder, src *spire.WaitingSource) error {
 	if src == nil {
 		return nil // --spire-enabled=false: no identity to wait for, no check
 	}
-	if err := m.AddReadyzCheck(spire.ReadyCheckName, spire.ReadyChecker(src)); err != nil {
+	if err := m.AddReadyzCheck(spire.ReadyCheckName, spire.ReadyChecker(src, spire.ServiceNotReadyDwell)); err != nil {
 		return fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
 	}
 	return nil

@@ -7,6 +7,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/cache"
 	commonlog "aethermesh.dev/common/log"
+	"aethermesh.dev/common/spire"
 	"aethermesh.dev/registry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -190,13 +191,35 @@ func (l *refreshLoop) reload(ctx context.Context) {
 	// unchanged; the resulting watch events trigger the next reload).
 	AssertWatchFilter(l.r.cache, l.r.registry)
 	if err := l.r.cache.LoadClustersFromRegistry(ctx, l.r.clusterName, l.r.nodeName, l.r.registry); err != nil {
-		l.r.log.ErrorContext(ctx, "failed to refresh clusters from registry", "error", err)
-		if l.r.refreshErrors != nil {
-			l.r.refreshErrors.Add(ctx, 1)
-		}
+		l.r.reportReloadFailure(ctx, err)
 		return
 	}
 	l.r.log.DebugContext(ctx, "refreshed clusters from registry")
+}
+
+// reportReloadFailure logs a failed reload and counts it — except when the
+// failure is the registrar's own startup, which is neither (issue #740, PR 4).
+//
+// A registrar replica that is in its Service's endpoints before SPIRE has issued
+// its SVID rejects the mTLS handshake with `x509svid: could not get X509 bundle`.
+// That surfaced here on the rev210 roll (2026-09-07 20:03:45Z) as
+// `failed to refresh clusters from registry` at ERROR, alongside the watch
+// stream's ERROR for the same handshake — two alarms for one transient that
+// self-heals in seconds and leaves the previous snapshot in place, which is
+// exactly what a WARN is for. Every other reload failure keeps ERROR and the
+// counter: those leave the cluster snapshot stale until the next change signal
+// (reloads are not retried), which is the condition refresh_errors exists to
+// surface, and burying it under a boot's worth of handshake noise is the thing
+// this avoids.
+func (r *RegistryRefresher) reportReloadFailure(ctx context.Context, err error) {
+	if spire.IsPeerIdentityUnavailable(err) {
+		r.log.WarnContext(ctx, "cluster refresh deferred: the registrar has no identity yet, keeping the current snapshot", "error", err)
+		return
+	}
+	r.log.ErrorContext(ctx, "failed to refresh clusters from registry", "error", err)
+	if r.refreshErrors != nil {
+		r.refreshErrors.Add(ctx, 1)
+	}
 }
 
 // onDependencyChange handles a node dependency-set change (pod add/remove,
