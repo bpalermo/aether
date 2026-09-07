@@ -463,13 +463,45 @@ kubectl -n aether exec ds/aether-agent -c agent -- wget -qO- localhost:8082/read
 ```
 
 `readyz?verbose` reads `spire-svid ok` for the first **2 minutes** of the wait
-(`--spire-wait-warn-after`, `spire.waitWarnAfter`) and then fails with
-`no SPIRE SVID after 2m10s (socket …)`. The dwell is deliberate: the controller's
-node-taint guard re-arms `aether.io/agent-not-ready:NoSchedule` after 30s of NotReady,
-and spire-server does not tolerate that taint — a gate that failed immediately would let
-a brief SPIRE outage fence the cluster against spire-server's own rescheduling. Past the
-dwell the NotReady is the point: stop scheduling pods onto a node that cannot give them
-an identity.
+(`--spire-wait-warn-after`, `spire.waitWarnAfter`) and then fails. It prints
+**`spire-svid failed: reason withheld`** — controller-runtime redacts checker errors, so
+the endpoint never shows the reason. The reason is in the **log**, once per transition:
+
+```bash
+kubectl -n aether logs ds/aether-agent | grep -E "readiness (failing|passing)"
+# spire-svid readiness failing   reason="no SPIRE SVID after 2m10s (socket /run/secrets/…)"
+# spire-svid readiness passing
+```
+
+The dwell is deliberate: the controller's node-taint guard re-arms
+`aether.io/agent-not-ready:NoSchedule` after 30s of NotReady, so a gate that failed
+immediately would turn a brief SPIRE hiccup into a fleet-wide taint. Past the dwell the
+NotReady is the point: stop scheduling pods onto a node that cannot give them an
+identity. Since #740 the agent's own taint remover **holds** that taint while any
+readiness gate is failing, instead of clearing it 50ms after the guard arms it — so
+**spire-server, spire-agent and the SPIFFE CSI driver must tolerate the taint**
+(`spire.waitWarnAfter`'s note in `values.yaml`; applied on talos-main in
+k8s-talos-main #45). Without those tolerations the outage fences out its own cure.
+
+**The node keeps serving.** While the agent has no SVID it does NOT open the xDS socket
+— it logs `holding xDS until this agent has an SVID; Envoy keeps its current
+configuration` every 15s with a rising `elapsed`, and Envoy goes on serving the last
+config it was given. This matters because the alternative is worse than the crash loop
+#740 replaced: a live agent that cannot reach the registrar publishes a **local-only**
+snapshot, which REPLACES a complete one and strips every cross-node endpoint. On
+2026-09-07 that failed ~95% of one node's mesh probes for a whole 6m41s outage. If you
+see `registry unavailable for initial snapshot; starting with local-only config` while
+SPIRE is down, that is the bug — the hold is missing.
+
+Recovery is announced only when **both** halves of the identity exist (the SVID and the
+bundle for its trust domain), and the registrar client is kicked out of its gRPC
+backoff the moment they do:
+
+```bash
+kubectl -n aether logs ds/aether-agent | grep -E "identity acquired"
+# identity acquired; generating the initial snapshot                      held=6m41.2s
+# identity acquired; reconnecting the registrar client immediately …
+```
 
 The upstream cause is almost always spire-server or the node's spire-agent, not aether:
 
@@ -493,9 +525,11 @@ sum(increase(aether_agent_spire_source_restarts_total[1h]))
 While the wait is on, the registrar watch stream logs
 `watch stream deferred until this agent has an SVID` at INFO and counts no
 `watch_errors` — the agent cannot handshake without a certificate, and that is not a
-registrar fault. Envoy keeps serving on the certificates it already holds; a **new** pod
-on that node gets its listener but no upstream mTLS until the SVID lands, which is the
-same absent-secret transient #715 covers.
+registrar fault. Envoy keeps serving on the certificates and the configuration it
+already holds. A **new** pod on that node is still registered and still gets its CNI
+redirect, but nothing is pushed to Envoy until the SVID lands (and it could not have
+meshed without an identity anyway) — which is why the node reports NotReady and stays
+tainted for the duration.
 
 ### Grepping the outbound identity bindings during a soak (issue #638)
 

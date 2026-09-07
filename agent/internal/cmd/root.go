@@ -256,6 +256,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
+	wakeRegistryOnIdentity(ctx, spireSource, reg)
 
 	snapshotCache, err := configureSnapshotCache(ctx, m)
 	if err != nil {
@@ -277,7 +278,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain.Get()); err != nil {
+	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain.Get(), identityGateOf(spireSource)); err != nil {
 		return err
 	}
 
@@ -371,6 +372,39 @@ func startSpireIdentity(ctx context.Context, m runnableAdder) (*commonspire.Wait
 	l.InfoContext(ctx, "acquiring this agent's SVID in the background; startup does not wait for SPIRE",
 		"socket", cfg.SpireWorkloadSocketPath, "warnAfter", cfg.SpireWaitWarnAfter)
 	return src, trustDomain, nil
+}
+
+// identityWaker is the registry-side half of the identity handshake: a client
+// that wants to be told the moment this workload can complete an mTLS handshake.
+type identityWaker interface {
+	NotifyIdentityReady()
+}
+
+// wakeRegistryOnIdentity kicks the registrar client the instant the SVID lands,
+// instead of leaving it to discover the fact on its own schedule.
+//
+// Without this, recovery is announced long before it happens. The watch loop's
+// own backoff is short, but the gRPC ClientConn underneath it has its own — and
+// after a multi-minute outage's worth of failed handshakes that one has reached
+// its ~120s cap, so new RPCs are answered from the cached failure rather than a
+// fresh dial. On 2026-09-07 readiness, svid_ready and the pod all said
+// "recovered" while the node's data path stayed down for another 2m11s (#740,
+// finding 3). A no-op when SPIRE is disabled or the registry does not implement
+// the wake.
+func wakeRegistryOnIdentity(ctx context.Context, src *commonspire.WaitingSource, reg registry.Registry) {
+	waker, ok := reg.(identityWaker)
+	if src == nil || !ok {
+		return
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-src.Ready():
+		}
+		l.InfoContext(ctx, "identity acquired; reconnecting the registrar client immediately rather than waiting out its backoff")
+		waker.NotifyIdentityReady()
+	}()
 }
 
 // reconcileSpireIdentity folds the trust domain SPIRE actually issued into the
@@ -535,26 +569,34 @@ func newCNIConflistReasserter() *cniconflist.Reasserter {
 //     the taint isn't present. Best-effort: NeedLeaderElection=false, never fails
 //     startup.
 //
-// The two compose: the guard arms the taint, and the remover then refuses to drop
-// it while the node is still unchained. A nil re-asserter
-// (--cni-conflist-reassert=false) reduces both to their pre-#667 behaviour.
+// The two compose, and they compose through ONE verdict: the guard arms the
+// taint, and the remover refuses to drop it while any readiness check is
+// failing. Letting the remover gate on a subset of readiness is what made the
+// escalation a no-op in #740's finding 2 — the guard armed the taint for the
+// SPIRE gate and the remover, which could not see it, cleared it 50ms later,
+// every 30s. A nil re-asserter (--cni-conflist-reassert=false) reduces the
+// chaining half of both to its pre-#667 behaviour.
 func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSource *commonspire.WaitingSource) error {
 	chain := chainStateOf(reasserter)
+	ready := newAgentReadiness(l)
 
-	if err := m.AddReadyzCheck("cni-chained", cniconflist.ReadyChecker(chain)); err != nil {
-		return fmt.Errorf("failed to set up the CNI chaining ready check: %w", err)
+	if err := ready.add(m, "cni-chained", cniconflist.ReadyChecker(chain)); err != nil {
+		return err
 	}
 
 	// The identity half of the same question, on the same terms (#740). A node
 	// with no SVID cannot give a new pod a working mesh identity, so past the
 	// dwell it should stop attracting pods — but only past the dwell: the taint
-	// guard re-arms on 30s of NotReady and spire-server does not tolerate that
-	// taint, so a hard-from-t=0 gate would let a brief SPIRE outage fence the
-	// cluster against spire-server's own rescheduling. See
-	// commonspire.NotReadyDwell. Nil (SPIRE disabled) registers no check at all.
+	// guard re-arms on 30s of NotReady, so a hard-from-t=0 gate would turn a
+	// brief SPIRE hiccup into a fleet-wide taint. That is survivable only
+	// because spire-server, spire-agent and the SPIFFE CSI driver now TOLERATE
+	// aether.io/agent-not-ready (k8s-talos-main #45, 2026-09-07); before they
+	// did, the outage could have fenced out its own cure, which is why SPIRE was
+	// kept out of the taint gate. It no longer is. See commonspire.NotReadyDwell.
+	// Nil (SPIRE disabled) registers no check at all.
 	if spireSource != nil {
-		if err := m.AddReadyzCheck("spire-svid", commonspire.ReadyChecker(spireSource)); err != nil {
-			return fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
+		if err := ready.add(m, "spire-svid", commonspire.ReadyChecker(spireSource)); err != nil {
+			return err
 		}
 	}
 
@@ -564,6 +606,7 @@ func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSo
 		SocketPath: cfg.CNIServerConfig.SocketPath,
 		Log:        l,
 		Chain:      chain,
+		Ready:      ready.Err,
 	}
 	if err := tr.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up startup-taint remover: %w", err)
@@ -586,6 +629,22 @@ func chainStateOf(r *cniconflist.Reasserter) cniconflist.ChainState {
 		return nil
 	}
 	return r
+}
+
+// identityGateOf adapts the SPIRE identity source to the interface the xDS
+// server takes, returning a TRULY nil interface when SPIRE is disabled.
+//
+// Same load-bearing guard as chainStateOf, and the same trap: assigning a nil
+// *WaitingSource straight into an interface-typed field yields a NON-nil
+// interface holding a nil pointer, so the server's `identity == nil` check would
+// be false and it would hold its first snapshot forever waiting on a source
+// nobody is ever going to start. Going through here is what keeps
+// --spire-enabled=false (#421) byte-identical.
+func identityGateOf(src *commonspire.WaitingSource) xdsServer.IdentityGate {
+	if src == nil {
+		return nil
+	}
+	return src
 }
 
 // wireCNIConflistReasserter registers the re-assert loop with the manager. A nil
@@ -771,12 +830,16 @@ func wireCaptureReconciler(m ctrl.Manager, snapshotCache *cache.SnapshotCache) e
 // setXDSServer creates and registers an Agent xDS server as a runnable with the Manager.
 // The server listens on a Unix domain socket and serves Envoy discovery service requests
 // (LDS, CDS, EDS, RDS, ADS) with resource snapshots generated from local pod storage and the registry.
-func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, trustDomain string) error {
+func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registry, localStorage storage.Storage[*cniv1.CNIPod], snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, trustDomain string, identity xdsServer.IdentityGate) error {
 	// Create xDS server
 	xdsSrv, err := xdsServer.NewAgentXdsServer(ctx, cfg.ClusterName, cfg.NodeName, trustDomain, registry, localStorage, snapshotCache, ackTracker.Callbacks(), l)
 	if err != nil {
 		return err
 	}
+	// Hold the first snapshot until this agent has an identity: without one the
+	// registrar handshake cannot succeed, so publishing anyway would replace
+	// Envoy's working config with a local-only one (#740, finding 1).
+	xdsSrv.SetIdentityGate(identity)
 	if err = m.Add(xdsSrv); err != nil {
 		return fmt.Errorf("failed to add xDS server: %w", err)
 	}

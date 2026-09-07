@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "config.go",
         "edge.go",
+        "readiness.go",
         "root.go",
         "supervisor.go",
     ],
@@ -36,6 +37,7 @@ go_library(
         "//common/apis/config/v1:config",
         "//common/config",
         "//common/constants/mesh",
+        "//common/log",
         "//common/manager",
         "//common/must",
         "//common/readymarker",
@@ -51,6 +53,7 @@ go_library(
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
         "@io_k8s_sigs_controller_runtime//pkg/cache",
         "@io_k8s_sigs_controller_runtime//pkg/client",
+        "@io_k8s_sigs_controller_runtime//pkg/healthz",
         "@io_k8s_sigs_controller_runtime//pkg/manager",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_k8s_sigs_gateway_api//apis/v1beta1",
@@ -63,6 +66,7 @@ go_test(
     name = "cmd_test",
     srcs = [
         "config_test.go",
+        "readiness_test.go",
         "root_test.go",
         "spire_identity_test.go",
         "supervisor_test.go",
@@ -74,6 +78,7 @@ go_test(
         "//agent/internal/node",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_k8s_sigs_controller_runtime//pkg/healthz",
         "@io_k8s_sigs_controller_runtime//pkg/manager",
     ],
 )

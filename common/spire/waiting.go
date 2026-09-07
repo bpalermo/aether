@@ -176,12 +176,12 @@ func (w *WaitingSource) attempt(ctx context.Context, attempt int) bool {
 		return false
 	}
 
-	td, err := TrustDomainFromSource(src)
+	td, err := firstIdentity(src)
 	if err != nil {
-		// A source that was created but cannot serve an SVID is worse than none:
-		// drop it and build a fresh one. This is the only path that re-creates a
-		// source, which is why aether.agent.spire.source_restarts staying 0 is a
-		// meaningful signal.
+		// A source that was created but cannot serve a COMPLETE identity is worse
+		// than none: drop it and build a fresh one. This is the only path that
+		// re-creates a source, which is why aether.agent.spire.source_restarts
+		// staying 0 is a meaningful signal.
 		_ = src.Close()
 		w.metrics.sourceRestarted(ctx)
 		w.logWaiting(ctx, attempt, err)
@@ -199,6 +199,30 @@ func (w *WaitingSource) attempt(ctx context.Context, attempt int) bool {
 	w.log.InfoContext(ctx, "obtained this workload's SVID from the SPIRE Workload API",
 		"socket", w.socketPath, "attempts", attempt, "elapsed", waited.Round(time.Millisecond), "trustDomain", td)
 	return true
+}
+
+// firstIdentity reads BOTH halves of this workload's mesh identity out of a
+// freshly created source — its own SVID and the X.509 bundle for the trust
+// domain that SVID belongs to — and returns the trust-domain name.
+//
+// Both, not just the SVID, because an mTLS peer needs both and they are what
+// readiness has to mean. On 2026-09-07 the agent announced recovery on the SVID
+// alone (readyz spire-svid ok, svid_ready=1) while every mTLS client kept
+// failing `x509svid: could not get X509 bundle` — the bundle half of the
+// identity was what the peers were actually blocked on, and readiness said
+// nothing about it. go-spiffe fills both from the same Workload API update, so
+// in practice this costs one extra map lookup and closes the window where they
+// could ever disagree (issue #740, finding 3).
+func firstIdentity(src SVIDSource) (string, error) {
+	svid, err := src.GetX509SVID()
+	if err != nil {
+		return "", fmt.Errorf("fetching workload SVID: %w", err)
+	}
+	td := svid.ID.TrustDomain()
+	if _, err := src.GetX509BundleForTrustDomain(td); err != nil {
+		return "", fmt.Errorf("fetching the X.509 bundle for trust domain %q: %w", td.Name(), err)
+	}
+	return td.Name(), nil
 }
 
 // logWaiting emits the one line per attempt that makes the wait visible, at INFO
@@ -252,8 +276,11 @@ func (w *WaitingSource) Updated() <-chan struct{} { return w.updated }
 // number of goroutines may wait on it.
 func (w *WaitingSource) Ready() <-chan struct{} { return w.ready }
 
-// HasSVID reports whether the first SVID has arrived. It is what the readiness
-// gate and the registrar client's identity check read.
+// HasSVID reports whether this workload's identity is complete: the first SVID
+// has arrived AND the bundle for its trust domain is servable (see
+// firstIdentity — the source is only published once both are). It is what the
+// readiness gate, the xDS hold and the registrar client's identity check read,
+// so all three mean the same thing an mTLS handshake means.
 func (w *WaitingSource) HasSVID() bool {
 	if w == nil {
 		return false

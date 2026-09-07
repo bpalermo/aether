@@ -24,13 +24,16 @@ go_library(
 go_test(
     name = "spire_test",
     srcs = [
+        "identity_test.go",
         "tls_test.go",
         "waiting_test.go",
     ],
     embed = [":spire"],
     deps = [
+        "@com_github_spiffe_go_spiffe_v2//bundle/x509bundle",
         "@com_github_spiffe_go_spiffe_v2//proto/spiffe/workload",
         "@com_github_spiffe_go_spiffe_v2//spiffeid",
+        "@com_github_spiffe_go_spiffe_v2//svid/x509svid",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_opentelemetry_go_otel//:otel",

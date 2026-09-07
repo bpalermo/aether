@@ -101,6 +101,12 @@ type RegistrarRegistry struct {
 	// on every reconnect; swapped atomically at SNAPSHOT_COMPLETE.
 	services map[string]struct{}
 
+	// wake cuts short the retry sleep between watch-stream attempts. Buffered
+	// with capacity 1 and written non-blocking, so a signal raised while the
+	// loop is not sleeping is still consumed by the next sleep. See
+	// NotifyIdentityReady.
+	wake chan struct{}
+
 	// notify coalesces endpoint-change signals for consumers (e.g. the agent
 	// xDS cache). It is buffered with capacity 1 and written non-blocking, so a
 	// burst of watch events collapses into a single pending signal.
@@ -152,6 +158,7 @@ func NewRegistrarRegistry(log *slog.Logger, cfg Config) *RegistrarRegistry {
 		metrics:     metrics,
 		cache:       make(map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint),
 		services:    make(map[string]struct{}),
+		wake:        make(chan struct{}, 1),
 		notify:      make(chan struct{}, 1),
 		ready:       make(chan struct{}),
 		reconnected: make(chan struct{}, 1),
@@ -565,10 +572,8 @@ func (r *RegistrarRegistry) failStream(ctx context.Context, msg string, err erro
 	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
 	wait := *backoff + jitter
 	r.log.ErrorContext(ctx, msg, "error", err, "backoff", wait)
-	select {
-	case <-ctx.Done():
+	if !r.waitBeforeRetry(ctx, wait) {
 		return false
-	case <-time.After(wait):
 	}
 	*backoff = min(*backoff*2, maxBackoff)
 	return true
@@ -591,12 +596,52 @@ func (r *RegistrarRegistry) deferStream(ctx context.Context, err error, backoff 
 	jitter := time.Duration(float64(backoff) * jitterFraction * rand.Float64())
 	wait := backoff + jitter
 	r.log.InfoContext(ctx, "watch stream deferred until this agent has an SVID", "error", err, "backoff", wait)
+	return r.waitBeforeRetry(ctx, wait)
+}
+
+// waitBeforeRetry sleeps between watch attempts, returning false if the context
+// ended first (shutdown). A NotifyIdentityReady wake cuts the sleep short: the
+// reason the loop was waiting has just gone away, so paying out the rest of the
+// backoff is pure added downtime.
+func (r *RegistrarRegistry) waitBeforeRetry(ctx context.Context, wait time.Duration) bool {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(wait):
+	case <-r.wake:
+		return true
+	case <-timer.C:
+		return true
 	}
-	return true
+}
+
+// NotifyIdentityReady tells this client that SPIRE has now issued the SVID its
+// mTLS handshake needs, so the next watch attempt should happen NOW.
+//
+// Two things stand between the SVID landing and the stream working, and this
+// clears both:
+//
+//   - The gRPC ClientConn's OWN reconnect backoff, which the app-level loop
+//     cannot see. Every attempt during the outage failed the handshake, so by
+//     the time identity arrived the ClientConn had backed off to its ~120s cap
+//     and was answering new RPCs with the cached failure instead of dialling.
+//     On 2026-09-07 that made the node's data path stay down for 2m11s AFTER
+//     readiness said it had recovered — `could not get X509 bundle` long after
+//     the bundle existed, because nothing had tried again (#740, finding 3).
+//     ResetConnectBackoff drops the ClientConn straight back to CONNECTING.
+//   - This loop's own sleep, cut short by the wake.
+//
+// Safe to call at any time and from any goroutine, including before Initialize
+// (the wake is buffered and the nil conn is skipped).
+func (r *RegistrarRegistry) NotifyIdentityReady() {
+	if r.conn != nil {
+		r.conn.ResetConnectBackoff()
+	}
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
 }
 
 // isServerDrainGoaway reports whether err is an established stream ending

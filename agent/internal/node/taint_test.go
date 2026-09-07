@@ -2,9 +2,11 @@ package node
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -227,6 +229,83 @@ func TestReconcileChainGate(t *testing.T) {
 		// Re-arming is the controller's guard, driven by the readiness check.
 		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, false))
 		r.Chain = observed(false)
+		res := reconcileNode(t, r)
+		assert.False(t, nodeTaintPresent(t, c))
+		assert.Zero(t, res.RequeueAfter)
+	})
+}
+
+// TestReconcileReadinessGate covers the third condition (#740, finding 2): the
+// remover must not clear a taint the controller's guard armed because this
+// agent is NotReady. Before this, the guard armed the taint for a failing
+// spire-svid check and the remover — which could see only the socket and the
+// conflist — dropped it ~50ms later, every 30s for eight cycles, so the node
+// was effectively never tainted and the designed escalation never happened.
+func TestReconcileReadinessGate(t *testing.T) {
+	errNoSVID := errors.New("spire-svid: no SPIRE SVID after 2m10s (socket /run/spire.sock)")
+
+	t.Run("readyz failing -> taint kept, requeued", func(t *testing.T) {
+		// Socket and chaining both good — exactly the state in which the old gate
+		// removed the taint — but the agent has no identity, so a pod scheduled
+		// here would come up without one.
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = observed(true)
+		r.Ready = func() error { return errNoSVID }
+
+		res := reconcileNode(t, r)
+		assert.True(t, nodeTaintPresent(t, c), "taint must be HELD while a readiness check is failing")
+		assert.Positive(t, res.RequeueAfter)
+	})
+
+	t.Run("readyz recovers -> taint removed", func(t *testing.T) {
+		// The other half: holding must be a hold, not a deadlock. Once the gate
+		// passes (SPIRE issued the SVID) the very next reconcile releases the node.
+		var failing atomic.Bool
+		failing.Store(true)
+
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = observed(true)
+		r.Ready = func() error {
+			if failing.Load() {
+				return errNoSVID
+			}
+			return nil
+		}
+
+		reconcileNode(t, r)
+		require.True(t, nodeTaintPresent(t, c))
+
+		failing.Store(false)
+		res := reconcileNode(t, r)
+		assert.False(t, nodeTaintPresent(t, c), "a passing readyz must release the node")
+		assert.Zero(t, res.RequeueAfter)
+	})
+
+	t.Run("nil Ready -> pre-#740 socket+chained gate", func(t *testing.T) {
+		// Nothing wired (the edge, or a test): the #667 semantics are unchanged.
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = observed(true)
+		r.Ready = nil
+		reconcileNode(t, r)
+		assert.False(t, nodeTaintPresent(t, c))
+	})
+
+	t.Run("readyz passing but unchained -> still held", func(t *testing.T) {
+		// The conditions are conjunctive: readiness does not substitute for the
+		// #667 chaining evidence any more than chaining substitutes for the socket.
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, true))
+		r.Chain = observed(false)
+		r.Ready = func() error { return nil }
+		res := reconcileNode(t, r)
+		assert.True(t, nodeTaintPresent(t, c))
+		assert.Positive(t, res.RequeueAfter)
+	})
+
+	t.Run("no taint + readyz failing -> no-op, no requeue", func(t *testing.T) {
+		// Remove-only, as before: the agent never ADDS the taint (proposal 033).
+		r, c := newRemover(t, touchSocket(t), nodeWithTaint(testNode, false))
+		r.Chain = observed(true)
+		r.Ready = func() error { return errNoSVID }
 		res := reconcileNode(t, r)
 		assert.False(t, nodeTaintPresent(t, c))
 		assert.Zero(t, res.RequeueAfter)
