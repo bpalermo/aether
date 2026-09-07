@@ -531,6 +531,32 @@ kubectl -n aether logs ds/aether-agent | grep -E "identity acquired"
 # identity acquired; reconnecting the registrar client immediately …
 ```
 
+**Acquiring the SVID is not the same as being able to use it.** Every handshake made
+before the SVID landed failed, so the registrar client's gRPC connection is still
+carrying that failure for the second or so it takes to redial — and a snapshot built in
+that window has no cross-node endpoints, which is the same local-only outage as above by
+another route. Since #740 PR 5 the initial snapshot therefore waits for a registry that
+actually **answers**, not merely for its readiness latch, and says so:
+
+```bash
+kubectl -n aether logs ds/aether-agent | grep -E "registry connected|not yet re-established|local-only"
+# registry connected; generating the initial snapshot                     waited=1.106s
+# registrar connection not yet re-established after identity; retrying    reconnecting=true …
+```
+
+`registry connected` is the healthy end of every agent start; `waited` is normally a few
+milliseconds and rises to about a second when the start raced identity. The
+`not yet re-established` INFO is that race being named correctly — it is **our own**
+connection catching up, not the registrar, so do not go reading registrar logs for it.
+Reserve that for `registrar has no identity yet; retrying`, which is only ever logged
+once this agent's identity has been settled for more than a few seconds. On the rev211
+deploy roll (2026-09-07 20:47Z) both lines read `registrar has no identity yet`, and
+`main-worker-02` published an endpoint-less snapshot and logged **316** prober
+`http_error` in ~30s while both registrar replicas had been Ready for 43 seconds. The
+wait is bounded by the same 15s budget as before, so a registrar that is genuinely
+unreachable still ends at `registry unavailable for initial snapshot; starting with
+local-only config` rather than stalling the node.
+
 The upstream cause is almost always spire-server or the node's spire-agent, not aether:
 
 ```bash

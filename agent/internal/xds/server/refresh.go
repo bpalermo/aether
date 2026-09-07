@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"aethermesh.dev/agent/internal/xds/cache"
@@ -47,7 +48,23 @@ type RegistryRefresher struct {
 	// retried). Either may be nil (instrumentation disabled).
 	coalesced     metric.Int64Counter
 	refreshErrors metric.Int64Counter
+
+	// identity is this agent's own mesh identity, and identityAt the instant
+	// it arrived (unix nanos; 0 = not yet). Together they are what makes a
+	// failed reload classifiable — see reportReloadFailure. Optional: a nil
+	// gate means "no identity to wait for" (--spire-enabled=false).
+	identity   IdentityGate
+	identityAt atomic.Int64
 }
+
+// SetIdentityGate gives the refresher this agent's own identity, so a reload
+// that fails the mTLS handshake can be attributed to the right party. A setter
+// for the same reason AgentXdsServer.SetIdentityGate is one: the gate is
+// diagnostic context, not something the refresher needs in order to exist.
+//
+// Pass a nil gate (or never call this) and every failure is classified from the
+// error alone, as it was before issue #740's PR 5.
+func (r *RegistryRefresher) SetIdentityGate(gate IdentityGate) { r.identity = gate }
 
 // AssertWatchFilter pushes the cache's current dependency set to the registry
 // as the watch service filter (registry.WatchScoper capability), so the
@@ -108,6 +125,8 @@ func NewRegistryRefresher(clusterName, nodeName string, snapshotCache *cache.Sna
 // upstreams) both funnel into the same debounced reload. It implements
 // controller-runtime's manager.Runnable.
 func (r *RegistryRefresher) Start(ctx context.Context) error {
+	r.watchIdentity(ctx)
+
 	depChanges := r.cache.DependencyChanges()
 
 	notifier, ok := r.registry.(registry.ChangeNotifier)
@@ -197,25 +216,82 @@ func (l *refreshLoop) reload(ctx context.Context) {
 	l.r.log.DebugContext(ctx, "refreshed clusters from registry")
 }
 
-// reportReloadFailure logs a failed reload and counts it — except when the
-// failure is the registrar's own startup, which is neither (issue #740, PR 4).
-//
-// A registrar replica that is in its Service's endpoints before SPIRE has issued
-// its SVID rejects the mTLS handshake with `x509svid: could not get X509 bundle`.
-// That surfaced here on the rev210 roll (2026-09-07 20:03:45Z) as
-// `failed to refresh clusters from registry` at ERROR, alongside the watch
-// stream's ERROR for the same handshake — two alarms for one transient that
-// self-heals in seconds and leaves the previous snapshot in place, which is
-// exactly what a WARN is for. Every other reload failure keeps ERROR and the
-// counter: those leave the cluster snapshot stale until the next change signal
-// (reloads are not retried), which is the condition refresh_errors exists to
-// surface, and burying it under a boot's worth of handshake noise is the thing
-// this avoids.
-func (r *RegistryRefresher) reportReloadFailure(ctx context.Context, err error) {
-	if spire.IsPeerIdentityUnavailable(err) {
-		r.log.WarnContext(ctx, "cluster refresh deferred: the registrar has no identity yet, keeping the current snapshot", "error", err)
+// watchIdentity stamps the instant this agent's own identity arrives, which is
+// half of what reportReloadFailure needs to attribute a failed handshake. A
+// gate that is already satisfied stamps now: a reload failing in the first
+// seconds of the process is the connection coming up either way.
+func (r *RegistryRefresher) watchIdentity(ctx context.Context) {
+	if r.identity == nil {
 		return
 	}
+	if r.identity.HasSVID() {
+		r.identityAt.Store(time.Now().UnixNano())
+		return
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-r.identity.Ready():
+			r.identityAt.Store(time.Now().UnixNano())
+		}
+	}()
+}
+
+// identityReady reports whether this agent can complete an mTLS handshake at
+// all. No gate means nothing to wait for (SPIRE disabled).
+func (r *RegistryRefresher) identityReady() bool {
+	return r.identity == nil || r.identity.HasSVID()
+}
+
+// sinceIdentity is how long ago this agent's identity arrived, or a negative
+// duration when that is unknown (no gate, or identity not yet acquired).
+func (r *RegistryRefresher) sinceIdentity() time.Duration {
+	at := r.identityAt.Load()
+	if at == 0 {
+		return -1
+	}
+	return time.Since(time.Unix(0, at))
+}
+
+// reportReloadFailure logs a failed reload and counts it — except when the
+// failure is one of the three startup transients that are neither
+// (issues #740 PR 4 and PR 5).
+//
+// The classification order is spire.ClassifyHandshake's, and it matters: the
+// same `x509svid: could not get X509 bundle` text is produced whichever party
+// was short of an identity, and after a pre-identity attempt it is not even
+// current. So this asks in the order the answers are trustworthy — our own
+// identity, then the connection catching up right after it, then the peer's:
+//
+//   - Our own SVID is pending: a workload with no certificate fails every
+//     handshake, and nothing about the registrar follows from that. Logged as
+//     itself; the rev211 roll (2026-09-07 20:47:27.338Z, main-worker-02) logged
+//     it as the registrar's problem.
+//   - Identity arrived moments ago: the ClientConn is still carrying the
+//     failures it collected before, so this is the reconnect, not a fault.
+//     Same roll, 20:47:27.912Z — 85ms after the SVID landed and 1.1s before the
+//     watch stream connected, again blamed on the registrar.
+//   - The registrar has no SVID yet (PR 4): its own startup, self-healing in
+//     seconds, leaving the previous snapshot in place — a WARN.
+//
+// Every other reload failure keeps ERROR and the counter: those leave the
+// cluster snapshot stale until the next change signal (reloads are not
+// retried), which is the condition refresh_errors exists to surface, and
+// burying it under a boot's worth of handshake noise is the thing this avoids.
+func (r *RegistryRefresher) reportReloadFailure(ctx context.Context, err error) {
+	switch spire.ClassifyHandshake(err, r.identityReady(), r.sinceIdentity()) {
+	case spire.HandshakeOwnIdentityPending:
+		r.log.InfoContext(ctx, "cluster refresh deferred until this agent has an SVID, keeping the current snapshot", "error", err)
+		return
+	case spire.HandshakeReconnecting:
+		r.log.InfoContext(ctx, "registrar connection not yet re-established after identity; retrying", "error", err)
+		return
+	case spire.HandshakePeerIdentityPending:
+		r.log.WarnContext(ctx, "cluster refresh deferred: the registrar has no identity yet, keeping the current snapshot", "error", err)
+		return
+	case spire.HandshakeFailure:
+	}
+
 	r.log.ErrorContext(ctx, "failed to refresh clusters from registry", "error", err)
 	if r.refreshErrors != nil {
 		r.refreshErrors.Add(ctx, 1)

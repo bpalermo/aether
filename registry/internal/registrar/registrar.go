@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
@@ -107,6 +108,12 @@ type RegistrarRegistry struct {
 	// loop is not sleeping is still consumed by the next sleep. See
 	// NotifyIdentityReady.
 	wake chan struct{}
+
+	// identityReadyAt is when this client was first told SPIRE had issued its
+	// SVID (unix nanos; 0 = never). It bounds the window in which a failed
+	// handshake is this connection catching up rather than the peer's fault —
+	// see sinceIdentity and failStream.
+	identityReadyAt atomic.Int64
 
 	// notify coalesces endpoint-change signals for consumers (e.g. the agent
 	// xDS cache). It is buffered with capacity 1 and written non-blocking, so a
@@ -565,13 +572,26 @@ func (r *RegistrarRegistry) recoverStreamOpen(ctx context.Context, err error, ca
 // the failure, log it at ERROR, then sleep the current backoff with jitter and
 // double it for the next attempt. It reports whether the loop should keep
 // watching (false = the context ended while waiting, i.e. shutdown).
+//
+// Three startup transients are classified out of that path first, in
+// spire.ClassifyHandshake's order — our own pending identity, the connection
+// re-establishing itself in the seconds right after identity, then the peer's
+// pending identity. The error text cannot order them: `x509svid: could not get
+// X509 bundle` is raised by the local verifier whichever party was short, and
+// the ClientConn hands back the failure it cached before identity for as long
+// as it takes to redial. #718's drain classification never reaches here (an
+// established stream ending on a GOAWAY returns no failure at all).
 func (r *RegistrarRegistry) failStream(ctx context.Context, msg string, err error, backoff *time.Duration) bool {
-	if r.identityPending() {
+	switch spire.ClassifyHandshake(err, !r.identityPending(), r.sinceIdentity()) {
+	case spire.HandshakeOwnIdentityPending:
 		return r.deferStream(ctx, err, *backoff)
-	}
-	if spire.IsPeerIdentityUnavailable(err) {
+	case spire.HandshakeReconnecting:
+		return r.deferReconnect(ctx, err, backoff)
+	case spire.HandshakePeerIdentityPending:
 		return r.deferPeerStream(ctx, err, backoff)
+	case spire.HandshakeFailure:
 	}
+
 	r.metrics.streamFailed(ctx)
 	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
 	wait := *backoff + jitter
@@ -590,6 +610,19 @@ func (r *RegistrarRegistry) identityPending() bool {
 	return r.config.IdentityReady != nil && !r.config.IdentityReady()
 }
 
+// sinceIdentity is how long ago this client was told its identity had arrived
+// (NotifyIdentityReady), or a negative duration when it never was — SPIRE
+// disabled, or a caller with no such notion. A negative value disables the
+// reconnect window, which is what keeps those callers on their pre-#740
+// classification exactly.
+func (r *RegistrarRegistry) sinceIdentity() time.Duration {
+	at := r.identityReadyAt.Load()
+	if at == 0 {
+		return -1
+	}
+	return time.Since(time.Unix(0, at))
+}
+
 // deferStream is the failure path's counterpart for a stream that could not be
 // established because this workload has no identity yet (issue #740): announce
 // it at INFO, wait out the CURRENT backoff with the usual jitter, and leave the
@@ -604,29 +637,56 @@ func (r *RegistrarRegistry) deferStream(ctx context.Context, err error, backoff 
 }
 
 // deferPeerStream is the other half of the same idea (issue #740, PR 4): OUR
-// identity is ready, but the REGISTRAR's is not, so the mTLS handshake fails
-// with `x509svid: could not get X509 bundle` raised by the server side of the
-// connection. That is the server's startup — not a client fault, and not the
-// "registrar will not serve this stream" condition #700 made these ERRORs for —
-// so it is classified the way #718 classified a drain GOAWAY: INFO, no
-// watch_errors, bounded retry.
+// identity is ready and has been for a while, and the mTLS handshake still fails
+// the way it fails when the REGISTRAR has no SVID. That is the server's startup
+// — not a client fault, and not the "registrar will not serve this stream"
+// condition #700 made these ERRORs for — so it is classified the way #718
+// classified a drain GOAWAY: INFO, no watch_errors, bounded retry.
 //
-// Unlike deferStream the backoff DOES escalate (capped at maxBackoff), because
-// nothing wakes this loop when the FAR side acquires its SVID: there is no local
-// signal to fire, so the loop has to keep polling, and the doubling is what stops
-// a genuinely dead registrar from being polled every second forever. The cap
-// bounds the added reconnect latency at maxBackoff.
+// "and has been for a while" is PR 5's correction: for the first seconds after
+// identity the identical error is our own reconnect, not the peer — see
+// deferReconnect and spire.ClassifyHandshake.
 //
 // Observed on the rev210 upgrade roll (2026-09-07 20:03:45Z): a registrar pod was
-// in its Service's endpoints before it had an SVID (the readiness dwell this PR
-// also removes), and the agent on main-worker-01 logged this as
+// in its Service's endpoints before it had an SVID (the readiness dwell #744
+// removed), and the agent on main-worker-01 logged this as
 // `failed to start watch stream, retrying` at ERROR for a replica that was
 // serving seconds later.
 func (r *RegistrarRegistry) deferPeerStream(ctx context.Context, err error, backoff *time.Duration) bool {
+	return r.deferRetry(ctx, "registrar has no identity yet; retrying", err, backoff, "peer_identity_pending")
+}
+
+// deferReconnect is the third shape (issue #740, PR 5), and the one that used
+// to be misread as the second: OUR identity has just arrived and the connection
+// underneath the watch loop has not caught up with it. Every attempt made before
+// the SVID landed failed the handshake, so the ClientConn holds a cached
+// transport failure — with the pre-identity error text — until it redials.
+//
+// On the rev211 deploy roll (2026-09-07, main-worker-02) the wake fired
+// ResetConnectBackoff at 20:47:27.911Z, this loop logged
+// `registrar has no identity yet; retrying` 1ms later, and the stream connected
+// at 20:47:29.017Z. The registrar had had its identity for a minute. Blaming the
+// far side for our own reconnect sends an operator to the wrong pod's logs.
+//
+// Same handling as deferPeerStream — INFO, no watch_errors, escalating backoff
+// capped at maxBackoff — only the attribution differs.
+func (r *RegistrarRegistry) deferReconnect(ctx context.Context, err error, backoff *time.Duration) bool {
+	return r.deferRetry(ctx, "registrar connection not yet re-established after identity; retrying", err, backoff, "reconnecting")
+}
+
+// deferRetry is the shared body of the two peer-side deferrals: announce at
+// INFO, wait out the current backoff with the usual jitter, then double it
+// (capped). No ERROR and no watch_errors — nothing here is a failure of either
+// party.
+//
+// Unlike deferStream the backoff DOES escalate, because nothing wakes this loop
+// for either condition: there is no local signal to fire, so the loop has to
+// keep polling, and the doubling is what stops a genuinely dead registrar from
+// being polled every second forever. The cap bounds the added reconnect latency.
+func (r *RegistrarRegistry) deferRetry(ctx context.Context, msg string, err error, backoff *time.Duration, reason string) bool {
 	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
 	wait := *backoff + jitter
-	r.log.InfoContext(ctx, "registrar has no identity yet; retrying",
-		"peer_identity_pending", true, "error", err, "backoff", wait)
+	r.log.InfoContext(ctx, msg, reason, true, "error", err, "backoff", wait)
 	if !r.waitBeforeRetry(ctx, wait) {
 		return false
 	}
@@ -670,6 +730,10 @@ func (r *RegistrarRegistry) waitBeforeRetry(ctx context.Context, wait time.Durat
 // Safe to call at any time and from any goroutine, including before Initialize
 // (the wake is buffered and the nil conn is skipped).
 func (r *RegistrarRegistry) NotifyIdentityReady() {
+	// Stamp the FIRST notification only: what the reconnect window measures is
+	// the age of this connection's identity, and a later re-announcement must
+	// not reopen a window that closed seconds after boot.
+	r.identityReadyAt.CompareAndSwap(0, time.Now().UnixNano())
 	if r.conn != nil {
 		r.conn.ResetConnectBackoff()
 	}

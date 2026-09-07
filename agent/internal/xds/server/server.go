@@ -42,6 +42,12 @@ type AgentXdsServer struct {
 	// Optional: nil means "no identity to wait for" (--spire-enabled=false, and
 	// the edge, whose source is still created synchronously).
 	identity IdentityGate
+
+	// readyTimeout bounds the initial snapshot's wait for a registry that can
+	// serve endpoints. A field rather than the bare constant so tests can hold
+	// the unreachable-registrar path to a fraction of a second; production
+	// never changes it from registryReadyTimeout.
+	readyTimeout time.Duration
 }
 
 // IdentityGate is the mesh identity as the xDS server needs to see it: is it
@@ -89,14 +95,15 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 	snapshotCache.SetRegistry(registry)
 
 	aXdsServer := &AgentXdsServer{
-		XdsServer:   xds.NewXdsServer(ctx, cfg, snapshotCache, combined, log),
-		log:         commonlog.Named(log, "agent-xds"),
-		clusterName: clusterName,
-		nodeName:    nodeName,
-		trustDomain: trustDomain,
-		registry:    registry,
-		storage:     storage,
-		cache:       snapshotCache,
+		XdsServer:    xds.NewXdsServer(ctx, cfg, snapshotCache, combined, log),
+		log:          commonlog.Named(log, "agent-xds"),
+		clusterName:  clusterName,
+		nodeName:     nodeName,
+		trustDomain:  trustDomain,
+		registry:     registry,
+		storage:      storage,
+		cache:        snapshotCache,
+		readyTimeout: registryReadyTimeout,
 	}
 
 	aXdsServer.AddCallback(aXdsServer)
@@ -142,33 +149,103 @@ func (s *AgentXdsServer) PreListen(ctx context.Context) error {
 	// registrar streams is the filtered one (demand-scoped distribution).
 	AssertWatchFilter(s.cache, s.registry)
 
-	// Wait (bounded) for the registry watch cache to hold a complete snapshot
-	// before deriving the initial config from it: a fresh agent that builds its
-	// snapshot from an empty/partial cache opens the xDS socket serving a
-	// route config with missing vhosts, and the reconnecting Envoy 404s live
-	// traffic until the next refresh (rev-66 agent roll, 2026-06-11). On
-	// timeout we proceed — the fallback below still serves local-only config
-	// rather than crash-looping the node.
-	if rw, ok := s.registry.(registry.ReadyWaiter); ok {
-		waitCtx, cancel := context.WithTimeout(ctx, registryReadyTimeout)
-		if err := rw.WaitReady(waitCtx); err != nil {
-			s.log.InfoContext(ctx, "registry watch cache not complete in time; proceeding (RPC fallback / background retry will fill in)", "timeout", registryReadyTimeout.String(), "error", err.Error())
-		}
-		cancel()
-	}
-
-	// Registry unavailability must not prevent the agent from starting: a
-	// crash-looping agent takes down the node's CNI ADD/DEL and xDS entirely,
-	// turning a registrar blip into a node-wide outage (observed cascading
-	// failure on talos-main, 2026-06-10). Serve the local-only snapshot now and
-	// fill in registry-derived clusters/endpoints as soon as the registry
-	// answers; the registry refresher keeps it current afterwards.
-	if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
-		s.log.ErrorContext(ctx, "registry unavailable for initial snapshot; starting with local-only config and retrying in background", "error", err)
-		go s.retryInitialRegistryLoad(ctx)
-	}
+	s.loadInitialRegistryConfig(ctx)
 
 	return nil
+}
+
+// loadInitialRegistryConfig derives the registry half of the initial snapshot,
+// waiting (bounded) until the registry can actually answer with endpoints
+// before it does — and falling back to local-only config when it genuinely
+// cannot.
+//
+// "Can answer with endpoints" is the load-bearing part, and it is what changed
+// in issue #740's PR 5. The wait this replaced was
+// registry.ReadyWaiter.WaitReady alone, which is satisfied by the one-shot latch
+// the registrar client closes at its first SNAPSHOT_COMPLETE
+// (registry/internal/registrar: readyOnce) — "a complete snapshot arrived at
+// some point", not "the registry will serve this read now". The read that
+// follows takes a different path (the RPC fallback when the cache is not
+// serving), and on the rev211 deploy roll (2026-09-07 20:47:28Z on
+// main-worker-02) it failed while the registrar client's ClientConn was still
+// recovering from the handshakes it had failed before this agent acquired its
+// SVID a fraction of a second earlier. The registrar was healthy and both
+// replicas had been Ready for 43 seconds. The snapshot published from that
+// failure had no cross-node endpoints, and the node's prober logged 316
+// http_error over the ~30s until the next refresh repaired it.
+//
+// So the wait now ends on a SUCCESSFUL load, not on a latch: retry inside the
+// same bounded budget the ready-wait already had. A registrar that is genuinely
+// unreachable still costs exactly what it cost before — the budget, then the
+// local-only fallback and the background retry — because a crash-looping or
+// stalled agent takes down the node's CNI ADD/DEL and xDS entirely, turning a
+// registrar blip into a node-wide outage (talos-main, 2026-06-10).
+//
+// Registries with no watch (the synchronous backends) have nothing to wait for
+// and keep the single-attempt behaviour exactly.
+func (s *AgentXdsServer) loadInitialRegistryConfig(ctx context.Context) {
+	started := time.Now()
+
+	rw, watchBacked := s.registry.(registry.ReadyWaiter)
+	if !watchBacked {
+		if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
+			s.startLocalOnly(ctx, err)
+		}
+		return
+	}
+
+	deadline := started.Add(s.readyTimeout)
+
+	// First the watch cache: a fresh agent that builds its snapshot from an
+	// empty/partial cache opens the xDS socket serving a route config with
+	// missing vhosts, and the reconnecting Envoy 404s live traffic until the
+	// next refresh (rev-66 agent roll, 2026-06-11).
+	waitCtx, cancel := context.WithDeadline(ctx, deadline)
+	err := rw.WaitReady(waitCtx)
+	cancel()
+	if err != nil {
+		s.log.InfoContext(ctx, "registry watch cache not complete in time; proceeding (RPC fallback / background retry will fill in)", "timeout", s.readyTimeout.String(), "error", err.Error())
+	}
+
+	if loadErr := s.loadClustersUntil(ctx, deadline); loadErr != nil {
+		s.startLocalOnly(ctx, loadErr)
+		return
+	}
+
+	s.log.InfoContext(ctx, "registry connected; generating the initial snapshot",
+		"waited", time.Since(started).Round(time.Millisecond).String())
+}
+
+// loadClustersUntil builds the registry-derived config, retrying until it
+// succeeds or the deadline passes. It always makes at least one attempt, so an
+// already-expired budget behaves exactly as the single attempt it replaces.
+func (s *AgentXdsServer) loadClustersUntil(ctx context.Context, deadline time.Time) error {
+	backoff := initialRegistryLoadBackoff
+	for {
+		err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil || !time.Now().Add(backoff).Before(deadline) {
+			return err
+		}
+		s.log.DebugContext(ctx, "registry not serving endpoints yet; holding the initial snapshot",
+			"backoff", backoff.String(), "error", err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, maxInitialRegistryLoadBackoff)
+	}
+}
+
+// startLocalOnly publishes what the node knows on its own and keeps trying for
+// the rest of the process's life. Deliberately loud: a node running on
+// local-only config has no cross-node endpoints at all.
+func (s *AgentXdsServer) startLocalOnly(ctx context.Context, err error) {
+	s.log.ErrorContext(ctx, "registry unavailable for initial snapshot; starting with local-only config and retrying in background", "error", err)
+	go s.retryInitialRegistryLoad(ctx)
 }
 
 // identityHoldLogInterval is how often the identity hold re-announces itself.
@@ -226,11 +303,22 @@ func (s *AgentXdsServer) holdForIdentity(ctx context.Context) bool {
 	}
 }
 
-// registryReadyTimeout bounds how long PreListen waits for the registry watch
-// cache to hold a complete snapshot. Generous enough to cover a registrar
-// restart finishing its first external-registry sync (~3-5s observed), small
-// enough that a genuinely unavailable registrar cannot stall agent startup.
+// registryReadyTimeout bounds how long PreListen waits for the registry to be
+// able to serve this node's endpoints — the watch cache holding a complete
+// snapshot AND a load succeeding against it. Generous enough to cover a
+// registrar restart finishing its first external-registry sync (~3-5s observed)
+// and a client connection re-establishing itself after identity (~1.1s on the
+// rev211 roll), small enough that a genuinely unavailable registrar cannot stall
+// agent startup.
 const registryReadyTimeout = 15 * time.Second
+
+// The retry cadence inside that budget. Short at first — the condition it exists
+// for clears in about a second — then backing off so a longer outage spends the
+// budget on a handful of attempts rather than a busy loop.
+const (
+	initialRegistryLoadBackoff    = 250 * time.Millisecond
+	maxInitialRegistryLoadBackoff = 2 * time.Second
+)
 
 // retryInitialRegistryLoad retries the registry-derived snapshot load with
 // capped exponential backoff until it succeeds or ctx ends.

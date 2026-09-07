@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -119,4 +120,72 @@ func TestReportReloadFailure_NilCounter(t *testing.T) {
 	r.reportReloadFailure(context.Background(), errors.New("boom"))
 
 	assert.Equal(t, "ERROR", lastRecord(t, logs)["level"])
+}
+
+// TestReportReloadFailure_ClassifiesInOrder is PR 5 of #740: the same error text
+// arrives for three different conditions, and only local state tells them apart.
+// On the rev211 deploy roll (2026-09-07) main-worker-02 logged the registrar as
+// the culprit twice within 600ms — once while the AGENT had no SVID, once while
+// its own connection was still re-establishing itself after acquiring one. The
+// registrar had had its identity for a minute.
+func TestReportReloadFailure_ClassifiesInOrder(t *testing.T) {
+	t.Run("our own identity pending outranks the peer", func(t *testing.T) {
+		r, logs, reader := newCountingRefresher(t)
+		r.SetIdentityGate(newFakeIdentity()) // no SVID
+
+		r.reportReloadFailure(context.Background(), errRegistrarNoIdentity)
+
+		rec := lastRecord(t, logs)
+		assert.Equal(t, "INFO", rec["level"])
+		assert.Equal(t, "cluster refresh deferred until this agent has an SVID, keeping the current snapshot", rec["msg"])
+
+		_, found := refreshErrorCount(t, reader)
+		assert.False(t, found, "our own missing identity is not a refresh error")
+	})
+
+	t.Run("the reconnect window outranks the peer", func(t *testing.T) {
+		r, logs, reader := newCountingRefresher(t)
+		gate := newFakeIdentity()
+		gate.arrive()
+		r.SetIdentityGate(gate)
+		r.watchIdentity(t.Context()) // identity is in hand as of now
+
+		r.reportReloadFailure(context.Background(), errRegistrarNoIdentity)
+
+		rec := lastRecord(t, logs)
+		assert.Equal(t, "INFO", rec["level"])
+		assert.Equal(t, "registrar connection not yet re-established after identity; retrying", rec["msg"])
+
+		_, found := refreshErrorCount(t, reader)
+		assert.False(t, found, "our own reconnect is not a refresh error")
+	})
+
+	t.Run("past the window it is the peer again", func(t *testing.T) {
+		r, logs, _ := newCountingRefresher(t)
+		gate := newFakeIdentity()
+		gate.arrive()
+		r.SetIdentityGate(gate)
+		r.identityAt.Store(time.Now().Add(-time.Hour).UnixNano())
+
+		r.reportReloadFailure(context.Background(), errRegistrarNoIdentity)
+
+		rec := lastRecord(t, logs)
+		assert.Equal(t, "WARN", rec["level"])
+		assert.Equal(t, "cluster refresh deferred: the registrar has no identity yet, keeping the current snapshot", rec["msg"])
+	})
+
+	t.Run("a settled identity keeps real failures loud", func(t *testing.T) {
+		r, logs, reader := newCountingRefresher(t)
+		gate := newFakeIdentity()
+		gate.arrive()
+		r.SetIdentityGate(gate)
+		r.identityAt.Store(time.Now().Add(-time.Hour).UnixNano())
+
+		r.reportReloadFailure(context.Background(), errors.New("registry: malformed response"))
+
+		assert.Equal(t, "ERROR", lastRecord(t, logs)["level"])
+		got, found := refreshErrorCount(t, reader)
+		require.True(t, found)
+		assert.Equal(t, int64(1), got)
+	})
 }
