@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"aethermesh.dev/common/manager"
+	"aethermesh.dev/common/spire"
 )
 
 const (
@@ -74,6 +75,11 @@ type RegistrarConfig struct {
 	SpireEnabled bool
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
 	SpireWorkloadSocketPath string
+	// SpireWaitWarnAfter is how long the wait for this workload's first SVID may
+	// run before it is reported at WARN. Accepted here so the chart can set the
+	// same value on every component; the registrar's own non-fatal wait lands in
+	// PR 2 of issue #740.
+	SpireWaitWarnAfter time.Duration
 }
 
 // DefaultSpireWorkloadSocketPath is the default SPIRE CSI-mounted socket path.
@@ -108,5 +114,6 @@ func NewRegistrarConfig() *RegistrarConfig {
 		GRPCAddress:             defaultGRPCAddress,
 		SpireEnabled:            true,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
+		SpireWaitWarnAfter:      spire.DefaultWaitWarnAfter,
 	}
 }

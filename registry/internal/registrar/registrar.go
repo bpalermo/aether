@@ -63,6 +63,17 @@ type Config struct {
 	// DialOptions are additional gRPC dial options (e.g., TLS credentials).
 	// When empty, insecure credentials are used.
 	DialOptions []grpc.DialOption
+	// IdentityReady reports whether this client can complete an mTLS handshake
+	// yet — i.e. whether SPIRE has issued this workload's SVID. Optional; nil
+	// means "always ready" (SPIRE disabled, or a caller with no such notion).
+	//
+	// Since #740 the process no longer blocks on the first SVID, so the watch
+	// stream can legitimately start before identity exists. Every such attempt
+	// fails the handshake, and reporting those as stream FAILURES would bury the
+	// one signal this loop's ERRORs exist for (a registrar that will not serve
+	// the stream, #700) under a boot's worth of noise, and count watch_errors
+	// for a condition that is not an error.
+	IdentityReady func() bool
 }
 
 // RegistrarRegistry implements the Registry interface by communicating with a
@@ -547,6 +558,9 @@ func (r *RegistrarRegistry) recoverStreamOpen(ctx context.Context, err error, ca
 // double it for the next attempt. It reports whether the loop should keep
 // watching (false = the context ended while waiting, i.e. shutdown).
 func (r *RegistrarRegistry) failStream(ctx context.Context, msg string, err error, backoff *time.Duration) bool {
+	if r.identityPending() {
+		return r.deferStream(ctx, err, *backoff)
+	}
 	r.metrics.streamFailed(ctx)
 	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
 	wait := *backoff + jitter
@@ -557,6 +571,31 @@ func (r *RegistrarRegistry) failStream(ctx context.Context, msg string, err erro
 	case <-time.After(wait):
 	}
 	*backoff = min(*backoff*2, maxBackoff)
+	return true
+}
+
+// identityPending reports whether this client is configured for mTLS but does
+// not have its SVID yet, which makes a failed stream a deferral rather than a
+// failure.
+func (r *RegistrarRegistry) identityPending() bool {
+	return r.config.IdentityReady != nil && !r.config.IdentityReady()
+}
+
+// deferStream is the failure path's counterpart for a stream that could not be
+// established because this workload has no identity yet (issue #740): announce
+// it at INFO, wait out the CURRENT backoff with the usual jitter, and leave the
+// backoff where it is. No ERROR, no watch_errors, and no escalation — the wait
+// is on SPIRE, not on the registrar, and the moment the SVID lands the very next
+// attempt handshakes. It reports whether the loop should keep watching.
+func (r *RegistrarRegistry) deferStream(ctx context.Context, err error, backoff time.Duration) bool {
+	jitter := time.Duration(float64(backoff) * jitterFraction * rand.Float64())
+	wait := backoff + jitter
+	r.log.InfoContext(ctx, "watch stream deferred until this agent has an SVID", "error", err, "backoff", wait)
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+	}
 	return true
 }
 

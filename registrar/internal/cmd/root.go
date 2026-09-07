@@ -83,6 +83,7 @@ func init() {
 	// it can never disagree with what SPIRE actually issues.
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Enable SPIRE mTLS for the gRPC server")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
+	rootCmd.Flags().DurationVar(&cfg.SpireWaitWarnAfter, "spire-wait-warn-after", cfg.SpireWaitWarnAfter, "How long to wait for this workload's first SVID before escalating the waiting log line to WARN (issue #740)")
 
 	must.NoError(rootCmd.MarkFlagRequired("cluster-name"))
 }

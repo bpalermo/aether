@@ -79,6 +79,7 @@ spec:
             - "--spire-enabled={{ .Values.spire.enabled }}"
             {{- if .Values.spire.enabled }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
+            - "--spire-wait-warn-after={{ .Values.spire.waitWarnAfter }}"
             {{- end }}
           ports:
             - name: grpc

@@ -11,14 +11,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 )
 
 // Source is an auto-rotating X.509 SVID source backed by the Workload API.
 // Callers own the returned source and must Close it on shutdown.
 type Source = workloadapi.X509Source
+
+// SVIDSource is the narrow view of a Workload API source that every helper in
+// this package needs: the workload's own SVID, the bundles peers are verified
+// against, and a signal that either changed.
+//
+// It exists so that a source no longer has to be a *Source that ALREADY holds an
+// SVID. WaitingSource implements it while the first SVID is still being waited
+// for (returning ErrNoSVIDYet meanwhile), which is what lets a binary finish
+// starting up — and answer /readyz — before SPIRE is serving (issue #740).
+// *Source satisfies it too, so existing callers are unaffected.
+type SVIDSource interface {
+	x509svid.Source
+	x509bundle.Source
+
+	// Updated returns a channel that is sent on whenever the SVID or the bundles
+	// change, including the first time one arrives. Same contract as
+	// workloadapi.X509Source.Updated.
+	Updated() <-chan struct{}
+}
 
 // SourceTimeout bounds how long NewSource waits for the Workload API to issue
 // this workload's first SVID.
@@ -76,7 +97,7 @@ const RootCATrustDomain = "ROOTCA"
 // resource names from the real trust domain SPIRE issues into, rather than from a
 // configured value (which may be the RootCATrustDomain authorization sentinel).
 // The source has already fetched its first SVID by the time NewSource returns.
-func TrustDomainFromSource(src *Source) (string, error) {
+func TrustDomainFromSource(src SVIDSource) (string, error) {
 	svid, err := src.GetX509SVID()
 	if err != nil {
 		return "", fmt.Errorf("fetching workload SVID for trust domain: %w", err)
@@ -87,7 +108,7 @@ func TrustDomainFromSource(src *Source) (string, error) {
 // ServerTLSConfig returns a mutual-TLS server config that presents the workload
 // SVID from src and authorizes peers belonging to trustDomain (or any valid peer
 // when trustDomain is empty / RootCATrustDomain).
-func ServerTLSConfig(src *Source, trustDomain string) (*tls.Config, error) {
+func ServerTLSConfig(src SVIDSource, trustDomain string) (*tls.Config, error) {
 	auth, err := authorizer(trustDomain)
 	if err != nil {
 		return nil, err
@@ -104,7 +125,7 @@ func ServerTLSConfig(src *Source, trustDomain string) (*tls.Config, error) {
 // the SVID must carry as a DNS SAN (set dnsNames on the SPIRE registration
 // entry). Setting GetCertificate here makes controller-runtime skip its CertDir
 // file watcher entirely.
-func WebhookServerCert(src *Source) func(*tls.Config) {
+func WebhookServerCert(src SVIDSource) func(*tls.Config) {
 	return func(cfg *tls.Config) {
 		cfg.GetCertificate = tlsconfig.GetCertificate(src)
 		cfg.ClientAuth = tls.NoClientCert
@@ -117,7 +138,7 @@ func WebhookServerCert(src *Source) func(*tls.Config) {
 // TrustBundlePEM returns the PEM-encoded X.509 trust bundle for the SVID's own
 // trust domain, suitable for use as a webhook/CRD caBundle. It reflects the
 // current bundle in src and should be re-read after each rotation (src.Updated()).
-func TrustBundlePEM(src *Source) ([]byte, error) {
+func TrustBundlePEM(src SVIDSource) ([]byte, error) {
 	svid, err := src.GetX509SVID()
 	if err != nil {
 		return nil, fmt.Errorf("fetching workload SVID for trust bundle: %w", err)
@@ -136,7 +157,7 @@ func TrustBundlePEM(src *Source) ([]byte, error) {
 // ClientTLSConfig returns a mutual-TLS client config that presents the workload
 // SVID from src and authorizes peers belonging to trustDomain (or any valid peer
 // when trustDomain is empty / RootCATrustDomain).
-func ClientTLSConfig(src *Source, trustDomain string) (*tls.Config, error) {
+func ClientTLSConfig(src SVIDSource, trustDomain string) (*tls.Config, error) {
 	auth, err := authorizer(trustDomain)
 	if err != nil {
 		return nil, err

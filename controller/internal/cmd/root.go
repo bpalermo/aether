@@ -79,6 +79,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.MeshConfigMapName, "mesh-config-configmap", cfg.MeshConfigMapName, "Name of the ConfigMap the MeshConfig reconciler projects into (in each MeshConfig's own namespace)")
 	rootCmd.Flags().BoolVar(&cfg.SpireEnabled, "spire-enabled", cfg.SpireEnabled, "Serve the validating webhook with a SPIRE X.509 SVID and inject the SPIRE trust bundle into the webhook caBundle (instead of a static cert)")
 	rootCmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", cfg.SpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket")
+	rootCmd.Flags().DurationVar(&cfg.SpireWaitWarnAfter, "spire-wait-warn-after", cfg.SpireWaitWarnAfter, "How long to wait for this workload's first SVID before escalating the waiting log line to WARN (issue #740)")
 	rootCmd.Flags().StringVar(&cfg.WebhookConfigName, "webhook-config-name", cfg.WebhookConfigName, "ValidatingWebhookConfiguration to patch with the SPIRE caBundle (SPIRE mode)")
 	rootCmd.Flags().StringVar(&cfg.MutatingWebhookConfigName, "mutating-webhook-config-name", cfg.MutatingWebhookConfigName, "MutatingWebhookConfiguration (pod ndots) to patch with the SPIRE caBundle (SPIRE mode); empty disables")
 	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", cfg.MeshDomain, "DNS-style domain mesh authorities live under; the pod-mutating webhook derives the injected dnsConfig ndots from its label count (2 for aether.internal)")
