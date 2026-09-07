@@ -3,6 +3,7 @@ package meshconfig
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -18,8 +19,13 @@ import (
 // bundle into the ValidatingWebhookConfiguration on startup and on every SVID
 // rotation. It runs on the leader only (a cluster-wide single writer).
 type CABundleInjector struct {
-	Client            client.Client
-	Source            *spire.Source
+	Client client.Client
+	// Source is this workload's SVID source. It is the narrow SVIDSource interface
+	// rather than a *spire.Source because the controller's source may still be
+	// waiting for its first SVID when this runnable starts (issue #740): the
+	// initial injection is then deferred (INFO, not ERROR) and performed on the
+	// Updated() wake that WaitingSource fires when the SVID lands.
+	Source            spire.SVIDSource
 	WebhookConfigName string
 	// MutatingWebhookConfigName is the pod-ndots MutatingWebhookConfiguration to
 	// keep in sync too; empty skips it.
@@ -34,9 +40,20 @@ func (i *CABundleInjector) NeedLeaderElection() bool { return true }
 // reports a rotation, until the context is cancelled.
 func (i *CABundleInjector) Start(ctx context.Context) error {
 	if err := i.inject(ctx); err != nil {
-		// Don't fail startup: failurePolicy=Ignore means an un-injected webhook
-		// fails open, and the next rotation tick retries.
-		i.Log.ErrorContext(ctx, "initial webhook caBundle injection failed", "error", err)
+		if errors.Is(err, spire.ErrNoSVIDYet) {
+			// Not a failure, and not something an operator can act on: SPIRE has not
+			// issued this workload's first SVID yet, so there is no trust bundle to
+			// inject (issue #740). The wait itself is announced, once per attempt, by
+			// the identity source. WaitingSource fires Updated() when the first SVID
+			// LANDS as well as on every rotation after it, so the loop below performs
+			// the initial injection — no polling, no retry logic here.
+			i.Log.InfoContext(ctx, "webhook caBundle injection deferred until this workload has an SVID",
+				"webhookConfig", i.WebhookConfigName)
+		} else {
+			// Don't fail startup: failurePolicy=Ignore means an un-injected webhook
+			// fails open, and the next rotation tick retries.
+			i.Log.ErrorContext(ctx, "initial webhook caBundle injection failed", "error", err)
+		}
 	}
 	for {
 		select {

@@ -215,6 +215,37 @@ func TestCachedMTLSClusterInvalidatedOnNodeIdentity(t *testing.T) {
 	assert.NotNil(t, echo.GetTransportSocket(), "SetNodeIdentity after the load must rebuild the cached cluster")
 }
 
+// TestUpdateEdgeIdentityAfterStart is the edge's counterpart, and the cache half
+// of issue #740: the edge no longer blocks startup on SPIRE, so its clusters are
+// loaded BEFORE it has an identity and are emitted bare. UpdateEdgeIdentity, called
+// when the SVID finally lands, must rebuild them and push a snapshot, so the edge
+// Envoy picks the identity up on the next CDS update instead of on a restart.
+func TestUpdateEdgeIdentityAfterStart(t *testing.T) {
+	c := newTestCache("edge-1")
+	ctx := context.Background()
+	ns := "default"
+
+	c.SetEdgeMode(8080)
+	// The seeds resolveEdgeIdentity hands out while SPIRE is still coming up.
+	c.SetEdgeIdentity("", "aether.internal")
+	c.SetStaticDependencies([]string{"aether-test/echo"})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "edge-1", echoRegistry(&ns)))
+
+	echo := snapshotEchoCluster(t, c, "edge-1")
+	assert.Nil(t, echo.GetTransportSocket(), "no upstream mTLS before the edge SVID exists")
+
+	require.NoError(t, c.UpdateEdgeIdentity(ctx, nodeIdentity, "aether.internal"))
+
+	echo = snapshotEchoCluster(t, c, "edge-1")
+	require.NotNil(t, echo.GetTransportSocket(), "a late edge identity must rebuild the cached cluster")
+
+	// Idempotent: an unchanged identity (every SVID rotation that keeps the same
+	// SPIFFE ID) is a no-op rather than another snapshot push.
+	before := c.version.Load()
+	require.NoError(t, c.UpdateEdgeIdentity(ctx, nodeIdentity, "aether.internal"))
+	assert.Equal(t, before, c.version.Load(), "an unchanged identity must not bump the snapshot version")
+}
+
 // TestCachedMTLSClusterInvalidatedOnSANNamespaceChange verifies the
 // sanNamespaces invalidation path: a registry reload whose endpoints moved to
 // a different namespace must re-render the pinned server identities on the

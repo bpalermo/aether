@@ -12,11 +12,16 @@ import (
 const waitMeterName = "aether/spire-identity"
 
 // waitSecondsBuckets are the explicit boundaries, in SECONDS, for
-// aether.agent.spire.wait_seconds. The OTel defaults are millisecond-oriented
+// aether.<component>.spire.wait_seconds. The OTel defaults are millisecond-oriented
 // (0, 5, 10, … 10000), which would put every wait short of 5s — the healthy
 // case — into one bucket and every outage into the next (#732). The interesting
 // range is one retry (1s) to well past the warn threshold (2m).
 var waitSecondsBuckets = []float64{0.5, 1, 2.5, 5, 10, 15, 30, 60, 120, 300, 600}
+
+// metricName builds this component's name for one of the wait instruments.
+func metricName(component, instrument string) string {
+	return fmt.Sprintf("aether.%s.spire.%s", component, instrument)
+}
 
 // waitMetrics instruments the wait for the first SVID. All methods are
 // nil-receiver-safe so the wait runs unchanged when instrument registration
@@ -28,22 +33,31 @@ type waitMetrics struct {
 	meter    metric.Meter
 }
 
-// newWaitMetrics registers the identity-wait instruments on the given meter.
-func newWaitMetrics(meter metric.Meter) (*waitMetrics, error) {
+// newWaitMetrics registers the identity-wait instruments on the given meter,
+// namespaced by the component that is waiting (aether.agent.spire.*,
+// aether.controller.spire.*, aether.registrar.spire.*, aether.edge.spire.*).
+//
+// The instruments are defined ONCE, here, and only their namespace varies: four
+// binaries wait for the same thing for the same reason, and an operator reading
+// one dashboard panel per component should be reading the same three series. The
+// namespace is per-component rather than a component ATTRIBUTE because these are
+// separate workloads with separate resource attributes, and #210's lesson is that
+// a fleet-collapsed counter makes rate() lie.
+func newWaitMetrics(meter metric.Meter, component string) (*waitMetrics, error) {
 	m := &waitMetrics{meter: meter}
 	var err error
 
-	if m.wait, err = meter.Float64Histogram("aether.agent.spire.wait_seconds",
+	if m.wait, err = meter.Float64Histogram(metricName(component, "wait_seconds"),
 		metric.WithDescription("Seconds from process start to the SPIRE Workload API issuing this workload's first SVID (recorded once, when it arrives)"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(waitSecondsBuckets...)); err != nil {
 		return nil, fmt.Errorf("spire wait seconds: %w", err)
 	}
-	if m.restarts, err = meter.Int64Counter("aether.agent.spire.source_restarts",
+	if m.restarts, err = meter.Int64Counter(metricName(component, "source_restarts"),
 		metric.WithDescription("Workload API sources that connected but could not serve an SVID and were re-created; expected to stay 0")); err != nil {
 		return nil, fmt.Errorf("spire source restarts: %w", err)
 	}
-	if m.ready, err = meter.Int64ObservableGauge("aether.agent.spire.svid_ready",
+	if m.ready, err = meter.Int64ObservableGauge(metricName(component, "svid_ready"),
 		metric.WithDescription("1 when this workload holds a SPIRE SVID, 0 while it is still waiting for its first one")); err != nil {
 		return nil, fmt.Errorf("spire svid ready: %w", err)
 	}

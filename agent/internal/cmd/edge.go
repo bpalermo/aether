@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
@@ -135,7 +136,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	defer deferTelemetryShutdown(ctx, result.Shutdown)
 	m := result.Manager
 
-	spireSource, identityTrustDomain, edgeSpiffeID, err := resolveEdgeIdentity(ctx)
+	spireSource, identityTrustDomain, edgeSpiffeID, err := resolveEdgeIdentity(ctx, m)
 	if err != nil {
 		return err
 	}
@@ -150,6 +151,9 @@ func runEdge(ctx context.Context) (retErr error) {
 	defer func() { retErr = errors.Join(retErr, reg.Close()) }()
 
 	snapshotCache := configureEdgeSnapshotCache(edgeSpiffeID, identityTrustDomain)
+
+	// Replace the seeds with the identity SPIRE issues, whenever it does (#740).
+	wireEdgeIdentity(ctx, spireSource, snapshotCache)
 
 	ackTracker := ack.NewTracker(l)
 
@@ -212,34 +216,105 @@ func buildEdgeScheme() (*runtime.Scheme, error) {
 	return scheme, nil
 }
 
-// resolveEdgeIdentity opens the SPIRE Workload API source and derives the edge's
-// trust domain and SPIFFE ID. When SPIRE is disabled, it returns nil source and
-// the mesh domain as trust domain. The caller is responsible for closing the source.
-func resolveEdgeIdentity(ctx context.Context) (*commonspire.Source, string, string, error) {
+// edgeSpireComponent namespaces the edge's SPIRE identity-wait metrics
+// (aether.edge.spire.wait_seconds and friends). The edge shares the agent binary
+// but is a separate workload with its own SPIRE registration entry and its own
+// failure mode, so it gets its own series rather than being collapsed into the
+// node agent's (#210: a fleet-collapsed counter makes rate() lie).
+const edgeSpireComponent = "edge"
+
+// edgeIdentityManager is the slice of the controller-runtime manager the edge's
+// identity wiring needs. A narrow interface rather than ctrl.Manager is what lets
+// the "returns immediately" test run without an apiserver.
+type edgeIdentityManager interface {
+	runnableAdder
+	AddReadyzCheck(name string, check healthz.Checker) error
+}
+
+// resolveEdgeIdentity starts acquiring the edge's SPIRE identity and RETURNS
+// IMMEDIATELY with the SEED values everything downstream is wired from: the mesh
+// domain as trust domain and an empty SPIFFE ID. When SPIRE is disabled it
+// registers nothing and returns those same seeds, byte for byte what it did
+// before (#421). The caller owns the returned source and must Close it.
+//
+// This slot used to be a blocking, FATAL 25s wait for the first SVID (issue #740).
+// The edge needs MORE from SPIRE than the other three — the trust domain AND its
+// own SPIFFE ID name the SDS resources and the upstream mTLS its Envoy presents —
+// which is exactly why the wait was here, and exactly why dying on it was wrong: a
+// north-south gateway that exits during a SPIRE cold boot takes ingress with it,
+// while an edge that starts without an identity simply cannot inject upstream mTLS
+// yet. SetEdgeIdentity recomputes the mTLS clusters and pushes a new snapshot, so
+// the identity folds in late without a restart (wireEdgeIdentity).
+//
+// The empty SPIFFE ID is not a placeholder that leaks: recomputeMTLSClusters skips
+// mTLS injection entirely while nodeSpiffeID is "", so the edge serves plain
+// clusters until the SVID lands rather than clusters naming an identity it does
+// not hold.
+func resolveEdgeIdentity(ctx context.Context, m edgeIdentityManager) (*commonspire.WaitingSource, string, string, error) {
 	if !cfg.SpireEnabled {
 		return nil, cfg.MeshDomain, "", nil
 	}
-	// Open the SPIRE Workload API source for registrar mTLS and to resolve the
-	// edge's own identity (trust domain + SVID name). The Envoy fetches its SVID
-	// from SPIRE directly over the spire_agent SDS cluster, so the agent runs no
-	// SPIRE bridge — it only needs the names to program into the clusters.
-	spireSource, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-	if err != nil {
-		return nil, "", "", err
+	// The Envoy fetches its own SVID from SPIRE directly over the spire_agent SDS
+	// cluster, so the edge control plane runs no SPIRE bridge — it only needs the
+	// names to program into the clusters, and it can learn them late.
+	src := commonspire.NewWaitingSource(cfg.SpireWorkloadSocketPath, cfg.SpireWaitWarnAfter, l, commonspire.WithComponent(edgeSpireComponent))
+	if err := m.Add(src); err != nil {
+		return nil, "", "", fmt.Errorf("failed to add the SPIRE identity source: %w", err)
 	}
-	identityTrustDomain, err := commonspire.TrustDomainFromSource(spireSource)
-	if err != nil {
-		_ = spireSource.Close()
-		return nil, "", "", fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
+	// Load-bearing: the edge is behind a LoadBalancer Service, so past the dwell
+	// NotReady takes this replica out of the ingress endpoints rather than letting
+	// it advertise an edge whose upstreams have no identity.
+	if err := m.AddReadyzCheck(commonspire.ReadyCheckName, commonspire.ReadyChecker(src)); err != nil {
+		return nil, "", "", fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
 	}
-	svid, err := spireSource.GetX509SVID()
-	if err != nil {
-		_ = spireSource.Close()
-		return nil, "", "", fmt.Errorf("failed to read edge SVID: %w", err)
+	l.InfoContext(ctx, "acquiring the edge's SVID in the background; startup does not wait for SPIRE",
+		"socket", cfg.SpireWorkloadSocketPath, "warnAfter", cfg.SpireWaitWarnAfter)
+	return src, cfg.MeshDomain, "", nil
+}
+
+// edgeIdentitySink is the slice of the snapshot cache wireEdgeIdentity writes to.
+type edgeIdentitySink interface {
+	UpdateEdgeIdentity(ctx context.Context, spiffeID, trustDomain string) error
+}
+
+// wireEdgeIdentity folds the edge's real identity into the snapshot cache once
+// SPIRE issues its first SVID, replacing the seeds resolveEdgeIdentity handed out.
+// It is a no-op when SPIRE is disabled and returns immediately otherwise: the work
+// happens in a goroutine that ends with ctx.
+//
+// UpdateEdgeIdentity recomputes the cached mTLS clusters and pushes a snapshot, so
+// the edge Envoy picks the identity up on the next CDS update rather than on a
+// restart — which is what makes acquiring it late acceptable in the first place.
+func wireEdgeIdentity(ctx context.Context, src *commonspire.WaitingSource, sink edgeIdentitySink) {
+	if src == nil {
+		return
 	}
-	edgeSpiffeID := svid.ID.String()
-	l.InfoContext(ctx, "resolved edge identity from SPIRE", "trustDomain", identityTrustDomain, "spiffeID", edgeSpiffeID)
-	return spireSource, identityTrustDomain, edgeSpiffeID, nil
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-src.Ready():
+		}
+
+		svid, err := src.GetX509SVID()
+		if err != nil {
+			l.WarnContext(ctx, "failed to read the edge SVID after SPIRE issued it", "error", err)
+			return
+		}
+		spiffeID, trustDomain := svid.ID.String(), svid.ID.TrustDomain().Name()
+		l.InfoContext(ctx, "resolved edge identity from SPIRE", "trustDomain", trustDomain, "spiffeID", spiffeID)
+		if trustDomain != cfg.MeshDomain {
+			// The seed everything else was wired from (xDS server, cluster SDS names)
+			// is the mesh domain; SPIRE issuing into a different one is a topology
+			// aether does not support (addressing and identity are one domain by
+			// design). Say so loudly rather than serving a half-updated edge.
+			l.WarnContext(ctx, "SPIRE issues into a different trust domain than the mesh domain",
+				"meshDomain", cfg.MeshDomain, "trustDomain", trustDomain)
+		}
+		if err := sink.UpdateEdgeIdentity(ctx, spiffeID, trustDomain); err != nil {
+			l.ErrorContext(ctx, "failed to apply the edge identity to the xDS snapshot", "error", err, "spiffeID", spiffeID)
+		}
+	}()
 }
 
 // configureEdgeSnapshotCache creates and configures the xDS snapshot cache for edge
