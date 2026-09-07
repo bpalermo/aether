@@ -595,7 +595,7 @@ func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSo
 	// kept out of the taint gate. It no longer is. See commonspire.NotReadyDwell.
 	// Nil (SPIRE disabled) registers no check at all.
 	if spireSource != nil {
-		if err := ready.add(m, "spire-svid", commonspire.ReadyChecker(spireSource)); err != nil {
+		if err := ready.add(m, commonspire.ReadyCheckName, commonspire.ReadyChecker(spireSource)); err != nil {
 			return err
 		}
 	}
@@ -918,9 +918,10 @@ func setupRegistrarClient(ctx context.Context, src commonspire.SVIDSource) (regi
 		}
 		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
 		// The SVID may not exist yet (#740): the watch loop defers instead of
-		// reporting stream failures it cannot do anything about. Sources that
-		// always hold one (the edge's, which is still created synchronously
-		// until PR 2) advertise no readiness and keep today's behaviour.
+		// reporting stream failures it cannot do anything about. Both callers —
+		// the node agent and the edge — now pass a WaitingSource, so both defer;
+		// a source that always holds an SVID advertises no readiness and keeps
+		// the pre-#740 behaviour.
 		if waiting, ok := src.(interface{ HasSVID() bool }); ok {
 			regCfg.IdentityReady = waiting.HasSVID
 		}

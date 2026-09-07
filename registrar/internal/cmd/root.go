@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmanager "sigs.k8s.io/controller-runtime/pkg/manager"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
@@ -32,7 +34,20 @@ import (
 
 const (
 	name = "aether-registrar"
+
+	// spireComponent namespaces this binary's SPIRE identity-wait metrics
+	// (aether.registrar.spire.wait_seconds and friends).
+	spireComponent = "registrar"
 )
+
+// readyzAdder is the slice of the controller-runtime manager buildSpireGRPCCreds
+// needs: register the identity runnable and its readiness gate. A narrow interface
+// rather than ctrl.Manager is what lets the "returns immediately" test run without
+// an apiserver.
+type readyzAdder interface {
+	Add(ctrlmanager.Runnable) error
+	AddReadyzCheck(name string, check healthz.Checker) error
+}
 
 // Version is set at build time via -ldflags (Bazel x_defs).
 var Version = "dev"
@@ -147,12 +162,12 @@ func runRegistrar(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	grpcOpts, spireCloser, err := buildSpireGRPCCreds(ctx)
+	grpcOpts, spireSource, err := buildSpireGRPCCreds(ctx, m)
 	if err != nil {
 		return err
 	}
-	if spireCloser != nil {
-		defer func() { retErr = errors.Join(retErr, spireCloser()) }()
+	if spireSource != nil {
+		defer func() { retErr = errors.Join(retErr, spireSource.Close()) }()
 	}
 
 	return wireGRPCServer(ctx, m, reg, snapshot, broadcaster, syncer, serverMetrics, grpcOpts)
@@ -336,33 +351,70 @@ func wireReplication(ctx context.Context, m ctrl.Manager, reg registry.Registry)
 	return nil
 }
 
-// buildSpireGRPCCreds opens the SPIRE Workload API source, resolves the trust domain,
-// and builds mTLS credentials for the gRPC server. When SPIRE is disabled, it returns
-// nil opts and nil closer. The caller must call the returned closer when done.
-func buildSpireGRPCCreds(ctx context.Context) ([]grpc.ServerOption, func() error, error) {
+// buildSpireGRPCCreds starts acquiring the SPIRE Workload API source and builds
+// mTLS credentials for the gRPC server from it. It RETURNS IMMEDIATELY, before the
+// first SVID exists. When SPIRE is disabled it returns nil opts and a nil source.
+// The caller owns the returned source and must Close it.
+//
+// This slot used to be a blocking, FATAL 25s wait (issue #740): a registrar that
+// started while SPIRE was still coming up — the normal state of a cold boot — died
+// with "failed to create SPIRE Workload API source: context deadline exceeded" and
+// crash-looped, taking every agent's endpoint watch with it for the duration.
+//
+// Nothing about the credentials needs the SVID now. grpc.Creds accepts a lazy
+// source: everything in the tls.Config resolves per HANDSHAKE — the certificate
+// through GetCertificate, and the peer authorizer through the source's own trust
+// domain (ServerTLSConfigForOwnTrustDomain). So while the SVID is pending the
+// registrar authorizes NOTHING — an agent's handshake fails before authorization is
+// ever consulted — and the moment it lands, handshakes succeed against the trust
+// domain SPIRE actually issued into. That is the same peer policy as before (the
+// mesh is a single trust domain by design; the old --spire-trust-domain flag could
+// silently disagree with it), only resolved late instead of at startup.
+//
+// The readiness gate is what keeps a stuck registrar from silently absorbing dials:
+// past the dwell this replica leaves the registrar Service's endpoints and agents
+// dial one that can actually handshake.
+func buildSpireGRPCCreds(ctx context.Context, m readyzAdder) ([]grpc.ServerOption, *spire.WaitingSource, error) {
 	if !cfg.SpireEnabled {
 		l.InfoContext(ctx, "SPIRE disabled, gRPC server will use insecure transport")
 		return nil, nil, nil
 	}
-	src, srcErr := spire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-	if srcErr != nil {
-		return nil, nil, srcErr
+
+	src := spire.NewWaitingSource(cfg.SpireWorkloadSocketPath, cfg.SpireWaitWarnAfter, l, spire.WithComponent(spireComponent))
+	if err := m.Add(src); err != nil {
+		return nil, nil, fmt.Errorf("failed to add the SPIRE identity source: %w", err)
 	}
-	// Authorize peers in the registrar's own trust domain, resolved from its
-	// SVID (the mesh is a single trust domain by design; the old
-	// --spire-trust-domain flag could silently disagree with it).
-	trustDomain, tdErr := spire.TrustDomainFromSource(src)
-	if tdErr != nil {
-		_ = src.Close()
-		return nil, nil, fmt.Errorf("failed to resolve SPIRE trust domain: %w", tdErr)
+	// Load-bearing here: the registrar is behind a Service, so NotReady takes this
+	// replica out of the endpoints agents dial. Dwell = commonspire.NotReadyDwell.
+	if err := m.AddReadyzCheck(spire.ReadyCheckName, spire.ReadyChecker(src)); err != nil {
+		return nil, nil, fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
 	}
-	tlsCfg, tlsErr := spire.ServerTLSConfig(src, trustDomain)
-	if tlsErr != nil {
-		_ = src.Close()
-		return nil, nil, tlsErr
+
+	// One line when the identity actually arrives, naming the trust domain peers
+	// are authorized against. It replaces the startup resolution: there is nothing
+	// to configure from it, only to report.
+	go logRegistrarTrustDomain(ctx, src)
+
+	tlsCfg := spire.ServerTLSConfigForOwnTrustDomain(src)
+	l.InfoContext(ctx, "SPIRE mTLS enabled for gRPC server; startup does not wait for SPIRE",
+		"socket", cfg.SpireWorkloadSocketPath, "warnAfter", cfg.SpireWaitWarnAfter)
+	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}, src, nil
+}
+
+// logRegistrarTrustDomain reports the trust domain the registrar authorizes peers
+// against, once its first SVID has been issued. It ends with ctx.
+func logRegistrarTrustDomain(ctx context.Context, src *spire.WaitingSource) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-src.Ready():
 	}
-	l.InfoContext(ctx, "SPIRE mTLS enabled for gRPC server", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", trustDomain)
-	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}, src.Close, nil
+	trustDomain, err := spire.TrustDomainFromSource(src)
+	if err != nil {
+		l.WarnContext(ctx, "failed to read the workload trust domain from the SPIRE SVID", "error", err)
+		return
+	}
+	l.InfoContext(ctx, "resolved workload trust domain from SPIRE", "trustDomain", trustDomain)
 }
 
 // wireGRPCServer assembles the gRPC registrar server, wires write-behind, gates on

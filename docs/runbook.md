@@ -531,6 +531,50 @@ redirect, but nothing is pushed to Envoy until the SVID lands (and it could not 
 meshed without an identity anyway) — which is why the node reports NotReady and stays
 tainted for the duration.
 
+#### The controller, registrar or edge is stuck waiting for SPIRE
+
+All four binaries wait the same way, log the same two lines, and register the same
+`spire-svid` readiness gate with the same 2m dwell, so the commands above work
+verbatim against `deploy/aether-controller`, `deploy/aether-registrar` and
+`deploy/aether-edge`. Only the metric namespace differs:
+`aether_controller_spire_*`, `aether_registrar_spire_*`, `aether_edge_spire_*`
+(**not** `aether_agent_spire_*` -- a false zero if you query the wrong one).
+
+What each component does while it waits:
+
+- **Controller** -- the admission webhooks cannot complete a TLS handshake, so the
+  apiserver **fails open**: both webhook configurations are `failurePolicy: Ignore`,
+  so `MeshConfig`/`HTTPFilter`/`EdgeConfig`/`EndpointPolicy`/`HTTPRoute` creations are
+  admitted **unvalidated** and pods are **not** mutated (no mesh-domain `ndots`
+  injection) for the duration. The caBundle injector logs
+  `webhook caBundle injection deferred until this workload has an SVID` at INFO and
+  injects on the first SVID. Symptom of the wait having ended: one
+  `injected SPIRE trust bundle into webhook caBundle`. Past the dwell the replica goes
+  NotReady and leaves the webhook Service's endpoints, which is what makes the
+  fail-open immediate instead of a 10s webhook timeout per request.
+- **Registrar** -- agents cannot handshake, so their watch streams retry (they log
+  `watch stream deferred until this agent has an SVID`, not errors). While the SVID is
+  pending the registrar authorizes **nothing**; the trust domain it authorizes against
+  is read from its own SVID at handshake time and announced once, as
+  `resolved workload trust domain from SPIRE`. Past the dwell the replica leaves the
+  registrar Service's endpoints so agents dial one that can serve.
+- **Edge** -- ingress keeps serving on the certificates its Envoy already holds. The
+  control plane starts with seeds (mesh domain, empty SPIFFE ID), so newly loaded
+  clusters carry **no upstream mTLS** until the SVID lands; the arrival logs
+  `resolved edge identity from SPIRE` and pushes a new snapshot, so no restart is
+  needed. Past the dwell the replica leaves the LoadBalancer's endpoints.
+
+```bash
+for d in aether-controller aether-registrar aether-edge; do
+  echo "== $d"
+  kubectl -n aether logs deploy/$d | grep -E "waiting for the SPIRE Workload API|obtained this workload's SVID"
+done
+```
+
+Before #740 each of these exited with `failed to create SPIRE Workload API source`
+(the controller: `failed to open SPIRE Workload API source`) and crash-looped. Seeing
+that error at all now means an OLD image.
+
 ### Grepping the outbound identity bindings during a soak (issue #638)
 
 `ssl_fail_verify_san` bursts a few tens of seconds into a fresh proxy generation point at

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/common/spire/spiretest"
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
@@ -41,9 +42,7 @@ var _ SVIDSource = (*svidOnlySource)(nil)
 // Readiness was answering a narrower question than the one its consumers ask.
 func TestFirstIdentityRequiresBothHalves(t *testing.T) {
 	t.Run("bundle missing is not an identity", func(t *testing.T) {
-		svid := &x509svid.SVID{
-			ID: spiffeid.RequireFromString("spiffe://" + testTrustDomain + "/ns/aether-system/sa/aether-agent"),
-		}
+		svid := &x509svid.SVID{ID: spiffeid.RequireFromString(testSpiffeID)}
 
 		_, err := firstIdentity(&svidOnlySource{svid: svid})
 		require.Error(t, err)
@@ -54,8 +53,8 @@ func TestFirstIdentityRequiresBothHalves(t *testing.T) {
 	t.Run("both halves present yields the trust domain", func(t *testing.T) {
 		// The real Workload API path: what a WaitingSource publishes answers both,
 		// and the trust domain it reports is the SVID's own.
-		fake, socket := startFakeWorkloadAPI(t)
-		fake.startServing()
+		fake, socket := spiretest.Start(t, testSpiffeID)
+		fake.StartServing()
 
 		w, _ := newTestWaitingSource(t, socket, time.Minute)
 		ctx, cancel := context.WithCancel(t.Context())

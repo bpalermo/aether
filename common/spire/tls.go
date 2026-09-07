@@ -7,6 +7,7 @@ package spire
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"strings"
 	"time"
@@ -114,6 +115,33 @@ func ServerTLSConfig(src SVIDSource, trustDomain string) (*tls.Config, error) {
 		return nil, err
 	}
 	return tlsconfig.MTLSServerConfig(src, src, auth), nil
+}
+
+// ServerTLSConfigForOwnTrustDomain returns a mutual-TLS server config that
+// presents the workload SVID from src and authorizes peers belonging to src's
+// OWN trust domain — resolved at HANDSHAKE time, not at construction.
+//
+// It is the deferred form of ServerTLSConfig, for a src that may not hold an SVID
+// yet (a WaitingSource, issue #740). Nothing is lost by deferring: the peer
+// authorizer is only ever consulted after the server has presented a certificate,
+// and a server with no SVID cannot present one — GetCertificate returns
+// ErrNoSVIDYet and the handshake fails there. So until the SVID lands this config
+// authorizes NOTHING, and once it lands the trust domain it authorizes against is
+// the one SPIRE actually issued into, re-read on every handshake and therefore
+// still correct after a rotation. That is strictly more accurate than resolving
+// the trust domain once at startup, which is what forced the process to own an
+// SVID before it could serve at all.
+func ServerTLSConfigForOwnTrustDomain(src SVIDSource) *tls.Config {
+	auth := func(peer spiffeid.ID, verifiedChains [][]*x509.Certificate) error {
+		svid, err := src.GetX509SVID()
+		if err != nil {
+			// Unreachable through a completed handshake (see above); returning the
+			// error rather than authorizing keeps the failure closed if it ever is.
+			return fmt.Errorf("cannot authorize peer %s without this workload's own SVID: %w", peer, err)
+		}
+		return tlsconfig.AuthorizeMemberOf(svid.ID.TrustDomain())(peer, verifiedChains)
+	}
+	return tlsconfig.MTLSServerConfig(src, src, auth)
 }
 
 // WebhookServerCert returns a tls.Config mutator (suitable for

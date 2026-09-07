@@ -3,149 +3,28 @@ package spire
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"log/slog"
-	"math/big"
-	"net"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/spiffe/go-spiffe/v2/proto/spiffe/workload"
+	"aethermesh.dev/common/spire/spiretest"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
-const testTrustDomain = "example.org"
+// testTrustDomain is the trust domain spiretest mints SVIDs in.
+const testTrustDomain = spiretest.TrustDomain
 
-// fakeWorkloadAPI is a SPIRE Workload API server whose FetchX509SVID refuses to
-// serve — exactly as a SPIRE agent that is up but cannot attest the workload yet
-// — until startServing is called. That switch is the whole point: it reproduces
-// the boot-time window in issue #740 without a container.
-type fakeWorkloadAPI struct {
-	workload.UnimplementedSpiffeWorkloadAPIServer
-
-	svid *workload.X509SVID
-
-	serving   atomic.Bool
-	fetches   atomic.Int64
-	badHeader atomic.Int64
-}
-
-func (f *fakeWorkloadAPI) startServing() { f.serving.Store(true) }
-
-func (f *fakeWorkloadAPI) FetchX509SVID(_ *workload.X509SVIDRequest, stream grpc.ServerStreamingServer[workload.X509SVIDResponse]) error {
-	f.fetches.Add(1)
-
-	// The Workload API's security header. go-spiffe sets it on every call; a
-	// real SPIRE agent rejects calls without it, so the fake asserts it too.
-	md, _ := metadata.FromIncomingContext(stream.Context())
-	if values := md.Get("workload.spiffe.io"); len(values) != 1 || values[0] != "true" {
-		f.badHeader.Add(1)
-		return status.Error(codes.InvalidArgument, "missing workload.spiffe.io header")
-	}
-
-	if !f.serving.Load() {
-		return status.Error(codes.Unavailable, "no identity issued for this workload yet")
-	}
-	if err := stream.Send(&workload.X509SVIDResponse{Svids: []*workload.X509SVID{f.svid}}); err != nil {
-		return err
-	}
-	<-stream.Context().Done()
-	return nil
-}
-
-// startFakeWorkloadAPI serves a fakeWorkloadAPI on a temporary UDS and returns
-// it with the socket path. os.MkdirTemp("") keeps the path inside the ~108-byte
-// AF_UNIX budget, which a Bazel sandbox path would blow (same reason as
-// agent/internal/spire's fake SPIRE agent).
-func startFakeWorkloadAPI(t *testing.T) (*fakeWorkloadAPI, string) {
-	t.Helper()
-
-	dir, err := os.MkdirTemp("", "wlapi")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "workload.sock")
-
-	lis, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-
-	fake := &fakeWorkloadAPI{svid: newWorkloadSVID(t, "spiffe://"+testTrustDomain+"/ns/aether-system/sa/aether-agent")}
-	srv := grpc.NewServer()
-	workload.RegisterSpiffeWorkloadAPIServer(srv, fake)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-
-	return fake, sock
-}
-
-// newWorkloadSVID mints a CA plus a leaf carrying the SPIFFE ID as its URI SAN
-// and marshals them the way the Workload API returns them (DER chain, PKCS#8
-// key, DER bundle), so go-spiffe's own parser accepts them.
-func newWorkloadSVID(t *testing.T, id string) *workload.X509SVID {
-	t.Helper()
-
-	sid := spiffeid.RequireFromString(id)
-
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	caTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{Organization: []string{"SPIRE test CA"}},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
-	caCert, err := x509.ParseCertificate(caDER)
-	require.NoError(t, err)
-
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	leafTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(2),
-		Subject:               pkix.Name{Organization: []string{"SPIRE test leaf"}},
-		URIs:                  []*url.URL{sid.URL()},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
-	require.NoError(t, err)
-
-	keyDER, err := x509.MarshalPKCS8PrivateKey(leafKey)
-	require.NoError(t, err)
-
-	return &workload.X509SVID{
-		SpiffeId:    id,
-		X509Svid:    leafDER,
-		X509SvidKey: keyDER,
-		Bundle:      caDER,
-	}
-}
+// testSpiffeID is the workload identity the fake Workload API issues.
+const testSpiffeID = "spiffe://" + testTrustDomain + "/ns/aether-system/sa/aether-agent"
 
 // newTestWaitingSource builds a WaitingSource with the retry policy compressed
 // so a test can watch several attempts go by, plus a recorder for its logs.
@@ -214,11 +93,7 @@ func (b *lockedBuffer) waitingLines(t *testing.T) []map[string]any {
 // the process.
 func TestWaitingSourceIsNeverFatal(t *testing.T) {
 	// A path nobody is serving: attempts fail, forever.
-	dir, err := os.MkdirTemp("", "wlapi")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-	w, logs := newTestWaitingSource(t, filepath.Join(dir, "absent.sock"), time.Hour)
+	w, logs := newTestWaitingSource(t, spiretest.UnservedSocket(t), time.Hour)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -262,12 +137,8 @@ func TestWaitingSourceIsNeverFatal(t *testing.T) {
 // --spire-wait-warn-after the same line is logged at WARN, so a wait that has
 // stopped being a normal boot is loud without ever being fatal.
 func TestWaitingSourceEscalatesToWarn(t *testing.T) {
-	dir, err := os.MkdirTemp("", "wlapi")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
 	// Warn immediately: every line must be WARN.
-	w, logs := newTestWaitingSource(t, filepath.Join(dir, "absent.sock"), time.Nanosecond)
+	w, logs := newTestWaitingSource(t, spiretest.UnservedSocket(t), time.Nanosecond)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -289,7 +160,7 @@ func TestWaitingSourceEscalatesToWarn(t *testing.T) {
 func TestWaitingSourceBecomesReadyWhenSPIREArrives(t *testing.T) {
 	reader := installTestMeterProvider(t)
 
-	fake, sock := startFakeWorkloadAPI(t)
+	fake, sock := spiretest.Start(t, testSpiffeID)
 	w, logs := newTestWaitingSource(t, sock, time.Hour)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -298,16 +169,16 @@ func TestWaitingSourceBecomesReadyWhenSPIREArrives(t *testing.T) {
 
 	// Still refusing to attest: the source waits and serves ErrNoSVIDYet.
 	require.Eventually(t, func() bool {
-		return fake.fetches.Load() >= 1
+		return fake.Fetches() >= 1
 	}, 30*time.Second, 10*time.Millisecond, "the source must be attempting; logs:\n%s", logs.String())
 	require.False(t, w.HasSVID())
 	_, err := w.GetX509SVID()
 	require.ErrorIs(t, err, ErrNoSVIDYet)
-	require.Equal(t, int64(0), fake.badHeader.Load(), "every call must carry the workload.spiffe.io header")
+	require.Equal(t, int64(0), fake.BadHeaders(), "every call must carry the workload.spiffe.io header")
 	require.Equal(t, int64(0), metricSum(t, reader, "aether.agent.spire.source_restarts"))
 	require.Equal(t, int64(0), gaugeValue(t, reader, "aether.agent.spire.svid_ready"))
 
-	fake.startServing()
+	fake.StartServing()
 
 	select {
 	case <-w.Ready():
@@ -345,6 +216,44 @@ func TestWaitingSourceBecomesReadyWhenSPIREArrives(t *testing.T) {
 	ready := findRecord(logs.records(t), "obtained this workload's SVID from the SPIRE Workload API")
 	require.NotNil(t, ready, "the arrival must be announced; logs:\n%s", logs.String())
 	assert.Equal(t, testTrustDomain, ready["trustDomain"])
+}
+
+// TestWaitingSourceComponentNamespacesItsMetrics pins the one thing that differs
+// between the four binaries that wait for an SVID (issue #740): the metric
+// namespace. The instruments themselves are defined once, so a per-component
+// dashboard panel reads the same three series everywhere, and a wait can still be
+// attributed to the workload that is stuck rather than collapsed across the fleet.
+func TestWaitingSourceComponentNamespacesItsMetrics(t *testing.T) {
+	reader := installTestMeterProvider(t)
+
+	fake, sock := spiretest.Start(t, testSpiffeID)
+	w := NewWaitingSource(sock, time.Hour, slog.New(slog.DiscardHandler), WithComponent("registrar"))
+	w.attemptTimeout = 500 * time.Millisecond
+	w.backoffInitial = 10 * time.Millisecond
+	w.backoffMax = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = w.Start(ctx) }()
+
+	fake.StartServing()
+	select {
+	case <-w.Ready():
+	case <-time.After(30 * time.Second):
+		t.Fatal("the source never became ready")
+	}
+
+	require.Equal(t, uint64(1), histogramCount(t, reader, "aether.registrar.spire.wait_seconds"))
+	require.Equal(t, int64(1), gaugeValue(t, reader, "aether.registrar.spire.svid_ready"))
+	assert.Nil(t, collect(t, reader, "aether.agent.spire.wait_seconds"),
+		"a registrar's wait must not land in the agent's series")
+
+	// An empty component keeps the default, so the agent's existing series — the
+	// ones already on dashboards — cannot be renamed by accident.
+	assert.Equal(t, "aether.agent.spire.wait_seconds", metricName(DefaultComponent, "wait_seconds"))
+	o := &waitOptions{component: DefaultComponent}
+	WithComponent("")(o)
+	assert.Equal(t, DefaultComponent, o.component)
 }
 
 // TestWaitingSourceErrNoSVIDYet pins the pre-identity contract every consumer

@@ -93,10 +93,12 @@ spire:
     mountPath: /run/spire/admin-sockets
     socketName: admin.sock
   # How long a component may wait for SPIRE to issue its first SVID before the
-  # waiting log line escalates from INFO to WARN. On the agent this is ALSO the
-  # dwell before the spire-svid readiness check reports NotReady (issue #740):
-  # startup no longer dies when the Workload API is not serving yet, it waits and
-  # keeps /healthz and /readyz answering.
+  # waiting log line escalates from INFO to WARN. It is ALSO the dwell before the
+  # spire-svid readiness check reports NotReady, on all four components (issue
+  # #740): startup no longer dies when the Workload API is not serving yet, it
+  # waits and keeps /healthz and /readyz answering. Past the dwell an identity-less
+  # controller, registrar or edge replica leaves its Service's endpoints (the
+  # webhooks are failurePolicy: Ignore, so admission fails open meanwhile).
   #
   # REQUIRED: spire-server, spire-agent AND the SPIFFE CSI driver MUST tolerate
   # aether.io/agent-not-ready (:NoSchedule). Past this dwell an identity-less node

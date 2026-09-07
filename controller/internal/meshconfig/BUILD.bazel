@@ -34,6 +34,7 @@ go_library(
 go_test(
     name = "meshconfig_test",
     srcs = [
+        "cabundle_test.go",
         "meshconfig_test.go",
         "reconciler_test.go",
     ],
@@ -42,10 +43,15 @@ go_test(
         "//api/aether/config/v1:config",
         "//common/apis/config/v1:config",
         "//common/config",
+        "//common/spire",
+        "//common/spire/spiretest",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_k8s_api//admissionregistration/v1:admissionregistration",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_client_go//kubernetes/scheme",
         "@io_k8s_sigs_controller_runtime//pkg/client",
         "@io_k8s_sigs_controller_runtime//pkg/client/fake",
         "@org_golang_google_protobuf//proto",

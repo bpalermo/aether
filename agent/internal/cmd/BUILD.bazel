@@ -66,6 +66,7 @@ go_test(
     name = "cmd_test",
     srcs = [
         "config_test.go",
+        "edge_identity_test.go",
         "readiness_test.go",
         "root_test.go",
         "spire_identity_test.go",
@@ -76,6 +77,8 @@ go_test(
         "//agent/internal/cni/server",
         "//agent/internal/cniconflist",
         "//agent/internal/node",
+        "//common/spire",
+        "//common/spire/spiretest",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_sigs_controller_runtime//pkg/healthz",

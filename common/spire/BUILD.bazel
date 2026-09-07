@@ -30,8 +30,8 @@ go_test(
     ],
     embed = [":spire"],
     deps = [
+        "//common/spire/spiretest",
         "@com_github_spiffe_go_spiffe_v2//bundle/x509bundle",
-        "@com_github_spiffe_go_spiffe_v2//proto/spiffe/workload",
         "@com_github_spiffe_go_spiffe_v2//spiffeid",
         "@com_github_spiffe_go_spiffe_v2//svid/x509svid",
         "@com_github_stretchr_testify//assert",
@@ -39,9 +39,5 @@ go_test(
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
-        "@org_golang_google_grpc//:grpc",
-        "@org_golang_google_grpc//codes",
-        "@org_golang_google_grpc//metadata",
-        "@org_golang_google_grpc//status",
     ],
 )
