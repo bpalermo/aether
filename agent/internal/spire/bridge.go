@@ -59,9 +59,21 @@ type NodeIdentitySink interface {
 }
 
 // X509SVIDSource provides the agent's own node SVID. It is satisfied by the
-// go-spiffe Workload API X509Source the agent already uses for registrar mTLS.
+// go-spiffe Workload API X509Source the agent already uses for registrar mTLS,
+// and by the WaitingSource that wraps it (issue #740), whose GetX509SVID errors
+// until SPIRE has issued one.
 type X509SVIDSource interface {
 	GetX509SVID() (*x509svid.SVID, error)
+}
+
+// UpdatedSource is the optional extension of X509SVIDSource that announces when
+// the SVID changed. When the node source implements it, the bridge serves the
+// node identity the instant it arrives instead of on the next 30s tick — which
+// is what keeps a late SVID (SPIRE still coming up at boot) from costing the
+// node up to half a minute of upstream mTLS after identity is finally available.
+// Both workloadapi.X509Source and spire.WaitingSource satisfy it.
+type UpdatedSource interface {
+	Updated() <-chan struct{}
 }
 
 // Bridge connects the SPIRE Delegated Identity API to the xDS snapshot cache.
@@ -168,7 +180,10 @@ func (b *Bridge) Start(ctx context.Context) error {
 	// node-health listener) and keep it refreshed on rotation.
 	if b.nodeSource != nil {
 		if err := b.refreshNodeSVID(ctx); err != nil {
-			b.log.ErrorContext(ctx, "serving initial node SVID", "error", err)
+			// Not an error at boot: while SPIRE is still coming up the source
+			// holds no SVID yet (issue #740). runNodeSVIDRefresh serves it the
+			// moment it lands, so this is an announcement, not a failure.
+			b.log.InfoContext(ctx, "node SVID not available yet; serving it as soon as SPIRE issues one", "error", err)
 		}
 		go b.runNodeSVIDRefresh(ctx)
 	}
@@ -511,19 +526,33 @@ func (b *Bridge) handleSVIDUpdate(ctx context.Context, resp *delegatedidentityv1
 	return b.pushSecrets(ctx)
 }
 
-// runNodeSVIDRefresh periodically re-reads and re-serves the node SVID so
-// rotations are pushed to Envoy. It returns when the context is cancelled.
+// runNodeSVIDRefresh re-reads and re-serves the node SVID whenever the source
+// says it changed, and on a periodic tick as a backstop. It returns when the
+// context is cancelled.
+//
+// The update channel is what makes a LATE first identity cheap: with SPIRE still
+// coming up the initial refreshNodeSVID in Start finds nothing, and before
+// issue #740 the node identity then waited for the next 30s tick even though the
+// SVID may have landed a second later. Sources that do not announce updates fall
+// back to the tick alone, exactly as before.
 func (b *Bridge) runNodeSVIDRefresh(ctx context.Context) {
 	ticker := time.NewTicker(nodeSVIDRefreshInterval)
 	defer ticker.Stop()
+
+	var updated <-chan struct{}
+	if src, ok := b.nodeSource.(UpdatedSource); ok {
+		updated = src.Updated()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := b.refreshNodeSVID(ctx); err != nil {
-				b.log.DebugContext(ctx, "refreshing node SVID", "error", err)
-			}
+		case <-updated:
+		}
+		if err := b.refreshNodeSVID(ctx); err != nil {
+			b.log.DebugContext(ctx, "refreshing node SVID", "error", err)
 		}
 	}
 }

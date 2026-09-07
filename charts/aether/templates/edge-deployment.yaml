@@ -142,6 +142,9 @@ spec:
             {{- if and .Values.spire.enabled (ne .Values.spire.workloadSocketPath "/run/secrets/workload-spiffe-uds/socket") }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             {{- end }}
+            {{- if .Values.spire.enabled }}
+            - "--spire-wait-warn-after={{ .Values.spire.waitWarnAfter }}"
+            {{- end }}
           env:
             - name: POD_NAME
               valueFrom:

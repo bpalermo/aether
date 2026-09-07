@@ -434,6 +434,69 @@ grep -c aether-cni /etc/cni/net.d/*.conflist
 
 Never hand-write either file: `cni-install` is the durable entry's only writer, and the
 conflist belongs to the primary CNI plus the re-assert loop.
+### The agent is stuck waiting for SPIRE
+
+Symptom: the agent logs, once per retry,
+
+```
+waiting for the SPIRE Workload API to issue this workload's SVID socket=/run/secrets/workload-spiffe-uds/socket attempt=7 elapsed=41.2s warnAfter=2m0s error=...
+```
+
+**That line is the fix working, not the failure** (issue #740). Startup no longer dies
+when the Workload API is not serving yet: the agent programs everything that does not
+need identity, keeps `/healthz` and `/readyz` answering, and folds the SVID in when it
+arrives. The signature of a healthy wait is the waiting lines plus **0 restarts** and
+**no** `failed to create SPIRE Workload API source` anywhere. Before #740 that error was
+followed by `exit 1`, which is how a cold boot produced 2-4 restarts per node.
+
+What to check, in order:
+
+```bash
+# 1. Is it still waiting, or did it resolve? (arrival is one INFO line)
+kubectl -n aether logs ds/aether-agent | grep -E "waiting for the SPIRE Workload API|obtained this workload's SVID|resolved workload trust domain"
+
+# 2. Restarts must be zero — a restarting agent is a DIFFERENT problem
+kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent
+
+# 3. The readiness gate and its dwell
+kubectl -n aether exec ds/aether-agent -c agent -- wget -qO- localhost:8082/readyz?verbose
+```
+
+`readyz?verbose` reads `spire-svid ok` for the first **2 minutes** of the wait
+(`--spire-wait-warn-after`, `spire.waitWarnAfter`) and then fails with
+`no SPIRE SVID after 2m10s (socket …)`. The dwell is deliberate: the controller's
+node-taint guard re-arms `aether.io/agent-not-ready:NoSchedule` after 30s of NotReady,
+and spire-server does not tolerate that taint — a gate that failed immediately would let
+a brief SPIRE outage fence the cluster against spire-server's own rescheduling. Past the
+dwell the NotReady is the point: stop scheduling pods onto a node that cannot give them
+an identity.
+
+The upstream cause is almost always spire-server or the node's spire-agent, not aether:
+
+```bash
+kubectl -n spire-server get pods                  # spire-server-0 Running and 1/1?
+kubectl -n spire-system get pods -o wide          # this node's spire-agent Running?
+kubectl -n spire-server logs spire-server-0 | tail -50
+```
+
+Metrics for the same question, fleet-wide:
+
+```promql
+# nodes without an SVID right now (0 = waiting)
+min by (k8s_node_name) (aether_agent_spire_svid_ready)
+# how long the wait took on the last boot
+histogram_quantile(0.99, sum by (le) (rate(aether_agent_spire_wait_seconds_bucket[15m])))
+# must stay flat at 0: a source that connected but could not serve an SVID
+sum(increase(aether_agent_spire_source_restarts_total[1h]))
+```
+
+While the wait is on, the registrar watch stream logs
+`watch stream deferred until this agent has an SVID` at INFO and counts no
+`watch_errors` — the agent cannot handshake without a certificate, and that is not a
+registrar fault. Envoy keeps serving on the certificates it already holds; a **new** pod
+on that node gets its listener but no upstream mTLS until the SVID lands, which is the
+same absent-secret transient #715 covers.
+
 ### Grepping the outbound identity bindings during a soak (issue #638)
 
 `ssl_fail_verify_san` bursts a few tens of seconds into a fresh proxy generation point at

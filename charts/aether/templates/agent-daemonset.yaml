@@ -138,6 +138,7 @@ spec:
             {{- if .Values.spire.enabled }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
             - "--spire-admin-socket={{ .Values.spire.adminSocket.mountPath }}/{{ .Values.spire.adminSocket.socketName }}"
+            - "--spire-wait-warn-after={{ .Values.spire.waitWarnAfter }}"
             {{- end }}
           ports:
             - name: metrics

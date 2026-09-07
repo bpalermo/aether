@@ -2,8 +2,11 @@
 package cmd
 
 import (
+	"time"
+
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/manager"
+	"aethermesh.dev/common/spire"
 	"aethermesh.dev/controller/internal/meshconfig"
 )
 
@@ -28,6 +31,11 @@ type ControllerConfig struct {
 	SpireEnabled bool
 	// SpireWorkloadSocketPath is the SPIRE Workload API UDS socket path.
 	SpireWorkloadSocketPath string
+	// SpireWaitWarnAfter is how long the wait for this workload's first SVID may
+	// run before it is reported at WARN. Accepted here so the chart can set the
+	// same value on every component; the controller's own non-fatal wait lands in
+	// PR 2 of issue #740.
+	SpireWaitWarnAfter time.Duration
 
 	// WebhookConfigName is the ValidatingWebhookConfiguration whose caBundle the
 	// controller patches with the SPIRE trust bundle (SPIRE mode only).
@@ -61,6 +69,7 @@ func NewControllerConfig() *ControllerConfig {
 		},
 		MeshConfigMapName:       meshconfig.DefaultMeshConfigMapName,
 		SpireWorkloadSocketPath: DefaultSpireWorkloadSocketPath,
+		SpireWaitWarnAfter:      spire.DefaultWaitWarnAfter,
 		MeshDomain:              meshconst.DefaultMeshDomain,
 	}
 }

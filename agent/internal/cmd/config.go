@@ -9,6 +9,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/manager"
+	commonspire "aethermesh.dev/common/spire"
 	"aethermesh.dev/common/udspath"
 )
 
@@ -91,6 +92,10 @@ type AgentConfig struct {
 	SpireAdminSocketPath string
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
 	SpireWorkloadSocketPath string
+	// SpireWaitWarnAfter is how long the wait for this workload's first SVID
+	// stays at INFO before escalating to WARN, and the dwell the spire-svid
+	// readiness gate allows before reporting NotReady (issue #740).
+	SpireWaitWarnAfter time.Duration
 
 	// CNIServerConfig holds CNI server configuration
 	CNIServerConfig *cniServer.CNIServerConfig
@@ -205,5 +210,6 @@ func NewAgentConfig() *AgentConfig {
 		SpireEnabled:            true,
 		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
+		SpireWaitWarnAfter:      commonspire.DefaultWaitWarnAfter,
 	}
 }

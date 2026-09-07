@@ -29,6 +29,7 @@ go_library(
 go_test(
     name = "spire_test",
     srcs = [
+        "bridge_late_identity_test.go",
         "bridge_reconnect_test.go",
         "bridge_test.go",
         "converter_test.go",

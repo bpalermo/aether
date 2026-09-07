@@ -36,6 +36,7 @@ import (
 	"aethermesh.dev/agent/internal/configimport"
 	"aethermesh.dev/agent/internal/endpointpolicy"
 	"aethermesh.dev/agent/internal/gamma"
+	"aethermesh.dev/agent/internal/identity"
 	"aethermesh.dev/agent/internal/l4route"
 	"aethermesh.dev/agent/internal/meshdns"
 	"aethermesh.dev/agent/internal/node"
@@ -63,6 +64,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlmanager "sigs.k8s.io/controller-runtime/pkg/manager"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
@@ -167,6 +169,7 @@ func registerSharedFlags(cmd *cobra.Command, requirePodIdentity bool) {
 
 	// SPIRE workload socket (per-instance; the SPIRE on/off policy is system-wide).
 	cmd.Flags().StringVar(&cfg.SpireWorkloadSocketPath, "spire-workload-socket", constants.DefaultSpireWorkloadSocketPath, "Path to the SPIRE Workload API UDS socket used for registrar mTLS")
+	cmd.Flags().DurationVar(&cfg.SpireWaitWarnAfter, "spire-wait-warn-after", cfg.SpireWaitWarnAfter, "How long to wait for this workload's first SVID before escalating the waiting log line to WARN; also the dwell before the spire-svid readiness check reports NotReady")
 
 	// These calls only fail if the flag name is not registered, which would be a programming error.
 	must.NoError(cmd.MarkFlagRequired("cluster-name"))
@@ -240,7 +243,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	spireSource, identityTrustDomain, err := setupSpireSource(ctx)
+	spireSource, identityTrustDomain, err := startSpireIdentity(ctx, m)
 	if err != nil {
 		return err
 	}
@@ -262,6 +265,11 @@ func runAgent(ctx context.Context) (retErr error) {
 	// next agent on this node restores what this one was serving (#701).
 	defer snapshotCache.FlushObservedUpstreams()
 
+	// Fold the real trust domain in whenever SPIRE gets around to issuing the
+	// first SVID. Everything below is wired from the seeded value (the mesh
+	// domain), which is what SPIRE issues into in every supported topology.
+	reconcileSpireIdentity(ctx, spireSource, identityTrustDomain, snapshotCache, localStorage)
+
 	ackTracker := ack.NewTracker(l)
 
 	spireBridge, err := wireSpireBridge(ctx, m, snapshotCache, spireSource)
@@ -269,7 +277,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain); err != nil {
+	if err = setXDSServer(ctx, m, reg, localStorage, snapshotCache, ackTracker, identityTrustDomain.Get()); err != nil {
 		return err
 	}
 
@@ -279,11 +287,11 @@ func runAgent(ctx context.Context) (retErr error) {
 	// self-heal evictions. It is registered with the manager further down.
 	reasserter := newCNIConflistReasserter()
 
-	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain, chainStateOf(reasserter)); err != nil {
+	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain.Get(), chainStateOf(reasserter)); err != nil {
 		return err
 	}
 
-	if err = setupNodeGating(m, reasserter); err != nil {
+	if err = setupNodeGating(m, reasserter, spireSource); err != nil {
 		return err
 	}
 
@@ -314,37 +322,102 @@ func runAgent(ctx context.Context) (retErr error) {
 	return m.Start(ctx)
 }
 
-// setupSpireSource opens the SPIRE Workload API source and resolves the trust domain.
-// When SPIRE is disabled, it returns nil source and the mesh domain as trust domain.
-// The caller is responsible for closing the returned source via defer.
-func setupSpireSource(ctx context.Context) (*commonspire.Source, string, error) {
+// runnableAdder is the one thing startSpireIdentity needs from the manager. A
+// narrow interface rather than ctrl.Manager so the "returns immediately" test
+// does not need a live manager (and an apiserver) to prove the point.
+type runnableAdder interface {
+	Add(ctrlmanager.Runnable) error
+}
+
+// startSpireIdentity registers the agent's SPIRE identity source with the manager
+// and RETURNS IMMEDIATELY, along with the trust-domain holder every downstream
+// consumer is wired from. When SPIRE is disabled it registers nothing, logs
+// nothing, and hands back the mesh domain (issue #421's cleartext path, byte for
+// byte what it was).
+//
+// This slot used to be a blocking, FATAL wait for the first SVID
+// (commonspire.NewSource, 25s bound). It ran before m.Start, so /healthz and
+// /readyz were still silent, and a SPIRE server that was itself still starting —
+// the normal state of a cold boot — exited the process with "failed to create
+// SPIRE Workload API source: context deadline exceeded". On the 2026-09-07 power
+// failure that cost 2-4 restarts on every node and ~60s of mesh readiness, for a
+// dependency that recovered on its own in 13 seconds (issue #740).
+//
+// Nothing here needs the SVID to exist yet:
+//   - the registrar client dials lazily and defers its watch stream while the
+//     identity is pending (registry/internal/registrar: IdentityReady),
+//   - the SPIRE bridge retries its delegated-identity streams forever and serves
+//     the node SVID the moment WaitingSource announces it,
+//   - the xDS cache omits upstream mTLS until SetNodeIdentity lands, and Envoy
+//     tolerates the absent secret (#715),
+//   - the trust domain is seeded with the mesh domain, which is what SPIRE issues
+//     into in every supported topology (peer authorization is scoped to it
+//     unconditionally in setupRegistrarClient), and reconciled against the real
+//     SVID by reconcileSpireIdentity.
+//
+// What is NOT tolerated indefinitely is a node that never gets an identity: the
+// spire-svid readiness gate reports NotReady once the wait passes its dwell
+// (setupNodeGating).
+func startSpireIdentity(ctx context.Context, m runnableAdder) (*commonspire.WaitingSource, *identity.TrustDomain, error) {
+	trustDomain := identity.NewTrustDomain(cfg.MeshDomain)
 	if !cfg.SpireEnabled {
-		return nil, cfg.MeshDomain, nil
+		return nil, trustDomain, nil
 	}
-	// When SPIRE is enabled, open the Workload API source and resolve the real
-	// trust domain SPIRE issues into (e.g. "aether.internal"). That trust domain
-	// names the SDS resources / SPIFFE IDs the agent programs into Envoy so they
-	// match the secrets the SPIRE bridge delivers. Peer authorization uses the
-	// mesh domain — addressing (<svc>.<mesh-domain>) and identity
-	// (spiffe://<mesh-domain>/...) are one domain by design, never split.
-	//
-	// This wait is on the startup path, before the manager serves /healthz, so it
-	// is bounded (commonspire.SourceTimeout) and announced: an unattested agent
-	// used to stall here with no log line at all until the liveness probe killed
-	// it (issue #662).
-	l.InfoContext(ctx, "waiting for the SPIRE Workload API to issue this agent's SVID",
-		"socket", cfg.SpireWorkloadSocketPath, "timeout", commonspire.SourceTimeout)
-	spireSource, err := commonspire.NewSource(ctx, cfg.SpireWorkloadSocketPath)
-	if err != nil {
-		return nil, "", err
+
+	src := commonspire.NewWaitingSource(cfg.SpireWorkloadSocketPath, cfg.SpireWaitWarnAfter, l)
+	if err := m.Add(src); err != nil {
+		return nil, nil, fmt.Errorf("failed to add the SPIRE identity source: %w", err)
 	}
-	identityTrustDomain, err := commonspire.TrustDomainFromSource(spireSource)
-	if err != nil {
-		_ = spireSource.Close()
-		return nil, "", fmt.Errorf("failed to resolve SPIRE trust domain: %w", err)
+	l.InfoContext(ctx, "acquiring this agent's SVID in the background; startup does not wait for SPIRE",
+		"socket", cfg.SpireWorkloadSocketPath, "warnAfter", cfg.SpireWaitWarnAfter)
+	return src, trustDomain, nil
+}
+
+// reconcileSpireIdentity folds the trust domain SPIRE actually issued into the
+// agent's configuration once the first SVID lands. It is a no-op when SPIRE is
+// disabled, and returns immediately otherwise: the work happens in a goroutine
+// that ends with ctx.
+//
+// The overwhelmingly common outcome is that SPIRE confirms the seed and this
+// logs one line. When it does NOT — SPIRE issuing into a trust domain other than
+// the mesh domain — every SDS name derived from the seed is wrong, so the
+// listeners are rebuilt from storage with the real one. That reload is
+// merge-safe: LoadListenersFromStorage merges into the live listener set rather
+// than replacing it (agent/internal/xds/cache), so a pod meshed in the meantime
+// is not lost.
+func reconcileSpireIdentity(
+	ctx context.Context,
+	src *commonspire.WaitingSource,
+	trustDomain *identity.TrustDomain,
+	snapshotCache *cache.SnapshotCache,
+	localStorage storage.Storage[*cniv1.CNIPod],
+) {
+	if src == nil {
+		return
 	}
-	l.InfoContext(ctx, "resolved workload trust domain from SPIRE", "trustDomain", identityTrustDomain)
-	return spireSource, identityTrustDomain, nil
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-src.Ready():
+		}
+
+		resolved, err := commonspire.TrustDomainFromSource(src)
+		if err != nil {
+			l.WarnContext(ctx, "failed to read the workload trust domain from the SPIRE SVID", "error", err)
+			return
+		}
+		l.InfoContext(ctx, "resolved workload trust domain from SPIRE", "trustDomain", resolved)
+
+		if !trustDomain.Set(resolved) {
+			return // SPIRE confirmed the seed: nothing to rebuild
+		}
+		l.WarnContext(ctx, "SPIRE issues into a different trust domain than the mesh domain; rebuilding listeners from storage",
+			"meshDomain", cfg.MeshDomain, "trustDomain", resolved)
+		if err := snapshotCache.LoadListenersFromStorage(ctx, localStorage, resolved); err != nil {
+			l.ErrorContext(ctx, "failed to rebuild listeners for the resolved trust domain", "error", err, "trustDomain", resolved)
+		}
+	}()
 }
 
 // configureSnapshotCache creates and configures the xDS snapshot cache, including
@@ -465,11 +538,24 @@ func newCNIConflistReasserter() *cniconflist.Reasserter {
 // The two compose: the guard arms the taint, and the remover then refuses to drop
 // it while the node is still unchained. A nil re-asserter
 // (--cni-conflist-reassert=false) reduces both to their pre-#667 behaviour.
-func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter) error {
+func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSource *commonspire.WaitingSource) error {
 	chain := chainStateOf(reasserter)
 
 	if err := m.AddReadyzCheck("cni-chained", cniconflist.ReadyChecker(chain)); err != nil {
 		return fmt.Errorf("failed to set up the CNI chaining ready check: %w", err)
+	}
+
+	// The identity half of the same question, on the same terms (#740). A node
+	// with no SVID cannot give a new pod a working mesh identity, so past the
+	// dwell it should stop attracting pods — but only past the dwell: the taint
+	// guard re-arms on 30s of NotReady and spire-server does not tolerate that
+	// taint, so a hard-from-t=0 gate would let a brief SPIRE outage fence the
+	// cluster against spire-server's own rescheduling. See
+	// commonspire.NotReadyDwell. Nil (SPIRE disabled) registers no check at all.
+	if spireSource != nil {
+		if err := m.AddReadyzCheck("spire-svid", commonspire.ReadyChecker(spireSource)); err != nil {
+			return fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
+		}
 	}
 
 	tr := &node.TaintRemover{
@@ -516,7 +602,7 @@ func wireCNIConflistReasserter(m ctrl.Manager, reasserter *cniconflist.Reasserte
 
 // wireSpireBridge optionally creates and registers the SPIRE bridge for SDS when
 // SPIRE is enabled. Returns the bridge (nil when SPIRE is disabled).
-func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.SnapshotCache, spireSource *commonspire.Source) (*spire.Bridge, error) {
+func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.SnapshotCache, spireSource *commonspire.WaitingSource) (*spire.Bridge, error) {
 	if !cfg.SpireEnabled {
 		l.InfoContext(ctx, "SPIRE integration disabled")
 		return nil, nil
@@ -753,7 +839,7 @@ func setupStorage(ctx context.Context, path string) (storage.Storage[*cniv1.CNIP
 // registration and discovery operations. When SPIRE is enabled, the connection
 // uses mTLS with an X.509 SVID fetched over the SPIRE Workload API socket;
 // otherwise, insecure transport is used.
-func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registry.Registry, error) {
+func setupRegistrarClient(ctx context.Context, src commonspire.SVIDSource) (registry.Registry, error) {
 	regCfg := registrarclient.Config{
 		Address:     cfg.RegistrarAddress,
 		ClusterName: cfg.ClusterName,
@@ -768,6 +854,13 @@ func setupRegistrarClient(ctx context.Context, src *commonspire.Source) (registr
 			return nil, err
 		}
 		regCfg.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
+		// The SVID may not exist yet (#740): the watch loop defers instead of
+		// reporting stream failures it cannot do anything about. Sources that
+		// always hold one (the edge's, which is still created synchronously
+		// until PR 2) advertise no readiness and keep today's behaviour.
+		if waiting, ok := src.(interface{ HasSVID() bool }); ok {
+			regCfg.IdentityReady = waiting.HasSVID
+		}
 		l.InfoContext(ctx, "registrar client using SPIRE mTLS", "socket", cfg.SpireWorkloadSocketPath, "trustDomain", cfg.MeshDomain)
 	} else {
 		l.InfoContext(ctx, "registrar client using insecure transport")
