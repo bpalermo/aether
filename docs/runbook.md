@@ -462,8 +462,36 @@ kubectl -n aether get pods -l app.kubernetes.io/name=aether-agent
 kubectl -n aether exec ds/aether-agent -c agent -- wget -qO- localhost:8082/readyz?verbose
 ```
 
-`readyz?verbose` reads `spire-svid ok` for the first **2 minutes** of the wait
-(`--spire-wait-warn-after`, `spire.waitWarnAfter`) and then fails. It prints
+#### The readiness semantics are NOT the same on every component
+
+This is the first thing to get straight, because the same `spire-svid` check
+deliberately answers differently on the agent and on the three Deployments:
+
+| Component | Workload | Dwell before NotReady | What NotReady does |
+| --- | --- | --- | --- |
+| `aether-agent` | DaemonSet | **2 m** (`spire.NotReadyDwell`) | The controller's node-taint guard re-arms `aether.io/agent-not-ready:NoSchedule` on this node |
+| `aether-registrar` | Deployment | **0** (`spire.ServiceNotReadyDwell`) | This replica leaves the registrar Service's endpoints |
+| `aether-controller` | Deployment | **0** | This replica leaves the webhook Service's endpoints |
+| `aether-edge` | Deployment | **0** | This replica leaves the LoadBalancer's endpoints |
+
+The agent's dwell is **not** a general tolerance for slow SPIRE. It exists solely
+because NotReady on the agent DaemonSet is the signal the node-taint guard consumes, and
+a taint is a fleet-level action a 40s SPIRE hiccup must not trigger. Nothing behind a
+Service has that coupling: there, NotReady removes one replica from one endpoint set,
+which is precisely the right handling of a pod that cannot complete an mTLS handshake,
+so those three go NotReady the instant they are known to lack an identity.
+
+That asymmetry is a fix, not an inconsistency. On the rev210 upgrade roll
+(2026-09-07 20:03:45Z) the registrar carried the agent's 2 m dwell, so a registrar Pod
+was Ready — and in its Service's endpoints — before it had an SVID, and an agent on
+`main-worker-01` that dialled it logged
+`transport: authentication handshake failed: x509svid: could not get X509 bundle`.
+
+The `--spire-wait-warn-after` flag is a **logging** threshold only; since #740 PR 4 it no
+longer drives readiness on any component. On the agent the two values coincide at 2 m.
+
+`readyz?verbose` reads `spire-svid ok` for the first **2 minutes** of an agent's wait
+(the dwell above) and then fails. It prints
 **`spire-svid failed: reason withheld`** — controller-runtime redacts checker errors, so
 the endpoint never shows the reason. The reason is in the **log**, once per transition:
 
@@ -534,9 +562,13 @@ tainted for the duration.
 #### The controller, registrar or edge is stuck waiting for SPIRE
 
 All four binaries wait the same way, log the same two lines, and register the same
-`spire-svid` readiness gate with the same 2m dwell, so the commands above work
-verbatim against `deploy/aether-controller`, `deploy/aether-registrar` and
-`deploy/aether-edge`. Only the metric namespace differs:
+`spire-svid` readiness gate, so the commands above work verbatim against
+`deploy/aether-controller`, `deploy/aether-registrar` and `deploy/aether-edge`.
+
+Two things differ, and both matter. The **dwell is 0** on all three Deployments (see the
+table above): they go NotReady the moment they are known to have no identity, and leave
+their Service's endpoints, rather than sitting Ready for 2 minutes absorbing dials they
+cannot handshake. And the **metric namespace** differs:
 `aether_controller_spire_*`, `aether_registrar_spire_*`, `aether_edge_spire_*`
 (**not** `aether_agent_spire_*` -- a false zero if you query the wrong one).
 
@@ -549,20 +581,28 @@ What each component does while it waits:
   injection) for the duration. The caBundle injector logs
   `webhook caBundle injection deferred until this workload has an SVID` at INFO and
   injects on the first SVID. Symptom of the wait having ended: one
-  `injected SPIRE trust bundle into webhook caBundle`. Past the dwell the replica goes
-  NotReady and leaves the webhook Service's endpoints, which is what makes the
+  `injected SPIRE trust bundle into webhook caBundle`. The replica is NotReady for the
+  whole wait and leaves the webhook Service's endpoints, which is what makes the
   fail-open immediate instead of a 10s webhook timeout per request.
 - **Registrar** -- agents cannot handshake, so their watch streams retry (they log
   `watch stream deferred until this agent has an SVID`, not errors). While the SVID is
   pending the registrar authorizes **nothing**; the trust domain it authorizes against
   is read from its own SVID at handshake time and announced once, as
-  `resolved workload trust domain from SPIRE`. Past the dwell the replica leaves the
-  registrar Service's endpoints so agents dial one that can serve.
+  `resolved workload trust domain from SPIRE`. The replica is NotReady for the whole
+  wait and leaves the registrar Service's endpoints, so agents dial one that can serve
+  instead of one that will reject the handshake. An agent that dials it anyway (a
+  single-replica registrar, or the endpoint update racing the dial) logs
+  `registrar has no identity yet; retrying` at **INFO** and counts no `watch_errors`;
+  the cluster-refresh path logs
+  `cluster refresh deferred: the registrar has no identity yet, keeping the current
+  snapshot` at **WARN** and counts no `refresh_errors`. Both are transients of the
+  server's startup, and both used to be ERRORs (#740 PR 4).
 - **Edge** -- ingress keeps serving on the certificates its Envoy already holds. The
   control plane starts with seeds (mesh domain, empty SPIFFE ID), so newly loaded
   clusters carry **no upstream mTLS** until the SVID lands; the arrival logs
   `resolved edge identity from SPIRE` and pushes a new snapshot, so no restart is
-  needed. Past the dwell the replica leaves the LoadBalancer's endpoints.
+  needed. The replica is NotReady for the whole wait and leaves the LoadBalancer's
+  endpoints; a second replica goes on serving ingress.
 
 ```bash
 for d in aether-controller aether-registrar aether-edge; do

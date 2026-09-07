@@ -141,42 +141,37 @@ func TestBuildSpireGRPCCredsSpireDisabled(t *testing.T) {
 // load-bearing here: NotReady removes this replica from the registrar Service's
 // endpoints, so agents dial one that can actually complete a handshake instead of
 // retrying against a registrar with no certificate to present.
+//
+// It has NO dwell (#740 PR 4), and that is the whole point of this test. On the
+// rev210 upgrade roll (2026-09-07 20:03:45Z) this replica carried the agent's 2m
+// dwell, so it was Ready — and therefore in the Service's endpoints — with no
+// SVID; the agent on main-worker-01 dialled it and got
+// `transport: authentication handshake failed: x509svid: could not get X509
+// bundle`. The dwell belongs to the DaemonSet, whose NotReady arms a node taint;
+// a Deployment behind a Service has no such coupling, and NotReady there is
+// exactly the removal a pod that cannot handshake deserves.
 func TestBuildSpireGRPCCredsReadiness(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "/readyz", nil)
 	require.NoError(t, err)
 
-	t.Run("inside the dwell the gate passes", func(t *testing.T) {
-		withSpireConfig(t, true, spiretest.UnservedSocket(t), time.Hour, slog.New(slog.DiscardHandler))
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		m := newStartingManager(ctx)
+	// An hour of warnAfter: the WARN escalation is a separate question from
+	// readiness, and however long it is set to, a replica with no identity must
+	// not stay in the endpoint set.
+	withSpireConfig(t, true, spiretest.UnservedSocket(t), time.Hour, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	m := newStartingManager(ctx)
 
-		_, src, err := buildSpireGRPCCreds(ctx, m)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = src.Close() })
+	_, src, err := buildSpireGRPCCreds(ctx, m)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = src.Close() })
 
-		check, ok := m.check(spire.ReadyCheckName)
-		require.True(t, ok, "the gate must be registered as %q", spire.ReadyCheckName)
-		assert.NoError(t, check(req), "a wait inside the dwell is a normal startup, not NotReady")
-	})
+	check, ok := m.check(spire.ReadyCheckName)
+	require.True(t, ok, "the gate must be registered as %q", spire.ReadyCheckName)
 
-	t.Run("past the dwell the gate fails", func(t *testing.T) {
-		// A dwell of one nanosecond has already elapsed by the time the check runs.
-		withSpireConfig(t, true, spiretest.UnservedSocket(t), time.Nanosecond, slog.New(slog.DiscardHandler))
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		m := newStartingManager(ctx)
-
-		_, src, err := buildSpireGRPCCreds(ctx, m)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = src.Close() })
-
-		check, ok := m.check(spire.ReadyCheckName)
-		require.True(t, ok)
-		checkErr := check(req)
-		require.Error(t, checkErr, "past the dwell the replica must leave the registrar Service's endpoints")
-		assert.Contains(t, checkErr.Error(), "no SPIRE SVID after")
-	})
+	checkErr := check(req)
+	require.Error(t, checkErr, "a registrar with no identity must leave its Service's endpoints at once")
+	assert.Contains(t, checkErr.Error(), "no SPIRE SVID after")
 }
 
 // TestRegistrarTrustDomainIsLoggedOnArrival pins the post-arrival callback that

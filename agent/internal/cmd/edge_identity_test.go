@@ -96,13 +96,19 @@ func TestResolveEdgeIdentityReturnsImmediately(t *testing.T) {
 	assert.Empty(t, spiffeID, "no identity is claimed before SPIRE issues one")
 	assert.Equal(t, 1, m.count(), "the identity source must be registered as a runnable")
 
-	// The readiness gate is registered and inside its dwell (warnAfter is a minute
-	// here), so a booting edge is Ready while it waits.
+	// The readiness gate is registered and already failing: the edge takes NO
+	// dwell (#740 PR 4). The agent's 2m dwell exists only because NotReady on the
+	// agent DaemonSet arms a node taint; the edge is a Deployment behind the
+	// MetalLB LoadBalancer, where NotReady means one replica leaves the ingress
+	// endpoints and a second goes on serving — the correct treatment of a gateway
+	// whose upstream clusters would carry no identity.
 	req, err := http.NewRequest(http.MethodGet, "/readyz", nil)
 	require.NoError(t, err)
 	check, ok := m.check(commonspire.ReadyCheckName)
 	require.True(t, ok, "the gate must be registered as %q", commonspire.ReadyCheckName)
-	assert.NoError(t, check(req), "a wait inside the dwell is a normal startup, not NotReady")
+	gateErr := check(req)
+	require.Error(t, gateErr, "an edge with no identity must leave the ingress endpoints at once")
+	assert.Contains(t, gateErr.Error(), "no SPIRE SVID after")
 
 	cancel()
 	select {
@@ -113,11 +119,13 @@ func TestResolveEdgeIdentityReturnsImmediately(t *testing.T) {
 	}
 }
 
-// TestResolveEdgeIdentityPastTheDwellIsNotReady is the other half of the gate: an
-// edge that never gets an identity stops advertising itself.
-func TestResolveEdgeIdentityPastTheDwellIsNotReady(t *testing.T) {
+// TestResolveEdgeIdentityGateIgnoresWarnAfter pins the separation PR 4 of #740
+// introduced: the readiness dwell is no longer the wait's WARN threshold. A long
+// --spire-wait-warn-after keeps the wait quiet in the log, but it must not keep
+// an identity-less edge inside the LoadBalancer's endpoint set.
+func TestResolveEdgeIdentityGateIgnoresWarnAfter(t *testing.T) {
 	withSpireConfig(t, true, spiretest.UnservedSocket(t), slog.New(slog.DiscardHandler))
-	cfg.SpireWaitWarnAfter = time.Nanosecond // already elapsed when the check runs
+	cfg.SpireWaitWarnAfter = time.Hour // the log stays at INFO; readiness does not care
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -132,7 +140,7 @@ func TestResolveEdgeIdentityPastTheDwellIsNotReady(t *testing.T) {
 	check, ok := m.check(commonspire.ReadyCheckName)
 	require.True(t, ok)
 	checkErr := check(req)
-	require.Error(t, checkErr, "past the dwell the edge must leave the ingress Service's endpoints")
+	require.Error(t, checkErr, "a long warn threshold must not keep an identity-less edge in the ingress endpoints")
 	assert.Contains(t, checkErr.Error(), "no SPIRE SVID after")
 }
 

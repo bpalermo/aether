@@ -385,8 +385,13 @@ func buildSpireGRPCCreds(ctx context.Context, m readyzAdder) ([]grpc.ServerOptio
 		return nil, nil, fmt.Errorf("failed to add the SPIRE identity source: %w", err)
 	}
 	// Load-bearing here: the registrar is behind a Service, so NotReady takes this
-	// replica out of the endpoints agents dial. Dwell = commonspire.NotReadyDwell.
-	if err := m.AddReadyzCheck(spire.ReadyCheckName, spire.ReadyChecker(src)); err != nil {
+	// replica out of the endpoints agents dial — and there is NO dwell (#740 PR 4).
+	// On the rev210 roll (2026-09-07 20:03:45Z) this replica carried the agent's 2m
+	// dwell, was therefore Ready with no SVID, and an agent that dialled it got
+	// `x509svid: could not get X509 bundle`. A replica that cannot handshake has no
+	// business being in the endpoint set; the agent's dwell is about the node taint
+	// its NotReady arms, which a Deployment does not have.
+	if err := m.AddReadyzCheck(spire.ReadyCheckName, spire.ReadyChecker(src, spire.ServiceNotReadyDwell)); err != nil {
 		return nil, nil, fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
 	}
 

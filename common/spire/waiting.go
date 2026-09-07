@@ -383,6 +383,33 @@ func (w *WaitingSource) source() (*Source, error) {
 // no new pods scheduled onto a node that cannot give them an identity.
 const NotReadyDwell = DefaultWaitWarnAfter
 
+// ServiceNotReadyDwell is the dwell for a workload that sits behind a Service:
+// the registrar, the controller and the edge. It is ZERO — NotReady from t=0
+// until BOTH halves of the identity exist — and that is the opposite of the
+// agent's NotReadyDwell for a reason that is specific to the DaemonSet.
+//
+// The agent's dwell is not about the agent. It exists solely because of the
+// node-taint guard interaction described above: NotReady on a DaemonSet pod is
+// read by the controller as "taint this node", and a taint is a fleet-level
+// action that a 40s SPIRE hiccup must not trigger. A Deployment behind a Service
+// has no such coupling. There, NotReady means exactly one thing — take this
+// replica out of the endpoint set — and that is precisely the correct handling
+// of a pod that cannot complete an mTLS handshake yet.
+//
+// Observed on the rev210 upgrade roll (2026-09-07 20:03:45Z), which is what this
+// constant fixes: a registrar pod carried the agent's 2m dwell, so it was Ready
+// and IN the registrar Service's endpoints while it still had no SVID. An agent
+// on main-worker-01 dialled it and got
+//
+//	transport: authentication handshake failed: x509svid: could not get X509 bundle
+//
+// A replica that cannot handshake should never have been in the endpoint set to
+// be dialled; with dwell 0 it is not, and (with more than one replica) the
+// caller lands on one that can serve. A single-replica Deployment is no worse
+// off: the dial fails either way, and now it fails against an endpoint list that
+// is honest about it.
+const ServiceNotReadyDwell time.Duration = 0
+
 // ReadyCheckName is the /readyz check name every binary registers its identity
 // gate under, so `readyz?verbose` reads the same on an agent, the controller, the
 // registrar and the edge — and one runbook line covers all four.
@@ -390,22 +417,32 @@ const ReadyCheckName = "spire-svid"
 
 // ReadyChecker returns a readiness check (assignable to controller-runtime's
 // healthz.Checker) that fails once this workload has been waiting for its first
-// SVID for longer than the wait's warn threshold.
+// SVID for longer than dwell.
+//
+// dwell is a PARAMETER, not the wait's warn threshold, because the two questions
+// are different and only happen to share a value on the agent. warnAfter asks
+// "how long before this wait is worth waking someone for" and is the same
+// everywhere; dwell asks "how long before NotReady is the right answer", and
+// that depends on what NotReady does to the workload's consumers. Pass
+// NotReadyDwell on the node agent (a DaemonSet whose NotReady arms a node taint)
+// and ServiceNotReadyDwell on anything behind a Service. A non-positive dwell
+// fails from the first poll.
 //
 // A nil source (SPIRE disabled) always passes: with --spire-enabled=false there
 // is no identity to wait for and the check must disappear entirely, exactly as
 // the CNI chaining check disappears with its kill switch.
-func ReadyChecker(w *WaitingSource) func(*http.Request) error {
+func ReadyChecker(w *WaitingSource, dwell time.Duration) func(*http.Request) error {
 	return func(*http.Request) error {
 		if w == nil || w.HasSVID() {
 			return nil
 		}
-		if waiting := time.Since(w.startedAt); waiting < w.warnAfter {
+		waiting := time.Since(w.startedAt)
+		if waiting < dwell {
 			return nil // inside the dwell: still a normal startup
 		}
 		return fmt.Errorf(
 			"no SPIRE SVID after %s (socket %s); this workload cannot serve or verify mesh identity",
-			time.Since(w.startedAt).Round(time.Second), w.socketPath,
+			waiting.Round(time.Second), w.socketPath,
 		)
 	}
 }

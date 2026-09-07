@@ -595,7 +595,7 @@ func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSo
 	// kept out of the taint gate. It no longer is. See commonspire.NotReadyDwell.
 	// Nil (SPIRE disabled) registers no check at all.
 	if spireSource != nil {
-		if err := ready.add(m, commonspire.ReadyCheckName, commonspire.ReadyChecker(spireSource)); err != nil {
+		if err := ready.add(m, commonspire.ReadyCheckName, commonspire.ReadyChecker(spireSource, commonspire.NotReadyDwell)); err != nil {
 			return err
 		}
 	}

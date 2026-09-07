@@ -16,6 +16,7 @@ go_library(
         "//agent/storage",
         "//api/aether/cni/v1:cni",
         "//common/log",
+        "//common/spire",
         "//common/xds",
         "//registry",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
@@ -32,6 +33,7 @@ go_test(
     srcs = [
         "identity_hold_test.go",
         "odcds_test.go",
+        "refresh_identity_test.go",
         "refresh_test.go",
         "server_integration_test.go",
         "server_test.go",
@@ -57,8 +59,12 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_sigs_controller_runtime//pkg/manager",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//status",
     ],
 )
 

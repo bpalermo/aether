@@ -313,37 +313,70 @@ func TestReadyChecker(t *testing.T) {
 	tests := []struct {
 		name    string
 		src     *WaitingSource
+		dwell   time.Duration
 		wantErr bool
 	}{
 		{
 			// The kill switch. --spire-enabled=false means there is no identity
 			// to wait for, so the check must disappear exactly as the CNI
 			// chaining check does with its own kill switch.
-			name: "nil source (SPIRE disabled) always passes",
-			src:  nil,
+			name:  "nil source (SPIRE disabled) always passes",
+			src:   nil,
+			dwell: NotReadyDwell,
 		},
 		{
-			name: "holding an SVID passes",
-			src:  ready,
+			name:  "nil source passes with no dwell too",
+			src:   nil,
+			dwell: ServiceNotReadyDwell,
 		},
 		{
-			// The decision this dwell exists for: a node must not go NotReady
-			// during the boot window, because the controller's taint guard
-			// re-arms on 30s of NotReady and spire-server does not tolerate
-			// that taint.
-			name: "waiting inside the dwell passes",
-			src:  waitingInsideDwell,
+			name:  "holding an SVID passes",
+			src:   ready,
+			dwell: NotReadyDwell,
 		},
 		{
-			name:    "waiting past the dwell fails",
+			// A workload that HAS its identity is Ready on either dwell: the
+			// dwell only ever governs the waiting state.
+			name:  "holding an SVID passes with no dwell",
+			src:   ready,
+			dwell: ServiceNotReadyDwell,
+		},
+		{
+			// The decision the agent's dwell exists for: a node must not go
+			// NotReady during the boot window, because the controller's taint
+			// guard re-arms on 30s of NotReady and spire-server does not
+			// tolerate that taint.
+			name:  "waiting inside the agent dwell passes",
+			src:   waitingInsideDwell,
+			dwell: NotReadyDwell,
+		},
+		{
+			name:    "waiting past the agent dwell fails",
 			src:     waitingPastDwell,
+			dwell:   NotReadyDwell,
+			wantErr: true,
+		},
+		{
+			// PR 4 of #740: a Deployment behind a Service must leave the endpoint
+			// set the moment it is known not to hold an identity. On the rev210
+			// roll this case was Ready, so an agent dialled a registrar that
+			// could not handshake.
+			name:    "waiting with no dwell fails immediately",
+			src:     waitingInsideDwell,
+			dwell:   ServiceNotReadyDwell,
+			wantErr: true,
+		},
+		{
+			name:    "waiting past the agent dwell also fails with no dwell",
+			src:     waitingPastDwell,
+			dwell:   ServiceNotReadyDwell,
 			wantErr: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ReadyChecker(tc.src)(req)
+			err := ReadyChecker(tc.src, tc.dwell)(req)
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "no SPIRE SVID after")
@@ -352,6 +385,23 @@ func TestReadyChecker(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+// TestServiceNotReadyDwellIsZero pins the per-component readiness semantics that
+// PR 4 of #740 introduced, because the two values look like an inconsistency
+// until you know why they differ.
+//
+// The agent is a DaemonSet whose NotReady is read by the controller's node-taint
+// guard, so its dwell is a guard against a 40s SPIRE hiccup tainting the fleet.
+// The registrar, controller and edge are Deployments behind Services; NotReady
+// there removes one replica from one endpoint set, which is precisely the right
+// treatment for a pod that cannot complete an mTLS handshake — and NOT doing it
+// is what let an agent dial an identity-less registrar on the rev210 roll.
+func TestServiceNotReadyDwellIsZero(t *testing.T) {
+	assert.Zero(t, ServiceNotReadyDwell,
+		"a workload behind a Service must go NotReady the moment it is known to have no identity")
+	assert.NotEqual(t, NotReadyDwell, ServiceNotReadyDwell,
+		"the DaemonSet dwell and the Service dwell are deliberately different")
 }
 
 // TestNotReadyDwellOutlastsTaintGuardGrace pins the cross-component relationship

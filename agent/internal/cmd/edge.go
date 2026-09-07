@@ -261,10 +261,13 @@ func resolveEdgeIdentity(ctx context.Context, m edgeIdentityManager) (*commonspi
 	if err := m.Add(src); err != nil {
 		return nil, "", "", fmt.Errorf("failed to add the SPIRE identity source: %w", err)
 	}
-	// Load-bearing: the edge is behind a LoadBalancer Service, so past the dwell
-	// NotReady takes this replica out of the ingress endpoints rather than letting
-	// it advertise an edge whose upstreams have no identity.
-	if err := m.AddReadyzCheck(commonspire.ReadyCheckName, commonspire.ReadyChecker(src)); err != nil {
+	// Load-bearing: the edge is behind a LoadBalancer Service, so NotReady takes
+	// this replica out of the ingress endpoints rather than letting it advertise
+	// an edge whose upstreams have no identity. No dwell (#740 PR 4): the agent's
+	// 2m dwell exists only to keep a DaemonSet's NotReady from arming the node
+	// taint, and the edge is a Deployment with no such coupling — a second replica
+	// goes on serving while this one waits.
+	if err := m.AddReadyzCheck(commonspire.ReadyCheckName, commonspire.ReadyChecker(src, commonspire.ServiceNotReadyDwell)); err != nil {
 		return nil, "", "", fmt.Errorf("failed to set up the SPIRE identity ready check: %w", err)
 	}
 	l.InfoContext(ctx, "acquiring the edge's SVID in the background; startup does not wait for SPIRE",

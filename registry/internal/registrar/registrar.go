@@ -18,6 +18,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
+	"aethermesh.dev/common/spire"
 	"aethermesh.dev/common/telemetry"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
@@ -568,6 +569,9 @@ func (r *RegistrarRegistry) failStream(ctx context.Context, msg string, err erro
 	if r.identityPending() {
 		return r.deferStream(ctx, err, *backoff)
 	}
+	if spire.IsPeerIdentityUnavailable(err) {
+		return r.deferPeerStream(ctx, err, backoff)
+	}
 	r.metrics.streamFailed(ctx)
 	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
 	wait := *backoff + jitter
@@ -597,6 +601,37 @@ func (r *RegistrarRegistry) deferStream(ctx context.Context, err error, backoff 
 	wait := backoff + jitter
 	r.log.InfoContext(ctx, "watch stream deferred until this agent has an SVID", "error", err, "backoff", wait)
 	return r.waitBeforeRetry(ctx, wait)
+}
+
+// deferPeerStream is the other half of the same idea (issue #740, PR 4): OUR
+// identity is ready, but the REGISTRAR's is not, so the mTLS handshake fails
+// with `x509svid: could not get X509 bundle` raised by the server side of the
+// connection. That is the server's startup — not a client fault, and not the
+// "registrar will not serve this stream" condition #700 made these ERRORs for —
+// so it is classified the way #718 classified a drain GOAWAY: INFO, no
+// watch_errors, bounded retry.
+//
+// Unlike deferStream the backoff DOES escalate (capped at maxBackoff), because
+// nothing wakes this loop when the FAR side acquires its SVID: there is no local
+// signal to fire, so the loop has to keep polling, and the doubling is what stops
+// a genuinely dead registrar from being polled every second forever. The cap
+// bounds the added reconnect latency at maxBackoff.
+//
+// Observed on the rev210 upgrade roll (2026-09-07 20:03:45Z): a registrar pod was
+// in its Service's endpoints before it had an SVID (the readiness dwell this PR
+// also removes), and the agent on main-worker-01 logged this as
+// `failed to start watch stream, retrying` at ERROR for a replica that was
+// serving seconds later.
+func (r *RegistrarRegistry) deferPeerStream(ctx context.Context, err error, backoff *time.Duration) bool {
+	jitter := time.Duration(float64(*backoff) * jitterFraction * rand.Float64())
+	wait := *backoff + jitter
+	r.log.InfoContext(ctx, "registrar has no identity yet; retrying",
+		"peer_identity_pending", true, "error", err, "backoff", wait)
+	if !r.waitBeforeRetry(ctx, wait) {
+		return false
+	}
+	*backoff = min(*backoff*2, maxBackoff)
+	return true
 }
 
 // waitBeforeRetry sleeps between watch attempts, returning false if the context

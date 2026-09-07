@@ -101,6 +101,13 @@ func TestBuildControllerBootstrapOptsSpireDisabled(t *testing.T) {
 // TestWireSpireReadiness is the controller's readiness table. The gate is
 // load-bearing here in a way it is not on a DaemonSet: NotReady removes this
 // replica from the webhook Service's endpoints.
+//
+// And it has NO dwell (#740 PR 4). The agent's 2m dwell exists solely because
+// NotReady on the agent DaemonSet is what arms the node taint; leaving one
+// Service's endpoint set has no such blast radius, so a controller that is known
+// not to hold an identity should leave immediately — the apiserver then fails
+// open at once (failurePolicy: Ignore) instead of paying a 10s webhook timeout
+// per request against a replica that cannot complete the handshake.
 func TestWireSpireReadiness(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "/readyz", nil)
 	require.NoError(t, err)
@@ -111,24 +118,17 @@ func TestWireSpireReadiness(t *testing.T) {
 		assert.Empty(t, readyz.checks, "with no identity to wait for the check must disappear entirely")
 	})
 
-	t.Run("inside the dwell the gate passes", func(t *testing.T) {
+	t.Run("no SVID fails the gate immediately", func(t *testing.T) {
 		readyz := newRecordingReadyz()
+		// An hour of warnAfter: the WARN escalation is a separate question from
+		// readiness, and a long one must not keep this replica Ready.
 		src := spire.NewWaitingSource(spiretest.UnservedSocket(t), time.Hour, slog.New(slog.DiscardHandler))
 		require.NoError(t, wireSpireReadiness(readyz, src))
 
 		check, ok := readyz.checks[spire.ReadyCheckName]
 		require.True(t, ok, "the gate must be registered as %q", spire.ReadyCheckName)
-		assert.NoError(t, check(req), "a wait inside the dwell is a normal startup, not NotReady")
-	})
-
-	t.Run("past the dwell the gate fails", func(t *testing.T) {
-		readyz := newRecordingReadyz()
-		// A dwell of one nanosecond has already elapsed by the time the check runs.
-		src := spire.NewWaitingSource(spiretest.UnservedSocket(t), time.Nanosecond, slog.New(slog.DiscardHandler))
-		require.NoError(t, wireSpireReadiness(readyz, src))
-
-		err := readyz.checks[spire.ReadyCheckName](req)
-		require.Error(t, err, "past the dwell the replica must leave the webhook Service's endpoints")
-		assert.Contains(t, err.Error(), "no SPIRE SVID after")
+		gateErr := check(req)
+		require.Error(t, gateErr, "a replica with no identity must leave the webhook Service's endpoints at once")
+		assert.Contains(t, gateErr.Error(), "no SPIRE SVID after")
 	})
 }
