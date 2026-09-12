@@ -51,6 +51,20 @@ go_deps.gazelle_override(
     path = "cel.dev/expr",
 )
 
+# cel.dev/cel-go (the new home of github.com/google/cel-go, pulled in by
+# buf.build/go/protovalidate >= 1.3) ships checked-in BUILD.bazel files that
+# still use the legacy `go_default_library` target names and
+# @io_bazel_rules_go. gazelle's default `auto` mode honours those, so the
+# `:interpreter` / `:cel` targets rules_go expects do not exist. Force
+# generation so the modern naming is used.
+go_deps.gazelle_override(
+    build_file_generation = "on",
+    directives = [
+        "gazelle:proto disable",
+    ],
+    path = "cel.dev/cel-go",
+)
+
 # etcd packages have protobuf files that need special handling
 go_deps.gazelle_override(
     build_file_generation = "on",
