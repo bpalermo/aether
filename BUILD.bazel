@@ -1,4 +1,5 @@
 load("@gazelle//:def.bzl", "gazelle")
+load("@rules_go//go:def.bzl", "TOOLS_NOGO", "nogo")
 
 # README.md is an input to //website:site — the architecture page is generated
 # from it at build time so the site can never carry a stale copy.
@@ -44,6 +45,27 @@ filegroup(
 # gazelle:go_grpc_compilers @rules_go//proto:go_grpc_v2,@rules_go//proto:go_proto
 # gazelle:go_proto_compilers @rules_go//proto:go_proto,//bazel/go:go_dynamo
 gazelle(name = "gazelle")
+
+# nogo — vet-class static analysis run as a validation action on every Go
+# compile in this repository (wired in via `go_sdk.nogo` in MODULE.bazel, which
+# is the only place a nogo target can be registered under bzlmod).
+#
+# TOOLS_NOGO is rules_go's re-export of the upstream
+# golang.org/x/tools/go/analysis/passes set — the same analyzers `go vet` runs,
+# minus the ones rules_go disables upstream (cgocall, pkgfact, and the
+# too-noisy shadow pass). We deliberately take the list as-is rather than
+# enumerating passes: new analyzers arriving with an x/tools bump should be
+# seen, not silently skipped. staticcheck is a separate, later step.
+#
+# Findings are scoped by :nogo.json; every exclusion there is justified inline.
+# Must be publicly visible — rules_go references it from the generated
+# @io_bazel_rules_nogo repository.
+nogo(
+    name = "nogo",
+    config = ":nogo.json",
+    visibility = ["//visibility:public"],
+    deps = TOOLS_NOGO,
+)
 
 alias(
     name = "format",

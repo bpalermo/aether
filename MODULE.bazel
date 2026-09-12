@@ -42,6 +42,25 @@ bazel_dep(name = "toolchains_buildbuddy", version = "0.0.4")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.27.1")
 
+# nogo: vet-class static analysis as a build-time validation action on every Go
+# target in this repo. //:nogo pulls in rules_go's TOOLS_NOGO (the upstream
+# golang.org/x/tools vet analyzer set) and //:nogo.json scopes it.
+#
+# Scope note: the tag's `includes` defaults to ["@@//:__subpackages__"] and
+# `excludes` to [], which we keep. Measured, not assumed: the nogo validation
+# action still runs over the Go targets of external repositories (a `bazel build
+# //...` shows ~3,900 "Running nogo on @..." actions), so //:nogo.json carries an
+# `external/` exclusion — a dependency bump must not be able to fail our build on
+# a finding in code we cannot edit.
+#
+# Version note: nogo on a Go 1.27 SDK needs golang.org/x/tools >= v0.48.0
+# (bazel-contrib/rules_go#4701, which postdates rules_go 0.63.0 and only bumped
+# rules_go's own go.mod). gazelle's go_deps resolves one x/tools across every
+# bzlmod module by MVS, so our go.mod's `golang.org/x/tools v0.49.0` is what
+# TOOLS_NOGO's `@org_golang_x_tools//...` analyzers are built from. Do not let
+# that requirement regress below v0.48.0 while the SDK is 1.27.x.
+go_sdk.nogo(nogo = "//:nogo")
+
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
 
