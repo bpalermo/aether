@@ -26,11 +26,11 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20260904.13144fb.envoy")
 # Direct deps of //:BUILD.bazel, //integration and //source/...
 ####################################################################################
 
-bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_cc", version = "0.2.22")
 
 # pkg_tar (//:envoy_tar).
-bazel_dep(name = "rules_pkg", version = "1.1.0")
+bazel_dep(name = "rules_pkg", version = "1.3.0")
 
 # sh_test (//integration:build_id_test, //integration:symtab_test).
 bazel_dep(name = "rules_shell", version = "0.8.0")
@@ -63,7 +63,7 @@ bazel_dep(name = "toolchains_llvm", version = "1.9.0.envoy")
 # Packaging (replaces //bazel:repositories.bzl and //bazel/oci:images.bzl)
 ####################################################################################
 
-bazel_dep(name = "rules_oci", version = "2.2.7")
+bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "container_structure_test", version = "1.22.1")
 
 ####################################################################################
