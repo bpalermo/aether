@@ -58,7 +58,7 @@ jobs:
       has_unit: ${{ steps.impacted.outputs.has_unit }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           # Full history so the first parent is reachable for the diff.
@@ -76,7 +76,7 @@ jobs:
             echo "sha=" >>"$GITHUB_OUTPUT"
           fi
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -118,7 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
       - name: Setup Bazel
@@ -126,7 +126,7 @@ jobs:
         with:
           bazelisk-cache: true
       - name: Download impacted target lists
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: impacted-targets-main
           path: ${{ runner.temp }}/impacted
