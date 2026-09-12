@@ -10,7 +10,9 @@ name: proxy
 # happens on merge (proxy-release.yml).
 on:
   pull_request:
-    branches: [main]
+    # `upgrade/**`: stacked PRs based on another upgrade branch must still get
+    # the `proxy` gate, otherwise the required check never reports on them.
+    branches: [main, "upgrade/**"]
 
 permissions:
   contents: read
@@ -30,7 +32,7 @@ jobs:
     outputs:
       proxy: ${{ steps.filter.outputs.proxy }}
     steps:
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -63,7 +65,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.19.0
