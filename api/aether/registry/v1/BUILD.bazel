@@ -12,7 +12,6 @@ proto_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "@com_github_pquerna_protoc_gen_dynamo//proto/dynamo/v1:v1_proto",
         "@protobuf//:any_proto",
         "@protobuf//:duration_proto",
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
@@ -21,10 +20,7 @@ proto_library(
 
 go_proto_library(
     name = "registryv1_go_proto",
-    compilers = [
-        "@rules_go//proto:go_proto",
-        "//bazel/go:go_dynamo",
-    ],
+    compilers = ["@rules_go//proto:go_proto"],
     importpath = "aethermesh.dev/api/aether/registry/v1",
     proto = ":registryv1_proto",
     visibility = ["//visibility:public"],

@@ -40,7 +40,7 @@ A practical guide to installing Aether and onboarding your first workload.
 
 ```mermaid
 flowchart TB
-    backend[("Registry backend<br/>(kubernetes / dynamodb / etcd)")]
+    backend[("Registry backend<br/>(kubernetes / etcd)")]
     registrar["registrar (Deployment ×2)<br/>watches the backend,<br/>fans endpoint changes to agents"]
     backend <--> registrar
 
@@ -80,7 +80,7 @@ flowchart TB
 | **Kubernetes cluster** | host | v1.30+ recommended (native `preStop.sleep` is used for hitless rolls). |
 | **A primary CNI** (Calico, Cilium, flannel, …) | pod IP + connectivity | Aether installs a **chained** CNI plugin (`aether.conflist`) that appends itself to your existing CNI config. It does *not* replace your CNI. |
 | **SPIRE** (SPIFFE runtime) | mTLS identity | Required when `spire.enabled=true` (the default). The agent, registrar and controller consume the **Workload API socket** (via the `csi.spiffe.io` CSI driver), and the agent additionally uses the SPIRE **agent admin / Delegated Identity** socket to mint proxy SVIDs. SPIRE pods must run in an ignored namespace (see §5) so they never depend on the mesh. |
-| **A registry backend** | endpoint storage | One of `kubernetes` (default, no external dependency), `dynamodb` (AWS), or `etcd`. |
+| **A registry backend** | endpoint storage | Either `kubernetes` (default, no external dependency) or `etcd`. |
 | **Helm 3** with OCI support | install | Charts are published as OCI artifacts. |
 | **Privileged pod-security** in `aether-system` | the agent needs `hostNetwork` + `NET_ADMIN` | The chart labels its namespace `privileged` automatically when it creates it. |
 
@@ -159,9 +159,8 @@ Set once at the top of the `aether` chart's values; every component inherits it.
 | `spire.enabled` | `true` | Mesh-wide mTLS switch. |
 | `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket. Every component resolves its own trust domain from its SVID over this socket — there is no `trustDomain` value to configure (retired: it could silently disagree with what SPIRE issues). |
 | `spire.adminSocket.*` | see values | SPIRE agent admin/Delegated-Identity socket the agent uses to mint proxy SVIDs. |
-| `registrar.registryBackend` | `kubernetes` | `kubernetes` \| `dynamodb` \| `etcd`. |
+| `registrar.registryBackend` | `kubernetes` | `kubernetes` \| `etcd`. |
 | `registrar.etcd.endpoints` | `[]` | etcd endpoints when backend is `etcd`. |
-| `registrar.aws.region` / `registrar.aws.roleArn` | `us-east-1` / `""` | DynamoDB backend config (IRSA on the registrar; the agent carries no AWS credentials). |
 | `otel.enabled` / `otel.endpoint` | `false` / `""` | Turn on OTel and point at an OTLP gRPC collector (`host:port`). |
 | `proxy.enabled` | `true` | Deploy the per-node Envoy. Set false to run only the agent. |
 | `edge.enabled` | `false` | Deploy the north-south ingress gateway (see §11). |

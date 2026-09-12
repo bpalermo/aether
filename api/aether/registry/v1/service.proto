@@ -4,7 +4,6 @@ package aether.registry.v1;
 
 import "api/aether/registry/v1/endpoint.proto";
 import "buf/validate/validate.proto";
-import "proto/dynamo/v1/dynamo.proto";
 
 // Preserve proto3 implicit field presence so the generated Go/C++ API is
 // unchanged by the edition migration (scalars stay value types, not pointers).
@@ -12,11 +11,6 @@ option features.field_presence = IMPLICIT;
 option go_package = "aethermesh.dev/api/aether/registry/v1;registryv1";
 
 message Service {
-  option (dynamo.v1.msg).key = {
-    pk_fields: ["name"]
-    sk_fields: ["protocol"]
-  };
-
   string name = 1 [(buf.validate.field).string.min_len = 1];
 
   enum Protocol {

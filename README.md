@@ -1,6 +1,6 @@
 # Aether
 
-A Kubernetes service mesh data plane built in Go. The Go module is `aethermesh.dev` (a vanity import path served by [the website](https://aethermesh.dev/); versions before the rename remain importable as `github.com/bpalermo/aether` — see proposal 035). Aether runs a per-node agent (DaemonSet) that drives a custom Envoy build (`aether-proxy`) via an xDS control plane, plus a CNI plugin that sets up pod network namespaces and registers their endpoints. Config is **demand-scoped**: each agent generates only the clusters, registry watches, and endpoints its local pods actually depend on (declared via the `config.aether.io/upstreams` annotation), with on-demand CDS for the cold path. An in-cluster Registrar service proxies all registry operations, caches a versioned endpoint snapshot, and streams changes to agents. Routing is driven by the **Gateway API** (GAMMA east-west + a north-south edge gateway). It integrates with SPIRE for workload identity and mTLS, supports zero-drop proxy rollouts via Envoy hot restart, and exports OpenTelemetry metrics and traces. Pluggable external registry backends: DynamoDB, etcd, and Kubernetes.
+A Kubernetes service mesh data plane built in Go. The Go module is `aethermesh.dev` (a vanity import path served by [the website](https://aethermesh.dev/); versions before the rename remain importable as `github.com/bpalermo/aether` — see proposal 035). Aether runs a per-node agent (DaemonSet) that drives a custom Envoy build (`aether-proxy`) via an xDS control plane, plus a CNI plugin that sets up pod network namespaces and registers their endpoints. Config is **demand-scoped**: each agent generates only the clusters, registry watches, and endpoints its local pods actually depend on (declared via the `config.aether.io/upstreams` annotation), with on-demand CDS for the cold path. An in-cluster Registrar service proxies all registry operations, caches a versioned endpoint snapshot, and streams changes to agents. Routing is driven by the **Gateway API** (GAMMA east-west + a north-south edge gateway). It integrates with SPIRE for workload identity and mTLS, supports zero-drop proxy rollouts via Envoy hot restart, and exports OpenTelemetry metrics and traces. Pluggable external registry backends: etcd and Kubernetes.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ graph TD
     Registrar["Registrar<br/><i>in-cluster Deployment, active/active</i>"]
     Agent -. "register · watch · list" .-> Registrar
 
-    Registry[("External Registry<br/>DynamoDB · etcd · Kubernetes")]
+    Registry[("External Registry<br/>etcd · Kubernetes")]
     Registrar -. "sync + persist" .-> Registry
 
     OTel["OTel Collector<br/><i>metrics · traces</i>"]
@@ -60,7 +60,6 @@ graph TD
 **SPIRE Bridge** — Connects to the SPIRE agent via the Delegated Identity API to obtain X.509 SVIDs and trust bundles. Converts them into Envoy SDS (Secret Discovery Service) resources for automatic mTLS between workloads.
 
 **External Registry** — Pluggable backend for durable endpoint storage, selected on the Registrar via `--registry-backend`:
-- **DynamoDB** — single-table design for AWS-native deployments
 - **etcd** — hierarchical key structure with protobuf serialization, native Watch for change streaming
 - **Kubernetes** — registry backed by the cluster API
 

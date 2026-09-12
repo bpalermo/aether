@@ -2,9 +2,8 @@
 // implementation: the node agent's client to the in-cluster Registrar gRPC
 // service. It lives outside the root registry package (which holds only the
 // interface and shared helpers) so that importing the interface — or this
-// client — does not transitively link the other registry backends (AWS SDK,
-// etcd client); those are linked only by registry/backend (the registrar's
-// factory).
+// client — does not transitively link the other registry backends (the etcd
+// client); that is linked only by registry/backend (the registrar's factory).
 package registrarclient
 
 import (

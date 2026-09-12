@@ -1,6 +1,6 @@
 // Package registry provides interfaces for service endpoint registration and discovery.
 // It manages the lifecycle of service endpoints and allows querying available services
-// and their endpoints. Implementations can use different backends (e.g., DynamoDB).
+// and their endpoints. Implementations can use different backends (e.g., etcd).
 package registry
 
 import (
@@ -53,7 +53,7 @@ type ChangeNotifier interface {
 // reads are served from an asynchronously populated cache (the registrar
 // watch client). WaitReady blocks until the cache holds a complete snapshot
 // or ctx ends; callers bound it with a timeout and may proceed with degraded
-// reads on expiry. Synchronous backends (DynamoDB, etcd) do not implement it.
+// reads on expiry. Synchronous backends (kubernetes, etcd) do not implement it.
 type ReadyWaiter interface {
 	WaitReady(ctx context.Context) error
 }
@@ -96,8 +96,8 @@ type WatchScoper interface {
 // (reads), so each cluster sees the union of exports clusterset-wide and can
 // materialize a local ServiceImport + clusterset VIP for any of them.
 //
-// Backends without a cross-cluster plane (kubernetes, dynamodb) do not implement
-// it; the registrar's MCS controllers no-op when it is absent.
+// Backends without a cross-cluster plane (kubernetes) do not implement it; the
+// registrar's MCS controllers no-op when it is absent.
 type ServiceExporter interface {
 	// SetExport records, under THIS instance's own partition, that the local
 	// cluster exports the named mesh service from the given namespace. Idempotent.
@@ -130,8 +130,8 @@ type AuthoritativeLister interface {
 // writes a service's projected GAMMA config under THIS instance's own partition
 // (writes), while ListConfig ranges every origin (reads), so each cluster sees the
 // clusterset-wide config view and can materialize imported routes read-only. Backends
-// without a cross-cluster plane (kubernetes, dynamodb) do not implement it; the
-// config export/import controllers no-op when it is absent.
+// without a cross-cluster plane (kubernetes) do not implement it; the config
+// export/import controllers no-op when it is absent.
 type ConfigExporter interface {
 	// SetConfig records this cluster's projected config for a service under its own
 	// authoritative partition. Idempotent (last-writer per origin); the stored

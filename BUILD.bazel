@@ -40,10 +40,8 @@ filegroup(
 # gazelle:prefix aethermesh.dev
 # gazelle:resolve proto buf/validate/validate.proto @protovalidate//proto/protovalidate/buf/validate:validate_proto
 # gazelle:resolve proto go buf/validate/validate.proto @build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate
-# gazelle:resolve proto proto/dynamo/v1/dynamo.proto @com_github_pquerna_protoc_gen_dynamo//proto/dynamo/v1:v1_proto
-# gazelle:resolve proto go proto/dynamo/v1/dynamo.proto @build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate
 # gazelle:go_grpc_compilers @rules_go//proto:go_grpc_v2,@rules_go//proto:go_proto
-# gazelle:go_proto_compilers @rules_go//proto:go_proto,//bazel/go:go_dynamo
+# gazelle:go_proto_compilers @rules_go//proto:go_proto
 gazelle(name = "gazelle")
 
 # nogo — vet-class static analysis run as a validation action on every Go

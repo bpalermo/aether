@@ -66,7 +66,6 @@ _GENERATED_SUFFIXES = [
     ".pb.go",
     "_pb.go",
     ".pb.validate.go",
-    ".pb.dynamo.go",
 ]
 
 _GENERATED_PREFIXES = [

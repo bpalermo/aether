@@ -85,7 +85,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.MeshDomain, "mesh-domain", meshconst.DefaultMeshDomain, "DNS-style mesh domain (proposal 026 config export resolves backend clusters <svc>.<mesh-domain>)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, the config-export controller runs only on this cluster; empty = federated (every cluster may export)")
 	rootCmd.Flags().StringVar(&cfg.Region, "region", cfg.Region, "Region owning this registrar's etcd partition (etcd backend; proposal 006). MUST be unique per regional etcd cluster: one region = one etcd. Pointing two etcds at the same region splits the registry; pointing two regions at one etcd collides their writes.")
-	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes, dynamodb, or etcd)")
+	rootCmd.Flags().StringVar(&cfg.RegistryBackend, "registry-backend", cfg.RegistryBackend, "Registry backend (kubernetes or etcd)")
 	rootCmd.Flags().StringSliceVar(&cfg.EtcdEndpoints, "etcd-endpoints", cfg.EtcdEndpoints, "Comma-separated etcd endpoints")
 	rootCmd.Flags().StringArrayVar(&cfg.PeerEtcd, "peer-etcd", nil, "Peer region etcd for cross-region replication (proposal 006), repeatable: <region>=<endpoint>[,<endpoint>...]. The leader registrar mirrors this region's own registry subtree verbatim into each peer. Requires the etcd backend and an explicit --region")
 	rootCmd.Flags().DurationVar(&cfg.SyncInterval, "sync-interval", cfg.SyncInterval, "How often to sync from the registry")
@@ -446,9 +446,7 @@ func wireGRPCServer(ctx context.Context, m ctrl.Manager, reg registry.Registry, 
 
 func setupRegistry(ctx context.Context, m ctrl.Manager) (registry.Registry, error) {
 	// Backend selection lives in the registry/backend factory; this is the only
-	// consumer that links every backend. For dynamodb, the AWS region comes from
-	// the standard AWS chain (AWS_REGION env — set by the chart's aws.region
-	// value — shared config, IMDS), falling back to us-east-1.
+	// consumer that links every backend.
 	reg, err := backend.New(ctx, l, cfg.RegistryBackend, backend.Config{
 		ClusterName:   cfg.ClusterName,
 		Reader:        m.GetAPIReader(),

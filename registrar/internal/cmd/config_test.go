@@ -102,8 +102,8 @@ func TestRegistrarConfig_InstancesAreIndependent(t *testing.T) {
 	cfg1 := NewRegistrarConfig()
 	cfg2 := NewRegistrarConfig()
 
-	cfg1.RegistryBackend = "dynamodb"
+	cfg1.RegistryBackend = "etcd"
 
-	assert.Equal(t, "dynamodb", cfg1.RegistryBackend)
+	assert.Equal(t, "etcd", cfg1.RegistryBackend)
 	assert.Equal(t, "kubernetes", cfg2.RegistryBackend)
 }
