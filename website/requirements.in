@@ -18,4 +18,4 @@
 # for a dependency bump.
 
 mkdocs==1.6.1
-mkdocs-material==9.5.50
+mkdocs-material==9.7.7
