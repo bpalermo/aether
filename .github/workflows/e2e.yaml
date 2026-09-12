@@ -39,7 +39,7 @@ permissions:
 
 env:
   IMAGE_REGISTRY: ghcr.io/bpalermo/aether
-  GATEWAY_API_VERSION: v1.6.1
+  GATEWAY_API_VERSION: v1.6.2
 
 jobs:
   # --- The ONLY bazel job: build the aether images once, ship as artifact.
