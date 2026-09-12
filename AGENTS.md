@@ -21,7 +21,7 @@ make format-check  # CI-friendly check (fails on drift)
 ## Toolchain
 
 - **Bazel:** 9.2.0 (via Bazelisk). Use `bazel` commands directly or via `Makefile`.
-- **Go:** 1.26.5
+- **Go:** 1.26.8
 - **Container images:** Built with `rules_img`, pushed to distroless (`gcr.io/distroless/static-debian12:nonroot`).
 - **Protobuf:** Uses `buf/validate` for validation, `protoc-gen-dynamo` for DynamoDB marshaling.
 
