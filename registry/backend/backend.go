@@ -1,9 +1,9 @@
 // Package backend is the registry backend factory: it owns the mapping from a
-// --registry-backend name ("kubernetes", "dynamodb", or "etcd") to a concrete
-// registry.Registry implementation. It is the ONLY package that links every
-// backend; consumers of the registry.Registry interface (and the agent, which
-// speaks only to the in-cluster registrar via registry/registrarclient) do not
-// transitively pull in the AWS SDK or the etcd client.
+// --registry-backend name ("kubernetes" or "etcd") to a concrete registry.Registry
+// implementation. It is the ONLY package that links every backend; consumers of
+// the registry.Registry interface (and the agent, which speaks only to the
+// in-cluster registrar via registry/registrarclient) do not transitively pull in
+// the etcd client.
 package backend
 
 import (
@@ -12,10 +12,8 @@ import (
 	"log/slog"
 
 	"aethermesh.dev/registry"
-	"aethermesh.dev/registry/internal/ddb"
 	"aethermesh.dev/registry/internal/etcd"
 	"aethermesh.dev/registry/internal/k8s"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -34,25 +32,13 @@ type Config struct {
 }
 
 // New constructs the registry.Registry implementation selected by name. The
-// caller owns the returned registry's lifecycle (Initialize/Close). The
-// dynamodb backend loads its AWS config from the standard chain (AWS_REGION
-// env, shared config, IMDS), falling back to us-east-1 so bare runs keep the
-// historical default.
-func New(ctx context.Context, log *slog.Logger, name string, cfg Config) (registry.Registry, error) {
+// caller owns the returned registry's lifecycle (Initialize/Close).
+func New(_ context.Context, log *slog.Logger, name string, cfg Config) (registry.Registry, error) {
 	switch name {
 	case "kubernetes":
 		return k8s.NewKubernetesRegistry(log, cfg.Reader, k8s.Config{
 			ClusterName: cfg.ClusterName,
 		}), nil
-	case "dynamodb":
-		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load AWS config: %w", err)
-		}
-		if awsCfg.Region == "" {
-			awsCfg.Region = "us-east-1"
-		}
-		return ddb.NewDynamoDBRegistry(log, awsCfg), nil
 	case "etcd":
 		return etcd.NewEtcdRegistry(log, etcd.Config{
 			Endpoints: cfg.EtcdEndpoints,
@@ -60,6 +46,6 @@ func New(ctx context.Context, log *slog.Logger, name string, cfg Config) (regist
 			Cluster:   cfg.ClusterName,
 		}), nil
 	default:
-		return nil, fmt.Errorf("unsupported registry backend: %s (supported: kubernetes, dynamodb, etcd)", name)
+		return nil, fmt.Errorf("unsupported registry backend: %s (supported: kubernetes, etcd)", name)
 	}
 }

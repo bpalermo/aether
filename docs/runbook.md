@@ -16,7 +16,7 @@ chart values and CLI/annotation reference, see
 |---|---|---|
 | **Bazel** via [Bazelisk](https://github.com/bazelbuild/bazelisk) | build system | The pinned version (`9.2.0`) is read from `.bazelversion`; just run `bazel …` and Bazelisk fetches it. |
 | **Go** 1.27.1 | language toolchain | Managed by `rules_go`; you rarely invoke `go` directly (use `bazel run @rules_go//go …`). |
-| **Docker** (or **Colima** on macOS) | container images + integration tests | Integration tests spin up real etcd / DynamoDB Local via testcontainers-go. |
+| **Docker** (or **Colima** on macOS) | container images + integration tests | Integration tests spin up a real etcd via testcontainers-go. |
 | **kubectl**, **Helm 3** (OCI) | deploy / e2e | |
 | **kind** | local multi-cluster e2e | Only needed for `e2e/multicluster_config.sh`. |
 

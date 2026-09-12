@@ -4,9 +4,9 @@ go_library(
     name = "constants",
     srcs = [
         "cni.go",
+        "doc.go",
         "endpoint.go",
         "namespaces.go",
-        "registry.go",
     ],
     importpath = "aethermesh.dev/common/constants",
     visibility = ["//visibility:public"],

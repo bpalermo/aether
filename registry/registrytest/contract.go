@@ -1,6 +1,6 @@
 // Package registrytest provides shared assertions every Registry backend must
-// satisfy, so the implementations (kubernetes, etcd, dynamodb, registrar) stay
-// consistent. The keying format is centralized in common/serviceref and the write
+// satisfy, so the implementations (kubernetes, etcd, registrar) stay consistent.
+// The keying format is centralized in common/serviceref and the write
 // path qualifies once in registry/cni.go; this contract guards against a backend
 // (especially a read-only one that DERIVES keys, like the kubernetes backend)
 // silently diverging to a bare or cross-namespace key.
@@ -24,7 +24,7 @@ import (
 //     same-named ServiceAccounts in different namespaces merge under one key.
 //
 // Call it from each backend's ListAllEndpoints test (the kubernetes unit test and
-// the etcd/dynamodb integration tests) so the keying can't drift.
+// the etcd integration test) so the keying can't drift.
 func RequireNamespaceQualifiedKeys(t testing.TB, services map[string][]*registryv1.ServiceEndpoint) {
 	t.Helper()
 	for key, eps := range services {

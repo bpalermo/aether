@@ -43,7 +43,7 @@ type RegistrarConfig struct {
 	// regional etcd; empty falls back to the etcd backend's default.
 	Region string
 
-	// RegistryBackend selects the registry backend ("kubernetes", "dynamodb", or "etcd")
+	// RegistryBackend selects the registry backend ("kubernetes" or "etcd")
 	RegistryBackend string
 
 	// EtcdEndpoints is the list of etcd endpoints when using the etcd backend
@@ -63,8 +63,8 @@ type RegistrarConfig struct {
 	// and records exports in the origin-partitioned registry, and materializes a
 	// ServiceImport (ClusterSetIP) + a local clusterset VIP Service for every
 	// service exported anywhere in the clusterset. Requires a registry backend
-	// with a cross-cluster plane (etcd); no-ops for kubernetes/dynamodb. Default
-	// off — adds nothing (and no ServiceExport/ServiceImport RBAC) unless enabled.
+	// with a cross-cluster plane (etcd); no-ops for kubernetes. Default off —
+	// adds nothing (and no ServiceExport/ServiceImport RBAC) unless enabled.
 	EnableMCS bool
 
 	// GRPCAddress is the address for the registrar gRPC server

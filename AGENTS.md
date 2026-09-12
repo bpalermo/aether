@@ -23,14 +23,14 @@ make format-check  # CI-friendly check (fails on drift)
 - **Bazel:** 9.2.0 (via Bazelisk). Use `bazel` commands directly or via `Makefile`.
 - **Go:** 1.27.1
 - **Container images:** Built with `rules_img`, pushed to distroless (`gcr.io/distroless/static-debian13:nonroot`).
-- **Protobuf:** Uses `buf/validate` for validation, `protoc-gen-dynamo` for DynamoDB marshaling.
+- **Protobuf:** Uses `buf/validate` for validation.
 
 ## Architecture
 
 **Binaries:**
 - `agent/cmd/agent` — Node DaemonSet. Manages xDS server (Envoy), CNI gRPC server, SPIRE bridge via `controller-runtime` Manager. Also hosts the `agent edge` and `agent proxy-supervisor` subcommands.
 - `agent/cmd/mesh-dns` — Slim standalone mesh-DNS daemon (own DaemonSet + image). Serves pods from the record snapshot the agent writes.
-- `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (Kubernetes/DynamoDB/etcd), maintains endpoint snapshot, streams to agents via gRPC.
+- `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (Kubernetes/etcd), maintains endpoint snapshot, streams to agents via gRPC.
 - `controller/cmd/controller` — In-cluster Deployment (leader-elected). Serves the validating + pod-mutating admission webhooks and the `MeshConfig`→ConfigMap reconciler.
 - `cni/cmd/cni` — CNI plugin binary (Add/Del/Check/GC/Status).
 - `cni/cmd/cni-install` — Init container that installs the CNI plugin binary and config onto the host.
@@ -49,7 +49,7 @@ make gazelle     # Regenerate BUILD.bazel
 make tidy        # Update go.mod dependencies
 ```
 
-**Integration tests:** Use `testcontainers-go` to run etcd/DynamoDB Local in Docker. Run `./bazel/configure_colima.sh` once on macOS with Colima to configure Docker socket access.
+**Integration tests:** Use `testcontainers-go` to run etcd in Docker. Run `./bazel/configure_colima.sh` once on macOS with Colima to configure Docker socket access.
 
 **Test tags:**
 - `size = "medium"` and `tags = ["integration"]` for integration tests.
@@ -58,7 +58,6 @@ make tidy        # Update go.mod dependencies
 ## Proto & Codegen
 
 - Proto files in `api/` under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`, `aether/config/v1/` (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`).
-- DynamoDB marshaling via `protoc-gen-dynamo` (suffix: `pb.dynamo.go`).
 - Run `make gazelle` after proto or import changes.
 
 ## Constraints

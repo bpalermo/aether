@@ -81,8 +81,8 @@ const changeDebounce = 200 * time.Millisecond
 // supports change notifications (registry.ChangeNotifier — the etcd backend's
 // clientv3 watch), the loop syncs at watch speed (debounced) instead of only
 // at the poll interval; the periodic poll remains a backstop for any event
-// missed during a watch re-establish. Backends without notifications (e.g.
-// DynamoDB) fall back to poll-only, unchanged.
+// missed during a watch re-establish. Backends without notifications (the
+// kubernetes backend) fall back to poll-only, unchanged.
 func (s *Syncer) Start(ctx context.Context) error {
 	s.log.InfoContext(ctx, "starting sync loop", "interval", s.syncInterval)
 

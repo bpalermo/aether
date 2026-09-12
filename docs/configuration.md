@@ -78,8 +78,8 @@ access-log/tracing policy via the MeshConfig CR.
 | `agent.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image; mirror by overriding `repository` alone. |
 | `agent.resources.{requests,limits}` | cpu `200m`, mem `64Mi` | |
 
-> The agent reaches the registry only through the registrar (gRPC) — it carries no
-> AWS credentials. AWS is used solely by the registrar's dynamodb backend.
+> The agent reaches the registry only through the registrar (gRPC) — it never
+> talks to an external registry backend and carries no backend credentials.
 
 ### `proxy` — per-node Envoy DaemonSet
 
@@ -123,14 +123,12 @@ access-log/tracing policy via the MeshConfig CR.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `registrar.registryBackend` | `kubernetes` | Backend (`--registry-backend`): `kubernetes`, `dynamodb`, or `etcd`. |
+| `registrar.registryBackend` | `kubernetes` | Backend (`--registry-backend`): `kubernetes` or `etcd`. |
 | `registrar.replicaCount` | `2` | Always 2 (exercises the multi-replica write-behind topology). |
 | `registrar.enableMCS` | `false` | Multi-Cluster Services phase 1 (018 + 006): export `ServiceExport`s and materialize `ServiceImport`s + clusterset VIPs. Requires the etcd backend + the MCS-API CRDs. |
 | `registrar.region` | `local` | Region owning this registrar's etcd partition (006); keys are `/aether/v1/regions/<region>/clusters/<clusterName>/…`. One region = one etcd. |
 | `registrar.etcd.endpoints` | `[]` | etcd client endpoints (etcd backend). |
 | `registrar.peerEtcd` | `[]` | Cross-region replication (006 Phase 2), one entry per peer region: `"<region>=<endpoint>[,<endpoint>...]"`. The leader registrar mirrors this region's own registry subtree verbatim into each peer's etcd under an **origin-heartbeat lease** (TTL ~30s): if this region dies, its mirror expires on the peers — whole-region failover cleanup with no peer-side GC. Requires the etcd backend + a non-default `region`. |
-| `registrar.aws.region` | `us-east-1` | AWS region for the dynamodb backend (IRSA; no static keys). |
-| `registrar.aws.roleArn` | `""` | Role ARN annotated onto the registrar ServiceAccount. Empty = no AWS access. |
 | `registrar.service.{port,targetPort}` | `443` / `8443` | gRPC service ports. |
 | `registrar.image.*` / `registrar.resources.*` | placeholders / cpu `100m`, mem `64Mi` | |
 

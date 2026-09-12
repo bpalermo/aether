@@ -765,7 +765,7 @@ func wireEndpointPolicies(m ctrl.Manager, snapshotCache *cache.SnapshotCache) er
 // projections peer clusters exported and materialize the imported GAMMA routes
 // into the cache (merged with local routes; local wins). Default off
 // (--import-config). No-op when the registry backend has no cross-cluster config
-// plane (kubernetes/dynamodb don't implement registry.ConfigImporter).
+// plane (kubernetes doesn't implement registry.ConfigImporter).
 func wireAuthzAndConfigImport(ctx context.Context, m ctrl.Manager, reg registry.Registry, snapshotCache *cache.SnapshotCache) {
 	if cfg.AuthzSidecar {
 		snapshotCache.SetAuthzSidecar(cfg.AuthzSidecarTimeout, cfg.AuthzSidecarFailureModeAllow)

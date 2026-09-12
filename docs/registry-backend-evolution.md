@@ -1,8 +1,9 @@
 # Registry Backend Evolution: from Kubernetes to Cloud Map to DynamoDB to etcd Watch
 
 **Status:** Current backend on talos-main = **etcd with watch-driven sync**.
-Supported backends: `kubernetes`, `dynamodb`, `etcd` (Cloud Map removed in #150).
-**Date:** 2026-06-13
+Supported backends: `kubernetes`, `etcd` (Cloud Map removed in #150, DynamoDB in
+#760).
+**Date:** 2026-06-13 (DynamoDB removal appended 2026-09-12)
 
 This document records *why* the registry backend evolved the way it did. The
 short version: every backend choice was really a choice about **how endpoint
@@ -69,7 +70,7 @@ wasn't worth surrendering that control. Post-removal cleanup landed in #151.
 immediate control over endpoint state transitions** — discovery freshness is a
 correctness property here, not a convenience.
 
-## 3. DynamoDB — managed KV with snapshot-first resilience
+## 3. DynamoDB — managed KV with snapshot-first resilience, then dropped (#760)
 
 DynamoDB replaced Cloud Map: a managed key-value store where *we* own the
 health/state semantics (the value is our `ServiceEndpoint` proto, written and
@@ -120,11 +121,47 @@ it still polled), then implemented the watch: the etcd backend now satisfies
 `registry.ChangeNotifier` via `clientv3.Watch` over the key prefix, and the
 registrar `Syncer` reacts to change signals (200 ms debounce to coalesce roll
 bursts) **with the 5 s poll retained as a backstop** for the rare gap during a
-watch re-establish (compaction, leader change). DynamoDB is unchanged
-(poll-only).
+watch re-establish (compaction, leader change). DynamoDB stayed poll-only until
+it was removed (see below).
 
 Result: cross-replica propagation drops from ~5 s to sub-second, and the
 last-old-exit window collapses.
+
+## 5. DynamoDB removed (2026-09-12, #760)
+
+DynamoDB was removed the same way Cloud Map was: not because it was broken, but
+because the propagation requirement had moved past it and nobody ran it.
+
+- **It only ever implemented the base interface.** Everything the registrar
+  gained after June is etcd-only: watch-driven sync (`registry.ChangeNotifier`,
+  #174 — the fix that closed the last-old-exit skew above), the cross-cluster
+  config plane (`ConfigExporter` / `ConfigImporter`, proposal 026),
+  `ServiceExporter` for MCS, and the multi-region mirror (proposal 006). On
+  DynamoDB the registrar fell back to the 5 s poll, and config propagation did
+  not work at all — it no longer met the propagation-time requirement this
+  document is about.
+- **The multi-region case had already been decided against it.** The 2026-06-13
+  directive (see *Multi-region: etcd, not DynamoDB global tables* below) ruled
+  out global tables, which was DynamoDB's remaining distinguishing argument.
+- **Nobody ran it.** talos-main has been on etcd since rev 47; the chart default
+  is the zero-infra `kubernetes` backend.
+- **It was the single largest block of third-party code in the module.** Removing
+  it deleted the AWS SDK (5 direct + ~14 indirect modules), smithy-go,
+  `protoc-gen-dynamo` (a protoc-gen-star fork shipping legacy
+  `go_default_library` BUILD files, and one of the two toolchains that capped our
+  protos at edition 2023), and the testcontainers DynamoDB Local integration
+  test.
+
+Out of scope of the removal: the registrar's write-behind pending-shield
+("flushed AND observed"), which exists because DynamoDB reads were eventually
+consistent — with only linearizable backends left it may be simplifiable, but
+that is a behaviour change. Retiring the `AetherService` table and the #257 IAM
+role is out-of-repo cleanup.
+
+**Lesson carried forward (matching #150):** a backend earns its place by the
+propagation channel it gives the registrar, not by its storage properties. A
+backend that cannot carry the change plane is carrying capability debt, not
+optionality.
 
 ## Why agents still go through the registrar (not direct to etcd)
 
@@ -222,7 +259,7 @@ it has since **shipped**: the replicator lives in
 `e2e/multicluster_replicator.sh`.
 
 **Net:** etcd is the substrate single- *and* multi-region. DynamoDB global
-tables are an alternative, not a requirement.
+tables were an alternative, not a requirement — and were never adopted.
 
 ## Empirical validation
 
@@ -244,19 +281,17 @@ cross-replica propagation eliminated even those.
 ## Where this leaves us
 
 - **Backend = a propagation-channel decision.** Cloud Map failed on *control*
-  (async health race), DynamoDB succeeds on *durability/managed/multi-region*
-  but its CDC can't close the skew, etcd's native `Watch` closes it directly.
-- **Current:** talos-main on etcd + watch (poll backstop); DynamoDB remains a
-  fully-supported, e2e-validated managed alternative; Kubernetes is the
-  zero-dependency option.
+  (async health race), DynamoDB succeeded on *durability/managed/multi-region*
+  but its CDC could not close the skew, etcd's native `Watch` closes it directly.
+- **Current:** talos-main on etcd + watch (poll backstop); Kubernetes is the
+  zero-dependency option. Those two are the only supported backends.
 - **Guidance:** **etcd is the chosen substrate single- and multi-region** —
   single-region/intra-cluster via `Watch`; multi-region via per-region etcd +
   asynchronous, origin-partitioned, lease-managed cross-region replication
-  (eventual consistency cross-region, accepted). DynamoDB is supported but is
-  *not* required by the multi-region case — we do not adopt a managed store
-  solely for global tables. Agents always go through the registrar, never the
-  store directly.
+  (eventual consistency cross-region, accepted). Agents always go through the
+  registrar, never the store directly.
 - **Open items:** `peer-watch` (registrar↔registrar) as the backend-agnostic
-  intra-cluster skew close — lower priority for etcd (Watch already gets it to
-  zero), relevant only if DynamoDB is the production substrate. (Proposal 006 —
-  multi-region etcd federation, key schema + replicator — is complete.)
+  intra-cluster skew close — lowest priority now that every supported backend
+  either has a native watch (etcd) or rides the API server's (kubernetes).
+  (Proposal 006 — multi-region etcd federation, key schema + replicator — is
+  complete.)
