@@ -314,7 +314,7 @@ spec:
       serviceAccountName: client
       containers:
         - name: curl
-          image: curlimages/curl:8.11.1
+          image: curlimages/curl:8.22.0
           command: ["sleep", "infinity"]
 YAML
 	kubectl --context "kind-$CLUSTER_B" -n "$TEST_NS" rollout status deploy/echo --timeout=120s >/dev/null || true

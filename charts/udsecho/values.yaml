@@ -35,4 +35,4 @@ client:
   enabled: true
   # Seconds between probe rounds (one request per service per round).
   interval: 1
-  image: curlimages/curl:8.11.1
+  image: curlimages/curl:8.22.0

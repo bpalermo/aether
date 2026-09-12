@@ -93,7 +93,7 @@ make push-all                # Push all images
 - `ServerCallback` interface (with `PreListen`) allows servers to do setup (e.g., generate initial xDS snapshot, query node metadata) before accepting connections.
 - Proto files use `buf/validate` annotations and `protoc-gen-dynamo` for DynamoDB attribute mapping.
 - Gazelle manages BUILD.bazel files. Run `make gazelle` after modifying Go imports or adding files.
-- Container images use distroless base (`gcr.io/distroless/static-debian12:nonroot`) and multi-arch builds (amd64/arm64).
+- Container images use distroless base (`gcr.io/distroless/static-debian13:nonroot`) and multi-arch builds (amd64/arm64).
 - Formatting and linting use `aspect_rules_lint`. Formatters (gofumpt, buildifier, shfmt, buf) are configured in `bazel/format/BUILD.bazel`. Lint aspects (buf, buildifier, shellcheck) are defined in `bazel/lint/linters.bzl`. Use `--config=lint` to run lints, `--config=ci` to fail on violations.
 
 ## Testing
