@@ -1,6 +1,14 @@
 # Use prebuilt protoc binary instead of compiling from source
 build --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
 
+# aspect_rules_lint >= 2.9.0 depends on @aspect_tools_telemetry, whose repository
+# rule curls a usage report to telemetry.aspect.build on the first evaluation
+# after the notice is acknowledged. Opt out: the report is an un-hermetic
+# outbound request from a repo rule, and it is off for everyone (local and CI)
+# rather than per-developer. `-all` is the ruleset's documented set-semantics
+# opt-out; DO_NOT_TRACK=1 is equivalent.
+common --repo_env=ASPECT_TOOLS_TELEMETRY=-all
+
 # Configure workspace status script
 build --workspace_status_command=./bazel/workspace_status.sh
 
