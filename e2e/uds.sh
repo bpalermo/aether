@@ -302,7 +302,7 @@ spec:
       serviceAccountName: client
       containers:
         - name: curl
-          image: curlimages/curl:8.11.1
+          image: curlimages/curl:8.22.0
           command: ["sleep", "infinity"]
 YAML
 	# (b) The service-scoped declaration for uds-cr-echo. targetRef names the mesh
