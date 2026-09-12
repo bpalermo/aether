@@ -38,7 +38,7 @@ TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
 # The pod-local outbound listener port every mesh client dials (post-030).
 OUTBOUND_PORT="18081"
-GWAPI_VERSION="v1.6.1"
+GWAPI_VERSION="v1.6.2"
 IMAGES=(agent mesh-dns cni-install registrar controller udsecho)
 # The declared socket, as "<volume>/<file>". SHORT by necessity: the resolved
 # host path is <kubelet-pods-dir>/<36-byte UID>/volumes/kubernetes.io~empty-dir/
