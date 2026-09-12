@@ -233,15 +233,22 @@ use_repo(
 # build if the reference it expects to rewrite is gone. aethermesh.dev is a .dev
 # domain (HSTS-preloaded) and issues zero third-party requests.
 #
-# MERMAID_VERSION = "11.16.0"
+# The MAJOR is not ours to choose: Material asks for `mermaid@11`, so this must
+# stay on the newest 11.x. mermaid 12 is a breaking release (ELK as the default
+# layout engine, a new default theme, ES2024/Safari 17.4 floor) and serving it
+# behind Material's `@11` URL would silently re-lay out and recolour every
+# diagram. Bump the major only when a Material release changes that URL — and
+# change CDN_REWRITES in website/build_site.py in the same commit.
+#
+# MERMAID_VERSION = "11.17.2"
 # ---------------------------------------------------------------------------
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
 http_file(
     name = "mermaid_js",
     downloaded_file_path = "mermaid.min.js",
-    sha256 = "74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b",
-    urls = ["https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"],
+    sha256 = "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8",
+    urls = ["https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js"],
 )
 
 # Hermetic CPython for the site build. Nothing else in the repo is Python, so
