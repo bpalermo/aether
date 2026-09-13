@@ -46,8 +46,16 @@ make format-check  # CI-friendly check (fails on drift)
 **After adding/modifying Go files:**
 ```bash
 make gazelle     # Regenerate BUILD.bazel
-make tidy        # Update go.mod dependencies
+make tidy        # bazel mod tidy — sync MODULE.bazel's use_repo with go.mod
+make deps-audit  # go.mod/go.sum hygiene; also a required CI job
 ```
+
+**Dependencies:** add with `bazel run @rules_go//go -- get <module>@<version>`,
+remove with `go mod edit -droprequire=<module>` (never `go get <module>@none`:
+`@none` downgrades everything that requires the module). Then `make tidy` +
+`make gazelle`. An unimported require that only pins a CVE-clean version is
+reclassified `// indirect`, never deleted. See `docs/runbook.md` § *Go dependency
+hygiene*.
 
 **Integration tests:** Use `testcontainers-go` to run etcd in Docker. Run `./bazel/configure_colima.sh` once on macOS with Colima to configure Docker socket access.
 
@@ -64,6 +72,10 @@ make tidy        # Update go.mod dependencies
 
 - Never modify production code when asked to add or fix tests only.
 - Never remove existing test cases unless explicitly asked.
+- Never run `go mod tidy` (or `go mod tidy -e`): the generated proto packages
+  `aethermesh.dev/api/aether/*/v1` exist only as Bazel outputs, so it cannot
+  resolve them, and `-e` strips modules that only generated code or a BUILD file
+  needs. Use `make tidy` + `make deps-audit`.
 - Formatting uses `gofumpt`, `buildifier`, `shfmt`, `buf`.
 - Lint violations fail with `--config=lint` (aspect-based).
 - SPIRE integration enabled by default; use `--spire-enabled=false` to disable.

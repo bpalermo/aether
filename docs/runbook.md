@@ -106,6 +106,62 @@ make gazelle
 make tidy               # bazel mod tidy
 ```
 
+### Go dependency hygiene
+
+```bash
+make deps-audit         # scripts/go-deps-audit.sh — also a required CI job
+```
+
+**`go mod tidy` is forbidden here, and `go mod tidy -e` is worse than useless.**
+The generated proto packages `aethermesh.dev/api/aether/{agent,cni,config,registrar,registry}/v1`
+exist only as Bazel outputs — there are no `.go` files for them in the tree — so
+the Go tool cannot resolve a single import of them and fails with *"no matching
+versions for query latest"*. The `-e` escape hatch does not fix that: it just
+keeps going and strips every module that only generated code or a BUILD file
+needs, which then breaks the `go_deps.gazelle_override`s and leaves `bazel mod
+tidy` failing with *"Some gazelle_overrides did not target a Go module with a
+matching path"*. Nothing that `go mod tidy -e` prints about this module is
+trustworthy.
+
+So `make deps-audit` does the job instead, from the module graph (`go list -m
+all`, which works from `go.mod` alone) and the Bazel graph (`@repo//`
+references in BUILD/.bzl files), and CI runs it on every PR. It reports:
+
+1. **stale `go.sum` modules** — modules no longer anywhere in the module graph.
+   Nothing prunes these automatically (`bazel mod tidy` does not touch go.sum),
+   so they accumulate after every removal. Fix: delete their lines, then
+   `bazel build //... //test/e2e:e2e_test` — gazelle's `go_deps` verifies every
+   module it fetches against `go.sum`, so an over-eager deletion fails loudly and
+   `bazel run @rules_go//go -- mod download <module>` puts it back.
+2. **unused direct requires** — no Go import, no BUILD/.bzl reference, no `tool`
+   directive.
+3. **direct requires with no Go import** that are only reachable from Bazel and
+   are not annotated.
+
+Two rules follow from that, and both matter:
+
+* **Reclassify, don't drop.** Most unimported requires (`golang.org/x/crypto`,
+  `github.com/go-openapi/swag`, `github.com/moby/go-archive`, …) exist to force a
+  CVE-clean version through MVS. Move them into the `// indirect` block — the pin,
+  and therefore the selected version, survives; only the directness changes.
+  Deleting the line silently lets the vulnerable version back in. Note that `go
+  get` marks whatever it fetched as direct, so a floor bump needs its `// indirect`
+  marker put back by hand.
+* **Annotate the Bazel-only tools.** A module that is genuinely only named by a
+  BUILD/.bzl file (`buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go`,
+  from the `gazelle:resolve` directive in `//BUILD.bazel`;
+  `github.com/uudashr/gocognit`, the lint aspect's binary) stays **direct** and
+  carries a `// bazel-only:` comment, so the next reader knows why it looks
+  unused. `//bazel/protodoc` is a real Go package, so protoc-gen-doc and protokit
+  are ordinary imports, not Bazel-only.
+
+To actually remove a module, use `go mod edit -droprequire`, not `go get
+<mod>@none`: `@none` *downgrades* everything that requires the module, which is
+how removing the unused `go.etcd.io/etcd/server/v3` once dragged
+controller-runtime from 0.25.0 back to 0.9.7 (`k8s.io/apiextensions-apiserver`
+requires it). Delete any matching `go_deps.gazelle_override` in the same change,
+then `make tidy` and `make gazelle`.
+
 ---
 
 ## 5. Container images
