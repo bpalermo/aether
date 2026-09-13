@@ -131,6 +131,7 @@ fi
 
 unused=0
 unannotated=0
+listed=0
 echo
 echo "==> direct requires with no Go import"
 while IFS=$'\t' read -r mod kind note; do
@@ -138,6 +139,7 @@ while IFS=$'\t' read -r mod kind note; do
 	if is_imported "$mod"; then
 		continue
 	fi
+	listed=$((listed + 1))
 	if is_tool "$mod"; then
 		echo "  ${mod} — tool directive (kept direct by the go tool)"
 		continue
@@ -154,7 +156,7 @@ while IFS=$'\t' read -r mod kind note; do
 	unused=$((unused + 1))
 	echo "::error file=go.mod::${mod} is a direct require that nothing uses: no Go import, no BUILD/.bzl reference, no tool directive. If it only exists to force a CVE-clean version through MVS, move it to the indirect block (reclassify, do not drop); otherwise remove it with 'bazel run @rules_go//go -- get ${mod}@none'."
 done <"$tmp/requires.tsv"
-[ "$unused" -ne 0 ] || [ "$unannotated" -ne 0 ] || echo "  (every direct require is imported, a tool, or annotated bazel-only)"
+[ "$listed" -ne 0 ] || echo "  none (every direct require is imported by a .go file)"
 
 # Indirect requires are not audited for imports: an indirect require with no
 # import of its own is the normal case (it is either a transitive dependency or
