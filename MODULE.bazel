@@ -92,20 +92,6 @@ go_deps.gazelle_override(
     ],
     path = "go.etcd.io/etcd/api/v3",
 )
-go_deps.gazelle_override(
-    build_file_generation = "on",
-    directives = [
-        "gazelle:proto disable",
-    ],
-    path = "go.etcd.io/etcd/server/v3",
-)
-go_deps.gazelle_override(
-    build_file_generation = "on",
-    directives = [
-        "gazelle:proto disable",
-    ],
-    path = "go.etcd.io/raft/v3",
-)
 
 # spire-api-sdk has proto files with pre-generated Go code
 go_deps.gazelle_override(
@@ -159,7 +145,6 @@ use_repo(
     "in_gopkg_natefinch_lumberjack_v2",
     "io_etcd_go_etcd_api_v3",
     "io_etcd_go_etcd_client_v3",
-    "io_etcd_go_etcd_server_v3",
     "io_k8s_api",
     "io_k8s_apimachinery",
     "io_k8s_client_go",
