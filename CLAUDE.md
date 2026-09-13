@@ -28,8 +28,14 @@ make build-registrar         # or: bazel build //registrar/cmd/registrar/...
 # Regenerate BUILD.bazel files after adding/changing Go files
 make gazelle                 # or: bazel run //:gazelle
 
-# Tidy module dependencies
+# Tidy module dependencies (syncs MODULE.bazel's use_repo with go.mod)
 make tidy                    # or: bazel mod tidy
+
+# Audit go.mod/go.sum (stale go.sum modules, unused direct requires). NEVER run
+# `go mod tidy`: the generated proto packages are Bazel-only outputs, so it
+# fails on every import of them and `-e` strips what only BUILD files need.
+# See docs/runbook.md, "Go dependency hygiene".
+make deps-audit              # or: scripts/go-deps-audit.sh
 
 # Format code (Go, protobuf, Starlark, shell)
 make format                  # or: bazel run //:format

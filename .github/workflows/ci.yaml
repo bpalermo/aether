@@ -107,6 +107,31 @@ jobs:
       - name: Require a Chart.yaml version bump for chart changes
         run: scripts/check-chart-version-bump.sh "${{ github.event.pull_request.base.sha }}"
 
+  deps-audit:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true'
+    # go.mod/go.sum must carry no residue: no go.sum module outside the build
+    # list, no direct require that nothing imports, no unannotated Bazel-only
+    # tool. `go mod tidy` cannot police this here (the generated proto packages
+    # exist only as Bazel outputs, so it fails on every import of them), so the
+    # audit is driven from the module graph + the Bazel graph instead. Cheap by
+    # design: `go list -m all` plus greps, no bazel build.
+    runs-on: ubuntu-latest
+    env:
+      # The go tool runs as a subprocess of `bazel run`, so --repo_env does not
+      # reach it; set the proxy in the environment.
+      GOPROXY: https://proxy.golang.org,direct
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Audit the Go dependency surface
+        run: scripts/go-deps-audit.sh
+
   envoy-api-parity:
     needs: changes
     # The agent's xDS bindings (go.mod: go-control-plane/envoy) must track the
@@ -388,7 +413,7 @@ jobs:
   # the main branch ruleset.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, envoy-api-parity, proxy-pin, test, integration, e2e]
+    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, test, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled

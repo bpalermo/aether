@@ -6,6 +6,10 @@ gazelle:
 tidy:
 	@bazel mod tidy
 
+.PHONY: deps-audit
+deps-audit:
+	@scripts/go-deps-audit.sh
+
 .PHONY: build
 build:
 	@bazel build //...
