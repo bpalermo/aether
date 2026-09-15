@@ -368,25 +368,63 @@ func TestReplicator_LeaseHandoffKeepsMirrorAlive(t *testing.T) {
 	peerCli := newClient(t, peerEndpoint)
 
 	ownPrefix := root(t) + "/regions/region-a/clusters/c1"
-	_, err := localCli.Put(ctx, ownPrefix+"/k1", "v1")
+	key := ownPrefix + "/k1"
+	_, err := localCli.Put(ctx, key, "v1")
 	require.NoError(t, err)
 
 	stop := startReplicator(t, localCli, ownPrefix, 10)
 	require.Eventually(t, func() bool {
-		return peerValue(t, peerCli, ownPrefix+"/k1") == "v1"
+		return peerValue(t, peerCli, key) == "v1"
 	}, 15*time.Second, 50*time.Millisecond, "initial sync did not converge")
 
 	// Leader handoff: the successor re-puts the (value-unchanged) key under
 	// its fresh lease. If the sync skipped it on value equality alone, it
 	// would stay on the predecessor's lease and expire below.
+	predLease := peerLeaseOf(t, peerCli, key)
+	require.NotZero(t, predLease, "mirrored key is not attached to a lease")
 	stop()
+
+	// The window this test has to watch is the predecessor lease's REMAINING
+	// TTL, not its nominal one: clientv3 refreshes at TTL/3, so at this moment
+	// it holds somewhere between 2/3 and all of the TTL and the test does not
+	// control which. Read it from the peer instead of assuming a phase, so the
+	// loop below is guaranteed to span the expiry rather than usually spanning
+	// it.
+	ttlResp, err := peerCli.TimeToLive(ctx, predLease)
+	require.NoError(t, err)
+	require.Positive(t, ttlResp.TTL, "predecessor lease already gone before the handoff")
+	predExpiry := time.Now().Add(time.Duration(ttlResp.TTL) * time.Second)
+
 	startReplicator(t, localCli, ownPrefix, 10)
 
-	// Watch through the predecessor's TTL expiry (plus slack): the mirrored
-	// key must never disappear across the handoff.
-	deadline := time.Now().Add(14 * time.Second)
-	for time.Now().Before(deadline) {
-		require.Equal(t, "v1", peerValue(t, peerCli, ownPrefix+"/k1"), "mirror dropped during leader handoff")
+	// Watch through the predecessor's measured expiry (plus slack): the
+	// mirrored key must never disappear across the handoff, and it must end up
+	// on the successor's lease rather than riding the predecessor's out.
+	hopped := false
+	for deadline := predExpiry.Add(3 * time.Second); time.Now().Before(deadline); {
+		resp, getErr := peerCli.Get(ctx, key)
+		require.NoError(t, getErr)
+		require.Len(t, resp.Kvs, 1, "mirror dropped during leader handoff")
+		require.Equal(t, "v1", string(resp.Kvs[0].Value))
+		if clientv3.LeaseID(resp.Kvs[0].Lease) != predLease {
+			hopped = true
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	assert.True(t, hopped, "successor never re-attached the mirror to a fresh lease")
+
+	// And prove the window really did cross the expiry, so a future change to
+	// the timing cannot turn this into a test that passes by stopping early.
+	ttlResp, err = peerCli.TimeToLive(ctx, predLease)
+	require.NoError(t, err)
+	require.EqualValues(t, -1, ttlResp.TTL, "predecessor lease had not expired; the handoff was never watched through it")
+}
+
+// peerLeaseOf returns the lease a mirrored key is attached to on the peer.
+func peerLeaseOf(t *testing.T, peerCli *clientv3.Client, key string) clientv3.LeaseID {
+	t.Helper()
+	resp, err := peerCli.Get(context.Background(), key)
+	require.NoError(t, err)
+	require.Len(t, resp.Kvs, 1)
+	return clientv3.LeaseID(resp.Kvs[0].Lease)
 }
