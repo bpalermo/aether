@@ -52,7 +52,13 @@ bazel test //:image_test
 > ```
 >
 > Everything from `bazel build --nobuild //:envoy` onward is validated by
-> `.github/workflows/proxy.yml`, which builds both arches on BuildBuddy RBE.
+> `.github/workflows/proxy.yml`, the PR check, which builds both arches on
+> BuildBuddy RBE. The release path is a separate workflow,
+> `.github/workflows/proxy-release.yml`: on a push to `main` touching `proxy/**`
+> it builds and pushes each arch by digest, assembles the multi-arch manifest
+> tagged with the commit SHA, and opens the chart pin PR that moves
+> `charts/aether/values.yaml`'s `proxy.image` onto it (#703/#727). Never push a
+> proxy image or edit that pin by hand.
 >
 > `MODULE.bazel.lock` is committed as a dev convenience. CI runs with the default
 > `--lockfile_mode=update`, **not** `error`: the `envoy_toolchains_extension`

@@ -1,9 +1,18 @@
-// Package meshdns is the node agent's in-process DNS resolver (Istio-style, proposal
-// 018 mesh-global FQDN). Unlike Envoy's dns_filter — which broke c-ares resolvers
-// (curl/Alpine), breaking even non-mesh resolution because it mishandled forwarded
-// queries — this is a real DNS server (miekg/dns): it answers <svc>.<meshDomain> from
-// the registry-fed records and forwards everything else to the upstream resolver
-// (kube-dns), speaking the full protocol correctly.
+// Package meshdns is Aether's DNS resolver (Istio-style, proposal 018 mesh-global
+// FQDN). Unlike Envoy's dns_filter — which broke c-ares resolvers (curl/Alpine),
+// breaking even non-mesh resolution because it mishandled forwarded queries — this
+// is a real DNS server (miekg/dns): it answers <svc>.<ns>.<meshDomain> (the
+// namespace-qualified shape of proposal 020; the flat <svc>.<meshDomain> is
+// malformed and answered NODATA) from the registry-fed records, speaking the full
+// protocol correctly.
+//
+// Two processes use it. The node agent runs it in-process to build and publish the
+// record table, which it persists to the host-local snapshot file. The standalone
+// mesh-dns daemon (agent/cmd/mesh-dns, its own DaemonSet and image since #578/#583)
+// is the resolver pods actually talk to: it serves from that snapshot and owns
+// upstream forwarding (everything that is not a mesh name goes to the configured
+// upstream resolvers, e.g. kube-dns). Forwarding is the daemon's job, not the
+// agent's — see docs/configuration.md.
 //
 // It listens on a single HOST-local address (the agent is host-network, HOST_IP:18054)
 // — no setns, no per-pod sockets. The CNI DNATs each pod's outbound :53 straight to
