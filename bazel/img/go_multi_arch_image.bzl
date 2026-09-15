@@ -66,15 +66,21 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
         compress = "zstd",  # Use zstd compression (optional, uses global default otherwise)
     )
 
-    image_layer(
-        name = "additional_layer",
-        srcs = image_tars_layer,
-        default_metadata = file_metadata(
-            mode = "0755",
-        ),
-        include_runfiles = False,
-        compress = "zstd",  # Use zstd compression (optional, uses global default otherwise)
-    )
+    # Only declared when there is something to put in it. Declared
+    # unconditionally, it left an empty `:additional_layer` in every image
+    # package that passes no `tars_layer` — four targets nothing referenced
+    # (image_manifest below already gates on `image_tars_layer`), which
+    # `bazel build //...` still had to build.
+    if image_tars_layer:
+        image_layer(
+            name = "additional_layer",
+            srcs = image_tars_layer,
+            default_metadata = file_metadata(
+                mode = "0755",
+            ),
+            include_runfiles = False,
+            compress = "zstd",  # Use zstd compression (optional, uses global default otherwise)
+        )
 
     image_manifest(
         name = "image_manifest",
