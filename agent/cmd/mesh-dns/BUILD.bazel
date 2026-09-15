@@ -11,6 +11,7 @@ go_library(
         "//agent/internal/meshdns",
         "//common/constants/mesh",
         "//common/log",
+        "//common/signals",
         "@com_github_fsnotify_fsnotify//:fsnotify",
         "@com_github_spf13_cobra//:cobra",
     ],
