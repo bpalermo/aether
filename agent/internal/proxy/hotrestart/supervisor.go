@@ -351,6 +351,13 @@ func (lp *restartLoop) handleChildExit(exit childExit) (retErr error, done bool)
 	return retErr, done
 }
 
+// shutdownProbeTimeout bounds the epoch-identity probe that selects the
+// shutdown branch. The probe runs on a context DETACHED from the caller's (see
+// handleShutdown), so it cannot inherit a deadline and needs its own:
+// adminServerInfo applies a readyPollInterval timeout inside it, and this is
+// the outer ceiling covering the dial and one retry-free round trip.
+const shutdownProbeTimeout = 2 * readyPollInterval
+
 // handleShutdown implements the ctx.Done case of the Run select: if this
 // supervisor is in the mid-handoff window (Envoy not LIVE at our epoch), it
 // waits for the successor's parent-shutdown protocol to terminate our Envoy
@@ -362,14 +369,30 @@ func (s *Supervisor) handleShutdown(ctx context.Context) error {
 	// it turns NotReady, which is exactly that window. Do NOT signal Envoy
 	// (the successor still needs its hot-restart parent alive, even before
 	// reaching LIVE — killing it aborts the successor with errno 111): wait
-	// for the successor's parent-shutdown protocol to terminate it, with a
-	// deadline fallback. The check cannot rely on the successor having
-	// published its epoch, since it does so only once LIVE.
+	// for the successor's parent-shutdown protocol to terminate it. The check
+	// cannot rely on the successor having published its epoch, since it does
+	// so only once LIVE.
 	//
+	// The probe MUST run on a context detached from ctx. handleShutdown has
+	// exactly one call site — `case <-lp.ctx.Done()` in restartLoop.run — so
+	// ctx is ALREADY cancelled by the time we get here. context.WithTimeout on
+	// an already-cancelled parent yields an already-cancelled child, and
+	// http.Client.Do then fails with "context canceled" in microseconds
+	// WITHOUT OPENING A SOCKET: the branch below read "not live at our epoch"
+	// on every SIGTERM regardless of Envoy's actual state, so the
+	// wait-for-successor path was taken unconditionally — including when no
+	// successor existed and Envoy was never drained (issue #771; measured
+	// on-cluster as exactly one server_info/unreachable per pod lifetime, at
+	// its SIGTERM, while server_info/live was still incrementing).
+	// Same trap, same idiom as common/telemetry/setup/lifecycle.go's
+	// DetachedTimeout (issue #662): keep the values, drop the cancellation.
+	probeCtx, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), shutdownProbeTimeout)
+	defer cancelProbe()
+
 	// StateDir is always set in production (the supervisor only runs in the
 	// cross-pod configuration); the guard keeps unit-test supervisors that
 	// run without coordination state on the plain shutdown path.
-	if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
+	if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(probeCtx, s.currentEpoch()) {
 		s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy")
 		s.awaitProtocolTermination()
 		return nil

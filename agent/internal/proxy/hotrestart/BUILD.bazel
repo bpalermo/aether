@@ -32,6 +32,7 @@ go_test(
         "coordination_test.go",
         "crash_test.go",
         "metrics_test.go",
+        "shutdown_test.go",
         "supervisor_test.go",
     ],
     # The chart's proxy.hotRestart values are an input to the admin re-verify
