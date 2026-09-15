@@ -13,6 +13,7 @@ import (
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -145,16 +146,53 @@ func (r *TaintRemover) Reconcile(ctx context.Context, req reconcile.Request) (re
 		return reconcile.Result{RequeueAfter: notReadyRequeue}, nil
 	}
 
-	base := node.DeepCopy()
-	if !removeTaint(node, aetherlabels.TaintAgentNotReady) {
-		return reconcile.Result{}, nil
-	}
-	if err := r.Client.Patch(ctx, node, client.MergeFrom(base)); err != nil {
+	removed, err := r.dropTaint(ctx)
+	if err != nil {
 		r.Log.ErrorContext(ctx, "failed to remove startup taint (best-effort, will retry)", "node", r.NodeName, "error", err)
 		return reconcile.Result{}, err
 	}
-	r.Log.InfoContext(ctx, "removed startup taint", "node", r.NodeName, "taint", aetherlabels.TaintAgentNotReady)
+	if removed {
+		r.Log.InfoContext(ctx, "removed startup taint", "node", r.NodeName, "taint", aetherlabels.TaintAgentNotReady)
+	}
 	return reconcile.Result{}, nil
+}
+
+// dropTaint removes the startup taint under an OPTIMISTIC LOCK, re-reading the
+// node and retrying on 409 Conflict. It reports whether it actually removed
+// anything (false = the taint was already gone by the time we wrote).
+//
+// The optimistic lock is not optional here. `spec.taints` has no patch-merge
+// key, so a merge patch emits the WHOLE array: a plain client.MergeFrom sends
+// the taint list this reconciler read, and any taint added between the Get and
+// the Patch — by the controller's guard, a drain, node-problem-detector — is
+// silently reverted by a writer that never knew about it. With
+// resourceVersion in the patch, that write is rejected as a conflict and this
+// re-reads instead of clobbering (#772, S37; the residual of the #743 fight).
+//
+// Semantics are unchanged: this still only ever removes the aether startup
+// taint, and only after the readiness gate above said this node can mesh a pod.
+func (r *TaintRemover) dropTaint(ctx context.Context) (bool, error) {
+	removed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		removed = false
+		node := &corev1.Node{}
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: r.NodeName}, node); err != nil {
+			return err
+		}
+		base := node.DeepCopy()
+		if !removeTaint(node, aetherlabels.TaintAgentNotReady) {
+			return nil
+		}
+		if err := r.Client.Patch(ctx, node, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return removed, nil
 }
 
 // socketServing reports whether the CNI server's Unix socket exists (it's
