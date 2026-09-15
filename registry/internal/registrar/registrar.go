@@ -368,9 +368,24 @@ func (r *RegistrarRegistry) UnregisterEndpoints(ctx context.Context, serviceName
 
 // ListEndpoints returns endpoints for a service from the local cache.
 // Falls back to the Registrar RPC if the cache is empty.
+//
+// OWNERSHIP CONTRACT: the returned slice belongs to the caller — it is a copy,
+// safe to append to, reorder, and range on any goroutine. The
+// *registryv1.ServiceEndpoint elements are SHARED with the cache and with
+// every other reader, so they must be treated as immutable; a caller that
+// needs to change one clones it first (proto.Clone).
+//
+// The copy is not optional. The watch goroutine mutates a service's slice in
+// place — upsertLocked overwrites eps[i], removeLocked left-shifts the tail
+// over the hole — so a slice handed out by reference is a backing array being
+// rewritten under the reader. That corrupts EDS content (an endpoint seen
+// twice, another skipped), not merely the race detector (#772, S2).
 func (r *RegistrarRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.mu.RLock()
 	eps, ok := r.cache[protocol][service]
+	if ok {
+		eps = slices.Clone(eps)
+	}
 	r.mu.RUnlock()
 
 	if ok {
@@ -383,6 +398,11 @@ func (r *RegistrarRegistry) ListEndpoints(ctx context.Context, service string, p
 
 // ListAllEndpoints returns all endpoints from the local cache.
 // Falls back to the Registrar RPC if the cache is empty.
+//
+// Same ownership contract as ListEndpoints: the map AND every slice in it are
+// the caller's copies; the *registryv1.ServiceEndpoint elements are shared and
+// immutable. Copying the map alone is not enough — its values would alias the
+// cache's slices, which the watch goroutine rewrites in place (#772, S2).
 func (r *RegistrarRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	// Serve from the watch-fed cache once it holds a complete world view (first
 	// SNAPSHOT_COMPLETE). Gating on readiness — not on a non-empty partition —
@@ -394,7 +414,7 @@ func (r *RegistrarRegistry) ListAllEndpoints(ctx context.Context, protocol regis
 		byName := r.cache[protocol]
 		result := make(map[string][]*registryv1.ServiceEndpoint, len(byName))
 		for k, v := range byName {
-			result[k] = v
+			result[k] = slices.Clone(v)
 		}
 		r.mu.RUnlock()
 		return result, nil
@@ -909,6 +929,10 @@ func (r *RegistrarRegistry) applyEvent(ctx context.Context, event *registrarv1.W
 
 // upsertLocked adds or updates an endpoint in the protocol's partition of the
 // cache. Caller must hold mu.
+//
+// It rewrites the slice IN PLACE (eps[i] = ep) rather than reallocating, which
+// is why ListEndpoints/ListAllEndpoints hand out copies: an aliased slice would
+// have its backing array rewritten under a reader ranging it (#772, S2).
 func (r *RegistrarRegistry) upsertLocked(protocol registryv1.Service_Protocol, svcName string, ep *registryv1.ServiceEndpoint) {
 	byName := r.cache[protocol]
 	if byName == nil {
@@ -927,6 +951,9 @@ func (r *RegistrarRegistry) upsertLocked(protocol registryv1.Service_Protocol, s
 
 // removeLocked removes an endpoint by IP from the protocol's partition of the
 // cache. Caller must hold mu.
+//
+// The removal left-shifts the tail over the hole IN PLACE — see upsertLocked
+// for why readers must not be given the cache's own slice.
 func (r *RegistrarRegistry) removeLocked(protocol registryv1.Service_Protocol, svcName string, ip string) {
 	byName := r.cache[protocol]
 	eps := byName[svcName]

@@ -27,6 +27,7 @@ go_library(
 go_test(
     name = "registrar_test",
     srcs = [
+        "cache_alias_test.go",
         "metrics_test.go",
         "registrar_test.go",
         "watch_drain_test.go",
