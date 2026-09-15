@@ -1,0 +1,1 @@
+# Helm test helpers. See defs.bzl; the rule itself is loaded from //charts/*.

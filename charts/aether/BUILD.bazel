@@ -1,4 +1,5 @@
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+load("//bazel/helm:defs.bzl", "helm_template_fail_test")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -49,6 +50,42 @@ helm_lint_test(
 helm_template_test(
     name = "aether_template_test",
     chart = ":aether",
+)
+
+# #770: proxy.authzSidecar.failureMode is an authorization control, and the
+# template used to compare it raw against "ALLOW". Every spelling that is not
+# exactly "ALLOW" — including `allow` — therefore selected fail-CLOSED with no
+# diagnostic anywhere. These two targets pin both halves of the fix: the
+# normalisation, and the guard that rejects what normalisation cannot rescue.
+#
+# The chart's output here is the agent flag; `--authz-sidecar-failure-mode-allow`
+# is what makes the agent render `failure_mode_allow: true` into the ext_authz
+# filter (agent/internal/xds/proxy).
+helm_template_test(
+    name = "aether_authz_failure_mode_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.authzSidecar.enabled=true",
+        # Lower case on purpose: the pre-#770 template rendered fail-closed here.
+        "--set",
+        "proxy.authzSidecar.failureMode=allow",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "--authz-sidecar-failure-mode-allow",
+        ],
+    },
+)
+
+helm_template_fail_test(
+    name = "aether_authz_failure_mode_invalid_test",
+    chart = ":aether",
+    expected_message = "proxy.authzSidecar.failureMode must be ALLOW or DENY",
+    opts = [
+        "--set",
+        "proxy.authzSidecar.failureMode=maybe",
+    ],
 )
 
 # Commit-pinned second packaging of the SAME chart (#692).

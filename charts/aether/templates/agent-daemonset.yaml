@@ -1,3 +1,9 @@
+{{/*
+Validate proxy.authzSidecar.failureMode unconditionally, not just on the branch
+below that consumes it (#770): a typo should be rejected when it is written, not
+silently carried until someone flips proxy.authzSidecar.enabled on.
+*/}}
+{{- $_ := include "aether.proxy.authzFailureMode" . -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -95,7 +101,7 @@ spec:
             {{- if .Values.proxy.authzSidecar.enabled }}
             - "--authz-sidecar"
             - "--authz-sidecar-timeout={{ .Values.proxy.authzSidecar.timeout }}"
-            {{- if eq .Values.proxy.authzSidecar.failureMode "ALLOW" }}
+            {{- if eq (include "aether.proxy.authzFailureMode" .) "ALLOW" }}
             - "--authz-sidecar-failure-mode-allow"
             {{- end }}
             {{- end }}
