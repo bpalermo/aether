@@ -75,8 +75,9 @@ func (s *recordingSink) get() (int, string, string) {
 // Workload API and then EXIT THE PROCESS — on a north-south gateway, which means
 // ingress stayed down for the whole crash loop.
 //
-// The negative control is the code this replaces: commonspire.NewSource on the
-// same unreachable socket returns only after commonspire.SourceTimeout (25s).
+// The negative control is the code this replaces: a bounded, blocking
+// first-SVID wait, which on the same unreachable socket returned only after its
+// 25s deadline elapsed.
 func TestResolveEdgeIdentityReturnsImmediately(t *testing.T) {
 	withSpireConfig(t, true, spiretest.UnservedSocket(t), slog.New(slog.DiscardHandler))
 
