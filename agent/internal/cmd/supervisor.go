@@ -2,12 +2,12 @@ package cmd
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"aethermesh.dev/agent/internal/proxy/hotrestart"
+	"aethermesh.dev/common/file"
 	"aethermesh.dev/common/manager"
 	"aethermesh.dev/common/readymarker"
 	"github.com/spf13/cobra"
@@ -107,8 +107,18 @@ func runInstall(supervisorDest, readinessDest string) error {
 	return nil
 }
 
-// installFile copies source to dest (0o755) via a .tmp + rename. Linux-only
-// when source is /proc/self/exe; the supervisor only ever runs on Linux nodes.
+// installFile copies source to dest (0o755) atomically. Linux-only when source
+// is /proc/self/exe; the supervisor only ever runs on Linux nodes.
+//
+// It goes through common/file rather than a hand-rolled copy. What it publishes
+// is an EXECUTABLE that another container then runs as its entrypoint, and the
+// hand-rolled version did the two things an atomic write must not do: it named
+// its temporary file `dest + ".tmp"`, a fixed path any concurrent writer in the
+// same directory would collide on, and it renamed without ever fsyncing, so the
+// directory entry could outlive the data it points at across a node crash —
+// leaving a truncated supervisor binary for the proxy container to exec.
+// common/file uses os.CreateTemp for a unique name and flushes before the
+// rename.
 func installFile(source, dest string) error {
 	src, err := os.Open(source)
 	if err != nil {
@@ -116,19 +126,7 @@ func installFile(source, dest string) error {
 	}
 	defer func() { _ = src.Close() }()
 
-	tmp := dest + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return fmt.Errorf("creating %s: %w", tmp, err)
-	}
-	if _, err := io.Copy(out, src); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("copying binary: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, filepath.Clean(dest)); err != nil {
+	if err := file.AtomicWriteReader(filepath.Clean(dest), src, 0o755); err != nil {
 		return fmt.Errorf("installing to %s: %w", dest, err)
 	}
 	return nil

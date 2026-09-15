@@ -13,6 +13,7 @@ go_library(
     importpath = "aethermesh.dev/agent/internal/proxy/hotrestart",
     visibility = ["//agent:__subpackages__"],
     deps = [
+        "//common/file",
         "//common/log",
         "@com_github_fsnotify_fsnotify//:fsnotify",
         "@io_opentelemetry_go_otel//attribute",

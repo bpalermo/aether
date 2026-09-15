@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"aethermesh.dev/common/file"
 )
 
 // Cross-pod hot-restart coordination (see docs/proposals/001_proxy-hot-restart.md).
@@ -130,14 +132,15 @@ func (s *Supervisor) writeState(epoch int) {
 	if cur, hb, ok := s.readState(); ok && epoch < cur && time.Since(hb) < predecessorStale {
 		return
 	}
-	tmp := s.statePath() + ".tmp"
+	// common/file, not a fixed dest+".tmp": StateDir is a shared hostPath and
+	// the flock above is explicitly best-effort ("a lock failure falls back to
+	// the unlocked behavior"), so on that fallback two overlapping supervisor
+	// pods write the SAME temp path and the rename can publish the other
+	// process's half-written bytes — into the file that decides the next pod's
+	// restart epoch. os.CreateTemp gives each writer its own name.
 	data := fmt.Sprintf("%d %d\n", epoch, time.Now().UnixMilli())
-	if err := os.WriteFile(tmp, []byte(data), 0o644); err != nil {
+	if err := file.AtomicWrite(s.statePath(), []byte(data), 0o644); err != nil {
 		s.log.Error("writing state", "error", err)
-		return
-	}
-	if err := os.Rename(tmp, s.statePath()); err != nil {
-		s.log.Error("renaming state", "error", err)
 	}
 }
 
@@ -283,6 +286,15 @@ func (s *Supervisor) checkWedgeWatchdogs(ctx context.Context, epoch int, everLiv
 	return false
 }
 
+// setReady publishes the pod-local readiness marker.
+//
+// A plain os.WriteFile is correct here and deliberately not an atomic write:
+// the marker is a pod-local emptyDir file whose only reader (//agent/cmd/
+// proxy-ready, via readymarker.Check) tests for EXISTENCE and never reads a
+// byte, so there is no torn read to prevent, no second writer to collide with,
+// and nothing to make durable across a crash — the marker is meant to vanish
+// with the pod. Going through common/file would add a temp file and an fsync to
+// the hottest path in the supervisor for no observable gain.
 func (s *Supervisor) setReady() {
 	if err := os.WriteFile(s.cfg.ReadyMarkerPath, []byte("ready\n"), 0o644); err != nil {
 		s.log.Error("writing ready marker", "error", err)
