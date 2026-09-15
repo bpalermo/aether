@@ -24,6 +24,7 @@ make format-check  # CI-friendly check (fails on drift)
 - **Go:** 1.27.1
 - **Container images:** Built with `rules_img`, pushed to distroless (`gcr.io/distroless/static-debian13:nonroot`).
 - **Protobuf:** Uses `buf/validate` for validation.
+- **Static analysis:** `nogo` is wired into the Go SDK (`go_sdk.nogo(nogo = "//:nogo")`), so vet-class analyzers run as a validation action on every Go target — findings fail `bazel build`, not just `make lint`. Scope lives in `nogo.json`.
 
 ## Architecture
 
@@ -78,7 +79,10 @@ hygiene*.
   needs. Use `make tidy` + `make deps-audit`.
 - Formatting uses `gofumpt`, `buildifier`, `shfmt`, `buf`.
 - Lint violations fail with `--config=lint` (aspect-based).
-- SPIRE integration enabled by default; use `--spire-enabled=false` to disable.
+- SPIRE integration is enabled by default on the **agent** and **registrar**
+  (`--spire-enabled=true`); use `--spire-enabled=false` to disable. The
+  **controller** is the exception: its `--spire-enabled` defaults to `false` (it
+  serves the webhook with the Helm self-signed cert unless SPIRE is turned on).
 
 ## Git Workflow
 
