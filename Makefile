@@ -110,14 +110,12 @@ check-build-id:
 	@bazel build //tools/buildid:release_build_ids
 	@cat bazel-bin/tools/buildid/release_build_ids.txt
 
-# Publish everything in the order that works: image manifests FIRST, then the
-# charts (chart-only push targets). The combined `:*.push` targets race the
-# chart's digest reference against the image manifest upload and fail with
-# `Tag ... not found` (observed repeatedly); pushing images first avoids it.
-.PHONY: publish
-publish: push-all
-	@bazel run //charts/agent:agent.push_registry --stamp
-	@bazel run //charts/registrar:registrar.push_registry --stamp
+# NOTE: there is deliberately no `publish` target. Releases are published by
+# .github/workflows/publish.yaml, which is serialised (#692) and pushes the
+# charts that actually exist. The old target named //charts/agent and
+# //charts/registrar — neither package exists — after its `push-all`
+# prerequisite had already pushed four images, so following it produced a
+# half-publish.
 
 # --- Website (aethermesh.dev; see //website) ---
 # `website` produces bazel-bin/website/site.tar, exactly what the pages workflow
@@ -140,10 +138,11 @@ website-serve:
 # used.
 # NOTE: building the proxy compiles Envoy from source (multi-hour); use a warm
 # cache / CI.
+#
+# Only the local `load` has a target: pushing the proxy image is owned end to end
+# by .github/workflows/proxy-release.yml (`bazel run //:push` on a native arm64
+# runner for that leg), which is fully automated (#703/#727). A local
+# `push-proxy-image` was a second, unaudited way to write the released tag.
 .PHONY: load-proxy-image
 load-proxy-image:
 	@cd proxy && bazel run --config=release //:load
-
-.PHONY: push-proxy-image
-push-proxy-image:
-	@cd proxy && bazel run --config=release //:push --stamp
