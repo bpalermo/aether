@@ -53,9 +53,9 @@ func withSpireConfig(t *testing.T, enabled bool, socket string, warnAfter time.D
 // process, so the controller was crash-looping through exactly the boot window in
 // which the apiserver needed it.
 //
-// The negative control is the code this replaces: spire.NewSource on the same
-// unreachable socket returns only after spire.SourceTimeout (25s) and with an
-// error that the caller turned into a process exit.
+// The negative control is the code this replaces: a bounded, blocking first-SVID
+// wait, which on the same unreachable socket returned only after its 25s deadline
+// elapsed, with an error that the caller turned into a process exit.
 func TestBuildControllerBootstrapOptsReturnsImmediately(t *testing.T) {
 	withSpireConfig(t, true, spiretest.UnservedSocket(t), time.Minute, slog.New(slog.DiscardHandler))
 
