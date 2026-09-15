@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -405,6 +406,83 @@ func TestEtcdRegistry_Close(t *testing.T) {
 	// Closing again should not error
 	err = registry.Close()
 	assert.NoError(t, err)
+}
+
+// TestEtcdRegistry_CloseRacesWatchLoop is the regression test for issue #772
+// race R1: Close used to cancel the watch context and immediately nil
+// r.client/r.watchCancel while watchLoop was still dereferencing r.client to
+// re-establish the watch — an unsynchronised write/read pair, and a nil-deref
+// panic window on shutdown. Close now waits for the loop to exit before
+// closing the client, so this must be clean under -race.
+//
+// Registry writes keep the watch busy (each one closes and re-delivers on the
+// watch channel), and several goroutines call Close concurrently to exercise
+// the idempotence guard at the same time.
+func TestEtcdRegistry_CloseRacesWatchLoop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+
+	for i := range 10 {
+		registry := etcd.NewEtcdRegistry(slog.New(slog.DiscardHandler), etcd.Config{
+			Endpoints:   []string{testEndpoint},
+			DialTimeout: 5 * time.Second,
+			KeyPrefix:   fmt.Sprintf("%s/%d", keyPrefix(t), i),
+		})
+		require.NoError(t, registry.Initialize(ctx))
+
+		// Churn the registry so the watch loop is actively delivering events
+		// (and periodically re-establishing) while Close runs.
+		var writers sync.WaitGroup
+		writeCtx, stopWriting := context.WithCancel(ctx)
+		for w := range 2 {
+			writers.Add(1)
+			go func() {
+				defer writers.Done()
+				for n := 0; writeCtx.Err() == nil; n++ {
+					ep := &registryv1.ServiceEndpoint{
+						Ip:          fmt.Sprintf("10.0.%d.%d", w, n%250),
+						ClusterName: "c",
+						Port:        8080,
+					}
+					// Stop on the first failure: once Close wins the race the
+					// client is shut and every further write just spams the log.
+					if registry.RegisterEndpoint(writeCtx, "ns/race-svc", registryv1.Service_PROTOCOL_HTTP, ep) != nil {
+						return
+					}
+				}
+			}()
+		}
+
+		// Concurrent Close calls: one must tear down, the rest must be no-ops
+		// that observe the same result.
+		var (
+			mu      sync.Mutex
+			results []error
+			closers sync.WaitGroup
+		)
+		for range 3 {
+			closers.Add(1)
+			go func() {
+				defer closers.Done()
+				err := registry.Close()
+				mu.Lock()
+				results = append(results, err)
+				mu.Unlock()
+			}()
+		}
+		closers.Wait()
+		stopWriting()
+		writers.Wait()
+
+		// Idempotent: every caller, including a late one, sees the same result.
+		final := registry.Close()
+		for _, err := range results {
+			require.Equal(t, final, err)
+		}
+	}
 }
 
 func TestEtcdRegistry_CloseWithoutStart(t *testing.T) {
