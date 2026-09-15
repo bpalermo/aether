@@ -19,6 +19,12 @@ make test                    # or: bazel test --test_output=errors //...
 # Run a single test target
 bazel test //agent/internal/xds/config:config_test
 
+# Go race detector. `--config=race` (.bazelrc) is the supported spelling; prefer
+# it scoped to the packages you touched — the whole tree still has known
+# test-only races, so a bare //... run reports failures you did not cause.
+bazel test --config=race //agent/internal/meshdns:all
+make test-race               # whole tree, same flag
+
 # Build
 make build-agent             # or: bazel build //agent/cmd/agent/...
 make build-mesh-dns          # or: bazel build //agent/cmd/mesh-dns/...
@@ -37,6 +43,10 @@ make tidy                    # or: bazel mod tidy
 # See docs/runbook.md, "Go dependency hygiene".
 make deps-audit              # or: scripts/go-deps-audit.sh — also a required
                              # CI job (`deps-audit` in .github/workflows/ci.yaml)
+# Its rule: reclassify, don't drop. An unimported direct require usually exists
+# only to force a CVE-clean version through MVS — move it to the `// indirect`
+# block so the pin survives; deleting the line lets the vulnerable version back
+# in. Bazel-only requires get a `// bazel-only:` annotation instead.
 
 # Format code (Go, protobuf, Starlark, shell)
 make format                  # or: bazel run //:format
@@ -65,6 +75,9 @@ There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cm
 
 - **`agent/cmd/agent`** - Node agent DaemonSet. Uses `controller-runtime` manager to run the xDS server and CNI gRPC server as runnables. CLI built with Cobra. Also hosts two subcommands: `agent edge` (the north-south edge gateway control plane, proposal 003/018) and `agent proxy-supervisor` (the Envoy hot-restart supervisor, proposal 001).
 - **`agent/cmd/mesh-dns`** - Slim standalone mesh-DNS daemon (its own DaemonSet and its own image since #583). Serves `<svc>.<ns>.<mesh-domain>` from the record snapshot the node agent writes and forwards everything else upstream, so the resolver survives agent rolls (#578).
+- **`agent/cmd/proxy-ready`** - The `aether-proxy` pod's exec readiness probe (#673). One flag (`--ready-marker`); exit 0 iff that path stats. Deliberately stdlib-only (~1.7MB vs the agent's 67MB) — `//agent/cmd/proxy-ready:deps_test` fails the build if it ever grows a dependency. Ships as an extra layer in the agent image and is staged onto the proxy pod by the `install-supervisor` initContainer.
+- **`agent/cmd/mesh-dns-ready`** - The same pattern for the `aether-mesh-dns` pod (#683), guarded by `//agent/cmd/mesh-dns-ready:deps_test`. Bundled in the mesh-dns image the DaemonSet already runs, so the prober and the daemon that writes the marker are the same artifact and no chart/image skew is possible.
+- **`prober/cmd/prober`** - Synthetic mesh-availability prober (proposal 013), shipped as its own chart (`charts/prober`) and its own image. A mesh-managed per-node DaemonSet that black-box probes the data plane from the *client* side across three tiers (liveness / reachability / mesh_dns) and emits `aether_probe_requests_total` — the external SLI the proxy's own stats cannot produce, because a source proxy cannot report its own outage.
 - **`registrar/cmd/registrar`** - In-cluster Registrar Deployment. Proxies registry operations, caches an endpoint snapshot, and streams changes to agents via gRPC. Uses `controller-runtime` manager with leader election. Also hosts the cross-cluster config-export controller (proposal 026).
 - **`controller/cmd/controller`** - In-cluster Controller Deployment (leader-elected). Serves the admission webhooks (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`, `HTTPRoute` validation on `/validate`; a pod-mutating webhook on `/mutate` for mesh-domain `ndots` + namespace-based mesh injection) and reconciles each namespace's `MeshConfig` CR into a projected ConfigMap.
 - **`cni/cmd/cni`** - CNI plugin binary invoked by the container runtime. Implements the CNI spec (Add/Del/Check/GC/Status) via `containernetworking/cni`.
@@ -87,6 +100,11 @@ There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cm
 - **`registrar/internal/server/`** - Registrar server: versioned endpoint snapshot, broadcaster for fan-out to agent watch streams, sync loop polling the external registry for changes.
 - **`registrar/internal/configexport/`** - The registrar's cross-cluster config-export controller (proposal 026, leader-elected). Projects exported (`ServiceExport`-listed) `HTTPRoute`/`GRPCRoute` targets via `common/gammaproject` and writes `registryv1.ServiceConfigProjection`s to the shared registry (etcd config keys) for peer clusters to import.
 - **`agent/internal/meshdns/`** - The in-process mesh-DNS resolver: answers `<svc>.<ns>.<mesh-domain>` from the generated mesh Services, persists its record table to a host-local snapshot file (`--mesh-dns-snapshot-path`) that the standalone `agent/cmd/mesh-dns` daemon watches, and self-checks for a wedged resolver.
+- **`common/spire/`** - Shared SPIRE Workload API plumbing for every component. `WaitingSource` acquires the X.509 SVID and trust bundle in the background over the Workload API socket, retrying with jittered backoff and returning `ErrNoSVIDYet` (a *waiting* state, never fatal) until the first SVID lands; `ReadyChecker` turns that into a controller-runtime readiness check, with `NotReadyDwell` (2m, node agent only — its NotReady arms a node taint) and `ServiceNotReadyDwell` (0, everything behind a Service). Issue #740, PRs #741–#744; operator view in `docs/runbook.md`.
+- **`agent/internal/identity/`** - The node agent's late-bound workload-identity facts, now that nothing blocks on SPIRE at wiring time. `TrustDomain` is a concurrency-safe holder for the trust domain the agent programs into Envoy (SDS resource names, SPIFFE IDs, peer validation): seeded with the mesh domain at wiring time and folded in whenever SPIRE gets around to issuing an SVID (#740).
+- **`agent/internal/node/`** + **`controller/internal/nodetaint/`** - The proposal 033 node-taint lifecycle, split across the two writers. The agent **removes** `aether.io/agent-not-ready:NoSchedule` once its own readiness gates pass (CNI serving, conflist chained, identity ready); the controller's leader-elected guard **re-arms** it when a node's agent pod is missing or not-Ready past a grace period (reboot / crash gaps G1 and G2, #569). Neither does the other's half.
+- **`agent/internal/cniconflist/`** - Keeps aether chained in the node's active CNI conflist (`--cni-conflist-reassert`). Aether installs itself as a chained plugin inside another CNI's conflist, and any competing writer that rewrites the file from its own template wins permanently — on Talos, kube-flannel's `cp -f` on every bootstrap-manifest re-sync silently unmeshed every subsequently-started pod (incident 2026-08-29, #645). The loop watches the mounted `net.d` with fsnotify plus a periodic re-check and only ever re-appends into an existing, valid conflist.
+- **`registrar/internal/replicator/`** - The registrar's leader-elected cross-region etcd replicator (proposal 006 Phase 2). It watches only this region's own authoritative subtree and replays every change verbatim into each peer region's etcd, so mirroring is loop-free by construction; every mirrored key hangs off a per-peer origin-heartbeat lease that only this replicator refreshes, so a dead region's mirror expires on the peers with no peer-side GC.
 - **`common/udspath/`** - Resolves a pod's `<volume>/<socket>` annotation onto its host path under kubelet's pod-volumes dir (`--kubelet-pods-dir`), enforcing the `emptyDir`-only shape and the 107-byte `AF_UNIX` budget (proposal 034).
 - **`agent/storage/`** - Local file-based storage with in-memory caching and fsnotify file watching. Stores CNI pod data as protojson (`<key>.json`).
 - **`api/`** - Protobuf definitions under `aether/cni/v1/`, `aether/registry/v1/`, `aether/registrar/v1/`, `aether/config/v1/` (`MeshConfig`, `HTTPFilter`, `EdgeConfig`, `EndpointPolicy`), and `aether/agent/v1/` (the node agent's persisted observed demand set, `ObservedUpstreams`; node-local state, not a wire API). Uses `buf/validate` for proto validation.
