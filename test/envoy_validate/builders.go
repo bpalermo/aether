@@ -484,8 +484,6 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 		edgeHTTPSPort   = uint32(18443)
 		// SDS cert name — ADS-served; validate mode accepts the reference without a live SDS server.
 		edgeTLSCertName = "spiffe://aether.internal/edge-test-cert"
-		// External HTTPS port for alt-svc advertisement.
-		externalHTTPSPort = uint32(443)
 	)
 
 	edgeHTTP := proxy.BuildEdgeGatewayHTTPListener(edgeGWNamespace, edgeGWName, edgeHTTPPort, false, geo, edgeCfg)

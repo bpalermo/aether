@@ -42,32 +42,14 @@ type SVIDSource interface {
 	Updated() <-chan struct{}
 }
 
-// SourceTimeout bounds how long NewSource waits for the Workload API to issue
-// this workload's first SVID.
-//
-// The wait used to be unbounded, which made an unavailable SPIRE agent (or a
-// SPIRE server that cannot attest it) a silent, indefinite stall on the startup
-// path. Every binary here initializes its dependencies BEFORE starting the
-// controller-runtime manager, and the manager is what starts answering /healthz
-// and /readyz — so a stall here is invisible to the process but fatal to it: the
-// chart's liveness probe (10s period, default 3 failures) kills the container
-// after roughly 35s, the signal handler cancels the shared startup context, and
-// the wait aborts with the misleading "context canceled". That is the crash loop
-// in issue #662. Failing fast, below the liveness budget, restarts on an accurate
-// error instead of an opaque probe kill.
-const SourceTimeout = 25 * time.Second
-
-// NewSource connects to the SPIRE Workload API at socketPath and returns an
-// X.509 SVID source that watches for rotations, waiting up to SourceTimeout for
-// the first SVID. socketPath may be a filesystem path to the agent UDS
+// NewSourceWithTimeout connects to the SPIRE Workload API at socketPath and
+// returns an X.509 SVID source that watches for rotations, bounding the wait for
+// the first SVID by timeout. A non-positive timeout waits as long as ctx allows,
+// which is what WaitingSource passes (issue #740: the wait moved off the startup
+// path, so it no longer needs a deadline below the liveness budget). socketPath
+// may be a filesystem path to the agent UDS
 // (e.g. /run/secrets/workload-spiffe-uds/socket) or a full endpoint address
 // (unix://… / tcp://…).
-func NewSource(ctx context.Context, socketPath string) (*Source, error) {
-	return NewSourceWithTimeout(ctx, socketPath, SourceTimeout)
-}
-
-// NewSourceWithTimeout is NewSource with an explicit bound on the first-SVID
-// wait. A non-positive timeout waits as long as ctx allows.
 //
 // The bound applies to the initial wait only: go-spiffe derives the rotation
 // watcher's context from context.Background() (workloadapi.newWatcher), so the
@@ -97,7 +79,6 @@ const RootCATrustDomain = "ROOTCA"
 // served by src (e.g. "example.org"). Use it to construct SPIFFE IDs and SDS
 // resource names from the real trust domain SPIRE issues into, rather than from a
 // configured value (which may be the RootCATrustDomain authorization sentinel).
-// The source has already fetched its first SVID by the time NewSource returns.
 func TrustDomainFromSource(src SVIDSource) (string, error) {
 	svid, err := src.GetX509SVID()
 	if err != nil {
@@ -106,24 +87,14 @@ func TrustDomainFromSource(src SVIDSource) (string, error) {
 	return svid.ID.TrustDomain().Name(), nil
 }
 
-// ServerTLSConfig returns a mutual-TLS server config that presents the workload
-// SVID from src and authorizes peers belonging to trustDomain (or any valid peer
-// when trustDomain is empty / RootCATrustDomain).
-func ServerTLSConfig(src SVIDSource, trustDomain string) (*tls.Config, error) {
-	auth, err := authorizer(trustDomain)
-	if err != nil {
-		return nil, err
-	}
-	return tlsconfig.MTLSServerConfig(src, src, auth), nil
-}
-
 // ServerTLSConfigForOwnTrustDomain returns a mutual-TLS server config that
 // presents the workload SVID from src and authorizes peers belonging to src's
 // OWN trust domain — resolved at HANDSHAKE time, not at construction.
 //
-// It is the deferred form of ServerTLSConfig, for a src that may not hold an SVID
-// yet (a WaitingSource, issue #740). Nothing is lost by deferring: the peer
-// authorizer is only ever consulted after the server has presented a certificate,
+// It is the deferred form of the old construction-time authorizer, for a src that
+// may not hold an SVID yet (a WaitingSource, issue #740). Nothing is lost by
+// deferring: the peer authorizer is only ever consulted after the server has
+// presented a certificate,
 // and a server with no SVID cannot present one — GetCertificate returns
 // ErrNoSVIDYet and the handshake fails there. So until the SVID lands this config
 // authorizes NOTHING, and once it lands the trust domain it authorizes against is
