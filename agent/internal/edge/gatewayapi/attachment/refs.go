@@ -170,27 +170,6 @@ func OurGatewayParentRefs(parentRefs []gatewayv1.ParentReference, routeNamespace
 	return out
 }
 
-// firstBackendService returns the name of the first core-Service backendRef that is
-// admissible: a same-namespace ref, or a cross-namespace ref permitted by a
-// ReferenceGrant. Ungranted cross-namespace refs are skipped (RefNotPermitted →
-// dropped from the data plane), so a rule whose only backend is ungranted yields no
-// backend (and, with no redirect, no route).
-func firstBackendService(refs []gatewayv1.HTTPBackendRef, routeNamespace string, grants []gatewayv1beta1.ReferenceGrant) string {
-	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue // only core Services in Phase 1
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		if !BackendPermitted(b.Namespace, routeNamespace, "HTTPRoute", string(b.Name), grants) {
-			continue
-		}
-		return string(b.Name)
-	}
-	return ""
-}
-
 // DerefBackendNamespace returns the backendRef namespace ("" when unset).
 func DerefBackendNamespace(ns *gatewayv1.Namespace) string {
 	if ns == nil {

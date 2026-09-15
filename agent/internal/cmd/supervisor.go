@@ -150,6 +150,11 @@ func init() {
 	f.StringVar(&supervisorCfg.ReadyMarkerPath, "ready-marker", "/var/run/aether-proxy/ready", "Pod-local path for the readiness marker maintained while Envoy is live at the newest epoch")
 	f.StringVar(&supervisorCfg.AdminAddress, "admin-address", "127.0.0.1:9901", "Envoy admin host:port used for the readiness check")
 	f.BoolVar(&supervisorReadinessCheck, "readiness-check", false, "DEPRECATED (#673): exit 0 iff the --ready-marker file exists (exec readiness probe mode). Re-execing this 67MB binary every 2s cost >=31% of the supervisor container's CPU in package init alone; the chart execs the stdlib-only proxy-ready prober instead. Retained so a chart predating #673 keeps a working probe against a newer image")
+	// Deprecated since #673, but still functional: a chart older than #673 probes
+	// with it. pflag prints "Flag --readiness-check has been deprecated, ..." on use,
+	// so an operator on a stale chart is told what to move to. The error can only be
+	// a missing flag name — it was registered on the line above.
+	_ = f.MarkDeprecated("readiness-check", "exec the stdlib-only proxy-ready prober staged by --install-readiness-path instead (#673)")
 	f.DurationVar(&supervisorCfg.HandoffDeadline, "handoff-deadline", 0, "Watchdog: max time a hot-restart epoch may stay not-LIVE after launch before the supervisor exits non-zero (0 = 2m default)")
 	f.DurationVar(&supervisorCfg.AdminUnresponsiveDeadline, "admin-unresponsive-deadline", 0, "Watchdog: max time the Envoy admin may be unreachable (once previously LIVE) before the supervisor exits non-zero (0 = 30s default)")
 	f.StringVar(&supervisorTelemetryCfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for hot-restart lifecycle metrics push (e.g. collector:4317); empty disables telemetry")

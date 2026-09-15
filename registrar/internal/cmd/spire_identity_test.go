@@ -85,9 +85,9 @@ func withSpireConfig(t *testing.T, enabled bool, socket string, warnAfter time.D
 // unreachable Workload API and then EXIT THE PROCESS, which took every agent's
 // endpoint watch down with it for the length of the crash loop.
 //
-// The negative control is the code this replaces: spire.NewSource on the same
-// unreachable socket returns only after spire.SourceTimeout (25s), with an error
-// the caller propagated straight out of runRegistrar.
+// The negative control is the code this replaces: a bounded, blocking first-SVID
+// wait, which on the same unreachable socket returned only after its 25s deadline
+// elapsed, with an error the caller propagated straight out of runRegistrar.
 func TestBuildSpireGRPCCredsReturnsImmediately(t *testing.T) {
 	withSpireConfig(t, true, spiretest.UnservedSocket(t), time.Minute, slog.New(slog.DiscardHandler))
 
