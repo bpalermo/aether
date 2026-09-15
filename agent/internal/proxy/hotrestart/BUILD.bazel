@@ -31,6 +31,7 @@ go_test(
         "adminreverify_test.go",
         "coordination_test.go",
         "crash_test.go",
+        "epoch_test.go",
         "metrics_test.go",
         "shutdown_test.go",
         "supervisor_test.go",

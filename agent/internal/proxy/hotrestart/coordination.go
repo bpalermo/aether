@@ -59,8 +59,15 @@ func (s *Supervisor) initStartEpoch(ctx context.Context) {
 			return
 		}
 		if s.adminLiveAtEpoch(ctx, epoch) {
+			// Publish the successor epoch and its readiness gate in ONE
+			// critical section. A watchLiveness tick that reads the new epoch
+			// must never be able to see a stale gate: it would find the
+			// PREDECESSOR's Envoy answering LIVE at exactly that epoch and
+			// mark the pod Ready before this pod's Envoy was forked (#132's
+			// hazard; see successorReadyGate).
 			s.mu.Lock()
 			s.nextEpoch = epoch + 1
+			s.readyGate = s.successorReadyGate()
 			s.mu.Unlock()
 			s.metrics.predecessorFound(true)
 			s.log.InfoContext(ctx, "live predecessor confirmed; starting cross-pod hot restart",
@@ -233,7 +240,11 @@ func (s *Supervisor) onLiveEpoch(ctx context.Context, epoch int, ready bool) boo
 // epoch: manages the readiness-hold logic for the mid-handoff parent state.
 // Returns the updated ready and holding states.
 func (s *Supervisor) onNotLiveEpoch(ctx context.Context, epoch int, ready, reachable, holding bool) (bool, bool) {
-	hold := ready && reachable && s.childTracked(epoch)
+	// anyChildTracked, not childTracked(epoch): during a bind-collision retry
+	// currentEpoch() names a rewound epoch that never had a child while an
+	// earlier one is still tracked and still serving the node. See
+	// anyChildTracked.
+	hold := ready && reachable && s.anyChildTracked()
 	if hold && !holding {
 		holding = true
 		s.log.InfoContext(ctx, "holding readiness: serving as hot-restart parent mid-handoff", "epoch", epoch)
