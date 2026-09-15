@@ -330,6 +330,118 @@ jobs:
       - name: Guard readiness-prober linkage
         run: scripts/check-proxy-ready-deps.sh --config=ci
 
+  # Race gate (#772). Runs the same impacted test set as `test` + `integration`,
+  # rebuilt with the Go race detector. Scoped by bazel-diff exactly like the
+  # other legs, so an unrelated PR pays nothing; a whole-tree race run measured
+  # 169 s locally, which is the worst case here.
+  #
+  # Test EXECUTION is local: `--config=ci` pulls in `--config=remote`, which sets
+  # `--strategy=TestRunner=local`. Only the (race-instrumented) compiles go to
+  # RBE. That matters twice over — the Docker-bound integration tests need the
+  # runner's Docker, and the race config is a different Bazel configuration, so
+  # nothing is shared with the `test` job's cache.
+  #
+  # Depends on `test` so a PR that is already red does not burn a second runner,
+  # and so this runs in parallel with `integration`/`e2e` rather than extending
+  # the critical path.
+  race:
+    needs: [changes, diff, test]
+    if: needs.changes.outputs.control_plane == 'true' && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+      - name: Download impacted target lists
+        uses: actions/download-artifact@v8
+        with:
+          name: impacted-targets
+          path: ${{ runner.temp }}/impacted
+      # The 19 concurrency-heavy packages from the 2026-09-15 races review get
+      # three runs each: the one production race the detector has ever caught
+      # (etcd Close vs. watchLoop, #772/R1) reproduced 2 of 3 runs and was
+      # invisible to a single pass. Everything else impacted runs once.
+      - name: Split impacted tests into hot / normal
+        id: split
+        env:
+          IMPACTED: ${{ runner.temp }}/impacted
+        run: |
+          set -euo pipefail
+          cat >"$RUNNER_TEMP/hot_packages.txt" <<'EOF'
+          agent/internal/capture
+          agent/internal/cni/server
+          agent/internal/cniconflist
+          agent/internal/configimport
+          agent/internal/edge/portalloc
+          agent/internal/meshdns
+          agent/internal/node
+          agent/internal/proxy/hotrestart
+          agent/internal/spire
+          agent/internal/xds/cache
+          agent/internal/xds/server
+          agent/storage
+          common/spire
+          common/xds
+          prober/internal/prober
+          registrar/internal/replicator
+          registrar/internal/server
+          registry/internal/etcd
+          registry/internal/registrar
+          EOF
+          : >"$RUNNER_TEMP/race_hot.txt"
+          : >"$RUNNER_TEMP/race_normal.txt"
+          # go_test only. The race config forces cgo on, which rules_go cannot
+          # do for the pure/static binaries the image and chart targets link
+          # ("race instrumentation can't be enabled when cgo is disabled"), so a
+          # literal `bazel test //... --config=race` fails analysis on ~8 of
+          # them. They are not race candidates anyway — buf-lint, helm-template
+          # and image-structure tests run no Go under test.
+          bazel query 'kind(go_test, tests(//...))' --noshow_progress 2>/dev/null |
+            sort -u >"$RUNNER_TEMP/go_tests.txt"
+          # A failed query would empty the race list and silently pass the gate.
+          if [ ! -s "$RUNNER_TEMP/go_tests.txt" ]; then
+            echo "::error::go_test query returned nothing — refusing to pass the race gate on an empty set"
+            exit 1
+          fi
+          # `|| true`: an empty leg makes grep exit 1, which pipefail would turn
+          # into a job failure. An empty combined list is handled by has_* below.
+          { cat "$IMPACTED/impacted_unit.txt" "$IMPACTED/impacted_integration.txt" 2>/dev/null |
+            grep -v '^[[:space:]]*$' | sort -u |
+            grep -Fxf "$RUNNER_TEMP/go_tests.txt" >"$RUNNER_TEMP/race_all.txt"; } || true
+          while IFS= read -r label; do
+            pkg="${label%%:*}"
+            pkg="${pkg#//}"
+            if grep -qxF "$pkg" "$RUNNER_TEMP/hot_packages.txt"; then
+              printf '%s\n' "$label" >>"$RUNNER_TEMP/race_hot.txt"
+            else
+              printf '%s\n' "$label" >>"$RUNNER_TEMP/race_normal.txt"
+            fi
+          done <"$RUNNER_TEMP/race_all.txt"
+          echo "has_hot=$([ -s "$RUNNER_TEMP/race_hot.txt" ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+          echo "has_normal=$([ -s "$RUNNER_TEMP/race_normal.txt" ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+          echo ">> race: hot=$(wc -l <"$RUNNER_TEMP/race_hot.txt") normal=$(wc -l <"$RUNNER_TEMP/race_normal.txt")"
+      - name: Race tests
+        if: steps.split.outputs.has_normal == 'true'
+        run: |
+          bazel test --config=ci --config=race \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --target_pattern_file=${{ runner.temp }}/race_normal.txt
+      - name: Race tests (concurrency-heavy packages, 3 runs)
+        if: steps.split.outputs.has_hot == 'true'
+        run: |
+          bazel test --config=ci --config=race --runs_per_test=3 \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME=${{ github.head_ref }} \
+            --target_pattern_file=${{ runner.temp }}/race_hot.txt
+
   integration:
     needs: [changes, diff, test]
     if: needs.changes.outputs.control_plane == 'true' && needs.diff.outputs.has_integration == 'true'
@@ -413,7 +525,7 @@ jobs:
   # the main branch ruleset.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, test, integration, e2e]
+    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, test, race, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -82,6 +83,15 @@ type EtcdRegistry struct {
 	notify chan struct{}
 	// watchCancel stops the background watch loop on Close.
 	watchCancel context.CancelFunc
+	// watchDone is closed by watchLoop when it returns. Close waits on it
+	// before closing the etcd client, so the loop can never dereference a
+	// client that Close has already torn down (issue #772, race R1).
+	watchDone chan struct{}
+	// closeOnce makes Close idempotent: a second Close must not cancel a
+	// re-used context, wait on an already-closed channel a second time, or
+	// double-close the etcd client.
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewEtcdRegistry creates a new etcd-backed Registry.
@@ -148,9 +158,16 @@ func (r *EtcdRegistry) Initialize(ctx context.Context) error {
 	// (from this replica or any other registrar/agent) at watch speed. A
 	// detached context keeps the watch alive for the registry's lifetime;
 	// Close cancels it.
+	//
+	// The plain writes to r.client/r.watchCancel/r.watchDone need no
+	// synchronisation: every field watchLoop reads is written before the `go`
+	// statement below, which is itself the happens-before edge. Close is the
+	// only other writer and it is ordered against the loop by watchDone, not by
+	// mutating these fields.
 	watchCtx, cancel := context.WithCancel(context.Background())
 	r.watchCancel = cancel
-	go r.watchLoop(watchCtx)
+	r.watchDone = make(chan struct{})
+	go r.watchLoop(watchCtx, r.watchDone)
 
 	r.log.InfoContext(ctx, "etcd registry initialized", "endpoints", r.config.Endpoints)
 	return nil
@@ -187,7 +204,9 @@ func (r *EtcdRegistry) signalChange() {
 // consumers on every change. It re-establishes the watch on channel closure
 // (compaction, leader change, transient error); the consumer's periodic poll
 // is the backstop for any gap during a re-establish.
-func (r *EtcdRegistry) watchLoop(ctx context.Context) {
+func (r *EtcdRegistry) watchLoop(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -558,18 +577,32 @@ func extractCluster(key string) string {
 	return rest
 }
 
-// Close closes the etcd client connection.
+// Close stops the background watch and closes the etcd client connection.
+//
+// Ordering matters: the watch loop dereferences r.client on every
+// re-establish, so Close cancels the watch context, waits for the loop to
+// return, and only then closes the client. The wait needs no context of its
+// own because watchLoop honours cancellation on both of its select arms and
+// clientv3 closes the watch channel when the watch context is cancelled, so
+// the loop returns promptly and unconditionally.
+//
+// Close never nils r.client: a post-Close call then fails with etcd's
+// "client closed" error instead of panicking on a nil dereference, and there
+// is no unsynchronised write for a concurrent reader to trip over. Close is
+// idempotent.
 func (r *EtcdRegistry) Close() error {
-	if r.watchCancel != nil {
-		r.watchCancel()
-		r.watchCancel = nil
-	}
-	if r.client != nil {
-		err := r.client.Close()
-		r.client = nil
-		return err
-	}
-	return nil
+	r.closeOnce.Do(func() {
+		if r.watchCancel != nil {
+			r.watchCancel()
+		}
+		if r.watchDone != nil {
+			<-r.watchDone
+		}
+		if r.client != nil {
+			r.closeErr = r.client.Close()
+		}
+	})
+	return r.closeErr
 }
 
 // nsMarker / serviceMarker delimit the namespace and service segments of a key,
