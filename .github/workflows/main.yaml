@@ -25,8 +25,10 @@ name: main-post-merge
 #
 # Nothing here is a required status check — `ci` (from `ci.yaml`) remains the only
 # one, and this workflow deliberately does not touch the pull_request path.
-# Integration and e2e are not repeated here: `e2e.yaml` already covers `main`
-# pushes, and the integration leg is bounded by the same PR scope this job
+# Integration and e2e are not repeated here: `e2e.yaml` runs the heavy suite
+# nightly (`schedule: 17 4 * * *`, plus `workflow_dispatch`) — it has no `push`
+# trigger, so a `main` push is covered by the next nightly rather than
+# immediately — and the integration leg is bounded by the same PR scope this job
 # re-derives.
 #
 # Deliberately NO `concurrency` group (unlike `publish.yaml`/`proxy-release.yml`,
