@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +38,10 @@ import (
 const (
 	defaultDialTimeout   = 5 * time.Second
 	defaultResyncBackoff = 5 * time.Second
+
+	// maxTxnOps is the largest transaction the sync will build. etcd rejects a
+	// transaction with more than --max-txn-ops operations (128 by default).
+	maxTxnOps = 128
 )
 
 // Source is the local authoritative store the replicator mirrors from: the
@@ -98,9 +104,13 @@ type Replicator struct {
 	Peers  []Peer
 	Log    *slog.Logger
 
-	// DialTimeout bounds each peer dial; ResyncBackoff spaces mirror-loop
-	// restarts after an error; LeaseTTLSeconds is the origin-heartbeat lease
-	// TTL on each peer (Phase 2b). Zero values take the defaults.
+	// DialTimeout is the peer-connect budget: it bounds the origin-heartbeat
+	// lease grant, the first RPC against a new peer client (see startLease),
+	// and clientv3 derives the first keepalive's deadline from it
+	// (DialTimeout+1s) — so it must stay comfortably above a peer round trip.
+	// ResyncBackoff spaces mirror-loop restarts after an error;
+	// LeaseTTLSeconds is the origin-heartbeat lease TTL on each peer (Phase
+	// 2b). Zero values take the defaults.
 	DialTimeout     time.Duration
 	ResyncBackoff   time.Duration
 	LeaseTTLSeconds int64
@@ -173,7 +183,7 @@ func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) e
 	}
 	defer func() { _ = peerCli.Close() }()
 
-	lease, err := startLease(ctx, peerCli, r.LeaseTTLSeconds)
+	lease, err := startLease(ctx, peerCli, r.LeaseTTLSeconds, r.DialTimeout)
 	if err != nil {
 		return fmt.Errorf("origin-heartbeat lease on peer %s: %w", p.Region, err)
 	}
@@ -252,25 +262,55 @@ func (r *Replicator) syncFull(ctx context.Context, peerCli *clientv3.Client, lea
 	for _, kv := range localResp.Kvs {
 		local[string(kv.Key)] = kv.Value
 	}
+	var stale []clientv3.Op
 	for _, kv := range peerResp.Kvs {
 		key := string(kv.Key)
 		want, ok := local[key]
 		if !ok {
-			if _, err = peerCli.Delete(ctx, key); err != nil {
-				return 0, fmt.Errorf("delete stale peer key: %w", err)
-			}
+			stale = append(stale, clientv3.OpDelete(key))
 			continue
 		}
 		if bytes.Equal(kv.Value, want) && kv.Lease == int64(leaseID) {
 			delete(local, key) // already converged; skip the put below
 		}
 	}
-	for key, value := range local {
-		if _, err = peerCli.Put(ctx, key, string(value), clientv3.WithLease(leaseID)); err != nil {
-			return 0, fmt.Errorf("put peer key: %w", err)
-		}
+	// Sorted so a given input always batches the same way — the sync is
+	// observable on the peer one batch at a time, and map order would make
+	// that boundary differ run to run.
+	puts := make([]clientv3.Op, 0, len(local))
+	for _, key := range slices.Sorted(maps.Keys(local)) {
+		puts = append(puts, clientv3.OpPut(key, string(local[key]), clientv3.WithLease(leaseID)))
+	}
+
+	// Re-attach BEFORE pruning. On a leader handoff every key is value-equal
+	// but still on the predecessor's lease, so these puts ARE the lease hop,
+	// and the mirror only survives if they land inside the predecessor's
+	// remaining TTL. Pruning stale keys is cleanup that can wait behind them;
+	// it used to run first, spending a round trip per stale key out of that
+	// same budget.
+	if err = applyBatched(ctx, peerCli, puts); err != nil {
+		return 0, fmt.Errorf("put peer keys: %w", err)
+	}
+	if err = applyBatched(ctx, peerCli, stale); err != nil {
+		return 0, fmt.Errorf("delete stale peer keys: %w", err)
 	}
 	return localResp.Header.Revision, nil
+}
+
+// applyBatched commits ops in transactions of at most maxTxnOps, so each batch
+// lands atomically and the whole set costs one round trip per batch instead of
+// one per key. Batching rather than a single transaction because the peer
+// enforces --max-txn-ops (128 by default) and an own-partition subtree is
+// unbounded; a batch that exceeded it would fail the whole sync.
+func applyBatched(ctx context.Context, peerCli *clientv3.Client, ops []clientv3.Op) error {
+	for len(ops) > 0 {
+		n := min(len(ops), maxTxnOps)
+		if _, err := peerCli.Txn(ctx).Then(ops[:n]...).Commit(); err != nil {
+			return err
+		}
+		ops = ops[n:]
+	}
+	return nil
 }
 
 // watchMirror replays local watch events verbatim into the peer, starting at
