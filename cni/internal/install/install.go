@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"aethermesh.dev/common/file"
 	"github.com/google/renameio/v2"
 )
 
@@ -148,6 +149,14 @@ func (in *Installer) copyFileAtomic(src, dst string) error {
 	// Atomic rename to final destination
 	if err := t.CloseAtomicallyReplace(); err != nil {
 		return fmt.Errorf("failed to atomically replace file: %w", err)
+	}
+
+	// renameio fsyncs the file before the rename but never the parent directory, so the
+	// new directory entry is not itself durable. Without this, a power cut can leave the
+	// host CNI bin dir without the plugin it was just told it had — the class of loss
+	// that took the fleet out on 2026-08-29 (#645, issue #772).
+	if err := file.SyncDir(filepath.Dir(dst)); err != nil {
+		return fmt.Errorf("failed to sync target directory: %w", err)
 	}
 
 	return nil
