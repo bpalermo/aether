@@ -340,8 +340,8 @@ type runnableAdder interface {
 // nothing, and hands back the mesh domain (issue #421's cleartext path, byte for
 // byte what it was).
 //
-// This slot used to be a blocking, FATAL wait for the first SVID
-// (commonspire.NewSource, 25s bound). It ran before m.Start, so /healthz and
+// This slot used to be a blocking, FATAL wait for the first SVID (a 25s-bounded
+// Workload API source constructor). It ran before m.Start, so /healthz and
 // /readyz were still silent, and a SPIRE server that was itself still starting —
 // the normal state of a cold boot — exited the process with "failed to create
 // SPIRE Workload API source: context deadline exceeded". On the 2026-09-07 power
