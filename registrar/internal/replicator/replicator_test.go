@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +101,84 @@ func TestParsePeers(t *testing.T) {
 		_, err := replicator.ParsePeers([]string{"region-b=b1:2379", "region-b=b2:2379"}, "region-a")
 		require.ErrorContains(t, err, "duplicate")
 	})
+}
+
+// TestReplicator_RetriesAgainstUnresponsivePeer pins the one RPC that cannot
+// use a lease-scoped context — the origin-heartbeat lease grant — to a
+// deadline. clientv3 gives it none: client creation is non-blocking, so
+// Config.DialTimeout does not bound connection establishment, and
+// WaitForReady(true) is a default call option, so a call to a peer that
+// accepts the connection and then says nothing waits indefinitely. Unbounded,
+// the peer's mirror loop parks on its very first attempt and never redials.
+//
+// Needs no etcd: the discriminator is whether the loop comes back around,
+// observed as repeated connections to a listener that answers nothing.
+func TestReplicator_RetriesAgainstUnresponsivePeer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	// Accepted connections are held open and never spoken to, so the client
+	// stays connected and the grant has nothing to time out against but its
+	// own deadline.
+	var mu sync.Mutex
+	var conns []net.Conn
+	accepted := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(conns)
+	}
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	}()
+
+	cli, err := clientv3.New(clientv3.Config{Endpoints: []string{ln.Addr().String()}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cli.Close() })
+
+	r := &replicator.Replicator{
+		Source:          &testSource{client: cli, prefix: "/unused"},
+		Peers:           []replicator.Peer{{Region: "region-b", Endpoints: []string{ln.Addr().String()}}},
+		Log:             slog.New(slog.DiscardHandler),
+		DialTimeout:     200 * time.Millisecond,
+		ResyncBackoff:   50 * time.Millisecond,
+		LeaseTTLSeconds: 10,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		assert.NoError(t, r.Start(ctx))
+	}()
+
+	// Each failed attempt costs DialTimeout+ResyncBackoff, so several retries
+	// fit well inside this; without the deadline it stays at one forever.
+	require.Eventually(t, func() bool {
+		return accepted() >= 3
+	}, 10*time.Second, 100*time.Millisecond, "mirror loop did not retry against an unresponsive peer")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("replicator did not stop")
+	}
 }
 
 // testSource implements replicator.Source over a raw client, standing in for
@@ -288,25 +368,63 @@ func TestReplicator_LeaseHandoffKeepsMirrorAlive(t *testing.T) {
 	peerCli := newClient(t, peerEndpoint)
 
 	ownPrefix := root(t) + "/regions/region-a/clusters/c1"
-	_, err := localCli.Put(ctx, ownPrefix+"/k1", "v1")
+	key := ownPrefix + "/k1"
+	_, err := localCli.Put(ctx, key, "v1")
 	require.NoError(t, err)
 
 	stop := startReplicator(t, localCli, ownPrefix, 10)
 	require.Eventually(t, func() bool {
-		return peerValue(t, peerCli, ownPrefix+"/k1") == "v1"
+		return peerValue(t, peerCli, key) == "v1"
 	}, 15*time.Second, 50*time.Millisecond, "initial sync did not converge")
 
 	// Leader handoff: the successor re-puts the (value-unchanged) key under
 	// its fresh lease. If the sync skipped it on value equality alone, it
 	// would stay on the predecessor's lease and expire below.
+	predLease := peerLeaseOf(t, peerCli, key)
+	require.NotZero(t, predLease, "mirrored key is not attached to a lease")
 	stop()
+
+	// The window this test has to watch is the predecessor lease's REMAINING
+	// TTL, not its nominal one: clientv3 refreshes at TTL/3, so at this moment
+	// it holds somewhere between 2/3 and all of the TTL and the test does not
+	// control which. Read it from the peer instead of assuming a phase, so the
+	// loop below is guaranteed to span the expiry rather than usually spanning
+	// it.
+	ttlResp, err := peerCli.TimeToLive(ctx, predLease)
+	require.NoError(t, err)
+	require.Positive(t, ttlResp.TTL, "predecessor lease already gone before the handoff")
+	predExpiry := time.Now().Add(time.Duration(ttlResp.TTL) * time.Second)
+
 	startReplicator(t, localCli, ownPrefix, 10)
 
-	// Watch through the predecessor's TTL expiry (plus slack): the mirrored
-	// key must never disappear across the handoff.
-	deadline := time.Now().Add(14 * time.Second)
-	for time.Now().Before(deadline) {
-		require.Equal(t, "v1", peerValue(t, peerCli, ownPrefix+"/k1"), "mirror dropped during leader handoff")
+	// Watch through the predecessor's measured expiry (plus slack): the
+	// mirrored key must never disappear across the handoff, and it must end up
+	// on the successor's lease rather than riding the predecessor's out.
+	hopped := false
+	for deadline := predExpiry.Add(3 * time.Second); time.Now().Before(deadline); {
+		resp, getErr := peerCli.Get(ctx, key)
+		require.NoError(t, getErr)
+		require.Len(t, resp.Kvs, 1, "mirror dropped during leader handoff")
+		require.Equal(t, "v1", string(resp.Kvs[0].Value))
+		if clientv3.LeaseID(resp.Kvs[0].Lease) != predLease {
+			hopped = true
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	assert.True(t, hopped, "successor never re-attached the mirror to a fresh lease")
+
+	// And prove the window really did cross the expiry, so a future change to
+	// the timing cannot turn this into a test that passes by stopping early.
+	ttlResp, err = peerCli.TimeToLive(ctx, predLease)
+	require.NoError(t, err)
+	require.EqualValues(t, -1, ttlResp.TTL, "predecessor lease had not expired; the handoff was never watched through it")
+}
+
+// peerLeaseOf returns the lease a mirrored key is attached to on the peer.
+func peerLeaseOf(t *testing.T, peerCli *clientv3.Client, key string) clientv3.LeaseID {
+	t.Helper()
+	resp, err := peerCli.Get(context.Background(), key)
+	require.NoError(t, err)
+	require.Len(t, resp.Kvs, 1)
+	return clientv3.LeaseID(resp.Kvs[0].Lease)
 }
