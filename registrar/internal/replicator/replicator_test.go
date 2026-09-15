@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +101,84 @@ func TestParsePeers(t *testing.T) {
 		_, err := replicator.ParsePeers([]string{"region-b=b1:2379", "region-b=b2:2379"}, "region-a")
 		require.ErrorContains(t, err, "duplicate")
 	})
+}
+
+// TestReplicator_RetriesAgainstUnresponsivePeer pins the one RPC that cannot
+// use a lease-scoped context — the origin-heartbeat lease grant — to a
+// deadline. clientv3 gives it none: client creation is non-blocking, so
+// Config.DialTimeout does not bound connection establishment, and
+// WaitForReady(true) is a default call option, so a call to a peer that
+// accepts the connection and then says nothing waits indefinitely. Unbounded,
+// the peer's mirror loop parks on its very first attempt and never redials.
+//
+// Needs no etcd: the discriminator is whether the loop comes back around,
+// observed as repeated connections to a listener that answers nothing.
+func TestReplicator_RetriesAgainstUnresponsivePeer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	// Accepted connections are held open and never spoken to, so the client
+	// stays connected and the grant has nothing to time out against but its
+	// own deadline.
+	var mu sync.Mutex
+	var conns []net.Conn
+	accepted := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(conns)
+	}
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	}()
+
+	cli, err := clientv3.New(clientv3.Config{Endpoints: []string{ln.Addr().String()}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cli.Close() })
+
+	r := &replicator.Replicator{
+		Source:          &testSource{client: cli, prefix: "/unused"},
+		Peers:           []replicator.Peer{{Region: "region-b", Endpoints: []string{ln.Addr().String()}}},
+		Log:             slog.New(slog.DiscardHandler),
+		DialTimeout:     200 * time.Millisecond,
+		ResyncBackoff:   50 * time.Millisecond,
+		LeaseTTLSeconds: 10,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		assert.NoError(t, r.Start(ctx))
+	}()
+
+	// Each failed attempt costs DialTimeout+ResyncBackoff, so several retries
+	// fit well inside this; without the deadline it stays at one forever.
+	require.Eventually(t, func() bool {
+		return accepted() >= 3
+	}, 10*time.Second, 100*time.Millisecond, "mirror loop did not retry against an unresponsive peer")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("replicator did not stop")
+	}
 }
 
 // testSource implements replicator.Source over a raw client, standing in for

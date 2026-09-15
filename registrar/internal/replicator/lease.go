@@ -3,6 +3,7 @@ package replicator
 import (
 	"context"
 	"fmt"
+	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -35,11 +36,25 @@ type peerLease struct {
 // TTL — the next leader re-syncs under a fresh lease well inside it (puts
 // re-attach the keys), and the old lease then expires holding nothing. Only
 // a region that truly stays down lets the TTL lapse with keys attached.
-func startLease(ctx context.Context, peerCli *clientv3.Client, ttlSeconds int64) (*peerLease, error) {
-	grant, err := peerCli.Grant(ctx, ttlSeconds)
+//
+// grantTimeout bounds the grant only. It is the first RPC on a freshly built
+// peer client and the one call that cannot use the lease-scoped context,
+// because the lease does not exist yet — so without a deadline an unreachable
+// peer parks it forever and that peer's mirror loop never retries. clientv3
+// will not do this for us: client creation is non-blocking (etcd #21832, so
+// Config.DialTimeout does not bound connection establishment) and
+// WaitForReady(true) is a default call option, so an RPC to a peer that never
+// answers waits rather than failing fast.
+func startLease(ctx context.Context, peerCli *clientv3.Client, ttlSeconds int64, grantTimeout time.Duration) (*peerLease, error) {
+	grantCtx, cancelGrant := context.WithTimeout(ctx, grantTimeout)
+	defer cancelGrant()
+	grant, err := peerCli.Grant(grantCtx, ttlSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("grant: %w", err)
 	}
+	// KeepAlive keeps the unbounded context on purpose: it is a stream that
+	// must live as long as the connection, and its own loss is what signals
+	// the mirror loop to redial.
 	ka, err := peerCli.KeepAlive(ctx, grant.ID)
 	if err != nil {
 		return nil, fmt.Errorf("keepalive: %w", err)

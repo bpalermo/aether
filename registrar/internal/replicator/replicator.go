@@ -98,9 +98,13 @@ type Replicator struct {
 	Peers  []Peer
 	Log    *slog.Logger
 
-	// DialTimeout bounds each peer dial; ResyncBackoff spaces mirror-loop
-	// restarts after an error; LeaseTTLSeconds is the origin-heartbeat lease
-	// TTL on each peer (Phase 2b). Zero values take the defaults.
+	// DialTimeout is the peer-connect budget: it bounds the origin-heartbeat
+	// lease grant, the first RPC against a new peer client (see startLease),
+	// and clientv3 derives the first keepalive's deadline from it
+	// (DialTimeout+1s) — so it must stay comfortably above a peer round trip.
+	// ResyncBackoff spaces mirror-loop restarts after an error;
+	// LeaseTTLSeconds is the origin-heartbeat lease TTL on each peer (Phase
+	// 2b). Zero values take the defaults.
 	DialTimeout     time.Duration
 	ResyncBackoff   time.Duration
 	LeaseTTLSeconds int64
@@ -173,7 +177,7 @@ func (r *Replicator) mirrorPeer(ctx context.Context, log *slog.Logger, p Peer) e
 	}
 	defer func() { _ = peerCli.Close() }()
 
-	lease, err := startLease(ctx, peerCli, r.LeaseTTLSeconds)
+	lease, err := startLease(ctx, peerCli, r.LeaseTTLSeconds, r.DialTimeout)
 	if err != nil {
 		return fmt.Errorf("origin-heartbeat lease on peer %s: %w", p.Region, err)
 	}
