@@ -41,6 +41,10 @@ build_id_check(
         # inside the cni-install image.
         "//cni/cmd/cni-install:cni-install_image_buildid_extra_0",
         "//controller/cmd/controller:controller_image_buildid_binary",
+        # The external SLI prober: its own chart (//charts/prober) and its own
+        # published image, so it is a released ELF like any other and its symbols
+        # are uploaded to Pyroscope under its build-ID.
+        "//prober/cmd/prober:prober_image_buildid_binary",
         "//registrar/cmd/registrar:registrar_image_buildid_binary",
     ],
 )

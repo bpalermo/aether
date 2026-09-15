@@ -133,6 +133,24 @@ app.kubernetes.io/name: aether-proxy
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: proxy
 {{- end -}}
+{{/*
+proxy.authzSidecar.failureMode, normalised and validated (#770).
+
+This is an authorization control: DENY fails closed (the proxy answers 403 when
+the sidecar is unreachable), ALLOW fails open. The consumer used to compare the
+raw value with `eq ... "ALLOW"`, so `allow`, `Allow` or a stray trailing space
+selected fail-CLOSED silently — no error, no warning, nothing in `helm lint`.
+Normalise first, then reject anything that is neither spelling rather than
+guessing a failure mode on the operator's behalf.
+*/}}
+{{- define "aether.proxy.authzFailureMode" -}}
+{{- $mode := upper (trim (toString .Values.proxy.authzSidecar.failureMode)) -}}
+{{- if not (has $mode (list "ALLOW" "DENY")) -}}
+{{- fail (printf "proxy.authzSidecar.failureMode must be ALLOW or DENY, got %q" (toString .Values.proxy.authzSidecar.failureMode)) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
+
 {{- define "aether.proxy.labels" -}}
 helm.sh/chart: {{ include "aether.chart" . }}
 {{ include "aether.proxy.selectorLabels" . }}
