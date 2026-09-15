@@ -2,7 +2,9 @@ package cache
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -431,7 +433,8 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
 	resources := make([]types.Resource, 0, len(services))
-	for svc := range services {
+	// Sorted: services is a set built from the UDPRoute backends (a map).
+	for _, svc := range slices.Sorted(maps.Keys(services)) {
 		entry, ok := c.clusters[svc]
 		if !ok || entry.loadAssignment == nil {
 			// Backend service not in scope yet; skip until its cluster/EDS exists.
@@ -475,6 +478,11 @@ func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
 	vhosts := make([]*routev3.VirtualHost, 0, len(c.captureAuthorities)+len(gammaRoutes))
 	vhosts = c.appendSABackedCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters)
 	vhosts = c.appendRouteOnlyCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters)
+	// Both appenders range maps (captureAuthorities, gammaRoutes), so without
+	// this the cap_http RouteConfiguration's repeated virtual_hosts field is in
+	// a fresh random order on every snapshot — the #135 mechanism on the primary
+	// client route table of a capture-enabled node. See ordering.go.
+	sortVirtualHostsByName(vhosts)
 	return vhosts
 }
 
@@ -623,6 +631,16 @@ func (c *SnapshotCache) captureKnownTargets() []proxy.KnownTargetRoute {
 		}
 		add(svc, ref.ClusterLocalFQDN())
 	}
+	// Both loops above range maps. These become routes on the redirect-all
+	// catch-all virtual host, and Envoy evaluates a virtual host's routes in
+	// order, first match wins — so map order is not just a re-hash here, it
+	// decides which authority regex wins when two services' short-name
+	// spellings overlap (the bare-name collision the doc above calls out).
+	// Cluster is unique per target (seen dedupes by service key), so this is a
+	// total order.
+	slices.SortStableFunc(targets, func(a, b proxy.KnownTargetRoute) int {
+		return strings.Compare(a.Cluster, b.Cluster)
+	})
 	return targets
 }
 
@@ -839,22 +857,29 @@ func applyChainFilter(vh *routev3.VirtualHost, filters map[string]proxy.Extensio
 // every such pod and must be treated as immutable — appending to it would land
 // one pod's entry in another's chain.
 func (c *SnapshotCache) extensionHTTPFilters() []*http_connection_managerv3.HttpFilter {
+	// Every source below is a map, and CollectExtensionFilters emits in
+	// first-seen order — so without sorting the keys, the HCM's repeated
+	// http_filters field comes out in a different order on each rebuild. That
+	// is worse than a re-hash: HTTP filter order is the filter chain's
+	// EXECUTION order, so two escape-hatch filters would run in a random order
+	// relative to each other. Service keys are unique, giving a total order.
+	routes := c.serviceRoutesSnapshot()
 	var allRules []proxy.GammaRoute
-	for _, rules := range c.serviceRoutesSnapshot() {
-		allRules = append(allRules, rules...)
+	for _, svc := range slices.Sorted(maps.Keys(routes)) {
+		allRules = append(allRules, routes[svc]...)
 	}
 	chainFilters := c.serviceChainFiltersSnapshot()
 	chainExtras := make([]proxy.ExtensionFilter, 0, len(chainFilters))
-	for _, ef := range chainFilters {
-		chainExtras = append(chainExtras, ef)
+	for _, svc := range slices.Sorted(maps.Keys(chainFilters)) {
+		chainExtras = append(chainExtras, chainFilters[svc])
 	}
 	// INBOUND-scope filters need their default-disabled chain entry too — rbac
 	// brings no system entry (unlike ext_authz's sidecar entry), so without this
 	// the inbound TPFC references an absent filter and Envoy rejects the listener
 	// (found live: an INBOUND rbac ENFORCE silently never took effect).
 	c.depMu.RLock()
-	for _, ef := range c.serviceInboundFilters {
-		chainExtras = append(chainExtras, ef)
+	for _, svc := range slices.Sorted(maps.Keys(c.serviceInboundFilters)) {
+		chainExtras = append(chainExtras, c.serviceInboundFilters[svc])
 	}
 	c.depMu.RUnlock()
 	union := proxy.CollectExtensionFilters(allRules, chainExtras...)
