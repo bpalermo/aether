@@ -28,6 +28,7 @@ import (
 	"net"
 
 	"aethermesh.dev/agent/internal/xds/config"
+	"aethermesh.dev/common/l4project"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -50,19 +51,14 @@ type L4ServiceRoute struct {
 	Backends []L4Backend
 }
 
-// L4Backend is one weighted backend of an L4 route.
-type L4Backend struct {
-	// Service is the namespace-qualified "<ns>/<svc>" serviceref key (020 Part 1,
-	// for dependency-set tracking).
-	Service string
-	// Cluster is the resolved data-plane TCP cluster name
-	// ("tcp:<svc>.<ns>.<meshDomain>").
-	Cluster string
-	// Weight is the load-balancing weight. The reconciler defaults an UNSET
-	// backendRef weight to 1; an explicit 0 means DRAIN (no traffic) and is omitted
-	// from the weighted-cluster set, per Gateway API.
-	Weight uint32
-}
+// L4Backend is one weighted backend of an L4 route: the namespace-qualified
+// "<ns>/<svc>" key, the resolved data-plane cluster name, and the weight.
+//
+// It is an alias for the shared projection type so the node agent's L4 reconciler
+// and the edge gateway reconciler can both feed this layer from one projector
+// (common/l4project.Backends). An explicit weight 0 means DRAIN and is omitted from
+// the weighted-cluster set here rather than normalised to 1 (#492).
+type L4Backend = l4project.Backend
 
 // BuildCaptureTCPRouteFilterChain builds a per-ClusterIP TCP floor filter chain
 // for a service that has a TCPRoute. It matches the service's ClusterIP as the
