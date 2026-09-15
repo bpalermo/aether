@@ -120,7 +120,7 @@ func TestStart_InvokesPreListenCallback(t *testing.T) {
 
 			// Give the server a moment to pass through PreListen and start serving.
 			assert.Eventually(t, func() bool {
-				return cb.called
+				return cb.called.Load()
 			}, time.Second, 10*time.Millisecond, "PreListen should have been called")
 
 			cancel()
