@@ -277,7 +277,9 @@ pod that can never become Ready.
 67MB binary every 2s per pod spent >=31% of the supervisor container's CPU on Go
 package init alone (which runs before `main()`, so no argv check can avoid it).
 The chart now execs the standalone `proxy-ready` binary below instead. The flag
-still works, so a chart predating #673 keeps a probe against a newer image.
+still works, so a chart predating #673 keeps a probe against a newer image — it is
+marked deprecated in cobra, so using it prints a warning and it no longer appears
+in `--help`.
 
 ### `proxy-ready` (standalone binary — bundled in the agent image, not run from it)
 
@@ -316,7 +318,8 @@ pod's `:53` to.
 (~3-4% of the container's CPU) on container exec and Go package init alone (which
 runs before `main()`, so no argv check can avoid it). The chart execs the
 standalone `mesh-dns-ready` binary below instead. The flag still works, so a
-chart predating #683 keeps a probe against a newer image.
+chart predating #683 keeps a probe against a newer image — it is marked deprecated
+in cobra, so using it prints a warning and it no longer appears in `--help`.
 
 `--debug` only raises the log level (Info to Trace); it gates no feature and no
 data-path behaviour. The mesh-DNS forward path logs **nothing per query** at any

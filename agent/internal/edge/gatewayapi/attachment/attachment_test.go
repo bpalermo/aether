@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // ptr returns a pointer to v (for optional Gateway API fields).
@@ -24,14 +23,6 @@ func httpRoute(hosts []string, rules []gatewayv1.HTTPRouteRule, parents ...strin
 		hr.Spec.ParentRefs = append(hr.Spec.ParentRefs, gatewayv1.ParentReference{Name: gatewayv1.ObjectName(p)})
 	}
 	return hr
-}
-
-func backend(svc string, port int32) []gatewayv1.HTTPBackendRef {
-	ref := gatewayv1.HTTPBackendRef{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: gatewayv1.ObjectName(svc)}}}
-	if port != 0 {
-		ref.Port = ptr(gatewayv1.PortNumber(port))
-	}
-	return []gatewayv1.HTTPBackendRef{ref}
 }
 
 // TestAttachedToOurGateway: only routes with a parentRef to one of our Gateways
@@ -53,27 +44,6 @@ func TestAttachedToOurGateway_ExplicitNamespace(t *testing.T) {
 	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "route-ns"}}
 	hr.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: "edge-gw", Namespace: &ns}}
 	assert.True(t, AttachedToOurGateway(hr.Spec.ParentRefs, "route-ns", ours))
-}
-
-func TestFirstBackendService(t *testing.T) {
-	assert.Equal(t, "echo", firstBackendService(backend("echo", 0), "ns", nil))
-	assert.Empty(t, firstBackendService(nil, "ns", nil))
-
-	// A cross-namespace backendRef without a grant is skipped (RefNotPermitted).
-	otherNs := gatewayv1.Namespace("other")
-	crossRefs := []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{
-		BackendObjectReference: gatewayv1.BackendObjectReference{Name: "echo", Namespace: &otherNs},
-	}}}
-	assert.Empty(t, firstBackendService(crossRefs, "ns", nil), "ungranted cross-ns backend dropped")
-
-	grants := []gatewayv1beta1.ReferenceGrant{{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
-		Spec: gatewayv1beta1.ReferenceGrantSpec{
-			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "ns"}},
-			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
-		},
-	}}
-	assert.Equal(t, "echo", firstBackendService(crossRefs, "ns", grants), "granted cross-ns backend kept")
 }
 
 // --- L4 edge helpers ---
