@@ -354,6 +354,19 @@ proxy:
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0
     shmHostPath: /run/aether/shm
+  # Pod terminationGracePeriodSeconds, and the same value passed to the supervisor
+  # as --termination-grace. The deleted pod must keep its Envoy alive as the
+  # successor's hot-restart parent until the successor's (xDS-gated, unbounded)
+  # init and parent-shutdown timer have run, so this is deliberately generous.
+  #
+  # The supervisor needs to know it because it is the only non-arbitrary bound on
+  # that wait: where no successor can ever appear — node shutdown, scale-down,
+  # `kubectl delete daemonset`, a replacement stuck Pending — it waits until
+  # terminationGrace minus (hotRestart.drainTime + 5s + 10s) and then drains Envoy
+  # itself, instead of being SIGKILLed with connections open (#771). Keep it well
+  # above hotRestart.drainTime + 15s or that fallback cannot fit and the supervisor
+  # reverts to waiting for the SIGKILL.
+  terminationGracePeriodSeconds: 180
   resources:
     requests:
       cpu: 500m

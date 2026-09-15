@@ -118,3 +118,56 @@ func TestHandleShutdownWaitsForGenuineSuccessor(t *testing.T) {
 	}
 	assert.False(t, s.childTracked(0))
 }
+
+// TestSuccessorWaitBudget pins the arithmetic that decides when the mid-handoff
+// wait gives up: the pod's whole grace period, minus what shutdown() will then
+// spend draining, minus the margin. 0 means "wait indefinitely".
+func TestSuccessorWaitBudget(t *testing.T) {
+	budget := func(grace, drain time.Duration) time.Duration {
+		s := New(Config{TerminationGrace: grace, DrainTime: drain}, slog.New(slog.DiscardHandler), nil)
+		return s.successorWaitBudget()
+	}
+
+	// Deployed values (charts/aether/values.yaml): 180s grace, 10s drain.
+	assert.Equal(t, 180*time.Second-(10*time.Second+shutdownGrace)-terminationFallbackMargin,
+		budget(180*time.Second, 10*time.Second))
+	// Unset grace: the pre-#771 unbounded behavior, which is what every chart
+	// predating this flag and every unit-test supervisor gets.
+	assert.Equal(t, time.Duration(0), budget(0, 10*time.Second))
+	// A grace period too small to fit a drain has no safe cutoff: waiting beats
+	// guaranteeing an errno-111 abort of a healthy successor.
+	assert.Equal(t, time.Duration(0), budget(20*time.Second, 10*time.Second))
+}
+
+// TestHandleShutdownFallsBackToDrainWhenNoSuccessorComes covers the case the
+// #771 reproduction could not induce on-cluster, because a `kubectl delete pod`
+// of a DaemonSet member self-rescues into the surge path: a termination where no
+// successor can ever appear (node shutdown, scale-down, `kubectl delete
+// daemonset`, a replacement stuck Pending). Admin answers LIVE at a newer epoch,
+// so the mid-handoff branch is correctly entered — but nothing ever terminates
+// our Envoy. The wait must expire at the budget and drain the child, rather than
+// sit there until the kubelet's SIGKILL with connections open.
+func TestHandleShutdownFallsBackToDrainWhenNoSuccessorComes(t *testing.T) {
+	requireShell(t)
+
+	f := newFakeAdmin(t, adminLiveState, 1) // not ours: the mid-handoff branch
+	s := newShutdownSupervisor(t, f)
+	// DrainTime 1s + shutdownGrace 5s + margin 10s + 2s of actual wait.
+	s.cfg.TerminationGrace = 18 * time.Second
+	require.Equal(t, 2*time.Second, s.successorWaitBudget())
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- s.handleShutdown(cancelledCtx()) }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("handleShutdown never gave up waiting for a successor that cannot come")
+	}
+
+	assert.GreaterOrEqual(t, time.Since(start), 2*time.Second,
+		"the fallback must not cut a handoff short before the budget")
+	assert.False(t, s.childTracked(0), "the fallback must drain and reap the child")
+}

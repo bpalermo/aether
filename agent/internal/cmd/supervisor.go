@@ -157,6 +157,7 @@ func init() {
 	_ = f.MarkDeprecated("readiness-check", "exec the stdlib-only proxy-ready prober staged by --install-readiness-path instead (#673)")
 	f.DurationVar(&supervisorCfg.HandoffDeadline, "handoff-deadline", 0, "Watchdog: max time a hot-restart epoch may stay not-LIVE after launch before the supervisor exits non-zero (0 = 2m default)")
 	f.DurationVar(&supervisorCfg.AdminUnresponsiveDeadline, "admin-unresponsive-deadline", 0, "Watchdog: max time the Envoy admin may be unreachable (once previously LIVE) before the supervisor exits non-zero (0 = 30s default)")
+	f.DurationVar(&supervisorCfg.TerminationGrace, "termination-grace", 0, "This pod's terminationGracePeriodSeconds (the chart passes its own value). Bounds the mid-handoff wait for a successor so a termination that can never have one — node shutdown, scale-down, DaemonSet delete, a replacement stuck Pending — still drains Envoy before the kubelet's SIGKILL (#771). 0 = unknown: wait indefinitely")
 	f.StringVar(&supervisorTelemetryCfg.OTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC collector endpoint for hot-restart lifecycle metrics push (e.g. collector:4317); empty disables telemetry")
 
 	rootCmd.AddCommand(proxySupervisorCmd)
