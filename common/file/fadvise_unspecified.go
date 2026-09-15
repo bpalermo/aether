@@ -16,10 +16,6 @@
 
 package file
 
-import (
-	"os"
-)
-
-func markNotNeeded(in *os.File) error {
+func markNotNeeded(uintptr) error {
 	return nil
 }
