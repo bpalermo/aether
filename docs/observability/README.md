@@ -16,6 +16,7 @@ exist — and why the external prober alone is not sufficient.
 | `MeshDNSNoUpstreams` | critical | no forward upstream → all non-mesh DNS fails |
 | `MeshDNSWatcherInactive` | warning | fsnotify watcher died → updates silently stop |
 | `MeshDNSReloadFailing` | warning | corrupt/unreadable snapshot |
+| `MeshDNSForwardConnsRecyclingOnError` | info | pooled upstream sockets retired on exchange errors (#674) — resolution still works, it just costs an extra dial |
 | `MeshDNSResolutionFailing` | critical | external prober can't resolve (per path) |
 | `MeshDNSMetricsAbsent` | critical | daemons down fleet-wide, or the OTLP path is broken |
 
