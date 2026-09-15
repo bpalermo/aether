@@ -1,8 +1,9 @@
 # Proposal: Vanity Go module path `aethermesh.dev`
 
-**Status:** Accepted — 2026-08-08 (apex `aethermesh.dev`, served by the docs site).
-The serving half (go-import meta + build guard) ships first; the module rename
-is the follow-up PR and is gated on the meta being live.
+**Status:** Implemented — 2026-08-08 (apex `aethermesh.dev`, served by the docs
+site). Both halves shipped: the serving half (go-import meta + build guard) and
+the module rename (#631–#633). `go.mod` is `module aethermesh.dev` and every
+import in the tree already uses it.
 **Author:** Bruno Palermo
 **Relates:** the aethermesh.dev website (the serving surface), proposal 010
 (the sibling proxy workspace — C++, unaffected).

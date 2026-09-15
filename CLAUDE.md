@@ -8,7 +8,7 @@ Aether is a Kubernetes service mesh data plane built in Go. It runs an **agent**
 
 ## Build System
 
-The project uses **Bazel 9.2.0** (via Bazelisk) with `rules_go` and Gazelle for Go, and `rules_img` for container images. Go module is `aethermesh.dev` (vanity import path, proposal 035; hosted at github.com/bpalermo/aether) with Go 1.26.x (see `MODULE.bazel` for the pinned SDK).
+The project uses **Bazel 9.2.0** (via Bazelisk) with `rules_go` and Gazelle for Go, and `rules_img` for container images. Go module is `aethermesh.dev` (vanity import path, proposal 035; hosted at github.com/bpalermo/aether) with Go 1.27.x (`MODULE.bazel`'s `go_sdk.download` carries the exact pin). `nogo` (vet-class static analysis) is wired via `go_sdk.nogo(nogo = "//:nogo")` and runs as a build-time validation action on **every** Go target — a vet finding fails the build, not just the lint pass; `nogo.json` scopes which analyzers apply where.
 
 ### Common Commands
 
@@ -35,7 +35,8 @@ make tidy                    # or: bazel mod tidy
 # `go mod tidy`: the generated proto packages are Bazel-only outputs, so it
 # fails on every import of them and `-e` strips what only BUILD files need.
 # See docs/runbook.md, "Go dependency hygiene".
-make deps-audit              # or: scripts/go-deps-audit.sh
+make deps-audit              # or: scripts/go-deps-audit.sh — also a required
+                             # CI job (`deps-audit` in .github/workflows/ci.yaml)
 
 # Format code (Go, protobuf, Starlark, shell)
 make format                  # or: bazel run //:format
@@ -58,7 +59,9 @@ make push-all                # Push all images
 
 ## Architecture
 
-### Binaries (under `cmd/`)
+### Binaries
+
+There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cmd/`, `registrar/cmd/`, `controller/cmd/`, `prober/cmd/`).
 
 - **`agent/cmd/agent`** - Node agent DaemonSet. Uses `controller-runtime` manager to run the xDS server and CNI gRPC server as runnables. CLI built with Cobra. Also hosts two subcommands: `agent edge` (the north-south edge gateway control plane, proposal 003/018) and `agent proxy-supervisor` (the Envoy hot-restart supervisor, proposal 001).
 - **`agent/cmd/mesh-dns`** - Slim standalone mesh-DNS daemon (its own DaemonSet and its own image since #583). Serves `<svc>.<ns>.<mesh-domain>` from the record snapshot the node agent writes and forwards everything else upstream, so the resolver survives agent rolls (#578).

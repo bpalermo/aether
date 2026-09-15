@@ -3,6 +3,7 @@ package xds
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,8 +12,12 @@ import (
 
 // stubCallback is a test implementation of ServerCallback that records calls
 // and optionally returns a configured error.
+//
+// PreListen runs on the server's Start goroutine while server_test polls the
+// flag from the test goroutine, so called is an atomic.Bool (issue #772,
+// race R4).
 type stubCallback struct {
-	called bool
+	called atomic.Bool
 	err    error
 }
 
@@ -20,7 +25,7 @@ type stubCallback struct {
 var _ ServerCallback = (*stubCallback)(nil)
 
 func (s *stubCallback) PreListen(_ context.Context) error {
-	s.called = true
+	s.called.Store(true)
 	return s.err
 }
 

@@ -19,9 +19,10 @@ const (
 	//     default is off).
 	//   - "false" → force OFF (opt-out; carve an infra/hostNetwork/prober pod out of
 	//     the managed-pod default, agent.captureRedirectAllDefault).
-	// Absent (or any other value) falls through to the node default. REQUIRES the
-	// agent --capture-redirect-all flag so the capture listener carries the
-	// passthrough fallback filter chain.
+	// Absent (or any other value) falls through to the node default. No flag is
+	// involved: the capture listener always carries the passthrough fallback filter
+	// chain (the agent's --capture-redirect-all flag was retired by proposal 031,
+	// and redirect-all is the managed-pod default).
 	AnnotationCaptureRedirectAll = annotationAetherCapturePrefix + "redirect-all"
 
 	// AnnotationCaptureExcludeOutboundPorts carves specific outbound TCP
