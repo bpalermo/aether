@@ -31,6 +31,7 @@ go_test(
         "metrics_test.go",
         "registrar_test.go",
         "watch_drain_test.go",
+        "watch_filter_test.go",
         "watch_identity_test.go",
         "watch_identity_wake_test.go",
         "watch_peer_identity_test.go",

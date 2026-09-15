@@ -265,11 +265,26 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 	}
 }
 
-// currentFilter returns the filter to assert on the next stream and its
-// generation.
-func (r *RegistrarRegistry) currentFilter() ([]string, uint64) {
+// assertFilter publishes cancel as the canceller for the stream the watch loop
+// is about to open and returns the filter that stream must assert, together
+// with its generation. Both halves happen in ONE filterMu critical section,
+// and that is the whole point: it makes the re-assert lossless.
+//
+// Read the filter in one critical section and publish the canceller in another
+// and a SetServiceFilter landing in between is lost (#772, S8): it reads the
+// PREVIOUS stream's streamCancel — already spent — so its cancel is a no-op,
+// while this loop proceeds to open a stream carrying the filter it read before
+// the update. Nothing cancels that stream, so the new dependency set is never
+// asserted until the stream dies for some other reason. That is the shape of
+// the #682 "demand-set shrink invisible until the next roll" stall.
+//
+// Holding the lock across both makes the two interleavings the only ones:
+// SetServiceFilter runs entirely before (this stream carries the new filter)
+// or entirely after (it sees this stream's canceller and cancels it).
+func (r *RegistrarRegistry) assertFilter(cancel context.CancelFunc) ([]string, uint64) {
 	r.filterMu.Lock()
 	defer r.filterMu.Unlock()
+	r.streamCancel = cancel
 	return slices.Clone(r.filterServices), r.filterGen
 }
 
@@ -505,7 +520,10 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		default:
 		}
 
-		services, filterGen := r.currentFilter()
+		// Per-stream context so SetServiceFilter can end the stream and force
+		// a reconnect that re-asserts the new filter.
+		streamCtx, streamCancel := context.WithCancel(ctx)
+		services, filterGen := r.assertFilter(streamCancel)
 		if filterGen != lastFilterGen {
 			lastVersion = ""
 			lastFilterGen = filterGen
@@ -518,13 +536,6 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		if services != nil {
 			req.Filter = &registrarv1.ServiceFilter{Services: services}
 		}
-
-		// Per-stream context so SetServiceFilter can end the stream and force
-		// a reconnect that re-asserts the new filter.
-		streamCtx, streamCancel := context.WithCancel(ctx)
-		r.filterMu.Lock()
-		r.streamCancel = streamCancel
-		r.filterMu.Unlock()
 
 		stream, err := r.client.WatchEndpoints(streamCtx, req)
 		if err != nil {
