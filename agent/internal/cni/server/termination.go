@@ -126,11 +126,21 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 	endpoint.Health = registryv1.ServiceEndpoint_HEALTH_DRAINING
-	if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
+	// Both calls below run with lifecycleMu held, so both are bounded (S20,
+	// #772): unbounded, a hung registrar would serialise every CNI ADD/DEL on
+	// this node behind one pod's drain marking. CNI DEL performs the final
+	// removal and the ghost sweep reconciles whatever is left, so a cut-off
+	// costs nothing the pipeline does not already recover.
+	drainCtx, drainCancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
+	defer drainCancel()
+	if err := s.registry.RegisterEndpoint(drainCtx, serviceName, protocol, endpoint); err != nil {
 		log.ErrorContext(ctx, "termination: failed to mark endpoint draining; falling back to deregistration", "error", err)
 		// Removal is strictly safer than leaving the endpoint selectable.
 		if _, ips, exErr := registry.ExtractCNIPodInformation(cur); exErr == nil {
-			if unregErr := s.registry.UnregisterEndpoints(ctx, serviceName, ips); unregErr != nil {
+			unregCtx, unregCancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
+			unregErr := s.registry.UnregisterEndpoints(unregCtx, serviceName, ips)
+			unregCancel()
+			if unregErr != nil {
 				log.ErrorContext(ctx, "termination: fallback deregistration also failed; CNI DEL will retry", "error", unregErr)
 			}
 		}
@@ -211,7 +221,10 @@ func (s *CNIServer) schedulePoolClose(ctx context.Context, delay time.Duration, 
 	}
 
 	endpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
-	if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
+	// Bounded for the same reason as phase 1 (S20, #772): lifecycleMu is held.
+	callCtx, cancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
+	defer cancel()
+	if err := s.registry.RegisterEndpoint(callCtx, serviceName, protocol, endpoint); err != nil {
 		log.ErrorContext(ctx, "termination: failed to mark draining endpoint unhealthy; pools close at app exit instead", "error", err)
 		return
 	}
