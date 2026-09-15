@@ -100,12 +100,12 @@ func (r *KubernetesRegistry) UnregisterEndpoints(_ context.Context, _ string, _ 
 // matches the given service name. Node topology labels are used for locality information.
 //
 // The Kubernetes registry derives endpoints from managed pods, every one of which is a
-// mesh-inbound (HTTP/h2 over :15008) endpoint by construction — it has no notion of a
-// per-pod TCP-only service. A TCP query must therefore return NOTHING, not the same
+// mesh-inbound (HTTP/h2 over :18008, proposal 030) endpoint by construction — it has
+// no notion of a per-pod TCP-only service. A TCP query must therefore return NOTHING, not the same
 // HTTP endpoint set: the agent's LoadClustersFromRegistry builds a service's HTTP
 // cluster (with its outbound/cap_http vhost) from the HTTP listing, then in a second
 // pass OVERWRITES the same map key with a vhost-less tcp:true entry from the TCP
-// listing ("a service is HTTP or TCP, never both" — true for etcd/ddb, which key by
+// listing ("a service is HTTP or TCP, never both" — true for etcd, which keys by
 // protocol). Returning the pods for TCP too violated that invariant: every mesh
 // service collapsed to a TCP-only entry, its CDS cluster + GAMMA cap_http vhost
 // vanished, and captured requests routing to it 503'd (no_healthy_upstream). Treat

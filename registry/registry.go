@@ -1,6 +1,7 @@
 // Package registry provides interfaces for service endpoint registration and discovery.
 // It manages the lifecycle of service endpoints and allows querying available services
-// and their endpoints. Implementations can use different backends (e.g., etcd).
+// and their endpoints. Implementations can use different backends (Kubernetes,
+// etcd, or the in-cluster registrar).
 package registry
 
 import (
