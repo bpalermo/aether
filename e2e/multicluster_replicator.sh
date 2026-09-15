@@ -339,7 +339,6 @@ install_aether() {
 			--set "clusterName=cluster-$c" \
 			--set "meshDomain=$MESH_DOMAIN" \
 			--set spire.enabled=true \
-			--set spire.trustDomain="$TRUST_DOMAIN" \
 			--set controller.webhook.spire=false \
 			--set edge.enabled=false \
 			--set agent.meshDns=true \

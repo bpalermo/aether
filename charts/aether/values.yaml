@@ -382,6 +382,10 @@ proxy:
       args: []
     # Check timeout and the REQUIRED failure mode: DENY (fail-closed, requests 403
     # when the sidecar is unreachable) or ALLOW (fail-open).
+    #
+    # Case- and whitespace-insensitive, and validated at render time: anything
+    # that is not ALLOW or DENY fails `helm template`/`helm install` with a named
+    # error. It used to be compared raw, so `allow` silently meant DENY (#770).
     timeout: 200ms
     failureMode: DENY
   # UDS delivery for workloads that serve on a Unix domain socket (proposal 034
