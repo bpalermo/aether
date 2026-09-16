@@ -36,6 +36,7 @@ go_test(
         "metrics_test.go",
         "server_test.go",
         "snapshot_test.go",
+        "snapshot_toctou_test.go",
         "sync_test.go",
         "writebehind_test.go",
     ],

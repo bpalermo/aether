@@ -48,6 +48,7 @@ go_library(
         "//common/constants/annotations",
         "//common/constants/mesh",
         "//common/extensionfilter",
+        "//common/l4project",
         "//common/serviceref",
         "@com_github_cncf_xds_go//xds/core/v3:core",
         "@com_github_cncf_xds_go//xds/type/matcher/v3:matcher",

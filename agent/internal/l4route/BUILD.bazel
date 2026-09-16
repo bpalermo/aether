@@ -9,6 +9,7 @@ go_library(
         "//agent/internal/gatewaystatus",
         "//agent/internal/xds/proxy",
         "//common/crdcheck",
+        "//common/l4project",
         "//common/log",
         "//common/referencegrant",
         "//common/serviceref",

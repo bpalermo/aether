@@ -118,10 +118,17 @@ func (s *Snapshot) GetAllWithVersion(protocol registryv1.Service_Protocol) (map[
 // Diff compares a new set of endpoints against the current snapshot and returns
 // the events needed to transition from the current state to the new state.
 // It does not modify the snapshot.
+//
+// A caller that goes on to Replace with the same state must use DiffAndReplace
+// instead — see the TOCTOU note there.
 func (s *Snapshot) Diff(newEndpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) []*registrarv1.WatchEndpointsResponse {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.diffLocked(newEndpoints)
+}
 
+// diffLocked is Diff's body. Caller must hold mu (read or write).
+func (s *Snapshot) diffLocked(newEndpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) []*registrarv1.WatchEndpointsResponse {
 	var events []*registrarv1.WatchEndpointsResponse
 
 	// Build a set of new keys for efficient lookup.
@@ -181,7 +188,37 @@ func (s *Snapshot) Diff(newEndpoints map[string]map[registryv1.Service_Protocol]
 func (s *Snapshot) Replace(endpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) (string, []*registrarv1.WatchEndpointsResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.replaceLocked(endpoints)
+}
 
+// DiffAndReplace computes the diff against the current contents and installs
+// the new contents in ONE critical section, returning the diff events, the new
+// version, and the catalog transitions.
+//
+// The two halves must not be separate lock acquisitions (#772, S13). The sync
+// loop is not the only writer: an agent's RegisterEndpoint lands via Apply on a
+// gRPC handler goroutine. One arriving between a separate Diff and Replace is
+// broadcast as ENDPOINT_ADDED by Apply and then silently erased by Replace,
+// which installs a state computed before that endpoint existed — with no
+// compensating REMOVED event, so every watcher keeps an endpoint the snapshot
+// no longer has until a later sync cycle happens to re-derive it.
+//
+// Today that hole is masked by a different component: Syncer.writeBehind
+// overlays the pending intents onto the new state before this call. But then
+// the invariant is held by the write-behind queue rather than by the snapshot,
+// and the legacy constructor path leaves writeBehind nil (NewRegistrarServer
+// without a queue), where nothing masks it. Holding the lock across both halves
+// makes the snapshot self-consistent on its own.
+func (s *Snapshot) DiffAndReplace(endpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) ([]*registrarv1.WatchEndpointsResponse, string, []*registrarv1.WatchEndpointsResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := s.diffLocked(endpoints)
+	version, transitions := s.replaceLocked(endpoints)
+	return events, version, transitions
+}
+
+// replaceLocked is Replace's body. Caller must hold mu for writing.
+func (s *Snapshot) replaceLocked(endpoints map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) (string, []*registrarv1.WatchEndpointsResponse) {
 	// The count map's key set is the service catalog (see the invariant on
 	// serviceCounts), so the old catalog is read straight off it.
 	oldServices := make(map[string]struct{}, len(s.serviceCounts))
