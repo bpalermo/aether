@@ -18,18 +18,38 @@ import (
 // Netns pinning (e2e findings 2026-06-10, finding 1).
 //
 // The agent points Envoy at each local pod via the pod's netns *filepath*
-// (upstream source-address network_namespace_filepath). Envoy 1.38's error path
-// for a vanished netns returns a nullptr connection and the caller segfaults,
-// so any dial racing the runtime's netns teardown takes down the whole node
-// proxy — and a stale path left in agent storage makes the proxy unbootable
-// (cold-start health checkers dial immediately).
+// (upstream source-address network_namespace_filepath), so any dial racing the
+// runtime's netns teardown opens a path that is already gone.
 //
-// CNI ADD therefore bind-mounts the runtime netns to an aether-owned pin path
-// and registers *that* path with the agent. The bind mount keeps the netns
-// alive (and the path open-able) independent of the runtime's teardown; CNI DEL
-// unpins only after the agent has deregistered the pod and Envoy acked the
-// config removal, plus a grace delay for deferred dials. A late dial against a
-// pinned-but-dead netns fails with a clean connection error instead of ENOENT.
+// HISTORICALLY that was a crash. Envoy 1.38's error path for a vanished netns
+// returned a nullptr connection which the caller dereferenced, so one racing
+// dial took down the whole node proxy, and a stale path left in agent storage
+// made the proxy unbootable (cold-start health checkers dial immediately) —
+// #112, #245. That is fixed upstream and the fixes are in the pinned proxy
+// snapshot (1.40.0-dev.20260904.13144fb):
+//
+//   - envoyproxy/envoy#45975 (merged 2026-07-13): the pool dial surfaces a
+//     FailedToCreateConnection / LocalConnectionFailure — a clean UF for that
+//     one request — instead of segfaulting.
+//   - envoyproxy/envoy#46503 (merged 2026-08-11): the active TCP/HTTP/gRPC
+//     health checkers, which create upstream connections directly and so still
+//     crashed after #45975, record a NETWORK health-check failure instead.
+//   - envoyproxy/envoy#45976 (opt-in netns validation at config load) is in the
+//     snapshot too and stays OFF for us: it would turn a stale pod into an
+//     LDS/CDS NACK, which is worse than a clean dial failure.
+//
+// The pin stays, because the window it covers is still real — just no longer
+// fatal. CNI ADD bind-mounts the runtime netns to an aether-owned pin path and
+// registers *that* path with the agent; the bind mount keeps the netns alive
+// (and the path open-able) independent of the runtime's teardown, so a
+// hot-restart successor can re-create the pod's listeners and deferred dials
+// (health checkers and pool drains were measured 10-13s after config removal
+// under roll churn) can still *succeed* rather than merely fail cleanly. CNI
+// DEL therefore unpins on a delay — but, since #796, it no longer waits on the
+// agent's ACK to do so: a DEL that cannot reach the agent unpins on the same
+// delay, returns success, and leaves reconciliation to the agent's ghost sweep
+// (agent/internal/cni/server/ghostsweep.go). Blocking instead wedged the node,
+// which is now the worse failure of the two.
 
 // pinNetns bind-mounts netns onto the pin path for containerID and returns the
 // pinned path. A pre-existing pin for the same container (retried ADD) is
@@ -163,7 +183,8 @@ var spawnDetachedUnpinFn = (*AetherPlugin).spawnDetachedUnpin
 // long in-process sleep delays pod teardown node-wide), but the pin must
 // outlive Envoy's drain tail — health checkers and pool drains were observed
 // dialing 10-13s after config removal under roll churn, and a dial through an
-// already-unpinned path is the nullptr segfault all over again.
+// already-unpinned path fails (cleanly, on the pinned snapshot — it used to be
+// a nullptr segfault; see the package comment above).
 func (p *AetherPlugin) spawnDetachedUnpin(target string, delay time.Duration) error {
 	self, err := os.Executable()
 	if err != nil {
@@ -208,8 +229,8 @@ type gcAttachments struct {
 }
 
 // sweepNetnsPins unpins every entry in the pin dir whose container ID is not in
-// the valid set — orphans left by DELs that never completed (e.g. the agent was
-// down, so the pin was deliberately retained). Best-effort.
+// the valid set — orphans left by DELs that never completed, or whose detached
+// unpinner never ran. Best-effort.
 func (p *AetherPlugin) sweepNetnsPins(conf config.AetherConf, stdinData []byte) {
 	var gc gcAttachments
 	if err := json.Unmarshal(stdinData, &gc); err != nil {

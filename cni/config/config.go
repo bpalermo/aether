@@ -35,20 +35,28 @@ type AetherConf struct {
 	CRISocket string `json:"cri_socket"`
 
 	// NetnsPinDisabled turns off netns pinning (on by default): Envoy dials
-	// local pods inside their netns by filepath, and a dial racing the
-	// runtime's netns removal segfaults Envoy (upstream bug; e2e findings
-	// 2026-06-10). CNI ADD bind-mounts the netns to an aether-owned path that
-	// stays valid until the agent has confirmed the pod's xDS resources are
-	// gone, so late dials fail gracefully instead of crashing the proxy.
+	// local pods inside their netns by filepath, so a dial racing the runtime's
+	// netns removal opens a path that is already gone. CNI ADD bind-mounts the
+	// netns to an aether-owned path that outlives the runtime's teardown, so
+	// those late dials still work.
+	//
+	// It used to be a crash (Envoy 1.38 dereferenced a nullptr connection;
+	// e2e findings 2026-06-10, #245). On the pinned proxy snapshot it is a
+	// clean per-request failure — envoyproxy/envoy#45975 for the pool dial and
+	// #46503 for the active health checkers — so the pin is now a
+	// data-plane-quality measure, not a crash guard, and nothing waits on it.
 	NetnsPinDisabled bool `json:"netns_pin_disabled"`
 	// NetnsPinDir is where CNI ADD bind-mounts each pod's netns. Must be a
 	// host path visible to the aether-proxy container (which mounts /run/aether
 	// with HostToContainer propagation). Empty = /run/aether/netns.
 	NetnsPinDir string `json:"netns_pin_dir"`
-	// NetnsUnpinDelaySeconds is how long CNI DEL waits after the agent has
-	// deregistered the pod (and Envoy acked the listener removal) before
-	// unpinning the netns, covering Envoy's deferred cluster destruction and
-	// connection-pool drains that can still dial for a few seconds.
+	// NetnsUnpinDelaySeconds is how long the detached unpinner waits before
+	// releasing the netns, covering Envoy's deferred cluster destruction, its
+	// connection-pool drains and a hot-restart successor re-creating the pod's
+	// listeners — all of which can still touch the netns for a few seconds
+	// after the pod is gone. The delay runs out of process, so it never slows
+	// pod teardown, and CNI DEL schedules it whether or not the agent ACKed
+	// the removal (#796).
 	// 0 = 10s default; negative = no delay.
 	NetnsUnpinDelaySeconds int `json:"netns_unpin_delay_seconds"`
 	// NetnsDelGiveUpAfterSeconds bounds how long CNI DEL keeps failing back to
@@ -123,9 +131,12 @@ const defaultNetnsPinDir = "/run/aether/netns"
 
 // defaultNetnsUnpinDelay covers the post-removal dial window observed on
 // talos-main: health checkers / connection pools dialed up to ~13s after the
-// listener and clusters were removed from the snapshot under roll churn (one
-// such dial through an already-released pin segfaulted Envoy 1.38). The unpin
-// runs as a detached process, so a generous delay does not slow pod teardown.
+// listener and clusters were removed from the snapshot under roll churn. Such a
+// dial through an already-released pin used to segfault Envoy 1.38; on the
+// pinned snapshot it is a clean failure (envoyproxy/envoy#45975, #46503), so
+// the delay now buys those dials a working netns rather than the node's life.
+// The unpin runs as a detached process, so a generous delay does not slow pod
+// teardown.
 const defaultNetnsUnpinDelay = 60 * time.Second
 
 // defaultNetnsDelGiveUpAfter bounds the DEL retry loop against a live-but-erroring

@@ -376,10 +376,16 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		netns := pod.GetNetworkNamespace()
 
 		// Skip a pod whose network namespace no longer exists: a missed CNI DEL
-		// left the storage entry behind, and programming its per-pod cluster
-		// (NetworkNamespaceFilepath) faults Envoy opening the dead netns (talos
-		// worker-01, 2026-06-19). The ghost sweep prunes the stale entry; this
-		// keeps the bad config out of the snapshot at startup, before that runs.
+		// (or one the agent was absent for, #796) left the storage entry behind,
+		// and its per-pod cluster would point Envoy at a dead netns via
+		// NetworkNamespaceFilepath. That used to fault the proxy outright (talos
+		// worker-01, 2026-06-19); on the pinned snapshot it is only stale config
+		// whose dials fail cleanly (envoyproxy/envoy#45975 for the pool dial,
+		// #46503 for the active health checkers). Skipping is still right — the
+		// config can never become correct again, and programming it only buys
+		// pointless health-check noise against a host that will never come back.
+		// The ghost sweep prunes the stale entry; this keeps the bad config out
+		// of the snapshot at startup, before that runs.
 		if netns != "" && !netnsExists(netns) {
 			c.log.WarnContext(ctx, "skipping pod with missing network namespace (stale storage; CNI DEL likely missed)", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 			continue

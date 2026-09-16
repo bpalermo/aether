@@ -95,7 +95,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// Pin the netns to an aether-owned path and register that path instead of
 	// the runtime's, so Envoy's per-pod dials never race the runtime's netns
 	// teardown (see netnspin.go). Pin failure falls back to the runtime path:
-	// a working mesh with the old crash window beats a failed pod start.
+	// a working mesh whose teardown-window dials fail beats a failed pod start.
 	if !netConf.NetnsPinDisabled {
 		if pinned, err := p.pinNetns(netConf, args.Netns, args.ContainerID); err != nil {
 			p.logger.Warn("failed to pin netns; falling back to runtime netns path",
