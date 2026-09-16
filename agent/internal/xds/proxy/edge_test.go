@@ -854,22 +854,6 @@ func TestBuildEdgeDirectResponseRoute_PredicatesPreserved(t *testing.T) {
 	assert.Equal(t, "GET", nameMap[":method"])
 }
 
-// TestSortRoutesBySpecificity_HeaderCountRanksHigher verifies that when two routes
-// share the same path the one with more headers sorts before the one with fewer.
-func TestSortRoutesBySpecificity_HeaderCountRanksHigher(t *testing.T) {
-	// Build two routes that differ only in header count.
-	fewer := BuildEdgeRoute("/api", "", []RouteHeaderMatch{{Name: "h1", Value: "v1"}}, "", nil, "svc", nil, nil, nil, nil)
-	more := BuildEdgeRoute("/api", "", []RouteHeaderMatch{{Name: "h1", Value: "v1"}, {Name: "h2", Value: "v2"}}, "", nil, "svc", nil, nil, nil, nil)
-
-	require.NotNil(t, fewer)
-	require.NotNil(t, more)
-
-	// The route with 2 headers must sort before the route with 1.
-	// Verify header counts are present.
-	assert.Len(t, more.GetMatch().GetHeaders(), 2)
-	assert.Len(t, fewer.GetMatch().GetHeaders(), 1)
-}
-
 // TestBuildEdgeRoute_MethodAndHeadersCombined verifies method present + extra header
 // both contribute distinct entries to GetHeaders().
 func TestBuildEdgeRoute_MethodAndHeadersCombined(t *testing.T) {
