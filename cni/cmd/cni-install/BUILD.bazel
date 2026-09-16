@@ -8,7 +8,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//cni/internal/cmd",
-        "@io_k8s_sigs_controller_runtime//:controller-runtime",
+        "//common/signals",
     ],
 )
 

@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "file",
     srcs = [
+        "dirsync_unix.go",
+        "dirsync_windows.go",
         "fadvise_linux.go",
         "fadvise_unspecified.go",
         "file.go",
@@ -22,6 +24,9 @@ go_library(
 
 go_test(
     name = "file_test",
-    srcs = ["file_test.go"],
+    srcs = [
+        "file_test.go",
+        "sync_test.go",
+    ],
     embed = [":file"],
 )

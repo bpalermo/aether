@@ -23,8 +23,10 @@ Resource names are derived from the **release** name, so install with
 ### Images (mirroring)
 
 Each image is configured as `repository` + `digest` (in-repo images, digest-pinned
-for immutability) or `repository` + `tag` (the external proxy image). To mirror to
-a private registry, override `repository` alone, e.g.:
+for immutability). The external proxy image carries `repository` + `tag` + `digest`
+— the `aether.image` helper prefers the digest, so the tag is documentation of the
+publishing commit, not the reference that is pulled. To mirror to a private
+registry, override `repository` alone, e.g.:
 
 ```yaml
 agent:
@@ -43,7 +45,7 @@ substitutes at package time, so packaged charts are pinned to a concrete digest.
 
 | Field | Value | Notes |
 | --- | --- | --- |
-| Chart `version` | e.g. `0.8.0-{GIT_COMMIT}` (crds), `0.2.0-{GIT_COMMIT}` (prober) | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). The `aether` chart is published **twice**: under its plain `Chart.yaml` version (e.g. `0.92.4`, what Flux and the deploy procedure consume) *and* — via `:aether_commit`, whose `Chart.yaml` is derived from the same file — under `0.92.4-{GIT_COMMIT}`, so every commit's chart stays addressable after the mutable bare tag has moved on (#692). Bump the chart's `version:` on any change to its templates/values (enforced in CI). |
+| Chart `version` | e.g. `0.8.0-{GIT_COMMIT}` (crds), `0.3.0-{GIT_COMMIT}` (prober) | SemVer pre-release; commit becomes the OCI tag (dash-separated — `+build` metadata would be rewritten to `_` by helm). The `aether` chart is published **twice**: under its plain `Chart.yaml` version (`<version>`, what Flux and the deploy procedure consume) *and* — via `:aether_commit`, whose `Chart.yaml` is derived from the same file — under `<version>-{GIT_COMMIT}`, so every commit's chart stays addressable after the mutable bare tag has moved on (#692). Bump the chart's `version:` on any change to its templates/values (enforced in CI). These versions move on nearly every release: read the live value from each chart's `Chart.yaml`, or from the version the publish workflow prints. |
 | Chart `appVersion` | `{STABLE_GIT_VERSION}` | `git describe` value — matches the binaries' embedded `Version`. |
 | Image refs | `repo@sha256:…` | Pinned to the exact built digest (strongest form). |
 
@@ -80,15 +82,20 @@ bazel run //charts/aether:aether.install
 ```
 
 From the published OCI registry (use the semver `+`/`-` form for `--version`;
-helm maps it to the dash-separated tag):
+helm maps it to the dash-separated tag).
+
+Do **not** copy a version out of this file — the charts are republished on nearly
+every merge. Take `<crds-version>` / `<aether-version>` from the corresponding
+`Chart.yaml` at the commit you are installing (or from the versions the publish
+workflow prints for that run):
 
 ```bash
 helm install aether-crds oci://ghcr.io/bpalermo/aether/charts/crds \
-  --version 0.8.0-<git-commit>
-# Prefer the commit-pinned tag; `--version 0.92.4` also resolves, but that tag is
-# mutable and re-pushed by every release.
+  --version <crds-version>-<git-commit>
+# Prefer the commit-pinned tag; the bare `--version <aether-version>` also
+# resolves, but that tag is mutable and re-pushed by every release.
 helm install aether oci://ghcr.io/bpalermo/aether/charts/aether \
-  --version 0.92.4-<git-commit> -n aether-system --create-namespace
+  --version <aether-version>-<git-commit> -n aether-system --create-namespace
 ```
 
 ## Multiple instances & labels
@@ -122,6 +129,8 @@ path namespace:
 | registrar image | `ghcr.io/bpalermo/aether/registrar` |
 | controller image | `ghcr.io/bpalermo/aether/controller` |
 | cni-install image | `ghcr.io/bpalermo/aether/cni-install` |
+| prober image | `ghcr.io/bpalermo/aether/prober` |
+| proxy image | `ghcr.io/bpalermo/aether/aether-proxy` (built by the `//proxy` workspace, published by `.github/workflows/proxy-release.yml`) |
 
 ```bash
 export HELM_REGISTRY_USERNAME=<github-user>

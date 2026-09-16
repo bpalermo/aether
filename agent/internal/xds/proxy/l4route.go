@@ -172,7 +172,9 @@ func CaptureUDPListenerName(podName string) string {
 //
 // The CNI installs a matching nftables REDIRECT rule (programCaptureRedirect in
 // cni/internal/plugin/capture.go) that steers outbound UDP destined for a mesh
-// ClusterIP:meshPort into this listener when --l4-routes is enabled.
+// ClusterIP:meshPort into this listener. The redirect is unconditional (the
+// --l4-routes flag was retired by proposal 031); the listener below exists only
+// when UDPRoute backends do.
 //
 // SECURITY NOTE: datagrams forwarded via this listener are NOT protected by
 // mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not implemented. Backend
