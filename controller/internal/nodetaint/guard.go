@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -128,7 +129,7 @@ func (g *Guard) Reconcile(ctx context.Context, req reconcile.Request) (reconcile
 		return reconcile.Result{RequeueAfter: wait}, nil
 	}
 
-	if err := g.armTaint(ctx, node); err != nil {
+	if err := g.armTaint(ctx, req.Name); err != nil {
 		return reconcile.Result{}, err
 	}
 	g.forget(req.Name)
@@ -185,15 +186,39 @@ func (g *Guard) forget(nodeName string) {
 	g.mu.Unlock()
 }
 
-// armTaint adds the startup taint to the node (a no-op patch if already present).
-func (g *Guard) armTaint(ctx context.Context, node *corev1.Node) error {
-	base := node.DeepCopy()
-	node.Spec.Taints = append(node.Spec.Taints, corev1.Taint{
-		Key:    aetherlabels.TaintAgentNotReady,
-		Value:  taintValue,
-		Effect: corev1.TaintEffectNoSchedule,
+// armTaint adds the startup taint to the node under an OPTIMISTIC LOCK,
+// re-reading and retrying on 409 Conflict. A node that already carries the
+// taint (or has gone away) is a no-op.
+//
+// `spec.taints` has no patch-merge key, so a merge patch emits the WHOLE array.
+// Without resourceVersion in the patch, this guard would write back the taint
+// list it read and silently revert anything added in between — the agent's own
+// removal included, which is precisely the taint fight #743 was about. With the
+// optimistic lock the losing write is rejected and re-derived from the current
+// node instead (#772, S37).
+//
+// Semantics are unchanged: the guard still only ever ADDS the taint, and only
+// after the 30s grace window with no Ready agent pod. Removal remains the
+// agent's job (agent/internal/node).
+func (g *Guard) armTaint(ctx context.Context, nodeName string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node := &corev1.Node{}
+		if err := g.Client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if hasTaint(node, aetherlabels.TaintAgentNotReady) {
+			return nil
+		}
+		base := node.DeepCopy()
+		node.Spec.Taints = append(node.Spec.Taints, corev1.Taint{
+			Key:    aetherlabels.TaintAgentNotReady,
+			Value:  taintValue,
+			Effect: corev1.TaintEffectNoSchedule,
+		})
+		return g.Client.Patch(ctx, node,
+			client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
+			client.FieldOwner(fieldOwner))
 	})
-	return g.Client.Patch(ctx, node, client.MergeFrom(base), client.FieldOwner(fieldOwner))
 }
 
 // hasTaint reports whether the node carries a taint with the given key.

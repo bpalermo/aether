@@ -265,11 +265,26 @@ func (r *RegistrarRegistry) SetServiceFilter(services []string) {
 	}
 }
 
-// currentFilter returns the filter to assert on the next stream and its
-// generation.
-func (r *RegistrarRegistry) currentFilter() ([]string, uint64) {
+// assertFilter publishes cancel as the canceller for the stream the watch loop
+// is about to open and returns the filter that stream must assert, together
+// with its generation. Both halves happen in ONE filterMu critical section,
+// and that is the whole point: it makes the re-assert lossless.
+//
+// Read the filter in one critical section and publish the canceller in another
+// and a SetServiceFilter landing in between is lost (#772, S8): it reads the
+// PREVIOUS stream's streamCancel — already spent — so its cancel is a no-op,
+// while this loop proceeds to open a stream carrying the filter it read before
+// the update. Nothing cancels that stream, so the new dependency set is never
+// asserted until the stream dies for some other reason. That is the shape of
+// the #682 "demand-set shrink invisible until the next roll" stall.
+//
+// Holding the lock across both makes the two interleavings the only ones:
+// SetServiceFilter runs entirely before (this stream carries the new filter)
+// or entirely after (it sees this stream's canceller and cancels it).
+func (r *RegistrarRegistry) assertFilter(cancel context.CancelFunc) ([]string, uint64) {
 	r.filterMu.Lock()
 	defer r.filterMu.Unlock()
+	r.streamCancel = cancel
 	return slices.Clone(r.filterServices), r.filterGen
 }
 
@@ -368,9 +383,24 @@ func (r *RegistrarRegistry) UnregisterEndpoints(ctx context.Context, serviceName
 
 // ListEndpoints returns endpoints for a service from the local cache.
 // Falls back to the Registrar RPC if the cache is empty.
+//
+// OWNERSHIP CONTRACT: the returned slice belongs to the caller — it is a copy,
+// safe to append to, reorder, and range on any goroutine. The
+// *registryv1.ServiceEndpoint elements are SHARED with the cache and with
+// every other reader, so they must be treated as immutable; a caller that
+// needs to change one clones it first (proto.Clone).
+//
+// The copy is not optional. The watch goroutine mutates a service's slice in
+// place — upsertLocked overwrites eps[i], removeLocked left-shifts the tail
+// over the hole — so a slice handed out by reference is a backing array being
+// rewritten under the reader. That corrupts EDS content (an endpoint seen
+// twice, another skipped), not merely the race detector (#772, S2).
 func (r *RegistrarRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.mu.RLock()
 	eps, ok := r.cache[protocol][service]
+	if ok {
+		eps = slices.Clone(eps)
+	}
 	r.mu.RUnlock()
 
 	if ok {
@@ -383,6 +413,11 @@ func (r *RegistrarRegistry) ListEndpoints(ctx context.Context, service string, p
 
 // ListAllEndpoints returns all endpoints from the local cache.
 // Falls back to the Registrar RPC if the cache is empty.
+//
+// Same ownership contract as ListEndpoints: the map AND every slice in it are
+// the caller's copies; the *registryv1.ServiceEndpoint elements are shared and
+// immutable. Copying the map alone is not enough — its values would alias the
+// cache's slices, which the watch goroutine rewrites in place (#772, S2).
 func (r *RegistrarRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	// Serve from the watch-fed cache once it holds a complete world view (first
 	// SNAPSHOT_COMPLETE). Gating on readiness — not on a non-empty partition —
@@ -394,7 +429,7 @@ func (r *RegistrarRegistry) ListAllEndpoints(ctx context.Context, protocol regis
 		byName := r.cache[protocol]
 		result := make(map[string][]*registryv1.ServiceEndpoint, len(byName))
 		for k, v := range byName {
-			result[k] = v
+			result[k] = slices.Clone(v)
 		}
 		r.mu.RUnlock()
 		return result, nil
@@ -485,7 +520,10 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		default:
 		}
 
-		services, filterGen := r.currentFilter()
+		// Per-stream context so SetServiceFilter can end the stream and force
+		// a reconnect that re-asserts the new filter.
+		streamCtx, streamCancel := context.WithCancel(ctx)
+		services, filterGen := r.assertFilter(streamCancel)
 		if filterGen != lastFilterGen {
 			lastVersion = ""
 			lastFilterGen = filterGen
@@ -498,13 +536,6 @@ func (r *RegistrarRegistry) watchLoop(ctx context.Context) {
 		if services != nil {
 			req.Filter = &registrarv1.ServiceFilter{Services: services}
 		}
-
-		// Per-stream context so SetServiceFilter can end the stream and force
-		// a reconnect that re-asserts the new filter.
-		streamCtx, streamCancel := context.WithCancel(ctx)
-		r.filterMu.Lock()
-		r.streamCancel = streamCancel
-		r.filterMu.Unlock()
 
 		stream, err := r.client.WatchEndpoints(streamCtx, req)
 		if err != nil {
@@ -909,6 +940,10 @@ func (r *RegistrarRegistry) applyEvent(ctx context.Context, event *registrarv1.W
 
 // upsertLocked adds or updates an endpoint in the protocol's partition of the
 // cache. Caller must hold mu.
+//
+// It rewrites the slice IN PLACE (eps[i] = ep) rather than reallocating, which
+// is why ListEndpoints/ListAllEndpoints hand out copies: an aliased slice would
+// have its backing array rewritten under a reader ranging it (#772, S2).
 func (r *RegistrarRegistry) upsertLocked(protocol registryv1.Service_Protocol, svcName string, ep *registryv1.ServiceEndpoint) {
 	byName := r.cache[protocol]
 	if byName == nil {
@@ -927,6 +962,9 @@ func (r *RegistrarRegistry) upsertLocked(protocol registryv1.Service_Protocol, s
 
 // removeLocked removes an endpoint by IP from the protocol's partition of the
 // cache. Caller must hold mu.
+//
+// The removal left-shifts the tail over the hole IN PLACE — see upsertLocked
+// for why readers must not be given the cache's own slice.
 func (r *RegistrarRegistry) removeLocked(protocol registryv1.Service_Protocol, svcName string, ip string) {
 	byName := r.cache[protocol]
 	eps := byName[svcName]

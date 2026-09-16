@@ -610,7 +610,7 @@ func TestSetServiceFilter_ReassertsOnChangeOnly(t *testing.T) {
 	r.SetServiceFilter(nil)
 	assert.Equal(t, 4, cancels)
 
-	services, gen := r.currentFilter()
+	services, gen := r.assertFilter(func() {})
 	assert.Nil(t, services)
 	assert.Equal(t, uint64(4), gen)
 }
