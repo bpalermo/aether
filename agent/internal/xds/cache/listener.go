@@ -265,6 +265,9 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 			probeClusters = append(probeClusters, hc.GetName())
 		}
 	}
+	// c.listeners is keyed by netns, so the per-pod listeners come out in a
+	// random order. (probeClusters is sorted inside BuildHealthGatewayListener.)
+	sortResourcesByName(resources)
 	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probeClusters))
 	// East/west waypoint (proposal 019): one host-netns tunnel listener that
 	// SNI-forwards cross-cluster mTLS to the services this node hosts. nil unless
@@ -328,6 +331,8 @@ func (c *SnapshotCache) appClusters() []types.Resource {
 			resources = append(resources, entry.healthCluster)
 		}
 	}
+	// c.listeners is a map: sort so the per-pod cluster set is stable.
+	sortResourcesByName(resources)
 	return resources
 }
 

@@ -265,7 +265,9 @@ type SnapshotCache struct {
 	// GAMMA route targets), so global scope is the right trade.
 	captureTCPDeps []string
 	// tcpServiceRoutes holds the TCPRoute L4 rules (parentRef=Service, proposal 018
-	// Phase 3b), keyed by the parent service. Empty unless --l4-routes is enabled.
+	// Phase 3b), keyed by the parent service. Empty unless the TCPRoute CRD is
+	// installed (the --l4-routes flag was retired by proposal 031; L4 routes are
+	// gated on CRD presence alone).
 	// Guarded by depMu (same lock as serviceRoutes: dependency state).
 	tcpServiceRoutes map[string][]proxy.L4ServiceRoute
 	// tlsServiceRoutes holds the TLSRoute L4 rules (SNI-based, parentRef=Service,

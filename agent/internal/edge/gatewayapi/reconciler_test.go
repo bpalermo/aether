@@ -220,45 +220,24 @@ func TestBuildVirtualHost_WeightedBackends(t *testing.T) {
 
 // --- L4 edge helpers ---
 
-func tcpBackendRef(svc string, weight int32) gatewayv1.BackendRef {
-	ref := gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: gatewayv1.ObjectName(svc)}}
-	if weight > 0 {
-		w := weight
-		ref.Weight = &w
-	}
-	return ref
-}
-
-// TestBuildL4Backends verifies the edge reconciler's L4 backend builder resolves
-// cluster names using TCPClusterName (tcp:<svc>.<meshDomain>).
-func TestBuildL4Backends(t *testing.T) {
-	r := &Reconciler{MeshDomain: "aether.internal"}
-	refs := []gatewayv1.BackendRef{
-		tcpBackendRef("pg", 1),
-		tcpBackendRef("cache", 2),
-	}
-	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
-	require.Len(t, backends, 2)
-	assert.Equal(t, "ns/pg", backends[0].Service)
-	assert.Equal(t, proxy.TCPClusterName("ns/pg", "aether.internal"), backends[0].Cluster)
-	assert.Equal(t, "tcp:pg.ns.aether.internal", backends[0].Cluster)
-	assert.Equal(t, uint32(1), backends[0].Weight)
-	assert.Equal(t, "ns/cache", backends[1].Service)
-	assert.Equal(t, uint32(2), backends[1].Weight)
-}
-
-// TestBuildL4Backends_ForeignGroupSkipped verifies non-core refs are skipped.
-func TestBuildL4Backends_ForeignGroupSkipped(t *testing.T) {
+// TestBuildL4Backends_Wiring proves the edge reconciler wires the shared L4
+// projector (common/l4project) with TCP cluster naming (tcp:<svc>.<ns>.<meshDomain>).
+// The projection semantics themselves - group/kind filtering, empty names, weight
+// defaulting and weight:0 drain, cross-namespace ReferenceGrants - are covered once
+// in //common/l4project:l4project_test, which the node agent's L4 reconciler shares.
+func TestBuildL4Backends_Wiring(t *testing.T) {
 	r := &Reconciler{MeshDomain: "aether.internal"}
 	refs := []gatewayv1.BackendRef{
 		{BackendObjectReference: gatewayv1.BackendObjectReference{
 			Group: ptr(gatewayv1.Group("apps")), Name: "skip",
 		}},
-		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "keep"}},
+		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "pg"}},
 	}
 	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 1)
-	assert.Equal(t, "ns/keep", backends[0].Service)
+	assert.Equal(t, "ns/pg", backends[0].Service)
+	assert.Equal(t, proxy.TCPClusterName("ns/pg", "aether.internal"), backends[0].Cluster)
+	assert.Equal(t, "tcp:pg.ns.aether.internal", backends[0].Cluster)
 }
 
 // TestBuildVirtualHost_RequestHeaderModifier: set/add/remove request header filters

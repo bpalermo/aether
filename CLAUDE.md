@@ -8,7 +8,7 @@ Aether is a Kubernetes service mesh data plane built in Go. It runs an **agent**
 
 ## Build System
 
-The project uses **Bazel 9.2.0** (via Bazelisk) with `rules_go` and Gazelle for Go, and `rules_img` for container images. Go module is `aethermesh.dev` (vanity import path, proposal 035; hosted at github.com/bpalermo/aether) with Go 1.26.x (see `MODULE.bazel` for the pinned SDK).
+The project uses **Bazel 9.2.0** (via Bazelisk) with `rules_go` and Gazelle for Go, and `rules_img` for container images. Go module is `aethermesh.dev` (vanity import path, proposal 035; hosted at github.com/bpalermo/aether) with Go 1.27.x (`MODULE.bazel`'s `go_sdk.download` carries the exact pin). `nogo` (vet-class static analysis) is wired via `go_sdk.nogo(nogo = "//:nogo")` and runs as a build-time validation action on **every** Go target — a vet finding fails the build, not just the lint pass; `nogo.json` scopes which analyzers apply where.
 
 ### Common Commands
 
@@ -35,7 +35,8 @@ make tidy                    # or: bazel mod tidy
 # `go mod tidy`: the generated proto packages are Bazel-only outputs, so it
 # fails on every import of them and `-e` strips what only BUILD files need.
 # See docs/runbook.md, "Go dependency hygiene".
-make deps-audit              # or: scripts/go-deps-audit.sh
+make deps-audit              # or: scripts/go-deps-audit.sh — also a required
+                             # CI job (`deps-audit` in .github/workflows/ci.yaml)
 
 # Format code (Go, protobuf, Starlark, shell)
 make format                  # or: bazel run //:format
@@ -58,7 +59,9 @@ make push-all                # Push all images
 
 ## Architecture
 
-### Binaries (under `cmd/`)
+### Binaries
+
+There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cmd/`, `registrar/cmd/`, `controller/cmd/`, `prober/cmd/`).
 
 - **`agent/cmd/agent`** - Node agent DaemonSet. Uses `controller-runtime` manager to run the xDS server and CNI gRPC server as runnables. CLI built with Cobra. Also hosts two subcommands: `agent edge` (the north-south edge gateway control plane, proposal 003/018) and `agent proxy-supervisor` (the Envoy hot-restart supervisor, proposal 001).
 - **`agent/cmd/mesh-dns`** - Slim standalone mesh-DNS daemon (its own DaemonSet and its own image since #583). Serves `<svc>.<ns>.<mesh-domain>` from the record snapshot the node agent writes and forwards everything else upstream, so the resolver survives agent rolls (#578).
@@ -78,6 +81,7 @@ make push-all                # Push all images
 - **`agent/internal/edge/`** - The `agent edge` control plane: watches Gateway API objects cluster-wide and serves xDS to a single-identity ingress Envoy (proposals 003/018/021/028).
 - **`agent/internal/cni/server/`** - CNI gRPC server handling pod registration/deregistration. Uses protovalidate for request validation. Queries Kubernetes node metadata for topology-aware routing.
 - **`common/gammaproject/`** - The **shared** Gateway API / GAMMA projector used by BOTH the agent's gamma reconciler and the registrar's config-export controller. `ProjectHTTPRule`/`ProjectGRPCRule` turn a route rule into a `registryv1.GammaRoute` proto; `ServiceParents`, `ServiceChainFilter`, `ServiceInboundFilter`, and `ServiceFilters` resolve `HTTPFilter` attachments.
+- **`common/l4project/`** - The **shared** L4 projector: turns a Gateway API `TCPRoute`/`TLSRoute`/`UDPRoute` backendRef list into weighted data-plane backends (core-Service filtering, ReferenceGrant admission, weight defaulting with `weight: 0` as drain, namespace-qualified `<ns>/<svc>` keys). Used by BOTH `agent/internal/l4route` and `agent/internal/edge/gatewayapi`; the caller supplies the cluster namer (`tcp:` vs `udp:`). The L4 sibling of `common/gammaproject`.
 - **`common/extensionfilter/`** - Single source of truth for the proxy-extension escape hatch (proposal 025): the allow-list of supported Envoy HTTP filters plus fail-closed validation/rendering of a filter's typed config. Shared by `gammaproject` and the controller's `HTTPFilter` webhook (which can't import agent internals).
 - **`controller/internal/`** - The controller's webhooks and reconciler: `webhook/` dispatches the `/validate` admission endpoint by Kind to `meshconfig/`, `httpfilter/`, `edgeconfig/` (edge best-practices/HTTP3 hardening, proposal 029), `endpointpolicy/` (service-scoped UDS delivery, proposal 034), and `gatewayapi/` validators; `podmutate/` is the `/mutate` pod-mutating webhook (ndots + namespace mesh injection); `meshconfig/` reconciles each namespace's `MeshConfig` CR into a projected ConfigMap.
 - **`registry/`** - Service registry interface with Kubernetes (`internal/k8s/`), etcd (`internal/etcd/`), and registrar (`internal/registrar/`) implementations. The registrar selects the backend via `--registry-backend`. Manages endpoint registration/discovery and, for etcd, the cross-cluster config plane (`ConfigExporter`/`ConfigImporter`).

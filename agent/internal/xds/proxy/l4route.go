@@ -25,9 +25,12 @@ package proxy
 
 import (
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 
 	"aethermesh.dev/agent/internal/xds/config"
+	"aethermesh.dev/common/l4project"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -50,19 +53,14 @@ type L4ServiceRoute struct {
 	Backends []L4Backend
 }
 
-// L4Backend is one weighted backend of an L4 route.
-type L4Backend struct {
-	// Service is the namespace-qualified "<ns>/<svc>" serviceref key (020 Part 1,
-	// for dependency-set tracking).
-	Service string
-	// Cluster is the resolved data-plane TCP cluster name
-	// ("tcp:<svc>.<ns>.<meshDomain>").
-	Cluster string
-	// Weight is the load-balancing weight. The reconciler defaults an UNSET
-	// backendRef weight to 1; an explicit 0 means DRAIN (no traffic) and is omitted
-	// from the weighted-cluster set, per Gateway API.
-	Weight uint32
-}
+// L4Backend is one weighted backend of an L4 route: the namespace-qualified
+// "<ns>/<svc>" key, the resolved data-plane cluster name, and the weight.
+//
+// It is an alias for the shared projection type so the node agent's L4 reconciler
+// and the edge gateway reconciler can both feed this layer from one projector
+// (common/l4project.Backends). An explicit weight 0 means DRAIN and is omitted from
+// the weighted-cluster set here rather than normalised to 1 (#492).
+type L4Backend = l4project.Backend
 
 // BuildCaptureTCPRouteFilterChain builds a per-ClusterIP TCP floor filter chain
 // for a service that has a TCPRoute. It matches the service's ClusterIP as the
@@ -170,7 +168,9 @@ func CaptureUDPListenerName(podName string) string {
 //
 // The CNI installs a matching nftables REDIRECT rule (programCaptureRedirect in
 // cni/internal/plugin/capture.go) that steers outbound UDP destined for a mesh
-// ClusterIP:meshPort into this listener when --l4-routes is enabled.
+// ClusterIP:meshPort into this listener. The redirect is unconditional (the
+// --l4-routes flag was retired by proposal 031); the listener below exists only
+// when UDPRoute backends do.
 //
 // SECURITY NOTE: datagrams forwarded via this listener are NOT protected by
 // mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not implemented. Backend
@@ -195,9 +195,14 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 	// cluster_specifier with weighted_clusters once it reaches stable.
 	// For now, collect all backends into a single primary cluster (the first
 	// non-empty service cluster). This is the minimal viable control-plane shape.
+	// udpRoutes is a map, so "the first non-empty service" must be taken over a
+	// sorted key list: Go randomises map iteration, and with two or more
+	// UDPRoute-backed services an unsorted pick sends the pod's UDP capture
+	// listener to a DIFFERENT backend cluster on each rebuild of identical
+	// input (and re-hashes the listener every time). See cache/ordering.go.
 	var primaryCluster string
-	for _, backends := range udpRoutes {
-		if len(backends) > 0 {
+	for _, svc := range slices.Sorted(maps.Keys(udpRoutes)) {
+		if backends := udpRoutes[svc]; len(backends) > 0 {
 			primaryCluster = backends[0].Cluster
 			break
 		}

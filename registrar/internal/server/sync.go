@@ -164,9 +164,10 @@ func (s *Syncer) sync(ctx context.Context) {
 		s.writeBehind.Overlay(newState)
 	}
 
-	// Compute diff and apply.
-	events := s.snapshot.Diff(newState)
-	version, transitions := s.snapshot.Replace(newState)
+	// Compute diff and apply, in one critical section: a RegisterEndpoint
+	// landing between the two halves would be broadcast as ADDED and then
+	// erased by the replacement with no compensating REMOVED (#772, S13).
+	events, version, transitions := s.snapshot.DiffAndReplace(newState)
 	events = append(events, transitions...)
 	span.SetAttributes(
 		attribute.Int("aether.sync.events", len(events)),
