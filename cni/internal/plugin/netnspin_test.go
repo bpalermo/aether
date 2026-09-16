@@ -114,7 +114,8 @@ func TestSweepNetnsPinsEmpty(t *testing.T) {
 }
 
 // TestUnpinDelayDefault pins the 60s drain-tail margin (observed late dials up
-// to ~13s post-removal; a dial through a released pin segfaults Envoy).
+// to ~13s post-removal; a dial through a released pin fails — cleanly on the
+// pinned proxy snapshot, with a segfault before envoyproxy/envoy#45975).
 func TestUnpinDelayDefault(t *testing.T) {
 	assert.Equal(t, 60*time.Second, config.AetherConf{}.NetnsUnpinDelay())
 }
