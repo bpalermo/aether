@@ -61,6 +61,14 @@ func newReadinessProber(netnsPath string) *readinessProber {
 	}
 }
 
+// delReadinessWait is the CNI DEL-side wait for the proxy to drop the pod's
+// listener socket, indirected so a test can assert whether a DEL waited on it
+// at all — the agent-unreachable path must not, there being no agent to have
+// removed the listener.
+var delReadinessWait = func(ctx context.Context, netnsPath string) error {
+	return newReadinessProber(netnsPath).waitGone(ctx)
+}
+
 // waitServing polls until the readiness endpoint answers 200 or ctx ends.
 func (p *readinessProber) waitServing(ctx context.Context) error {
 	ticker := time.NewTicker(readyProbeInterval)

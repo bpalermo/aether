@@ -51,6 +51,18 @@ type AetherConf struct {
 	// connection-pool drains that can still dial for a few seconds.
 	// 0 = 10s default; negative = no delay.
 	NetnsUnpinDelaySeconds int `json:"netns_unpin_delay_seconds"`
+	// NetnsDelGiveUpAfterSeconds bounds how long CNI DEL keeps failing back to
+	// the runtime when a *reachable* agent answers the removal with an error.
+	// containerd retries a failed DEL indefinitely, and a pod whose sandbox
+	// cannot be torn down keeps its CPU request — that is how one wedged DEL
+	// starved a node of its replacement agent/proxy/mesh-dns pods for 12m47s
+	// (#796). Past this bound the plugin degrades to the agent-unreachable
+	// path: it unpins on the normal delay, returns success, and leaves the
+	// reconciliation to the agent's ghost sweep. The first failure's timestamp
+	// is kept in a "<pin>.delfail" marker next to the netns pin, because the
+	// plugin process lives for exactly one CNI call.
+	// 0 = 5m default; negative = give up on the first failure.
+	NetnsDelGiveUpAfterSeconds int `json:"netns_del_give_up_after_seconds"`
 
 	// ReadinessProbeDisabled turns off the in-netns data-plane readiness probe
 	// (on by default): after the agent confirms a pod's xDS config, CNI ADD
@@ -116,6 +128,13 @@ const defaultNetnsPinDir = "/run/aether/netns"
 // runs as a detached process, so a generous delay does not slow pod teardown.
 const defaultNetnsUnpinDelay = 60 * time.Second
 
+// defaultNetnsDelGiveUpAfter bounds the DEL retry loop against a live-but-erroring
+// agent. Five minutes is long enough for an agent rolling on the node to come back
+// and ACK the removal normally, and short enough that a pod stuck Terminating
+// cannot hold its CPU request past the point where the node's own DaemonSet pods
+// fail to schedule (#796).
+const defaultNetnsDelGiveUpAfter = 5 * time.Minute
+
 // NetnsPinPath returns the pin target for a container (sandbox) ID.
 func (c AetherConf) NetnsPinPath(containerID string) string {
 	dir := c.NetnsPinDir
@@ -134,6 +153,18 @@ func (c AetherConf) NetnsUnpinDelay() time.Duration {
 		return 0
 	default:
 		return time.Duration(c.NetnsUnpinDelaySeconds) * time.Second
+	}
+}
+
+// NetnsDelGiveUpAfter returns the effective bound on the CNI DEL retry loop.
+func (c AetherConf) NetnsDelGiveUpAfter() time.Duration {
+	switch {
+	case c.NetnsDelGiveUpAfterSeconds == 0:
+		return defaultNetnsDelGiveUpAfter
+	case c.NetnsDelGiveUpAfterSeconds < 0:
+		return 0
+	default:
+		return time.Duration(c.NetnsDelGiveUpAfterSeconds) * time.Second
 	}
 }
 

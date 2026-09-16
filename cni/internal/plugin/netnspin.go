@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -87,9 +88,75 @@ func (p *AetherPlugin) unpinTarget(target string) error {
 	return nil
 }
 
+// delFailSuffix names the marker that records when the DEL for a container
+// FIRST failed against a reachable agent. It sits next to that container's pin
+// (same dir, same ID) so the two are created, swept and removed together.
+const delFailSuffix = ".delfail"
+
+// delFailPath returns the first-failure marker path for a container.
+func delFailPath(conf config.AetherConf, containerID string) string {
+	return conf.NetnsPinPath(containerID) + delFailSuffix
+}
+
+// noteDelFailure records the first time a DEL for containerID failed against a
+// reachable agent, and reports whether that first failure is now older than
+// conf.NetnsDelGiveUpAfter() — i.e. whether CmdDel should stop handing the
+// error back to the runtime.
+//
+// containerd retries a failed DEL indefinitely, and a pod whose sandbox cannot
+// be torn down keeps its CPU request, so an agent that answers but never
+// succeeds wedges the node just as thoroughly as an absent one (#796). The
+// bound has to live on disk because the plugin process exists for exactly one
+// CNI call and has no memory of the previous attempt.
+func (p *AetherPlugin) noteDelFailure(conf config.AetherConf, containerID string) bool {
+	giveUp := conf.NetnsDelGiveUpAfter()
+	if giveUp <= 0 {
+		return true
+	}
+	path := delFailPath(conf, containerID)
+	if first, err := readDelFailure(path); err == nil {
+		return time.Since(first) >= giveUp
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		p.logger.Warn("failed to create netns pin dir for the CNI DEL failure marker; the retry loop stays unbounded",
+			zap.String("path", path), zap.Error(err))
+		return false
+	}
+	if err := os.WriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o600); err != nil {
+		p.logger.Warn("failed to record the CNI DEL failure marker; the retry loop stays unbounded",
+			zap.String("path", path), zap.Error(err))
+	}
+	return false
+}
+
+// clearDelFailure drops the marker once the DEL stops needing it (the agent
+// ACKed, or the plugin gave up). A missing marker is not an error.
+func (p *AetherPlugin) clearDelFailure(conf config.AetherConf, containerID string) {
+	if err := os.Remove(delFailPath(conf, containerID)); err != nil && !os.IsNotExist(err) {
+		p.logger.Warn("failed to remove the CNI DEL failure marker",
+			zap.String("containerID", containerID), zap.Error(err))
+	}
+}
+
+// readDelFailure reads a marker's timestamp. Any unreadable or malformed
+// marker is reported as an error, so the caller rewrites it with "now" rather
+// than giving up on a file it cannot interpret.
+func readDelFailure(path string) (time.Time, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b)))
+}
+
 // NetnsUnpinSubcommand is the hidden argv[1] under which the CNI binary
 // re-executes itself as a short-lived detached unpinner.
 const NetnsUnpinSubcommand = "netns-unpin"
+
+// spawnDetachedUnpinFn indirects the detached-unpin spawn so a test can assert
+// that a CNI DEL scheduled the unpin (and with which target and delay) without
+// forking a process.
+var spawnDetachedUnpinFn = (*AetherPlugin).spawnDetachedUnpin
 
 // spawnDetachedUnpin re-executes this binary as a detached (setsid) process
 // that sleeps delay and then unpins target. CNI DEL must return promptly (a
@@ -163,6 +230,18 @@ func (p *AetherPlugin) sweepNetnsPins(conf config.AetherConf, stdinData []byte) 
 		return
 	}
 	for _, e := range entries {
+		// A DEL-failure marker belongs to its container's pin: it survives
+		// exactly as long as the attachment does, and must never be mistaken
+		// for a pin (unpinning it would silently reset the give-up bound of a
+		// DEL still being retried).
+		if cid, isMarker := strings.CutSuffix(e.Name(), delFailSuffix); isMarker {
+			if _, ok := valid[cid]; !ok {
+				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
+					p.logger.Warn("netns pin sweep: failed to remove orphan DEL marker", zap.String("file", e.Name()), zap.Error(err))
+				}
+			}
+			continue
+		}
 		if _, ok := valid[e.Name()]; ok {
 			continue
 		}
@@ -171,5 +250,6 @@ func (p *AetherPlugin) sweepNetnsPins(conf config.AetherConf, stdinData []byte) 
 		} else {
 			p.logger.Info("netns pin sweep: unpinned orphan", zap.String("containerID", e.Name()))
 		}
+		p.clearDelFailure(conf, e.Name())
 	}
 }
