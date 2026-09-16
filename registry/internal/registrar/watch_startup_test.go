@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,6 +68,13 @@ func (s *fakeWatchServer) WatchEndpoints(req *registrarv1.WatchEndpointsRequest,
 	return stream.Context().Err()
 }
 
+// lastRequest returns the request recorded LAST, which is NOT necessarily the
+// one the newest stream carried. grpc-go dispatches each server stream on its
+// own goroutine, so when the client cancels stream N and immediately opens
+// stream N+1, N+1's handler can reach the append above before N's handler is
+// ever scheduled. Recording order therefore only tracks stream order when the
+// streams do not overlap; use sawFilter for anything that churns streams
+// (#772, S8).
 func (s *fakeWatchServer) lastRequest() *registrarv1.WatchEndpointsRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,6 +82,18 @@ func (s *fakeWatchServer) lastRequest() *registrarv1.WatchEndpointsRequest {
 		return nil
 	}
 	return s.requests[len(s.requests)-1]
+}
+
+// sawFilter reports whether ANY stream this server accepted asserted exactly
+// the given service filter. That is the ordering-immune form of "the client
+// told the registrar about this filter": a filter the client never asserted
+// appears in no request at all, whatever order the handlers ran in.
+func (s *fakeWatchServer) sawFilter(services []string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.ContainsFunc(s.requests, func(req *registrarv1.WatchEndpointsRequest) bool {
+		return slices.Equal(req.GetFilter().GetServices(), services)
+	})
 }
 
 func (s *fakeWatchServer) requestCount() int {
