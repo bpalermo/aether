@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "signals",
+    srcs = ["signals.go"],
+    importpath = "aethermesh.dev/common/signals",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "signals_test",
+    srcs = ["signals_test.go"],
+    embed = [":signals"],
+    deps = ["@com_github_stretchr_testify//require"],
+)

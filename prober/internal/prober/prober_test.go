@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -117,7 +117,7 @@ func TestClassifyErr(t *testing.T) {
 func TestNewMeshDNSTargets(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MeshDNSTargets = []string{"echo.aether-test.aether.internal:18081", "echo.aether-test.aether.internal"}
-	p, err := New(context.Background(), cfg, logr.Discard(), "test")
+	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestNewMeshDNSTargets(t *testing.T) {
 func TestNewTargets(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReachabilityTargets = []string{"svc-1", "svc-2"}
-	p, err := New(context.Background(), cfg, logr.Discard(), "test")
+	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestTierClients(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReachabilityTargets = []string{"svc-1"}
 	cfg.MeshDNSTargets = []string{"echo.aether-test.aether.internal:18081"}
-	p, err := New(context.Background(), cfg, logr.Discard(), "test")
+	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestProbeConnectionReuse(t *testing.T) {
 			cfg.Egress = strings.TrimPrefix(srv.URL, "http://")
 			cfg.LivenessPath = "/"
 			cfg.MeshDNSTargets = []string{cfg.Egress}
-			p, err := New(context.Background(), cfg, logr.Discard(), "test")
+			p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}

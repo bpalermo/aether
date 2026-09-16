@@ -25,15 +25,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"aethermesh.dev/agent/constants"
 	"aethermesh.dev/agent/internal/meshdns"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/log"
+	"aethermesh.dev/common/signals"
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 )
@@ -135,17 +134,15 @@ func rootCmd() *cobra.Command {
 // socket are drained by this process instead of discarded by its close(). A second
 // signal cuts that short.
 func run(ctx context.Context) error {
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-
 	// A SECOND termination signal cuts the lame-duck window (#729) short. The first one
 	// only cancels ctx, which STARTS the window — the resolver deliberately keeps
 	// serving after it — so without this an operator has no way to say "stop waiting"
-	// short of SIGKILL.
+	// short of SIGKILL. That is why this uses NotifyContextFunc rather than the
+	// exit-on-second default: closing abort lets the resolver shut its listeners down
+	// in order instead of dropping the datagrams already queued to them.
 	abort := make(chan struct{})
-	stopped := make(chan struct{})
-	defer close(stopped)
-	go awaitSecondSignal(ctx, abort, stopped)
+	ctx, stop := signals.NotifyContextFunc(ctx, func() { close(abort) })
+	defer stop()
 
 	// Metrics + log push, best-effort (push-only OTel like the proxy-supervisor): the
 	// daemon runs in the host netns with no controller-runtime manager and no scrape
@@ -183,31 +180,6 @@ func run(ctx context.Context) error {
 	go watchSnapshot(ctx, server, snapshotPath, l)
 
 	return server.Start(ctx)
-}
-
-// awaitSecondSignal closes abort when a termination signal arrives AFTER the shutdown
-// has already begun, so the lame-duck window can be cut short.
-//
-// The handler is registered only once ctx is done, which is what makes "second" work
-// without bookkeeping: the first signal was consumed by signal.NotifyContext, whose
-// channel is already full and therefore swallows anything further, so nothing here can
-// ever see it. (NotifyContext leaves the handler installed after cancelling, so an
-// extra signal in the sliver before we register is dropped rather than killing the
-// process; the lame-duck deadline remains the backstop.)
-func awaitSecondSignal(ctx context.Context, abort chan<- struct{}, stopped <-chan struct{}) {
-	select {
-	case <-ctx.Done():
-	case <-stopped:
-		return
-	}
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(sigs)
-	select {
-	case <-sigs:
-		close(abort)
-	case <-stopped:
-	}
 }
 
 // resolveUpstreams returns the forward upstreams: the explicit --mesh-dns-upstream
