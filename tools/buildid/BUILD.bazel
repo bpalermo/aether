@@ -36,6 +36,12 @@ build_id_check(
     binaries = [
         "//agent/cmd/agent:agent_image_buildid_binary",
         "//agent/cmd/mesh-dns:mesh-dns_image_buildid_binary",
+        # The Envoy hot-restart supervisor (#772 phase B2). It is PID 1 of the
+        # aether-proxy container, so the continuous profiler sees it as its own
+        # process and its symbols are uploaded under its build-ID — exactly the
+        # property #673's profiling pass depended on when the same code was part
+        # of the agent binary.
+        "//agent/cmd/proxy-supervisor:proxy-supervisor_image_buildid_binary",
         "//cni/cmd/cni-install:cni-install_image_buildid_binary",
         # The CNI plugin the installer drops on the host — a second released ELF
         # inside the cni-install image.

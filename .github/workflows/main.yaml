@@ -155,6 +155,14 @@ jobs:
       # the query runs against the cache the build step above just warmed.
       - name: Guard proxy-ready linkage
         run: scripts/check-proxy-ready-deps.sh --config=ci
+      # #772 phase B2: the aether-proxy pod's PID 1 must stay the carved-out
+      # supervisor, not the agent binary it used to be. It is staged onto the pod's
+      # volume and re-launched on every hot restart, so every linked package is paid
+      # in Go package init() — which runs before main(), so no argv check can avoid
+      # it. //agent/cmd/proxy-supervisor:deps_test asserts this on the linked ELF;
+      # this is the build-graph half.
+      - name: Guard proxy-supervisor linkage
+        run: scripts/check-proxy-supervisor-deps.sh --config=ci
 
   # Keep the open chart-pin PRs (#727) current with `main`.
   #

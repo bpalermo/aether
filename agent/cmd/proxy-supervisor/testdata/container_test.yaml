@@ -1,0 +1,31 @@
+schemaVersion: 2.0.0
+metadataTest:
+  entrypoint: ["/proxy-supervisor"]
+  user: 65532 # nonroot
+fileExistenceTests:
+  # The Envoy hot-restart supervisor (#772 phase B2). The install-supervisor
+  # initContainer runs THIS image and self-copies this binary onto the proxy
+  # pod's shared volume, where the proxy container runs it as PID 1 — so it must
+  # be present and executable by the (non-root) runtime user.
+  - name: 'proxy-supervisor'
+    path: '/proxy-supervisor'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
+  # The aether-proxy pod's stdlib-only exec readiness probe (#673), staged by the
+  # same initContainer via --install-readiness-path. It rides in this image
+  # rather than the agent's since #772: the supervisor and its probe are now one
+  # artifact built from one commit, so the chart/image skew the agent-image
+  # variant had to hard-fail on is structurally impossible.
+  - name: 'proxy-ready'
+    path: '/proxy-ready'
+    shouldExist: true
+    permissions: '-rwxr-xr-x'
+    isExecutableBy: 'other'
+  # This image exists to NOT be the agent image. The whole point of #772 phase B2
+  # is that the proxy pod stops staging and running 65MiB of controller-runtime,
+  # client-go, go-control-plane and SPIRE to fork a child process; assert the
+  # agent binary cannot quietly reappear here.
+  - name: 'no agent binary'
+    path: '/agent'
+    shouldExist: false

@@ -295,9 +295,20 @@ The readiness listener is the fixed port 18021 (030 constant), per-Gateway
 addressing is unconditional (021 Phase 2), and the empty local store lives at
 the fixed pod-local path.
 
-### `agent proxy-supervisor` (subcommand — standalone flag set)
+### `proxy-supervisor` (standalone binary — the `aether-proxy` container's PID 1)
 
-The Envoy hot-restart supervisor (proposal 001): `--envoy-path`
+The Envoy hot-restart supervisor (proposal 001). It was `agent proxy-supervisor`
+until #772: as a subcommand it made the proxy pod stage and run the whole 65MiB
+agent binary — controller-runtime, client-go, go-control-plane, SPIRE, Gateway
+API, miekg/dns — to fork a child process. It is now its own binary
+(`//agent/cmd/proxy-supervisor`, 15MiB / 24 modules) in its own image
+(`ghcr.io/bpalermo/aether/proxy-supervisor`), which also means the proxy
+DaemonSet no longer depends on the agent image at all. `agent proxy-supervisor`
+remains as a deprecated alias for one release so a chart predating #772 still
+has a working initContainer against a newer agent image.
+
+Flags (every name and default unchanged by the split — the chart passes them
+literally): `--envoy-path`
 (`/usr/local/bin/envoy`), `--config` (`/etc/envoy/envoy.yaml`), `--base-id` (`0`),
 `--drain-time` (`45s`), `--parent-shutdown-time` (`60s`), `--watch-config`
 (`true`), `--state-dir` (`/run/aether/hotrestart`), `--ready-marker`, `--envoy-arg`
@@ -307,28 +318,34 @@ The Envoy hot-restart supervisor (proposal 001): `--envoy-path`
 
 `--install-path` and `--install-readiness-path` are the initContainer's staging
 mode: the first self-copies this binary to the shared volume as the supervisor,
-the second copies the bundled `/proxy-ready` prober out of the agent image. A
-requested `--install-readiness-path` against an agent image predating #673 is a
-hard failure, so chart/image skew surfaces in the initContainer rather than as a
-pod that can never become Ready.
+the second copies the bundled `/proxy-ready` prober out of the same image. A
+requested `--install-readiness-path` against an image that does not carry one is
+a hard failure, so image skew surfaces in the initContainer rather than as a pod
+that can never become Ready. Since #772 both binaries ship in the
+`proxy-supervisor` image and are built from one commit, so that skew is no longer
+reachable through the supported path — the check stays for the deprecated
+`agent proxy-supervisor` alias, where the source is the agent image.
 
-`--readiness-check` is the pre-#673 exec probe and is deprecated: re-execing this
-67MB binary every 2s per pod spent >=31% of the supervisor container's CPU on Go
-package init alone (which runs before `main()`, so no argv check can avoid it).
+`--readiness-check` is the pre-#673 exec probe and is deprecated: re-execing a
+supervisor binary every 2s per pod spent >=31% of the supervisor container's CPU
+on Go package init alone (which runs before `main()`, so no argv check can avoid
+it) — measured when that binary was the agent's 67MB one.
 The chart now execs the standalone `proxy-ready` binary below instead. The flag
 still works, so a chart predating #673 keeps a probe against a newer image — it is
 marked deprecated in cobra, so using it prints a warning and it no longer appears
 in `--help`.
 
-### `proxy-ready` (standalone binary — bundled in the agent image, not run from it)
+### `proxy-ready` (standalone binary — bundled in the proxy-supervisor image, not run from it)
 
 The `aether-proxy` pod's exec readiness probe (#673). One flag: `--ready-marker`
 (`/var/run/aether-proxy/ready`); exit 0 iff that path stats. It is deliberately
 stdlib-only (~1.7MB vs the agent's 67MB) — it imports nothing but
 `common/readymarker`, and `//agent/cmd/proxy-ready:deps_test` fails the build if
-that ever changes. It ships as an extra layer in the agent image (no second pull:
-the `install-supervisor` initContainer, which already runs that image, copies it
-onto the proxy pod's shared volume at `/opt/aether/proxy-ready`).
+that ever changes. It ships as an extra layer in the `proxy-supervisor` image (no
+second pull: the `install-supervisor` initContainer, which already runs that
+image, copies it onto the proxy pod's shared volume at
+`/opt/aether/proxy-ready`). It is also still layered into the agent image, for
+the deprecated `agent proxy-supervisor` alias.
 
 The probe stays an **exec** probe on the pod-local marker rather than an
 `httpGet`/`tcpSocket`: the proxy DaemonSet is `hostNetwork: true` with

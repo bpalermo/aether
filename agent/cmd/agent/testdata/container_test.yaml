@@ -8,11 +8,11 @@ fileExistenceTests:
     shouldExist: true
     permissions: '-rwxr-xr-x'
     isExecutableBy: 'other'
-  # The aether-proxy pod's stdlib-only exec readiness probe (#673). The
-  # install-supervisor initContainer runs this image and copies it onto the proxy
-  # pod's shared volume, so it must be present AND executable here — a missing
-  # one hard-fails that initContainer (which is the intended way chart/image skew
-  # surfaces, rather than a pod that can never become Ready).
+  # The aether-proxy pod's stdlib-only exec readiness probe (#673). Since #772
+  # the chart stages it out of the proxy-supervisor image instead; this copy is
+  # kept for the DEPRECATED `agent proxy-supervisor` alias, which a chart
+  # predating #772 still runs from THIS image and which hard-fails without it.
+  # Assert it until the alias goes.
   - name: 'proxy-ready'
     path: '/proxy-ready'
     shouldExist: true

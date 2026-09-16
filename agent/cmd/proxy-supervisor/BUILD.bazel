@@ -1,0 +1,68 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//bazel/img:go_multi_arch_image.bzl", "go_multi_arch_image")
+
+# deps_test.go is hand-wired below into its own :deps_test target (it needs the
+# linked binary as data and has to be nameable on its own), so keep gazelle from
+# folding it into a :proxy-supervisor_test.
+# gazelle:exclude deps_test.go
+
+go_library(
+    name = "proxy-supervisor_lib",
+    srcs = ["main.go"],
+    importpath = "aethermesh.dev/agent/cmd/proxy-supervisor",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//agent/internal/supervisorcmd",
+        "//common/signals",
+    ],
+)
+
+go_binary(
+    name = "proxy-supervisor",
+    embed = [":proxy-supervisor_lib"],
+    visibility = ["//visibility:public"],
+    x_defs = {
+        "aethermesh.dev/agent/cmd/proxy-supervisor.Version": "{STABLE_GIT_VERSION}",
+    },
+)
+
+# Dedicated image for the aether-proxy pod's install-supervisor initContainer
+# (#772 phase B2). The supervisor used to be `agent proxy-supervisor`, so that
+# initContainer ran the AGENT image and self-copied the whole 65MiB agent binary
+# onto the proxy pod's shared volume for the proxy container to run as PID 1 —
+# controller-runtime, client-go, go-control-plane, SPIRE, Gateway API and
+# miekg/dns, to fork a child process. This image carries the carved-out binary
+# alone.
+#
+# It also retires a documented hazard: the proxy DaemonSet no longer depends on
+# the agent image at all, so `agent.image` and the supervisor can no longer skew.
+go_multi_arch_image(
+    name = "proxy-supervisor_image",
+    binary = ":proxy-supervisor",
+    repository = "bpalermo/aether/proxy-supervisor",
+    # The proxy pod's exec readiness probe (#673). It ships as an extra layer in
+    # THIS image — the one the initContainer already runs — so there is no second
+    # pull, and the probe and the supervisor that writes the marker it reads are
+    # one artifact built from one commit. The whole point of that binary is what
+    # it does NOT link; see //agent/cmd/proxy-ready:deps_test.
+    tars_layer = {
+        "/proxy-ready": "//agent/cmd/proxy-ready:proxy-ready",
+    },
+)
+
+# Linkage guard (#772 phase B2). This binary is the proxy pod's PID 1, so every
+# linked package is paid in Go package init() on every supervisor start and every
+# hot-restart epoch — init() runs before main(), so no argv check can skip it.
+# One stray import silently re-acquires the agent's payload, so it is asserted
+# against the linked ELF that actually ships.
+go_test(
+    name = "deps_test",
+    size = "small",
+    srcs = ["deps_test.go"],
+    data = [":proxy-supervisor"],
+    embed = [":proxy-supervisor_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

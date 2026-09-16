@@ -28,6 +28,7 @@ make test-race               # whole tree, same flag
 # Build
 make build-agent             # or: bazel build //agent/cmd/agent/...
 make build-mesh-dns          # or: bazel build //agent/cmd/mesh-dns/...
+make build-proxy-supervisor  # or: bazel build //agent/cmd/proxy-supervisor/...
 make build-cni-install       # or: bazel build //cni/cmd/cni-install/...
 make build-registrar         # or: bazel build //registrar/cmd/registrar/...
 
@@ -61,6 +62,7 @@ bazel run @rules_go//go get <package>
 # Container images
 make load-agent-image        # Load agent image into local Docker
 make load-mesh-dns-image     # Load mesh-dns image into local Docker
+make load-proxy-supervisor-image  # Load proxy-supervisor image into local Docker
 make load-cni-install-image  # Load cni-install image into local Docker
 make load-registrar-image    # Load registrar image into local Docker
 make load-all                # Load all images
@@ -73,7 +75,8 @@ make push-all                # Push all images
 
 There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cmd/`, `registrar/cmd/`, `controller/cmd/`, `prober/cmd/`).
 
-- **`agent/cmd/agent`** - Node agent DaemonSet. Uses `controller-runtime` manager to run the xDS server and CNI gRPC server as runnables. CLI built with Cobra. Also hosts two subcommands: `agent edge` (the north-south edge gateway control plane, proposal 003/018) and `agent proxy-supervisor` (the Envoy hot-restart supervisor, proposal 001).
+- **`agent/cmd/agent`** - Node agent DaemonSet. Uses `controller-runtime` manager to run the xDS server and CNI gRPC server as runnables. CLI built with Cobra. Also hosts the `agent edge` subcommand (the north-south edge gateway control plane, proposal 003/018), plus `agent proxy-supervisor` as a **deprecated alias** of the binary below (kept one release so a chart predating #772 still works against a newer agent image).
+- **`agent/cmd/proxy-supervisor`** - The Envoy hot-restart supervisor (proposal 001), PID 1 of the `aether-proxy` container. Its own binary and its own image since #772: it used to be an `agent` subcommand, so the proxy pod staged and ran the whole 65 MiB agent binary (controller-runtime, client-go, go-control-plane, SPIRE) to fork a child process. 15 MiB / 24 modules now. `//agent/cmd/proxy-supervisor:deps_test` and `scripts/check-proxy-supervisor-deps.sh` keep it that way.
 - **`agent/cmd/mesh-dns`** - Slim standalone mesh-DNS daemon (its own DaemonSet and its own image since #583). Serves `<svc>.<ns>.<mesh-domain>` from the record snapshot the node agent writes and forwards everything else upstream, so the resolver survives agent rolls (#578).
 - **`agent/cmd/proxy-ready`** - The `aether-proxy` pod's exec readiness probe (#673). One flag (`--ready-marker`); exit 0 iff that path stats. Deliberately stdlib-only (~1.7MB vs the agent's 67MB) — `//agent/cmd/proxy-ready:deps_test` fails the build if it ever grows a dependency. Ships as an extra layer in the agent image and is staged onto the proxy pod by the `install-supervisor` initContainer.
 - **`agent/cmd/mesh-dns-ready`** - The same pattern for the `aether-mesh-dns` pod (#683), guarded by `//agent/cmd/mesh-dns-ready:deps_test`. Bundled in the mesh-dns image the DaemonSet already runs, so the prober and the daemon that writes the marker are the same artifact and no chart/image skew is possible.
