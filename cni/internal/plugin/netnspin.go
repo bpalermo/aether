@@ -251,26 +251,33 @@ func (p *AetherPlugin) sweepNetnsPins(conf config.AetherConf, stdinData []byte) 
 		return
 	}
 	for _, e := range entries {
-		// A DEL-failure marker belongs to its container's pin: it survives
-		// exactly as long as the attachment does, and must never be mistaken
-		// for a pin (unpinning it would silently reset the give-up bound of a
-		// DEL still being retried).
-		if cid, isMarker := strings.CutSuffix(e.Name(), delFailSuffix); isMarker {
-			if _, ok := valid[cid]; !ok {
-				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
-					p.logger.Warn("netns pin sweep: failed to remove orphan DEL marker", zap.String("file", e.Name()), zap.Error(err))
-				}
-			}
-			continue
-		}
-		if _, ok := valid[e.Name()]; ok {
-			continue
-		}
-		if err := p.unpinNetns(conf, e.Name()); err != nil {
-			p.logger.Warn("netns pin sweep: failed to unpin orphan", zap.String("containerID", e.Name()), zap.Error(err))
-		} else {
-			p.logger.Info("netns pin sweep: unpinned orphan", zap.String("containerID", e.Name()))
-		}
-		p.clearDelFailure(conf, e.Name())
+		p.sweepPinEntry(conf, dir, e.Name(), valid)
 	}
+}
+
+// sweepPinEntry handles one directory entry of the pin dir: a DEL-failure
+// marker, a pin still backing a valid attachment, or an orphan pin to release.
+func (p *AetherPlugin) sweepPinEntry(conf config.AetherConf, dir, name string, valid map[string]struct{}) {
+	// A DEL-failure marker belongs to its container's pin: it survives exactly
+	// as long as the attachment does, and must never be mistaken for a pin
+	// (unpinning it would silently reset the give-up bound of a DEL still being
+	// retried).
+	if cid, isMarker := strings.CutSuffix(name, delFailSuffix); isMarker {
+		if _, ok := valid[cid]; ok {
+			return
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+			p.logger.Warn("netns pin sweep: failed to remove orphan DEL marker", zap.String("file", name), zap.Error(err))
+		}
+		return
+	}
+	if _, ok := valid[name]; ok {
+		return
+	}
+	if err := p.unpinNetns(conf, name); err != nil {
+		p.logger.Warn("netns pin sweep: failed to unpin orphan", zap.String("containerID", name), zap.Error(err))
+	} else {
+		p.logger.Info("netns pin sweep: unpinned orphan", zap.String("containerID", name))
+	}
+	p.clearDelFailure(conf, name)
 }
