@@ -59,6 +59,14 @@ type Metrics struct {
 	// SPIFFE ID (issue #638). Non-zero means the node's egress would present a
 	// co-located workload's SVID on that pod's behalf.
 	bindingMismatch metric.Int64Counter
+	// staleNetnsSkipped counts per-pod listener entries left OUT of a snapshot
+	// generation because the pod's network-namespace file is gone (a CNI DEL the
+	// agent was absent for, #796). Non-zero means the ghost sweep has work
+	// pending; a series that never returns to zero means it is not doing it.
+	// The skip itself is load-bearing: a stale netns in an LDS response makes a
+	// hot-restart successor NACK the whole response and come up with ZERO
+	// listeners (#717), because the netns jump wraps the parent-socket handoff.
+	staleNetnsSkipped metric.Int64Counter
 	// inboundBindingMismatch counts local pods whose INBOUND filter chains are
 	// bound to an SDS server-certificate secret that is NOT that pod's own
 	// SPIFFE ID (issue #638). Non-zero means the node would TERMINATE mesh mTLS
@@ -127,20 +135,26 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Local source pods whose outbound clusters are bound to another workload's SDS client-certificate secret")); err != nil {
 		return nil, fmt.Errorf("outbound binding mismatch: %w", err)
 	}
+	if m.staleNetnsSkipped, err = meter.Int64Counter("aether.agent.snapshot.stale_netns_skipped",
+		metric.WithDescription("Per-pod listener entries excluded from a snapshot generation because the pod's network namespace is gone")); err != nil {
+		return nil, fmt.Errorf("stale netns skipped: %w", err)
+	}
 	if m.inboundBindingMismatch, err = meter.Int64Counter("aether.agent.identity.inbound_binding_mismatch",
 		metric.WithDescription("Inbound filter chains bound to another workload's SDS server-certificate secret")); err != nil {
 		return nil, fmt.Errorf("inbound binding mismatch: %w", err)
 	}
 
-	// Seed the two #638 discriminator counters at zero. The OTel SDK exports a
-	// counter only after its first Add, so a counter that is never incremented
-	// (the healthy case for both of these) never appears in Prometheus at all —
-	// and "no series" is indistinguishable from "zero" to a grading query.
-	// Seeding makes a live zero visible and lets increase()/rate() work from
-	// process start. Observed on talos-main rev200: neither series existed.
+	// Seed the two #638 discriminator counters and the #717 stale-netns counter
+	// at zero. The OTel SDK exports a counter only after its first Add, so a
+	// counter that is never incremented (the healthy case for all three) never
+	// appears in Prometheus at all — and "no series" is indistinguishable from
+	// "zero" to a grading query. Seeding makes a live zero visible and lets
+	// increase()/rate() work from process start. Observed on talos-main rev200:
+	// neither #638 series existed.
 	ctx := context.Background()
 	m.bindingMismatch.Add(ctx, 0)
 	m.inboundBindingMismatch.Add(ctx, 0)
+	m.staleNetnsSkipped.Add(ctx, 0)
 
 	return m, nil
 }
@@ -166,6 +180,18 @@ func (m *Metrics) InboundBindingMismatch(ctx context.Context, n int64) {
 		return
 	}
 	m.inboundBindingMismatch.Add(ctx, n)
+}
+
+// StaleNetnsSkipped counts n per-pod listener entries excluded from ONE
+// snapshot generation because their network namespace no longer exists
+// (#796/#717). Pod names are deliberately NOT attributes (unbounded
+// cardinality); the skip logs the pod at WARN, once per pod. A no-op for
+// n <= 0, so the healthy case rides on the zero seeded at registration.
+func (m *Metrics) StaleNetnsSkipped(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.staleNetnsSkipped.Add(ctx, n)
 }
 
 // SnapshotShape records per-snapshot size gauges.

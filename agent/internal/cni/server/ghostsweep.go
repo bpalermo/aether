@@ -50,7 +50,8 @@ const ghostSweepInterval = 60 * time.Second
 // The sweep used to run end to end under lifecycleMu with untimed registry and
 // Eviction API calls, so a rolling registrar or a stalled apiserver blocked every
 // CNI ADD/DEL that needed the lock — the credible mechanism for a DEL timing out
-// and leaving a stale netns behind for Envoy to fault on (#245).
+// and leaving a stale netns behind (#245; since #796 a DEL that times out on us
+// completes anyway and leaves the stale entry for this sweep to prune).
 //
 // The budget these have to fit inside is the CNI plugin's own: cni/internal/plugin
 // bounds an ADD at 5s (addTimeout) and a DEL at 5s (delTimeout). Nothing here may
@@ -458,10 +459,15 @@ type staleRunningPod struct {
 // evictions interlock on).
 func (s *CNIServer) pruneStaleStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool) ([]*cniv1.CNIPod, int, int, int, []staleRunningPod, bool) {
 	// Prune storage entries that no longer correspond to a live pod: a missed CNI
-	// DEL left the file behind. Keeping it both re-registers a dead endpoint (the
-	// missing-direction loop would treat it as a live local pod) and makes Envoy
-	// fault creating a connection in the gone netns when the per-pod app cluster
-	// is programmed (talos worker-01, 2026-06-19). Two independent signals catch
+	// DEL, or one the agent was absent for (#796, where the plugin now completes
+	// the DEL without us and leaves the reconciliation here), left the file
+	// behind. Keeping it both re-registers a dead endpoint (the missing-direction
+	// loop would treat it as a live local pod) and programs a per-pod app cluster
+	// whose netns is gone — historically an Envoy crash creating the connection
+	// (talos worker-01, 2026-06-19), and on the pinned proxy snapshot a clean
+	// per-request failure plus an eternally unhealthy host (envoyproxy/envoy
+	// #45975, #46503). Either way this sweep is what makes it go away. Two
+	// independent signals catch
 	// it: the netns path is gone, OR the Kubernetes pod is gone. The latter is
 	// essential because a missed DEL can leave the netns bind-mount pin behind, so
 	// netnsExists reports present and the netns check alone never prunes it

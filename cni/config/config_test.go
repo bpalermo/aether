@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	agentConstans "aethermesh.dev/agent/constants"
 	"github.com/containernetworking/cni/pkg/types"
@@ -245,4 +246,21 @@ func TestRuntimeConfig_NilSafety(t *testing.T) {
 	err = json.Unmarshal(data, &unmarshalled)
 	require.NoError(t, err)
 	assert.Nil(t, unmarshalled.RuntimeConfig)
+}
+
+// TestNetnsDelGiveUpAfter pins the bound on the CNI DEL retry loop against a
+// live-but-erroring agent (#796), including the negative "give up at once"
+// spelling the plugin relies on to skip the marker entirely.
+func TestNetnsDelGiveUpAfter(t *testing.T) {
+	assert.Equal(t, 5*time.Minute, AetherConf{}.NetnsDelGiveUpAfter())
+	assert.Equal(t, 90*time.Second, AetherConf{NetnsDelGiveUpAfterSeconds: 90}.NetnsDelGiveUpAfter())
+	assert.Equal(t, time.Duration(0), AetherConf{NetnsDelGiveUpAfterSeconds: -1}.NetnsDelGiveUpAfter())
+}
+
+// TestNetnsDelGiveUpAfterFromNetconf: the bound arrives in the conflist, so the
+// JSON key is part of the contract.
+func TestNetnsDelGiveUpAfterFromNetconf(t *testing.T) {
+	conf, err := NewConf([]byte(`{"cniVersion":"1.0.0","name":"aether","type":"aether-cni","netns_del_give_up_after_seconds":120}`))
+	require.NoError(t, err)
+	assert.Equal(t, 2*time.Minute, conf.NetnsDelGiveUpAfter())
 }

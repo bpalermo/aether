@@ -91,6 +91,7 @@ go_test(
         "races_test.go",
         "route_memo_test.go",
         "snapshot_test.go",
+        "stalenetns_test.go",
         "tcp_service_test.go",
         "uds_test.go",
         "udspolicy_test.go",

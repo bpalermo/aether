@@ -20,6 +20,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -39,6 +40,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -92,7 +95,7 @@ func (p *AetherPlugin) CmdAdd(args *skel.CmdArgs) error {
 	// Pin the netns to an aether-owned path and register that path instead of
 	// the runtime's, so Envoy's per-pod dials never race the runtime's netns
 	// teardown (see netnspin.go). Pin failure falls back to the runtime path:
-	// a working mesh with the old crash window beats a failed pod start.
+	// a working mesh whose teardown-window dials fail beats a failed pod start.
 	if !netConf.NetnsPinDisabled {
 		if pinned, err := p.pinNetns(netConf, args.Netns, args.ContainerID); err != nil {
 			p.logger.Warn("failed to pin netns; falling back to runtime netns path",
@@ -232,11 +235,40 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		zap.String("pod", podName))
 
 	if err := p.sendRemovePod(context.Background(), conf, podName, namespace, containerID); err != nil {
-		// Keep the netns pin: the agent has not confirmed the pod's xDS
-		// resources are gone, and unpinning now reintroduces the deleted-netns
-		// Envoy crash. The runtime retries DEL; CmdGC sweeps true orphans.
-		return err
+		// The agent's ACK is no longer a *safety* requirement (see netnspin.go):
+		// on the pinned proxy snapshot a dial into a vanished netns is a clean
+		// failure, not a crash. So the outcome now turns on who failed.
+		unreachable := agentUnreachable(conf, err)
+		if !unreachable && p.noteDelFailure(conf, args.ContainerID) {
+			// A live agent keeps answering with an error and containerd keeps
+			// retrying: past the bound, stop pinning the node on it (#796).
+			p.logger.Warn("CNI DEL has been failing past the give-up bound; degrading to the agent-unreachable path",
+				zap.String("namespace", namespace),
+				zap.String("pod", podName),
+				zap.String("containerID", args.ContainerID),
+				zap.Duration("give_up_after", conf.NetnsDelGiveUpAfter()),
+				zap.Error(err))
+			unreachable = true
+		}
+		if !unreachable {
+			// A live agent answered with an error: it still owns the pod's xDS
+			// resources and will ACK a retry. Return the error — containerd
+			// retries the DEL, and the netns stays pinned meanwhile.
+			return err
+		}
+		p.logger.Warn("agent unreachable at CNI DEL; unpinning on the normal delay and letting the ghost sweep reconcile",
+			zap.String("namespace", namespace),
+			zap.String("pod", podName),
+			zap.String("containerID", args.ContainerID),
+			zap.Error(err))
+		p.clearDelFailure(conf, args.ContainerID)
+		// No readiness probe on this path: there is no agent to have removed the
+		// pod's listener, so waiting for that socket to disappear can only burn
+		// the probe's whole timeout before the sandbox teardown completes.
+		p.scheduleUnpin(conf, args.ContainerID)
+		return nil
 	}
+	p.clearDelFailure(conf, args.ContainerID)
 
 	// Confirm the proxy actually closed the pod's listener socket (connection
 	// refused) before scheduling the unpin: the agent's removal-ACK wait is
@@ -244,7 +276,7 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 	if !conf.ReadinessProbeDisabled {
 		if netns := p.delProbeNetns(conf, args); netns != "" {
 			probeCtx, cancel := context.WithTimeout(context.Background(), readyProbeDelTimeout)
-			if probeErr := newReadinessProber(netns).waitGone(probeCtx); probeErr != nil {
+			if probeErr := delReadinessWait(probeCtx, netns); probeErr != nil {
 				p.logger.Warn("proxy listener removal not confirmed; continuing",
 					zap.String("netns", netns), zap.Error(probeErr))
 			}
@@ -252,17 +284,64 @@ func (p *AetherPlugin) CmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
-	if !conf.NetnsPinDisabled {
-		// The agent has deregistered the pod and waited for Envoy to ack the
-		// listener removal; a detached unpinner holds the pin through Envoy's
-		// drain tail (health checkers and pool drains were observed dialing
-		// 10-13s after removal under churn) without delaying pod teardown.
-		if err := p.spawnDetachedUnpin(conf.NetnsPinPath(args.ContainerID), conf.NetnsUnpinDelay()); err != nil {
-			p.logger.Warn("failed to spawn netns unpinner; orphan will be swept by GC",
-				zap.String("containerID", args.ContainerID), zap.Error(err))
-		}
-	}
+	p.scheduleUnpin(conf, args.ContainerID)
 	return nil
+}
+
+// scheduleUnpin hands the pod's netns pin to the detached unpinner, which
+// releases it after conf.NetnsUnpinDelay() without delaying pod teardown.
+// Best-effort — a failure leaves an orphan pin for CmdGC to sweep.
+func (p *AetherPlugin) scheduleUnpin(conf config.AetherConf, containerID string) {
+	if conf.NetnsPinDisabled {
+		return
+	}
+	if err := spawnDetachedUnpinFn(p, conf.NetnsPinPath(containerID), conf.NetnsUnpinDelay()); err != nil {
+		p.logger.Warn("failed to spawn netns unpinner; orphan will be swept by GC",
+			zap.String("containerID", containerID), zap.Error(err))
+	}
+}
+
+// agentUnreachable classifies a sendRemovePod failure: true means *no agent
+// answered* (its socket is gone, nothing is listening on it, or it never
+// replied), false means a live agent answered the RPC with an error.
+//
+// The distinction is the whole of the #796 fix. A live agent that errors will
+// ACK a retry, so the DEL is worth retrying and the pin is worth holding. A
+// missing agent never will: containerd would retry the DEL forever while the
+// Terminating pod keeps its CPU request, which is exactly what kept the
+// replacement agent/proxy/mesh-dns pods from being scheduled (12m47s of an
+// unmanaged node). Nor does that wait buy any safety — on the pinned proxy a
+// dial into a vanished netns is a clean failure, not a segfault
+// (envoyproxy/envoy#45975, #46503).
+func agentUnreachable(conf config.AetherConf, err error) bool {
+	if err == nil {
+		return false
+	}
+	// The socket file itself is gone: the agent pod is not running at all.
+	// Checked first because a stale socket left behind by a dead agent fails
+	// the dial instead (ECONNREFUSED -> codes.Unavailable, below).
+	if !fileExists(conf.AgentCNIPath) {
+		return true
+	}
+	// Dial errors as the OS reports them, in case one reaches us unwrapped
+	// (a NewCNIClient failure) rather than as a gRPC status.
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.Unavailable:
+		// No transport: nothing is accepting on the socket, or the agent is
+		// mid-restart.
+		return true
+	case codes.DeadlineExceeded, codes.Canceled:
+		// The call's own budget (delTimeout) ran out with no reply — from the
+		// node's point of view indistinguishable from an absent agent, and the
+		// pod holds its CPU request for every second of the wait.
+		return true
+	default:
+		// An answer, and an answer means an agent that will ACK a retry.
+		return false
+	}
 }
 
 // CmdGC handles the CNI GC (garbage collection) operation: it unpins netns

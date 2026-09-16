@@ -956,3 +956,114 @@ proxy **served** it, then compared with the node whose proxy was restarting.
    - Terminating nodes **scattered across many nodes** for one presented identity → the
      identity was not bound per-server, and `upstream_host` is not the TLS-terminating
      peer; record it and re-open the transport path.
+
+### A pod is stuck `Terminating`, or a node has stale netns entries (#245, #796)
+
+Two related symptoms, one mechanism: the pod's CNI DEL never completed.
+
+**Symptom A — the sandbox will not tear down.** `kubectl describe pod` shows repeated
+`KillPodSandbox` failures, the pod sits `Terminating` for minutes, and — the part that
+hurts — it keeps its **CPU request** the whole time. On a node that is already tight this
+starves the replacements for that node's own DaemonSets (`0/6 nodes are available:
+1 Insufficient cpu`), so the agent, proxy and mesh-dns cannot come back and the node goes
+unmanaged. Priority does not help: the scheduler refuses to preempt on a node that has a
+terminating pod (`preemption: not eligible due to a terminating pod on the nominated
+node`). That is the #796 outage — 12m47s on worker-03.
+
+**Since #796 the plugin does not enter that loop when the agent is simply gone.** CNI DEL
+classifies the failure:
+
+- **Nothing answered** (the agent's socket is missing, or the RPC came back
+  `Unavailable`/`DeadlineExceeded`/`Canceled`) → the DEL logs WARN `agent unreachable at
+  CNI DEL; unpinning on the normal delay and letting the ghost sweep reconcile`, skips the
+  DEL readiness probe, schedules the usual detached unpin, and **returns success**. The
+  sandbox tears down, the CPU request is released, and the node keeps its agent.
+- **A live agent answered with an error** → unchanged: the DEL fails, containerd retries,
+  the netns stays pinned. That loop is now bounded by `netns_del_give_up_after_seconds`
+  (default 5m, tracked in a `<pin>.delfail` marker beside the netns pin, since the plugin
+  process lives for exactly one CNI call). Past the bound it degrades to the first case
+  and logs WARN `CNI DEL has been failing past the give-up bound`.
+
+So a pod still stuck `Terminating` means either a **live** agent that keeps refusing the
+removal (grep that node's agent for the RemovePod error) or a failure outside aether
+(the primary CNI, the runtime). Confirm which before force-deleting:
+
+```bash
+# Is the node's agent even there? (the unreachable case should no longer stick)
+kubectl -n aether get pods -o wide --field-selector spec.nodeName=<node>
+# The plugin's own verdict, on the node:
+journalctl -u containerd | grep -E 'agent unreachable at CNI DEL|give-up bound'
+# Node pressure, which is what turns one stuck DEL into an outage:
+kubectl describe node <node> | sed -n '/Allocated resources/,/Events/p'
+```
+
+Force-deleting the pod (`--grace-period=0 --force`) clears it in seconds and is the right
+escape hatch, but it leaves exactly the state of symptom B.
+
+**Symptom B — stale storage entries for pods that no longer exist.** The agent's host
+registry (`/var/lib/aether/registry/<containerID>.json`) still lists a pod whose netns is
+gone. This is expected after the unreachable path above: the plugin completed the DEL
+without the agent, so nothing deregistered the pod. **It self-heals — do not hand-edit
+the registry.**
+
+- At startup, `LoadListenersFromStorage` skips any pod whose netns is missing, so the
+  stale entry never reaches the snapshot (`skipping pod with missing network namespace`).
+- On **every** snapshot generation the same check runs again (#717): the pod's listeners
+  and its per-pod app/health clusters are left out, logged once per pod as
+  `skipping pod with missing network namespace in snapshot generation`, and counted in
+  `aether_agent_snapshot_stale_netns_skipped_total`.
+- The ghost sweep (60s) prunes the entry, drops its listeners and per-pod clusters, and
+  deregisters the endpoint. It counts the prune in
+  `aether_agent_ghost_sweep_stale_pruned_total` (OTel instrument
+  `aether.agent.ghost_sweep.stale_pruned`).
+- CNI GC unpins orphan netns pins and removes orphan `.delfail` markers as a backstop.
+
+```promql
+# Prunes per node over the last hour. A burst right after an agent comes back on a node
+# is the expected #796 reconciliation; a series that never stops is a defect.
+sum by (k8s_node_name) (increase(aether_agent_ghost_sweep_stale_pruned_total[1h]))
+# Stale entries the snapshot generator had to step over. Non-zero is normal for a minute
+# after a DEL the agent missed; still climbing an hour later means the sweep is not
+# pruning. Both counters are seeded, so a flat 0 is a real reading.
+sum by (k8s_node_name) (increase(aether_agent_snapshot_stale_netns_skipped_total[1h]))
+# Entries the agent is tracking per node -- must settle at the node's managed pod count.
+aether_agent_storage_pods
+```
+
+> The metric families are `aether_agent_ghost_sweep_*` and `aether_agent_snapshot_*`.
+> Querying `aether_ghost_sweep_*` or the dotted OTel spelling returns a **false zero**.
+
+**Why the snapshot-time skip matters more than the crash ever did.** A stale netns on the
+*listener* side does not crash the pinned proxy — the listener is rejected
+(`listener_manager.listener_create_failure`, `listener_manager.lds.update_rejected`, the
+log line `failed to open netns file <path>: No such file or directory`, and
+`lds.version_text` frozen at the last good version) and everything else keeps serving. But
+a **hot-restart successor** asked to create that listener NACKs the whole LDS response and
+comes up with **zero listeners** — every listener on the node, not just the stale one —
+because Envoy jumps into the netns *before* it asks the parent for the socket, so the
+inheritance that would have worked never happens. The port then dies when the parent
+finishes draining. That is why the agent filters stale pods out of every generation rather
+than relying on the sweep's ≤60s window being quiet. An in-place LDS *modify* of such a
+listener is silently accepted (the socket factory is cloned and the netns is never
+reopened), so a dangling path can hide across arbitrarily many updates and only surface at
+the next roll — do not read "LDS is being accepted" as "no stale netns".
+
+```promql
+# After a proxy roll on a node that had a stale entry: this must not go to zero.
+envoy_listener_manager_total_listeners_active
+max_over_time(envoy_listener_manager_lds_update_rejected[1h])   # never an instant query
+max_over_time(envoy_listener_manager_listener_create_failure[1h])
+```
+
+**Why the stale entry is no longer dangerous.** It used to be: Envoy 1.38 dereferenced a
+nullptr when a dial (or a cold-start health checker) opened a netns that had vanished, so
+one stale entry could make the node proxy unbootable — the whole reason CNI DEL blocked
+on the agent's ACK. The pinned proxy snapshot (`1.40.0-dev.20260904.13144fb`) carries
+envoyproxy/envoy#45975 (the pool dial returns a clean `LocalConnectionFailure`, a `UF` for
+that request) and #46503 (the active TCP/HTTP/gRPC health checkers record a `NETWORK`
+failure instead of crashing). A stale per-pod cluster now costs at most one failed request
+plus an unhealthy host until the sweep prunes it. envoyproxy/envoy#45976 (opt-in netns
+validation at config load) is in the snapshot too and stays **off** — it would turn a
+stale pod into an LDS/CDS NACK, which is worse. The netns pin and its 60s unpin delay
+stay: a hot-restart successor re-creating the pod's listeners and dials deferred 10-13s
+past removal still need a live netns to *succeed* rather than merely fail cleanly.

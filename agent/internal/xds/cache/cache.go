@@ -164,6 +164,15 @@ type SnapshotCache struct {
 	listenerMu sync.RWMutex
 	listeners  map[string]listenerEntry // keyed by container network namespace
 
+	// staleNetnsMu guards staleNetnsWarned. Its own mutex because the snapshot
+	// read paths that record a skip hold only listenerMu.RLock.
+	staleNetnsMu sync.Mutex
+	// staleNetnsWarned remembers which pods have already had a stale-netns skip
+	// logged (keyed by netns, like c.listeners). A stale entry is skipped on
+	// EVERY regeneration until the ghost sweep prunes it — up to 60s of them —
+	// so the WARN is emitted once per pod rather than once per snapshot (#717).
+	staleNetnsWarned map[string]struct{}
+
 	clusterMu sync.RWMutex
 	clusters  map[string]clusterEntry // keyed by cluster name
 	// serviceRetentionGrace overrides defaultServiceRetentionGrace when > 0
@@ -534,6 +543,7 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		// map. LoadListenersFromStorage assigns directly (no lazy init), which
 		// panics on agent restart when pods already exist in local storage.
 		listeners:          make(map[string]listenerEntry),
+		staleNetnsWarned:   make(map[string]struct{}),
 		clusters:           make(map[string]clusterEntry),
 		secrets:            make(map[string]*tlsv3.Secret),
 		localWorkloads:     make(map[string]string),

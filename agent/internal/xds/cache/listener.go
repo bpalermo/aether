@@ -20,10 +20,57 @@ import (
 
 // netnsExists reports whether a pod's network-namespace path is still present.
 // Overridable in tests (which use synthetic netns paths). A pod whose netns is
-// gone is excluded from listener generation — see LoadListenersFromStorage.
+// gone is excluded from listener generation — see LoadListenersFromStorage (at
+// startup) and staleNetns (on EVERY snapshot generation).
 var netnsExists = func(path string) bool {
 	_, err := os.Stat(path)
 	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// staleNetns reports whether a per-pod listener entry must be left out of the
+// snapshot because the pod's network namespace is gone.
+//
+// Checking at startup only is not enough (#717). The window between a pod's
+// netns being unpinned and the ghost sweep pruning its storage entry is up to
+// 60s, and CNI DEL now completes without the agent when the agent is absent
+// (#796), so the window opens routinely. What happens inside it is not benign:
+//
+//   - A hot-restart successor asked to create a listener in a netns whose path
+//     is gone NACKs the WHOLE SotW LDS response and comes up with ZERO
+//     listeners — Envoy opens the netns before it asks the parent for the
+//     socket (the netns jump wraps the parent-socket handoff), so a listener
+//     that rode the previous handoff fine is silently dropped and the port dies
+//     when the parent finishes draining. Measured on the pinned snapshot.
+//   - An in-place LDS modify of such a listener is ACCEPTED (the socket factory
+//     is cloned, the netns never reopened), so the dangling path hides until
+//     the next remove+re-add or hot restart.
+//
+// A stat per pod per regeneration is cheap; losing every listener on the node
+// at the next proxy roll is not. The ghost sweep still owns the actual prune.
+func (c *SnapshotCache) staleNetns(netns string) bool {
+	return netns != "" && !netnsExists(netns)
+}
+
+// warnStaleNetnsOnce logs a skipped pod at WARN the first time it is skipped.
+// A stale entry survives every regeneration until the ghost sweep prunes it, so
+// an unconditional log would repeat the same line on each one.
+func (c *SnapshotCache) warnStaleNetnsOnce(netns string, entry listenerEntry) {
+	c.staleNetnsMu.Lock()
+	defer c.staleNetnsMu.Unlock()
+	if _, seen := c.staleNetnsWarned[netns]; seen {
+		return
+	}
+	c.staleNetnsWarned[netns] = struct{}{}
+	c.log.Warn("skipping pod with missing network namespace in snapshot generation (stale storage; the ghost sweep will prune it)",
+		"pod", entry.cniPod.GetName(), "namespace", entry.cniPod.GetNamespace(), "netns", netns)
+}
+
+// forgetStaleNetnsWarning drops a pod's warn-once record, so an ID that is
+// reused later can warn again.
+func (c *SnapshotCache) forgetStaleNetnsWarning(netns string) {
+	c.staleNetnsMu.Lock()
+	defer c.staleNetnsMu.Unlock()
+	delete(c.staleNetnsWarned, netns)
 }
 
 // AddPod generates the inbound and outbound listeners and per-pod clusters for the
@@ -165,6 +212,7 @@ func (c *SnapshotCache) RemovePod(ctx context.Context, netns string) error {
 		return nil
 	}
 
+	c.forgetStaleNetnsWarning(netns)
 	c.removeLocalWorkload(netns)
 
 	// Shrink the node dependency set; clusters only this pod depended on are
@@ -252,7 +300,16 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 
 	resources := make([]types.Resource, 0, 2*len(c.listeners)+1)
 	probeClusters := make([]string, 0, len(c.listeners))
-	for _, entry := range c.listeners {
+	var stale int64
+	for netns, entry := range c.listeners {
+		// A pod whose netns is gone must not reach an LDS response at all: the
+		// successor of the next hot restart would NACK the whole thing and come
+		// up with no listeners (see staleNetns).
+		if c.staleNetns(netns) {
+			stale++
+			c.warnStaleNetnsOnce(netns, entry)
+			continue
+		}
 		// appendListener filters out any nil / typed-nil / malformed listener
 		// (empty Name AND no Address) so a single bad per-pod resource cannot make
 		// Envoy NACK the entire LDS push ("address is necessary"), which would drop
@@ -265,6 +322,12 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 			probeClusters = append(probeClusters, hc.GetName())
 		}
 	}
+	// Counted once per generation, from the listener pass only: appClusters()
+	// applies the same filter but must not double-count the same pod. The
+	// context is Background because the read path carries none — a counter
+	// needs no trace linkage, and the WARN above names the pod.
+	c.metrics.StaleNetnsSkipped(context.Background(), stale)
+
 	// c.listeners is keyed by netns, so the per-pod listeners come out in a
 	// random order. (probeClusters is sorted inside BuildHealthGatewayListener.)
 	sortResourcesByName(resources)
@@ -325,7 +388,15 @@ func (c *SnapshotCache) appClusters() []types.Resource {
 	defer c.listenerMu.RUnlock()
 
 	resources := make([]types.Resource, 0, 2*len(c.listeners))
-	for _, entry := range c.listeners {
+	for netns, entry := range c.listeners {
+		// Same stale-netns filter as meshListeners (which does the counting and
+		// the logging for both): a per-pod app/health cluster carries the pod's
+		// NetworkNamespaceFilepath, so it is stale config too, and leaving it in
+		// would keep the health checkers dialling a netns that will never exist
+		// again.
+		if c.staleNetns(netns) {
+			continue
+		}
 		resources = append(resources, entry.appClusters...)
 		if entry.healthCluster != nil {
 			resources = append(resources, entry.healthCluster)
@@ -376,10 +447,16 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		netns := pod.GetNetworkNamespace()
 
 		// Skip a pod whose network namespace no longer exists: a missed CNI DEL
-		// left the storage entry behind, and programming its per-pod cluster
-		// (NetworkNamespaceFilepath) faults Envoy opening the dead netns (talos
-		// worker-01, 2026-06-19). The ghost sweep prunes the stale entry; this
-		// keeps the bad config out of the snapshot at startup, before that runs.
+		// (or one the agent was absent for, #796) left the storage entry behind,
+		// and its per-pod cluster would point Envoy at a dead netns via
+		// NetworkNamespaceFilepath. That used to fault the proxy outright (talos
+		// worker-01, 2026-06-19); on the pinned snapshot it is only stale config
+		// whose dials fail cleanly (envoyproxy/envoy#45975 for the pool dial,
+		// #46503 for the active health checkers). Skipping is still right — the
+		// config can never become correct again, and programming it only buys
+		// pointless health-check noise against a host that will never come back.
+		// The ghost sweep prunes the stale entry; this keeps the bad config out
+		// of the snapshot at startup, before that runs.
 		if netns != "" && !netnsExists(netns) {
 			c.log.WarnContext(ctx, "skipping pod with missing network namespace (stale storage; CNI DEL likely missed)", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 			continue

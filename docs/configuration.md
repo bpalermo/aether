@@ -468,6 +468,14 @@ unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
 annotations opt out). (The `cni` plugin binary itself is configured via
 CNI-spec stdin, not flags.)
 
+Netconf keys the plugin reads but `cni-install` does not write (edit the conflist to
+override a default): `netns_pin_disabled`, `netns_pin_dir` (`/run/aether/netns`),
+`netns_unpin_delay_seconds` (`0` = 60s), `readiness_probe_disabled`, and
+`netns_del_give_up_after_seconds` — how long CNI DEL keeps failing back to the runtime
+when a *reachable* agent answers the removal with an error before it degrades to the
+agent-unreachable path (unpin on the normal delay, return success, let the ghost sweep
+reconcile). `0` = 5m default; negative = give up on the first failure (#796).
+
 ### `prober` (standalone chart `charts/prober`, proposal 013)
 
 The synthetic **mesh-availability prober**: a per-node DaemonSet, mesh-managed
