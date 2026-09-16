@@ -6,8 +6,8 @@ go_library(
     importpath = "aethermesh.dev/prober/internal/cmd",
     visibility = ["//prober:__subpackages__"],
     deps = [
+        "//common/log",
         "//prober/internal/prober",
         "@com_github_spf13_cobra//:cobra",
-        "@io_k8s_sigs_controller_runtime//pkg/log/zap",
     ],
 )

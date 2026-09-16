@@ -25,7 +25,9 @@ package proxy
 
 import (
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 
 	"aethermesh.dev/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -170,7 +172,9 @@ func CaptureUDPListenerName(podName string) string {
 //
 // The CNI installs a matching nftables REDIRECT rule (programCaptureRedirect in
 // cni/internal/plugin/capture.go) that steers outbound UDP destined for a mesh
-// ClusterIP:meshPort into this listener when --l4-routes is enabled.
+// ClusterIP:meshPort into this listener. The redirect is unconditional (the
+// --l4-routes flag was retired by proposal 031); the listener below exists only
+// when UDPRoute backends do.
 //
 // SECURITY NOTE: datagrams forwarded via this listener are NOT protected by
 // mesh mTLS. mTLS is a TCP/TLS construct; DTLS is not implemented. Backend
@@ -195,9 +199,14 @@ func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, ud
 	// cluster_specifier with weighted_clusters once it reaches stable.
 	// For now, collect all backends into a single primary cluster (the first
 	// non-empty service cluster). This is the minimal viable control-plane shape.
+	// udpRoutes is a map, so "the first non-empty service" must be taken over a
+	// sorted key list: Go randomises map iteration, and with two or more
+	// UDPRoute-backed services an unsorted pick sends the pod's UDP capture
+	// listener to a DIFFERENT backend cluster on each rebuild of identical
+	// input (and re-hashes the listener every time). See cache/ordering.go.
 	var primaryCluster string
-	for _, backends := range udpRoutes {
-		if len(backends) > 0 {
+	for _, svc := range slices.Sorted(maps.Keys(udpRoutes)) {
+		if backends := udpRoutes[svc]; len(backends) > 0 {
 			primaryCluster = backends[0].Cluster
 			break
 		}

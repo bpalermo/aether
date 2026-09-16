@@ -1,8 +1,12 @@
 // Package gamma contains the node agent's GAMMA controller: it watches Gateway API
-// HTTPRoutes attached to a Service (parentRef kind=Service) and projects their L7
-// rules into the node proxy's outbound routing (proposal 018, Phase 2 — east-west).
-// Routing and mTLS are unchanged; HTTPRoute adds canary/header/timeout vocabulary
-// to the outbound path the proxy already serves.
+// HTTPRoutes and GRPCRoutes attached to a Service (parentRef kind=Service) — plus
+// the ReferenceGrants that authorise cross-namespace backendRefs and the HTTPFilter
+// extensions those rules attach (proposal 025) — and projects their L7 rules into
+// the node proxy's routing (proposal 018, Phase 2 — east-west). The projection
+// feeds BOTH route paths the proxy serves: the outbound per-service listeners and
+// the transparent-capture listener's cap_http virtual hosts. Routing and mTLS are
+// unchanged; the routes add canary/header/timeout vocabulary to a path the proxy
+// already serves.
 package gamma
 
 import (

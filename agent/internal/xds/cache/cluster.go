@@ -113,6 +113,14 @@ func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.
 			vhosts = append(vhosts, entry.vhost)
 		}
 	}
+	// c.clusters is a map, so the three slices above come out in a different
+	// order on every call. vhosts is the protocol-visible one — it becomes the
+	// aether_outbound RouteConfiguration's repeated virtual_hosts field, which
+	// re-hashes (and makes Envoy rebuild the whole route table) on every push
+	// unless the order is stable. See ordering.go.
+	sortResourcesByName(clusters)
+	sortResourcesByName(clas)
+	sortVirtualHostsByName(vhosts)
 	return clusters, clas, vhosts
 }
 
@@ -140,6 +148,7 @@ func (c *SnapshotCache) VirtualHosts() []types.Resource {
 	for _, entry := range c.clusters {
 		resources = append(resources, entry.vhost)
 	}
+	sortResourcesByName(resources)
 	return resources
 }
 

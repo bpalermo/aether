@@ -99,6 +99,8 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		secrets = append(secrets, s)
 	}
 	c.secretMu.RUnlock()
+	// c.secrets is a map: sort so the SDS resource set is stable.
+	sortResourcesByName(secrets)
 
 	// The shared subset-headers extension config (ECDS): every outbound
 	// HCM's header_to_metadata filter references this one resource, so

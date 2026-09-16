@@ -45,7 +45,21 @@ func SDSConfigSourceFromCluster(clusterName string) *corev3.ConfigSource {
 
 // TypedConfig wraps a protobuf message as a Google Any type.
 // This is used to package Envoy extension configurations for transport in xDS messages.
+//
+// The inner message is marshalled DETERMINISTICALLY. An Any freezes its payload
+// bytes at construction: the enclosing resource's later marshal (go-control-plane's
+// MarshalResource, which does set Deterministic) re-encodes the Any's `value` field
+// verbatim and cannot canonicalise what is inside it. So any map field in an
+// extension config — structpb.Struct.fields is the one aether actually ships, in the
+// aether_stats TypedStruct on every per-pod HCM — would otherwise serialise in Go's
+// randomised map order and give the enclosing Listener/Cluster/Route a different
+// hash on every rebuild of identical config. That is incident #135's mechanism
+// (issue #772, races report S6) reaching an emitted resource through an Any rather
+// than through a repeated field. See agent/internal/xds/cache/ordering.go.
 func TypedConfig(config proto.Message) *anypb.Any {
-	c, _ := anypb.New(config)
+	c := &anypb.Any{}
+	if err := anypb.MarshalFrom(c, config, proto.MarshalOptions{Deterministic: true}); err != nil {
+		return nil
+	}
 	return c
 }
