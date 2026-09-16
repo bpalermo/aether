@@ -141,6 +141,16 @@ type Config struct {
 	// successor still drains Envoy (see successorWaitBudget, issue #771).
 	// 0 = unknown: wait indefinitely, the pre-#771 behavior.
 	TerminationGrace time.Duration
+	// ShutdownDrainImmediately skips the bounded wait for a surge successor on
+	// SIGTERM and drains Envoy's listeners straight away (issue #795). It is an
+	// escape hatch for a deployment where no replacement can overlap this pod —
+	// a DaemonSet without maxSurge, a single-instance proxy — where the wait can
+	// only ever burn the grace period before falling back to the same drain.
+	//
+	// Leave it false wherever a surge replacement exists: the wait is what makes
+	// pod delete, node drain, eviction and preemption hitless, because the
+	// replacement's Envoy hot-restarts ours instead of finding the node empty.
+	ShutdownDrainImmediately bool
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -363,22 +373,41 @@ func (lp *restartLoop) handleChildExit(exit childExit) (retErr error, done bool)
 // the outer ceiling covering the dial and one retry-free round trip.
 const shutdownProbeTimeout = 2 * readyPollInterval
 
-// handleShutdown implements the ctx.Done case of the Run select: if this
-// supervisor is in the mid-handoff window (Envoy not LIVE at our epoch), it
-// waits for the successor's parent-shutdown protocol to terminate our Envoy
-// before returning; otherwise it signals all children and drains.
+// handleShutdown implements the ctx.Done case of the Run select. It resolves a
+// SIGTERM onto exactly one of four branches, off ONE authoritative
+// epoch-identity probe:
+//
+//	admin LIVE at a NEWER epoch  A successor already holds our listen sockets and
+//	                             is still initializing. Do NOT signal Envoy — the
+//	                             successor needs its hot-restart parent alive, and
+//	                             killing it aborts the successor with errno 111.
+//	                             Wait for its parent-shutdown protocol.  -> handoff
+//	admin LIVE at OUR epoch      No handoff has begun. This is NOT "nobody is
+//	                             coming": the DaemonSet creates the surge
+//	                             replacement within ~1s of the deletionTimestamp
+//	                             and its Envoy hot-restarts ours. Keep serving and
+//	                             wait for it, bounded the same way. -> successor_wait
+//	admin unreachable            The child is dead or its main thread is wedged:
+//	                             nothing to drain, nobody to hand to. -> child_dead
+//	the wait expires, or
+//	--shutdown-drain-immediately Graceful drain: POST /drain_listeners?graceful,
+//	                             wait --drain-time, then SIGTERM and reap.
+//	                                                                -> drain_fallback
+//
+// The successor_wait arm is issue #795. Before #785 it existed by accident — the
+// broken probe took the wait branch on every SIGTERM — and that accident is why
+// `kubectl delete pod` of an aether-proxy had always been hitless (21-23s
+// termination, Envoy drained, zero prober errors, measured on rev213). #785 fixed
+// the probe, which correctly routed the no-handoff-yet case to an immediate
+// s.shutdown(); s.shutdown() is a bare SIGTERM, Envoy does not drain on SIGTERM,
+// and the supervisor then WON the race against its own replacement: 1.5-2.3s
+// termination, 7.95s/8.11s with no Envoy on the node, 130/126 prober
+// connection_errors per delete, and AetherProberLivenessErrors paging (rev214 F2).
+// `kubectl delete pod` is also the code path of node drain, eviction and
+// preemption, so the policy here is the pre-#785 behaviour made deliberate and
+// bounded, with a real graceful drain — never a bare SIGTERM on a serving Envoy —
+// as the fallback for the terminations where no successor can ever arrive.
 func (s *Supervisor) handleShutdown(ctx context.Context) error {
-	// If our Envoy no longer answers admin LIVE at our own epoch, its
-	// sockets have (very likely) been transferred to a surging successor
-	// that is still initializing — the DaemonSet deletes this pod the moment
-	// it turns NotReady, which is exactly that window. Do NOT signal Envoy
-	// (the successor still needs its hot-restart parent alive, even before
-	// reaching LIVE — killing it aborts the successor with errno 111): wait
-	// for the successor's parent-shutdown protocol to terminate it, bounded by
-	// what is left of this pod's own termination grace (see
-	// successorWaitBudget). The check cannot rely on the successor having
-	// published its epoch, since it does so only once LIVE.
-	//
 	// The probe MUST run on a context detached from ctx. handleShutdown has
 	// exactly one call site — `case <-lp.ctx.Done()` in restartLoop.run — so
 	// ctx is ALREADY cancelled by the time we get here. context.WithTimeout on
@@ -395,23 +424,141 @@ func (s *Supervisor) handleShutdown(ctx context.Context) error {
 	probeCtx, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), shutdownProbeTimeout)
 	defer cancelProbe()
 
-	// StateDir is always set in production (the supervisor only runs in the
-	// cross-pod configuration); the guard keeps unit-test supervisors that
-	// run without coordination state on the plain shutdown path.
-	if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(probeCtx, s.currentEpoch()) {
-		budget := s.successorWaitBudget()
-		s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy",
-			"epoch", s.currentEpoch(), "successorWaitBudget", budget)
-		if s.awaitProtocolTermination(budget) {
-			return nil
-		}
-		s.logSuccessorWaitFallback(ctx, budget)
-		s.shutdown()
-		return nil
+	epoch := s.currentEpoch()
+	// live: the admin answered LIVE and named OUR restart epoch.
+	// reachable: the admin answered at all (see adminServerInfo). With no admin
+	// address configured — unit-test supervisors only, never the chart — both
+	// stay false and the mid-handoff arm is taken, exactly as before.
+	var live, reachable bool
+	if s.cfg.AdminAddress != "" {
+		live, reachable = s.adminServerInfo(probeCtx, epoch)
 	}
-	s.log.InfoContext(ctx, "termination requested, shutting down all envoy epochs")
-	s.shutdown()
+
+	switch {
+	// StateDir is always set in production (the supervisor only runs in the
+	// cross-pod configuration), and --shutdown-drain-immediately is the
+	// operator's declaration that this deployment has no surge replacement.
+	// Either way no successor can arrive, so there is nothing to wait for.
+	case s.cfg.StateDir == "" || s.cfg.ShutdownDrainImmediately:
+		s.log.InfoContext(ctx, "termination requested; draining listeners immediately (no successor expected)",
+			"epoch", epoch, "drainImmediately", s.cfg.ShutdownDrainImmediately,
+			"crossPodCoordination", s.cfg.StateDir != "")
+		s.drainThenShutdown(ctx)
+
+	// The admin did not answer at all: our Envoy is dead or wedged. A drain
+	// request would go nowhere and there is no traffic left to protect.
+	case s.cfg.AdminAddress != "" && !reachable:
+		s.log.InfoContext(ctx, "termination requested, shutting down all envoy epochs",
+			"epoch", epoch, "adminReachable", false)
+		s.metrics.shutdownBranchTaken(shutdownBranchChildDead)
+		s.shutdown()
+
+	// Reachable but not LIVE at our epoch: a successor has taken the shared
+	// admin port. Genuinely mid-handoff.
+	case !live:
+		s.awaitSuccessor(ctx, true)
+
+	// LIVE at our own epoch: still the serving Envoy, no handoff yet.
+	default:
+		s.awaitSuccessor(ctx, false)
+	}
 	return nil
+}
+
+// awaitSuccessor keeps the child serving — never signalling it — while a
+// successor takes over, bounded by successorWaitBudget. midHandoff says which
+// state we entered from, which changes only the wording and the branch
+// attribute: the wait, its bound and its fallback are identical, because in
+// both cases the only safe way to end a live Envoy is a successor taking its
+// sockets, and the only safe fallback is draining them ourselves.
+func (s *Supervisor) awaitSuccessor(ctx context.Context, midHandoff bool) {
+	budget := s.successorWaitBudget()
+	epoch := s.currentEpoch()
+	if midHandoff {
+		s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy",
+			"epoch", epoch, "successorWaitBudget", budget)
+	} else {
+		s.log.InfoContext(ctx, "waiting for a successor before draining",
+			"epoch", epoch, "successorWaitBudget", budget, "drainTime", s.cfg.DrainTime)
+	}
+
+	if s.awaitProtocolTermination(budget) {
+		s.log.InfoContext(ctx, "successor took over during shutdown wait",
+			"epoch", epoch, "midHandoff", midHandoff)
+		if midHandoff {
+			s.metrics.shutdownBranchTaken(shutdownBranchHandoff)
+		} else {
+			s.metrics.shutdownBranchTaken(shutdownBranchSuccessorWait)
+		}
+		return
+	}
+
+	s.logSuccessorWaitFallback(ctx, budget)
+	s.log.InfoContext(ctx, "no successor within budget; draining listeners",
+		"epoch", epoch, "successorWaitBudget", budget, "drainTime", s.cfg.DrainTime)
+	s.drainThenShutdown(ctx)
+}
+
+// drainThenShutdown is the only safe way to end a still-serving Envoy with no
+// successor to hand it to: ask it to drain its listeners gracefully over
+// --drain-time-s, wait that out, and only then SIGTERM and reap.
+//
+// It is deliberately not s.shutdown(). SIGTERM is not a drain — Envoy's handler
+// exits the server outright (0.33-0.74s, measured) — which is what turned every
+// pod delete, node drain, eviction and preemption into an ~8s node-wide
+// connection blackout once #785 stopped the accidental successor wait (#795).
+//
+// Envoy may well exit on its own at the end of its drain sequence; the wait
+// reaps it if so, and the trailing shutdown() then has nothing left to signal.
+func (s *Supervisor) drainThenShutdown(ctx context.Context) {
+	start := time.Now()
+	defer s.metrics.shutdownBranchTaken(shutdownBranchDrainFallback)
+
+	s.mu.Lock()
+	hadChildren := len(s.children) > 0
+	s.mu.Unlock()
+
+	// With no admin endpoint there is nothing to ask, and with no drain window
+	// nothing to wait out: degenerate to the plain shutdown, which is what
+	// coordination-less unit-test supervisors have always got.
+	if s.cfg.AdminAddress != "" && s.cfg.DrainTime > 0 {
+		drained := s.drainListeners(ctx)
+		s.awaitDrain(s.cfg.DrainTime)
+		s.log.InfoContext(ctx, "listeners drained; stopping envoy",
+			"epoch", s.currentEpoch(), "drainAccepted", drained, "elapsed", time.Since(start))
+	}
+
+	s.terminateChildren()
+	// Measured over the WHOLE fallback, graceful drain window included — and
+	// recorded even when Envoy exited during its own drain sequence, which is
+	// the outcome terminateChildren then has nothing left to report.
+	if hadChildren {
+		s.metrics.drainCompleted(time.Since(start).Seconds())
+	}
+}
+
+// awaitDrain waits up to d for the children to exit on their own, reaping any
+// that do. Envoy's graceful drain sequence ends by shutting the server down, so
+// the common outcome is that this returns early with nothing left to SIGTERM.
+func (s *Supervisor) awaitDrain(d time.Duration) {
+	s.mu.Lock()
+	pending := len(s.children)
+	s.mu.Unlock()
+	if pending == 0 {
+		return
+	}
+
+	t := time.NewTimer(d)
+	defer t.Stop()
+	for pending > 0 {
+		select {
+		case exit := <-s.childExited:
+			s.reap(exit.epoch)
+			pending--
+		case <-t.C:
+			return
+		}
+	}
 }
 
 // handleDebounce implements the debounceC case of the Run select: defers the
@@ -917,9 +1064,25 @@ func (s *Supervisor) awaitProtocolTermination(budget time.Duration) bool {
 }
 
 // shutdown SIGTERMs every tracked epoch and waits up to DrainTime+grace for them
-// to exit, SIGKILLing any straggler. It reads childExited directly because the
-// main loop has stopped selecting on it.
+// to exit, SIGKILLing any straggler.
+//
+// NOTE: SIGTERM is not a drain. Envoy exits on it immediately, so this is only
+// correct for an Envoy that is no longer serving — one a successor has taken
+// over from, one that is already dead, or one drainThenShutdown has just
+// drained. Never call it on a live, serving Envoy (issue #795).
 func (s *Supervisor) shutdown() {
+	start := time.Now()
+	if s.terminateChildren() {
+		s.metrics.drainCompleted(time.Since(start).Seconds())
+	}
+}
+
+// terminateChildren SIGTERMs every tracked epoch and waits up to
+// DrainTime+grace for them to exit, SIGKILLing any straggler. It reads
+// childExited directly because the main loop has stopped selecting on it.
+// It reports whether there was anything left to terminate, which is what
+// decides whether a drain duration is worth recording.
+func (s *Supervisor) terminateChildren() bool {
 	s.mu.Lock()
 	pending := make(map[int]struct{}, len(s.children))
 	for e := range s.children {
@@ -931,10 +1094,8 @@ func (s *Supervisor) shutdown() {
 		s.signalEpoch(e, syscall.SIGTERM)
 	}
 	if len(pending) == 0 {
-		return
+		return false
 	}
-	start := time.Now()
-	defer func() { s.metrics.drainCompleted(time.Since(start).Seconds()) }()
 
 	deadline := time.NewTimer(s.cfg.DrainTime + shutdownGrace)
 	defer deadline.Stop()
@@ -950,7 +1111,8 @@ func (s *Supervisor) shutdown() {
 				s.signalEpoch(e, syscall.SIGKILL)
 				s.reap(e)
 			}
-			return
+			return true
 		}
 	}
+	return true
 }

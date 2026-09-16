@@ -22,6 +22,39 @@ const (
 	attrProbeResult   = attribute.Key("aether.supervisor.probe.result")
 )
 
+// attrShutdownBranch labels which arm of handleShutdown's decision table a
+// SIGTERM resolved on. Four values, fixed.
+const attrShutdownBranch = attribute.Key("aether.supervisor.shutdown.branch")
+
+// Shutdown branches. See handleShutdown's decision table (issue #795).
+const (
+	// shutdownBranchHandoff: the admin answered at a NEWER epoch — a successor
+	// already holds our listen sockets — and its parent-shutdown protocol
+	// terminated our Envoy inside the budget. The hitless mid-roll case.
+	shutdownBranchHandoff = "handoff"
+	// shutdownBranchSuccessorWait: the admin answered LIVE at OUR epoch (no
+	// handoff had begun), we kept serving, and a surge successor arrived and
+	// took over inside the budget. The hitless case for `kubectl delete pod`,
+	// node drain, eviction and preemption.
+	shutdownBranchSuccessorWait = "successor_wait"
+	// shutdownBranchDrainFallback: no successor came (node shutdown, scale-down,
+	// `kubectl delete daemonset`, a replacement stuck Pending) or
+	// --shutdown-drain-immediately declared that none ever would, so the
+	// supervisor drained Envoy's listeners itself before stopping it.
+	shutdownBranchDrainFallback = "drain_fallback"
+	// shutdownBranchChildDead: the admin did not answer at all — the child is
+	// gone, or its main thread is wedged. Nothing to drain, nobody to hand to.
+	shutdownBranchChildDead = "child_dead"
+)
+
+// shutdownBranchValues is the closed set, used to seed the counter at zero.
+var shutdownBranchValues = []string{
+	shutdownBranchHandoff,
+	shutdownBranchSuccessorWait,
+	shutdownBranchDrainFallback,
+	shutdownBranchChildDead,
+}
+
 // Admin endpoints the watchdog probes.
 const (
 	probeEndpointReady      = "ready"
@@ -67,6 +100,7 @@ type SupervisorMetrics struct {
 	drainDuration       metric.Float64Histogram
 	readyTransitions    metric.Int64Counter
 	adminProbes         metric.Int64Counter
+	shutdownBranches    metric.Int64Counter
 }
 
 // NewSupervisorMetrics registers the supervisor instruments on the given meter.
@@ -105,7 +139,7 @@ func NewSupervisorMetrics(meter metric.Meter) (*SupervisorMetrics, error) {
 		return nil, fmt.Errorf("predecessor detected: %w", err)
 	}
 	if m.drainDuration, err = meter.Float64Histogram("aether.supervisor.drain.duration",
-		metric.WithDescription("Time from shutdown SIGTERM to the last supervised Envoy exiting"),
+		metric.WithDescription("Time spent draining Envoy on a shutdown fallback, from the graceful /drain_listeners request (where one is made) to the last supervised Envoy exiting"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(1, 5, 10, 30, 60, 120)); err != nil {
 		return nil, fmt.Errorf("drain duration: %w", err)
@@ -117,6 +151,19 @@ func NewSupervisorMetrics(meter metric.Meter) (*SupervisorMetrics, error) {
 	if m.adminProbes, err = meter.Int64Counter("aether.supervisor.admin_probes",
 		metric.WithDescription("Envoy admin watchdog probes, by endpoint and outcome. The server_info share is the epoch re-verification rate; a steady-state ratio other than ~1:14 against ready means the fast path is not engaging (#646)")); err != nil {
 		return nil, fmt.Errorf("admin probes: %w", err)
+	}
+	if m.shutdownBranches, err = meter.Int64Counter("aether.supervisor.shutdown.branch",
+		metric.WithDescription("SIGTERM outcomes, by which arm of the shutdown decision table was taken. handoff and successor_wait are the hitless ones; a drain_fallback during a rolling upgrade means the surge replacement never arrived (#795)")); err != nil {
+		return nil, fmt.Errorf("shutdown branches: %w", err)
+	}
+	// Seed every branch at zero. A supervisor records exactly ONE shutdown
+	// branch, once, at the very end of its life, and the OTel SDK exports a
+	// counter only after its first Add — so without this, "the fleet never took
+	// the drain_fallback branch" and "this counter was never registered" are the
+	// same empty result in Prometheus. That is precisely how #638's identity
+	// mismatch counters read as false zeros until #717 seeded them.
+	for _, branch := range shutdownBranchValues {
+		m.shutdownBranches.Add(context.Background(), 0, metric.WithAttributes(attrShutdownBranch.String(branch)))
 	}
 
 	return m, nil
@@ -187,6 +234,17 @@ func (m *SupervisorMetrics) readyTransition(ready bool) {
 		return
 	}
 	m.readyTransitions.Add(context.Background(), 1, metric.WithAttributes(attrReady.Bool(ready)))
+}
+
+// shutdownBranchTaken records the arm of handleShutdown's decision table this
+// SIGTERM resolved on. Called exactly once per supervisor lifetime, just before
+// Run returns; supervisorcmd's deferred telemetry flush is what gets it out of
+// the dying process.
+func (m *SupervisorMetrics) shutdownBranchTaken(branch string) {
+	if m == nil {
+		return
+	}
+	m.shutdownBranches.Add(context.Background(), 1, metric.WithAttributes(attrShutdownBranch.String(branch)))
 }
 
 func (m *SupervisorMetrics) adminProbed(endpoint, result string) {

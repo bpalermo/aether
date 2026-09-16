@@ -472,6 +472,77 @@ rolls, and the series age out with the generation. That ageing-out is why an **i
 query is never the right read here: minutes after a roll the generation's series is
 gone, and the instant read returns nothing at all rather than the exit it recorded.
 
+### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
+
+The `aether-proxy` pod is `hostNetwork` with `maxSurge: 1`, so the node's Envoy is a
+*node-scoped* resource that happens to live in a pod. Terminating that pod is only free
+if the node's Envoy is handed to a successor rather than killed, and SIGTERM is not a
+drain — Envoy's handler exits the server outright (0.33–0.74 s measured), taking every
+connection on the node with it. So the supervisor resolves a SIGTERM onto exactly one of
+four branches, chosen from one authoritative `/server_info` probe, and records which one
+it took (issue #795):
+
+| branch | when | what happens | data-plane cost |
+| --- | --- | --- | --- |
+| `handoff` | admin answers at a **newer** epoch — a successor already holds our listen sockets | wait, without signalling Envoy, for the successor's parent-shutdown protocol to terminate it | none |
+| `successor_wait` | admin answers **LIVE at our own epoch** — no handoff has begun | keep serving and wait (bounded by `successorWaitBudget`, 155 s at the chart default) for the DaemonSet's surge replacement, which is created within ~1 s and hot-restarts us | none |
+| `drain_fallback` | that wait expires, or `--shutdown-drain-immediately` is set | `POST /drain_listeners?graceful`, wait `--drain-time`, then SIGTERM and reap | in-flight requests finish; new connections go to whatever else serves the node |
+| `child_dead` | the admin does not answer at all | SIGTERM and reap; there is nothing to drain | already gone |
+
+`kubectl delete pod aether-proxy-<x>` takes the **`successor_wait`** branch. Expect
+**≈20–25 s** of termination (that is the successor initializing, not a hang) and **zero**
+prober errors on that node. A 1–2 s termination is the symptom to be alarmed by: it means
+the supervisor won the race against its own replacement and left the node with no Envoy —
+which cost 7.95 s / 8.11 s of blackout and 130 / 126 prober `connection_error`s per delete
+on rev214, before this branch existed.
+
+```bash
+# The supervisor's logs never reach VictoriaLogs (service.name carries only
+# registrar/agent/controller/edge), so start the follower BEFORE the delete.
+kubectl -n aether logs -f <proxy-pod> -c aether-proxy | tee /tmp/sigterm.log &
+kubectl -n aether delete pod <proxy-pod>
+```
+
+Lines to look for, in order, on a healthy delete:
+
+```
+waiting for a successor before draining        successorWaitBudget=2m35s drainTime=10s
+envoy epoch terminated by successor            epoch=N
+successor took over during shutdown wait       epoch=N midHandoff=false
+```
+
+and on a termination where no successor can come (node shutdown, scale-down,
+`kubectl delete daemonset`, a replacement stuck Pending/unschedulable):
+
+```
+no successor terminated our envoy within the termination-grace budget; …   (WARN)
+no successor within budget; draining listeners  successorWaitBudget=2m35s drainTime=10s
+listeners drained; stopping envoy               drainAccepted=true elapsed=10.0s
+reaped envoy epoch                              epoch=N
+```
+
+Both are also gradeable without logs, which matters because the pod is gone by the time
+you look. The branch counter is **seeded at zero for all four values** (#717), so an
+empty result means the metric never arrived, not that nothing happened:
+
+```promql
+# Which branch each node's last terminating supervisor took. Anything other than
+# handoff/successor_wait during a rolling upgrade means the surge replacement
+# never arrived.
+sum by (k8s_node_name, aether_supervisor_shutdown_branch) (
+  increase(aether_supervisor_shutdown_branch_total[30m]))
+
+# How long a fallback drain actually took (the graceful window included).
+histogram_quantile(0.95,
+  sum by (le) (rate(aether_supervisor_drain_duration_seconds_bucket[30m])))
+```
+
+> **A dying process exports once.** The branch is recorded immediately before `Run`
+> returns, and `supervisorcmd`'s deferred telemetry flush is what pushes it — a supervisor
+> SIGKILLed at the grace period flushes nothing, so a *missing* branch sample on a node is
+> itself the finding. Use `increase()`/`max_over_time`, never an instant read: like the
+> mesh-DNS lame-duck series, these age out with the generation that wrote them.
+
 ### The agent reports an unrepairable conflist
 
 Symptom: `AetherCNIConflistUnchained` fires for a node, the agent there is NotReady and

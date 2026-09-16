@@ -127,6 +127,44 @@ func TestSupervisorMetrics_NilReceiverSafe(t *testing.T) {
 	m.drainCompleted(1.0)
 	m.readyTransition(true)
 	m.adminProbed(probeEndpointReady, probeResultLive)
+	m.shutdownBranchTaken(shutdownBranchSuccessorWait)
+}
+
+// TestShutdownBranchesSeededAtZero is the #717 lesson applied to a counter that
+// can only ever be incremented once, at the end of a process's life: without a
+// seed, "no proxy in the fleet has ever taken this branch" and "the instrument
+// was never registered" are the same empty query result, and the branch a
+// termination took is exactly what #795 needs to be gradeable.
+func TestShutdownBranchesSeededAtZero(t *testing.T) {
+	_, reader := newTestSupervisorMetrics(t)
+
+	byBranch := metricSumByAttr(t, reader, "aether.supervisor.shutdown.branch", attrShutdownBranch)
+	for _, branch := range shutdownBranchValues {
+		if _, ok := byBranch[branch]; !ok {
+			t.Errorf("branch %q is not exported before its first increment", branch)
+			continue
+		}
+		if got := byBranch[branch]; got != 0 {
+			t.Errorf("seeded branch %q = %d, want 0", branch, got)
+		}
+	}
+	if len(byBranch) != len(shutdownBranchValues) {
+		t.Errorf("exported branches = %v, want exactly %v", byBranch, shutdownBranchValues)
+	}
+}
+
+func TestShutdownBranchRecording(t *testing.T) {
+	m, reader := newTestSupervisorMetrics(t)
+
+	m.shutdownBranchTaken(shutdownBranchDrainFallback)
+
+	byBranch := metricSumByAttr(t, reader, "aether.supervisor.shutdown.branch", attrShutdownBranch)
+	if got := byBranch[shutdownBranchDrainFallback]; got != 1 {
+		t.Errorf("%s = %d, want 1", shutdownBranchDrainFallback, got)
+	}
+	if got := byBranch[shutdownBranchHandoff]; got != 0 {
+		t.Errorf("%s = %d, want 0 (untaken branches stay at their seed)", shutdownBranchHandoff, got)
+	}
 }
 
 func TestSupervisorMetrics_Recording(t *testing.T) {

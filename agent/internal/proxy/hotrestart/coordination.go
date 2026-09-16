@@ -308,7 +308,11 @@ func (s *Supervisor) clearReady() { _ = os.Remove(s.cfg.ReadyMarkerPath) }
 // predecessor answers admin at the old epoch until the new Envoy takes over.
 //
 // Deliberately authoritative and unpooled: every caller (initStartEpoch,
-// handleDebounce, handleShutdown) is making an epoch-identity decision.
+// handleDebounce) is making an epoch-identity decision. handleShutdown calls
+// adminServerInfo directly instead — the same probe on the same client — because
+// it must also tell "answered at another epoch" (a successor took over) apart
+// from "did not answer at all" (our Envoy is dead or wedged), which this
+// wrapper collapses into a single false.
 func (s *Supervisor) adminLiveAtEpoch(ctx context.Context, epoch int) bool {
 	live, _ := s.adminServerInfo(ctx, epoch)
 	return live
