@@ -1,6 +1,6 @@
 # Proposal: Hot Restart for the aether-proxy Envoy (Spike)
 
-**Status:** Implemented — the `agent proxy-supervisor` hot-restart supervisor shipped (Strategy B), zero-drop validated on talos-main; follow-on audits merged (#109–#111). (2026-06-09 spike.)
+**Status:** Implemented — the hot-restart supervisor shipped (Strategy B), zero-drop validated on talos-main; follow-on audits merged (#109–#111). Carved out of the agent binary into `//agent/cmd/proxy-supervisor` and its own image by #772. (2026-06-09 spike.)
 **Author:** Bruno Palermo
 **Date:** 2026-06-09
 
@@ -26,7 +26,7 @@ The current chart already helps: `aether-proxy` runs `hostNetwork: true`, so all
 
 ## Common Building Block: The Supervisor
 
-All three strategies share one component — a Go **hot-restart supervisor** (`agent/internal/proxy/hotrestart`, run via the `agent proxy-supervisor` subcommand) that reimplements Envoy's [`hot-restarter.py`](https://www.envoyproxy.io/docs/envoy/latest/operations/hot_restarter):
+All three strategies share one component — a Go **hot-restart supervisor** (`agent/internal/proxy/hotrestart`, wired by `agent/internal/supervisorcmd` and run as the `//agent/cmd/proxy-supervisor` binary; it was the `agent proxy-supervisor` subcommand until #772) that reimplements Envoy's [`hot-restarter.py`](https://www.envoyproxy.io/docs/envoy/latest/operations/hot_restarter):
 
 | Trigger | Action |
 |---------|--------|
@@ -53,8 +53,8 @@ Keep **one long-lived proxy Pod** whose supervisor is the stable entrypoint, and
 Gated behind `proxy.hotRestart.enabled` (off by default; the existing direct-Envoy path is unchanged):
 
 - **The runtime container stays the Envoy image** (it carries Envoy *and its shared libraries*). The Envoy binary is dynamically linked, so copying it alone into a distroless image would not run — we inject the supervisor into the Envoy image instead of the reverse.
-- An **initContainer runs the agent image and self-installs** the statically linked supervisor onto a shared `emptyDir` (`agent proxy-supervisor --install-path=/opt/aether/supervisor`). Since #673 the same initContainer also stages the readiness prober out of that image (`--install-readiness-path=/opt/aether/proxy-ready`); a source that is absent — i.e. an agent image predating #673 — is a hard failure, so chart/image skew surfaces here instead of as a pod that can never become Ready.
-- The runtime container's command becomes `/opt/aether/supervisor proxy-supervisor --envoy-path=/usr/local/bin/envoy --watch-config ...`; the Envoy service flags are passed through as `--envoy-arg`.
+- An **initContainer runs the proxy-supervisor image and self-installs** the statically linked supervisor onto a shared `emptyDir` (`--install-path=/opt/aether/supervisor`). Since #673 the same initContainer also stages the readiness prober out of that image (`--install-readiness-path=/opt/aether/proxy-ready`); an absent source is a hard failure, so image skew surfaces here instead of as a pod that can never become Ready. Until #772 the image it ran was the *agent* image and the binary it staged was the whole 65MiB agent.
+- The runtime container's command becomes `/opt/aether/supervisor --envoy-path=/usr/local/bin/envoy --watch-config ...` (the `proxy-supervisor` argv word is gone since #772 — the staged binary *is* the supervisor); the Envoy service flags are passed through as `--envoy-arg`.
 - A shared `emptyDir{medium: Memory}` mounted at `/dev/shm` carries the hot-restart shmem.
 - The supervisor watches the bootstrap config dir (fsnotify, debounced); a `kubectl edit`/touch of the ConfigMap (or `kill -SIGHUP`) triggers the in-place hot restart.
 

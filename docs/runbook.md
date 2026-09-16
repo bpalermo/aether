@@ -41,8 +41,9 @@ over Bazel).
 ```bash
 make build              # bazel build //...  (everything)
 
-make build-agent        # //agent/cmd/agent/...        (node agent + edge + supervisor)
+make build-agent        # //agent/cmd/agent/...        (node agent + edge)
 make build-mesh-dns     # //agent/cmd/mesh-dns/...     (slim standalone mesh-DNS daemon)
+make build-proxy-supervisor  # //agent/cmd/proxy-supervisor/... (Envoy hot-restart supervisor)
 make build-registrar    # //registrar/cmd/registrar/...
 make build-cni-install  # //cni/cmd/cni-install/...
 ```

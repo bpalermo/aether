@@ -4,7 +4,14 @@ load("//bazel/helm:defs.bzl", "helm_template_fail_test")
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
 # ship here are an input to //agent/internal/proxy/hotrestart (#666).
-exports_files(["values.yaml"])
+# agent-proxy-daemonset.yaml is exported for the same reason: it is the literal
+# argv the supervisor is handed, and //agent/internal/supervisorcmd asserts every
+# flag in it exists on the command (#772). A rename there would otherwise only
+# surface as every proxy pod failing to start at rollout time.
+exports_files([
+    "values.yaml",
+    "templates/agent-proxy-daemonset.yaml",
+])
 
 # Shared by both packagings below (see :aether_commit). `images` is what makes the
 # `{@//...:image_push.digest}` placeholders in values.yaml resolve at package time,
@@ -13,6 +20,7 @@ exports_files(["values.yaml"])
 AETHER_IMAGES = [
     "//agent/cmd/agent:image_push",
     "//agent/cmd/mesh-dns:image_push",
+    "//agent/cmd/proxy-supervisor:image_push",
     "//cni/cmd/cni-install:image_push",
     "//registrar/cmd/registrar:image_push",
     "//controller/cmd/controller:image_push",
@@ -50,6 +58,23 @@ helm_lint_test(
 helm_template_test(
     name = "aether_template_test",
     chart = ":aether",
+)
+
+# #772 phase B2: the aether-proxy pod must run the carved-out supervisor image,
+# not the 65MiB agent binary. Both halves are individually easy to half-change —
+# the initContainer's image and the proxy container's command — and neither
+# failure is visible until a rollout, so pin them against the packaged chart
+# (where the `{@//...:image_push.repository}` placeholder is already resolved).
+helm_template_test(
+    name = "aether_proxy_supervisor_image_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "aether/proxy-supervisor@sha256:",
+            "--install-path=/opt/aether/supervisor",
+            "--install-readiness-path=/opt/aether/proxy-ready",
+        ],
+    },
 )
 
 # #770: proxy.authzSidecar.failureMode is an authorization control, and the
