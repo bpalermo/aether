@@ -68,6 +68,20 @@ load-mesh-dns-image:
 push-mesh-dns-image:
 	@bazel run --stamp //agent/cmd/mesh-dns:image_push
 
+# The Envoy hot-restart supervisor (#772 phase B2) — its own binary AND its own
+# image, so the aether-proxy pod no longer stages and runs the full agent.
+.PHONY: build-proxy-supervisor
+build-proxy-supervisor:
+	@bazel build //agent/cmd/proxy-supervisor/...
+
+.PHONY: load-proxy-supervisor-image
+load-proxy-supervisor-image:
+	@bazel run //agent/cmd/proxy-supervisor:image_load
+
+.PHONY: push-proxy-supervisor-image
+push-proxy-supervisor-image:
+	@bazel run --stamp //agent/cmd/proxy-supervisor:image_push
+
 .PHONY: build-cni-install
 build-cni-install:
 	@bazel build //cni/cmd/cni-install/...
@@ -93,14 +107,14 @@ push-registrar-image:
 	@bazel run --stamp //registrar/cmd/registrar:image_push
 
 .PHONY: load-all
-load-all: load-agent-image load-mesh-dns-image load-cni-install-image load-registrar-image
+load-all: load-agent-image load-mesh-dns-image load-proxy-supervisor-image load-cni-install-image load-registrar-image
 
 # Every push target passes --stamp so the released artifacts carry the git
 # version information (charts, x_defs). The GNU build-IDs do NOT depend on it:
 # //tools/buildid derives each one from the binary's own content (#651, #653),
 # in every build configuration.
 .PHONY: push-all
-push-all: push-agent-image push-mesh-dns-image push-cni-install-image push-registrar-image
+push-all: push-agent-image push-mesh-dns-image push-proxy-supervisor-image push-cni-install-image push-registrar-image
 
 # Print (and assert) the GNU build-ID of every binary that ships in a released
 # image. Each must hash that binary's own content and no two may be equal — the

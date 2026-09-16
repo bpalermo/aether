@@ -315,15 +315,19 @@ cniInstall:
 
 # Per-node Envoy proxy DaemonSet. Disable to deploy only the agent.
 #
-# NOTE — this DaemonSet is COUPLED TO THE AGENT IMAGE, not just the proxy image
-# below. Its install-supervisor initContainer runs `agent.image` and stages two
-# binaries onto the pod's shared volume: the hot-restart supervisor (the agent
-# binary, self-copied) and, since #673, the stdlib-only `/proxy-ready` readiness
-# prober the kubelet execs every 2s. An agent image predating #673 does not carry
-# /proxy-ready, and the initContainer hard-fails rather than starting a pod whose
-# probe could never succeed — chart >= 0.92.0 therefore requires an agent image
-# built from #673 or later. maxUnavailable:0 keeps the previous pods serving
-# through such a skew; the fix is to align the images (or roll the chart back).
+# NOTE — this DaemonSet uses TWO images: `proxy.image` (Envoy) for the runtime
+# container, and `proxy.supervisor.image` for the install-supervisor
+# initContainer, which stages the hot-restart supervisor and the stdlib-only
+# `/proxy-ready` prober onto the pod's shared volume. Both staged binaries come
+# out of that one image, built from one commit, so they cannot skew against each
+# other.
+#
+# Until #772 the initContainer ran `agent.image` instead and self-copied the
+# whole agent binary as the supervisor, which made this DaemonSet depend on the
+# agent image and required chart >= 0.92.0 to be paired with a #673-or-later
+# agent image. That coupling is gone. A chart predating #772 still works against
+# a newer agent image (`agent proxy-supervisor` is kept as a deprecated alias for
+# one release), so a `helm rollback` is safe.
 proxy:
   enabled: true
   # External image (built by the //proxy workspace), tag-pinned to the publishing
@@ -335,6 +339,17 @@ proxy:
     # helper prefers digest over tag. Multi-arch index for e985de2f4f30e13a7be6bff938259a8b319a7eb3.
     digest: "sha256:c85d98abd28f2a40b36dab82918df0c4130a1ee546433a0a8540a0bb88bf6a59"
     pullPolicy: Always
+  # The Envoy hot-restart supervisor (#772): its own binary and its own image
+  # since it stopped being an `agent` subcommand. The initContainer runs it to
+  # stage /opt/aether/supervisor and /opt/aether/proxy-ready; nothing else pulls
+  # it. Mirror to a private registry by overriding `repository` alone; the digest
+  # is preserved.
+  supervisor:
+    image:
+      repository: "{@//agent/cmd/proxy-supervisor:image_push.repository}"
+      digest: "{@//agent/cmd/proxy-supervisor:image_push.digest}"
+      tag: ""
+      pullPolicy: Always
   logLevel: info
   # Emit Envoy's own application logs as one JSON object per line (bootstrap
   # application_log_config). Set false for Envoy's default text format.

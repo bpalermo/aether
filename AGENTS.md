@@ -35,7 +35,8 @@ make format-check  # CI-friendly check (fails on drift)
 ## Architecture
 
 **Binaries:**
-- `agent/cmd/agent` — Node DaemonSet. Manages xDS server (Envoy), CNI gRPC server, SPIRE bridge via `controller-runtime` Manager. Also hosts the `agent edge` and `agent proxy-supervisor` subcommands.
+- `agent/cmd/agent` — Node DaemonSet. Manages xDS server (Envoy), CNI gRPC server, SPIRE bridge via `controller-runtime` Manager. Also hosts the `agent edge` subcommand, and `agent proxy-supervisor` as a deprecated alias of the binary below.
+- `agent/cmd/proxy-supervisor` — Envoy hot-restart supervisor (own binary + own image since #772; PID 1 of the `aether-proxy` container). 15 MiB / 24 modules, no k8s, no xDS, no SPIRE — asserted by `:deps_test` and `scripts/check-proxy-supervisor-deps.sh`.
 - `agent/cmd/mesh-dns` — Slim standalone mesh-DNS daemon (own DaemonSet + image). Serves pods from the record snapshot the agent writes.
 - `registrar/cmd/registrar` — In-cluster Deployment. Proxies external registry (Kubernetes/etcd), maintains endpoint snapshot, streams to agents via gRPC.
 - `controller/cmd/controller` — In-cluster Deployment (leader-elected). Serves the validating + pod-mutating admission webhooks and the `MeshConfig`→ConfigMap reconciler.

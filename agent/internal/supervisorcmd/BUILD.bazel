@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "supervisorcmd",
+    srcs = ["supervisor.go"],
+    importpath = "aethermesh.dev/agent/internal/supervisorcmd",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//agent/internal/proxy/hotrestart",
+        "//common/file",
+        "//common/log",
+        "//common/readymarker",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_test(
+    name = "supervisorcmd_test",
+    srcs = [
+        "flags_test.go",
+        "supervisor_test.go",
+    ],
+    # TestFlagsCoverTheChartContract reads the argv the chart actually passes.
+    # Gazelle does not manage `data` — keep this by hand.
+    data = ["//charts/aether:templates/agent-proxy-daemonset.yaml"],
+    embed = [":supervisorcmd"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

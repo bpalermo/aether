@@ -57,24 +57,32 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.proxy.terminationGracePeriodSeconds }}
       initContainers:
         # The runtime container is the Envoy image (it carries Envoy and its
-        # shared libraries); inject the statically linked supervisor from the
-        # agent image by having it self-copy onto a shared volume.
+        # shared libraries); inject the statically linked supervisor by having it
+        # self-copy onto a shared volume.
+        #
+        # #772: the image this runs is the supervisor's own, not the agent's. As
+        # an `agent` subcommand the supervisor was the whole 65MB agent binary —
+        # controller-runtime, client-go, go-control-plane, SPIRE, Gateway API,
+        # miekg/dns — staged onto this volume and run as the proxy container's
+        # PID 1 to fork a child process. The carved-out binary is ~15MB, and the
+        # proxy DaemonSet no longer depends on the agent image at all.
         - name: install-supervisor
-          image: {{ include "aether.image" .Values.agent.image | quote }}
-          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          image: {{ include "aether.image" .Values.proxy.supervisor.image | quote }}
+          imagePullPolicy: {{ .Values.proxy.supervisor.image.pullPolicy }}
           args:
-            - "proxy-supervisor"
             - "--install-path=/opt/aether/supervisor"
             # #673: also stage the tiny stdlib-only readiness prober that ships in
-            # the agent image at /proxy-ready. The probe below used to re-exec the
-            # supervisor — i.e. the whole 67MB agent binary — every 2s per pod,
+            # this image at /proxy-ready. The probe below used to re-exec the
+            # supervisor — then the whole 67MB agent binary — every 2s per pod,
             # and Go package init (which runs before main() and so cannot be
             # short-circuited by argv) was >=31% of this container's CPU.
             #
-            # This flag hard-fails if the agent image predates #673, which is the
-            # intended way chart/image skew surfaces: the initContainer
+            # This flag hard-fails when the image carries no prober, which is the
+            # intended way image skew surfaces: the initContainer
             # CrashLoopBackOffs while maxUnavailable:0 keeps the old pods serving,
-            # instead of a pod that starts and can never become Ready.
+            # instead of a pod that starts and can never become Ready. Since #772
+            # the prober and the supervisor ship in this one image, built from one
+            # commit, so that skew is not reachable through the supported path.
             - "--install-readiness-path=/opt/aether/proxy-ready"
           volumeMounts:
             - name: supervisor-bin
@@ -86,9 +94,11 @@ spec:
           # of the binary, so no module volume or search-path env is needed.
           image: {{ include "aether.image" .Values.proxy.image | quote }}
           imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          # The staged binary IS the supervisor since #772 — there is no
+          # `proxy-supervisor` subcommand word any more (it was an `agent`
+          # subcommand, so the argv had to select it out of the agent's CLI).
           command:
             - "/opt/aether/supervisor"
-            - "proxy-supervisor"
             - "--config=/etc/envoy/envoy.yaml"
             - "--envoy-path=/usr/local/bin/envoy"
             - "--watch-config=true"
@@ -182,10 +192,12 @@ spec:
           # the supervisor deliberately HOLDS readiness while it is still the
           # serving parent.
           #
-          # #673: the exec'd binary is now the ~1.7MB stdlib-only prober instead of
-          # /opt/aether/supervisor, which IS the 67MB agent binary. Probe TIMINGS
-          # are unchanged on purpose — periodSeconds x failureThreshold is how long
-          # a marker flap is absorbed, and this change must not move that.
+          # #673: the exec'd binary is the ~1.7MB stdlib-only prober rather than
+          # /opt/aether/supervisor (which was the 67MB agent binary then, and is
+          # the ~15MB carved-out supervisor since #772 — still far too much to
+          # re-launch every 2s). Probe TIMINGS are unchanged on purpose —
+          # periodSeconds x failureThreshold is how long a marker flap is
+          # absorbed, and neither change may move that.
           readinessProbe:
             exec:
               command:
