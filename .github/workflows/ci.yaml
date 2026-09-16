@@ -23,7 +23,32 @@ env:
 
 jobs:
   # Coarse path scoping lives here (not in `on:`) so the workflow always runs and
-  # the `ci` gate always reports. control_plane = any changed file outside proxy/.
+  # the `ci` gate always reports. control_plane = any changed file outside the
+  # //proxy sibling workspace, which has its own `proxy` gate.
+  #
+  # `predicate-quantifier` is load-bearing, not decoration. Under the action's
+  # default (`some`) the rule items are simply OR-ed, and picomatch compiles a
+  # leading `!` into "matches everything the positive pattern does NOT" — so
+  # `'!proxy/**'` matched `agent/...`, `docs/...`, everything, and the filter was
+  # true for every file ever changed. The negations below were inert from the day
+  # they were written: `control_plane` has never once been `false`, and every
+  # proxy-only PR still paid for bazel-diff, the chart-bump check and the dep
+  # audit. `some-with-excludes` (v4) is the quantifier that means what the list
+  # says: a file counts when at least one positive pattern matches it and no
+  # negated pattern does. An exclusion is final — the action returns `false` the
+  # moment one matches, so a later positive cannot add a path back.
+  #
+  # Only the proxy workspace is excluded. Documentation deliberately is NOT:
+  # `//:website_docs` (BUILD.bazel) feeds `README.md`, `AGENTS.md`,
+  # `charts/README.md`, `docs/**/*.md` and `.github/workflows/e2e.yaml` into
+  # `//website:site_test`, an ordinary test, so a docs-only PR must reach
+  # bazel-diff and run the strict site build (a dead link fails review instead of
+  # production). `!(*.md)` carves the proxy's Markdown back out of the exclusion
+  # for the same reason: `website/staged/proxy-README.md` is a symlink to
+  # `proxy/README.md`, so it is an input to that same test — and proxy.yml now
+  # excludes Markdown from the Envoy compile, which leaves this as its only gate.
+  # Only a *leading* `!` negates a pattern; the `!( )` extglob inside is ordinary
+  # picomatch syntax and does not make the pattern an exclusion.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -32,10 +57,11 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          predicate-quantifier: "some-with-excludes"
           filters: |
             control_plane:
               - '**'
-              - '!proxy/**'
+              - '!proxy/**/!(*.md)'
               - '!.github/workflows/proxy.yml'
               - '!.github/workflows/proxy-release.yml'
 
@@ -523,6 +549,14 @@ jobs:
   # every PR — including proxy-only PRs where the control-plane jobs skip — and
   # fails only if a job that actually ran failed. This is the context required by
   # the main branch ruleset.
+  #
+  # The `skipped` result is deliberately not in the failure test below: a skipped
+  # required check is a *missing* check to GitHub and would block the PR forever,
+  # which is the whole reason the gate is a separate fan-in job instead of the
+  # legs themselves. `needs.*.result` yields one entry per need, so `contains`
+  # sees 'skipped' for every leg bazel-diff or the path filter scoped out and
+  # ignores it. Not theoretical: this already reports green on PRs where `e2e`
+  # (and often `integration`) skip for an empty impact set.
   ci:
     if: always()
     needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, test, race, integration, e2e]
