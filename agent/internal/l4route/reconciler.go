@@ -21,6 +21,7 @@ import (
 	"aethermesh.dev/agent/internal/gatewaystatus"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/common/crdcheck"
+	"aethermesh.dev/common/l4project"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/referencegrant"
 	"aethermesh.dev/common/serviceref"
@@ -361,17 +362,6 @@ func derefBackendNamespace(ns *gatewayv1.Namespace) string {
 	return string(*ns)
 }
 
-// backendPermitted reports whether a backendRef is allowed onto the data plane: a
-// same-namespace ref always is; a cross-namespace ref needs a matching ReferenceGrant.
-// Non-permitted cross-namespace backends are dropped from the built route.
-func backendPermitted(backendNamespace *gatewayv1.Namespace, routeNamespace, routeKind, name string, grants []gatewayv1beta1.ReferenceGrant) bool {
-	ns := derefBackendNamespace(backendNamespace)
-	if !referencegrant.CrossNamespace(ns, routeNamespace) {
-		return true
-	}
-	return referencegrant.PermitsBackend(grants, gatewayv1.GroupName, routeKind, routeNamespace, ns, name)
-}
-
 func tcpBackendRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
 	var refs []gatewayv1.BackendObjectReference
 	for _, rule := range rules {
@@ -424,18 +414,6 @@ func serviceParents(refs []gatewayv1.ParentReference, routeNamespace string) []s
 	return svcs
 }
 
-// backendServiceKey resolves a backendRef to its namespace-qualified "<ns>/<svc>"
-// registry key (020 Part 1): the backendRef's own namespace when set, else the
-// route's namespace. The resulting key feeds both the data-plane cluster name
-// (TCP/TLS/UDP ClusterName) and the node dependency set (L4Backend.Service).
-func backendServiceKey(backendNamespace *gatewayv1.Namespace, routeNamespace, name string) string {
-	ns := routeNamespace
-	if bn := derefBackendNamespace(backendNamespace); bn != "" {
-		ns = bn
-	}
-	return serviceref.New(ns, name).Key()
-}
-
 // buildTCPRoute translates a TCPRouteRule into an L4ServiceRoute (no SNI match).
 // Backends without a valid Service name (foreign group/kind) are skipped.
 func (r *Reconciler) buildTCPRoute(rule gatewayv1.TCPRouteRule, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.L4ServiceRoute {
@@ -461,14 +439,13 @@ func (r *Reconciler) buildUDPBackends(rule gatewayv1.UDPRouteRule, routeNamespac
 	return r.buildUDPL4Backends(rule.BackendRefs, routeNamespace, routeKind, grants)
 }
 
-// buildL4Backends converts a BackendRef slice into L4Backends with resolved
-// TCP cluster names. Refs with a non-core group or non-Service kind are skipped.
+// buildL4Backends converts a BackendRef slice into L4Backends with resolved TCP
+// cluster names, via the shared projector (common/l4project) the edge gateway also
+// uses. TCP clusters share the same EDS endpoints as HTTP clusters but use ALPN
+// "aether-tcp" (see TCPClusterName); the capture TCP floor chains already reference
+// "tcp:<svc>.<ns>.<domain>" clusters.
 func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
-	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(key string) string {
-		// TCP clusters share the same EDS endpoints as HTTP clusters but use
-		// ALPN "aether-tcp" (see TCPClusterName). The capture TCP floor chains
-		// already reference "tcp:<svc>.<ns>.<domain>" clusters. The key is the
-		// backend's namespace-qualified "<ns>/<svc>" (020 Part 1).
+	return l4project.Backends(refs, routeNamespace, routeKind, grants, func(key string) string {
 		return proxy.TCPClusterName(key, r.MeshDomain)
 	})
 }
@@ -477,46 +454,7 @@ func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace
 // UDP cluster names ("udp:<svc>.<domain>"). These clusters are plain EDS without
 // a transport socket — UDP traffic is not covered by mesh mTLS.
 func (r *Reconciler) buildUDPL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
-	return r.buildBackendsWithCluster(refs, routeNamespace, routeKind, grants, func(key string) string {
-		// key is the backend's namespace-qualified "<ns>/<svc>" (020 Part 1).
+	return l4project.Backends(refs, routeNamespace, routeKind, grants, func(key string) string {
 		return proxy.UDPClusterName(key, r.MeshDomain)
 	})
-}
-
-// buildBackendsWithCluster converts a BackendRef slice into L4Backends, resolving
-// the cluster name via clusterNameFn. Refs with a non-core group or non-Service
-// kind are skipped, as are ungranted cross-namespace refs (RefNotPermitted: dropped
-// from the data plane, mirroring the route's ResolvedRefs status).
-func (r *Reconciler) buildBackendsWithCluster(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant, clusterNameFn func(key string) string) []proxy.L4Backend {
-	backends := make([]proxy.L4Backend, 0, len(refs))
-	for _, b := range refs {
-		if b.Group != nil && string(*b.Group) != "" {
-			continue
-		}
-		if b.Kind != nil && string(*b.Kind) != "Service" {
-			continue
-		}
-		name := string(b.Name)
-		if name == "" {
-			continue
-		}
-		if !backendPermitted(b.Namespace, routeNamespace, routeKind, name, grants) {
-			continue
-		}
-		weight := uint32(1)
-		if b.Weight != nil {
-			weight = uint32(*b.Weight)
-		}
-		// 020 Part 1: the backend's data-plane cluster and dependency-set key are
-		// namespace-qualified "<ns>/<svc>" (backendRef namespace if set, else the
-		// route's). A split to a different backend service therefore resolves the
-		// right registry cluster.
-		key := backendServiceKey(b.Namespace, routeNamespace, name)
-		backends = append(backends, proxy.L4Backend{
-			Service: key,
-			Cluster: clusterNameFn(key),
-			Weight:  weight,
-		})
-	}
-	return backends
 }

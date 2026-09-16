@@ -14,12 +14,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
@@ -125,7 +125,7 @@ func newDurationHistogram(meter metric.Meter) (metric.Float64Histogram, error) {
 // Prober samples the mesh data plane and records results to OTel.
 type Prober struct {
 	cfg       Config
-	log       logr.Logger
+	log       *slog.Logger
 	client    *http.Client
 	dnsClient *http.Client
 	provider  *sdkmetric.MeterProvider // nil when telemetry is disabled
@@ -156,7 +156,7 @@ func newClient(keepAlive bool) *http.Client {
 }
 
 // New builds a Prober.
-func New(ctx context.Context, cfg Config, log logr.Logger, version string) (*Prober, error) {
+func New(ctx context.Context, cfg Config, log *slog.Logger, version string) (*Prober, error) {
 	meter, provider, err := newMeter(ctx, cfg.OTLPEndpoint, version)
 	if err != nil {
 		return nil, err
@@ -280,7 +280,7 @@ func (p *Prober) Run(ctx context.Context) error {
 		sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := p.provider.Shutdown(sctx); err != nil {
-			p.log.Error(err, "telemetry shutdown")
+			p.log.Error("telemetry shutdown", "error", err)
 		}
 	}
 	return nil

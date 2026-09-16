@@ -15,9 +15,35 @@ import (
 
 var unmarshalOpts = protojson.UnmarshalOptions{DiscardUnknown: true}
 
+// clone returns a deep copy of a cached message, so no value is ever aliased
+// across the storage boundary (see the CachedLocalStorage doc). An invalid
+// (typed-nil) message has nothing to copy and is returned as-is.
+func clone[T proto.Message](m T) T {
+	if !m.ProtoReflect().IsValid() {
+		return m
+	}
+	return proto.Clone(m).(T)
+}
+
 // CachedLocalStorage is a storage implementation that persists resources to the local filesystem
 // and maintains an in-memory cache for fast access. Each resource is stored as a JSON file.
-// The implementation is safe for concurrent access using RWMutex.
+//
+// It is safe for concurrent access, and the guarantee covers the VALUES as well as
+// the map: the RWMutex alone only ever protected the map, so handing out the
+// cache's own pointers made every consumer of GetAll a potential writer of
+// somebody else's read. That was a real race — the CNI server's termination watch
+// set CNIPod.Terminating in place (under its own lifecycleMu) while the liveness
+// ticker read the same pointer holding no lock at all, and AddResource's
+// protojson.Marshal read it a third time. So every value crossing this boundary
+// is deep-copied: AddResource caches a clone of what it is given, GetResource and
+// GetAll return clones of what they hold. A caller owns what it gets back and may
+// mutate it freely; to make the change stick it writes the value back with
+// AddResource (copy-on-write, which is what the two CNI call sites do).
+//
+// The copies are not free but they are cheap where it matters: the cached
+// resources are node-local pod records (tens per node), the readers are a 5s
+// liveness tick and a 60s sweep, and AddResource already marshals to JSON and
+// fsyncs a file — a clone is noise next to that.
 type CachedLocalStorage[T proto.Message] struct {
 	basePath    string
 	cache       map[types.ContainerID]T
@@ -92,8 +118,10 @@ func (f *CachedLocalStorage[T]) AddResource(_ context.Context, key types.Contain
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Update in-memory cache
-	f.cache[key] = resource
+	// Update in-memory cache with a private copy: the caller keeps its own value
+	// (the CNI ADD request's proto, which the handler goes on using) and must not
+	// be able to mutate the cache through it.
+	f.cache[key] = clone(resource)
 
 	return nil
 }
@@ -120,13 +148,14 @@ func (f *CachedLocalStorage[T]) RemoveResource(_ context.Context, key types.Cont
 
 // GetResource retrieves a resource by key, checking the in-memory cache first.
 // If not in cache, it loads the resource from disk and caches it for future access.
+// The returned message is a deep copy the caller owns (see CachedLocalStorage).
 func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.ContainerID) (T, error) {
 	f.mu.RLock()
 
 	// Check cache first
 	if resource, ok := f.cache[key]; ok {
 		f.mu.RUnlock()
-		return resource, nil
+		return clone(resource), nil
 	}
 	f.mu.RUnlock()
 
@@ -136,7 +165,7 @@ func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.Contain
 
 	// Double-check cache after acquiring write lock
 	if resource, ok := f.cache[key]; ok {
-		return resource, nil
+		return clone(resource), nil
 	}
 
 	var resource T
@@ -157,14 +186,17 @@ func (f *CachedLocalStorage[T]) GetResource(_ context.Context, key types.Contain
 		return resource, fmt.Errorf("failed to unmarshal resource: %w", err)
 	}
 
-	// Store in the cache for future access
+	// Store in the cache for future access. The freshly unmarshaled message is
+	// not aliased anywhere else, so it can be cached directly and a copy handed
+	// back to the caller.
 	f.cache[key] = resource
 
-	return resource, nil
+	return clone(resource), nil
 }
 
 // GetAll returns all cached resources as a slice.
 // Resources must be initialized before calling this method.
+// Each element is a deep copy the caller owns (see CachedLocalStorage).
 func (f *CachedLocalStorage[T]) GetAll(_ context.Context) ([]T, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -172,7 +204,7 @@ func (f *CachedLocalStorage[T]) GetAll(_ context.Context) ([]T, error) {
 	// Create a slice with all cached values
 	result := make([]T, 0, len(f.cache))
 	for _, v := range f.cache {
-		result = append(result, v)
+		result = append(result, clone(v))
 	}
 
 	return result, nil
@@ -180,6 +212,7 @@ func (f *CachedLocalStorage[T]) GetAll(_ context.Context) ([]T, error) {
 
 // loadAll loads all resources from disk into the in-memory cache.
 // It reads all JSON files from the base directory and unmarshals them.
+// The returned slice holds deep copies (see CachedLocalStorage).
 func (f *CachedLocalStorage[T]) loadAll(_ context.Context) ([]T, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -209,7 +242,7 @@ func (f *CachedLocalStorage[T]) loadAll(_ context.Context) ([]T, error) {
 		}
 
 		f.cache[types.ContainerID(key)] = resource
-		resources = append(resources, resource)
+		resources = append(resources, clone(resource))
 	}
 
 	return resources, nil

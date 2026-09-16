@@ -219,7 +219,13 @@ func (s *CNIServer) registerHealthTransition(
 		s.log.DebugContext(ctx, "liveness: pod gone or terminating; skipping health update", "pod", pod.GetName())
 		return
 	}
-	err := s.registry.RegisterEndpoint(spanCtx, serviceName, protocol, endpoint)
+	// Bounded (S20, #772): this call is made with lifecycleMu held, so an
+	// unbounded one lets a hung registrar serialise every CNI ADD/DEL behind a
+	// liveness tick. The update is best-effort — the next tick retries the same
+	// transition — so the cap costs a retry at worst.
+	callCtx, cancel := context.WithTimeout(spanCtx, lifecycleRegistryTimeout)
+	err := s.registry.RegisterEndpoint(callCtx, serviceName, protocol, endpoint)
+	cancel()
 	s.lifecycleMu.Unlock()
 	telemetry.EndSpan(span, err)
 	if err != nil {

@@ -56,8 +56,10 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "ghostsweep_lock_test.go",
         "ghostsweep_test.go",
         "identity_test.go",
+        "lifecycle_race_test.go",
         "liveness_test.go",
         "metrics_test.go",
         "pod_test.go",

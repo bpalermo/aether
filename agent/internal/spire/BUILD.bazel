@@ -30,6 +30,7 @@ go_test(
     name = "spire_test",
     srcs = [
         "bridge_late_identity_test.go",
+        "bridge_push_ordering_test.go",
         "bridge_reconnect_test.go",
         "bridge_test.go",
         "converter_test.go",
@@ -44,6 +45,8 @@ go_test(
         "@com_github_spiffe_spire_api_sdk//proto/spire/api/types",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
         "@org_golang_google_grpc//:grpc",
     ],
 )

@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "l4project",
+    srcs = ["l4project.go"],
+    importpath = "aethermesh.dev/common/l4project",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//common/referencegrant",
+        "//common/serviceref",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+        "@io_k8s_sigs_gateway_api//apis/v1beta1",
+    ],
+)
+
+go_test(
+    name = "l4project_test",
+    srcs = ["l4project_test.go"],
+    embed = [":l4project"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
+        "@io_k8s_sigs_gateway_api//apis/v1beta1",
+    ],
+)
