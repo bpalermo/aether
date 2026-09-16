@@ -50,7 +50,11 @@ spec:
       # parent mid-protocol on 3/5 nodes when a proxy roll coincided with
       # churn). Give the supervisor generous room to wait; the kubelet's
       # SIGKILL here is the hard stop.
-      terminationGracePeriodSeconds: 180
+      #
+      # The same value is passed to the supervisor as --termination-grace so it
+      # knows its own deadline and can fall back to draining Envoy itself when
+      # no successor can ever appear (#771).
+      terminationGracePeriodSeconds: {{ .Values.proxy.terminationGracePeriodSeconds }}
       initContainers:
         # The runtime container is the Envoy image (it carries Envoy and its
         # shared libraries); inject the statically linked supervisor from the
@@ -96,6 +100,9 @@ spec:
             - "--admin-address=127.0.0.1:9901"
             - "--handoff-deadline={{ .Values.proxy.hotRestart.handoffDeadline }}"
             - "--admin-unresponsive-deadline={{ .Values.proxy.hotRestart.adminUnresponsiveDeadline }}"
+            # Must equal terminationGracePeriodSeconds above: it is how the
+            # supervisor knows how long it has before the kubelet's SIGKILL.
+            - "--termination-grace={{ .Values.proxy.terminationGracePeriodSeconds }}s"
             {{- with .Values.otel.endpoint }}
             # Push-first: the supervisor exports its hot-restart lifecycle
             # metrics over OTLP; no scrape port to collide on in the host netns.

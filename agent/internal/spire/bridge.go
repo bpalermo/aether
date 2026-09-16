@@ -98,8 +98,25 @@ type Bridge struct {
 	nodeSource   X509SVIDSource
 	nodeSpiffeID string
 
+	// mu guards secrets and gen. Every mutation of secrets bumps gen, so a
+	// generation identifies exactly one state of the secret set.
 	mu      sync.RWMutex
 	secrets map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
+	gen     uint64
+
+	// pushMu serialises pushSecrets. It is held across BOTH the snapshot of
+	// secrets and the store publish, which is what makes publication ordered:
+	// four independent goroutines push (the bundle stream, every per-pod SVID
+	// stream, the node-SVID refresher and UnsubscribePod), and before this lock
+	// existed they built a slice, released mu, and raced into SetSecrets — a
+	// whole-map replace, so the loser overwrote the winner and a just-arrived
+	// secret vanished from SDS until the next push (issue #772, S10).
+	//
+	// publishedGen is the generation the store currently holds; it only ever
+	// moves forward, so a push that observed an older generation is rejected
+	// rather than published.
+	pushMu       sync.Mutex
+	publishedGen uint64
 
 	// subscriptions tracks active SVID subscriptions keyed by the pod's network
 	// namespace (unique per pod), not its SPIFFE ID: pods sharing a service
@@ -474,7 +491,10 @@ func (b *Bridge) UnsubscribePod(ctx context.Context, netns string) error {
 
 	if !stillReferenced {
 		b.mu.Lock()
-		delete(b.secrets, sub.spiffeID)
+		if _, served := b.secrets[sub.spiffeID]; served {
+			delete(b.secrets, sub.spiffeID)
+			b.bumpGenLocked()
+		}
 		b.mu.Unlock()
 	}
 
@@ -483,45 +503,89 @@ func (b *Bridge) UnsubscribePod(ctx context.Context, netns string) error {
 
 // handleBundleUpdate processes a bundle update from SPIRE and converts each
 // trust domain's CA certificates into an Envoy validation context Secret.
+//
+// The whole new set is built off to the side and swapped in only once every
+// trust domain converted. The previous shape deleted every validation context
+// first and re-added them one at a time, so one malformed bundle mid-loop left
+// the map with no trust bundles at all — and any other goroutine's next push
+// then published a validation-context-less secret set, costing Envoy every
+// peer it could verify (issue #772, S11).
 func (b *Bridge) handleBundleUpdate(ctx context.Context, resp *delegatedidentityv1.SubscribeToX509BundlesResponse) error {
+	caCerts := resp.GetCaCertificates()
+	next := make(map[string]*tlsv3.Secret, len(caCerts))
+	for trustDomain, derCerts := range caCerts {
+		secret, err := BundleToValidationContextSecret(trustDomain, derCerts)
+		if err != nil {
+			// Nothing has been mutated yet: the cached bundles keep serving.
+			return fmt.Errorf("converting bundle for %s: %w", trustDomain, err)
+		}
+		// Key by the canonical secret name, not the response key: the two
+		// differ when SPIRE reports a bare trust domain, and the store re-keys
+		// by name anyway.
+		next[secret.GetName()] = secret
+	}
+
 	b.mu.Lock()
-	// Remove old bundle secrets (trust domain keys)
+	if len(next) == 0 && b.hasValidationContextLocked() {
+		b.mu.Unlock()
+		// An empty bundle set is never a legitimate instruction to stop
+		// verifying peers. Keep what we have and let the next update correct it.
+		b.metrics.emptyBundleSkipped(ctx)
+		b.log.WarnContext(ctx, "bundle update carried no trust bundles; keeping the previously served validation contexts")
+		return nil
+	}
 	for name, secret := range b.secrets {
 		if _, isValidation := secret.Type.(*tlsv3.Secret_ValidationContext); isValidation {
 			delete(b.secrets, name)
 		}
 	}
-
-	for trustDomain, derCerts := range resp.GetCaCertificates() {
-		secret, err := BundleToValidationContextSecret(trustDomain, derCerts)
-		if err != nil {
-			b.mu.Unlock()
-			return fmt.Errorf("converting bundle for %s: %w", trustDomain, err)
-		}
-		b.secrets[trustDomain] = secret
+	for name, secret := range next {
+		b.secrets[name] = secret
 	}
+	b.bumpGenLocked()
 	b.mu.Unlock()
 
-	b.log.DebugContext(ctx, "processed bundle update", "trustDomains", len(resp.GetCaCertificates()))
+	b.log.DebugContext(ctx, "processed bundle update", "trustDomains", len(caCerts))
 
 	return b.pushSecrets(ctx)
+}
+
+// hasValidationContextLocked reports whether any trust bundle is currently
+// served. Callers must hold b.mu.
+func (b *Bridge) hasValidationContextLocked() bool {
+	for _, secret := range b.secrets {
+		if _, isValidation := secret.Type.(*tlsv3.Secret_ValidationContext); isValidation {
+			return true
+		}
+	}
+	return false
 }
 
 // handleSVIDUpdate processes an SVID update from SPIRE and converts each SVID
 // into an Envoy TLS certificate Secret.
 func (b *Bridge) handleSVIDUpdate(ctx context.Context, resp *delegatedidentityv1.SubscribeToX509SVIDsResponse) error {
-	b.mu.Lock()
-	for _, svidWithKey := range resp.GetX509Svids() {
+	// Convert before touching the map so a malformed SVID mid-response leaves
+	// the served set untouched rather than half-applied and unpushed.
+	svids := resp.GetX509Svids()
+	next := make([]*tlsv3.Secret, 0, len(svids))
+	for _, svidWithKey := range svids {
 		secret, err := SVIDToTLSCertificateSecret(svidWithKey)
 		if err != nil {
-			b.mu.Unlock()
 			return fmt.Errorf("converting SVID: %w", err)
 		}
-		b.secrets[secret.Name] = secret
+		next = append(next, secret)
 	}
-	b.mu.Unlock()
 
-	b.log.DebugContext(ctx, "processed SVID update", "svids", len(resp.GetX509Svids()))
+	if len(next) > 0 {
+		b.mu.Lock()
+		for _, secret := range next {
+			b.secrets[secret.GetName()] = secret
+		}
+		b.bumpGenLocked()
+		b.mu.Unlock()
+	}
+
+	b.log.DebugContext(ctx, "processed SVID update", "svids", len(svids))
 
 	return b.pushSecrets(ctx)
 }
@@ -581,6 +645,7 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 		return nil // unchanged; avoid a no-op snapshot bump
 	}
 	b.secrets[secret.GetName()] = secret
+	b.bumpGenLocked()
 	firstServe := b.nodeSpiffeID == ""
 	b.nodeSpiffeID = secret.GetName()
 	b.mu.Unlock()
@@ -612,13 +677,54 @@ func secretsEqual(a, b *tlsv3.Secret) bool {
 }
 
 // pushSecrets collects all current secrets and pushes them to the snapshot cache.
+//
+// Publication is monotonic. pushMu is held across the snapshot AND the store
+// call, so concurrent pushers publish in the order they acquire it and each one
+// carries the newest secret set at the moment it built — never an older one.
+// The generation stamp turns that into a checked invariant and lets overlapping
+// wakes collapse: a pusher that finds the store already holding its generation
+// returns without a redundant SetSecrets, which would otherwise regenerate the
+// whole node snapshot for a set the proxy already has.
 func (b *Bridge) pushSecrets(ctx context.Context) error {
+	b.pushMu.Lock()
+	defer b.pushMu.Unlock()
+
+	// Read the generation and the map together: they must come from one
+	// critical section or the stamp would not describe the slice.
 	b.mu.RLock()
+	gen := b.gen
 	secrets := make([]*tlsv3.Secret, 0, len(b.secrets))
 	for _, s := range b.secrets {
 		secrets = append(secrets, s)
 	}
 	b.mu.RUnlock()
 
-	return b.store.SetSecrets(ctx, secrets)
+	switch {
+	case gen == b.publishedGen:
+		// An overlapping push already carried this exact state.
+		b.log.DebugContext(ctx, "skipping SDS push; snapshot already holds this generation", "generation", gen)
+		return nil
+	case gen < b.publishedGen:
+		// Unreachable while pushMu covers the build: a build under the lock
+		// cannot observe a state older than what the lock's previous holder
+		// published. Kept as a fail-safe so a future caller that builds outside
+		// the lock is caught by a counter instead of silently regressing SDS.
+		b.metrics.stalePushRejected(ctx)
+		b.log.WarnContext(ctx, "rejecting stale SDS push; snapshot holds a newer generation",
+			"generation", gen, "published", b.publishedGen)
+		return nil
+	}
+
+	if err := b.store.SetSecrets(ctx, secrets); err != nil {
+		// Leave publishedGen alone: the next push retries this generation.
+		return err
+	}
+	b.publishedGen = gen
+	return nil
+}
+
+// bumpGenLocked records that the secret set changed. Callers must hold b.mu for
+// writing.
+func (b *Bridge) bumpGenLocked() {
+	b.gen++
 }

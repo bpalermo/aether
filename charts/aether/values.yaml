@@ -330,10 +330,10 @@ proxy:
   # commit SHA. Mirror by overriding `repository`.
   image:
     repository: ghcr.io/bpalermo/aether/aether-proxy
-    tag: 733802bafb723dae61df2b986e274c1b2ffcede0
+    tag: e985de2f4f30e13a7be6bff938259a8b319a7eb3
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Multi-arch index for 733802bafb723dae61df2b986e274c1b2ffcede0.
-    digest: "sha256:9613fa9f05711183dbd31a2d91b64004552173f090eebd863ac60fa6e4cd2b02"
+    # helper prefers digest over tag. Multi-arch index for e985de2f4f30e13a7be6bff938259a8b319a7eb3.
+    digest: "sha256:c85d98abd28f2a40b36dab82918df0c4130a1ee546433a0a8540a0bb88bf6a59"
     pullPolicy: Always
   logLevel: info
   # Emit Envoy's own application logs as one JSON object per line (bootstrap
@@ -354,6 +354,19 @@ proxy:
     handoffDeadline: 0
     adminUnresponsiveDeadline: 0
     shmHostPath: /run/aether/shm
+  # Pod terminationGracePeriodSeconds, and the same value passed to the supervisor
+  # as --termination-grace. The deleted pod must keep its Envoy alive as the
+  # successor's hot-restart parent until the successor's (xDS-gated, unbounded)
+  # init and parent-shutdown timer have run, so this is deliberately generous.
+  #
+  # The supervisor needs to know it because it is the only non-arbitrary bound on
+  # that wait: where no successor can ever appear — node shutdown, scale-down,
+  # `kubectl delete daemonset`, a replacement stuck Pending — it waits until
+  # terminationGrace minus (hotRestart.drainTime + 5s + 10s) and then drains Envoy
+  # itself, instead of being SIGKILLed with connections open (#771). Keep it well
+  # above hotRestart.drainTime + 15s or that fallback cannot fit and the supervisor
+  # reverts to waiting for the SIGKILL.
+  terminationGracePeriodSeconds: 180
   resources:
     requests:
       cpu: 500m

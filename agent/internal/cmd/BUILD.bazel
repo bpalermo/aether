@@ -37,6 +37,7 @@ go_library(
         "//common/apis/config/v1:config",
         "//common/config",
         "//common/constants/mesh",
+        "//common/file",
         "//common/log",
         "//common/manager",
         "//common/must",
