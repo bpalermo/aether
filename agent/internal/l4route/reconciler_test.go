@@ -6,9 +6,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -98,62 +96,23 @@ func TestBuildUDPBackends(t *testing.T) {
 	assert.Equal(t, uint32(5), backends[0].Weight)
 }
 
-// TestBuildL4Backends_ForeignGroupSkipped verifies that refs with a non-core
-// group or non-Service kind are skipped.
-func TestBuildL4Backends_ForeignGroupSkipped(t *testing.T) {
+// TestBuildL4Backends_Wiring proves this reconciler wires the shared L4 projector
+// (common/l4project) with TCP cluster naming. The projection semantics themselves -
+// group/kind filtering, empty names, weight defaulting and weight:0 drain,
+// cross-namespace ReferenceGrants, namespace-qualified keys - are covered once in
+// //common/l4project:l4project_test, which both this reconciler and the edge
+// gateway reconciler share.
+func TestBuildL4Backends_Wiring(t *testing.T) {
 	r := &Reconciler{MeshDomain: "aether.internal"}
 	refs := []gatewayv1.BackendRef{
 		{BackendObjectReference: gatewayv1.BackendObjectReference{
 			Group: ptr(gatewayv1.Group("apps")), Name: "should-skip",
-		}},
-		{BackendObjectReference: gatewayv1.BackendObjectReference{
-			Kind: ptr(gatewayv1.Kind("ServiceImport")), Name: "also-skip",
 		}},
 		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "keep-me"}},
 	}
 	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
 	require.Len(t, backends, 1)
 	assert.Equal(t, "ns/keep-me", backends[0].Service)
-}
-
-// TestBuildL4Backends_DefaultWeight verifies that nil weight becomes 1.
-func TestBuildL4Backends_DefaultWeight(t *testing.T) {
-	r := &Reconciler{MeshDomain: "aether.internal"}
-	refs := []gatewayv1.BackendRef{
-		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-d"}},
-	}
-	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
-	require.Len(t, backends, 1)
-	assert.Equal(t, uint32(1), backends[0].Weight, "nil weight should default to 1")
-}
-
-// TestBuildL4Backends_DropsUngrantedCrossNamespace verifies that an ungranted
-// cross-namespace backendRef is dropped (RefNotPermitted), while a matching grant
-// keeps it.
-func TestBuildL4Backends_DropsUngrantedCrossNamespace(t *testing.T) {
-	r := &Reconciler{MeshDomain: "aether.internal"}
-	otherNs := gatewayv1.Namespace("other")
-	refs := []gatewayv1.BackendRef{
-		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "local"}},
-		{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "remote", Namespace: &otherNs}},
-	}
-	// No grants: cross-ns "remote" dropped.
-	backends := r.buildL4Backends(refs, "ns", "TCPRoute", nil)
-	require.Len(t, backends, 1)
-	assert.Equal(t, "ns/local", backends[0].Service)
-
-	// Matching grant: both kept. The cross-namespace backend resolves to its own
-	// "other/remote" key (backendRef namespace), not the route's "ns" (020 Part 1).
-	grants := []gatewayv1beta1.ReferenceGrant{{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "other"},
-		Spec: gatewayv1beta1.ReferenceGrantSpec{
-			From: []gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "TCPRoute", Namespace: "ns"}},
-			To:   []gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Service"}},
-		},
-	}}
-	backends = r.buildL4Backends(refs, "ns", "TCPRoute", grants)
-	require.Len(t, backends, 2)
-	assert.Equal(t, "ns/local", backends[0].Service)
-	assert.Equal(t, "other/remote", backends[1].Service)
-	assert.Equal(t, proxy.TCPClusterName("other/remote", "aether.internal"), backends[1].Cluster)
+	assert.Equal(t, proxy.TCPClusterName("ns/keep-me", "aether.internal"), backends[0].Cluster)
+	assert.Equal(t, "tcp:keep-me.ns.aether.internal", backends[0].Cluster)
 }
