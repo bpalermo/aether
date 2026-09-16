@@ -143,3 +143,5 @@ use_repo(
     "distroless_cc_linux_amd64",
     "distroless_cc_linux_arm64_v8",
 )
+
+# ci-filter proof (throwaway, see #789): a non-Markdown proxy/ change must NOT be control-plane.
