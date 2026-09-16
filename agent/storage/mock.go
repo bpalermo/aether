@@ -21,6 +21,11 @@ import (
 // double without that guarantee turns any test of those paths into a data race
 // on the backing map rather than a test of the code under test. The configurable
 // function fields are NOT guarded: set them before the storage is shared.
+//
+// It also honours the package's ownership contract: the map path deep-copies
+// every value in and out, so a test double can never hand two goroutines the
+// same proto pointer when the real storage would not. A GetAllFunc/
+// GetResourceFunc override is the test's own business and is returned verbatim.
 type MockStorage[T proto.Message] struct {
 	// GetAllFunc is called by GetAll. If nil, GetAll iterates the resources map.
 	GetAllFunc func(ctx context.Context) ([]T, error)
@@ -72,7 +77,7 @@ func (m *MockStorage[T]) AddResource(ctx context.Context, key types.ContainerID,
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.resources[key] = resource
+	m.resources[key] = clone(resource)
 	return nil
 }
 
@@ -97,7 +102,7 @@ func (m *MockStorage[T]) GetResource(ctx context.Context, key types.ContainerID)
 		var zero T
 		return zero, errors.New("not found")
 	}
-	return r, nil
+	return clone(r), nil
 }
 
 func (m *MockStorage[T]) GetAll(ctx context.Context) ([]T, error) {
@@ -108,7 +113,7 @@ func (m *MockStorage[T]) GetAll(ctx context.Context) ([]T, error) {
 	defer m.mu.RUnlock()
 	result := make([]T, 0, len(m.resources))
 	for _, v := range m.resources {
-		result = append(result, v)
+		result = append(result, clone(v))
 	}
 	return result, nil
 }
