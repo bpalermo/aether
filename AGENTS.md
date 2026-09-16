@@ -8,8 +8,14 @@ This file provides concise, high-signal guidance for OpenCode agents working in 
 ```bash
 make test          # All tests (requires Docker for integration)
 make test-unit     # Unit tests only (no Docker)
+make test-race     # Whole tree under the Go race detector
 make build-agent   # Build agent binary
 ```
+
+`--config=race` (`.bazelrc`) is the supported spelling; prefer it scoped to what
+you touched (`bazel test --config=race //agent/internal/meshdns:all`) — the whole
+tree still has known test-only races, so a bare `//...` run reports failures you
+did not cause.
 
 **Format & Lint:**
 ```bash
@@ -35,6 +41,16 @@ make format-check  # CI-friendly check (fails on drift)
 - `controller/cmd/controller` — In-cluster Deployment (leader-elected). Serves the validating + pod-mutating admission webhooks and the `MeshConfig`→ConfigMap reconciler.
 - `cni/cmd/cni` — CNI plugin binary (Add/Del/Check/GC/Status).
 - `cni/cmd/cni-install` — Init container that installs the CNI plugin binary and config onto the host.
+- `agent/cmd/proxy-ready` — Exec readiness probe for the `aether-proxy` pod (#673). One flag (`--ready-marker`), stdlib-only; `//agent/cmd/proxy-ready:deps_test` fails the build if it grows a dependency.
+- `agent/cmd/mesh-dns-ready` — Same for the `aether-mesh-dns` pod (#683); bundled in the mesh-dns image, guarded by `//agent/cmd/mesh-dns-ready:deps_test`.
+- `prober/cmd/prober` — Synthetic mesh-availability prober (proposal 013). Own chart (`charts/prober`) + own image; mesh-managed per-node DaemonSet that probes the data plane from the client side and emits `aether_probe_requests_total`.
+
+**Notable packages** (beyond the ones named above):
+- `common/spire` — the shared identity wait/readiness model (#740): `WaitingSource` (never fatal on a missing SPIRE), `ReadyChecker`, `NotReadyDwell` (2m, node agent only) / `ServiceNotReadyDwell` (0).
+- `agent/internal/identity` — late-bound trust domain, folded in when the first SVID arrives.
+- `agent/internal/node` + `controller/internal/nodetaint` — proposal 033 taint lifecycle: the agent removes `aether.io/agent-not-ready`, the controller's leader-elected guard re-arms it.
+- `agent/internal/cniconflist` — re-asserts aether's chained entry in the node's CNI conflist (#645).
+- `registrar/internal/replicator` — leader-elected cross-region etcd mirroring under an origin-heartbeat lease (proposal 006).
 
 **Key patterns:**
 - gRPC servers use Unix domain sockets for node-local communication.

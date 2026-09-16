@@ -81,6 +81,24 @@ target with:
 bazel test //... --test_arg=-test.short
 ```
 
+### The race gate
+
+`.bazelrc` defines `test:race --@rules_go//go/config:race`, so `--config=race` is
+the supported spelling and `make test-race` is the whole-tree run of it:
+
+```bash
+bazel test --config=race //agent/internal/meshdns:all //agent/storage:all
+bazel test --config=race --runs_per_test=3 --nocache_test_results //common/xds:all
+```
+
+Prefer the scoped spelling while developing: a bare `//...` race run currently
+reports known test-only races that are being fixed separately (#772 phase A2), so
+its failures are not necessarily yours. `--runs_per_test=3
+--nocache_test_results` is what actually shakes out a scheduling-dependent race.
+And a clean run is not evidence of absence: the detector only reports
+interleavings a test actually produced, so a race between two goroutines no test
+runs concurrently stays invisible no matter how often you run it.
+
 ---
 
 ## 4. Format & lint
@@ -341,7 +359,9 @@ bazel run //charts/aether:aether.install
 > the chart's `version:` on any change to its templates/values (CI enforces this).
 
 There are also two standalone charts, installed independently: **`prober`**
-(`charts/prober`) — the external mesh-availability prober (proposal 013) — and
+(`charts/prober`) — the external mesh-availability prober (proposal 013; its
+flags, metrics and deployment shape are in
+[`configuration.md`](./configuration.md) § *`prober`*) — and
 **`udsecho`** (`charts/udsecho`) — the UDS validation workloads (proposal 034)
 that exercise both socket-delivery paths (annotation and `EndpointPolicy`) under
 continuous mesh traffic.

@@ -55,6 +55,7 @@ access-log/tracing policy via the MeshConfig CR.
 | `spire.adminSocket.hostPath` | `/run/spire/agent/sockets/csi.spiffe.io/admin` | SPIRE agent admin (Delegated Identity) socket the agent uses to mint proxy SVIDs. |
 | `spire.adminSocket.mountPath` | `/run/spire/admin-sockets` | Where the admin socket is mounted. |
 | `spire.adminSocket.socketName` | `admin.sock` | Admin socket filename. |
+| `spire.waitWarnAfter` | `2m` | How long a component may wait for its first SVID before the waiting log line escalates from INFO to WARN (`--spire-wait-warn-after` on agent, registrar, controller and edge). On the **agent** it is also the dwell before the `spire-svid` readiness check reports NotReady — which arms the node taint, so it must not fire on a brief SPIRE hiccup (#740). The Deployments take no dwell: they go NotReady the instant they are known to lack an identity, which just removes one replica from one endpoint set. |
 
 ### `meshConfig` — proxy MeshConfig seeding
 
@@ -75,6 +76,9 @@ access-log/tracing policy via the MeshConfig CR.
 | `agent.meshDns` | `true` | Per-pod mesh DNS (018). Gates BOTH halves: the agent's in-process resolver (which writes the record snapshot) and the separate `aether-mesh-dns` DaemonSet that serves pods from it. |
 | `agent.meshDnsUpstream` | `[]` | Upstream resolver(s) for non-mesh queries, passed to the **mesh-dns daemon** (`--mesh-dns-upstream`), not the agent. Empty = the daemon's own resolv.conf (kube-dns). |
 | `agent.meshDnsDaemon.image.*` / `.resources` | repo+digest placeholders | The slim `mesh-dns` image, pinned separately from the agent's (#583) — the DaemonSet ships only the `/mesh-dns` binary. Rendered when `agent.meshDns` is true. |
+| `agent.meshDnsDaemon.forwardPoolSize` | `null` | Pooled, already-connected UDP sockets per upstream on the forward path (`--forward-pool-size`; #674 — dialling per query was 20.97% of this daemon's CPU). Unset emits no flag and takes the built-in default of `8`; `0` disables pooling and restores dial-per-query. An escape hatch, not a tuning knob: reuse trades per-query source-port randomisation for the socket's lifetime, which is safe only because the socket is *connected* (the kernel drops any datagram not from the upstream's exact address). |
+| `agent.meshDnsDaemon.lameDuckMax` | `10s` | Ceiling on the post-SIGTERM window in which the resolver stops reporting ready but keeps answering (`--lame-duck-max`; #729). It closes as soon as it observes a *different* instance answering on the same address, so the ceiling only bites when no successor appears (scale-down, node drain, failed surge). The DaemonSet's `terminationGracePeriodSeconds` is derived from this (+5s). `"0s"` restores the pre-#729 close-on-SIGTERM behaviour, which dropped one queued datagram on every roll. |
+| `agent.meshDnsDaemon.debug` | `false` | TRACE logging for this daemon only (#684). The top-level `debug` deliberately no longer reaches mesh-dns — it is the one component on every managed pod's `:53` path, and everything it logs is also fanned out to the OTLP log exporter. |
 | `agent.image.*` | repo+digest placeholders, `pullPolicy: Always` | Digest-pinned image; mirror by overriding `repository` alone. |
 | `agent.resources.{requests,limits}` | cpu `200m`, mem `64Mi` | |
 
@@ -176,6 +180,33 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.spire.clusterSpiffeID.{create,className}` | `true` / `""` | Create the edge's `ClusterSPIFFEID` (when `spire.enabled`); `className` required when `create=true`. |
 | `edge.resources.{requests,limits}` | cpu `200m`, mem `128Mi`/`256Mi` | |
 
+#### `edge.config` — the fleet-default `EdgeConfig` (proposal 029)
+
+This block renders one `EdgeConfig` CR (`edge-defaultconfig.yaml`) that the
+chart's `GatewayClass` points at through its `parametersRef`, so **every** Gateway
+of that class inherits it. Override per-Gateway with your own `EdgeConfig` via
+`Gateway.spec.infrastructure.parametersRef` (override-wins merge). Every field is
+optional in the CRD and has a compiled best-practice default — the values below
+just surface those defaults for discoverability and tuning.
+
+`edge.xffNumTrustedHops` (above) also feeds this CR's `xffNumTrustedHops`; it
+lives outside the block because it is a topology fact shared with the geoip
+filter.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `edge.config.name` | `""` | Name of the generated `EdgeConfig`; empty means `aether-edge-defaults`. |
+| `edge.config.useRemoteAddress` | `true` | The edge treats the immediate downstream connection address as the client and manages XFF from it. Correct for an internet-facing edge; XFF is forgeable otherwise. |
+| `edge.config.headersWithUnderscoresAction` | `HEADERS_WITH_UNDERSCORES_ACTION_REJECT_REQUEST` | Header-smuggling defence. Canonical enum names (buf `ENUM_VALUE_PREFIX`): `…_ALLOW`, `…_REJECT_REQUEST`, `…_DROP_HEADER`. |
+| `edge.config.streamIdleTimeout` | `300s` | Bound on an idle stream (slowloris). |
+| `edge.config.requestTimeout` | `300s` | Bound on the whole request; `0s` disables. |
+| `edge.config.idleTimeout` | `3600s` | Downstream connection idle timeout. |
+| `edge.config.perConnectionBufferLimitBytes` | `32768` (32 KiB) | Listener + edge-cluster buffer cap. |
+| `edge.config.http2.maxConcurrentStreams` | `100` | Downstream HTTP/2 concurrent-stream cap (malicious-client protection). |
+| `edge.config.http2.initialStreamWindowSize` | `65536` (64 KiB) | Downstream HTTP/2 per-stream flow-control window. |
+| `edge.config.http2.initialConnectionWindowSize` | `1048576` (1 MiB) | Downstream HTTP/2 per-connection flow-control window. |
+| `edge.config.http3.enabled` | `false` | Add the QUIC/HTTP3 UDP listener on the HTTPS port plus `alt-svc` advertisement (029 M3). |
+
 ---
 
 ## 2. CRDs (`charts/crds`)
@@ -218,7 +249,15 @@ Identity/registrar/SPIRE: `--mesh-config` (`/etc/aether/mesh-config.yaml`),
 (required; doubles as the xDS node identity — the old `--proxy-id` was retired),
 `--cluster-name` (required),
 `--registrar-address` (`aether-registrar.aether-system.svc:443`),
-`--spire-workload-socket`.
+`--spire-workload-socket`, `--spire-wait-warn-after` (`2m`).
+
+`--spire-wait-warn-after` (also on `registrar`, `controller` and `agent edge`;
+chart key `spire.waitWarnAfter`) is how long the wait for this workload's first
+SVID stays at INFO before the waiting log line escalates to WARN. Since #740 no
+component dies on a missing SPIRE — it retries in the background — so this is a
+*logging* threshold everywhere except the node agent, where it doubles as the
+dwell before the `spire-svid` readiness check reports NotReady. See
+[`runbook.md`](./runbook.md) § *The agent is stuck waiting for SPIRE*.
 
 Node-agent-specific:
 
@@ -309,9 +348,24 @@ agent rolls never gap pod DNS. It does **not** share the agent's flag set:
 `--mesh-domain` (`aether.internal`), `--mesh-dns-upstream` (repeatable,
 `host[:port]`; empty = `/etc/resolv.conf`), `--ready-marker`
 (`/run/aether/mesh-dns.ready`), `--readiness-check` (deprecated),
-`--forward-pool-size` (`8`), `--otlp-endpoint`, `--debug`.
+`--forward-pool-size` (`8`), `--lame-duck-max` (`10s`), `--otlp-endpoint`,
+`--debug`.
 It binds UDP+TCP on the host at port 18054, which the CNI DNATs each managed
 pod's `:53` to.
+
+`--lame-duck-max` (#729) is the longest this resolver keeps **serving** after
+SIGTERM before closing its `SO_REUSEPORT` listeners. It stops reporting ready
+immediately and closes as soon as it observes a successor answering on the same
+address (a TXT identity stamp carrying someone else's value proves the successor
+is both in the reuseport group and serving), so the ceiling only applies when no
+successor appears — a scale-down, a node drain, or a failed surge. The chart
+derives the DaemonSet's `terminationGracePeriodSeconds` as this value + 5s, so
+raising it cannot silently leave the kubelet SIGKILLing mid-window. `0` disables
+the window and closes on SIGTERM, which dropped one queued datagram on every
+roll before #729. Grade a roll on
+`aether_mesh_dns_lame_duck_exits_total{reason}` — a healthy roll is `successor`
+on every node (see [`runbook.md`](./runbook.md) § *Grading the mesh-DNS lame-duck
+handoff across a roll*).
 
 `--readiness-check` is the pre-#683 exec probe and is deprecated: re-execing this
 16.9MB daemon every 15s per pod spent ~10 core-seconds per 25 minutes fleet-wide
@@ -376,6 +430,54 @@ count; the old `--pod-ndots` was retired).
 unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
 annotations opt out). (The `cni` plugin binary itself is configured via
 CNI-spec stdin, not flags.)
+
+### `prober` (standalone chart `charts/prober`, proposal 013)
+
+The synthetic **mesh-availability prober**: a per-node DaemonSet, mesh-managed
+like any other client, that black-box probes the data plane from the *client*
+side and emits its own pass/fail SLI. It exists because a source proxy cannot
+report its own outage, so the proxy-emitted `aether_stats` metric is structurally
+blind to the connection-level failures a hot restart can produce. It has its own
+chart and its own image (`//prober/cmd/prober`) and is installed independently of
+the `aether` chart. It does **not** take the shared manager flags; the list below
+is its whole flag set.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--egress` | `127.0.0.1:18081` | Local mesh egress listener the prober dials (the per-pod listener the CNI plumbs). |
+| `--liveness-path` | `/-/-/live` | Proxy local-reply liveness route. The agent programs a `direct_response` 200 on this exact path, first in the catch-all vhost — no upstream, no app — so a failure is unambiguously the mesh's fault. |
+| `--liveness-authority` | `liveness.aether.internal` | Reserved `Host` authority for the liveness probe; must not be a real service, so the request lands on that catch-all vhost. |
+| `--mesh-domain` | `aether.internal` | Mesh authority suffix for the reachability tier. |
+| `--reachability-targets` | `[]` | Echo upstream service names for the `reachability` tier. Empty disables the tier. |
+| `--mesh-dns-targets` | `[]` | Namespace-qualified FQDN authorities (`host[:port]`, default port `18081`) for the `mesh_dns` tier. Unlike the other two tiers these are **resolved** through the mesh DNS path rather than Host-overridden, so a real mesh-DNS outage becomes an alertable `dns_*` result (#574). Probed on a no-keep-alive client, so every probe resolves and dials afresh. |
+| `--rate` | `5` | Probes per second, per target. |
+| `--timeout` | `2s` | Per-probe timeout. |
+| `--max-concurrent` | `16` | Max in-flight probes per target; a tick that finds the semaphore full records `saturated` instead of probing. |
+| `--otlp-endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables telemetry — the prober still runs but emits nothing. |
+
+**Metrics.** Two instruments, both carrying `tier` (`liveness`, `reachability`,
+`mesh_dns`), `target` (the probed name) and `result`:
+
+| Metric | Type | Notes |
+|---|---|---|
+| `aether_probe_requests_total` | counter | `result` is one of `success`, `http_error`, `connection_error`, `timeout`, `saturated`, plus — `mesh_dns` tier only — `dns_error`, `dns_nxdomain`, `dns_timeout`. A resolution failure is an independently alertable signal; a post-resolution connect failure stays `connection_error`. |
+| `aether_probe_request_duration_seconds` | histogram | Explicit **seconds**-valued buckets (`0.001` … `5`). They have to be set explicitly: the SDK's default boundaries are tuned for millisecond-valued durations, so against seconds the first bucket is `<= 5s` and a healthy 2 ms probe is indistinguishable from a timed-out 2 s one (#732). |
+
+Per-node identity is a **resource** attribute, not a metric label: the chart sets
+`OTEL_RESOURCE_ATTRIBUTES=k8s.node.name=$(NODE_NAME),…` and the prober's resource
+builder reads it from the environment, so the series de-collapse per node once
+the collector promotes it (#210).
+
+**Deployment.** The chart renders a DaemonSet + ServiceAccount into a namespace
+that must already be mesh-managed — the probe only works if the CNI has plumbed
+the pod's egress listener. `namespace.create` is `false` and `namespace.name`
+defaults to the release namespace; on talos-main that is `aether-test`. The pod
+carries `aether.io/managed: "true"`, and the chart derives
+`config.aether.io/upstreams` from the union of the reachability and `mesh_dns`
+targets so the agent programs those clusters (proposal 004). It ships **no CPU
+limit** on purpose: the limit is a CFS quota, which quantises probe latency in
+~100 ms steps, and at the previous `50m` limit that was the dominant term in the
+published SLI (#735). The memory limit stays — it also feeds `GOMEMLIMIT`.
 
 ---
 
