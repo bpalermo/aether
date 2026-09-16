@@ -9,8 +9,16 @@ name: proxy-release
 on:
   push:
     branches: [main]
+    # A docs-only edit under proxy/ must not rebuild Envoy and open a pin PR
+    # (#773 touched proxy/README.md and produced pin PR #786). GitHub rejects
+    # `paths` and `paths-ignore` on the same event, so the exclusion is a
+    # negated pattern inside `paths`; patterns are evaluated in order and a
+    # later negative wins, hence it must follow "proxy/**". `proxy/**/*.md`
+    # matches proxy/README.md as well as nested ones ("**/" matches zero
+    # directories).
     paths:
       - "proxy/**"
+      - "!proxy/**/*.md"
       - ".github/workflows/proxy-release.yml"
 
 permissions:

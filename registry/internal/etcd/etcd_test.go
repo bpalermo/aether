@@ -2,6 +2,7 @@ package etcd_test
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,6 +21,18 @@ import (
 var testEndpoint string
 
 func TestMain(m *testing.M) {
+	// testing.Short() is only meaningful after the test flags are parsed, and
+	// the check has to come before the container so `-test.short` is actually
+	// Docker-free: every container-backed test in this file already skips
+	// itself under -short, but TestMain paid the pull/start/readiness cost
+	// regardless. TestEtcdRegistry_CloseWithoutStart needs no endpoint, so the
+	// short path still runs the suite. Mirrors
+	// registrar/internal/replicator/replicator_test.go:29.
+	flag.Parse()
+	if testing.Short() {
+		os.Exit(m.Run())
+	}
+
 	ctx := context.Background()
 
 	container, err := tcetcd.Run(ctx, "gcr.io/etcd-development/etcd:v3.5.21")

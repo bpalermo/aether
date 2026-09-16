@@ -134,6 +134,13 @@ type Config struct {
 	// AdminUnresponsiveDeadline overrides defaultAdminUnresponsiveDeadline
 	// (0 = default).
 	AdminUnresponsiveDeadline time.Duration
+	// TerminationGrace is this pod's terminationGracePeriodSeconds, i.e. how
+	// long after SIGTERM the kubelet SIGKILLs the container. The supervisor
+	// cannot read it from the API, so the chart passes its own value. It bounds
+	// the mid-handoff wait for a successor so a termination with no possible
+	// successor still drains Envoy (see successorWaitBudget, issue #771).
+	// 0 = unknown: wait indefinitely, the pre-#771 behavior.
+	TerminationGrace time.Duration
 }
 
 // childExit reports the termination of a supervised Envoy epoch.
@@ -179,35 +186,34 @@ type Supervisor struct {
 	readyGate time.Time
 }
 
-// setReadyGate / readyGateTime guard readyGate for concurrent access between
-// Run (bind-collision retries) and watchLiveness.
-func (s *Supervisor) setReadyGate(t time.Time) {
-	s.mu.Lock()
-	s.readyGate = t
-	s.mu.Unlock()
-}
-
+// readyGateTime guards readyGate for concurrent access between Run
+// (bind-collision retries) and watchLiveness. It is only ever written by
+// initStartEpoch, under the same lock acquisition that publishes nextEpoch.
 func (s *Supervisor) readyGateTime() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.readyGate
 }
 
-// gateReadinessIfSuccessor delays readiness when epoch detection selected a
-// cross-pod successor epoch (>0): the predecessor must be terminated by this
-// Envoy's own parent-shutdown protocol before the pod may report Ready.
-func (s *Supervisor) gateReadinessIfSuccessor() {
-	s.mu.Lock()
-	successor := s.nextEpoch > 0
-	s.mu.Unlock()
-	if successor {
-		s.setReadyGate(time.Now().Add(s.cfg.ParentShutdownTime + readyGateBuffer))
-	}
-}
-
 // readyGateBuffer is added to ParentShutdownTime when gating a cross-pod
 // successor's readiness, to ensure the predecessor is fully gone first.
 const readyGateBuffer = 3 * time.Second
+
+// successorReadyGate is the gate value for a supervisor that has just selected a
+// cross-pod successor epoch: the predecessor must be terminated by this Envoy's
+// own parent-shutdown protocol before the pod may report Ready.
+//
+// It is applied by initStartEpoch INSIDE the critical section that publishes
+// nextEpoch, never afterwards. Publishing the epoch first and the gate second
+// left a window in which a watchLiveness tick could read the successor epoch E
+// while the gate was still the previous (long-expired) one, see the
+// PREDECESSOR's Envoy answering LIVE at E, and mark the pod Ready before this
+// pod's Envoy had even been forked — #132's hazard re-entering through the
+// bind-collision retry path, where retries can run 4.5 minutes against a 15s
+// parent-shutdown-time so the old gate is certainly stale.
+func (s *Supervisor) successorReadyGate() time.Time {
+	return time.Now().Add(s.cfg.ParentShutdownTime + readyGateBuffer)
+}
 
 // New creates a Supervisor. metrics may be nil to disable instrumentation.
 func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
@@ -247,7 +253,6 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	// Pick the start epoch from a confirmed-live predecessor (if any), then
 	// maintain the readiness marker and the LIVE-gated node epoch heartbeat.
 	s.initStartEpoch(ctx)
-	s.gateReadinessIfSuccessor()
 	go s.watchLiveness(ctx)
 
 	if err := s.hotRestart(); err != nil {
@@ -351,6 +356,13 @@ func (lp *restartLoop) handleChildExit(exit childExit) (retErr error, done bool)
 	return retErr, done
 }
 
+// shutdownProbeTimeout bounds the epoch-identity probe that selects the
+// shutdown branch. The probe runs on a context DETACHED from the caller's (see
+// handleShutdown), so it cannot inherit a deadline and needs its own:
+// adminServerInfo applies a readyPollInterval timeout inside it, and this is
+// the outer ceiling covering the dial and one retry-free round trip.
+const shutdownProbeTimeout = 2 * readyPollInterval
+
 // handleShutdown implements the ctx.Done case of the Run select: if this
 // supervisor is in the mid-handoff window (Envoy not LIVE at our epoch), it
 // waits for the successor's parent-shutdown protocol to terminate our Envoy
@@ -362,16 +374,39 @@ func (s *Supervisor) handleShutdown(ctx context.Context) error {
 	// it turns NotReady, which is exactly that window. Do NOT signal Envoy
 	// (the successor still needs its hot-restart parent alive, even before
 	// reaching LIVE — killing it aborts the successor with errno 111): wait
-	// for the successor's parent-shutdown protocol to terminate it, with a
-	// deadline fallback. The check cannot rely on the successor having
+	// for the successor's parent-shutdown protocol to terminate it, bounded by
+	// what is left of this pod's own termination grace (see
+	// successorWaitBudget). The check cannot rely on the successor having
 	// published its epoch, since it does so only once LIVE.
 	//
+	// The probe MUST run on a context detached from ctx. handleShutdown has
+	// exactly one call site — `case <-lp.ctx.Done()` in restartLoop.run — so
+	// ctx is ALREADY cancelled by the time we get here. context.WithTimeout on
+	// an already-cancelled parent yields an already-cancelled child, and
+	// http.Client.Do then fails with "context canceled" in microseconds
+	// WITHOUT OPENING A SOCKET: the branch below read "not live at our epoch"
+	// on every SIGTERM regardless of Envoy's actual state, so the
+	// wait-for-successor path was taken unconditionally — including when no
+	// successor existed and Envoy was never drained (issue #771; measured
+	// on-cluster as exactly one server_info/unreachable per pod lifetime, at
+	// its SIGTERM, while server_info/live was still incrementing).
+	// Same trap, same idiom as common/telemetry/setup/lifecycle.go's
+	// DetachedTimeout (issue #662): keep the values, drop the cancellation.
+	probeCtx, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), shutdownProbeTimeout)
+	defer cancelProbe()
+
 	// StateDir is always set in production (the supervisor only runs in the
 	// cross-pod configuration); the guard keeps unit-test supervisors that
 	// run without coordination state on the plain shutdown path.
-	if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(ctx, s.currentEpoch()) {
-		s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy")
-		s.awaitProtocolTermination()
+	if s.cfg.StateDir != "" && !s.adminLiveAtEpoch(probeCtx, s.currentEpoch()) {
+		budget := s.successorWaitBudget()
+		s.log.InfoContext(ctx, "termination requested mid-handoff; waiting for successor to terminate our envoy",
+			"epoch", s.currentEpoch(), "successorWaitBudget", budget)
+		if s.awaitProtocolTermination(budget) {
+			return nil
+		}
+		s.logSuccessorWaitFallback(ctx, budget)
+		s.shutdown()
 		return nil
 	}
 	s.log.InfoContext(ctx, "termination requested, shutting down all envoy epochs")
@@ -500,29 +535,66 @@ func (s *Supervisor) retryBindCollision(ctx context.Context, exit childExit, bin
 	}
 	s.resetEpochForRetry()
 	s.initStartEpoch(ctx)
-	s.gateReadinessIfSuccessor()
 	if err := s.hotRestart(); err != nil {
 		return true, fmt.Errorf("relaunching envoy after retry: %w", err), true
 	}
 	return true, nil, false
 }
 
+// reserveEpoch picks the restart epoch for the next launch: nextEpoch, advanced
+// past any epoch whose child is STILL TRACKED.
+//
+// children is keyed by epoch, so reusing a key silently replaces the *exec.Cmd
+// of a child that is still alive. That is reachable: resetEpochForRetry rewinds
+// nextEpoch to 0 on every bind-collision retry, and if the heartbeat is stale
+// initStartEpoch leaves it there — so an epoch-0 Envoy that is still draining
+// gets its entry overwritten by the relaunch. The draining process is then
+// orphaned (signalEpoch resolves epoch 0 to the new cmd, so shutdown() never
+// signals it), awaitProtocolTermination's pending count undercounts it, and its
+// eventual exit can take the container down non-zero while the new Envoy is
+// healthy. A tracked child at epoch E also means E's base-id domain socket is
+// still held, so launching E again would bind-collide anyway: E+1 is both the
+// safe key and the correct hot-restart epoch to attach at.
+func (s *Supervisor) reserveEpoch() int {
+	s.mu.Lock()
+	requested := s.nextEpoch
+	epoch := requested
+	for {
+		if _, tracked := s.children[epoch]; !tracked {
+			break
+		}
+		epoch++
+	}
+	s.mu.Unlock()
+
+	if epoch != requested {
+		s.log.Warn("restart epoch still has a tracked envoy; attaching above it instead of reusing the key",
+			"requestedEpoch", requested, "epoch", epoch)
+	}
+	return epoch
+}
+
 // hotRestart forks a new Envoy child at the next restart epoch and schedules
 // shutdown of the previous one after ParentShutdownTime.
 func (s *Supervisor) hotRestart() error {
-	s.mu.Lock()
-	epoch := s.nextEpoch
-	s.nextEpoch++
-	s.mu.Unlock()
+	epoch := s.reserveEpoch()
 
 	cmd := s.buildEnvoyCmd(epoch)
 	s.log.Info("starting envoy", "epoch", epoch, "args", cmd.Args)
 	if err := cmd.Start(); err != nil {
+		// nextEpoch is deliberately NOT advanced on a fork failure. A Start
+		// error from handleDebounce is non-fatal ("keeping current epoch"), and
+		// advancing here would leave currentEpoch() naming an epoch with no
+		// child: both wedge watchdogs and the readiness hold are gated on
+		// childTracked(epoch), so none of them could fire and the ready marker
+		// would stay cleared forever while the old Envoy kept serving — exactly
+		// the failure the watchdogs exist to prevent.
 		return err
 	}
 
 	s.mu.Lock()
 	s.children[epoch] = cmd
+	s.nextEpoch = epoch + 1
 	s.epochLaunched = time.Now()
 	s.epochLive = false
 	s.mu.Unlock()
@@ -683,6 +755,25 @@ func (s *Supervisor) childTracked(epoch int) bool {
 	return ok
 }
 
+// anyChildTracked reports whether ANY supervised Envoy is still tracked,
+// regardless of epoch. It is the readiness hold's question (see onNotLiveEpoch):
+// "is one of our Envoy processes still the thing serving this node?"
+//
+// Asking it per-epoch instead was a readiness flap. Between resetEpochForRetry
+// and the relaunch — which includes initStartEpoch's up-to-8s heartbeat/admin
+// re-probe loop — currentEpoch() is the rewound nextEpoch-1, i.e. -1, an epoch
+// that never had a child. A supervisor that was Ready (epoch 0 LIVE) and then
+// lost a just-forked epoch 1 to a bind collision therefore cleared its ready
+// marker for the whole retry, and recorded a ready_transitions{ready=false},
+// while its epoch-0 Envoy was still tracked and still serving every request on
+// the node. That is a candidate mechanism for the unexplained proxy
+// readiness-marker flap on w01/w05 in the 2026-09-03 soak.
+func (s *Supervisor) anyChildTracked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.children) > 0
+}
+
 func (s *Supervisor) handoffDeadline() time.Duration {
 	if s.cfg.HandoffDeadline > 0 {
 		return s.cfg.HandoffDeadline
@@ -732,24 +823,97 @@ func (s *Supervisor) reap(epoch int) {
 	s.log.Info("reaped envoy epoch", "epoch", epoch)
 }
 
-// awaitProtocolTermination waits (without signaling) for the remaining children to
-// exit via the successor's hot-restart parent-shutdown protocol. It deliberately
-// imposes NO deadline of its own: the successor's timers start only after its
-// (xDS-gated, unbounded) init completes, and the successor keeps using the parent
-// socket (stat merges) right up to protocol-terminate — killing the parent at any
-// "reasonable" cutoff aborts the successor with errno 111. The kubelet's SIGKILL
-// at the pod's terminationGracePeriod is the real, and only safe, hard stop.
-func (s *Supervisor) awaitProtocolTermination() {
+// terminationFallbackMargin is the head-room left between the end of the
+// successor wait and the kubelet's SIGKILL, on top of the drain the fallback
+// itself needs. It absorbs the scheduling jitter of a node under termination
+// load; it is not a tuning knob.
+const terminationFallbackMargin = 10 * time.Second
+
+// successorWaitBudget returns how long the mid-handoff path may wait for a
+// successor to terminate our Envoy before draining it ourselves, or 0 for
+// "wait indefinitely".
+//
+// The wait must NOT be bounded by any "reasonable"-looking timer of its own:
+// the successor's parent-shutdown timer starts only after its (xDS-gated,
+// unbounded) init completes, and it keeps using the parent socket for stat
+// merges right up to protocol-terminate, so cutting a healthy handoff short
+// aborts the successor with errno 111 — the 2026-06-11 node data-plane gap.
+// The only bound that is not arbitrary is this pod's own death sentence: the
+// kubelet SIGKILLs us at terminationGracePeriodSeconds no matter what. Waiting
+// right up to it is what issue #771 showed to be wrong for the cases where no
+// successor can ever appear (node shutdown, scale-down, DaemonSet delete, a
+// replacement stuck Pending): Envoy is never drained and dies with connections
+// open.
+//
+// So: wait as long as the pod has, minus what draining will then cost
+// (DrainTime + shutdownGrace, exactly what shutdown() budgets) minus a margin.
+// A grace period too small to fit a drain leaves no safe cutoff at all, and
+// falls back to waiting indefinitely rather than guaranteeing an errno-111
+// abort — as does an unset TerminationGrace, which is how every pre-#771 chart
+// and every unit test invokes the supervisor.
+func (s *Supervisor) successorWaitBudget() time.Duration {
+	if s.cfg.TerminationGrace <= 0 {
+		return 0
+	}
+	budget := s.cfg.TerminationGrace - (s.cfg.DrainTime + shutdownGrace) - terminationFallbackMargin
+	if budget <= 0 {
+		return 0
+	}
+	return budget
+}
+
+// logSuccessorWaitFallback records, at WARN, that the successor wait expired,
+// together with the epoch state observed at that moment. The probe runs on a
+// context detached from the (already cancelled) caller's — see handleShutdown.
+func (s *Supervisor) logSuccessorWaitFallback(ctx context.Context, budget time.Duration) {
+	epoch := s.currentEpoch()
+	var live, reachable bool
+	if s.cfg.AdminAddress != "" {
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownProbeTimeout)
+		defer cancel()
+		live, reachable = s.adminServerInfo(probeCtx, epoch)
+	}
+	s.log.WarnContext(ctx,
+		"no successor terminated our envoy within the termination-grace budget; draining it ourselves before the kubelet's SIGKILL",
+		"epoch", epoch,
+		"successorWaitBudget", budget,
+		"adminLiveAtOurEpoch", live,
+		"adminReachable", reachable,
+		"childTracked", s.childTracked(epoch),
+		"terminationGrace", s.cfg.TerminationGrace,
+		"drainTime", s.cfg.DrainTime,
+	)
+}
+
+// awaitProtocolTermination waits (without signaling) for the remaining children
+// to exit via the successor's hot-restart parent-shutdown protocol, bounded by
+// budget (0 = no bound; see successorWaitBudget for why the bound must be the
+// pod's grace period and nothing shorter). It reports whether every child
+// terminated within the budget; on false the caller must drain them itself.
+func (s *Supervisor) awaitProtocolTermination(budget time.Duration) bool {
 	s.mu.Lock()
 	pending := len(s.children)
 	s.mu.Unlock()
 
-	for pending > 0 {
-		exit := <-s.childExited
-		s.reap(exit.epoch)
-		pending--
-		s.log.Info("envoy epoch terminated by successor", "epoch", exit.epoch)
+	// A nil channel blocks forever, which is exactly the unbounded behavior.
+	var expired <-chan time.Time
+	if budget > 0 {
+		t := time.NewTimer(budget)
+		defer t.Stop()
+		expired = t.C
 	}
+
+	for pending > 0 {
+		select {
+		case exit := <-s.childExited:
+			s.reap(exit.epoch)
+			pending--
+			s.log.Info("envoy epoch terminated by successor", "epoch", exit.epoch)
+		case <-expired:
+			return false
+		}
+	}
+	return true
 }
 
 // shutdown SIGTERMs every tracked epoch and waits up to DrainTime+grace for them

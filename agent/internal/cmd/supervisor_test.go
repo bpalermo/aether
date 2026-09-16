@@ -3,11 +3,25 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// dirEntryNames lists the names directly under dir.
+func dirEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
 
 func TestInstallFile(t *testing.T) {
 	t.Run("copies contents and makes the result executable", func(t *testing.T) {
@@ -27,9 +41,45 @@ func TestInstallFile(t *testing.T) {
 		assert.Equal(t, os.FileMode(0o755), info.Mode().Perm(),
 			"the runtime container execs this; it must be installed executable")
 
-		// The copy goes through a .tmp + rename, which must leave nothing behind.
-		_, err = os.Stat(dest + ".tmp")
-		assert.True(t, os.IsNotExist(err), "the staging file must be renamed away")
+		// The copy stages through a temp file and renames, which must leave
+		// nothing behind — under any name, not just the old fixed dest+".tmp".
+		assert.ElementsMatch(t, []string{"src", "dest"}, dirEntryNames(t, dir),
+			"the staging file must be renamed away")
+	})
+
+	// S24: the staging file used to be a FIXED dest+".tmp", so two writers
+	// aiming at the same destination interleaved into one temp file and the
+	// rename could publish half of each — and what is published here is an
+	// executable another container execs as its entrypoint. Every concurrent
+	// install must now either fail or produce the whole binary, never a splice.
+	t.Run("concurrent installs never publish a partial file", func(t *testing.T) {
+		dir := t.TempDir()
+		payload := strings.Repeat("aether-supervisor-payload\n", 4096)
+		source := filepath.Join(dir, "src")
+		require.NoError(t, os.WriteFile(source, []byte(payload), 0o600))
+		dest := filepath.Join(dir, "dest")
+
+		const writers = 8
+		var wg sync.WaitGroup
+		errs := make(chan error, writers)
+		for range writers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs <- installFile(source, dest)
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+
+		got, err := os.ReadFile(dest)
+		require.NoError(t, err)
+		assert.Equal(t, payload, string(got), "a concurrent install published a spliced file")
+		assert.ElementsMatch(t, []string{"src", "dest"}, dirEntryNames(t, dir),
+			"every writer must clean up its own staging file")
 	})
 
 	t.Run("a missing source is an error, not a silent no-op", func(t *testing.T) {

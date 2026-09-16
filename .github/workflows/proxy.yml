@@ -35,9 +35,18 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          # A docs-only edit under proxy/ must not run the Envoy compile either
+          # (same reason as proxy-release.yml's paths filter). dorny's default
+          # quantifier ORs the patterns, under which a leading '!' would match
+          # every path the positive pattern does not and make the filter always
+          # true; 'some-with-excludes' is the mode that treats '!' as an
+          # exclusion — a file matches when at least one positive pattern
+          # matches it and no negated one does.
+          predicate-quantifier: 'some-with-excludes'
           filters: |
             proxy:
               - 'proxy/**'
+              - '!proxy/**/*.md'
               - '.github/workflows/proxy.yml'
 
   test:
