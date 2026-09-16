@@ -3,7 +3,6 @@ package registrar
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -49,18 +48,34 @@ func TestWatchLoop_FilterReassertIsNeverLost(t *testing.T) {
 	// streams, then requires that the LAST one reached the server. A re-assert
 	// lost mid-burst is invisible (a later one supersedes it); a lost LAST one
 	// is terminal, because nothing else will ever cancel that stream.
+	//
+	// The predicate is "the server ever saw this filter", not "the server's
+	// most recently RECORDED request carries it". Those differ, and the
+	// difference is the fake's, not the loop's: grpc-go runs each server
+	// stream's handler on its own goroutine, so when the loop cancels stream N
+	// and opens N+1 the two handlers race to record, and N's request can land
+	// after N+1's. The loop then sits — correctly — on the newest stream while
+	// lastRequest() reports the superseded one forever, and a "the loop is
+	// stuck" failure is reported for a loop that did exactly the right thing
+	// (#772, S8: 7/7 of the observed failures had the wanted filter present in
+	// the request log, immediately followed by an OLDER stream's request).
+	// sawFilter is immune to that ordering while losing no strength: a
+	// re-assert that really was lost leaves its filter in no request at all.
 	for round := range 40 {
 		var want []string
 		for i := range 4 {
 			want = []string{fmt.Sprintf("default/svc-%d-%d", round, i)}
 			r.SetServiceFilter(want)
 		}
+		// logs is passed as a Stringer, not as logs.String(): arguments are
+		// evaluated before Eventuallyf runs, so a pre-rendered string captures
+		// the log as it was BEFORE the wait — i.e. never shows what happened
+		// during the 10s that failed.
 		require.Eventuallyf(t, func() bool {
-			last := fake.lastRequest()
-			return last != nil && slices.Equal(last.GetFilter().GetServices(), want)
+			return fake.sawFilter(want)
 		}, 10*time.Second, time.Millisecond,
 			"round %d: the loop never re-asserted %v; it is stuck on a stream with a stale filter. logs:\n%s",
-			round, want, logs.String())
+			round, want, logs)
 	}
 }
 
