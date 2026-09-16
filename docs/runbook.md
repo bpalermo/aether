@@ -525,8 +525,8 @@ deliberately answers differently on the agent and on the three Deployments:
 
 | Component | Workload | Dwell before NotReady | What NotReady does |
 | --- | --- | --- | --- |
-| `aether-agent` | DaemonSet | **2 m** (`spire.NotReadyDwell`) | The controller's node-taint guard re-arms `aether.io/agent-not-ready:NoSchedule` on this node |
-| `aether-registrar` | Deployment | **0** (`spire.ServiceNotReadyDwell`) | This replica leaves the registrar Service's endpoints |
+| `aether-agent` | DaemonSet | **2 m** (the Go constant `spire.NotReadyDwell`, not a chart value) | The controller's node-taint guard re-arms `aether.io/agent-not-ready:NoSchedule` on this node |
+| `aether-registrar` | Deployment | **0** (the Go constant `spire.ServiceNotReadyDwell`) | This replica leaves the registrar Service's endpoints |
 | `aether-controller` | Deployment | **0** | This replica leaves the webhook Service's endpoints |
 | `aether-edge` | Deployment | **0** | This replica leaves the LoadBalancer's endpoints |
 

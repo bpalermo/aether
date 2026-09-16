@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 
+	"aethermesh.dev/common/log"
 	"aethermesh.dev/prober/internal/prober"
 	"github.com/spf13/cobra"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 // Version is stamped at build time (see BUILD.bazel x_defs).
@@ -22,8 +22,15 @@ func GetCommand() *cobra.Command {
 			"aether_stats metric is structurally blind to during hot restarts.",
 		SilenceUsage: true,
 		RunE: func(c *cobra.Command, _ []string) error {
-			log := zap.New()
-			p, err := prober.New(c.Context(), cfg, log, Version)
+			// //common/log (slog), not controller-runtime's zap wrapper: that
+			// import was the prober's second path to controller-runtime and a
+			// leftover from the logr/zap -> slog migration (issue #772, phase B1).
+			// The JSON record keeps the "level", "caller" and "error" keys; the
+			// timestamp and message keys are slog's ("timestamp"/"message" rather
+			// than zap's "ts"/"msg"). Nothing consumes prober log lines — the SLI
+			// and every alert read the aether_probe_* metrics.
+			logger := log.NewLogger(false)
+			p, err := prober.New(c.Context(), cfg, logger, Version)
 			if err != nil {
 				return fmt.Errorf("init prober: %w", err)
 			}

@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "util",
@@ -8,5 +8,14 @@ go_library(
     deps = [
         "//common/file",
         "@com_github_fsnotify_fsnotify//:fsnotify",
+    ],
+)
+
+go_test(
+    name = "util_test",
+    srcs = ["watcher_test.go"],
+    deps = [
+        ":util",
+        "@com_github_stretchr_testify//require",
     ],
 )

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -117,7 +117,7 @@ func TestClassifyErr(t *testing.T) {
 func TestNewMeshDNSTargets(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MeshDNSTargets = []string{"echo.aether-test.aether.internal:18081", "echo.aether-test.aether.internal"}
-	p, err := New(context.Background(), cfg, logr.Discard(), "test")
+	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestNewMeshDNSTargets(t *testing.T) {
 func TestNewTargets(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReachabilityTargets = []string{"svc-1", "svc-2"}
-	p, err := New(context.Background(), cfg, logr.Discard(), "test")
+	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestTierClients(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReachabilityTargets = []string{"svc-1"}
 	cfg.MeshDNSTargets = []string{"echo.aether-test.aether.internal:18081"}
-	p, err := New(context.Background(), cfg, logr.Discard(), "test")
+	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -305,7 +305,11 @@ func TestProbeConnectionReuse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			conns := make(map[net.Conn]struct{})
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Unstarted: ConnState must be installed BEFORE the server starts
+			// serving, or the assignment races net/http's own reads of it on
+			// the serve goroutine — and may not take effect at all (issue
+			// #772, race R3).
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				// A non-empty body is the whole point: an empty one pools regardless.
 				_, _ = io.WriteString(w, `{"echo":"body that must be drained"}`)
 			}))
@@ -317,13 +321,14 @@ func TestProbeConnectionReuse(t *testing.T) {
 				conns[c] = struct{}{}
 				mu.Unlock()
 			}
+			srv.Start()
 			t.Cleanup(srv.Close)
 
 			cfg := DefaultConfig()
 			cfg.Egress = strings.TrimPrefix(srv.URL, "http://")
 			cfg.LivenessPath = "/"
 			cfg.MeshDNSTargets = []string{cfg.Egress}
-			p, err := New(context.Background(), cfg, logr.Discard(), "test")
+			p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}

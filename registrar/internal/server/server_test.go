@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"log/slog"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,17 +18,33 @@ import (
 
 // fakeWatchServerStream captures events sent by WatchEndpoints. Only Send and
 // Context are used; the embedded nil interface panics on anything else.
+//
+// Send runs on the WatchEndpoints goroutine while the assertions below poll
+// from the test goroutine, so sent is guarded by mu and read only through
+// snapshot() (issue #772, race R2).
 type fakeWatchServerStream struct {
 	grpc.ServerStream
 	ctx  context.Context
+	mu   sync.Mutex
 	sent []*registrarv1.WatchEndpointsResponse
 }
 
 func (f *fakeWatchServerStream) Send(e *registrarv1.WatchEndpointsResponse) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sent = append(f.sent, e)
 	return nil
 }
 func (f *fakeWatchServerStream) Context() context.Context { return f.ctx }
+
+// snapshot returns a copy of the events sent so far. Every assertion goes
+// through it: the slice header, its backing array, and the proto pointers the
+// server is still filling in are all off-limits without the lock.
+func (f *fakeWatchServerStream) snapshot() []*registrarv1.WatchEndpointsResponse {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.sent)
+}
 
 func newGateTestServer(t *testing.T) *RegistrarServer {
 	t.Helper()
@@ -55,15 +73,16 @@ func TestWatchEndpointsSendsSnapshotComplete(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.WatchEndpoints(&registrarv1.WatchEndpointsRequest{}, stream) }()
 
-	require.Eventually(t, func() bool { return len(stream.sent) >= 2 },
+	require.Eventually(t, func() bool { return len(stream.snapshot()) >= 2 },
 		5*time.Second, 10*time.Millisecond, "snapshot + marker never sent")
 	cancel()
 	<-done
 
-	last := stream.sent[len(stream.sent)-1]
+	sent := stream.snapshot()
+	last := sent[len(sent)-1]
 	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE, last.GetType())
 	assert.NotEmpty(t, last.GetVersion(), "marker must carry the snapshot version")
-	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT, stream.sent[0].GetType())
+	assert.Equal(t, registrarv1.WatchEndpointsResponse_EVENT_TYPE_FULL_SNAPSHOT, sent[0].GetType())
 }
 
 // TestWatchEndpointsGatedOnFirstSync verifies a freshly started registrar
@@ -81,10 +100,10 @@ func TestWatchEndpointsGatedOnFirstSync(t *testing.T) {
 	go func() { done <- s.WatchEndpoints(&registrarv1.WatchEndpointsRequest{}, stream) }()
 
 	time.Sleep(100 * time.Millisecond)
-	assert.Empty(t, stream.sent, "nothing may be served before the first sync")
+	assert.Empty(t, stream.snapshot(), "nothing may be served before the first sync")
 
 	close(synced) // first sync completes
-	require.Eventually(t, func() bool { return len(stream.sent) >= 2 },
+	require.Eventually(t, func() bool { return len(stream.snapshot()) >= 2 },
 		5*time.Second, 10*time.Millisecond, "snapshot not served after gate opened")
 	cancel()
 	<-done
@@ -159,7 +178,7 @@ func TestWatchEndpointsFilteredSnapshot(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- s.WatchEndpoints(req, stream) }()
 		require.Eventually(t, func() bool {
-			for _, e := range stream.sent {
+			for _, e := range stream.snapshot() {
 				if e.GetType() == registrarv1.WatchEndpointsResponse_EVENT_TYPE_SNAPSHOT_COMPLETE {
 					return true
 				}
@@ -168,7 +187,7 @@ func TestWatchEndpointsFilteredSnapshot(t *testing.T) {
 		}, 5*time.Second, 10*time.Millisecond, "snapshot-complete marker never sent")
 		cancel()
 		<-done
-		return stream.sent
+		return stream.snapshot()
 	}
 
 	// The service CATALOG (every service's name) is replayed to every

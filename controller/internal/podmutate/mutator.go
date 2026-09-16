@@ -1,5 +1,5 @@
 // Package podmutate contains the controller's pod-mutating admission webhook. It
-// does two things on pod CREATE, mirroring Istio's sidecar injector:
+// does three things on pod CREATE, mirroring Istio's sidecar injector:
 //
 //   - Namespace auto-injection: a pod created in a namespace labeled
 //     aether.io/managed=true is given the aether.io/managed=true POD label so the
@@ -11,7 +11,8 @@
 //     cluster.local search list. Without it the k8s default ndots:5 makes the
 //     resolver apply the search domains first; glibc tolerates the fall-through to
 //     the bare name, but musl (Alpine) trips on the churn and fails to resolve mesh
-//     names. ndots is opt-in (default off) alongside mesh DNS.
+//     names. The chart ships ndots injection ON (`controller.injectPodNdots: true`)
+//     alongside mesh DNS.
 //   - dnsConfig timeout/attempts: bounds what a single LOST DNS datagram costs.
 //     The resolver a managed pod talks to is node-local (the CNI DNATs :53 to the
 //     node's mesh-DNS), so a query that gets no answer is not a slow answer, it is
