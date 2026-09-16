@@ -54,21 +54,85 @@ func cancelledCtx() context.Context {
 	return ctx
 }
 
-// TestHandleShutdownProbesOnDetachedCtxAndDrains is the issue #771 regression
-// test. The loop context is already cancelled (its only real state), Envoy is
-// LIVE at OUR epoch and no successor exists: the probe must still reach the
-// admin endpoint and the drain branch must be taken.
+// TestHandleShutdownWaitsForTheSurgeSuccessor is the issue #795 regression test,
+// and carries issue #771's with it.
 //
-// Before the fix the probe failed in microseconds without opening a socket, so
-// this always fell into the wait-for-successor branch and blocked until the
-// kubelet's SIGKILL, with Envoy never signalled.
-func TestHandleShutdownProbesOnDetachedCtxAndDrains(t *testing.T) {
+// The loop context is already cancelled (its only real state), Envoy is LIVE at
+// OUR epoch and no handoff has begun — a plain `kubectl delete pod`, i.e. also
+// node drain, eviction and preemption. Two things must hold:
+//
+//   - #771: the probe must really reach the admin endpoint. Before that fix it
+//     failed in microseconds without opening a socket, so the branch was chosen
+//     off a lie.
+//   - #795: knowing Envoy is LIVE at our epoch, the supervisor must NOT drain.
+//     The DaemonSet's surge replacement is created within ~1s and hot-restarts
+//     us; the old Envoy has to still be there when it does. So: keep the child
+//     serving, and end only when the successor's protocol terminates it.
+//
+// On main this fails at the one-second `childTracked` assertion: handleShutdown
+// takes the drain branch immediately and the child is already SIGTERMed and
+// reaped. That is the measured production regression — 1.5-2.3s termination,
+// ~8s with no Envoy on the node, 130/126 prober connection_errors (rev214 F2).
+func TestHandleShutdownWaitsForTheSurgeSuccessor(t *testing.T) {
 	requireShell(t)
 
 	f := newFakeAdmin(t, adminLiveState, 0) // LIVE at our own epoch: NOT mid-handoff
 	s := newShutdownSupervisor(t, f)
+	// 30s - (1s drain + 5s grace) - 10s margin = 14s of budget; the successor
+	// below arrives at 2s, so the wait must end long before the bound.
+	s.cfg.TerminationGrace = 30 * time.Second
+	require.Equal(t, 14*time.Second, s.successorWaitBudget())
 	before := f.serverInfoHits.Load()
 
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- s.handleShutdown(cancelledCtx()) }()
+
+	// One second in: still serving. Nothing of ours may have signalled Envoy,
+	// and no drain may have been requested.
+	time.Sleep(1 * time.Second)
+	require.True(t, s.childTracked(0),
+		"envoy was stopped while a surge successor could still have hot-restarted it")
+	require.Zero(t, f.drainHits.Load(), "a serving envoy with a successor coming must not be drained")
+	select {
+	case <-done:
+		t.Fatal("handleShutdown returned instead of waiting for the surge successor")
+	default:
+	}
+
+	// 2s in, the surge replacement's Envoy takes over and its parent-shutdown
+	// protocol terminates ours.
+	time.Sleep(1 * time.Second)
+	s.signalEpoch(0, syscall.SIGTERM)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("handleShutdown did not return after the successor took over")
+	}
+
+	assert.Less(t, time.Since(start), 14*time.Second,
+		"the handoff must end when the successor arrives, not at the budget")
+	assert.Greater(t, f.serverInfoHits.Load(), before,
+		"the branch decision was made without the probe ever reaching the admin endpoint")
+	assert.Zero(t, f.drainHits.Load(), "a handoff costs no drain")
+	assert.False(t, s.childTracked(0))
+}
+
+// TestHandleShutdownDrainsImmediatelyWhenToldTo covers the escape hatch for a
+// deployment with no surge replacement (--shutdown-drain-immediately): there is
+// nothing to wait for, so the graceful drain must start at once — and it must
+// still be a DRAIN, not the bare SIGTERM that cost the node its data plane.
+func TestHandleShutdownDrainsImmediatelyWhenToldTo(t *testing.T) {
+	requireShell(t)
+
+	f := newFakeAdmin(t, adminLiveState, 0)
+	s := newShutdownSupervisor(t, f)
+	s.cfg.TerminationGrace = 180 * time.Second // a budget it must not spend
+	s.cfg.ShutdownDrainImmediately = true
+
+	start := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- s.handleShutdown(cancelledCtx()) }()
 
@@ -76,12 +140,15 @@ func TestHandleShutdownProbesOnDetachedCtxAndDrains(t *testing.T) {
 	case err := <-done:
 		require.NoError(t, err)
 	case <-time.After(15 * time.Second):
-		t.Fatal("handleShutdown blocked: the drain branch was not taken")
+		t.Fatal("--shutdown-drain-immediately did not drain immediately")
 	}
 
-	assert.Greater(t, f.serverInfoHits.Load(), before,
-		"the branch decision was made without the probe ever reaching the admin endpoint")
-	assert.False(t, s.childTracked(0), "the drain branch must SIGTERM and reap the child")
+	elapsed := time.Since(start)
+	assert.Less(t, elapsed, s.successorWaitBudget(), "the escape hatch must not wait for a successor")
+	assert.GreaterOrEqual(t, elapsed, s.cfg.DrainTime, "the drain window must still be honoured")
+	assert.Equal(t, int64(1), f.drainHits.Load(), "listeners must be drained exactly once")
+	assert.Equal(t, "graceful", f.drainQuery.Load(), "the drain must be the graceful one")
+	assert.False(t, s.childTracked(0), "envoy must be stopped after the drain")
 }
 
 // TestHandleShutdownWaitsForGenuineSuccessor is the control: the same cancelled
@@ -167,7 +234,74 @@ func TestHandleShutdownFallsBackToDrainWhenNoSuccessorComes(t *testing.T) {
 		t.Fatal("handleShutdown never gave up waiting for a successor that cannot come")
 	}
 
-	assert.GreaterOrEqual(t, time.Since(start), 2*time.Second,
-		"the fallback must not cut a handoff short before the budget")
+	assert.GreaterOrEqual(t, time.Since(start), 2*time.Second+s.cfg.DrainTime,
+		"the fallback must not cut a handoff short before the budget, nor skip the drain window")
+	assert.Equal(t, int64(1), f.drainHits.Load(),
+		"the fallback must drain the listeners, not bare-SIGTERM a serving envoy")
+	assert.Equal(t, "graceful", f.drainQuery.Load())
 	assert.False(t, s.childTracked(0), "the fallback must drain and reap the child")
+}
+
+// TestHandleShutdownDrainsGracefullyWhenNoSuccessorArrives is the other half of
+// #795: the successor wait is bounded, and what happens at the bound is a real
+// drain.
+//
+// Envoy is LIVE at OUR epoch (no handoff started) and nothing ever comes — a
+// node shutdown, a scale-down, `kubectl delete daemonset`, a replacement stuck
+// Pending. The supervisor must hold the child for the whole budget, then ask
+// Envoy to drain its listeners gracefully ONCE, wait --drain-time, and only then
+// stop it. A bare SIGTERM here is what Envoy exits on in 0.33-0.74s with every
+// connection still open, which is exactly what this branch exists to avoid.
+func TestHandleShutdownDrainsGracefullyWhenNoSuccessorArrives(t *testing.T) {
+	requireShell(t)
+
+	f := newFakeAdmin(t, adminLiveState, 0) // ours, still serving
+	s := newShutdownSupervisor(t, f)
+	// DrainTime 1s + shutdownGrace 5s + margin 10s + 2s of actual wait.
+	s.cfg.TerminationGrace = 18 * time.Second
+	require.Equal(t, 2*time.Second, s.successorWaitBudget())
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- s.handleShutdown(cancelledCtx()) }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("handleShutdown never gave up waiting for a successor that cannot come")
+	}
+
+	assert.GreaterOrEqual(t, time.Since(start), 2*time.Second+s.cfg.DrainTime,
+		"the budget must be spent waiting, and the drain window honoured after it")
+	assert.Equal(t, int64(1), f.drainHits.Load(), "listeners must be drained exactly once")
+	assert.Equal(t, "graceful", f.drainQuery.Load(), "the drain must be the graceful one")
+	assert.False(t, s.childTracked(0), "the child must be SIGTERMed and reaped after the drain")
+}
+
+// TestHandleShutdownStopsADeadChildWithoutDraining is the fourth branch: the
+// admin does not answer at all, so the child is gone or its main thread is
+// wedged. There is nothing to drain and no successor to wait for — asking a
+// dead admin to drain would only burn the request timeout.
+func TestHandleShutdownStopsADeadChildWithoutDraining(t *testing.T) {
+	requireShell(t)
+
+	f := newFakeAdmin(t, adminLiveState, 0)
+	s := newShutdownSupervisor(t, f)
+	s.cfg.TerminationGrace = 180 * time.Second
+	// The admin stops answering entirely (a wedged main thread leaves the socket
+	// bound but never accepting; here, closed).
+	f.srv.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- s.handleShutdown(cancelledCtx()) }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("an unreachable admin must not put the shutdown into a successor wait")
+	}
+	assert.Zero(t, f.drainHits.Load(), "a dead admin must not be asked to drain")
+	assert.False(t, s.childTracked(0), "the child must still be reaped")
 }

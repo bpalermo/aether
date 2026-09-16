@@ -313,8 +313,28 @@ literally): `--envoy-path`
 `--drain-time` (`45s`), `--parent-shutdown-time` (`60s`), `--watch-config`
 (`true`), `--state-dir` (`/run/aether/hotrestart`), `--ready-marker`, `--envoy-arg`
 (repeatable), `--handoff-deadline`/`--admin-unresponsive-deadline` (`0` = defaults),
+`--termination-grace` (`0`), `--shutdown-drain-immediately` (`false`),
 `--admin-address` (`127.0.0.1:9901`), `--install-path`,
 `--install-readiness-path`, `--readiness-check` (deprecated), `--otlp-endpoint`.
+
+`--termination-grace` is the pod's own `terminationGracePeriodSeconds` (the chart
+passes the same value it sets on the pod spec; `180s` as deployed). The supervisor
+cannot read it from the API, and it is the only non-arbitrary bound on how long a
+SIGTERM may wait for a successor before the kubelet's SIGKILL settles the matter.
+The wait budget is `terminationGrace − (drainTime + 5s) − 10s`, i.e. 155s at the
+deployed values; `0` means "unknown", which keeps the wait unbounded (the
+pre-#771 behaviour, and what every chart predating the flag gets).
+
+`--shutdown-drain-immediately` is the escape hatch for a deployment where no
+replacement pod can overlap this one — a DaemonSet without `maxSurge`, or a
+single-instance proxy. **Leave it off wherever a surge replacement exists.** On
+SIGTERM with Envoy still serving at our own epoch, the default is to keep serving
+and wait (bounded as above) for the replacement's Envoy to hot-restart ours; that
+wait is the entire reason `kubectl delete pod` — and therefore node drain,
+eviction and preemption — costs the node's data plane nothing. Turning it on
+trades that for a prompt, still-graceful drain: `POST /drain_listeners?graceful`,
+wait `--drain-time`, then SIGTERM. It never restores the bare SIGTERM that #795
+was filed for. The chart does not set it.
 
 `--install-path` and `--install-readiness-path` are the initContainer's staging
 mode: the first self-copies this binary to the shared volume as the supervisor,

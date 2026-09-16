@@ -55,6 +55,13 @@ type fakeAdminServer struct {
 	serverInfoHits atomic.Int64
 	readyHits      atomic.Int64
 	conns          atomic.Int64
+	// drainHits counts POST /drain_listeners and drainQuery records the last
+	// query string it was called with, so a test can assert both THAT the
+	// graceful drain was requested and that it asked for `graceful` — the
+	// parameter that is the whole difference between a drain and an immediate
+	// close (issue #795).
+	drainHits  atomic.Int64
+	drainQuery atomic.Value // string
 }
 
 func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
@@ -81,6 +88,15 @@ func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		fmt.Fprintf(w, "%s\n", state)
+	})
+
+	mux.HandleFunc("/drain_listeners", func(w http.ResponseWriter, r *http.Request) {
+		f.drainHits.Add(1)
+		f.drainQuery.Store(r.URL.RawQuery)
+		if f.wedged(r) {
+			return
+		}
+		fmt.Fprint(w, "OK\n")
 	})
 
 	f.srv = httptest.NewUnstartedServer(mux)

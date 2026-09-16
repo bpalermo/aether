@@ -118,11 +118,64 @@ func (s *Supervisor) logAdminReverifyBudget(ctx context.Context) {
 const (
 	adminReadyBodyLimit      = 64      // "PRE_INITIALIZING\n" and friends
 	adminServerInfoBodyLimit = 1 << 20 // /server_info is a few KB; cap the unbounded doc
+	adminDrainBodyLimit      = 256     // "OK\n"
 	adminDialTimeout         = 1 * time.Second
 	adminIdleConnTimeout     = 30 * time.Second
 	adminLiveState           = "LIVE"
 	epochUnverified          = -1
 )
+
+// adminDrainPath is Envoy's graceful listener drain. The `graceful` parameter is
+// what makes it a drain rather than an immediate close: Envoy runs its normal
+// drain sequence — the same one a hot-restart parent runs — over the window set
+// by --drain-time-s (and --drain-strategy), so in-flight requests finish and
+// the listeners stop accepting on a schedule instead of all at once.
+//
+// This is the thing a bare SIGTERM is NOT. Envoy's SIGTERM handler exits the
+// server outright: measured on talos-main during the rev214 validation, `caught
+// ENVOY_SIGTERM` to `exiting` took 0.74s and 0.33s, taking every connection on
+// the node with it (issue #795).
+const adminDrainPath = "/drain_listeners?graceful"
+
+// adminDrainRequestTimeout bounds the drain REQUEST, not the drain. Envoy
+// answers /drain_listeners as soon as the sequence is started; the caller then
+// waits out DrainTime itself.
+const adminDrainRequestTimeout = 2 * readyPollInterval
+
+// drainListeners asks Envoy to start a graceful listener drain and reports
+// whether it accepted. Best-effort: a supervisor that cannot reach its own
+// admin still has to stop Envoy, so the caller proceeds either way.
+//
+// Like every other shutdown-path request this runs on a context DETACHED from
+// the caller's, which is already cancelled by the signal handler by the time
+// any of this executes — otherwise http.Client.Do returns "context canceled" in
+// microseconds without opening a socket, and the drain silently never happens
+// (issue #771, the same trap, on a path where it would be invisible).
+func (s *Supervisor) drainListeners(ctx context.Context) bool {
+	reqCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), adminDrainRequestTimeout)
+	defer cancel()
+
+	url := "http://" + s.cfg.AdminAddress + adminDrainPath
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, nil)
+	if err != nil {
+		s.log.ErrorContext(ctx, "building the envoy graceful-drain request", "error", err, "url", url)
+		return false
+	}
+	resp, err := s.adminAuthoritative.Do(req)
+	if err != nil {
+		s.log.ErrorContext(ctx, "envoy admin did not accept the graceful listener drain; "+
+			"stopping it without one", "error", err, "url", url)
+		return false
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, adminDrainBodyLimit))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.log.ErrorContext(ctx, "envoy admin rejected the graceful listener drain; stopping it without one",
+			"status", resp.StatusCode, "body", strings.TrimSpace(string(body)), "url", url)
+		return false
+	}
+	return true
+}
 
 // newAdminClients builds the two Envoy-admin HTTP clients. The difference
 // between them is a correctness invariant, not tuning:
