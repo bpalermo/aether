@@ -45,6 +45,40 @@ import (
 
 const ghostSweepInterval = 60 * time.Second
 
+// Deadlines for everything the sweep does out of process (S19/S20, #772).
+//
+// The sweep used to run end to end under lifecycleMu with untimed registry and
+// Eviction API calls, so a rolling registrar or a stalled apiserver blocked every
+// CNI ADD/DEL that needed the lock — the credible mechanism for a DEL timing out
+// and leaving a stale netns behind for Envoy to fault on (#245).
+//
+// The budget these have to fit inside is the CNI plugin's own: cni/internal/plugin
+// bounds an ADD at 5s (addTimeout) and a DEL at 5s (delTimeout). Nothing here may
+// consume that whole budget, because the plugin's call still has its own work to
+// do after it finally gets the lock.
+const (
+	// lifecycleRegistryTimeout bounds ONE registry RPC issued while lifecycleMu is
+	// held: the sweep's per-endpoint (de)registration, the liveness loop's health
+	// re-registration and the termination watch's drain marking. It is therefore
+	// the worst case a CNI ADD/DEL can wait on the lock, which is why it sits well
+	// under the plugin's 5s — a DEL queueing behind one still has >3s of its own
+	// budget left. Every one of these calls is best-effort (the sweep retries in
+	// 60s, the liveness loop in 5s, CNI DEL reconciles via the sweep), so being cut
+	// off costs a retry and nothing else.
+	lifecycleRegistryTimeout = 2 * time.Second
+
+	// sweepListTimeout bounds the authoritative registry listing that opens each
+	// pass. It runs with the lock NOT held, so it blocks no CNI call; the bound
+	// only stops a wedged registrar pinning sweep passes on top of each other.
+	sweepListTimeout = 10 * time.Second
+
+	// sweepAPITimeout bounds the sweep's Kubernetes calls — the node-scoped pod
+	// List, the Eviction API request and the Event write. These also run with the
+	// lock released; the bound keeps a stalled apiserver from holding a pass open
+	// indefinitely.
+	sweepAPITimeout = 5 * time.Second
+)
+
 // Prune circuit-breaker guards (#566, 2026-07-19 power-blip incident). A
 // transient netns-stat failure across the whole fleet must not be read as every
 // pod becoming a ghost at once.
@@ -196,9 +230,83 @@ func (s *CNIServer) drainLivenessForget(state *livenessState) {
 	s.livenessForget = nil
 }
 
+// sweepPlan is what one pass decided to do: computed under lifecycleMu from a
+// single consistent view of storage, then executed with the lock released. The
+// counts ride along because the pass reports them as metrics and span attributes
+// whether or not the execution half finds anything left to do.
+type sweepPlan struct {
+	// evictions are the self-heal candidates in priority order
+	// (stale-while-Running first — after a node reboot it is the whole node). The
+	// per-pass budget is applied at execution time so a PDB-blocked eviction does
+	// not consume it, exactly as before the split.
+	evictions []plannedEviction
+	// ghosts are registry entries for this node that no live local pod accounted
+	// for at plan time; each is re-validated before it is deregistered.
+	ghosts []plannedGhost
+	// missing are live local pods the registry had no entry for.
+	missing []plannedMissing
+
+	stalePruned    int
+	orphansPruned  int
+	staleRunning   int
+	missingStorage int
+	storedPods     int
+
+	// err is a plan-phase failure (storage unreadable), reported as a sweep error.
+	err error
+}
+
+// evictionKind routes a planned eviction to its metric and its streak map.
+type evictionKind int
+
+const (
+	// evictionLostAdd is the #567 path: a live mesh pod with no storage entry.
+	evictionLostAdd evictionKind = iota
+	// evictionStaleRunning is the #640 path: a Running pod whose only storage
+	// entries reference dead network namespaces.
+	evictionStaleRunning
+)
+
+// plannedEviction is one self-heal eviction the plan phase selected, carrying the
+// bookkeeping the execution phase clears if the Eviction API accepts it.
+type plannedEviction struct {
+	kind         evictionKind
+	pod          *corev1.Pod
+	reason       string
+	eventMessage string
+	logMessage   string
+	// streakKey is the namespace/name (lost-ADD) or container ID
+	// (stale-while-Running) whose streak resets once the eviction is accepted.
+	streakKey string
+}
+
+// plannedGhost is one registry endpoint the plan phase judged a ghost.
+type plannedGhost struct {
+	service string
+	ip      string
+	podName string
+}
+
+// plannedMissing is one live local pod the registry has no endpoint for, keyed by
+// the IP found missing (a dual-stack pod is planned per IP, as the pre-split code
+// registered per IP).
+type plannedMissing struct {
+	ip  string
+	pod *cniv1.CNIPod
+}
+
 // sweepGhostEndpoints reconciles this node's registry endpoints with local pod
 // storage: deregisters entries no live local pod accounts for, and re-registers
 // live pods the registry is missing.
+//
+// It runs in two halves (S19, #772). The plan half holds lifecycleMu and does only
+// local work — read storage, prune dead entries, update the lifecycleMu-guarded
+// streak bookkeeping, classify — so an in-flight AddPod or RemovePod still cannot
+// race the liveness judgment. The execution half issues the RPCs the plan implies
+// with the lock released, re-taking it per mutation just long enough to
+// re-validate the decision and make one BOUNDED registry call. What used to be a
+// single critical section spanning a whole pass of untimed registry and Eviction
+// API calls is now a series of holds each capped at lifecycleRegistryTimeout.
 func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// A sweep correction is direct evidence of a missed update somewhere in the
 	// pipeline, so each iteration is traced with the corrections it made.
@@ -218,35 +326,61 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 		telemetry.EndSpan(span, retErr)
 	}()
 
-	all, err := s.listRegistryEndpoints(ctx)
+	// Both inputs are gathered with the lock NOT held, and both are bounded: the
+	// registry listing is the sweep's one unavoidable round trip to a registrar
+	// that may be rolling, and the pod List is the API-side ground truth.
+	listCtx, listCancel := context.WithTimeout(ctx, sweepListTimeout)
+	all, err := s.listRegistryEndpoints(listCtx)
+	listCancel()
 	if err != nil {
 		retErr = err
 		return
 	}
-
-	// Serialize against pod lifecycle so an in-flight AddPod (stored after the
-	// registry write) or RemovePod cannot race the liveness judgment.
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-
-	pods, err := s.storage.GetAll(ctx)
-	if err != nil {
-		s.log.DebugContext(ctx, "ghost sweep: failed to list local pods", "error", err)
-		retErr = err
-		return
-	}
-	storedPods = len(pods)
 
 	// Ground-truth reconcile: the manager cache is scoped to spec.nodeName=<this
 	// node>, so this lists exactly this node's pods, cheaply. Used to prune
 	// storage entries whose pod K8s no longer has, and to surface live pods
 	// storage is missing. If the list fails we must NOT prune by pod-absence (an
 	// empty list would nuke every entry), so that half is skipped this cycle.
-	nodePods, nodePodsOK := s.listNodePods(ctx)
+	nodeCtx, nodeCancel := context.WithTimeout(ctx, sweepAPITimeout)
+	nodePods, nodePodsOK := s.listNodePods(nodeCtx)
+	nodeCancel()
+
+	plan := s.planSweep(ctx, nodePods, nodePodsOK, all)
+	stalePruned, orphansPruned = plan.stalePruned, plan.orphansPruned
+	staleRunning, missingStorage, storedPods = plan.staleRunning, plan.missingStorage, plan.storedPods
+	if plan.err != nil {
+		retErr = plan.err
+		return
+	}
+
+	s.applyEvictions(ctx, plan.evictions)
+	ghostsRemoved = s.applyGhostDeregistrations(ctx, plan.ghosts)
+	missingRegistered = s.applyMissingRegistrations(ctx, plan.missing)
+}
+
+// planSweep is the locked half of a pass. It holds lifecycleMu across local work
+// only — storage reads and prunes, the snapshot-cache listener drops, the streak
+// bookkeeping documented as lifecycleMu-guarded, and the classification — and
+// returns everything the pass intends to do out of process.
+func (s *CNIServer) planSweep(ctx context.Context, nodePods map[string]*corev1.Pod, nodePodsOK bool, all map[string][]*registryv1.ServiceEndpoint) sweepPlan {
+	// Serialize against pod lifecycle so an in-flight AddPod (stored after the
+	// registry write) or RemovePod cannot race the liveness judgment.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	var plan sweepPlan
+	pods, err := s.storage.GetAll(ctx)
+	if err != nil {
+		s.log.DebugContext(ctx, "ghost sweep: failed to list local pods", "error", err)
+		plan.err = err
+		return plan
+	}
+	plan.storedPods = len(pods)
 
 	var breakerTripped bool
 	var staleRunningRipe []staleRunningPod
-	pods, stalePruned, orphansPruned, staleRunning, staleRunningRipe, breakerTripped = s.pruneStaleStoragePods(ctx, pods, nodePods, nodePodsOK)
+	pods, plan.stalePruned, plan.orphansPruned, plan.staleRunning, staleRunningRipe, breakerTripped = s.pruneStaleStoragePods(ctx, pods, nodePods, nodePodsOK)
 
 	// Both self-heal paths evict a pod to force its sandbox to be recreated and a
 	// fresh CNI ADD to fire. That only heals anything if a CNI ADD would actually
@@ -257,16 +391,18 @@ func (s *CNIServer) sweepGhostEndpoints(ctx context.Context) {
 	// only the eviction, exactly as the #566 prune breaker does.
 	evictionsBlocked := breakerTripped || s.unchained()
 
-	// Self-heal evictions share one per-pass budget so the two paths can never
-	// jointly exceed the rate cap. Stale-while-Running goes first: after a node
-	// reboot it is the entire node's population (#640).
-	budget := &evictionBudget{remaining: sweepEvictPerPass}
-	s.evictStaleRunningPods(ctx, staleRunningRipe, evictionsBlocked, budget)
-	missingStorage = s.reportMissingStoragePods(ctx, pods, nodePods, nodePodsOK, evictionsBlocked, budget)
+	// Stale-while-Running goes first: after a node reboot it is the entire node's
+	// population (#640). The two paths share one per-pass budget, applied when the
+	// evictions are executed.
+	plan.evictions = s.planStaleRunningEvictions(staleRunningRipe, evictionsBlocked)
+	var missingEvictions []plannedEviction
+	plan.missingStorage, missingEvictions = s.planMissingStorageEvictions(ctx, pods, nodePods, nodePodsOK, evictionsBlocked)
+	plan.evictions = append(plan.evictions, missingEvictions...)
 
 	live, terminating := s.classifyPods(pods)
-	ghostsRemoved = s.deregisterGhostEndpoints(ctx, all, live, terminating)
-	missingRegistered = s.registerMissingEndpoints(ctx, live, all)
+	plan.ghosts = s.planGhostDeregistrations(all, live, terminating)
+	plan.missing = s.planMissingRegistrations(live, all)
+	return plan
 }
 
 // listRegistryEndpoints fetches all registry endpoints for this node across all
@@ -666,13 +802,17 @@ func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns stri
 	return false
 }
 
-// reportMissingStoragePods surfaces live mesh-managed K8s pods that have no
-// entry in local storage (a lost CNI ADD) and, after lostAddEvictThreshold
-// consecutive detections, evicts them to force a fresh CNI ADD (#567). Returns
-// the count of such pods found. evictionsBlocked skips eviction entirely while
-// still reporting: the #566 breaker (mass loss means fix the storage cause, not
-// evict the world) or an unchained conflist (#667, the eviction cannot heal).
-func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, evictionsBlocked bool, budget *evictionBudget) int {
+// planMissingStorageEvictions surfaces live mesh-managed K8s pods that have no
+// entry in local storage (a lost CNI ADD) and selects the ones that have been
+// missing for lostAddEvictThreshold consecutive passes for eviction, which forces
+// a fresh CNI ADD (#567). Returns the count of such pods found and the eviction
+// candidates. evictionsBlocked plans no eviction at all while still reporting:
+// the #566 breaker (mass loss means fix the storage cause, not evict the world)
+// or an unchained conflist (#667, where the eviction cannot heal anything).
+//
+// Runs under lifecycleMu — the streak map is guarded by it — and performs no RPC;
+// applyEvictions issues the Eviction API requests afterwards.
+func (s *CNIServer) planMissingStorageEvictions(ctx context.Context, pods []*cniv1.CNIPod, nodePods map[string]*corev1.Pod, nodePodsOK bool, evictionsBlocked bool) (int, []plannedEviction) {
 	// Surface live mesh-managed pods on this node that local storage has no entry
 	// for: a lost CNI ADD (talos worker-01, 2026-06-22: prober-k7vsm running with
 	// no listener). The agent has no CNI data (netns, IPs) to synthesize a
@@ -683,7 +823,7 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 		// Without a trustworthy pod list we cannot tell missing from mid-ADD; drop
 		// all streaks so a list blip never accrues toward an eviction.
 		s.missingStorageStreaks = nil
-		return 0
+		return 0, nil
 	}
 	if s.missingStorageStreaks == nil {
 		s.missingStorageStreaks = map[string]int{}
@@ -696,6 +836,7 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 	missing := s.collectMissingStoragePods(stored, nodePods)
 	s.resetVanishedMissingStreaks(missing)
 
+	var planned []plannedEviction
 	for _, kp := range missing {
 		key := podKey(kp.GetNamespace(), kp.GetName())
 		s.missingStorageStreaks[key]++
@@ -707,43 +848,73 @@ func (s *CNIServer) reportMissingStoragePods(ctx context.Context, pods []*cniv1.
 		if evictionsBlocked {
 			continue // #566 breaker tripped, or #667 unchained: eviction is futile
 		}
-		if streak < lostAddEvictThreshold || budget.remaining <= 0 {
+		if streak < lostAddEvictThreshold {
 			continue
 		}
-		if s.evictSelfHealPod(ctx, kp, evictReasonLostAdd,
-			"aether agent evicted this pod: CNI ADD was lost (no mesh listener); eviction forces sandbox recreation to re-run CNI ADD",
-			"ghost sweep: evicted lost-ADD pod to force CNI re-ADD") {
-			s.metrics.lostAddEvicted(ctx)
-			budget.remaining--
-			delete(s.missingStorageStreaks, key) // don't re-count until re-detected
-		}
+		planned = append(planned, plannedEviction{
+			kind:         evictionLostAdd,
+			pod:          kp,
+			reason:       evictReasonLostAdd,
+			eventMessage: "aether agent evicted this pod: CNI ADD was lost (no mesh listener); eviction forces sandbox recreation to re-run CNI ADD",
+			logMessage:   "ghost sweep: evicted lost-ADD pod to force CNI re-ADD",
+			streakKey:    key,
+		})
 	}
-	return len(missing)
+	return len(missing), planned
 }
 
-// evictStaleRunningPods evicts pods whose only storage entries reference dead
-// network namespaces while the API reports them Running (#640 — the post-reboot
-// boot race: the pod is up on the base CNI with no mesh interception, and only a
-// sandbox recreation re-runs CNI ADD). Shares the per-pass budget with the
-// lost-ADD path and honors both eviction interlocks (#566 breaker, #667
-// unchained conflist).
-func (s *CNIServer) evictStaleRunningPods(ctx context.Context, ripe []staleRunningPod, evictionsBlocked bool, budget *evictionBudget) {
+// planStaleRunningEvictions selects pods whose only storage entries reference
+// dead network namespaces while the API reports them Running (#640 — the
+// post-reboot boot race: the pod is up on the base CNI with no mesh
+// interception, and only a sandbox recreation re-runs CNI ADD). Honors both
+// eviction interlocks (#566 breaker, #667 unchained conflist); the per-pass
+// budget it shares with the lost-ADD path is applied by applyEvictions.
+func (s *CNIServer) planStaleRunningEvictions(ripe []staleRunningPod, evictionsBlocked bool) []plannedEviction {
 	if evictionsBlocked {
 		// #566: correlated netns weirdness, do not evict on it. #667: aether is not
 		// chained, so the replacement pod would come up unmeshed too.
-		return
+		return nil
 	}
+	planned := make([]plannedEviction, 0, len(ripe))
 	for _, sr := range ripe {
+		planned = append(planned, plannedEviction{
+			kind:         evictionStaleRunning,
+			pod:          sr.kp,
+			reason:       evictReasonStaleRegistration,
+			eventMessage: "aether agent evicted this pod: its mesh registration references a defunct network namespace while the pod is Running (node-reboot CNI boot race); eviction forces sandbox recreation to re-run CNI ADD",
+			logMessage:   "ghost sweep: evicted stale-while-Running pod to force CNI re-ADD (#640)",
+			streakKey:    sr.containerID,
+		})
+	}
+	return planned
+}
+
+// applyEvictions issues the planned Eviction API requests with lifecycleMu NOT
+// held — an eviction is an apiserver write, and blocking every CNI ADD/DEL on one
+// is exactly what S19 is about. The shared per-pass budget is spent here rather
+// than at plan time so a PDB-blocked request (429, expected and benign) does not
+// consume it, matching the pre-split behaviour. The only work that re-takes the
+// lock is clearing the streak, which lives under it.
+func (s *CNIServer) applyEvictions(ctx context.Context, evictions []plannedEviction) {
+	budget := &evictionBudget{remaining: sweepEvictPerPass}
+	for _, e := range evictions {
 		if budget.remaining <= 0 {
 			return
 		}
-		if s.evictSelfHealPod(ctx, sr.kp, evictReasonStaleRegistration,
-			"aether agent evicted this pod: its mesh registration references a defunct network namespace while the pod is Running (node-reboot CNI boot race); eviction forces sandbox recreation to re-run CNI ADD",
-			"ghost sweep: evicted stale-while-Running pod to force CNI re-ADD (#640)") {
-			s.metrics.staleRunningEvicted(ctx)
-			budget.remaining--
-			delete(s.staleRunningStreaks, sr.containerID) // don't re-count until re-detected
+		if !s.evictSelfHealPod(ctx, e.pod, e.reason, e.eventMessage, e.logMessage) {
+			continue
 		}
+		budget.remaining--
+		s.lifecycleMu.Lock()
+		switch e.kind {
+		case evictionLostAdd:
+			s.metrics.lostAddEvicted(ctx)
+			delete(s.missingStorageStreaks, e.streakKey) // don't re-count until re-detected
+		case evictionStaleRunning:
+			s.metrics.staleRunningEvicted(ctx)
+			delete(s.staleRunningStreaks, e.streakKey)
+		}
+		s.lifecycleMu.Unlock()
 	}
 }
 
@@ -791,7 +962,10 @@ func (s *CNIServer) evictSelfHealPod(ctx context.Context, kp *corev1.Pod, reason
 	if s.evictPod == nil {
 		return false
 	}
-	if err := s.evictPod(ctx, kp.GetNamespace(), kp.GetName()); err != nil {
+	// Bounded: a stalled apiserver must not hold a sweep pass open (S19).
+	evictCtx, cancel := context.WithTimeout(ctx, sweepAPITimeout)
+	defer cancel()
+	if err := s.evictPod(evictCtx, kp.GetNamespace(), kp.GetName()); err != nil {
 		// A PDB block (429 TooManyRequests) is expected and benign — the pod stays
 		// in the detection set and eviction is retried on a later pass.
 		s.log.WarnContext(ctx, "ghost sweep: failed to evict pod for self-heal; will retry",
@@ -830,7 +1004,11 @@ func (s *CNIServer) recordPodEvent(ctx context.Context, kp *corev1.Pod, reason, 
 		LastTimestamp:  now,
 		Count:          1,
 	}
-	if err := s.k8sClient.Create(ctx, ev); err != nil {
+	// Bounded for the same reason as the eviction itself; the Event is
+	// best-effort, so being cut off costs only the record.
+	createCtx, cancel := context.WithTimeout(ctx, sweepAPITimeout)
+	defer cancel()
+	if err := s.k8sClient.Create(createCtx, ev); err != nil {
 		s.log.DebugContext(ctx, "ghost sweep: failed to record eviction event", "pod", kp.GetName(), "error", err)
 	}
 }
@@ -859,20 +1037,19 @@ func (s *CNIServer) classifyPods(pods []*cniv1.CNIPod) (live map[string]*cniv1.C
 	return live, terminating
 }
 
-// deregisterGhostEndpoints removes registry entries for this node that no live
-// local pod accounts for. Returns the count of ghost endpoints removed.
-func (s *CNIServer) deregisterGhostEndpoints(ctx context.Context, all map[string][]*registryv1.ServiceEndpoint, live map[string]*cniv1.CNIPod, terminating map[string]struct{}) int {
-	ghostsRemoved := 0
+// planGhostDeregistrations selects the registry entries for this node that no
+// live local pod accounts for. Pure: it makes no call and mutates nothing.
+func (s *CNIServer) planGhostDeregistrations(all map[string][]*registryv1.ServiceEndpoint, live map[string]*cniv1.CNIPod, terminating map[string]struct{}) []plannedGhost {
+	var ghosts []plannedGhost
 	for service, endpoints := range all {
-		ghostsRemoved += s.deregisterGhostEndpointsForService(ctx, service, endpoints, live, terminating)
+		ghosts = append(ghosts, s.planGhostsForService(service, endpoints, live, terminating)...)
 	}
-	return ghostsRemoved
+	return ghosts
 }
 
-// deregisterGhostEndpointsForService removes ghost endpoints for a single service.
-// Returns the count of endpoints deregistered.
-func (s *CNIServer) deregisterGhostEndpointsForService(ctx context.Context, service string, endpoints []*registryv1.ServiceEndpoint, live map[string]*cniv1.CNIPod, terminating map[string]struct{}) int {
-	removed := 0
+// planGhostsForService selects the ghost endpoints of a single service.
+func (s *CNIServer) planGhostsForService(service string, endpoints []*registryv1.ServiceEndpoint, live map[string]*cniv1.CNIPod, terminating map[string]struct{}) []plannedGhost {
+	var ghosts []plannedGhost
 	for _, ep := range endpoints {
 		// Own only this cluster's slice of this node's endpoints: registrars
 		// run per cluster against a shared mesh registry, and node names are
@@ -887,16 +1064,88 @@ func (s *CNIServer) deregisterGhostEndpointsForService(ctx context.Context, serv
 		if _, ok := terminating[ep.GetIp()]; ok {
 			continue // draining; CNI DEL owns the final removal
 		}
-		if err := s.registry.UnregisterEndpoint(ctx, service, ep.GetIp()); err != nil {
-			s.log.ErrorContext(ctx, "ghost sweep: failed to deregister ghost endpoint", "error", err,
-				"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
-			continue
+		ghosts = append(ghosts, plannedGhost{
+			service: service,
+			ip:      ep.GetIp(),
+			podName: ep.GetKubernetesMetadata().GetPodName(),
+		})
+	}
+	return ghosts
+}
+
+// applyGhostDeregistrations issues the planned deregistrations. Returns the count
+// actually removed.
+func (s *CNIServer) applyGhostDeregistrations(ctx context.Context, ghosts []plannedGhost) int {
+	removed := 0
+	for _, g := range ghosts {
+		if s.deregisterGhost(ctx, g) {
+			removed++
 		}
-		removed++
-		s.log.InfoContext(ctx, "ghost sweep: deregistered ghost endpoint",
-			"service", service, "ip", ep.GetIp(), "pod", ep.GetKubernetesMetadata().GetPodName())
 	}
 	return removed
+}
+
+// deregisterGhost removes one ghost endpoint. It re-takes lifecycleMu for exactly
+// as long as it needs to re-validate the judgment — the plan is a snapshot, and a
+// CNI ADD may have raced the pod's IP back into storage since — and to make ONE
+// bounded registry call.
+//
+// Holding the lock across that call is deliberate rather than an oversight: the
+// check and the deregistration have to be atomic against RemovePod, or the sweep
+// can unregister an endpoint a pod just re-acquired and blackhole it until the
+// next pass. What the split buys is that the hold is now one call capped at
+// lifecycleRegistryTimeout instead of a whole pass of unbounded ones, so the
+// worst a CNI DEL waits is that cap (Go hands a starved waiter the mutex on
+// release) rather than however long the registrar takes to finish rolling.
+func (s *CNIServer) deregisterGhost(ctx context.Context, g plannedGhost) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	if s.podHoldsIP(ctx, g.ip) {
+		s.log.DebugContext(ctx, "ghost sweep: endpoint is accounted for again; skipping deregistration",
+			"service", g.service, "ip", g.ip, "pod", g.podName)
+		return false
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
+	defer cancel()
+	if err := s.registry.UnregisterEndpoint(callCtx, g.service, g.ip); err != nil {
+		s.log.ErrorContext(ctx, "ghost sweep: failed to deregister ghost endpoint", "error", err,
+			"service", g.service, "ip", g.ip, "pod", g.podName)
+		return false
+	}
+	s.log.InfoContext(ctx, "ghost sweep: deregistered ghost endpoint",
+		"service", g.service, "ip", g.ip, "pod", g.podName)
+	return true
+}
+
+// podHoldsIP reports whether local storage now has a non-ignorable pod holding
+// this IP — live or terminating. A terminating pod's endpoint is deliberately
+// kept registered (marked DRAINING; CNI DEL owns the final removal), so either
+// state means the endpoint is no longer a ghost.
+//
+// Called under lifecycleMu, and it re-reads storage rather than trusting the
+// plan's snapshot, which is the whole point. It is a linear scan per ghost, which
+// costs nothing in the steady state where there are no ghosts at all, and stays
+// trivial at node-local pod counts when there are.
+func (s *CNIServer) podHoldsIP(ctx context.Context, ip string) bool {
+	pods, err := s.storage.GetAll(ctx)
+	if err != nil {
+		// Storage unreadable: refuse to deregister on a guess.
+		s.log.DebugContext(ctx, "ghost sweep: failed to re-read local pods; skipping deregistration", "error", err)
+		return true
+	}
+	for _, p := range pods {
+		if isIgnorablePod(p) {
+			continue
+		}
+		for _, podIP := range p.GetIps() {
+			if podIP == ip {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // registeredIPs returns the set of IPs present in the registry for this node,
@@ -916,38 +1165,73 @@ func (s *CNIServer) registeredIPs(all map[string][]*registryv1.ServiceEndpoint, 
 	return registered
 }
 
-// registerMissingEndpoints registers live local pods absent from the registry
-// (lost ADD registration, registry data loss). Returns the count registered.
-func (s *CNIServer) registerMissingEndpoints(ctx context.Context, live map[string]*cniv1.CNIPod, all map[string][]*registryv1.ServiceEndpoint) int {
-	// Missing direction: live local pods absent from the registry (lost ADD
-	// registration, registry data loss). Register at the mode-default health
-	// (EDS mode: UNHEALTHY) and reset the liveness transition cache so the next
-	// healthy observation re-promotes.
+// planMissingRegistrations selects live local pods absent from the registry (lost
+// ADD registration, registry data loss). Pure: it makes no call and mutates
+// nothing.
+func (s *CNIServer) planMissingRegistrations(live map[string]*cniv1.CNIPod, all map[string][]*registryv1.ServiceEndpoint) []plannedMissing {
 	registered := s.registeredIPs(all, live)
-	missingRegistered := 0
+	var missing []plannedMissing
 	for ip, pod := range live {
 		if _, ok := registered[ip]; ok {
 			continue
 		}
-		serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, pod)
-		if err != nil {
-			s.log.DebugContext(ctx, "ghost sweep: failed to build endpoint for missing pod", "pod", pod.GetName(), "error", err)
-			continue
-		}
-		if endpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
-			endpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
-		}
-		if err := s.registry.RegisterEndpoint(ctx, serviceName, protocol, endpoint); err != nil {
-			s.log.ErrorContext(ctx, "ghost sweep: failed to register missing endpoint", "error", err,
-				"service", serviceName, "ip", ip, "pod", pod.GetName())
-			continue
-		}
-		s.forgetLiveness(pod.GetContainerId())
-		missingRegistered++
-		s.log.InfoContext(ctx, "ghost sweep: registered missing endpoint",
-			"service", serviceName, "ip", ip, "pod", pod.GetName())
+		missing = append(missing, plannedMissing{ip: ip, pod: pod})
 	}
-	return missingRegistered
+	return missing
+}
+
+// applyMissingRegistrations registers the planned endpoints. Returns the count
+// registered.
+func (s *CNIServer) applyMissingRegistrations(ctx context.Context, missing []plannedMissing) int {
+	registered := 0
+	for _, m := range missing {
+		if s.registerMissingEndpoint(ctx, m) {
+			registered++
+		}
+	}
+	return registered
+}
+
+// registerMissingEndpoint registers one endpoint the registry was missing, at the
+// mode-default health (EDS mode: UNHEALTHY), and resets the liveness transition
+// cache so the next healthy observation re-promotes.
+//
+// Like deregisterGhost it re-takes lifecycleMu around the re-validation and ONE
+// bounded call. The re-validation matters more in this direction: RemovePod holds
+// the lock across "delete from storage, then unregister", so registering from a
+// stale plan could resurrect an endpoint the DEL just removed — the same hazard
+// the liveness loop's re-check guards against (docs/proposals/002, R4).
+func (s *CNIServer) registerMissingEndpoint(ctx context.Context, m plannedMissing) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	cur, err := s.storage.GetResource(ctx, types.ContainerID(m.pod.GetContainerId()))
+	if err != nil || cur.GetTerminating() {
+		s.log.DebugContext(ctx, "ghost sweep: pod gone or terminating; skipping missing registration",
+			"pod", m.pod.GetName(), "ip", m.ip)
+		return false
+	}
+
+	serviceName, protocol, endpoint, err := registry.NewServiceEndpointFromCNIPod(s.clusterName, s.nodeName, s.nodeRegion, s.nodeZone, s.nodeIP, cur)
+	if err != nil {
+		s.log.DebugContext(ctx, "ghost sweep: failed to build endpoint for missing pod", "pod", cur.GetName(), "error", err)
+		return false
+	}
+	if endpoint.GetHealthCheckMode() == registryv1.ServiceEndpoint_HEALTH_CHECK_MODE_EDS {
+		endpoint.Health = registryv1.ServiceEndpoint_HEALTH_UNHEALTHY
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
+	defer cancel()
+	if err := s.registry.RegisterEndpoint(callCtx, serviceName, protocol, endpoint); err != nil {
+		s.log.ErrorContext(ctx, "ghost sweep: failed to register missing endpoint", "error", err,
+			"service", serviceName, "ip", m.ip, "pod", cur.GetName())
+		return false
+	}
+	s.forgetLiveness(cur.GetContainerId())
+	s.log.InfoContext(ctx, "ghost sweep: registered missing endpoint",
+		"service", serviceName, "ip", m.ip, "pod", cur.GetName())
+	return true
 }
 
 // listNodePods returns this node's pods keyed by namespace/name. The agent's

@@ -19,10 +19,14 @@ go_library(
 
 go_test(
     name = "storage_test",
-    srcs = ["local_test.go"],
+    srcs = [
+        "isolation_test.go",
+        "local_test.go",
+    ],
     embed = [":storage"],
     deps = [
         "//agent/types",
+        "//api/aether/cni/v1:cni",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_protobuf//encoding/protojson",
