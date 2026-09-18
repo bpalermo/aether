@@ -58,6 +58,7 @@ go_test(
     srcs = [
         "ghostsweep_lock_test.go",
         "ghostsweep_test.go",
+        "ghostsweep_unsubscribe_test.go",
         "identity_test.go",
         "lifecycle_race_test.go",
         "liveness_test.go",
@@ -82,6 +83,7 @@ go_test(
         "//api/aether/registry/v1:registry",
         "//common/constants/annotations",
         "//common/constants/labels",
+        "//common/spire/spiretest",
         "//registry",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

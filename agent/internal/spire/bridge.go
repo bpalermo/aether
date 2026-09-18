@@ -505,6 +505,15 @@ func (b *Bridge) drainSVIDStream(subCtx context.Context, ch <-chan *brokerpb.Sub
 	}
 }
 
+// Subscribed reports whether a Broker subscription exists for the pod in the
+// given network namespace.
+func (b *Bridge) Subscribed(netns string) bool {
+	b.subsMu.Lock()
+	defer b.subsMu.Unlock()
+	_, ok := b.subscriptions[netns]
+	return ok
+}
+
 // UnsubscribePod stops the Broker subscription for the pod in the given network
 // namespace. The pod's SVID secret is removed only when no other subscribed pod
 // shares the same SPIFFE ID (service account), so a rolling restart that briefly

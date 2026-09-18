@@ -793,6 +793,16 @@ func (s *CNIServer) pruneOnePod(ctx context.Context, p *cniv1.CNIPod, netns stri
 		if err := s.snapshotCache.RemovePod(ctx, netns); err != nil {
 			s.log.ErrorContext(ctx, "ghost sweep: failed to drop listener for pruned pod", "pod", p.GetName(), "netns", netns, "error", err)
 		}
+		// Stop the pod's SVID subscription too. A pruned pod never gets the CNI
+		// DEL that would have unsubscribed it, and since #798 that DEL returns
+		// without the agent when the agent is down, so this is the only place the
+		// subscription can end. Left running, it asks SPIRE for a pod that no
+		// longer exists and retries NotFound for the agent's lifetime.
+		if s.spireBridge != nil {
+			if err := s.spireBridge.UnsubscribePod(ctx, netns); err != nil {
+				s.log.ErrorContext(ctx, "ghost sweep: failed to unsubscribe SVID for pruned pod", "pod", p.GetName(), "netns", netns, "error", err)
+			}
+		}
 	}
 	switch {
 	case cand.orphaned:
