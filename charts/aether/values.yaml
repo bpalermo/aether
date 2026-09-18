@@ -77,7 +77,7 @@ otel:
 
 # System-wide SPIRE config. `enabled` is the mesh-wide mTLS switch (agent,
 # registrar, and the controller webhook serving cert); the socket paths / trust
-# domain / admin socket are per-component plumbing.
+# domain / broker socket are per-component plumbing.
 spire:
   enabled: true
   # Workload API socket path (the csi.spiffe.io mount + socket filename), shared
@@ -86,12 +86,21 @@ spire:
   # is no trustDomain value to configure (retired: it could silently disagree
   # with what SPIRE actually issues).
   workloadSocketPath: /run/secrets/workload-spiffe-uds/socket
-  # SPIRE agent admin socket (Delegated Identity API) used by the agent to mint
-  # proxy SVIDs. hostPath is bind-mounted at mountPath; the socket is socketName.
-  adminSocket:
-    hostPath: /run/spire/agent/sockets/csi.spiffe.io/admin
-    mountPath: /run/spire/admin-sockets
-    socketName: admin.sock
+  # SPIRE agent SPIFFE Broker Endpoint socket, over which the node agent brokers
+  # an X.509-SVID for every pod on its node (proposal 036). hostPath is
+  # bind-mounted at mountPath; the socket is socketName.
+  #
+  # REQUIRED: SPIRE >= 1.15.2 with its experimental broker enabled, and the
+  # agent's SPIFFE ID registered as a broker. With the spiffe/spire chart
+  # (>= 0.30) that is spire-agent.sockets.broker.{enabled,mountOnHost}=true plus
+  # a brokerAPI.brokers.<key> entry and a matching
+  # workloadAttestors.k8s.brokerAPI.brokers.<key> entry — see
+  # docs/getting-started.md. hostPath below is where that chart puts the socket
+  # directory on the node.
+  brokerSocket:
+    hostPath: /run/spire/agent/sockets/csi.spiffe.io/broker
+    mountPath: /run/spire/broker-sockets
+    socketName: broker.sock
   # How long a component may wait for SPIRE to issue its first SVID before the
   # waiting log line escalates from INFO to WARN. Startup no longer dies when the
   # Workload API is not serving yet (issue #740): it waits and keeps /healthz and

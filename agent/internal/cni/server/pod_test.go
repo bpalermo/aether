@@ -75,7 +75,7 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		storage:       stor,
 		registry:      reg,
 		snapshotCache: sc,
-		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireAdminSocketPath, sc, nil, slog.New(slog.DiscardHandler)),
+		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireBrokerSocketPath, sc, nil, slog.New(slog.DiscardHandler)),
 		ackTracker:    ack.NewTracker(slog.New(slog.DiscardHandler)),
 		healthClient:  newHealthGatewayClient(healthSocket),
 		// Effectively disables drain phase 2 so unrelated tests never race the

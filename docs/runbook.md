@@ -733,6 +733,43 @@ redirect, but nothing is pushed to Envoy until the SVID lands (and it could not 
 meshed without an identity anyway) — which is why the node reports NotReady and stays
 tainted for the duration.
 
+#### A pod has no SDS certificate: the SPIFFE Broker Endpoint
+
+Distinct from the wait above, and the failure mode is per-pod rather than
+per-node. Since proposal 036 the agent does **not** mint pod SVIDs from a
+selector set it builds itself; it presents a **Kubernetes object reference**
+(`pods`/`core`, namespace + name + UID) over the SPIRE agent's SPIFFE Broker
+Endpoint (`--spire-broker-socket`, mounted from
+`/run/spire/agent/sockets/csi.spiffe.io/broker`), and SPIRE resolves and attests
+the pod itself. A reference resolves **at request time**, which is a class of
+failure the delegated path did not have.
+
+```promql
+# references that did not resolve — a handful per pod creation is the expected
+# CNI-ADD-beats-the-kubelet-list race; a sustained rate is not
+sum by (k8s_node_name) (rate(aether_agent_spire_broker_reference_not_found_total[5m]))
+# the provider refused us: ALWAYS a policy/config problem, never transient churn
+sum by (k8s_node_name) (rate(aether_agent_spire_broker_permission_denied_total[5m]))
+```
+
+Both counters are seeded at zero, so "no series" means the agent is too old, not
+that the value is zero (#717).
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `has not resolved this pod yet` at INFO, converging in seconds | The CNI ADD beat the pod into the kubelet's pod list. Expected. | Nothing. The subscription retries on the jittered backoff. |
+| The same line escalating to **WARN** (>30s on one reference) | The pod is gone, the UID does not match what SPIRE resolved, or `podReferenceScope` is wrong for this topology. | Check the pod still exists and its UID matches; check `spire-agent`'s `experimental.broker` block lists this agent. |
+| `denied this agent the pod's identity` + `permission_denied` climbing | SPIRE's `access_policy` is `enforced` without the `impersonate-via-spire` RBAC grant, or the agent's SPIFFE ID is not in the k8s attestor's broker list (`broker "…" is not configured`). | Set `workloadAttestors.k8s.brokerAPI.accessPolicy=permissive`, or grant the RBAC. **`accessPolicy: auto` is not safe here** — it resolves to `enforced` for our reference type. |
+| `rejected the request as malformed; not retrying` | A bug in the agent (missing security header, bad reference). Never self-heals. | File it; the subscription is dead until the agent restarts. |
+| Every subscribe fails `Unavailable` on a healthy SPIRE agent | The agent's SPIFFE ID is not in `spire-agent.brokerAPI.brokers.*` — an unauthorised broker is rejected at the **TLS layer**, which gRPC reports as `Unavailable`, not `PermissionDenied`. | Fix `idTemplate` to the agent's real ServiceAccount ID. |
+
+Trust bundles do **not** come from the broker (its bundle RPC also needs a
+workload reference, which a node with no managed pods does not have). They are
+built from the agent's **own** Workload API bundle plus the union of the
+`federated_bundles` each pod stream carries, so a node with zero pods still
+serves validation contexts — if it does not, the agent has no identity yet and
+the section above is the one you want.
+
 #### The controller, registrar or edge is stuck waiting for SPIRE
 
 All four binaries wait the same way, log the same two lines, and register the same

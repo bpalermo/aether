@@ -88,8 +88,9 @@ type AgentConfig struct {
 
 	// SpireEnabled controls whether the SPIRE bridge is started
 	SpireEnabled bool
-	// SpireAdminSocketPath is the path to the SPIRE agent admin socket
-	SpireAdminSocketPath string
+	// SpireBrokerSocketPath is the path to the SPIRE agent's SPIFFE Broker
+	// Endpoint socket (proposal 036), over which the agent brokers per-pod SVIDs.
+	SpireBrokerSocketPath string
 	// SpireWorkloadSocketPath is the path to the SPIRE Workload API UDS socket
 	SpireWorkloadSocketPath string
 	// SpireWaitWarnAfter is how long the wait for this workload's first SVID
@@ -208,7 +209,7 @@ func NewAgentConfig() *AgentConfig {
 		RegistrarAddress:        "aether-registrar.aether-system.svc:443",
 		MeshDomain:              meshconst.DefaultMeshDomain,
 		SpireEnabled:            true,
-		SpireAdminSocketPath:    constants.DefaultSpireAdminSocketPath,
+		SpireBrokerSocketPath:   constants.DefaultSpireBrokerSocketPath,
 		SpireWorkloadSocketPath: constants.DefaultSpireWorkloadSocketPath,
 		SpireWaitWarnAfter:      commonspire.DefaultWaitWarnAfter,
 	}

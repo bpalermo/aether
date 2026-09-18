@@ -138,14 +138,16 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 		}
 	}
 
-	// Subscribe to the pod's SVID via the SPIRE Delegated Identity API using its
-	// Kubernetes selectors. No container PID is needed: the agent already knows
-	// the pod's identity from the API server, and SPIRE matches the entry the
-	// controller-manager binds by k8s:pod-uid.
+	// Subscribe to the pod's SVID via the SPIFFE Broker API, referencing the pod
+	// by namespace/name AND UID. SPIRE resolves and attests the pod itself, so no
+	// container PID is needed and every selector its Kubernetes attestor can
+	// produce (labels, image, sigstore) is usable in the registration entry. The
+	// reference resolves at request time, so this ADD can beat the pod into the
+	// kubelet's list — SubscribePod never blocks on the broker and retries.
 	if s.spireBridge != nil {
 		spiffeID := proxy.SpiffeIDFromPod(cniPod, s.trustDomain)
-		selectors := spire.PodSelectors(cniPod.GetNamespace(), cniPod.GetServiceAccount(), cniPod.GetName(), podUID)
-		if err = s.spireBridge.SubscribePod(cniPod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
+		ref := spire.PodRef{Namespace: cniPod.GetNamespace(), Name: cniPod.GetName(), UID: podUID}
+		if err = s.spireBridge.SubscribePod(cniPod.GetNetworkNamespace(), spiffeID, ref); err != nil {
 			log.ErrorContext(ctx, "failed to subscribe to SVID", "error", err, "spiffeID", spiffeID)
 		}
 	}

@@ -92,15 +92,6 @@ go_deps.gazelle_override(
     ],
     path = "go.etcd.io/etcd/api/v3",
 )
-
-# spire-api-sdk has proto files with pre-generated Go code
-go_deps.gazelle_override(
-    build_file_generation = "on",
-    directives = [
-        "gazelle:proto disable",
-    ],
-    path = "github.com/spiffe/spire-api-sdk",
-)
 use_repo(
     go_deps,
     "build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go",
@@ -119,7 +110,6 @@ use_repo(
     "com_github_pseudomuto_protokit",
     "com_github_spf13_cobra",
     "com_github_spiffe_go_spiffe_v2",
-    "com_github_spiffe_spire_api_sdk",
     "com_github_stretchr_testify",
     "com_github_testcontainers_testcontainers_go",
     "com_github_testcontainers_testcontainers_go_modules_etcd",

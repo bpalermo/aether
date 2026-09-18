@@ -38,8 +38,11 @@ const (
 	// /run/aether is shared between the agent and proxy containers.
 	DefaultProxyHealthSocketPath = "/run/aether/health.sock"
 
-	// DefaultSpireAdminSocketPath is the default path to the SPIRE agent admin socket
-	DefaultSpireAdminSocketPath = "/tmp/spire-agent/private/admin.sock"
+	// DefaultSpireBrokerSocketPath is the default path to the SPIRE agent's
+	// SPIFFE Broker Endpoint socket, as the aether chart mounts it (proposal 036).
+	// The SPIRE chart puts it on the node at
+	// /run/spire/agent/sockets/csi.spiffe.io/broker/broker.sock.
+	DefaultSpireBrokerSocketPath = "/run/spire/broker-sockets/broker.sock"
 	// DefaultSpireWorkloadSocketPath is the default SPIRE Workload API UDS socket (csi.spiffe.io mount)
 	DefaultSpireWorkloadSocketPath = "/run/secrets/workload-spiffe-uds/socket"
 )

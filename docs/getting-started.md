@@ -79,7 +79,7 @@ flowchart TB
 |---|---|---|
 | **Kubernetes cluster** | host | v1.30+ recommended (native `preStop.sleep` is used for hitless rolls). |
 | **A primary CNI** (Calico, Cilium, flannel, …) | pod IP + connectivity | Aether installs a **chained** CNI plugin (`aether.conflist`) that appends itself to your existing CNI config. It does *not* replace your CNI. |
-| **SPIRE** (SPIFFE runtime) | mTLS identity | Required when `spire.enabled=true` (the default). The agent, registrar and controller consume the **Workload API socket** (via the `csi.spiffe.io` CSI driver), and the agent additionally uses the SPIRE **agent admin / Delegated Identity** socket to mint proxy SVIDs. SPIRE pods must run in an ignored namespace (see §5) so they never depend on the mesh. |
+| **SPIRE** (SPIFFE runtime) | mTLS identity | Required when `spire.enabled=true` (the default). **SPIRE >= 1.15.2** (`spiffe/spire` chart >= 0.30) — see the broker values below. The agent, registrar and controller consume the **Workload API socket** (via the `csi.spiffe.io` CSI driver), and the agent additionally brokers each pod's SVID over the SPIRE agent's **SPIFFE Broker Endpoint** socket. SPIRE pods must run in an ignored namespace (see §5) so they never depend on the mesh. |
 | **A registry backend** | endpoint storage | Either `kubernetes` (default, no external dependency) or `etcd`. |
 | **Helm 3** with OCI support | install | Charts are published as OCI artifacts. |
 | **Privileged pod-security** in `aether-system` | the agent needs `hostNetwork` + `NET_ADMIN` | The chart labels its namespace `privileged` automatically when it creates it. |
@@ -87,6 +87,75 @@ flowchart TB
 > You can run **without mTLS** for a quick kick-the-tires install by setting
 > `spire.enabled=false`, which skips the SPIRE dependency entirely. Don't do that
 > in production — it disables workload mTLS.
+
+### 2a. SPIRE: enable the Broker Endpoint
+
+> **BREAKING (proposal 036).** Aether used to mint per-pod SVIDs through SPIRE's
+> proprietary **Delegated Identity API** on the agent's admin socket, authorised
+> by `authorizedDelegates`. It now uses the standard **SPIFFE Broker API**
+> instead, and the delegated path is gone — there is no flag to put it back.
+> Upgrading aether therefore requires the three SPIRE values below **first**;
+> without them every pod's SDS certificate is missing and the node proxy cannot
+> complete a single mTLS handshake. The change is additive on the SPIRE side, so
+> apply it while the old aether is still running, then upgrade aether.
+
+With the `spiffe/spire` chart (>= 0.30, SPIRE >= 1.15.2), three blocks under
+`spire-agent`:
+
+```yaml
+spire-agent:
+  # 1. Serve the Broker Endpoint on a UDS and expose it on the node, so the
+  #    aether agent's DaemonSet can bind-mount it.
+  sockets:
+    broker:
+      enabled: true
+      mountOnHost: true
+
+  # 2. Authorise the aether agent's own SPIFFE ID as a broker, limited to
+  #    Kubernetes object references over UDS.
+  brokerAPI:
+    brokers:
+      aether-agent:
+        enabled: true
+        idTemplate: "spiffe://{{ .TrustDomain }}/ns/aether-system/sa/aether-agent"
+        allowedReferenceTypes:
+          - typeURL: type.googleapis.com/spiffe.broker.KubernetesObjectReference
+            allowOverTCP: false
+
+  # 3. Let the Kubernetes workload attestor resolve those references.
+  workloadAttestors:
+    k8s:
+      brokerAPI:
+        accessPolicy: permissive
+        brokers:
+          aether-agent:
+            enabled: true
+```
+
+Three things that are easy to get wrong:
+
+- **Use the same broker key in both blocks** (`aether-agent` above). The
+  attestor block looks its `idTemplate` up from `brokerAPI.brokers.<key>`, so a
+  mismatched key fails the chart render; a broker present in only one of them is
+  rejected at runtime with `broker "…" is not configured`.
+- **Set `accessPolicy` explicitly to `permissive`; do not leave it at `auto`.**
+  `auto` resolves to `enforced` for any allowed reference type other than
+  `WorkloadPIDReference` — i.e. for the one aether uses. `enforced` makes SPIRE
+  run a `SubjectAccessReview` (verb `impersonate-via-spire`) for every referenced
+  pod, and the chart only renders the matching RBAC grant when the broker also
+  sets `workloadAttestors.k8s.brokerAPI.brokers.<key>.impersonation.clusterWidePodsOnly`.
+  `auto` on its own therefore fails **closed**: every pod gets `PermissionDenied`.
+  Hardening to `enforced` means flipping both at once.
+- **The `idTemplate` must name where aether actually runs** — the agent's
+  ServiceAccount, `spiffe://<trust domain>/ns/<release namespace>/sa/<release>-aether-agent`
+  under a non-default release name. It is the client certificate the Broker
+  Endpoint authorises, so a mismatch surfaces as `Unavailable` on every
+  subscribe (the handshake is rejected before gRPC).
+
+Aether's own defaults already point at where that chart puts the socket
+(`/run/spire/agent/sockets/csi.spiffe.io/broker/broker.sock`); override
+`spire.brokerSocket.hostPath` if your SPIRE install uses a different
+`sockets.hostBasePath`.
 
 ---
 
@@ -158,7 +227,7 @@ Set once at the top of the `aether` chart's values; every component inherits it.
 | `meshDomain` | `aether.internal` | The authority suffix services are addressed under (`<svc>.<ns>.<meshDomain>`). Also defaults the SPIRE trust domain. |
 | `spire.enabled` | `true` | Mesh-wide mTLS switch. |
 | `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket. Every component resolves its own trust domain from its SVID over this socket — there is no `trustDomain` value to configure (retired: it could silently disagree with what SPIRE issues). |
-| `spire.adminSocket.*` | see values | SPIRE agent admin/Delegated-Identity socket the agent uses to mint proxy SVIDs. |
+| `spire.brokerSocket.*` | see values | SPIRE agent SPIFFE Broker Endpoint socket the agent brokers each pod's SVID over (proposal 036). |
 | `registrar.registryBackend` | `kubernetes` | `kubernetes` \| `etcd`. |
 | `registrar.etcd.endpoints` | `[]` | etcd endpoints when backend is `etcd`. |
 | `otel.enabled` / `otel.endpoint` | `false` / `""` | Turn on OTel and point at an OTLP gRPC collector (`host:port`). |

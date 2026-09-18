@@ -13,7 +13,7 @@
 //   - mounted-registry-dir: Directory where pod data is stored locally
 //   - registrar-address: gRPC address of the in-cluster Registrar service
 //   - spire-enabled: Whether to enable SPIRE integration for mTLS via SDS
-//   - spire-admin-socket: Path to SPIRE agent admin socket
+//   - spire-broker-socket: Path to the SPIRE agent's SPIFFE Broker Endpoint socket
 //
 // The agent uses controller-runtime Manager to orchestrate multiple runnables:
 // xDS server (serves Envoy discovery requests over Unix domain socket), CNI gRPC server
@@ -126,9 +126,10 @@ func init() {
 	// concern; the edge serves no local workloads).
 	rootCmd.Flags().StringVar(&cfg.KubeletPodsDir, "kubelet-pods-dir", cfg.KubeletPodsDir, "Kubelet pod-volumes directory, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket for UDS delivery (proposal 034). Empty disables UDS delivery: pods annotated endpoint.aether.io/uds-socket fall back to TCP loopback")
 
-	// SPIRE admin socket (node proxy only — delegated identity for many local
-	// workloads; the edge presents a single identity served by SPIRE directly).
-	rootCmd.Flags().StringVar(&cfg.SpireAdminSocketPath, "spire-admin-socket", constants.DefaultSpireAdminSocketPath, "Path to SPIRE agent admin socket for X.509 certificate delegation")
+	// SPIFFE Broker Endpoint socket (node proxy only — the agent brokers an
+	// identity for every local workload; the edge presents a single identity
+	// served by SPIRE directly over the Workload API).
+	rootCmd.Flags().StringVar(&cfg.SpireBrokerSocketPath, "spire-broker-socket", constants.DefaultSpireBrokerSocketPath, "Path to the SPIRE agent's SPIFFE Broker Endpoint socket, over which the agent brokers an X.509-SVID for every pod on this node (proposal 036). Requires SPIRE >= 1.15.2 with its experimental broker enabled")
 
 	rootCmd.Flags().BoolVar(&cfg.Gamma, "gamma", true, "GAMMA east-west L7 routing: watch HTTPRoutes parented to a Service and enrich the node proxy's outbound routes (proposal 018, Phase 2). Default on (kill switch, proposal 031); degrades gracefully when the Gateway API CRDs are absent")
 	rootCmd.Flags().BoolVar(&cfg.ImportConfig, "import-config", false, "Enable cross-cluster config import: poll the registrar for GAMMA config projections peer clusters exported and materialize them into the node proxy's routes (proposal 026). No-op unless the registry backend has a cross-cluster config plane (etcd)")
@@ -351,8 +352,8 @@ type runnableAdder interface {
 // Nothing here needs the SVID to exist yet:
 //   - the registrar client dials lazily and defers its watch stream while the
 //     identity is pending (registry/internal/registrar: IdentityReady),
-//   - the SPIRE bridge retries its delegated-identity streams forever and serves
-//     the node SVID the moment WaitingSource announces it,
+//   - the SPIRE bridge retries its Broker API streams forever and serves the
+//     node SVID the moment WaitingSource announces it,
 //   - the xDS cache omits upstream mTLS until SetNodeIdentity lands, and Envoy
 //     tolerates the absent secret (#715),
 //   - the trust domain is seeded with the mesh domain, which is what SPIRE issues
@@ -671,7 +672,7 @@ func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.S
 		return nil, nil
 	}
 	// Optionally create and start the SPIRE bridge for SDS
-	spireBridge := spire.NewBridge(cfg.SpireAdminSocketPath, snapshotCache, spireSource, l)
+	spireBridge := spire.NewBridge(cfg.SpireBrokerSocketPath, snapshotCache, spireSource, l)
 	if err := m.Add(spireBridge); err != nil {
 		return nil, fmt.Errorf("failed to add SPIRE bridge: %w", err)
 	}

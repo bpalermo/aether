@@ -1,7 +1,8 @@
 # Proposal: Replace SPIRE's Delegated Identity API with the SPIFFE Broker API
 
-**Status:** Accepted — 2026-09-18. Decision record; nothing is implemented yet.
-Phase 0 is platform-side ([k8s-talos-main#77](https://github.com/bpalermo/k8s-talos-main/issues/77)).
+**Status:** Accepted — 2026-09-18; phase 1 implemented in this change, phases
+0/2/3 platform-side ([k8s-talos-main#77](https://github.com/bpalermo/k8s-talos-main/issues/77);
+phase 0 merged as k8s-talos-main#79).
 **Author:** Bruno Palermo
 **Relates:** the mesh mTLS model (per-pod app inbound, every hop mTLS), the
 SPIRE startup decoupling (#740), the monotonic SDS publication (#784), the
@@ -80,9 +81,19 @@ reopen them:
   → refresh from `WaitingSource` and redial. `InvalidArgument` → a programming
   error: ERROR, no retry. `Unavailable` → backoff, exactly today's SPIRE-outage
   behaviour.
-- **Access policy.** Ship on the chart's `accessPolicy: auto`, which resolves to
-  `permissive` while broker access is node-local UDS. `enforced` is a later,
-  separate hardening step.
+- **Access policy.** Ship on an **explicit `permissive`**, never on the chart's
+  `auto`. `auto` was expected to resolve to `permissive` while broker access is
+  node-local UDS; it does not. The chart's `spire-agent.broker-access-policy`
+  helper escalates `auto` to `enforced` for any allowed reference type other than
+  `WorkloadPIDReference` — which is exactly the `KubernetesObjectReference` this
+  design uses (and likewise for `pod_reference_scope: cluster`,
+  `allowOverTCP: true`, or an empty `allowedReferenceTypes`). `enforced` makes
+  SPIRE run a `SubjectAccessReview` per referenced pod, whose RBAC grant the
+  chart only renders when the broker also sets
+  `workloadAttestors.k8s.brokerAPI.brokers.<key>.impersonation.clusterWidePodsOnly`.
+  `auto` on its own therefore fails **closed**: every pod gets `PermissionDenied`.
+  `enforced` is a later, separate hardening step, and it moves both settings at
+  once.
 - **Unchanged.** SDS secret naming and the #638 inbound/outbound discriminator,
   the node SVID path, the xDS hold while identity is pending, and the edge,
   controller and registrar — they use the plain Workload API.
@@ -114,8 +125,11 @@ in validation. The breaking change is called out in the release notes and
    (`sockets.broker.{enabled, mountOnHost}`), register the aether agent's SPIFFE
    ID (`spiffe://<trust-domain>/ns/aether-system/sa/aether-agent`) as a broker
    limited to `KubernetesObjectReference` over UDS, and enable the k8s attestor's
-   broker block with `accessPolicy: auto`. The admin socket stays, so an aether
-   rollback remains trivial.
+   broker block with an explicit `accessPolicy: permissive` (see the access-policy
+   decision above — `auto` fails closed here). The same broker key must appear in
+   both `brokerAPI.brokers.<key>` and
+   `workloadAttestors.k8s.brokerAPI.brokers.<key>`. The admin socket stays, so an
+   aether rollback remains trivial.
 1. **aether, one hard-switch change.** Broker client behind a small interface;
    `SubscribePod` takes a pod reference instead of selectors and `PodSelectors`
    is deleted; the bundle loop becomes a Workload API bundle watcher plus per-pod
@@ -128,10 +142,13 @@ in validation. The breaking change is called out in the release notes and
 2. **Platform cleanup, after one 8-hour soak on phase 1.** Remove
    `authorizedDelegates` and `sockets.admin`. From here a `helm rollback` of
    aether to a pre-switch revision no longer works.
-3. **Hardening.** `accessPolicy: enforced` plus RBAC granting
-   `impersonate-via-spire` on pods to the agent's SPIFFE ID; measure the
-   SubjectAccessReview load and the CNI ADD latency; consider granting it only in
-   mesh-managed namespaces.
+3. **Hardening.** `accessPolicy: enforced` **and**
+   `workloadAttestors.k8s.brokerAPI.brokers.<key>.impersonation.clusterWidePodsOnly`
+   in ONE change — the flag is what makes the chart render the ClusterRole/Binding
+   granting `impersonate-via-spire` on pods to the agent's SPIFFE ID, so either
+   alone is broken (`enforced` without it denies every pod; the grant without
+   `enforced` is inert). Then measure the SubjectAccessReview load and the CNI ADD
+   latency, and consider granting it only in mesh-managed namespaces.
 
 ## Validation (phase 1, on talos-main)
 

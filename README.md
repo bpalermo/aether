@@ -21,7 +21,7 @@ graph TD
         Agent -. "record snapshot (file)" .-> MeshDNS
         CNI -. "register (gRPC/UDS)" .-> Agent
         Agent -. "xDS, demand-scoped<br/>LDS·CDS·EDS·RDS·SDS·ODCDS" .-> Proxy
-        Agent -. "Delegated Identity API" .-> SPIRE
+        Agent -. "SPIFFE Broker API" .-> SPIRE
         SPIRE -. "X.509 SVIDs (via SDS)" .-> Proxy
     end
 
@@ -57,7 +57,7 @@ graph TD
 
 **UDS delivery** — Workloads that serve on a Unix domain socket instead of a TCP port join the mesh with `endpoint.aether.io/uds-socket: <volume>/<file>` (or a service-scoped `EndpointPolicy` CR). The proxy delivers inbound requests to the socket through kubelet's pod-volumes directory; callers are unaffected — the pod is still reached at its pod IP over mTLS. See proposal [034](docs/proposals/034_pod-uds-support.md).
 
-**SPIRE Bridge** — Connects to the SPIRE agent via the Delegated Identity API to obtain X.509 SVIDs and trust bundles. Converts them into Envoy SDS (Secret Discovery Service) resources for automatic mTLS between workloads.
+**SPIRE Bridge** — Connects to the SPIRE agent's [SPIFFE Broker Endpoint](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Broker_Endpoint.md) (mTLS over a Unix socket) and brokers an X.509-SVID for every pod on the node by **Kubernetes object reference** — SPIRE resolves and attests the pod itself, so any selector its attestor can produce is usable in the registration entry. Trust bundles come from the agent's own Workload API identity plus the federated bundles those streams carry. Everything is converted into Envoy SDS (Secret Discovery Service) resources for automatic mTLS between workloads. Requires **SPIRE >= 1.15.2** with its experimental broker enabled (proposal 036; replaced SPIRE's proprietary Delegated Identity API).
 
 **External Registry** — Pluggable backend for durable endpoint storage, selected on the Registrar via `--registry-backend`:
 - **etcd** — hierarchical key structure with protobuf serialization, native Watch for change streaming

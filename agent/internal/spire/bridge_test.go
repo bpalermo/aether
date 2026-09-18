@@ -20,7 +20,8 @@ func TestBridgeStartedNotClosedBeforeStart(t *testing.T) {
 // before Start has connected (the started-channel gate, not a racy nil-check).
 func TestSubscribePodNoopBeforeStart(t *testing.T) {
 	b := NewBridge("/nonexistent/socket", nil, nil, slog.New(slog.DiscardHandler))
-	if err := b.SubscribePod("/proc/1/ns/net", "spiffe://example.org/x", nil); err != nil {
+	ref := PodRef{Namespace: "x", Name: "pod", UID: "uid"}
+	if err := b.SubscribePod("/proc/1/ns/net", "spiffe://example.org/x", ref); err != nil {
 		t.Fatalf("SubscribePod before Start must be a no-op, got: %v", err)
 	}
 	b.subsMu.Lock()

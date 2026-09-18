@@ -1,13 +1,17 @@
 // Package spire provides integration with SPIRE for X.509 SVID management.
 //
-// The SPIRE bridge connects the SPIRE Delegated Identity API to the Aether agent's
-// xDS snapshot cache. It subscribes to X.509 SVIDs (Secure Workload Identity Documents)
-// and trust bundles from a SPIRE agent and converts them to Envoy Secret resources.
-// These secrets are pushed to the xDS cache and delivered to Envoy proxies for mTLS.
+// The SPIRE bridge connects the SPIFFE Broker API to the Aether agent's xDS
+// snapshot cache. For every pod on this node it opens a Broker subscription
+// carrying a KubernetesObjectReference; the SPIRE agent resolves and attests the
+// referenced pod itself and streams its X.509-SVIDs, which the bridge converts
+// to Envoy Secret resources. Validation contexts come from the agent's OWN
+// Workload API trust bundle plus the union of the federated bundles those pod
+// streams carry. The secrets are pushed to the xDS cache and delivered to Envoy
+// proxies for mTLS.
 //
-// The bridge implements controller-runtime's Runnable interface for lifecycle management
-// within the agent's Manager. It uses goroutines to handle asynchronous SVID and bundle
-// subscription streams from SPIRE.
+// The bridge implements controller-runtime's Runnable interface for lifecycle
+// management within the agent's Manager. It uses goroutines to handle the
+// asynchronous per-pod subscription streams.
 //
 // SPIRE integration is optional and can be disabled via the spire-enabled flag.
 // If disabled, the agent skips the SPIRE bridge but still functions normally.
@@ -18,27 +22,40 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"sync"
 	"time"
 
 	commonlog "aethermesh.dev/common/log"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
-	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
-	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
+	brokerpb "github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker"
 	"go.opentelemetry.io/otel"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// nodeSVIDRefreshInterval is how often the bridge re-reads its node SVID from
-// the Workload API source to pick up rotations and push the refreshed secret.
-const nodeSVIDRefreshInterval = 30 * time.Second
+// identityRefreshInterval is how often the bridge re-reads its own SVID and
+// trust bundle from the Workload API source to pick up rotations and push the
+// refreshed secrets. It is a backstop: the source's update signal normally wakes
+// the refresher the instant either changes.
+const identityRefreshInterval = 30 * time.Second
 
-// Backoff policy for re-establishing delegated-identity subscription streams
-// after a disconnect (e.g. a SPIRE agent restart). Matches the registrar
-// watch-stream policy. The backoff resets only once a response is received on
-// the new stream, so a stream that connects and immediately closes keeps
-// backing off rather than hot-looping.
+// referenceUnresolvedWarnAfter is how long a pod reference may keep coming back
+// unresolved before the per-attempt log line escalates from INFO to WARN.
+//
+// A brief NotFound is EXPECTED and benign: the Broker API resolves the reference
+// at request time, so a CNI ADD can legitimately beat the pod into the kubelet's
+// list — a race the selector-based delegated path never had, because it never
+// resolved anything. What is not benign is a reference that never resolves, and
+// the only thing that distinguishes the two is how long it has been going on.
+const referenceUnresolvedWarnAfter = 30 * time.Second
+
+// Backoff policy for re-establishing Broker subscription streams after a failed
+// subscribe or a disconnect (e.g. a SPIRE agent restart). Matches the registrar
+// watch-stream policy. The backoff resets only once a subscribe succeeds, so a
+// stream that connects and immediately closes keeps backing off rather than
+// hot-looping.
 const (
 	initialStreamBackoff = 1 * time.Second
 	maxStreamBackoff     = 30 * time.Second
@@ -58,31 +75,28 @@ type NodeIdentitySink interface {
 	SetNodeIdentity(ctx context.Context, nodeSpiffeID string) error
 }
 
-// X509SVIDSource provides the agent's own node SVID. It is satisfied by the
-// go-spiffe Workload API X509Source the agent already uses for registrar mTLS,
-// and by the WaitingSource that wraps it (issue #740), whose GetX509SVID errors
-// until SPIRE has issued one.
-type X509SVIDSource interface {
-	GetX509SVID() (*x509svid.SVID, error)
-}
-
-// UpdatedSource is the optional extension of X509SVIDSource that announces when
-// the SVID changed. When the node source implements it, the bridge serves the
-// node identity the instant it arrives instead of on the next 30s tick — which
-// is what keeps a late SVID (SPIRE still coming up at boot) from costing the
-// node up to half a minute of upstream mTLS after identity is finally available.
-// Both workloadapi.X509Source and spire.WaitingSource satisfy it.
+// UpdatedSource is the optional extension of IdentitySource that announces when
+// the SVID or the trust bundle changed. When the source implements it, the bridge
+// serves the node identity the instant it arrives instead of on the next 30s tick
+// — which is what keeps a late SVID (SPIRE still coming up at boot) from costing
+// the node up to half a minute of upstream mTLS after identity is finally
+// available. Both workloadapi.X509Source and spire.WaitingSource satisfy it.
 type UpdatedSource interface {
 	Updated() <-chan struct{}
 }
 
-// Bridge connects the SPIRE Delegated Identity API to the xDS snapshot cache.
-// It subscribes to X.509 SVIDs and trust bundles from SPIRE and converts them
-// to Envoy Secret resources. Bridge implements controller-runtime's Runnable
-// interface for lifecycle management.
+// newClientFunc builds the Broker client. It is a Bridge field so tests can
+// substitute a client without a socket.
+type newClientFunc func(socketPath string, source IdentitySource, log *slog.Logger) (BrokerClient, error)
+
+// Bridge connects the SPIFFE Broker API to the xDS snapshot cache. It subscribes
+// to per-pod X.509 SVIDs, derives trust bundles from the agent's own identity and
+// the pods' federated bundles, and converts both to Envoy Secret resources.
+// Bridge implements controller-runtime's Runnable interface.
 type Bridge struct {
 	socketPath string
-	client     *Client
+	client     BrokerClient
+	newClient  newClientFunc
 	store      SecretStore
 	log        *slog.Logger
 	metrics    *bridgeMetrics
@@ -92,25 +106,40 @@ type Bridge struct {
 	backoffInitial time.Duration
 	backoffMax     time.Duration
 
-	// nodeSource provides the agent's own SVID (the node identity). When set,
-	// the bridge serves it as an SDS secret named by its SPIFFE ID and refreshes
-	// it on rotation. nodeSpiffeID caches that name for config references.
-	nodeSource   X509SVIDSource
+	// source is the agent's own Workload API identity: the node SVID it serves,
+	// the client certificate for the mutually-authenticated Broker Endpoint, and
+	// the trust bundle every validation context starts from. nodeSpiffeID caches
+	// the served node identity's name for config references.
+	source       IdentitySource
 	nodeSpiffeID string
 
-	// mu guards secrets and gen. Every mutation of secrets bumps gen, so a
-	// generation identifies exactly one state of the secret set.
+	// mu guards secrets, gen and the two bundle INPUTS below. Every mutation of
+	// secrets bumps gen, so a generation identifies exactly one state of the
+	// secret set.
 	mu      sync.RWMutex
 	secrets map[string]*tlsv3.Secret // keyed by secret name (SPIFFE ID or trust domain)
 	gen     uint64
 
+	// ownBundles is the agent's own Workload API trust bundle (at most one entry,
+	// keyed by the canonical trust-domain SPIFFE URI) and podBundles is the
+	// per-pod federated bundle map keyed by network namespace. The served
+	// validation contexts are DERIVED from their union, so a pod going away drops
+	// exactly its own contribution — see rebuildValidationContextsLocked.
+	//
+	// The Broker API cannot serve a node-wide bundle stream: SubscribeToX509Bundles
+	// also takes a workload reference, and a node with zero managed pods has none.
+	// Hence the agent's own identity, which exists as soon as SPIRE attests the
+	// agent itself, is the authoritative source for its trust domain.
+	ownBundles map[string][]byte
+	podBundles map[string]map[string][]byte
+
 	// pushMu serialises pushSecrets. It is held across BOTH the snapshot of
 	// secrets and the store publish, which is what makes publication ordered:
-	// four independent goroutines push (the bundle stream, every per-pod SVID
-	// stream, the node-SVID refresher and UnsubscribePod), and before this lock
-	// existed they built a slice, released mu, and raced into SetSecrets — a
-	// whole-map replace, so the loser overwrote the winner and a just-arrived
-	// secret vanished from SDS until the next push (issue #772, S10).
+	// several independent goroutines push (every per-pod SVID stream, the
+	// identity refresher and UnsubscribePod), and before this lock existed they
+	// built a slice, released mu, and raced into SetSecrets — a whole-map
+	// replace, so the loser overwrote the winner and a just-arrived secret
+	// vanished from SDS until the next push (issue #772, S10).
 	//
 	// publishedGen is the generation the store currently holds; it only ever
 	// moves forward, so a push that observed an older generation is rejected
@@ -130,21 +159,22 @@ type Bridge struct {
 	// ctx is the bridge's root context, set during Start.
 	ctx context.Context
 
-	// started is closed once Start has connected to the SPIRE agent and the
-	// bridge can accept subscriptions (SubscribePod no-ops before then).
+	// started is closed once Start has built the Broker client and the bridge can
+	// accept subscriptions (SubscribePod no-ops before then).
 	started chan struct{}
 }
 
-// podSubscription is an active delegated-identity subscription for one pod.
+// podSubscription is an active Broker subscription for one pod.
 type podSubscription struct {
 	cancel   context.CancelFunc
 	spiffeID string
+	ref      PodRef
 }
 
-// NewBridge creates a new SPIRE bridge. nodeSource is the agent's own Workload
-// API SVID source used to serve the node identity; it may be nil to disable
-// node-SVID serving.
-func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, log *slog.Logger) *Bridge {
+// NewBridge creates a new SPIRE bridge. source is the agent's own Workload API
+// identity, used for the Broker Endpoint's mutual TLS, for the node identity
+// secret, and for the trust bundle. It may be nil only in tests that never Start.
+func NewBridge(socketPath string, store SecretStore, source IdentitySource, log *slog.Logger) *Bridge {
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the bridge.
 	metrics, err := newBridgeMetrics(otel.Meter(meterName))
@@ -153,150 +183,67 @@ func NewBridge(socketPath string, store SecretStore, nodeSource X509SVIDSource, 
 	}
 
 	return &Bridge{
-		socketPath:     socketPath,
+		socketPath: socketPath,
+		newClient: func(socketPath string, source IdentitySource, log *slog.Logger) (BrokerClient, error) {
+			return newBrokerClient(socketPath, source, log)
+		},
 		store:          store,
-		nodeSource:     nodeSource,
+		source:         source,
 		log:            commonlog.Named(log, "spire-bridge"),
 		metrics:        metrics,
 		backoffInitial: initialStreamBackoff,
 		backoffMax:     maxStreamBackoff,
 		secrets:        make(map[string]*tlsv3.Secret),
+		ownBundles:     make(map[string][]byte),
+		podBundles:     make(map[string]map[string][]byte),
 		subscriptions:  make(map[string]podSubscription),
 		started:        make(chan struct{}),
 	}
 }
 
-// Started returns a channel that is closed once the bridge has connected to the
-// SPIRE agent and can accept subscriptions. Callers re-subscribing stored pods
-// after an agent restart wait on it (selecting on their context as well, since
-// the channel never closes if Start fails before connecting).
+// Started returns a channel that is closed once the bridge can accept
+// subscriptions. Callers re-subscribing stored pods after an agent restart wait
+// on it (selecting on their context as well, since the channel never closes if
+// Start fails before connecting).
 func (b *Bridge) Started() <-chan struct{} {
 	return b.started
 }
 
-// Start connects to the SPIRE agent and begins subscribing to trust bundles.
-// It blocks until the context is canceled. Implements controller-runtime Runnable.
+// Start builds the Broker client and serves the agent's own identity. It blocks
+// until the context is canceled. Implements controller-runtime Runnable.
+//
+// Nothing is dialled here and nothing waits for SPIRE: grpc.NewClient is lazy and
+// the identity source may still be empty (issue #740). Per-pod subscriptions
+// retry on their own backoff until the SPIRE agent answers.
 func (b *Bridge) Start(ctx context.Context) error {
 	b.ctx = ctx
 
-	client, err := NewClient(ctx, b.socketPath, b.log)
+	client, err := b.newClient(b.socketPath, b.source, b.log)
 	if err != nil {
-		return fmt.Errorf("creating SPIRE client: %w", err)
+		return fmt.Errorf("creating the SPIFFE Broker API client: %w", err)
 	}
 	b.client = client
 	defer func() {
 		if closeErr := client.Close(); closeErr != nil {
-			b.log.DebugContext(ctx, "failed to close SPIRE client", "error", closeErr)
+			b.log.DebugContext(ctx, "failed to close the SPIFFE Broker API client", "error", closeErr)
 		}
 	}()
 
-	b.log.InfoContext(ctx, "connected to SPIRE agent", "socket", b.socketPath)
+	b.log.InfoContext(ctx, "SPIFFE Broker API client ready", "socket", b.socketPath)
 	close(b.started)
 
 	// Serve the agent's own node SVID (for node-originated upstream mTLS and the
-	// node-health listener) and keep it refreshed on rotation.
-	if b.nodeSource != nil {
-		if err := b.refreshNodeSVID(ctx); err != nil {
-			// Not an error at boot: while SPIRE is still coming up the source
-			// holds no SVID yet (issue #740). runNodeSVIDRefresh serves it the
-			// moment it lands, so this is an announcement, not a failure.
-			b.log.InfoContext(ctx, "node SVID not available yet; serving it as soon as SPIRE issues one", "error", err)
-		}
-		go b.runNodeSVIDRefresh(ctx)
+	// node-health listener) and its trust bundle, and keep both refreshed. At boot
+	// the source usually holds neither yet (issue #740); runIdentityRefresh serves
+	// them the moment they land, so the failures below are announcements.
+	if b.source != nil {
+		b.refreshIdentity(ctx, true)
+		go b.runIdentityRefresh(ctx)
 	}
 
-	return b.runBundleSubscriptionLoop(ctx, client)
-}
-
-// runBundleSubscriptionLoop maintains the bundle subscription for the bridge's
-// lifetime, re-subscribing with backoff when the stream ends (e.g. the SPIRE
-// agent restarts) instead of failing the runnable — which would take down the
-// whole agent for a transient disconnect. SPIRE sends the full bundle set as
-// the first response on every new stream, so a plain re-subscribe fully
-// resynchronizes; the cached bundle secrets keep serving while disconnected.
-func (b *Bridge) runBundleSubscriptionLoop(ctx context.Context, client *Client) error {
-	backoff := b.backoffInitial
-	first := true
-	for {
-		bundleCh, subErr := client.SubscribeBundles(ctx)
-		if subErr != nil {
-			ok, newBackoff := b.handleBundleSubscribeError(ctx, subErr, backoff)
-			if !ok {
-				return nil
-			}
-			backoff = newBackoff
-			first = false
-			continue
-		}
-		b.logBundleSubscribed(ctx, first)
-		first = false
-
-		done, newBackoff := b.drainBundleStream(ctx, bundleCh, backoff)
-		if done {
-			return nil
-		}
-		backoff = newBackoff
-
-		b.metrics.streamFailed(ctx, streamBundle)
-		wait := jitteredBackoff(backoff)
-		b.log.InfoContext(ctx, "bundle subscription stream closed; re-subscribing", "backoff", wait)
-		if !sleepCtx(ctx, wait) {
-			b.log.InfoContext(ctx, "shutting down SPIRE bridge")
-			return nil
-		}
-		backoff = min(backoff*2, b.backoffMax)
-	}
-}
-
-// handleBundleSubscribeError handles a subscription error in runBundleSubscriptionLoop.
-// Returns (ok=false) if the context is cancelled and the loop should exit,
-// otherwise waits with backoff and returns (true, updatedBackoff).
-func (b *Bridge) handleBundleSubscribeError(ctx context.Context, subErr error, backoff time.Duration) (ok bool, newBackoff time.Duration) {
-	if ctx.Err() != nil {
-		b.log.InfoContext(ctx, "shutting down SPIRE bridge")
-		return false, backoff
-	}
-	b.metrics.streamFailed(ctx, streamBundle)
-	wait := jitteredBackoff(backoff)
-	b.log.ErrorContext(ctx, "subscribing to X.509 bundles failed; retrying", "error", subErr, "backoff", wait)
-	if !sleepCtx(ctx, wait) {
-		b.log.InfoContext(ctx, "shutting down SPIRE bridge")
-		return false, backoff
-	}
-	return true, min(backoff*2, b.backoffMax)
-}
-
-// logBundleSubscribed emits the appropriate log line for a successful bundle subscription.
-func (b *Bridge) logBundleSubscribed(ctx context.Context, first bool) {
-	if first {
-		b.log.InfoContext(ctx, "subscribed to X.509 bundles")
-	} else {
-		b.metrics.streamReconnected(ctx, streamBundle)
-		b.log.InfoContext(ctx, "re-subscribed to X.509 bundles")
-	}
-}
-
-// drainBundleStream reads from bundleCh until the channel is closed or the
-// context is cancelled. Returns (done=true) when the context is cancelled
-// (caller should return nil), and the updated backoff (reset to initial on
-// each successful receive).
-func (b *Bridge) drainBundleStream(ctx context.Context, bundleCh <-chan *delegatedidentityv1.SubscribeToX509BundlesResponse, backoff time.Duration) (done bool, newBackoff time.Duration) {
-	for {
-		select {
-		case <-ctx.Done():
-			b.log.InfoContext(ctx, "shutting down SPIRE bridge")
-			return true, backoff
-		case resp, ok := <-bundleCh:
-			if !ok {
-				return false, backoff
-			}
-			// Receiving proves the stream is healthy; reset the backoff.
-			backoff = b.backoffInitial
-			if err := b.handleBundleUpdate(ctx, resp); err != nil {
-				b.log.ErrorContext(ctx, "handling bundle update", "error", err)
-			}
-		}
-	}
+	<-ctx.Done()
+	b.log.InfoContext(ctx, "shutting down SPIRE bridge")
+	return nil
 }
 
 // jitteredBackoff returns d plus up to streamJitterFraction of random jitter,
@@ -316,35 +263,19 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// PodSelectors builds the SPIRE k8s workload selectors that identify a pod by
-// its namespace, service account, name and UID. SPIRE issues the SVID of any
-// registration entry whose selectors are a subset of these; the
-// spire-controller-manager binds entries by k8s:pod-uid, which is unique per pod.
-func PodSelectors(namespace, serviceAccount, podName, uid string) []*apitypes.Selector {
-	sel := make([]*apitypes.Selector, 0, 4)
-	if namespace != "" {
-		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "ns:" + namespace})
-	}
-	if serviceAccount != "" {
-		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "sa:" + serviceAccount})
-	}
-	if podName != "" {
-		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "pod-name:" + podName})
-	}
-	if uid != "" {
-		sel = append(sel, &apitypes.Selector{Type: "k8s", Value: "pod-uid:" + uid})
-	}
-	return sel
-}
-
-// SubscribePod starts an SVID subscription for the pod in the given network
-// namespace using its Kubernetes workload selectors (namespace, service account,
-// pod name and UID). The SPIRE agent returns the SVIDs of every registration
-// entry whose selectors are satisfied — no process attestation, so no container
-// PID is required. spiffeID is used as the secret name for Envoy. It is a no-op
-// if the bridge has not been started yet or the netns is already subscribed. The
-// subscription is bound to the bridge's lifetime, not any request context.
-func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Selector) error {
+// SubscribePod starts a Broker subscription for the pod in the given network
+// namespace, referenced by its namespace, name and UID. The SPIRE agent resolves
+// and attests the pod itself, so every selector its Kubernetes attestor can
+// produce (labels, image, sigstore) is usable in the registration entry — and no
+// container PID is required. spiffeID is used as the secret name for Envoy.
+//
+// It is a no-op if the bridge has not been started yet or the netns is already
+// subscribed, and it NEVER blocks on the broker: the first subscribe happens on
+// the subscription's own goroutine, which retries on the jittered backoff. That
+// matters because a reference resolves at request time, so a CNI ADD routinely
+// beats the pod into the kubelet's list and gets NotFound. The subscription is
+// bound to the bridge's lifetime, not any request context.
+func (b *Bridge) SubscribePod(netns, spiffeID string, ref PodRef) error {
 	// Gate on the started channel rather than a bare b.client nil-check: the
 	// close(b.started) in Start happens-after the client/ctx assignments, so this
 	// select also synchronizes their reads (a plain nil-check is a data race).
@@ -362,106 +293,224 @@ func (b *Bridge) SubscribePod(netns, spiffeID string, selectors []*apitypes.Sele
 	}
 
 	subCtx, cancel := context.WithCancel(b.ctx)
-	b.subscriptions[netns] = podSubscription{cancel: cancel, spiffeID: spiffeID}
+	b.subscriptions[netns] = podSubscription{cancel: cancel, spiffeID: spiffeID, ref: ref}
 	b.subsMu.Unlock()
 
-	svidCh, err := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
-	if err != nil {
-		cancel()
-		b.subsMu.Lock()
-		delete(b.subscriptions, netns)
-		b.subsMu.Unlock()
-		return fmt.Errorf("subscribing to SVIDs for %s: %w", spiffeID, err)
-	}
-
-	b.log.Info("subscribed to SVIDs", "spiffeID", spiffeID)
-
-	go b.runSVIDSubscriptionLoop(subCtx, svidCh, spiffeID, selectors)
+	b.log.Info("subscribing to SVIDs", "spiffeID", spiffeID, "pod", ref.String())
+	go (&subscriptionLoop{
+		bridge:   b,
+		netns:    netns,
+		spiffeID: spiffeID,
+		ref:      ref,
+		backoff:  b.backoffInitial,
+	}).run(subCtx)
 
 	return nil
 }
 
-// runSVIDSubscriptionLoop is the goroutine that drives an SVID subscription for
-// one pod. It reads from the initial channel and re-subscribes with backoff
-// whenever the stream closes (e.g. the SPIRE agent restarts). It exits when
-// subCtx is cancelled.
-func (b *Bridge) runSVIDSubscriptionLoop(subCtx context.Context, svidCh <-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, spiffeID string, selectors []*apitypes.Selector) {
-	ch := svidCh
-	backoff := b.backoffInitial
+// subscriptionLoop drives one pod's Broker subscription for the bridge's
+// lifetime: subscribe, drain, and re-subscribe with backoff whenever the
+// subscribe fails or the stream closes (e.g. the SPIRE agent restarts).
+//
+// The retry state is a struct rather than locals because it spans three
+// outcomes that each have to update it consistently — a failed subscribe, a
+// successful one, and a stream that ended — and threading four mutable values
+// through them as pointers is how the old loop grew past readability.
+type subscriptionLoop struct {
+	bridge   *Bridge
+	netns    string
+	spiffeID string
+	ref      PodRef
+
+	// backoff is the current re-subscribe delay; degraded records that the last
+	// attempt failed, so a success logs and counts a reconnect; unresolvedSince
+	// is when the reference first failed to resolve (zero once it has).
+	backoff         time.Duration
+	degraded        bool
+	unresolvedSince time.Time
+}
+
+// run loops until ctx is cancelled, or an error the specification says never to
+// retry ends the subscription.
+func (s *subscriptionLoop) run(ctx context.Context) {
 	for {
-		backoff = b.drainSVIDStream(subCtx, ch, spiffeID, backoff)
-		if subCtx.Err() != nil {
-			return
+		ch, err := s.bridge.client.SubscribeX509SVID(ctx, s.ref)
+		if err != nil {
+			if !s.onSubscribeFailed(ctx, err) {
+				return
+			}
+			continue
 		}
 
-		// The stream ended while the pod is still subscribed (e.g. the SPIRE
-		// agent restarted): re-subscribe with backoff so rotations keep
-		// flowing — exiting here would silently freeze this pod's SVID until
-		// it expired. The cached SVID keeps serving meanwhile, and the first
-		// response on the new stream is the current SVID set, so a plain
-		// re-subscribe fully resynchronizes.
-		b.metrics.streamFailed(subCtx, streamSVID)
-		newCh, ok := b.resubscribeSVIDs(subCtx, selectors, spiffeID, &backoff)
-		if !ok {
+		s.onSubscribed(ctx)
+		s.bridge.drainSVIDStream(ctx, ch, s.netns, s.spiffeID)
+		if ctx.Err() != nil {
 			return
 		}
-		ch = newCh
+		if !s.onStreamEnded(ctx) {
+			return
+		}
 	}
 }
 
+// onSubscribeFailed classifies, logs and counts a failed subscribe, then waits.
+// It reports whether the loop should try again.
+func (s *subscriptionLoop) onSubscribeFailed(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	s.bridge.metrics.streamFailed(ctx, streamSVID)
+	retry := s.bridge.reportSubscribeError(ctx, err, s.spiffeID, s.ref, &s.unresolvedSince)
+	if !retry.retry {
+		return false
+	}
+	s.degraded = true
+	if retry.slow {
+		// A policy decision is not going to change in a second; go straight to
+		// the slowest backoff rather than hammering the endpoint.
+		s.backoff = s.bridge.backoffMax
+	}
+	return s.wait(ctx)
+}
+
+// onSubscribed resets the retry state after a successful subscribe.
+func (s *subscriptionLoop) onSubscribed(ctx context.Context) {
+	if s.degraded {
+		s.bridge.metrics.streamReconnected(ctx, streamSVID)
+		s.bridge.log.Info("re-subscribed to SVIDs", "spiffeID", s.spiffeID, "pod", s.ref.String())
+	}
+	s.degraded = false
+	s.unresolvedSince = time.Time{}
+	s.backoff = s.bridge.backoffInitial
+}
+
+// onStreamEnded handles a stream that closed while the pod is still subscribed
+// (e.g. the SPIRE agent restarted) and reports whether to re-subscribe.
+//
+// Exiting here instead would silently freeze this pod's SVID until it expired.
+// The cached SVID keeps serving meanwhile, and the first response on the new
+// stream is the current SVID set, so a plain re-subscribe fully resynchronizes.
+func (s *subscriptionLoop) onStreamEnded(ctx context.Context) bool {
+	s.bridge.metrics.streamFailed(ctx, streamSVID)
+	s.degraded = true
+	s.bridge.log.Info("SVID subscription stream closed; re-subscribing",
+		"spiffeID", s.spiffeID, "pod", s.ref.String(), "backoff", s.backoff)
+	return s.wait(ctx)
+}
+
+// wait sleeps out the jittered backoff and doubles it, reporting whether the
+// full wait elapsed (false = the subscription is shutting down).
+func (s *subscriptionLoop) wait(ctx context.Context) bool {
+	if !sleepCtx(ctx, jitteredBackoff(s.backoff)) {
+		return false
+	}
+	s.backoff = min(s.backoff*2, s.bridge.backoffMax)
+	return true
+}
+
+// brokerRetry is how the bridge reacts to a failed subscribe: whether to retry at
+// all, and whether to go straight to the slowest backoff.
+type brokerRetry struct {
+	retry bool
+	slow  bool
+}
+
+// classifyBrokerError maps a Broker Endpoint gRPC status onto a retry policy.
+// The mapping is the one the endpoint specification prescribes (§6 plus Broker
+// API §4.8) and is part of proposal 036's decision.
+func classifyBrokerError(err error) brokerRetry {
+	switch status.Code(err) {
+	case codes.NotFound, codes.FailedPrecondition:
+		// The pod is not in the kubelet's list yet, or it has no registration
+		// entry yet. Both resolve on their own; retry on the normal backoff.
+		return brokerRetry{retry: true}
+	case codes.PermissionDenied:
+		// The provider's policy may be non-static, so retry — but slowly: a
+		// tight loop against a policy decision is just load.
+		return brokerRetry{retry: true, slow: true}
+	case codes.Unauthenticated:
+		// Credentials are stale. go-spiffe re-reads the SVID from the source on
+		// every handshake, so a plain retry IS the refresh.
+		return brokerRetry{retry: true}
+	case codes.InvalidArgument:
+		// A malformed request or a missing security header: a bug in this client,
+		// which retrying cannot fix.
+		return brokerRetry{}
+	default:
+		// Unavailable (SPIRE agent down, still initializing, load shedding) and
+		// anything unforeseen: exactly today's SPIRE-outage behaviour.
+		return brokerRetry{retry: true}
+	}
+}
+
+// reportSubscribeError logs and counts a failed subscribe and returns the retry
+// policy. unresolvedSince carries how long the reference has been failing to
+// resolve, which is the only thing that distinguishes the benign CNI-ADD race
+// from a reference that is never going to resolve.
+func (b *Bridge) reportSubscribeError(ctx context.Context, err error, spiffeID string, ref PodRef, unresolvedSince *time.Time) brokerRetry {
+	retry := classifyBrokerError(err)
+	code := status.Code(err)
+
+	switch code {
+	case codes.NotFound, codes.FailedPrecondition:
+		b.metrics.referenceNotFound(ctx)
+		if unresolvedSince.IsZero() {
+			*unresolvedSince = time.Now()
+		}
+		elapsed := time.Since(*unresolvedSince)
+		level := slog.LevelInfo
+		if elapsed >= referenceUnresolvedWarnAfter {
+			level = slog.LevelWarn
+		}
+		b.log.Log(ctx, level, "the SPIFFE Broker Endpoint has not resolved this pod yet; retrying",
+			"spiffeID", spiffeID, "pod", ref.String(), "code", code.String(),
+			"elapsed", elapsed.Round(time.Millisecond), "warnAfter", referenceUnresolvedWarnAfter, "error", err)
+	case codes.PermissionDenied:
+		b.metrics.permissionDenied(ctx)
+		b.log.ErrorContext(ctx, "the SPIFFE Broker Endpoint denied this agent the pod's identity; retrying slowly in case the provider's policy is not static",
+			"spiffeID", spiffeID, "pod", ref.String(), "error", err)
+	case codes.Unauthenticated:
+		b.log.ErrorContext(ctx, "the SPIFFE Broker Endpoint could not authenticate this agent; refreshing credentials from the Workload API and retrying",
+			"spiffeID", spiffeID, "pod", ref.String(), "error", err)
+	case codes.InvalidArgument:
+		b.log.ErrorContext(ctx, "the SPIFFE Broker Endpoint rejected the request as malformed; not retrying (this is a bug in the aether agent)",
+			"spiffeID", spiffeID, "pod", ref.String(), "error", err)
+	default:
+		b.log.ErrorContext(ctx, "subscribing to the pod's X.509 SVIDs failed; retrying",
+			"spiffeID", spiffeID, "pod", ref.String(), "code", code.String(), "error", err)
+	}
+
+	return retry
+}
+
 // drainSVIDStream reads responses from ch until it is closed or subCtx is
-// cancelled. Resets backoff to initial on each successful receive. Returns the
-// updated backoff.
-func (b *Bridge) drainSVIDStream(subCtx context.Context, ch <-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, spiffeID string, backoff time.Duration) time.Duration {
+// cancelled.
+func (b *Bridge) drainSVIDStream(subCtx context.Context, ch <-chan *brokerpb.SubscribeToX509SVIDResponse, netns, spiffeID string) {
 	for {
 		select {
 		case <-subCtx.Done():
-			return backoff
+			return
 		case resp, ok := <-ch:
 			if !ok {
-				return backoff
+				return
 			}
-			// Receiving proves the stream is healthy; reset the backoff.
-			backoff = b.backoffInitial
 			// Use subCtx (tied to the bridge/subscription lifetime), not the
 			// caller's request context: SubscribePod is called synchronously
 			// from CmdAdd, whose context is cancelled as soon as it returns —
 			// pushing the SVID into the snapshot must outlive that request.
-			if handleErr := b.handleSVIDUpdate(subCtx, resp); handleErr != nil {
+			if handleErr := b.handleSVIDUpdate(subCtx, netns, resp); handleErr != nil {
 				b.log.Error("handling SVID update", "error", handleErr, "spiffeID", spiffeID)
 			}
 		}
 	}
 }
 
-// resubscribeSVIDs retries subscribing to SVIDs with backoff until it succeeds
-// or subCtx is cancelled. Returns (channel, true) on success, (nil, false) when
-// the context was cancelled.
-func (b *Bridge) resubscribeSVIDs(subCtx context.Context, selectors []*apitypes.Selector, spiffeID string, backoff *time.Duration) (<-chan *delegatedidentityv1.SubscribeToX509SVIDsResponse, bool) {
-	for {
-		wait := jitteredBackoff(*backoff)
-		b.log.Info("SVID subscription stream closed; re-subscribing", "spiffeID", spiffeID, "backoff", wait)
-		if !sleepCtx(subCtx, wait) {
-			return nil, false
-		}
-		*backoff = min(*backoff*2, b.backoffMax)
-		newCh, subErr := b.client.SubscribeSVIDsBySelectors(subCtx, selectors)
-		if subErr != nil {
-			b.metrics.streamFailed(subCtx, streamSVID)
-			b.log.Error("re-subscribing to SVIDs failed; retrying", "error", subErr, "spiffeID", spiffeID)
-			continue
-		}
-		b.metrics.streamReconnected(subCtx, streamSVID)
-		b.log.Info("re-subscribed to SVIDs", "spiffeID", spiffeID)
-		return newCh, true
-	}
-}
-
-// UnsubscribePod stops the SVID subscription for the pod in the given network
+// UnsubscribePod stops the Broker subscription for the pod in the given network
 // namespace. The pod's SVID secret is removed only when no other subscribed pod
 // shares the same SPIFFE ID (service account), so a rolling restart that briefly
-// runs two same-identity pods never drops the live SVID. No-op if the bridge has
-// not been started or the netns is not subscribed.
+// runs two same-identity pods never drops the live SVID. The pod's contribution
+// to the federated-bundle union is dropped too. No-op if the bridge has not been
+// started or the netns is not subscribed.
 func (b *Bridge) UnsubscribePod(ctx context.Context, netns string) error {
 	// See SubscribePod: the started gate synchronizes client/ctx reads.
 	select {
@@ -489,65 +538,148 @@ func (b *Bridge) UnsubscribePod(ctx context.Context, netns string) error {
 	}
 	b.subsMu.Unlock()
 
+	b.mu.Lock()
+	mutated := false
 	if !stillReferenced {
-		b.mu.Lock()
 		if _, served := b.secrets[sub.spiffeID]; served {
 			delete(b.secrets, sub.spiffeID)
-			b.bumpGenLocked()
+			mutated = true
 		}
-		b.mu.Unlock()
 	}
+	if b.setPodBundlesLocked(netns, nil) {
+		changed, err := b.rebuildValidationContextsLocked(ctx)
+		if err != nil {
+			b.log.ErrorContext(ctx, "rebuilding validation contexts after an unsubscribe", "error", err, "netns", netns)
+		}
+		mutated = mutated || changed
+	}
+	if mutated {
+		b.bumpGenLocked()
+	}
+	b.mu.Unlock()
 
 	return b.pushSecrets(ctx)
 }
 
-// handleBundleUpdate processes a bundle update from SPIRE and converts each
-// trust domain's CA certificates into an Envoy validation context Secret.
+// handleSVIDUpdate processes one Broker response: the pod's X.509-SVIDs become
+// Envoy TLS-certificate secrets, and the federated bundles it carries become this
+// pod's contribution to the served validation contexts.
+func (b *Bridge) handleSVIDUpdate(ctx context.Context, netns string, resp *brokerpb.SubscribeToX509SVIDResponse) error {
+	// Convert before touching the map so a malformed SVID mid-response leaves
+	// the served set untouched rather than half-applied and unpushed.
+	svids := resp.GetSvids()
+	next := make([]*tlsv3.Secret, 0, len(svids))
+	for _, svid := range svids {
+		secret, err := SVIDToTLSCertificateSecret(svid)
+		if err != nil {
+			return fmt.Errorf("converting SVID: %w", err)
+		}
+		next = append(next, secret)
+	}
+
+	var bundleErr error
+	b.mu.Lock()
+	mutated := false
+	for _, secret := range next {
+		b.secrets[secret.GetName()] = secret
+		mutated = true
+	}
+	if b.setPodBundlesLocked(netns, resp.GetFederatedBundles()) {
+		changed, err := b.rebuildValidationContextsLocked(ctx)
+		bundleErr = err
+		mutated = mutated || changed
+	}
+	if mutated {
+		b.bumpGenLocked()
+	}
+	b.mu.Unlock()
+
+	b.log.DebugContext(ctx, "processed SVID update", "svids", len(svids), "federatedBundles", len(resp.GetFederatedBundles()))
+
+	if err := b.pushSecrets(ctx); err != nil {
+		return err
+	}
+	return bundleErr
+}
+
+// setPodBundlesLocked records a pod's federated bundles and reports whether the
+// union's inputs changed. A nil/empty map drops the pod's contribution entirely.
+// Callers must hold b.mu.
+func (b *Bridge) setPodBundlesLocked(netns string, federated map[string][]byte) bool {
+	existing, had := b.podBundles[netns]
+	if len(federated) == 0 {
+		if !had {
+			return false
+		}
+		delete(b.podBundles, netns)
+		return true
+	}
+	if had && maps.EqualFunc(existing, federated, bytes.Equal) {
+		return false
+	}
+	b.podBundles[netns] = maps.Clone(federated)
+	return true
+}
+
+// rebuildValidationContextsLocked recomputes the served validation contexts from
+// the two bundle inputs (the agent's own Workload API bundle and the union of the
+// live pods' federated bundles) and reports whether the served set changed.
+// Callers must hold b.mu.
 //
-// The whole new set is built off to the side and swapped in only once every
-// trust domain converted. The previous shape deleted every validation context
-// first and re-added them one at a time, so one malformed bundle mid-loop left
-// the map with no trust bundles at all — and any other goroutine's next push
-// then published a validation-context-less secret set, costing Envoy every
-// peer it could verify (issue #772, S11).
-func (b *Bridge) handleBundleUpdate(ctx context.Context, resp *delegatedidentityv1.SubscribeToX509BundlesResponse) error {
-	caCerts := resp.GetCaCertificates()
-	next := make(map[string]*tlsv3.Secret, len(caCerts))
-	for trustDomain, derCerts := range caCerts {
-		secret, err := BundleToValidationContextSecret(trustDomain, derCerts)
+// The whole new set is built off to the side and swapped in only once every trust
+// domain converted. The previous shape deleted every validation context first and
+// re-added them one at a time, so one malformed bundle mid-loop left the map with
+// no trust bundles at all — and any other goroutine's next push then published a
+// validation-context-less secret set, costing Envoy every peer it could verify
+// (issue #772, S11).
+func (b *Bridge) rebuildValidationContextsLocked(ctx context.Context) (bool, error) {
+	merged := make(map[string][]byte, len(b.ownBundles)+len(b.podBundles))
+	for _, perPod := range b.podBundles {
+		maps.Copy(merged, perPod)
+	}
+	// The agent's own Workload API bundle is authoritative for its trust domain:
+	// applied last so a peer's federated copy can never shadow it.
+	maps.Copy(merged, b.ownBundles)
+
+	next := make(map[string]*tlsv3.Secret, len(merged))
+	for trustDomain, der := range merged {
+		secret, err := BundleToValidationContextSecret(trustDomain, der)
 		if err != nil {
 			// Nothing has been mutated yet: the cached bundles keep serving.
-			return fmt.Errorf("converting bundle for %s: %w", trustDomain, err)
+			return false, fmt.Errorf("converting bundle for %s: %w", trustDomain, err)
 		}
-		// Key by the canonical secret name, not the response key: the two
-		// differ when SPIRE reports a bare trust domain, and the store re-keys
+		// Key by the canonical secret name, not the map key: the two differ when
+		// the bundle is reported under a bare trust domain, and the store re-keys
 		// by name anyway.
 		next[secret.GetName()] = secret
 	}
 
-	b.mu.Lock()
 	if len(next) == 0 && b.hasValidationContextLocked() {
-		b.mu.Unlock()
-		// An empty bundle set is never a legitimate instruction to stop
-		// verifying peers. Keep what we have and let the next update correct it.
+		// An empty bundle set is never a legitimate instruction to stop verifying
+		// peers. Keep what we have and let the next update correct it.
 		b.metrics.emptyBundleSkipped(ctx)
-		b.log.WarnContext(ctx, "bundle update carried no trust bundles; keeping the previously served validation contexts")
-		return nil
+		b.log.WarnContext(ctx, "trust bundle inputs went empty; keeping the previously served validation contexts")
+		return false, nil
 	}
+
+	changed := false
 	for name, secret := range b.secrets {
-		if _, isValidation := secret.Type.(*tlsv3.Secret_ValidationContext); isValidation {
+		if _, isValidation := secret.Type.(*tlsv3.Secret_ValidationContext); !isValidation {
+			continue
+		}
+		if _, keep := next[name]; !keep {
 			delete(b.secrets, name)
+			changed = true
 		}
 	}
 	for name, secret := range next {
+		if existing, served := b.secrets[name]; served && validationContextsEqual(existing, secret) {
+			continue
+		}
 		b.secrets[name] = secret
+		changed = true
 	}
-	b.bumpGenLocked()
-	b.mu.Unlock()
-
-	b.log.DebugContext(ctx, "processed bundle update", "trustDomains", len(caCerts))
-
-	return b.pushSecrets(ctx)
+	return changed, nil
 }
 
 // hasValidationContextLocked reports whether any trust bundle is currently
@@ -561,50 +693,31 @@ func (b *Bridge) hasValidationContextLocked() bool {
 	return false
 }
 
-// handleSVIDUpdate processes an SVID update from SPIRE and converts each SVID
-// into an Envoy TLS certificate Secret.
-func (b *Bridge) handleSVIDUpdate(ctx context.Context, resp *delegatedidentityv1.SubscribeToX509SVIDsResponse) error {
-	// Convert before touching the map so a malformed SVID mid-response leaves
-	// the served set untouched rather than half-applied and unpushed.
-	svids := resp.GetX509Svids()
-	next := make([]*tlsv3.Secret, 0, len(svids))
-	for _, svidWithKey := range svids {
-		secret, err := SVIDToTLSCertificateSecret(svidWithKey)
-		if err != nil {
-			return fmt.Errorf("converting SVID: %w", err)
-		}
-		next = append(next, secret)
-	}
-
-	if len(next) > 0 {
-		b.mu.Lock()
-		for _, secret := range next {
-			b.secrets[secret.GetName()] = secret
-		}
-		b.bumpGenLocked()
-		b.mu.Unlock()
-	}
-
-	b.log.DebugContext(ctx, "processed SVID update", "svids", len(svids))
-
-	return b.pushSecrets(ctx)
+// validationContextsEqual reports whether two secrets carry the same trusted CA
+// bytes, used to skip a no-op snapshot bump when a bundle is re-reported
+// unchanged.
+func validationContextsEqual(a, b *tlsv3.Secret) bool {
+	return bytes.Equal(
+		a.GetValidationContext().GetTrustedCa().GetInlineBytes(),
+		b.GetValidationContext().GetTrustedCa().GetInlineBytes(),
+	)
 }
 
-// runNodeSVIDRefresh re-reads and re-serves the node SVID whenever the source
-// says it changed, and on a periodic tick as a backstop. It returns when the
-// context is cancelled.
+// runIdentityRefresh re-reads and re-serves the agent's own SVID and trust bundle
+// whenever the source says either changed, and on a periodic tick as a backstop.
+// It returns when the context is cancelled.
 //
 // The update channel is what makes a LATE first identity cheap: with SPIRE still
-// coming up the initial refreshNodeSVID in Start finds nothing, and before
-// issue #740 the node identity then waited for the next 30s tick even though the
-// SVID may have landed a second later. Sources that do not announce updates fall
-// back to the tick alone, exactly as before.
-func (b *Bridge) runNodeSVIDRefresh(ctx context.Context) {
-	ticker := time.NewTicker(nodeSVIDRefreshInterval)
+// coming up the initial refresh in Start finds nothing, and before issue #740 the
+// node identity then waited for the next 30s tick even though the SVID may have
+// landed a second later. Sources that do not announce updates fall back to the
+// tick alone, exactly as before.
+func (b *Bridge) runIdentityRefresh(ctx context.Context) {
+	ticker := time.NewTicker(identityRefreshInterval)
 	defer ticker.Stop()
 
 	var updated <-chan struct{}
-	if src, ok := b.nodeSource.(UpdatedSource); ok {
+	if src, ok := b.source.(UpdatedSource); ok {
 		updated = src.Updated()
 	}
 
@@ -615,21 +728,42 @@ func (b *Bridge) runNodeSVIDRefresh(ctx context.Context) {
 		case <-ticker.C:
 		case <-updated:
 		}
-		if err := b.refreshNodeSVID(ctx); err != nil {
+		b.refreshIdentity(ctx, false)
+	}
+}
+
+// refreshIdentity re-serves both halves of the agent's own identity. announce
+// selects the log level for a miss: at Start a missing identity is expected and
+// logged at INFO, afterwards it is routine churn and logged at DEBUG.
+func (b *Bridge) refreshIdentity(ctx context.Context, announce bool) {
+	if err := b.refreshNodeSVID(ctx); err != nil {
+		if announce {
+			// Not an error at boot: while SPIRE is still coming up the source
+			// holds no SVID yet (issue #740). runIdentityRefresh serves it the
+			// moment it lands, so this is an announcement, not a failure.
+			b.log.InfoContext(ctx, "node SVID not available yet; serving it as soon as SPIRE issues one", "error", err)
+		} else {
 			b.log.DebugContext(ctx, "refreshing node SVID", "error", err)
+		}
+	}
+	if err := b.refreshWorkloadBundle(ctx); err != nil {
+		if announce {
+			b.log.InfoContext(ctx, "trust bundle not available yet; serving validation contexts as soon as SPIRE issues one", "error", err)
+		} else {
+			b.log.DebugContext(ctx, "refreshing the Workload API trust bundle", "error", err)
 		}
 	}
 }
 
 // refreshNodeSVID reads the current node SVID from the Workload API source and,
 // if it changed, updates the cached secret and pushes it. It is a no-op when the
-// node source is unset.
+// source is unset.
 func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
-	if b.nodeSource == nil {
+	if b.source == nil {
 		return nil
 	}
 
-	svid, err := b.nodeSource.GetX509SVID()
+	svid, err := b.source.GetX509SVID()
 	if err != nil {
 		return fmt.Errorf("fetching node SVID: %w", err)
 	}
@@ -662,6 +796,57 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 	}
 
 	b.log.DebugContext(ctx, "served node SVID", "spiffeID", secret.GetName())
+	return b.pushSecrets(ctx)
+}
+
+// refreshWorkloadBundle reads the agent's own trust bundle from the Workload API
+// source and, if it changed, rebuilds and republishes the validation contexts.
+//
+// This is what replaces the delegated API's node-wide bundle stream: the Broker
+// API has no equivalent, because SubscribeToX509Bundles also needs a workload
+// reference and a node with no managed pods has none. The agent's own bundle is
+// available as soon as SPIRE attests the agent itself — strictly earlier than any
+// pod's — so nothing is lost.
+func (b *Bridge) refreshWorkloadBundle(ctx context.Context) error {
+	if b.source == nil {
+		return nil
+	}
+
+	svid, err := b.source.GetX509SVID()
+	if err != nil {
+		return fmt.Errorf("fetching this agent's SVID to resolve its trust domain: %w", err)
+	}
+	td := svid.ID.TrustDomain()
+
+	bundle, err := b.source.GetX509BundleForTrustDomain(td)
+	if err != nil {
+		return fmt.Errorf("fetching the X.509 bundle for trust domain %q: %w", td.Name(), err)
+	}
+
+	var der []byte
+	for _, authority := range bundle.X509Authorities() {
+		der = append(der, authority.Raw...)
+	}
+	if len(der) == 0 {
+		return fmt.Errorf("the X.509 bundle for trust domain %q carries no authorities", td.Name())
+	}
+
+	b.mu.Lock()
+	if existing, ok := b.ownBundles[td.IDString()]; ok && bytes.Equal(existing, der) {
+		b.mu.Unlock()
+		return nil // unchanged; avoid a no-op snapshot bump
+	}
+	b.ownBundles = map[string][]byte{td.IDString(): der}
+	changed, rebuildErr := b.rebuildValidationContextsLocked(ctx)
+	if changed {
+		b.bumpGenLocked()
+	}
+	b.mu.Unlock()
+
+	if rebuildErr != nil {
+		return rebuildErr
+	}
+	b.log.DebugContext(ctx, "served the Workload API trust bundle", "trustDomain", td.Name())
 	return b.pushSecrets(ctx)
 }
 

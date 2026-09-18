@@ -47,7 +47,8 @@ make format-check  # CI-friendly check (fails on drift)
 - `prober/cmd/prober` — Synthetic mesh-availability prober (proposal 013). Own chart (`charts/prober`) + own image; mesh-managed per-node DaemonSet that probes the data plane from the client side and emits `aether_probe_requests_total`.
 
 **Notable packages** (beyond the ones named above):
-- `common/spire` — the shared identity wait/readiness model (#740): `WaitingSource` (never fatal on a missing SPIRE), `ReadyChecker`, `NotReadyDwell` (2m, node agent only) / `ServiceNotReadyDwell` (0).
+- `common/spire` — the shared identity wait/readiness model (#740): `WaitingSource` (never fatal on a missing SPIRE), `ReadyChecker`, `NotReadyDwell` (2m, node agent only) / `ServiceNotReadyDwell` (0). `spiretest` also serves the fake Workload API and the fake SPIFFE Broker Endpoint the identity tests run against.
+- `agent/internal/spire` — the SPIFFE **Broker API** client + the SDS bridge (proposal 036, replaced SPIRE's Delegated Identity API): per-pod `SubscribeToX509SVID` streams keyed by a `KubernetesObjectReference` (ns/name **and** UID) over mTLS on `--spire-broker-socket`; validation contexts from the agent's own Workload API bundle plus the pods' federated bundles. Needs SPIRE >= 1.15.2 with its experimental broker enabled.
 - `agent/internal/identity` — late-bound trust domain, folded in when the first SVID arrives.
 - `agent/internal/node` + `controller/internal/nodetaint` — proposal 033 taint lifecycle: the agent removes `aether.io/agent-not-ready`, the controller's leader-elected guard re-arms it.
 - `agent/internal/cniconflist` — re-asserts aether's chained entry in the node's CNI conflist (#645).
