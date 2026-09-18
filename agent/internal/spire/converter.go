@@ -1,10 +1,11 @@
-// Package spire provides a bridge between the SPIRE Delegated Identity API
-// and Envoy's Secret Discovery Service (SDS) via go-control-plane.
+// Package spire provides a bridge between the SPIFFE Broker API and Envoy's
+// Secret Discovery Service (SDS) via go-control-plane.
 //
-// The bridge subscribes to X.509 SVIDs and trust bundles from the SPIRE Agent's
-// admin socket using the Delegated Identity API, converts them to Envoy Secret
-// resources, and pushes them into the xDS snapshot cache for delivery to Envoy
-// proxies via ADS.
+// The bridge subscribes to X.509 SVIDs for the pods on this node through the
+// SPIRE agent's SPIFFE Broker Endpoint, builds validation contexts from the
+// agent's own Workload API bundle plus the federated bundles those streams
+// carry, converts both to Envoy Secret resources, and pushes them into the xDS
+// snapshot cache for delivery to Envoy proxies via ADS.
 package spire
 
 import (
@@ -14,27 +15,34 @@ import (
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	brokerpb "github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
-	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 )
 
-// SVIDToTLSCertificateSecret converts a SPIRE X509SVIDWithKey to an Envoy
-// TLS certificate Secret. The secret name is the full SPIFFE ID URI.
-// DER-encoded cert chain and PKCS#8 private key are PEM-encoded for Envoy.
-func SVIDToTLSCertificateSecret(svid *delegatedidentityv1.X509SVIDWithKey) (*tlsv3.Secret, error) {
+// SVIDToTLSCertificateSecret converts a SPIFFE Broker API X509SVID to an Envoy
+// TLS certificate Secret. The secret name is the full SPIFFE ID URI, exactly as
+// the broker reports it.
+//
+// Both wire fields are single byte strings, not lists: x509_svid is the ASN.1
+// DER certificate chain with the leaf FIRST and any intermediates concatenated
+// after it, and x509_svid_key is an unencrypted PKCS#8 DER private key
+// (brokerapi.proto, X509SVID). Envoy wants PEM, so the chain is parsed and
+// re-emitted as one PEM block per certificate, preserving order.
+func SVIDToTLSCertificateSecret(svid *brokerpb.X509SVID) (*tlsv3.Secret, error) {
 	if svid == nil {
 		return nil, fmt.Errorf("svid is nil")
 	}
 
-	x509Svid := svid.GetX509Svid()
-	if x509Svid == nil {
-		return nil, fmt.Errorf("x509_svid is nil")
+	spiffeID := svid.GetSpiffeId()
+	if spiffeID == "" {
+		return nil, fmt.Errorf("spiffe_id is empty")
+	}
+	if _, err := spiffeid.FromString(spiffeID); err != nil {
+		return nil, fmt.Errorf("invalid spiffe_id %q: %w", spiffeID, err)
 	}
 
-	spiffeID := fmt.Sprintf("spiffe://%s%s", x509Svid.GetId().GetTrustDomain(), x509Svid.GetId().GetPath())
-
-	certChainPEM, err := derCertChainToPEM(x509Svid.GetCertChain())
+	certChainPEM, err := derCertChainToPEM(svid.GetX509Svid())
 	if err != nil {
 		return nil, fmt.Errorf("converting cert chain to PEM: %w", err)
 	}
@@ -63,7 +71,7 @@ func SVIDToTLSCertificateSecret(svid *delegatedidentityv1.X509SVIDWithKey) (*tls
 // the Workload API source) to an Envoy TLS certificate Secret. The secret name is
 // the full SPIFFE ID URI. This is used to serve the agent's own node identity to
 // the proxy for node-originated upstream mTLS and the node-health listener, distinct
-// from the per-pod workload SVIDs served via the Delegated Identity API.
+// from the per-pod workload SVIDs served via the SPIFFE Broker API.
 func X509SVIDToTLSCertificateSecret(svid *x509svid.SVID) (*tlsv3.Secret, error) {
 	if svid == nil {
 		return nil, fmt.Errorf("svid is nil")
@@ -91,8 +99,8 @@ func X509SVIDToTLSCertificateSecret(svid *x509svid.SVID) (*tlsv3.Secret, error) 
 
 // BundleToValidationContextSecret converts a trust domain's CA certificates to
 // an Envoy validation context Secret. trustDomain may be a bare trust domain
-// name ("example.org") or a SPIFFE URI ("spiffe://example.org") — the SPIRE
-// Delegated Identity bundle map is keyed by the latter. Either way the secret is
+// name ("example.org") or a SPIFFE URI ("spiffe://example.org") — the Broker
+// API's federated_bundles map is keyed by the latter. Either way the secret is
 // named with the canonical SPIFFE URI (e.g. "spiffe://example.org") to match the
 // validation context name referenced by inbound listeners and the SVID secret
 // naming. The DER-encoded CA certs are PEM-encoded.
@@ -119,18 +127,29 @@ func BundleToValidationContextSecret(trustDomain string, derCACerts []byte) (*tl
 	}, nil
 }
 
-// derCertChainToPEM converts a slice of DER-encoded certificates to
-// concatenated PEM blocks.
-func derCertChainToPEM(derCerts [][]byte) ([]byte, error) {
-	if len(derCerts) == 0 {
+// derCertChainToPEM converts a Broker API certificate chain — concatenated
+// ASN.1 DER certificates in one byte string, leaf first — to concatenated PEM
+// blocks in the same order.
+//
+// Unlike the old delegated-identity shape (a repeated bytes field, one entry per
+// certificate) the boundaries are not given, so the chain MUST be parsed to be
+// split. Parsing is not optional anyway: a chain Envoy cannot load is better
+// rejected here, where the error names the SVID, than accepted into SDS.
+func derCertChainToPEM(derChain []byte) ([]byte, error) {
+	if len(derChain) == 0 {
 		return nil, fmt.Errorf("empty certificate chain")
 	}
 
+	certs, err := x509.ParseCertificates(derChain)
+	if err != nil {
+		return nil, fmt.Errorf("parsing DER certificates: %w", err)
+	}
+
 	var pemBytes []byte
-	for _, der := range derCerts {
+	for _, cert := range certs {
 		pemBytes = append(pemBytes, pem.EncodeToMemory(&pem.Block{
 			Type:  "CERTIFICATE",
-			Bytes: der,
+			Bytes: cert.Raw,
 		})...)
 	}
 	return pemBytes, nil

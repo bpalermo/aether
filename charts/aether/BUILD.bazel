@@ -10,6 +10,7 @@ load("//bazel/helm:defs.bzl", "helm_template_fail_test")
 # surface as every proxy pod failing to start at rollout time.
 exports_files([
     "values.yaml",
+    "templates/agent-daemonset.yaml",
     "templates/agent-proxy-daemonset.yaml",
 ])
 
@@ -73,6 +74,25 @@ helm_template_test(
             "aether/proxy-supervisor@sha256:",
             "--install-path=/opt/aether/supervisor",
             "--install-readiness-path=/opt/aether/proxy-ready",
+        ],
+    },
+)
+
+# Proposal 036: the agent brokers per-pod SVIDs over the SPIRE agent's SPIFFE
+# Broker Endpoint, not the Delegated Identity API's admin socket. Three things
+# have to agree — the flag, the hostPath the SPIRE chart puts the socket
+# directory at, and the mount path the flag is built from — and a mismatch is
+# invisible until a rollout leaves every pod without an SDS certificate. The
+# admin socket's absence is pinned separately, by
+# //agent/internal/cmd:TestChartFlagsExistOnTheAgentCommand, which reads this same
+# template and asserts every flag it passes exists on the agent command.
+helm_template_test(
+    name = "aether_spire_broker_socket_test",
+    chart = ":aether",
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "--spire-broker-socket=/run/spire/broker-sockets/broker.sock",
+            "/run/spire/agent/sockets/csi.spiffe.io/broker",
         ],
     },
 )

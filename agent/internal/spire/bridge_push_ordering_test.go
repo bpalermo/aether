@@ -2,23 +2,19 @@ package spire
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/pem"
 	"log/slog"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 
+	"aethermesh.dev/common/spire/spiretest"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
-	apitypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
+	brokerpb "github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
-
-// svidVersionPrefix marks the synthetic certificate chains svidResponse mints.
-const svidVersionPrefix = "svid-version:"
 
 // publishedSet is one observed SetSecrets call, reduced to what the ordering
 // invariants are stated over: the SVID generation served for each identity and
@@ -61,19 +57,16 @@ func (s *recordingStore) snapshot() []publishedSet {
 	return append([]publishedSet(nil), s.pushes...)
 }
 
-// svidResponse builds a delegated-identity SVID response for id whose
-// certificate chain carries version. SVIDToTLSCertificateSecret never parses the
-// DER, so an opaque marker is enough to tell one generation of an SVID from the
-// next — which is the whole point: the assertion is about ordering, not crypto.
-func svidResponse(id *apitypes.SPIFFEID, version int) *delegatedidentityv1.SubscribeToX509SVIDsResponse {
-	return &delegatedidentityv1.SubscribeToX509SVIDsResponse{
-		X509Svids: []*delegatedidentityv1.X509SVIDWithKey{{
-			X509Svid: &apitypes.X509SVID{
-				Id:        id,
-				CertChain: [][]byte{[]byte(svidVersionPrefix + strconv.Itoa(version))},
-			},
-			X509SvidKey: []byte("key"),
-		}},
+// svidResponse builds a Broker API response for id whose certificate carries
+// version in its serial number. An opaque marker is enough to tell one
+// generation of an SVID from the next — which is the whole point: the assertion
+// is about ordering, not crypto — but it must still be a real certificate,
+// because the converter parses the chain now.
+func svidResponse(t *testing.T, ca *spiretest.CA, id string, version int, federated map[string][]byte) *brokerpb.SubscribeToX509SVIDResponse {
+	t.Helper()
+	return &brokerpb.SubscribeToX509SVIDResponse{
+		Svids:            []*brokerpb.X509SVID{ca.BrokerSVID(t, id, version)},
+		FederatedBundles: federated,
 	}
 }
 
@@ -83,24 +76,14 @@ func decodeSVIDVersion(secret *tlsv3.Secret) int {
 	if block == nil {
 		return -1
 	}
-	version, err := strconv.Atoi(strings.TrimPrefix(string(block.Bytes), svidVersionPrefix))
+	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return -1
 	}
-	return version
+	return int(cert.SerialNumber.Int64()) - 1
 }
 
-// bundleResponse builds a bundle response carrying one real DER-encoded CA for
-// the trust domain. BundleToValidationContextSecret parses this one for real.
-func bundleResponse(t *testing.T, trustDomain string) *delegatedidentityv1.SubscribeToX509BundlesResponse {
-	t.Helper()
-	svid := newTestX509SVID(t, "spiffe://"+trustDomain+"/ca-holder")
-	return &delegatedidentityv1.SubscribeToX509BundlesResponse{
-		CaCertificates: map[string][]byte{"spiffe://" + trustDomain: svid.Certificates[0].Raw},
-	}
-}
-
-// newOrderingTestBridge returns a bridge wired to store, with no SPIRE client:
+// newOrderingTestBridge returns a bridge wired to store, with no broker client:
 // the update handlers under test are driven directly.
 func newOrderingTestBridge(store SecretStore) *Bridge {
 	return NewBridge("/nonexistent/socket", store, nil, slog.New(slog.DiscardHandler))
@@ -108,11 +91,11 @@ func newOrderingTestBridge(store SecretStore) *Bridge {
 
 // TestPushSecretsPublishesMonotonically is the S10/S11 regression test.
 //
-// Four goroutines push SDS in production (the bundle stream, every per-pod SVID
-// stream, the node-SVID refresher and UnsubscribePod). Before the fix,
-// pushSecrets snapshotted the secret map, released the lock, and then raced into
-// SetSecrets — a whole-map replace — so a slow pusher could land an older set on
-// top of a newer one and a just-rotated SVID silently disappeared from SDS until
+// Several goroutines push SDS in production (every per-pod subscription stream,
+// the identity refresher and UnsubscribePod). Before the fix, pushSecrets
+// snapshotted the secret map, released the lock, and then raced into SetSecrets
+// — a whole-map replace — so a slow pusher could land an older set on top of a
+// newer one and a just-rotated SVID silently disappeared from SDS until
 // something else pushed.
 //
 // The assertions are stated over the sequence of published sets, not the final
@@ -120,45 +103,60 @@ func newOrderingTestBridge(store SecretStore) *Bridge {
 // published without a validation context once one has been served.
 func TestPushSecretsPublishesMonotonically(t *testing.T) {
 	const (
-		rounds  = 150
-		idAName = "spiffe://example.org/ns/aether-test/sa/svc-a"
-		idBName = "spiffe://example.org/ns/aether-test/sa/svc-b"
+		rounds    = 150
+		idAName   = "spiffe://example.org/ns/aether-test/sa/svc-a"
+		idBName   = "spiffe://example.org/ns/aether-test/sa/svc-b"
+		netnsA    = "/proc/1/ns/net"
+		netnsB    = "/proc/2/ns/net"
+		netnsPeer = "/proc/3/ns/net"
 	)
-	idA := &apitypes.SPIFFEID{TrustDomain: "example.org", Path: "/ns/aether-test/sa/svc-a"}
-	idB := &apitypes.SPIFFEID{TrustDomain: "example.org", Path: "/ns/aether-test/sa/svc-b"}
+
+	ca := spiretest.NewCA(t)
+	federated := map[string][]byte{"spiffe://peer.example": spiretest.NewCA(t).BundleDER()}
+	// A second, larger bundle set the peer stream alternates with, so its pushes
+	// really mutate the served validation contexts and race the SVID rotations
+	// rather than collapsing into no-ops.
+	federatedPlus := map[string][]byte{
+		"spiffe://peer.example":  federated["spiffe://peer.example"],
+		"spiffe://peer2.example": spiretest.NewCA(t).BundleDER(),
+	}
 
 	store := &recordingStore{}
 	b := newOrderingTestBridge(store)
+	ctx := t.Context()
 
 	// Serve a trust bundle first so "a validation context was once served" holds
-	// for every later push, and pre-seed both identities at version 0.
-	require.NoError(t, b.handleBundleUpdate(t.Context(), bundleResponse(t, "example.org")))
-	require.NoError(t, b.handleSVIDUpdate(t.Context(), svidResponse(idA, 0)))
-	require.NoError(t, b.handleSVIDUpdate(t.Context(), svidResponse(idB, 0)))
-
-	bundle := bundleResponse(t, "example.org")
+	// for every later push, and pre-seed both identities at version 0. The third
+	// pod carries only federated bundles, which is what makes it the bundle
+	// pusher of the old delegated shape.
+	require.NoError(t, b.handleSVIDUpdate(ctx, netnsPeer, &brokerpb.SubscribeToX509SVIDResponse{FederatedBundles: federated}))
+	require.NoError(t, b.handleSVIDUpdate(ctx, netnsA, svidResponse(t, ca, idAName, 0, nil)))
+	require.NoError(t, b.handleSVIDUpdate(ctx, netnsB, svidResponse(t, ca, idBName, 0, nil)))
 
 	// Errors are collected rather than asserted in the goroutines: testify's
 	// require calls runtime.Goexit, which off the test goroutine would leak the
 	// WaitGroup instead of failing the test.
 	errs := make(chan error, 3*rounds)
-	ctx := t.Context()
 	var wg sync.WaitGroup
 	wg.Add(3)
-	rotate := func(id *apitypes.SPIFFEID) {
+	rotate := func(netns, id string) {
 		defer wg.Done()
 		for i := 1; i <= rounds; i++ {
-			if err := b.handleSVIDUpdate(ctx, svidResponse(id, i)); err != nil {
+			if err := b.handleSVIDUpdate(ctx, netns, svidResponse(t, ca, id, i, nil)); err != nil {
 				errs <- err
 			}
 		}
 	}
-	go rotate(idA)
-	go rotate(idB)
+	go rotate(netnsA, idAName)
+	go rotate(netnsB, idBName)
 	go func() {
 		defer wg.Done()
-		for range rounds {
-			if err := b.handleBundleUpdate(ctx, bundle); err != nil {
+		for i := range rounds {
+			set := federated
+			if i%2 == 0 {
+				set = federatedPlus
+			}
+			if err := b.handleSVIDUpdate(ctx, netnsPeer, &brokerpb.SubscribeToX509SVIDResponse{FederatedBundles: set}); err != nil {
 				errs <- err
 			}
 		}
@@ -168,6 +166,10 @@ func TestPushSecretsPublishesMonotonically(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
+
+	// Settle on a deterministic final state so the last-publication assertions
+	// below are exact.
+	require.NoError(t, b.handleSVIDUpdate(ctx, netnsPeer, &brokerpb.SubscribeToX509SVIDResponse{FederatedBundles: federated}))
 
 	pushes := store.snapshot()
 	require.NotEmpty(t, pushes)
@@ -199,7 +201,7 @@ func TestPushSecretsPublishesMonotonically(t *testing.T) {
 	last := pushes[len(pushes)-1]
 	require.Equal(t, rounds, last.svidVersion[idAName], "final published set must carry svc-a's newest SVID")
 	require.Equal(t, rounds, last.svidVersion[idBName], "final published set must carry svc-b's newest SVID")
-	require.Equal(t, 1, last.validationContexts, "final published set must carry the trust bundle")
+	require.Equal(t, 1, last.validationContexts, "final published set must carry the federated trust bundle")
 
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -212,14 +214,20 @@ func TestPushSecretsPublishesMonotonically(t *testing.T) {
 // map before it failed, so the next push from any other goroutine served Envoy
 // a secret set with nothing to verify peers against.
 func TestHandleBundleUpdateKeepsBundlesOnConversionError(t *testing.T) {
+	const netnsPeer = "/proc/3/ns/net"
+
+	ca := spiretest.NewCA(t)
 	store := &recordingStore{}
 	b := newOrderingTestBridge(store)
+	ctx := t.Context()
 
-	require.NoError(t, b.handleBundleUpdate(t.Context(), bundleResponse(t, "example.org")))
+	require.NoError(t, b.handleSVIDUpdate(ctx, netnsPeer, &brokerpb.SubscribeToX509SVIDResponse{
+		FederatedBundles: map[string][]byte{"spiffe://peer.example": spiretest.NewCA(t).BundleDER()},
+	}))
 	require.Equal(t, 1, store.snapshot()[0].validationContexts)
 
-	err := b.handleBundleUpdate(t.Context(), &delegatedidentityv1.SubscribeToX509BundlesResponse{
-		CaCertificates: map[string][]byte{"spiffe://example.org": []byte("not a DER certificate")},
+	err := b.handleSVIDUpdate(ctx, netnsPeer, &brokerpb.SubscribeToX509SVIDResponse{
+		FederatedBundles: map[string][]byte{"spiffe://peer.example": []byte("not a DER certificate")},
 	})
 	require.Error(t, err, "a malformed bundle must be reported")
 
@@ -229,25 +237,32 @@ func TestHandleBundleUpdateKeepsBundlesOnConversionError(t *testing.T) {
 
 	// Whatever pushes next (an SVID rotation, an unsubscribe) must still carry
 	// the bundle.
-	require.NoError(t, b.handleSVIDUpdate(t.Context(),
-		svidResponse(&apitypes.SPIFFEID{TrustDomain: "example.org", Path: "/ns/x/sa/a"}, 1)))
+	require.NoError(t, b.handleSVIDUpdate(ctx, "/proc/1/ns/net",
+		svidResponse(t, ca, "spiffe://example.org/ns/x/sa/a", 1, nil)))
 	pushes := store.snapshot()
 	require.Equal(t, 1, pushes[len(pushes)-1].validationContexts,
 		"a push following a failed bundle update must still serve the cached validation context")
 }
 
 // TestHandleBundleUpdateSkipsEmptyBundleSet covers the other half of S11: an
-// update that carries no trust bundles at all is never a legitimate instruction
+// update that leaves no trust bundles at all is never a legitimate instruction
 // to stop verifying peers, so the cached contexts are kept and counted.
 func TestHandleBundleUpdateSkipsEmptyBundleSet(t *testing.T) {
+	const netnsPeer = "/proc/3/ns/net"
+
 	store := &recordingStore{}
 	b := newOrderingTestBridge(store)
 	reader := installTestBridgeMetrics(t, b)
+	ctx := t.Context()
 
-	require.NoError(t, b.handleBundleUpdate(t.Context(), bundleResponse(t, "example.org")))
+	require.NoError(t, b.handleSVIDUpdate(ctx, netnsPeer, &brokerpb.SubscribeToX509SVIDResponse{
+		FederatedBundles: map[string][]byte{"spiffe://peer.example": spiretest.NewCA(t).BundleDER()},
+	}))
 	before := len(store.snapshot())
 
-	require.NoError(t, b.handleBundleUpdate(t.Context(), &delegatedidentityv1.SubscribeToX509BundlesResponse{}))
+	// The peer's stream drops every bundle it was carrying, and nothing else
+	// contributes one: the served contexts must be kept.
+	require.NoError(t, b.handleSVIDUpdate(ctx, netnsPeer, &brokerpb.SubscribeToX509SVIDResponse{}))
 
 	require.Len(t, store.snapshot(), before, "an empty bundle update must not publish anything")
 	b.mu.RLock()
@@ -258,15 +273,17 @@ func TestHandleBundleUpdateSkipsEmptyBundleSet(t *testing.T) {
 	require.Equal(t, int64(0), counterValue(t, reader, "aether.agent.sds_push.stale_rejected"))
 }
 
-// TestBridgeMetricsSDSPushCountersSeededAtZero pins the #717 lesson: the OTel
-// SDK exports a counter only after its first Add, and both of these are zero in
+// TestBridgeMetricsCountersSeededAtZero pins the #717 lesson: the OTel SDK
+// exports a counter only after its first Add, and all four of these are zero in
 // a healthy agent — so without seeding, "never registered" and "zero" look the
 // same to a grading query.
-func TestBridgeMetricsSDSPushCountersSeededAtZero(t *testing.T) {
+func TestBridgeMetricsCountersSeededAtZero(t *testing.T) {
 	reader := installTestBridgeMetrics(t, newOrderingTestBridge(&recordingStore{}))
 	for _, name := range []string{
 		"aether.agent.sds_push.stale_rejected",
 		"aether.agent.sds_push.empty_bundle_skipped",
+		"aether.agent.spire.broker.reference_not_found",
+		"aether.agent.spire.broker.permission_denied",
 	} {
 		value, found := lookupCounter(t, reader, name)
 		require.Truef(t, found, "%s not exported before its first increment", name)

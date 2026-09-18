@@ -64,12 +64,17 @@ go_library(
 go_test(
     name = "cmd_test",
     srcs = [
+        "chart_flags_test.go",
         "config_test.go",
         "edge_identity_test.go",
         "readiness_test.go",
         "root_test.go",
         "spire_identity_test.go",
     ],
+    # keep: chart_flags_test.go reads the agent DaemonSet template as test data
+    # and asserts every flag it passes exists on the command (proposal 036,
+    # mirroring //agent/internal/supervisorcmd for the proxy).
+    data = ["//charts/aether:templates/agent-daemonset.yaml"],
     embed = [":cmd"],
     deps = [
         "//agent/internal/cni/server",

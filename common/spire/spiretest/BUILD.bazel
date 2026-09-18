@@ -4,16 +4,25 @@ go_library(
     name = "spiretest",
     # keep: a fake Workload API server must never link into a production binary.
     testonly = True,
-    srcs = ["fake.go"],
+    srcs = [
+        "broker.go",
+        "fake.go",
+    ],
     importpath = "aethermesh.dev/common/spire/spiretest",
     visibility = ["//visibility:public"],
     deps = [
+        "@com_github_spiffe_go_spiffe_v2//bundle/x509bundle",
+        "@com_github_spiffe_go_spiffe_v2//exp/proto/spiffe/broker",
         "@com_github_spiffe_go_spiffe_v2//proto/spiffe/workload",
         "@com_github_spiffe_go_spiffe_v2//spiffeid",
+        "@com_github_spiffe_go_spiffe_v2//spiffetls/tlsconfig",
+        "@com_github_spiffe_go_spiffe_v2//svid/x509svid",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//credentials",
         "@org_golang_google_grpc//metadata",
         "@org_golang_google_grpc//status",
+        "@org_golang_google_protobuf//proto",
     ],
 )

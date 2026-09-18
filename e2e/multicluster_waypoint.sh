@@ -38,8 +38,12 @@ TRUST_DOMAIN="aether.internal"
 MESH_DOMAIN="aether.internal"
 TUNNEL_PORT="18009"
 GWAPI_VERSION="v1.6.2"
-SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.28.4}"
-SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.5.0}"
+# SPIRE >= 1.15.2 is REQUIRED since proposal 036: the agent brokers per-pod
+# SVIDs over the SPIFFE Broker Endpoint, which 0.28.4 (SPIRE 1.14.5) does not
+# serve at all. The crds chart version moves with it — 0.30.2 ships CRD schemas
+# 0.5.0 cannot express, and the controller-manager rejects the newer fields.
+SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
+SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
 SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
 IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller)
 
@@ -185,6 +189,21 @@ install_spire() {
 		die "failed to create upstream-ca secret on '$1'"
 	helm --kube-context "$ctx" upgrade --install spire-crds spiffe/spire-crds \
 		-n spire-mgmt --version "$SPIRE_CRDS_VERSION" --wait --timeout 3m >/dev/null
+	# Register the aether agent as a SPIFFE Broker (proposal 036), replacing the
+	# Delegated Identity API's authorizedDelegates + admin socket.
+	#
+	# accessPolicy is set to permissive EXPLICITLY, never left at the chart's
+	# `auto`. `auto` resolves to `enforced` for any allowed reference type other
+	# than WorkloadPIDReference — i.e. for the KubernetesObjectReference we use —
+	# and `enforced` makes SPIRE run a SubjectAccessReview (verb
+	# impersonate-via-spire) per referenced pod, whose RBAC grant the chart only
+	# renders when the broker also sets
+	# workloadAttestors.k8s.brokerAPI.brokers.<key>.impersonation.clusterWidePodsOnly.
+	# `auto` alone therefore fails CLOSED: every pod gets PermissionDenied.
+	#
+	# The same broker key must appear in BOTH blocks: the k8s attestor block
+	# looks its idTemplate up from brokerAPI.brokers.<key>, and a broker missing
+	# from the attestor block is rejected at runtime ("broker %q is not configured").
 	helm --kube-context "$ctx" upgrade --install spire spiffe/spire \
 		-n spire-mgmt --version "$SPIRE_CHART_VERSION" \
 		--set global.spire.trustDomain="$TRUST_DOMAIN" \
@@ -194,9 +213,14 @@ install_spire() {
 		--set "spire-server.upstreamAuthority.disk.secret.create=false" \
 		--set "spire-server.upstreamAuthority.disk.secret.name=upstream-ca" \
 		--set "spire-server.upstreamAuthority.disk.secret.namespace=spire-mgmt" \
-		--set "spire-agent.authorizedDelegates[0]=spiffe://$TRUST_DOMAIN/ns/$NS/sa/aether-agent" \
-		--set "spire-agent.sockets.admin.enabled=true" \
-		--set "spire-agent.sockets.admin.mountOnHost=true" \
+		--set "spire-agent.sockets.broker.enabled=true" \
+		--set "spire-agent.sockets.broker.mountOnHost=true" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.enabled=true" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.idTemplate=spiffe://$TRUST_DOMAIN/ns/$NS/sa/aether-agent" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.allowedReferenceTypes[0].typeURL=type.googleapis.com/spiffe.broker.KubernetesObjectReference" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.allowedReferenceTypes[0].allowOverTCP=false" \
+		--set "spire-agent.workloadAttestors.k8s.brokerAPI.accessPolicy=permissive" \
+		--set "spire-agent.workloadAttestors.k8s.brokerAPI.brokers.aether-agent.enabled=true" \
 		--wait --timeout 6m >/dev/null || die "SPIRE install failed on '$1'"
 	# A ClusterSPIFFEID so every mesh pod gets spiffe://<td>/ns/<ns>/sa/<sa>. The
 	# className must match the spire-controller-manager class ($SPIRE_CLASS).

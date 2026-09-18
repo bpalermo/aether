@@ -12,11 +12,9 @@ import (
 	"testing"
 	"time"
 
-	typesv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
+	brokerpb "github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 )
 
 // generateTestCert creates a self-signed X.509 certificate and returns its
@@ -58,6 +56,16 @@ func generateTestPKCS8Key(t *testing.T) []byte {
 	return derKey
 }
 
+// concatDER joins DER-encoded certificates the way the Broker API carries a
+// chain or a bundle: one byte string, no separators, leaf first.
+func concatDER(ders ...[]byte) []byte {
+	var out []byte
+	for _, der := range ders {
+		out = append(out, der...)
+	}
+	return out
+}
+
 // pemToCertType decodes a PEM block from the given bytes and returns the type
 // header (e.g. "CERTIFICATE" or "PRIVATE KEY").
 func pemBlockType(data []byte) string {
@@ -68,84 +76,67 @@ func pemBlockType(data []byte) string {
 	return block.Type
 }
 
-// countPEMBlocks returns the number of PEM blocks in the given byte slice.
-func countPEMBlocks(data []byte) int {
-	count := 0
+// pemBlocks returns the payload of every PEM block in the given byte slice, in
+// order.
+func pemBlocks(data []byte) [][]byte {
+	var out [][]byte
 	rest := data
 	for {
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
 		if block == nil {
-			break
+			return out
 		}
-		count++
+		out = append(out, block.Bytes)
 	}
-	return count
+}
+
+// countPEMBlocks returns the number of PEM blocks in the given byte slice.
+func countPEMBlocks(data []byte) int {
+	return len(pemBlocks(data))
 }
 
 func TestSVIDToTLSCertificateSecret(t *testing.T) {
 	validDERCert, _ := generateTestCert(t)
+	otherDERCert, _ := generateTestCert(t)
 	validDERKey := generateTestPKCS8Key(t)
 
 	tests := []struct {
-		name        string
-		svid        *delegatedidentityv1.X509SVIDWithKey
-		wantErr     bool
-		wantErrMsg  string
-		wantName    string
-		wantCertPEM bool
-		wantKeyPEM  bool
+		name       string
+		svid       *brokerpb.X509SVID
+		wantErr    bool
+		wantErrMsg string
+		wantName   string
 	}{
 		{
 			name: "converts valid SVID with trust domain and path",
-			svid: &delegatedidentityv1.X509SVIDWithKey{
-				X509Svid: &typesv1.X509SVID{
-					Id: &typesv1.SPIFFEID{
-						TrustDomain: "example.org",
-						Path:        "/ns/default/sa/web",
-					},
-					CertChain: [][]byte{validDERCert},
-				},
+			svid: &brokerpb.X509SVID{
+				SpiffeId:    "spiffe://example.org/ns/default/sa/web",
+				X509Svid:    validDERCert,
 				X509SvidKey: validDERKey,
 			},
-			wantErr:     false,
-			wantName:    "spiffe://example.org/ns/default/sa/web",
-			wantCertPEM: true,
-			wantKeyPEM:  true,
+			wantName: "spiffe://example.org/ns/default/sa/web",
 		},
 		{
 			name: "converts valid SVID with no path",
-			svid: &delegatedidentityv1.X509SVIDWithKey{
-				X509Svid: &typesv1.X509SVID{
-					Id: &typesv1.SPIFFEID{
-						TrustDomain: "example.org",
-						Path:        "",
-					},
-					CertChain: [][]byte{validDERCert},
-				},
+			svid: &brokerpb.X509SVID{
+				SpiffeId:    "spiffe://example.org",
+				X509Svid:    validDERCert,
 				X509SvidKey: validDERKey,
 			},
-			wantErr:     false,
-			wantName:    "spiffe://example.org",
-			wantCertPEM: true,
-			wantKeyPEM:  true,
+			wantName: "spiffe://example.org",
 		},
 		{
+			// The Broker API carries the chain as ONE concatenated DER byte
+			// string, leaf first — not a repeated field as the Delegated
+			// Identity API did.
 			name: "converts valid SVID with multi-cert chain",
-			svid: &delegatedidentityv1.X509SVIDWithKey{
-				X509Svid: &typesv1.X509SVID{
-					Id: &typesv1.SPIFFEID{
-						TrustDomain: "cluster.local",
-						Path:        "/workload/api",
-					},
-					CertChain: [][]byte{validDERCert, validDERCert},
-				},
+			svid: &brokerpb.X509SVID{
+				SpiffeId:    "spiffe://cluster.local/workload/api",
+				X509Svid:    concatDER(validDERCert, otherDERCert),
 				X509SvidKey: validDERKey,
 			},
-			wantErr:     false,
-			wantName:    "spiffe://cluster.local/workload/api",
-			wantCertPEM: true,
-			wantKeyPEM:  true,
+			wantName: "spiffe://cluster.local/workload/api",
 		},
 		{
 			name:       "returns error when svid is nil",
@@ -154,24 +145,42 @@ func TestSVIDToTLSCertificateSecret(t *testing.T) {
 			wantErrMsg: "svid is nil",
 		},
 		{
-			name: "returns error when x509_svid field is nil",
-			svid: &delegatedidentityv1.X509SVIDWithKey{
-				X509Svid:    nil,
+			// The delegated shape's equivalent was a nil x509_svid message; the
+			// Broker API carries the ID as a plain string, so the empty case is
+			// an empty spiffe_id.
+			name: "returns error when spiffe_id is empty",
+			svid: &brokerpb.X509SVID{
+				X509Svid:    validDERCert,
 				X509SvidKey: validDERKey,
 			},
 			wantErr:    true,
-			wantErrMsg: "x509_svid is nil",
+			wantErrMsg: "spiffe_id is empty",
+		},
+		{
+			name: "returns error when spiffe_id is not a SPIFFE ID",
+			svid: &brokerpb.X509SVID{
+				SpiffeId:    "https://example.org/ns/default/sa/web",
+				X509Svid:    validDERCert,
+				X509SvidKey: validDERKey,
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid spiffe_id",
 		},
 		{
 			name: "returns error when cert chain is empty",
-			svid: &delegatedidentityv1.X509SVIDWithKey{
-				X509Svid: &typesv1.X509SVID{
-					Id: &typesv1.SPIFFEID{
-						TrustDomain: "example.org",
-						Path:        "/workload",
-					},
-					CertChain: [][]byte{},
-				},
+			svid: &brokerpb.X509SVID{
+				SpiffeId:    "spiffe://example.org/workload",
+				X509Svid:    []byte{},
+				X509SvidKey: validDERKey,
+			},
+			wantErr:    true,
+			wantErrMsg: "converting cert chain to PEM",
+		},
+		{
+			name: "returns error when cert chain is not DER",
+			svid: &brokerpb.X509SVID{
+				SpiffeId:    "spiffe://example.org/workload",
+				X509Svid:    []byte("not-valid-der-data"),
 				X509SvidKey: validDERKey,
 			},
 			wantErr:    true,
@@ -179,14 +188,9 @@ func TestSVIDToTLSCertificateSecret(t *testing.T) {
 		},
 		{
 			name: "returns error when private key is empty",
-			svid: &delegatedidentityv1.X509SVIDWithKey{
-				X509Svid: &typesv1.X509SVID{
-					Id: &typesv1.SPIFFEID{
-						TrustDomain: "example.org",
-						Path:        "/workload",
-					},
-					CertChain: [][]byte{validDERCert},
-				},
+			svid: &brokerpb.X509SVID{
+				SpiffeId:    "spiffe://example.org/workload",
+				X509Svid:    validDERCert,
 				X509SvidKey: []byte{},
 			},
 			wantErr:    true,
@@ -235,14 +239,9 @@ func TestSVIDToTLSCertificateSecret_MultiCertChainCount(t *testing.T) {
 	certDER2, _ := generateTestCert(t)
 	keyDER := generateTestPKCS8Key(t)
 
-	svid := &delegatedidentityv1.X509SVIDWithKey{
-		X509Svid: &typesv1.X509SVID{
-			Id: &typesv1.SPIFFEID{
-				TrustDomain: "example.org",
-				Path:        "/workload",
-			},
-			CertChain: [][]byte{certDER1, certDER2},
-		},
+	svid := &brokerpb.X509SVID{
+		SpiffeId:    "spiffe://example.org/workload",
+		X509Svid:    concatDER(certDER1, certDER2),
 		X509SvidKey: keyDER,
 	}
 
@@ -252,6 +251,27 @@ func TestSVIDToTLSCertificateSecret_MultiCertChainCount(t *testing.T) {
 
 	certChainBytes := got.GetTlsCertificate().GetCertificateChain().GetInlineBytes()
 	assert.Equal(t, 2, countPEMBlocks(certChainBytes), "expected 2 PEM certificate blocks for a 2-cert chain")
+}
+
+// TestSVIDToTLSCertificateSecretPreservesChainOrder pins the property the
+// Broker API's single-byte-string chain makes easy to get wrong: the leaf MUST
+// stay first, because Envoy presents the chain in the order it is given.
+func TestSVIDToTLSCertificateSecretPreservesChainOrder(t *testing.T) {
+	leafDER, _ := generateTestCert(t)
+	intermediateDER, _ := generateTestCert(t)
+	keyDER := generateTestPKCS8Key(t)
+
+	got, err := SVIDToTLSCertificateSecret(&brokerpb.X509SVID{
+		SpiffeId:    "spiffe://example.org/workload",
+		X509Svid:    concatDER(leafDER, intermediateDER),
+		X509SvidKey: keyDER,
+	})
+	require.NoError(t, err)
+
+	blocks := pemBlocks(got.GetTlsCertificate().GetCertificateChain().GetInlineBytes())
+	require.Len(t, blocks, 2)
+	assert.Equal(t, leafDER, blocks[0], "the leaf must come first")
+	assert.Equal(t, intermediateDER, blocks[1])
 }
 
 func TestBundleToValidationContextSecret(t *testing.T) {
@@ -280,7 +300,7 @@ func TestBundleToValidationContextSecret(t *testing.T) {
 			wantName:    "spiffe://cluster.local",
 		},
 		{
-			// The Delegated Identity bundle map is keyed by the SPIFFE URI
+			// The Broker API's federated_bundles map is keyed by the SPIFFE URI
 			// (td.IDString()); it must not be double-prefixed.
 			name:        "accepts an already-prefixed SPIFFE URI without doubling it",
 			trustDomain: "spiffe://aether.internal",
@@ -355,7 +375,7 @@ func TestDerCertChainToPEM(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		derCerts       [][]byte
+		derChain       []byte
 		wantErr        bool
 		wantErrMsg     string
 		wantBlockCount int
@@ -363,34 +383,41 @@ func TestDerCertChainToPEM(t *testing.T) {
 	}{
 		{
 			name:           "converts single DER cert to PEM",
-			derCerts:       [][]byte{cert1DER},
+			derChain:       cert1DER,
 			wantErr:        false,
 			wantBlockCount: 1,
 			wantBlockType:  "CERTIFICATE",
 		},
 		{
-			name:           "converts multiple DER certs to concatenated PEM",
-			derCerts:       [][]byte{cert1DER, cert2DER},
+			name:           "converts a concatenated DER chain to multiple PEM blocks",
+			derChain:       concatDER(cert1DER, cert2DER),
 			wantErr:        false,
 			wantBlockCount: 2,
 			wantBlockType:  "CERTIFICATE",
 		},
 		{
-			name:           "preserves arbitrary bytes as PEM payload without parsing",
-			derCerts:       [][]byte{[]byte("arbitrary-bytes")},
-			wantErr:        false,
-			wantBlockCount: 1,
-			wantBlockType:  "CERTIFICATE",
+			// Unlike the old repeated-bytes shape, the certificate boundaries are
+			// not given, so arbitrary bytes can no longer pass through unparsed.
+			name:       "returns error for arbitrary bytes",
+			derChain:   []byte("arbitrary-bytes"),
+			wantErr:    true,
+			wantErrMsg: "parsing DER certificates",
+		},
+		{
+			name:       "returns error for truncated DER data",
+			derChain:   cert1DER[:len(cert1DER)/2],
+			wantErr:    true,
+			wantErrMsg: "parsing DER certificates",
 		},
 		{
 			name:       "returns error for empty cert chain",
-			derCerts:   [][]byte{},
+			derChain:   []byte{},
 			wantErr:    true,
 			wantErrMsg: "empty certificate chain",
 		},
 		{
 			name:       "returns error for nil cert chain",
-			derCerts:   nil,
+			derChain:   nil,
 			wantErr:    true,
 			wantErrMsg: "empty certificate chain",
 		},
@@ -398,7 +425,7 @@ func TestDerCertChainToPEM(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := derCertChainToPEM(tt.derCerts)
+			got, err := derCertChainToPEM(tt.derChain)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -480,7 +507,7 @@ func TestDerBundleToPEM(t *testing.T) {
 	cert2DER, _ := generateTestCert(t)
 
 	// Build a concatenated DER bundle with two certificates.
-	twoCertBundle := append(cert1DER, cert2DER...)
+	twoCertBundle := concatDER(cert1DER, cert2DER)
 
 	tests := []struct {
 		name           string

@@ -52,9 +52,9 @@ access-log/tracing policy via the MeshConfig CR.
 |---|---|---|
 | `spire.enabled` | `true` | Mesh-wide mTLS switch (agent, registrar, controller webhook cert). |
 | `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket (the `csi.spiffe.io` mount). |
-| `spire.adminSocket.hostPath` | `/run/spire/agent/sockets/csi.spiffe.io/admin` | SPIRE agent admin (Delegated Identity) socket the agent uses to mint proxy SVIDs. |
-| `spire.adminSocket.mountPath` | `/run/spire/admin-sockets` | Where the admin socket is mounted. |
-| `spire.adminSocket.socketName` | `admin.sock` | Admin socket filename. |
+| `spire.brokerSocket.hostPath` | `/run/spire/agent/sockets/csi.spiffe.io/broker` | SPIRE agent **SPIFFE Broker Endpoint** socket directory on the node — where the `spiffe/spire` chart puts it with `spire-agent.sockets.broker.mountOnHost=true`. The agent brokers an X.509-SVID for every pod on its node through it (proposal 036). |
+| `spire.brokerSocket.mountPath` | `/run/spire/broker-sockets` | Where that directory is mounted in the agent container. |
+| `spire.brokerSocket.socketName` | `broker.sock` | Broker socket filename. |
 | `spire.waitWarnAfter` | `2m` | How long a component may wait for its first SVID before the waiting log line escalates from INFO to WARN (`--spire-wait-warn-after` on agent, registrar, controller and edge). On the **agent** it is also the dwell before the `spire-svid` readiness check reports NotReady — which arms the node taint, so it must not fire on a brief SPIRE hiccup (#740). The Deployments take no dwell: they go NotReady the instant they are known to lack an identity, which just removes one replica from one endpoint set. |
 
 ### `meshConfig` — proxy MeshConfig seeding
@@ -265,7 +265,7 @@ Node-agent-specific:
 |---|---|---|
 | `--mounted-registry-dir` | `/host/var/lib/aether/registry` | Local pod-data dir for the CNI plugin. |
 | `--kubelet-pods-dir` | `/var/lib/kubelet/pods` | Kubelet's pod-volumes dir, mounted into the proxy at the identical host path, through which the proxy reaches a workload's Unix socket (034). Empty disables UDS delivery: pods annotated `endpoint.aether.io/uds-socket` fall back to TCP loopback. Gated by the chart's `proxy.udsWorkloads.enabled`. |
-| `--spire-admin-socket` | `/tmp/spire-agent/private/admin.sock` | SPIRE admin socket for proxy SVID delegation. |
+| `--spire-broker-socket` | `/run/spire/broker-sockets/broker.sock` | SPIRE agent's SPIFFE Broker Endpoint socket, over which the agent brokers an X.509-SVID for every pod on its node (036). Replaced `--spire-admin-socket`; requires SPIRE >= 1.15.2 with its experimental broker enabled. |
 | `--gamma` | `true` | GAMMA east-west routing (018); default-on kill switch (031). CRD-detected. |
 | `--cni-conflist-reassert` | `true` | Re-assert the chained `aether-cni` entry in the node's active CNI conflist whenever a competing writer strips it (#645). Watches `--mounted-cni-net-dir` (fsnotify) plus a 60s re-check; only ever appends to an existing, valid conflist that still carries a primary CNI plugin. |
 | `--mounted-cni-net-dir` | `/host/etc/cni/net.d` | Host CNI config dir as mounted into the agent (read-write) for the re-assert loop. |

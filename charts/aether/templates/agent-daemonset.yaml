@@ -143,7 +143,7 @@ spec:
             # the system config above.
             {{- if .Values.spire.enabled }}
             - "--spire-workload-socket={{ .Values.spire.workloadSocketPath }}"
-            - "--spire-admin-socket={{ .Values.spire.adminSocket.mountPath }}/{{ .Values.spire.adminSocket.socketName }}"
+            - "--spire-broker-socket={{ .Values.spire.brokerSocket.mountPath }}/{{ .Values.spire.brokerSocket.socketName }}"
             - "--spire-wait-warn-after={{ .Values.spire.waitWarnAfter }}"
             {{- end }}
           ports:
@@ -204,8 +204,11 @@ spec:
               add:
                 - NET_ADMIN
                 {{- if .Values.spire.enabled }}
-                # Access the SPIRE agent admin socket (owned by the spire-agent
-                # uid) from this root-but-capability-dropped container.
+                # Access the SPIRE agent's SPIFFE Broker Endpoint socket from
+                # this root-but-capability-dropped container. The SPIRE chart
+                # creates it mode 0770 owned by the spire-agent uid:gid (1000
+                # with its recommended securityContexts, root otherwise), so a
+                # capability is what makes the connect work regardless of which.
                 - DAC_OVERRIDE
                 {{- end }}
           volumeMounts:
@@ -238,8 +241,8 @@ spec:
             - name: spire-workload-socket
               mountPath: /run/secrets/workload-spiffe-uds
               readOnly: true
-            - name: spire-admin-socket
-              mountPath: {{ .Values.spire.adminSocket.mountPath }}
+            - name: spire-broker-socket
+              mountPath: {{ .Values.spire.brokerSocket.mountPath }}
               readOnly: true
             {{- end }}
           resources:
@@ -288,8 +291,8 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
-        - name: spire-admin-socket
+        - name: spire-broker-socket
           hostPath:
-            path: {{ .Values.spire.adminSocket.hostPath }}
+            path: {{ .Values.spire.brokerSocket.hostPath }}
             type: DirectoryOrCreate
         {{- end }}

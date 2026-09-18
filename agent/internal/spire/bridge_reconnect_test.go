@@ -3,149 +3,64 @@ package spire
 import (
 	"context"
 	"log/slog"
-	"net"
-	"os"
-	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
+	"aethermesh.dev/common/spire/spiretest"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
+	brokerpb "github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 )
 
-// fakeDelegatedIdentity is a SPIRE delegated-identity server whose first
-// subscription stream of each kind sends one empty response and then ends,
-// simulating a SPIRE agent restart. Subsequent streams stay open until the
-// test ends so the bridge can settle in a healthy reconnected state.
-type fakeDelegatedIdentity struct {
-	delegatedidentityv1.UnimplementedDelegatedIdentityServer
+// Identities used across the broker-backed bridge tests.
+const (
+	testAgentID  = "spiffe://" + spiretest.TrustDomain + "/ns/aether-system/sa/aether-agent"
+	testWorkload = "spiffe://" + spiretest.TrustDomain + "/ns/aether-test/sa/echo"
+)
 
-	mu         sync.Mutex
-	bundleSubs int
-	svidSubs   int
-}
-
-// counts returns the number of bundle and SVID subscriptions seen so far.
-func (f *fakeDelegatedIdentity) counts() (bundle, svid int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.bundleSubs, f.svidSubs
-}
-
-func (f *fakeDelegatedIdentity) SubscribeToX509Bundles(_ *delegatedidentityv1.SubscribeToX509BundlesRequest, stream grpc.ServerStreamingServer[delegatedidentityv1.SubscribeToX509BundlesResponse]) error {
-	f.mu.Lock()
-	f.bundleSubs++
-	n := f.bundleSubs
-	f.mu.Unlock()
-
-	if err := stream.Send(&delegatedidentityv1.SubscribeToX509BundlesResponse{}); err != nil {
-		return err
-	}
-	if n == 1 {
-		return nil // simulated SPIRE agent restart: stream ends after one update
-	}
-	<-stream.Context().Done()
-	return nil
-}
-
-func (f *fakeDelegatedIdentity) SubscribeToX509SVIDs(_ *delegatedidentityv1.SubscribeToX509SVIDsRequest, stream grpc.ServerStreamingServer[delegatedidentityv1.SubscribeToX509SVIDsResponse]) error {
-	f.mu.Lock()
-	f.svidSubs++
-	n := f.svidSubs
-	f.mu.Unlock()
-
-	if err := stream.Send(&delegatedidentityv1.SubscribeToX509SVIDsResponse{}); err != nil {
-		return err
-	}
-	if n == 1 {
-		return nil // simulated SPIRE agent restart: stream ends after one update
-	}
-	<-stream.Context().Done()
-	return nil
-}
+// testPodRef is the pod reference every broker-backed test subscribes with.
+var testPodRef = PodRef{Namespace: "aether-test", Name: "echo-7c9f", UID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}
 
 // nopStore is a SecretStore that accepts and discards all pushes.
 type nopStore struct{}
 
 func (nopStore) SetSecrets(context.Context, []*tlsv3.Secret) error { return nil }
 
-// startFakeSpire serves a fakeDelegatedIdentity on a temporary UDS and returns
-// it with the socket path. It uses os.MkdirTemp under /tmp to keep the path
-// within the ~108-byte UDS limit (Bazel sandbox paths can exceed it).
-func startFakeSpire(t *testing.T) (*fakeDelegatedIdentity, string) {
+// brokerFixture is a bridge wired to a fake SPIFFE Broker Endpoint over mutual
+// TLS, exactly as production is wired: a real brokerClient, a real UDS, a real
+// mTLS handshake and the real security-header interceptors.
+type brokerFixture struct {
+	bridge   *Bridge
+	broker   *spiretest.FakeBroker
+	ca       *spiretest.CA
+	identity *spiretest.Identity
+	store    SecretStore
+}
+
+// startBrokerBridge starts a fake broker and a bridge against it, and runs the
+// bridge until the test ends. backoff is shortened so reconnects happen inside
+// the test budget.
+func startBrokerBridge(t *testing.T, store SecretStore, identity *spiretest.Identity, ca *spiretest.CA) *brokerFixture {
 	t.Helper()
 
-	dir, err := os.MkdirTemp("", "spire")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "agent.sock")
+	fake, sock := spiretest.StartBroker(t, ca, spiretest.DefaultBrokerServerID)
 
-	lis, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-
-	fake := &fakeDelegatedIdentity{}
-	srv := grpc.NewServer()
-	delegatedidentityv1.RegisterDelegatedIdentityServer(srv, fake)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-
-	return fake, sock
-}
-
-// newReconnectTestBridge creates a bridge against the fake SPIRE socket with
-// backoff shortened so reconnects happen within the test budget.
-func newReconnectTestBridge(sock string) *Bridge {
-	b := NewBridge(sock, nopStore{}, nil, slog.New(slog.DiscardHandler))
+	b := NewBridge(sock, store, identity, slog.New(slog.DiscardHandler))
 	b.backoffInitial = 10 * time.Millisecond
 	b.backoffMax = 50 * time.Millisecond
-	return b
-}
-
-// TestBundleStreamReconnects verifies that a bundle subscription stream ending
-// (e.g. a SPIRE agent restart) does not fail the bridge runnable — which would
-// take down the whole agent — but is re-subscribed with backoff.
-func TestBundleStreamReconnects(t *testing.T) {
-	fake, sock := startFakeSpire(t)
-	b := newReconnectTestBridge(sock)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- b.Start(ctx) }()
-
-	require.Eventually(t, func() bool {
-		bundle, _ := fake.counts()
-		return bundle >= 2
-	}, 10*time.Second, 10*time.Millisecond, "bridge must re-subscribe to bundles after the stream ends")
-
-	select {
-	case err := <-done:
-		t.Fatalf("Start returned instead of retrying the bundle stream: %v", err)
-	default:
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		require.NoError(t, err, "Start must return nil on context cancellation")
-	case <-time.After(10 * time.Second):
-		t.Fatal("Start did not return after cancellation")
-	}
-}
-
-// TestSVIDStreamResubscribes verifies that a pod's SVID stream ending is
-// re-subscribed instead of silently freezing the pod's SVID until expiry, and
-// that the subscription stays tracked so UnsubscribePod still works.
-func TestSVIDStreamResubscribes(t *testing.T) {
-	fake, sock := startFakeSpire(t)
-	b := newReconnectTestBridge(sock)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- b.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err, "Start must return nil on context cancellation")
+		case <-time.After(10 * time.Second):
+			t.Error("Start did not return after cancellation")
+		}
+	})
 
 	select {
 	case <-b.Started():
@@ -153,22 +68,75 @@ func TestSVIDStreamResubscribes(t *testing.T) {
 		t.Fatal("bridge did not start")
 	}
 
+	return &brokerFixture{bridge: b, broker: fake, ca: ca, identity: identity, store: store}
+}
+
+// newServedFixture is the common case: an agent identity that already exists and
+// a broker that resolves testPodRef to one SVID.
+func newServedFixture(t *testing.T, store SecretStore) *brokerFixture {
+	t.Helper()
+
+	ca := spiretest.NewCA(t)
+	f := startBrokerBridge(t, store, ca.Identity(t, testAgentID), ca)
+	f.setEntry(t, 1, nil)
+	return f
+}
+
+// setEntry points the broker at a fresh SVID generation for testPodRef.
+func (f *brokerFixture) setEntry(t *testing.T, version int, federated map[string][]byte) {
+	t.Helper()
+	f.broker.SetEntry(testPodRef.Namespace, testPodRef.Name, &spiretest.BrokerEntry{
+		SVIDs:            []*brokerpb.X509SVID{f.ca.BrokerSVID(t, testWorkload, version)},
+		FederatedBundles: federated,
+	})
+}
+
+// rotate pushes a new SVID generation onto every live stream for testPodRef and
+// reports how many streams received it.
+func (f *brokerFixture) rotate(t *testing.T, version int, federated map[string][]byte) int {
+	t.Helper()
+	return f.broker.Rotate(testPodRef.Namespace, testPodRef.Name, &spiretest.BrokerEntry{
+		SVIDs:            []*brokerpb.X509SVID{f.ca.BrokerSVID(t, testWorkload, version)},
+		FederatedBundles: federated,
+	})
+}
+
+// TestSVIDStreamResubscribes verifies that a pod's subscription stream ending
+// (e.g. a SPIRE agent restart) is re-subscribed instead of silently freezing the
+// pod's SVID until expiry, and that the subscription stays tracked so
+// UnsubscribePod still works.
+func TestSVIDStreamResubscribes(t *testing.T) {
+	f := newServedFixture(t, nopStore{})
+	f.broker.SetCloseAfterFirst(testPodRef.Namespace, testPodRef.Name, true)
+
 	const netns = "/proc/42/ns/net"
-	require.NoError(t, b.SubscribePod(netns, "spiffe://example.org/sa", PodSelectors("ns", "sa", "pod", "uid")))
+	require.NoError(t, f.bridge.SubscribePod(netns, testWorkload, testPodRef))
 
 	require.Eventually(t, func() bool {
-		_, svid := fake.counts()
-		return svid >= 2
-	}, 10*time.Second, 10*time.Millisecond, "bridge must re-subscribe to SVIDs after the stream ends")
+		return f.broker.Subscribes() >= 2
+	}, 10*time.Second, 10*time.Millisecond, "bridge must re-subscribe after the stream ends")
 
-	b.subsMu.Lock()
-	_, exists := b.subscriptions[netns]
-	b.subsMu.Unlock()
+	f.bridge.subsMu.Lock()
+	_, exists := f.bridge.subscriptions[netns]
+	f.bridge.subsMu.Unlock()
 	require.True(t, exists, "subscription must remain tracked across reconnects")
+}
 
-	select {
-	case err := <-done:
-		t.Fatalf("Start returned unexpectedly: %v", err)
-	default:
-	}
+// TestBridgeSurvivesSubscribeFailures is the successor to the bundle-stream
+// reconnect test: the bridge runnable must never fail for a transient broker
+// problem — that would take the whole agent down for a SPIRE hiccup. Here every
+// subscribe is refused, and the bridge keeps retrying without returning.
+func TestBridgeSurvivesSubscribeFailures(t *testing.T) {
+	ca := spiretest.NewCA(t)
+	f := startBrokerBridge(t, nopStore{}, ca.Identity(t, testAgentID), ca)
+	// No entry registered: every subscribe gets NotFound.
+
+	require.NoError(t, f.bridge.SubscribePod("/proc/43/ns/net", testWorkload, testPodRef))
+
+	require.Eventually(t, func() bool {
+		return f.broker.Subscribes() >= 3
+	}, 10*time.Second, 10*time.Millisecond, "an unresolved reference must be retried, not abandoned")
+
+	// The cleanup registered by startBrokerBridge asserts Start returned nil; if
+	// Start had already returned, that assertion is what fails.
 }

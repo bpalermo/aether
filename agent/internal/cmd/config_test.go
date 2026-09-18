@@ -76,14 +76,15 @@ func TestAgentConfig_SubConfigsAreIndependent(t *testing.T) {
 // come back — capture, the dormant redirect-all passthrough chain, and L4
 // routing are unconditional, the tunnel port is a constant, the xDS identity
 // is the node name (no separate proxy-id), and the startup-taint remover runs
-// unconditionally.
+// unconditionally. It also pins proposal 036's hard switch: the admin socket
+// the Delegated Identity API used is gone, replaced by --spire-broker-socket.
 func TestRetiredFlagsGone(t *testing.T) {
 	cmd := GetCommand()
 	for _, name := range []string{
 		"transparent-capture", "capture-redirect-all", "l4-routes", "east-west-tunnel-port",
-		"proxy-id", "remove-startup-taint",
+		"proxy-id", "remove-startup-taint", "spire-admin-socket",
 	} {
-		assert.Nil(t, cmd.Flags().Lookup(name), "flag --%s was retired by proposal 031 and must not be re-registered", name)
+		assert.Nil(t, cmd.Flags().Lookup(name), "flag --%s was retired (proposal 031 / 036) and must not be re-registered", name)
 	}
 }
 

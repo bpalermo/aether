@@ -11,14 +11,13 @@ import (
 // meterName identifies this instrumentation scope in metric backends.
 const meterName = "aether/agent-spire-bridge"
 
-// attrStream labels which delegated-identity stream an event belongs to.
-// Bounded cardinality: bundle or svid.
+// attrStream labels which subscription stream an event belongs to. Bounded
+// cardinality: only svid since the Broker API replaced the node-wide bundle
+// stream with the agent's own Workload API bundle (proposal 036); the attribute
+// is kept so the existing series and dashboard queries are unchanged.
 const attrStream = attribute.Key("aether.spire.stream")
 
-const (
-	streamBundle = "bundle"
-	streamSVID   = "svid"
-)
+const streamSVID = "svid"
 
 // bridgeMetrics holds the subscription-stream instruments. All methods are
 // nil-receiver-safe so the bridge runs unchanged when telemetry is disabled.
@@ -35,6 +34,13 @@ type bridgeMetrics struct {
 	// healthy agent, which is exactly why they are seeded: see newBridgeMetrics.
 	stalePushes  metric.Int64Counter
 	emptyBundles metric.Int64Counter
+
+	// SPIFFE Broker API reference-resolution instruments (proposal 036). The
+	// Broker API resolves a pod reference at request time, which the selector
+	// based delegated path never did, so two failure modes are new and both are
+	// seeded at zero for the same reason as the pair above.
+	refNotFound metric.Int64Counter
+	permDenied  metric.Int64Counter
 }
 
 // newBridgeMetrics registers the subscription-stream instruments on the given meter.
@@ -43,11 +49,11 @@ func newBridgeMetrics(meter metric.Meter) (*bridgeMetrics, error) {
 	var err error
 
 	if m.failures, err = meter.Int64Counter("aether.agent.spire.stream_failures",
-		metric.WithDescription("SPIRE delegated-identity streams that ended unexpectedly or failed to re-subscribe, by stream kind (bundle/svid)")); err != nil {
+		metric.WithDescription("SPIFFE Broker API subscription streams that ended unexpectedly or failed to (re-)subscribe, by stream kind (svid)")); err != nil {
 		return nil, fmt.Errorf("stream failures: %w", err)
 	}
 	if m.reconnects, err = meter.Int64Counter("aether.agent.spire.stream_reconnects",
-		metric.WithDescription("SPIRE delegated-identity streams re-established after a failure, by stream kind (bundle/svid)")); err != nil {
+		metric.WithDescription("SPIFFE Broker API subscription streams re-established after a failure, by stream kind (svid)")); err != nil {
 		return nil, fmt.Errorf("stream reconnects: %w", err)
 	}
 	if m.stalePushes, err = meter.Int64Counter("aether.agent.sds_push.stale_rejected",
@@ -59,7 +65,16 @@ func newBridgeMetrics(meter metric.Meter) (*bridgeMetrics, error) {
 		return nil, fmt.Errorf("empty bundles: %w", err)
 	}
 
-	// Seed the two publication-ordering counters at zero. The OTel SDK exports
+	if m.refNotFound, err = meter.Int64Counter("aether.agent.spire.broker.reference_not_found",
+		metric.WithDescription("SPIFFE Broker API subscribe attempts whose pod reference did not resolve (NotFound/FailedPrecondition): the pod is not in the kubelet list yet, or has no registration entry yet. Retried; a sustained rate means references are not converging")); err != nil {
+		return nil, fmt.Errorf("broker reference not found: %w", err)
+	}
+	if m.permDenied, err = meter.Int64Counter("aether.agent.spire.broker.permission_denied",
+		metric.WithDescription("SPIFFE Broker API subscribe attempts the provider refused (PermissionDenied): the broker is not authorized for this reference type, or the access policy denied impersonation of the referenced pod")); err != nil {
+		return nil, fmt.Errorf("broker permission denied: %w", err)
+	}
+
+	// Seed the publication-ordering and broker-resolution counters at zero. The OTel SDK exports
 	// a counter only after its first Add, so one that never increments — the
 	// healthy case for both of these — never appears in Prometheus at all, and
 	// "no series" is indistinguishable from "zero" to a grading query. Learned
@@ -67,6 +82,8 @@ func newBridgeMetrics(meter metric.Meter) (*bridgeMetrics, error) {
 	ctx := context.Background()
 	m.stalePushes.Add(ctx, 0)
 	m.emptyBundles.Add(ctx, 0)
+	m.refNotFound.Add(ctx, 0)
+	m.permDenied.Add(ctx, 0)
 
 	return m, nil
 }
@@ -104,4 +121,25 @@ func (m *bridgeMetrics) emptyBundleSkipped(ctx context.Context) {
 		return
 	}
 	m.emptyBundles.Add(ctx, 1)
+}
+
+// referenceNotFound records one subscribe attempt whose pod reference the SPIFFE
+// provider could not resolve. A handful per pod creation is the expected CNI-ADD
+// race; a sustained rate means references are not converging.
+func (m *bridgeMetrics) referenceNotFound(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.refNotFound.Add(ctx, 1)
+}
+
+// permissionDenied records one subscribe attempt the SPIFFE provider refused.
+// Non-zero always means a policy or configuration problem: the agent is not a
+// registered broker for this reference type, or the provider's access policy
+// denies it impersonating the referenced pod.
+func (m *bridgeMetrics) permissionDenied(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.permDenied.Add(ctx, 1)
 }

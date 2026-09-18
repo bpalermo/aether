@@ -19,7 +19,8 @@ import (
 // It waits for the SPIRE bridge to connect (SubscribePod no-ops before then),
 // then re-subscribes every managed stored pod, re-fetching the pod UID from the
 // API server. The UID is persisted in storage since proposal 034, but the
-// re-fetch stays: records written before the field existed lack it, and the
+// re-fetch stays — and matters more now that it is half of the Broker API's
+// workload reference: records written before the field existed lack it, and the
 // lookup doubles as liveness proof for the pod (deleted-while-down pods fail
 // it and are skipped). Idempotent: SubscribePod no-ops for an
 // already-subscribed network namespace, so racing a concurrent CNI ADD is safe.
@@ -61,8 +62,8 @@ func (s *CNIServer) runResubscribeStoredPods(ctx context.Context) {
 		s.reportRejectedSpiffeIDOverride(ctx, log, pod)
 
 		spiffeID := proxy.SpiffeIDFromPod(pod, s.trustDomain)
-		selectors := spire.PodSelectors(pod.GetNamespace(), pod.GetServiceAccount(), pod.GetName(), string(k8sPod.UID))
-		if err := s.spireBridge.SubscribePod(pod.GetNetworkNamespace(), spiffeID, selectors); err != nil {
+		ref := spire.PodRef{Namespace: pod.GetNamespace(), Name: pod.GetName(), UID: string(k8sPod.UID)}
+		if err := s.spireBridge.SubscribePod(pod.GetNetworkNamespace(), spiffeID, ref); err != nil {
 			log.ErrorContext(ctx, "resubscribe: failed to subscribe SVID", "error", err, "spiffeID", spiffeID)
 			continue
 		}
