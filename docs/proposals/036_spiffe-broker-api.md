@@ -1,8 +1,9 @@
 # Proposal: Replace SPIRE's Delegated Identity API with the SPIFFE Broker API
 
-**Status:** Accepted — 2026-09-18; phase 1 implemented in this change, phases
-0/2/3 platform-side ([k8s-talos-main#77](https://github.com/bpalermo/k8s-talos-main/issues/77);
-phase 0 merged as k8s-talos-main#79).
+**Status:** Accepted — 2026-09-18; phase 0 (k8s-talos-main#79) and phase 1 (#802)
+are implemented, deployed (talos-main rev217) and validated; phases 2 and 3 are
+platform-side and wait on a soak ([k8s-talos-main#77](https://github.com/bpalermo/k8s-talos-main/issues/77)).
+The measured result is in the Outcome section below.
 **Author:** Bruno Palermo
 **Relates:** the mesh mTLS model (per-pod app inbound, every hop mTLS), the
 SPIRE startup decoupling (#740), the monotonic SDS publication (#784), the
@@ -101,10 +102,15 @@ reopen them:
 ## Consequences
 
 **Gained.** SPIRE attests the pod itself, so every selector the k8s attestor can
-produce (labels, image, sigstore) becomes usable in registration entries. The
-admin socket and `authorizedDelegates` disappear. Impersonation can be
-RBAC-scoped per pod once `enforced` is on. The agent speaks a SPIFFE standard
-rather than a SPIRE API, and `spire-api-sdk` leaves the module.
+produce (labels, image, sigstore) is *available* to registration entries. In
+practice that only matters for entries written with such selectors:
+`spire-controller-manager` emits entries keyed on exactly one selector,
+`k8s:pod-uid:<uid>`, which the delegated path's hand-built set already carried —
+so for ClusterSPIFFEID-managed entries nothing matches now that did not match
+before (measured on talos-main, see Outcome). The concrete gains are the other
+three: the admin socket and `authorizedDelegates` disappear, impersonation can be
+RBAC-scoped per pod once `enforced` is on, and the agent speaks a SPIFFE standard
+rather than a SPIRE API, with `spire-api-sdk` out of the module.
 
 **Cost.** SPIRE marks the Broker API **experimental**: its configuration may
 change before it is promoted (upstream tracks open questions in
@@ -159,6 +165,37 @@ and converging; an SVID rotation observed on a live stream; the #740 SPIRE-outag
 tiers (agents never exit, xDS held, recovery on attestation); a registration
 entry keyed on a pod **label** receiving its identity — the capability the
 delegated path could not provide; then the 8-hour soak before phase 2.
+
+## Outcome (phase 1, 2026-09-18)
+
+Deployed to talos-main as rev217 (`0.92.24-9fc27c8`, #802) on top of phase 0.
+Every per-pod SVID on the cluster is now minted over the Broker API.
+
+| Measure | Result |
+|---|---|
+| Agent roll | 2 m 19 s; per-node time until every local pod had its SVID again: 1.5 – 2.2 s; 39/39 subscriptions |
+| `permission_denied` / `reference_not_found` | 0 / 0 fleet-wide (both counters exist, seeded) |
+| External prober across roll, churn and a SPIRE agent restart | 0 errors, both tiers, all five nodes |
+| Workload churn (8 new pods) | time-to-SVID mean 195 ms (60 – 391 ms); the bounded first receive never fired |
+| SPIRE agent restart on one node (~34 s socket outage) | all streams resubscribed 17.18 s in, against 17.4 s for the delegated bridge; the agent never went NotReady |
+| #638 mismatch, `sds_push_*`, Envoy `ssl_*`, LDS/CDS rejects | 0 |
+
+What it did **not** show, recorded so the next validation covers it:
+
+- **The selector gain is not observable here** (see Consequences): controller-manager
+  entries carry only `k8s:pod-uid`. Proving it needs a hand-written entry with a
+  different selector, which is a platform exercise.
+- **The `NotFound` race at CNI ADD never fired** — 8 of 8 references resolved on
+  the first attempt, so the retry path and the bounded first receive are covered
+  by unit tests only. A burst scale-up or a node drain is the way to provoke it.
+- **No rotation was observed.** `default_x509_svid_ttl` on this cluster is 4 h
+  (half-life ~2 h); the 8-hour soak spans several and is the decisive check.
+- **`PermissionDenied` was never provoked** — `permissive` was in force; phase 3's
+  `enforced` path is untested.
+- A startup race logs one ERROR per managed pod when the stored-pod resubscribe
+  runs before the agent's own SVID has landed (the mTLS dial has no client
+  certificate yet). It self-heals in about a second at no cost; the severity is
+  wrong, not the behaviour (#766).
 
 ## Rejected alternatives
 
