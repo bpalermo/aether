@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 
@@ -148,6 +149,85 @@ func (c *SnapshotCache) udsSocketPathForPod(ctx context.Context, cniPod *cniv1.C
 	return path
 }
 
+// inboundReadyIdentity is the node-wide input the per-pod inbound-readiness
+// probe clusters are rendered from: the node's own SVID (the client certificate
+// those probes present) and the trust domain (the validation-context secret
+// name and the pod SPIFFE IDs pinned as the expected server identity).
+type inboundReadyIdentity struct {
+	nodeSpiffeID string
+	trustDomain  string
+}
+
+// inboundReadyIdentitySnapshot copies the node identity under localMu. Callers
+// take it BEFORE listenerMu so the two locks are never nested.
+func (c *SnapshotCache) inboundReadyIdentitySnapshot() inboundReadyIdentity {
+	c.localMu.RLock()
+	defer c.localMu.RUnlock()
+	return inboundReadyIdentity{nodeSpiffeID: c.nodeSpiffeID, trustDomain: c.trustDomain}
+}
+
+// inboundReadyClusterFor builds a pod's inbound-readiness probe cluster, or
+// returns nil when the probe would be meaningless or unbuildable (issue #815):
+//
+//   - edge mode: no local workloads, no per-pod listeners at all;
+//   - SPIRE off: the inbound listener is CLEARTEXT (buildInboundCleartextFilterChain),
+//     so there is no handshake to prove and no secret to wait for. The whole
+//     feature is then inert and the SPIRE-off snapshot stays byte-identical;
+//   - no node SVID yet, or no trust domain yet: there is no client certificate
+//     to present. Emitting the cluster anyway would make it permanently
+//     unhealthy and demote every pod on the node. SetNodeIdentity rebuilds
+//     these the moment the SPIRE bridge delivers the node SVID;
+//   - no netns: nothing to bind the probe's dial into.
+func (c *SnapshotCache) inboundReadyClusterFor(cniPod *cniv1.CNIPod, id inboundReadyIdentity) types.Resource {
+	if c.edge || !c.spireEnabled || cniPod == nil {
+		return nil
+	}
+	if id.nodeSpiffeID == "" || id.trustDomain == "" || cniPod.GetNetworkNamespace() == "" {
+		return nil
+	}
+	return proxy.NewInboundReadyProbeCluster(
+		proxy.InboundReadyClusterName(cniPod),
+		cniPod.GetNetworkNamespace(),
+		id.nodeSpiffeID,
+		fmt.Sprintf("spiffe://%s", id.trustDomain),
+		proxy.SpiffeIDFromPod(cniPod, id.trustDomain),
+	)
+}
+
+// inboundReadyClusterName returns the name of the entry's inbound-readiness
+// probe cluster, or "" when the entry carries none. It reads the NAME OFF THE
+// EMITTED PROTO rather than re-deriving it from the pod, so the health gateway
+// can never require a cluster the CDS snapshot does not carry (which the
+// health_check filter treats as unhealthy — a gate that never opens).
+func inboundReadyClusterName(entry listenerEntry) string {
+	cl, ok := entry.inboundReadyCluster.(*clusterv3.Cluster)
+	if !ok || cl == nil {
+		return ""
+	}
+	return cl.GetName()
+}
+
+// recomputeInboundReadyClusters rebuilds every entry's inbound-readiness probe
+// cluster from the current node identity. Called when that identity arrives or
+// changes (SetNodeIdentity) and after a bulk listener load — the probes name the
+// node SVID as their client certificate, so before it lands there is nothing to
+// build.
+//
+// Rebuilding every entry (rather than only the changed pod) is deliberate: the
+// rendered proto is a pure function of (pod, node identity), so a pod whose
+// inputs did not change is rebuilt to BYTE-IDENTICAL config and costs the data
+// plane nothing — the delta-xDS hash is unchanged and Envoy skips it.
+func (c *SnapshotCache) recomputeInboundReadyClusters() {
+	id := c.inboundReadyIdentitySnapshot()
+
+	c.listenerMu.Lock()
+	defer c.listenerMu.Unlock()
+	for netns, entry := range c.listeners {
+		entry.inboundReadyCluster = c.inboundReadyClusterFor(entry.cniPod, id)
+		c.listeners[netns] = entry
+	}
+}
+
 func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
 	netns := cniPod.GetNetworkNamespace()
 	c.log.DebugContext(ctx, "adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
@@ -161,7 +241,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		return err
 	}
 	c.applyWaypointInboundServerNames(inbound, cniPod)
-	capture, err := c.generateCaptureListener(cniPod, extensionFilters)
+	capture, err := c.generateCaptureListener(cniPod, trustDomain, extensionFilters)
 	if err != nil {
 		return err
 	}
@@ -170,18 +250,28 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		return err
 	}
 
+	// The node identity the pod's inbound-readiness probe presents. Read before
+	// listenerMu (localMu is never nested inside it).
+	readyIdentity := c.inboundReadyIdentitySnapshot()
+	if readyIdentity.trustDomain == "" {
+		// First pod on a fresh agent: setLocalWorkload below records the trust
+		// domain, but the probe is built here. Use the one the CNI ADD carries.
+		readyIdentity.trustDomain = trustDomain
+	}
+
 	c.listenerMu.Lock()
 	if c.listeners == nil {
 		c.listeners = make(map[string]listenerEntry)
 	}
 	c.listeners[netns] = listenerEntry{
-		inbound:       inbound,
-		outbound:      outbound,
-		capture:       capture,
-		udpCapture:    udpCapture,
-		cniPod:        cniPod,
-		appClusters:   clustersToResources(appClusters),
-		healthCluster: healthCluster,
+		inbound:             inbound,
+		outbound:            outbound,
+		capture:             capture,
+		udpCapture:          udpCapture,
+		cniPod:              cniPod,
+		appClusters:         clustersToResources(appClusters),
+		healthCluster:       healthCluster,
+		inboundReadyCluster: c.inboundReadyClusterFor(cniPod, readyIdentity),
 	}
 	c.listenerMu.Unlock()
 
@@ -299,7 +389,7 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 	defer c.listenerMu.RUnlock()
 
 	resources := make([]types.Resource, 0, 2*len(c.listeners)+1)
-	probeClusters := make([]string, 0, len(c.listeners))
+	probes := make([]proxy.HealthGatewayProbe, 0, len(c.listeners))
 	var stale int64
 	for netns, entry := range c.listeners {
 		// A pod whose netns is gone must not reach an LDS response at all: the
@@ -319,7 +409,12 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 		resources = appendListener(resources, entry.capture)
 		resources = appendListener(resources, entry.udpCapture)
 		if hc, ok := entry.healthCluster.(*clusterv3.Cluster); ok && hc != nil {
-			probeClusters = append(probeClusters, hc.GetName())
+			// The pod's gateway path answers 200 only when the app probe AND —
+			// when it is programmed — the inbound-readiness probe both pass
+			// (issue #815). A pod without the second cluster keeps exactly
+			// today's single-cluster gate, which is what makes SPIRE-off and
+			// pre-node-SVID snapshots byte-identical.
+			probes = append(probes, proxy.NewHealthGatewayProbe(hc.GetName(), inboundReadyClusterName(entry)))
 		}
 	}
 	// Counted once per generation, from the listener pass only: appClusters()
@@ -331,7 +426,7 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 	// c.listeners is keyed by netns, so the per-pod listeners come out in a
 	// random order. (probeClusters is sorted inside BuildHealthGatewayListener.)
 	sortResourcesByName(resources)
-	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probeClusters))
+	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probes))
 	// East/west waypoint (proposal 019): one host-netns tunnel listener that
 	// SNI-forwards cross-cluster mTLS to the services this node hosts. nil unless
 	// --east-west-waypoint is set and the node hosts mesh pods.
@@ -400,6 +495,9 @@ func (c *SnapshotCache) appClusters() []types.Resource {
 		resources = append(resources, entry.appClusters...)
 		if entry.healthCluster != nil {
 			resources = append(resources, entry.healthCluster)
+		}
+		if entry.inboundReadyCluster != nil {
+			resources = append(resources, entry.inboundReadyCluster)
 		}
 	}
 	// c.listeners is a map: sort so the per-pod cluster set is stable.
@@ -471,7 +569,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			continue
 		}
 		c.applyWaypointInboundServerNames(inbound, pod)
-		capture, captureErr := c.generateCaptureListener(pod, extensionFilters)
+		capture, captureErr := c.generateCaptureListener(pod, trustDomain, extensionFilters)
 		if captureErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate capture listener for pod", "error", captureErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, captureErr)
@@ -491,6 +589,8 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 			cniPod:        pod,
 			appClusters:   clustersToResources(appClusters),
 			healthCluster: healthCluster,
+			// inboundReadyCluster is filled by recomputeInboundReadyClusters
+			// below, once the trust domain and node identity are recorded.
 		}
 		local[netns] = proxy.SpiffeIDFromPod(pod, trustDomain)
 		// Contribute to the node dependency set so the scoped registry load
@@ -516,6 +616,10 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	// mTLS-injected cluster; rebuild them before the snapshot below reads the
 	// cache (issue #537).
 	c.recomputeMTLSClusters()
+	// Now that the trust domain is recorded, render each pod's inbound-readiness
+	// probe (a no-op until the SPIRE bridge delivers the node SVID, which calls
+	// SetNodeIdentity and recomputes again).
+	c.recomputeInboundReadyClusters()
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)

@@ -29,6 +29,36 @@ const livenessInterval = 5 * time.Second
 // never-serving app still gets gated — just not flapped during startup.
 const livenessWarmupGrace = 15 * time.Second
 
+// livenessDemoteStreak is how many CONSECUTIVE failing observations a pod that
+// has already served must produce before the agent demotes its endpoint to
+// UNHEALTHY. At livenessInterval that is 15s — the same window as
+// livenessWarmupGrace, and for the same underlying reason.
+//
+// Why it exists (issue #815). The gateway path for a pod now also reflects its
+// inbound-readiness probe: an active mTLS health check against the pod's OWN
+// inbound listener. A NEW Envoy epoch — every proxy hot restart, every proxy
+// container restart — re-establishes that from scratch: hosts start FAILED and
+// stay so until the epoch has re-fetched the pod's SDS secret, warmed the
+// inbound listener (which does not listen() until the secret lands) and
+// completed one TLS handshake. The existing warm-up grace does NOT cover this:
+// it only applies to pods that have never served, and after a proxy roll every
+// pod on the node has served. Demoting on the first 503 would therefore drop
+// the node's ENTIRE endpoint set out of every client's EDS at every proxy roll
+// — a far worse availability event than the premature-promotion hole #815
+// closes.
+//
+// The arithmetic: with the HC interval at 5s and the liveness loop at 5s, an
+// epoch change can produce at most two consecutive 503s before the first check
+// passes. Three is that plus a margin.
+//
+// The cost is that a genuinely dead application is demoted ~10s later than
+// before. That is deliberate: EDS demotion is the slow, global, consistent path
+// — fast local failure detection is the clusters' outlier detection (3
+// consecutive local-origin failures, see proxy.NewServiceCluster), which is
+// unaffected, as is the two-phase drain on pod deletion, which does not go
+// through this loop at all.
+const livenessDemoteStreak = 3
+
 // livenessState carries the loop's per-container memory between ticks.
 type livenessState struct {
 	// last is the most recent health reported to the registry, to re-register
@@ -40,6 +70,15 @@ type livenessState struct {
 	// sawHealthy marks containers that have passed their health check at least
 	// once; after that, a 503 is never warm-up.
 	sawHealthy map[string]struct{}
+	// failStreak counts consecutive failing observations per container, so a
+	// previously-serving pod is only demoted after livenessDemoteStreak of them.
+	failStreak map[string]int
+	// gatewayUnreachable records that an earlier tick could not reach the health
+	// gateway at all — the proxy was down or restarting. The first tick that
+	// reaches it again re-arms the warm-up grace for every pod (rearmWarmup),
+	// because the Envoy answering now is a fresh epoch whose health checkers all
+	// start failed.
+	gatewayUnreachable bool
 }
 
 func newLivenessState() *livenessState {
@@ -47,6 +86,7 @@ func newLivenessState() *livenessState {
 		last:       make(map[string]registryv1.ServiceEndpoint_Health),
 		firstSeen:  make(map[string]time.Time),
 		sawHealthy: make(map[string]struct{}),
+		failStreak: make(map[string]int),
 	}
 }
 
@@ -55,6 +95,21 @@ func (st *livenessState) forget(containerID string) {
 	delete(st.last, containerID)
 	delete(st.firstSeen, containerID)
 	delete(st.sawHealthy, containerID)
+	delete(st.failStreak, containerID)
+}
+
+// rearmWarmup puts every tracked container back into the warm-up grace after
+// the health gateway became reachable again. It deliberately does NOT touch
+// `last`: the registry state has not changed, only this proxy's health-checker
+// state has been reset, so nothing should be re-registered — the loop just must
+// not read the new epoch's initial all-failed state as an application failure.
+func (st *livenessState) rearmWarmup(now time.Time) {
+	st.gatewayUnreachable = false
+	st.sawHealthy = make(map[string]struct{})
+	st.failStreak = make(map[string]int)
+	for key := range st.firstSeen {
+		st.firstSeen[key] = now
+	}
 }
 
 // runLivenessLoop periodically reflects local pod application health (as actively
@@ -104,8 +159,15 @@ func (s *CNIServer) reconcileLiveness(ctx context.Context, state *livenessState)
 		if err != nil {
 			// The gateway itself is unreachable (proxy down / restarting): no
 			// probe this tick can succeed, abort instead of logging per pod.
+			// Remember it, so the tick that gets an answer again knows it is
+			// talking to a fresh Envoy whose health checkers all start failed.
+			state.gatewayUnreachable = true
 			s.log.DebugContext(ctx, "liveness: health gateway unreachable", "error", err)
 			return
+		}
+		if state.gatewayUnreachable {
+			state.rearmWarmup(time.Now())
+			s.log.DebugContext(ctx, "liveness: health gateway reachable again; re-arming the warm-up grace for all local pods")
 		}
 		if !known {
 			continue // pod's gateway filter not yet programmed / propagated
@@ -148,6 +210,9 @@ func (s *CNIServer) applyPodLiveness(ctx context.Context, state *livenessState, 
 	_, servedBefore := state.sawHealthy[key]
 	if healthy {
 		state.sawHealthy[key] = struct{}{}
+		state.failStreak[key] = 0
+	} else {
+		state.failStreak[key]++
 	}
 
 	want := livenessWant(healthy)
@@ -158,6 +223,14 @@ func (s *CNIServer) applyPodLiveness(ctx context.Context, state *livenessState, 
 	// window is startup, not an app failure. EDS-mode pods need no grace —
 	// they are registered UNHEALTHY, so warm-up 503s are not transitions.
 	if !healthy && !eds && !servedBefore && time.Since(state.firstSeen[key]) < livenessWarmupGrace {
+		return false
+	}
+
+	// Demotion hysteresis for a pod that HAS served: see livenessDemoteStreak.
+	// The gateway's 503 cannot distinguish "the app died" from "this Envoy
+	// epoch has not finished re-establishing the pod's inbound mTLS probe", so
+	// a single failing observation is never enough to pull the endpoint.
+	if !healthy && servedBefore && state.failStreak[key] < livenessDemoteStreak {
 		return false
 	}
 

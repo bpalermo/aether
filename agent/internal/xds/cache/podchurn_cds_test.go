@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -136,9 +136,26 @@ func TestLocalPodChurnRewritesEveryServiceCluster(t *testing.T) {
 	require.NoError(t, c.AddPod(ctx, newcomer, "aether.internal"))
 	afterAdd := clusterResourceDigests(t, c, "node-1")
 
+	// The RESIDENT pod's own per-pod clusters must be untouched by a stranger
+	// arriving. That includes inboundready_<pod> (issue #815), which is
+	// node-identity + pod scoped and deliberately NOT run through
+	// InjectUpstreamMTLS' per-source matcher: adding one pod must add exactly
+	// one cluster, not perturb the other pods'.
+	for name, digest := range before {
+		if !proxy.IsPerPodClusterName(name) {
+			continue
+		}
+		require.Equalf(t, digest, afterAdd[name],
+			"per-pod cluster %s changed bytes when an unrelated pod was added; "+
+				"per-pod clusters must not embed node-wide state", name)
+	}
+	require.Contains(t, afterAdd, "inboundready_"+newcomer.GetName(),
+		"the new pod must bring its own inbound-readiness probe cluster")
+	require.NotContains(t, before, "inboundready_"+newcomer.GetName())
+
 	// Every service cluster — the bare FQDN and each per-port alias — must have
-	// been rewritten. The per-pod app_/health_ STATIC clusters carry no upstream
-	// mTLS and are deliberately not asserted on.
+	// been rewritten. The per-pod app_/health_/inboundready_ STATIC clusters
+	// carry no per-source upstream mTLS and are deliberately not asserted on.
 	serviceClusters := 0
 	for name, digest := range before {
 		if !isServiceClusterName(name) {
@@ -161,11 +178,13 @@ func TestLocalPodChurnRewritesEveryServiceCluster(t *testing.T) {
 		require.Equalf(t, digest, afterDel[name],
 			"cluster %s did not return to its pre-ADD bytes after the pod DEL", name)
 	}
+	require.NotContains(t, afterDel, "inboundready_"+newcomer.GetName(),
+		"the departing pod's inbound-readiness probe must go with it")
 }
 
 // isServiceClusterName reports whether a cluster name is a registry-derived mesh
 // service cluster (the ones that carry the per-source mTLS matcher), as opposed
-// to a per-pod app_/health_ delivery cluster.
+// to a per-pod app_/health_/inboundready_ delivery or probe cluster.
 func isServiceClusterName(name string) bool {
-	return !strings.HasPrefix(name, "app_") && !strings.HasPrefix(name, "health_")
+	return !proxy.IsPerPodClusterName(name)
 }

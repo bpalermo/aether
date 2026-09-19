@@ -62,7 +62,7 @@ func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, 
 		return nil, nil, nil, nil, err
 	}
 
-	outbound, err = GenerateOutboundHTTPListener(cniPod, meshDomain, emitStatsPod, extensionFilters)
+	outbound, err = GenerateOutboundHTTPListener(cniPod, SourceIdentityForPod(cniPod, trustDomain), meshDomain, emitStatsPod, extensionFilters)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -106,7 +106,11 @@ func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClus
 	return appClusters, healthCluster
 }
 
-func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
+// GenerateOutboundHTTPListener builds the pod's explicit-egress listener.
+// sourceSpiffeID is the pod's own SPIFFE ID (SourceIdentityForPod), stamped into
+// filter state next to the netns for the cluster transport-socket matcher; "" is
+// accepted and reproduces the pre-#815 shape exactly.
+func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -135,7 +139,7 @@ func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, meshDomain string, emitS
 		StatPrefix:       fmt.Sprintf("out_http_%s", cniPod.GetName()),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultOutboundHTTPFilterChain(cniPod, meshDomain, emitStatsPod, extensionFilters),
+			buildDefaultOutboundHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters),
 		},
 	}, nil
 }

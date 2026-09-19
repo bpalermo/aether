@@ -210,6 +210,27 @@ data:
             # Repro-validated against the deployed image: filter answers 200.
             - safe_regex:
                 regex: "^cluster\\.health_[^.]*\\.(upstream_|lb_|retry|external|circuit_breakers|http1|http2|max_host_weight|assignment|bind_|original_dst|default_total_match).*"
+            # inboundready_<pod> probe clusters (issue #815): the per-pod active
+            # mTLS check of that pod's OWN mesh inbound listener. Same shape and
+            # same reasoning as health_<pod> above — never routed, so the same
+            # subtrees are permanently zero.
+            #
+            # ⚠ The SAME rule applies as for health_: membership_healthy /
+            # membership_total must stay readable. The health gateway's
+            # health_check filter evaluates cluster_min_healthy_percentages by
+            # READING those gauges, and this cluster is now named there next to
+            # health_<pod>. Excluding them nulls both to 0, the gateway answers
+            # 503, and the liveness loop demotes every endpoint on the node
+            # (2026-06-11 20:03-20:14Z outage — read the block above before
+            # editing this pattern).
+            #
+            # ssl.* is deliberately NOT excluded: cluster.inboundready_<pod>.ssl.
+            # {handshake,connection_error,fail_verify_san,fail_verify_error} is
+            # the direct read-out of WHY a pod is stuck un-promoted, which is the
+            # whole point of the probe. ssl.certificate.* is already excluded
+            # globally above.
+            - safe_regex:
+                regex: "^cluster\\.inboundready_[^.]*\\.(upstream_|lb_|retry|external|circuit_breakers|http1|http2|max_host_weight|assignment|bind_|original_dst|default_total_match).*"
 
 {{- if .Values.proxy.overload.enabled }}
     # Graceful degradation BEFORE the container memory limit OOM-kills Envoy:

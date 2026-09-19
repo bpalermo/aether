@@ -261,7 +261,9 @@ func TestLivenessRegistryCallIsBounded(t *testing.T) {
 	sock := fakeHealthGateway(t, "health_pod-a", http.StatusServiceUnavailable)
 	s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
-	s.reconcileLiveness(ctx, servedState(pod.GetContainerId()))
+	// livenessDemoteStreak consecutive failures are needed before the demotion
+	// (and therefore the registry call) happens at all — see #815.
+	reconcileUntilDemote(s, servedState(pod.GetContainerId()))
 
 	requireBounded(t, reg, "register", lifecycleRegistryTimeout)
 }
