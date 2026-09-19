@@ -70,6 +70,7 @@ type CNIServer struct {
 
 	snapshotCache *cache.SnapshotCache
 	spireBridge   *spire.Bridge
+	identityWatch IdentityWatch
 	// ackTracker confirms (and diagnoses) Envoy's delta-xDS ACK/NACK of pod
 	// listener updates; healthClient probes the proxy's health gateway
 	// listener for the liveness loop. The agent makes no Envoy admin calls.
@@ -137,6 +138,23 @@ type CNIServer struct {
 // independently in root.go and this is an optional interlock, not a dependency
 // the server needs to exist. Same shape as SnapshotCache.SetMeshDNSSnapshotPath.
 func (s *CNIServer) SetChainState(cs cniconflist.ChainState) { s.chain = cs }
+
+// IdentityWatch is this agent's own mesh identity as the CNI server needs to see
+// it: whether it is here yet. commonspire.WaitingSource implements it.
+type IdentityWatch interface {
+	HasSVID() bool
+}
+
+// SetIdentityWatch lets the server tell a registry call that failed because this
+// agent has no SVID yet — it cannot complete a handshake with the registrar, the
+// designed #740 wait — from a real registry fault when it logs (#766). Log
+// severity only; nil (the default) means "identity is never pending".
+func (s *CNIServer) SetIdentityWatch(w IdentityWatch) { s.identityWatch = w }
+
+// identityPending reports whether this agent is still waiting for its first SVID.
+func (s *CNIServer) identityPending() bool {
+	return s.identityWatch != nil && !s.identityWatch.HasSVID()
+}
 
 // unchained reports whether this node is known to be UNABLE to mesh a new pod
 // because aether is not chained in its active CNI conflist.

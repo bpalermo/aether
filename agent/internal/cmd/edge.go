@@ -169,6 +169,9 @@ func runEdge(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
+	// Severity only: the edge does not hold its first snapshot for identity, but a
+	// registry it cannot reach for want of an SVID is the designed wait (#766).
+	xdsSrv.SetIdentityWatch(identityGateOf(spireSource))
 	if err = m.Add(xdsSrv); err != nil {
 		return fmt.Errorf("failed to add xDS server: %w", err)
 	}
