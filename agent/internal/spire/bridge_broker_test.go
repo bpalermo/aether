@@ -48,7 +48,7 @@ func TestSubscribeSendsTheSecurityHeaderAndTheFullReference(t *testing.T) {
 func TestReferenceNotFoundRetriesUntilResolved(t *testing.T) {
 	store := &identityStore{}
 	f := newServedFixture(t, store)
-	reader := installTestBridgeMetrics(t, f.bridge)
+	reader := f.reader
 
 	f.broker.SetNotFoundFor(testPodRef.Namespace, testPodRef.Name, 3)
 
@@ -71,7 +71,7 @@ func TestReferenceNotFoundRetriesUntilResolved(t *testing.T) {
 // node fails this way, and the counter is the only thing that says so out loud.
 func TestPermissionDeniedIsCountedAndRetried(t *testing.T) {
 	f := newServedFixture(t, nopStore{})
-	reader := installTestBridgeMetrics(t, f.bridge)
+	reader := f.reader
 
 	f.broker.SetPermissionDeniedFor(testPodRef.Namespace, testPodRef.Name, true)
 	f.bridge.backoffMax = 20 * time.Millisecond // PermissionDenied jumps straight to max

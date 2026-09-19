@@ -133,6 +133,11 @@ type Bridge struct {
 	ownBundles map[string][]byte
 	podBundles map[string]map[string][]byte
 
+	// podSVIDs remembers the certificate chain last served for each subscribed
+	// pod (by network namespace), which is what tells a rotation from a first
+	// delivery and from a redelivery after a re-subscribe. Guarded by mu.
+	podSVIDs map[string][]byte
+
 	// pushMu serialises pushSecrets. It is held across BOTH the snapshot of
 	// secrets and the store publish, which is what makes publication ordered:
 	// several independent goroutines push (every per-pod SVID stream, the
@@ -196,6 +201,7 @@ func NewBridge(socketPath string, store SecretStore, source IdentitySource, log 
 		secrets:        make(map[string]*tlsv3.Secret),
 		ownBundles:     make(map[string][]byte),
 		podBundles:     make(map[string]map[string][]byte),
+		podSVIDs:       make(map[string][]byte),
 		subscriptions:  make(map[string]podSubscription),
 		started:        make(chan struct{}),
 	}
@@ -548,6 +554,7 @@ func (b *Bridge) UnsubscribePod(ctx context.Context, netns string) error {
 	b.subsMu.Unlock()
 
 	b.mu.Lock()
+	delete(b.podSVIDs, netns)
 	mutated := false
 	if !stillReferenced {
 		if _, served := b.secrets[sub.spiffeID]; served {
@@ -593,7 +600,10 @@ func (b *Bridge) handleSVIDUpdate(ctx context.Context, netns string, resp *broke
 		b.secrets[secret.GetName()] = secret
 		mutated = true
 	}
-	if b.setPodBundlesLocked(netns, resp.GetFederatedBundles()) {
+	update := b.classifyPodSVIDLocked(netns, next)
+	_, hadBundles := b.podBundles[netns]
+	bundlesChanged := b.setPodBundlesLocked(netns, resp.GetFederatedBundles())
+	if bundlesChanged {
 		changed, err := b.rebuildValidationContextsLocked(ctx)
 		bundleErr = err
 		mutated = mutated || changed
@@ -603,7 +613,18 @@ func (b *Bridge) handleSVIDUpdate(ctx context.Context, netns string, resp *broke
 	}
 	b.mu.Unlock()
 
-	b.log.DebugContext(ctx, "processed SVID update", "svids", len(svids), "federatedBundles", len(resp.GetFederatedBundles()))
+	if update != "" {
+		b.metrics.svidUpdated(ctx, identityPod, update)
+	}
+	if bundlesChanged {
+		b.metrics.bundleUpdated(ctx, bundleFederated, initialOrRotated(!hadBundles))
+	}
+	if update == updateRotated {
+		// Rare (once per pod per SVID half-life) and the one healthy event worth a
+		// line: until this existed, a rotation could only be inferred from Envoy.
+		b.log.InfoContext(ctx, "pod SVID rotated", "netns", netns, "spiffeID", next[0].GetName())
+	}
+	b.log.DebugContext(ctx, "processed SVID update", "svids", len(svids), "federatedBundles", len(resp.GetFederatedBundles()), "update", update)
 
 	if err := b.pushSecrets(ctx); err != nil {
 		return err
@@ -793,6 +814,11 @@ func (b *Bridge) refreshNodeSVID(ctx context.Context) error {
 	b.nodeSpiffeID = secret.GetName()
 	b.mu.Unlock()
 
+	b.metrics.svidUpdated(ctx, identityNode, initialOrRotated(firstServe))
+	if !firstServe {
+		b.log.InfoContext(ctx, "node SVID rotated", "spiffeID", secret.GetName())
+	}
+
 	// Inform the cache of the node identity so outbound clusters (which reference
 	// it as the no-match upstream client cert) can be generated. Only needed once:
 	// the SPIFFE ID is stable across rotations.
@@ -845,6 +871,7 @@ func (b *Bridge) refreshWorkloadBundle(ctx context.Context) error {
 		b.mu.Unlock()
 		return nil // unchanged; avoid a no-op snapshot bump
 	}
+	firstBundle := len(b.ownBundles) == 0
 	b.ownBundles = map[string][]byte{td.IDString(): der}
 	changed, rebuildErr := b.rebuildValidationContextsLocked(ctx)
 	if changed {
@@ -852,11 +879,43 @@ func (b *Bridge) refreshWorkloadBundle(ctx context.Context) error {
 	}
 	b.mu.Unlock()
 
+	b.metrics.bundleUpdated(ctx, bundleOwn, initialOrRotated(firstBundle))
+	if !firstBundle {
+		b.log.InfoContext(ctx, "Workload API trust bundle changed", "trustDomain", td.Name(), "authorities", len(bundle.X509Authorities()))
+	}
 	if rebuildErr != nil {
 		return rebuildErr
 	}
 	b.log.DebugContext(ctx, "served the Workload API trust bundle", "trustDomain", td.Name())
 	return b.pushSecrets(ctx)
+}
+
+// classifyPodSVIDLocked compares the first SVID of a Broker response with the one
+// last served for this pod and records the new one. It returns "" for a response
+// that carried no SVID (a federated-bundle-only update). Callers must hold b.mu.
+func (b *Bridge) classifyPodSVIDLocked(netns string, secrets []*tlsv3.Secret) string {
+	if len(secrets) == 0 {
+		return ""
+	}
+	chain := secrets[0].GetTlsCertificate().GetCertificateChain().GetInlineBytes()
+	previous, seen := b.podSVIDs[netns]
+	b.podSVIDs[netns] = chain
+	switch {
+	case !seen:
+		return updateInitial
+	case bytes.Equal(previous, chain):
+		return updateUnchanged
+	default:
+		return updateRotated
+	}
+}
+
+// initialOrRotated names an update by whether anything was served before it.
+func initialOrRotated(first bool) string {
+	if first {
+		return updateInitial
+	}
+	return updateRotated
 }
 
 // secretsEqual reports whether two TLS-certificate secrets carry the same cert
