@@ -115,6 +115,12 @@ access-log/tracing policy via the MeshConfig CR.
 | `proxy.authzSidecar.image.{repository,tag,args}` | `""` / `[]` | Bring-your-own authz container (serves `envoy.service.auth.v3.Authorization` on `unix:///run/aether/authz/authz.sock`). |
 | `proxy.authzSidecar.timeout` | `200ms` | Per-check gRPC timeout. |
 | `proxy.authzSidecar.failureMode` | `DENY` | `DENY` (fail-closed, 403 when unreachable) or `ALLOW` (fail-open). |
+| `proxy.authzSidecar.resources` | `10m` / `32Mi` requests, `128Mi` memory limit | Sidecar resources (OPA preset and bring-your-own). No CPU limit on purpose: it is on the request path, and throttling becomes ext_authz timeouts — 403s under `DENY`. |
+
+Envoy exports **no** `ext_authz` statistics until a route actually uses the filter
+(its OTLP stats sink only flushes counters that have been used). The prober chart's
+`authzCanary` gives a cluster one such route and asserts an allow and a deny
+decision every cycle — see `charts/prober/values.yaml`.
 
 ### `cniInstall` — CNI installer init container
 
@@ -140,7 +146,7 @@ access-log/tracing policy via the MeshConfig CR.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `controller.replicaCount` | `1` | Leader election is on; extra replicas are warm standbys. |
+| `controller.replicaCount` | `2` | Reconcilers and the node-taint guard are leader-elected, but every replica serves the admission webhooks, which are `failurePolicy: Ignore`: with none answering, a pod in an `aether.io/managed` namespace is admitted **unmeshed**. One replica measured a 49 s gap on a leader delete. |
 | `controller.injectPodNdots` | `true` | Pod-mutating webhook injects `dnsConfig` ndots into managed pods so mesh FQDNs resolve absolute-first (musl/Alpine safety). Pairs with mesh DNS. |
 | `controller.namespaceInjection` | `true` | Namespace auto-injection: a pod in a namespace labeled `aether.io/managed=true` is given the pod label automatically (opt out with `aether.io/managed=false`). |
 | `controller.webhook.spire` | `false` | Webhook serving cert source — decoupled from mesh SPIRE. `false` = Helm self-signed cert (works out of the box). `true` = serve with the controller's SPIRE SVID + inject the trust bundle. |

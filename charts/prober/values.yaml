@@ -81,3 +81,34 @@ resources:
     memory: 32Mi
   limits:
     memory: 64Mi
+
+# Always-on canary for aether's node-local ext_authz sidecar (proposal 027): a
+# dedicated echo target with an extAuthz HTTPFilter, and a client that asserts an
+# ALLOW and a DENY decision every cycle. Off by default: it needs aether's
+# proxy.authzSidecar enabled with a policy that lets the allow header through and
+# denies everything else from this ServiceAccount (`authz-canary`), e.g. with OPA:
+#
+#   allow if input.attributes.request.http.headers["x-authz"] == "letmein"
+#
+# Without it, Envoy exports no ext_authz statistics at all (its OTLP sink only
+# flushes counters that have been used), so a sidecar that stops evaluating
+# policy is invisible. FAIL lines in `kubectl logs deploy/authz-canary` are the
+# ledger; `envoy_http_ext_authz_*` in Prometheus is the rate.
+authzCanary:
+  enabled: false
+  # Client image: needs /bin/sh, curl and date.
+  image: curlimages/curl:8.22.0
+  # Mesh authority suffix (aether's meshDomain).
+  meshDomain: aether.internal
+  # Seconds between cycles (one allow + one deny request each).
+  interval: 5
+  # Log an OK heartbeat every N clean cycles, so silence is never ambiguous.
+  heartbeatEvery: 720
+  allow:
+    header: "x-authz: letmein"
+    expect: "200"
+  deny:
+    expect: "403"
+  echo:
+    replicas: 2
+    image: gcr.io/k8s-staging-gateway-api/echo-basic@sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3

@@ -27,7 +27,7 @@ spec:
         - key: aether.io/agent-not-ready
           operator: Exists
           effect: NoSchedule
-      # Keep the singleton controller off the registrars' node when possible.
+      # Keep the controller off the registrars' node when possible.
       # Preferred, not required: a small or single-node cluster still schedules.
       # The controller + both-registrars pile-up on one node is the #629 density
       # suspect. Override via controller.affinity.
@@ -49,6 +49,15 @@ spec:
                     - key: app.kubernetes.io/component
                       operator: In
                       values: [registrar]
+            # And keep the replicas apart from each other: two webhook servers on
+            # one node share that node's fate, which is the gap the second replica
+            # exists to close.
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "aether.controller.selectorLabels" . | nindent 20 }}
       {{- end }}
       containers:
         - name: controller

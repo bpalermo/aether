@@ -1,0 +1,192 @@
+{{- if .Values.authzCanary.enabled }}
+{{- $ns := include "prober.namespace" . }}
+# Always-on canary for the node-local ext_authz sidecar (proposal 027).
+#
+# Why it exists: Envoy's OTLP stats sink only flushes counters that have been
+# USED, so on a cluster where no route opts into ext_authz the whole
+# `ext_authz` stat family — ok / denied / error / timeout / failure_mode_allowed —
+# and the `authz_sidecar` cluster's stats simply do not exist, and neither does any
+# evidence that the sidecar still EVALUATES policy. The 2026-09-19 OPA
+# 1.18.2 -> 1.20.2 bump on talos-main could only be validated as "starts, compiles
+# the policy, listens on its socket".
+#
+# So this gives the cluster one route that really uses the filter, and one client
+# that asserts BOTH decisions every cycle: with the allow header it must get
+# {{ .Values.authzCanary.allow.expect }}, without it {{ .Values.authzCanary.deny.expect }}.
+# A sidecar that stops evaluating shows up as FAIL lines here (allow -> 403 under
+# failureMode DENY, deny -> 200 under ALLOW) and as `ext_authz` error/timeout
+# counters in Prometheus — which exist from the first request on.
+#
+# It has its own echo target on purpose: attaching the filter to the prober's
+# `echo` would put the authz sidecar on the mesh_dns SLI path and change what
+# every soak baseline has measured.
+#
+# Requires aether's `proxy.authzSidecar.enabled: true` with a policy that allows
+# the configured header (values.yaml); with the sidecar off the agent strips the
+# filter and the deny probe fails loudly, which is the correct signal.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: authz-canary
+  namespace: {{ $ns }}
+  labels:
+    {{- include "prober.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authz-echo
+  namespace: {{ $ns }}
+  labels:
+    {{- include "prober.labels" . | nindent 4 }}
+    aether.io/mesh-service: "true"
+  annotations:
+    aether.io/service: authz-echo
+    aether.io/port: "8080"
+    aether.io/app-protocol: http
+spec:
+  type: ClusterIP
+  selector:
+    app: authz-echo
+  ports:
+    - name: mesh
+      port: 18081
+      targetPort: 18081
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authz-echo
+  namespace: {{ $ns }}
+  labels:
+    {{- include "prober.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.authzCanary.echo.replicas }}
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: {app: authz-echo}
+  template:
+    metadata:
+      labels:
+        app: authz-echo
+        aether.io/managed: "true"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: {{ .Values.authzCanary.echo.image | quote }}
+          env:
+            - name: HTTP_PORT
+              value: "8080"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 8080
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The route that uses the filter: every request to authz-echo is checked.
+apiVersion: config.aether.io/v1
+kind: HTTPFilter
+metadata:
+  name: authz-canary
+  namespace: {{ $ns }}
+  labels:
+    {{- include "prober.labels" . | nindent 4 }}
+spec:
+  scope: SCOPE_CHAIN
+  targetRefs:
+    - kind: Service
+      name: authz-echo
+  extAuthz:
+    contextExtensions:
+      canary: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authz-canary
+  namespace: {{ $ns }}
+  labels:
+    {{- include "prober.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: authz-canary}
+  template:
+    metadata:
+      labels:
+        app: authz-canary
+        aether.io/managed: "true"
+      annotations:
+        # Same-namespace bare name (see charts/udsecho for why the form matters).
+        config.aether.io/upstreams: "authz-echo"
+    spec:
+      serviceAccountName: authz-canary
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: curl
+          image: {{ .Values.authzCanary.image | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              url="http://authz-echo.{{ $ns }}.{{ .Values.authzCanary.meshDomain }}:18081/"
+              echo "authz-canary loop start $(date -u +%FT%TZ) url=$url allow={{ .Values.authzCanary.allow.expect }} deny={{ .Values.authzCanary.deny.expect }}"
+              ok=0
+              while true; do
+                a=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H '{{ .Values.authzCanary.allow.header }}' "$url" 2>/dev/null || echo 000)
+                d=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || echo 000)
+                if [ "$a" = "{{ .Values.authzCanary.allow.expect }}" ] && [ "$d" = "{{ .Values.authzCanary.deny.expect }}" ]; then
+                  ok=$((ok+1))
+                  [ $((ok % {{ .Values.authzCanary.heartbeatEvery }})) -eq 0 ] && echo "$(date -u +%FT%TZ) OK cycles=$ok"
+                else
+                  echo "$(date -u +%FT%TZ) FAIL allow=$a (want {{ .Values.authzCanary.allow.expect }}) deny=$d (want {{ .Values.authzCanary.deny.expect }})"
+                fi
+                sleep {{ .Values.authzCanary.interval }}
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}
