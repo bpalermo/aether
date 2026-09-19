@@ -35,10 +35,10 @@ func TestUpstreamTransportSocketMatches(t *testing.T) {
 }
 
 func TestUpstreamTransportSocketMatcher(t *testing.T) {
-	netnsA := "/var/run/netns/cni-a"
 	idA := "spiffe://aether.internal/ns/aether-test/sa/echo"
 
-	matcher := UpstreamTransportSocketMatcher(map[string]string{netnsA: idA, "": "x", "y": ""})
+	// Two pods of the same ServiceAccount plus an empty entry: one map entry.
+	matcher := UpstreamTransportSocketMatcher([]string{idA, "", idA})
 
 	tree := matcher.GetMatcherTree()
 	require.NotNil(t, tree)
@@ -57,12 +57,14 @@ func TestUpstreamTransportSocketMatcher(t *testing.T) {
 		"must be envoy.matching.inputs.transport_socket_filter_state, not the generic filter_state")
 	var input tsinputsv3.FilterStateInput
 	require.NoError(t, proto.Unmarshal(tree.GetInput().GetTypedConfig().GetValue(), &input))
-	assert.Equal(t, networkNamespaceFilterStateKey, input.GetKey())
+	assert.Equal(t, sourceIdentityFilterStateKey, input.GetKey(),
+		"release two keys the matcher on the source SPIFFE ID, not the netns path")
 
-	// Only the valid netns->id pair is present; the action names the SPIFFE ID.
+	// One entry per ServiceAccount; the action names the SPIFFE ID, which is
+	// also the entry's key and the name of its transport_socket_match.
 	m := tree.GetExactMatchMap().GetMap()
 	require.Len(t, m, 1)
-	onMatch, ok := m[netnsA]
+	onMatch, ok := m[idA]
 	require.True(t, ok)
 
 	action := onMatch.GetAction()
@@ -82,7 +84,7 @@ func TestUpstreamTransportSocketMatcher(t *testing.T) {
 // originating pod's, and for TCP floor clusters causes TLS handshake failures
 // (client cert SAN mismatch), manifesting as upstream_cx_total = 0.
 func TestUpstreamTransportSocketMatcherExtensionName(t *testing.T) {
-	matcher := UpstreamTransportSocketMatcher(map[string]string{"/var/run/netns/cni-a": "spiffe://aether.internal/ns/ns/sa/sa"})
+	matcher := UpstreamTransportSocketMatcher([]string{"spiffe://aether.internal/ns/ns/sa/sa"})
 	name := matcher.GetMatcherTree().GetInput().GetName()
 	assert.Equal(t, "envoy.matching.inputs.transport_socket_filter_state", name,
 		"must be the transport-socket-scoped FilterStateInput, not the generic network filter_state input")

@@ -20,39 +20,51 @@ const (
 	networkNamespaceFilterStateKey = "aether.network.network_namespace"
 
 	// sourceIdentityFilterStateKey carries the SOURCE POD'S SPIFFE ID, written as
-	// a literal string by every listener chain that can originate mesh traffic.
+	// a literal string by every listener chain that can originate mesh traffic,
+	// and read by the cluster transport_socket_matcher
+	// (UpstreamTransportSocketMatcher, transportsocketmatch.go) since release two.
 	//
-	// TWO-RELEASE CONTRACT (issue #815) — read this before touching either key.
+	// THREE-RELEASE CONTRACT (issue #815) — read this before touching either key.
 	//
-	// Today the cluster transport_socket_matcher
-	// (UpstreamTransportSocketMatcher, transportsocketmatch.go) keys its
-	// exact_match_map on networkNamespaceFilterStateKey. A netns path is unique
-	// PER POD, so every local pod ADD/DEL rewrites a field of EVERY mesh cluster
-	// on the node; under delta-xDS each rewritten EDS cluster re-warms for the
-	// full 15 s EDS initial_fetch_timeout and the warming→active swap then
-	// DrainAndDeletes every upstream connection pool on the node. Measured on the
-	// live cluster: 24–33 clusters warming for exactly 15 s per pod ADD.
+	// The matcher's exact_match_map used to be keyed on
+	// networkNamespaceFilterStateKey. A netns path is unique PER POD, so every
+	// local pod ADD/DEL rewrote a field of EVERY mesh cluster on the node; under
+	// delta-xDS each rewritten EDS cluster re-warmed for the full 15 s EDS
+	// initial_fetch_timeout and the warming→active swap then DrainAndDeletes
+	// every upstream connection pool on the node. Measured on the live cluster:
+	// 20–33 clusters warming for exactly 15 s per pod ADD, 30 s for two.
 	//
-	// The thing the matcher SELECTS is already per-ServiceAccount (the match name
-	// is the SPIFFE ID, UpstreamTransportSocketMatches). So keying the map on the
+	// The thing the matcher SELECTS was always per-ServiceAccount (the match name
+	// is the SPIFFE ID, UpstreamTransportSocketMatches). Keying the map on the
 	// SPIFFE ID instead makes the Cluster proto byte-stable across pod churn: a
 	// pod of an already-present ServiceAccount changes no cluster at all and
 	// Envoy's hash gate blocks the update.
 	//
-	//	RELEASE ONE (this change): every chain that sets the netns key ALSO sets
-	//	this one. Clusters are untouched and stay byte-identical — asserted by
-	//	TestClusterBytesUnchangedBySourceIdentityFilterState.
+	//	RELEASE ONE (#819/#821, SHIPPED — talos-main rev224, 2026-09-19): every
+	//	chain that sets the netns key ALSO sets this one. Clusters untouched and
+	//	byte-identical.
 	//
-	//	RELEASE TWO: switch the matcher's FilterStateInput.key to this key. Safe
-	//	only once every proxy in the fleet is running release-one listeners: a
-	//	cluster carrying the new matcher input in front of a listener that sets
-	//	only the old key matches nothing, falls to OnNoMatch = the node identity,
-	//	and presents the WRONG client certificate (#686 territory).
+	//	RELEASE TWO (SHIPPED, this release): the matcher's FilterStateInput.key is
+	//	this key. Both keys are still stamped on every originating chain.
+	//	UPGRADE CONSTRAINT: a proxy must run release-one (or later) LISTENERS
+	//	before it is handed release-two CLUSTERS. Upgrading a node straight from a
+	//	pre-#819 build is NOT supported — the agent publishes both in one
+	//	snapshot, but LDS and CDS are separate responses with no ordering
+	//	guarantee (the ADS server is go-control-plane's default, not
+	//	sotw.WithOrderedADS), so a cluster with the new input can face a listener
+	//	that only sets the old key. Such a connection matches nothing, takes
+	//	OnNoMatch, and presents the NODE identity instead of the pod's (#686
+	//	territory). Go through release one first.
 	//
-	//	RELEASE THREE, at the earliest: only then may networkNamespaceFilterStateKey
-	//	be removed from the listeners. Removing it in release two would strand any
-	//	proxy still holding a release-one cluster on the OnNoMatch path in exactly
-	//	the same way, in the other direction.
+	//	RELEASE THREE, NOT YET: drop networkNamespaceFilterStateKey from the
+	//	listeners. Allowed only once no supported upgrade path can run
+	//	release-two-or-later clusters against pre-release-one listeners — i.e.
+	//	once the oldest supported chart/agent version is >= release one AND every
+	//	proxy has been through a filter-chain-changing LDS update or a restart
+	//	since. Doing it in release two would strand any proxy still holding a
+	//	pre-release-one cluster on the OnNoMatch path in exactly the same way, in
+	//	the other direction. The netns key costs one set_filter_state entry per
+	//	chain; there is no hurry.
 	//
 	// Namespaced under "aether." like the netns key so it can never collide with
 	// an Envoy-owned filter state object name.

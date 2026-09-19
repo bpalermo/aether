@@ -7,6 +7,23 @@ System config:
 
 Components: agent (+ Envoy proxy), registrar, controller.
 CRD: install //charts/crds first (the MeshConfig CRD).
+{{- if .Values.spire.enabled }}
+
+UPGRADE ORDER (issue #815, applies to chart 0.92.28 and newer):
+  Do NOT jump to this chart from a release OLDER than 0.92.27. Upgrade to
+  0.92.27 first, let every node's aether-proxy take the new listeners, then
+  upgrade again. 0.92.27 taught each pod's listener to stamp its SPIFFE ID
+  into filter state; this release moved the outbound client-certificate
+  selection onto that key. Skipping 0.92.27 leaves a window in which a pod's
+  egress presents the NODE identity instead of its own, because LDS and CDS
+  are separate xDS responses with no ordering guarantee. Not a hard failure,
+  but visible to inbound RBAC / ext_authz / peer-identity checks. Already on
+  0.92.27 or later, or a fresh install: nothing to do.
+  Verify afterwards -- this must stay flat at 0 on every node during a pod
+  roll, at a 5s step:
+    max_over_time(envoy_cluster_manager_warming_clusters[1m])
+  See docs/runbook.md, "#815 release two".
+{{- end }}
 {{- if .Values.edge.enabled }}
 
 Edge (ingress): the chart manages the edge Gateway{{ if .Values.edge.gateway.create }} (created){{ end }} and

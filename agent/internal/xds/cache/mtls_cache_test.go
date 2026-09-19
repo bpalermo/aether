@@ -102,8 +102,7 @@ func TestCachedMTLSClusterMatchesInlineInjection(t *testing.T) {
 			},
 			expected: func() *clusterv3.Cluster {
 				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil), true)
-				proxy.InjectUpstreamMTLS(cl,
-					map[string]string{testPodNetns: testPodSpiffeID}, []string{testPodSpiffeID},
+				proxy.InjectUpstreamMTLS(cl, []string{testPodSpiffeID},
 					nodeIdentity, validationContextName, sanURIs, "18080", "")
 				return cl
 			},
@@ -117,8 +116,7 @@ func TestCachedMTLSClusterMatchesInlineInjection(t *testing.T) {
 			},
 			expected: func() *clusterv3.Cluster {
 				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil), true)
-				proxy.InjectUpstreamMTLS(cl,
-					map[string]string{testPodNetns: testPodSpiffeID}, []string{testPodSpiffeID},
+				proxy.InjectUpstreamMTLS(cl, []string{testPodSpiffeID},
 					nodeIdentity, validationContextName, sanURIs, "18080", "18080."+fqdn)
 				return cl
 			},

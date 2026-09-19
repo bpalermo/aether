@@ -359,6 +359,30 @@ bazel run //charts/aether:aether.install
 > do **not** use `--reuse-values` (it keeps the stale digest-pinned image). Bump
 > the chart's `version:` on any change to its templates/values (CI enforces this).
 
+### Version-ordering constraint: issue #815 (per-source client certificates)
+
+**You may not upgrade a cluster from a chart/agent older than `0.92.27` (the
+#819 + #821 "release one" build) straight to `0.92.28` or newer.** Go through a
+release-one build first, let every node's proxy pick up the new listeners, and
+only then upgrade again. Skipping the step is not a hard failure, but for the
+length of one config transition a pod's egress can present the **node** identity
+instead of its own, which inbound RBAC / `ext_authz` / peer-identity
+expectations will see.
+
+Why: the client certificate a pod's egress presents is selected by a cluster
+transport-socket matcher that reads a filter-state key the pod's *listener*
+stamps. Release one (`0.92.27`) started stamping `aether.source.spiffe_id`
+alongside the old `aether.network.network_namespace`; release two (`0.92.28`)
+moved the matcher onto it. The agent publishes listeners and clusters in the
+same snapshot, but LDS and CDS are separate xDS responses with no ordering
+guarantee, so a release-two cluster can briefly face a pre-release-one listener.
+That connection matches nothing and takes `on_no_match` = the node identity.
+
+Both keys are still stamped after release two; the old one is removed no earlier
+than release three, which will carry the same constraint in the other direction.
+Verification and the runtime failure signature are under *"#815 release two"* in
+§8.
+
 There are also two standalone charts, installed independently: **`prober`**
 (`charts/prober`) — the external mesh-availability prober (proposal 013; its
 flags, metrics and deployment shape are in
@@ -1345,3 +1369,161 @@ Two guards remain and still earn their place:
 A node-wide demotion wave aligned with a proxy roll is therefore a bug, not a
 tuning problem — capture `aether_agent_liveness_health_transitions_total` and
 the agent log and reopen #815.
+
+### #815 release two: every pod event used to re-warm every cluster on the node
+
+**What changed.** Every mesh service cluster carries a per-source upstream-mTLS
+`transport_socket_matcher`. Its `exact_match_map` used to be keyed by the source
+pod's **netns path**, which is unique per pod — so one CNI ADD or DEL rewrote a
+field of **every** mesh cluster on that node. Under delta-xDS each rewritten EDS
+cluster then re-warmed for the full 15 s EDS `initial_fetch_timeout` (delta
+sends no EDS request for a name the old cluster already watches, so no CLA
+arrives), and the warming→active swap destroyed the old `ClusterEntry` on every
+worker, which `drainConnPools()`-es **every upstream pool on the node**. The
+next request to every endpoint then paid a fresh TCP + mTLS handshake. Measured
+on talos-main (rev220 and again on rev224): one new pod → 20–24 clusters warming
+for 15 s; two new pods on one node → 30 clusters for 30 s; nodes with no new pod
+→ 0. That handshake storm is the latency excursion after a service roll, and it
+cost an 8 h soak its largest error episode.
+
+The map is now keyed by the **source SPIFFE ID** (`aether.source.spiffe_id`
+filter state), which is per **ServiceAccount**. The thing the matcher selects
+was always per-ServiceAccount — the `transport_socket_matches` entry name *is*
+the SPIFFE ID — so nothing about certificate selection changed; the key simply
+stopped carrying per-pod state.
+
+#### What still re-warms, and what is now free
+
+| event | before | after |
+|---|---|---|
+| pod ADD/DEL, ServiceAccount already on the node | every cluster, 15 s each | **nothing** |
+| rolling update, replacement lands on the same node | every cluster, twice | **nothing** |
+| FIRST pod of a ServiceAccount arriving on a node | every cluster | every cluster, once |
+| LAST pod of a ServiceAccount leaving a node | every cluster | every cluster, once |
+| node SVID rotation (same SPIFFE ID) | nothing | nothing |
+| registry change to the cluster itself | that cluster | that cluster |
+
+A scale-to-zero-and-back (the soak's SHRINK step) still costs one re-warm per
+direction per node that held a pod — not one per pod. **Keeping a departed
+ServiceAccount's entry alive for a grace period was considered and rejected:**
+the retained entry would name an SDS secret the agent stops serving when the
+pod's SVID subscription ends, and while Envoy's *delta* SDS keeps the last known
+secret on a removal (`sds_api.cc` ACKs and ignores it), a **new Envoy epoch**
+after a hot restart would not — every service cluster on the node would then
+warm for its SDS `initial_fetch_timeout` on every proxy roll and come up with
+`upstream_context_secrets_not_ready`, which is the same defect on a worse path.
+A retained entry is also unreachable by construction (no listener stamps a
+departed pod's identity), so it would buy byte-stability and nothing else.
+
+#### Verifying the fix
+
+The re-warm is invisible at a 60 s step — the proxy scrape is 5 s and the whole
+event lasts 15 s. Always `max_over_time` at a 5 s step:
+
+```promql
+# THE measurement. Add a pod to a ServiceAccount that already has one on the
+# node: this must stay 0 on every node. Before the fix it read 20-33 for 15 s.
+max_over_time(envoy_cluster_manager_warming_clusters[1m])
+
+# The same event from the other side: cluster rebuilds per node.
+increase(envoy_cluster_manager_cluster_modified[20m])
+```
+
+`cluster_modified` running at tens per node per 20 minutes against a handful of
+pod events is the pre-fix signature.
+
+#### The failure signature: a connection took the `on_no_match` path
+
+`on_no_match` presents the **node** identity. That is deliberate (some upstream
+connections legitimately have no source pod), so it is not an error — but a
+*workload's* traffic arriving as the node is the thing that says the
+filter-state key is not reaching the matcher.
+
+Envoy emits one counter per transport-socket match, named by the match:
+
+```
+cluster.<cluster>.<match_name>.total_match_count
+cluster.<cluster>.default.total_match_count
+```
+
+Every match on a mesh service cluster is named by a SPIFFE ID, so the chart
+lifts that into an attribute (`stats_tags` → `aether.transport_socket_match`,
+added with this release). Without it the SPIFFE ID lands in the exported metric
+**name**, one family per ServiceAccount, permanently in Prometheus' name index.
+Because the node identity is only reachable through `on_no_match`, **the node
+identity's counter on a service cluster is the no-match counter**:
+
+```promql
+# Connections that selected the NODE identity on a mesh service cluster.
+# Expect a small non-zero floor (see note 2) — compare it against the cluster's
+# upstream_cx_total, not against zero.
+increase(envoy_cluster_total_match_count{aether_transport_socket_match=~"spiffe://[^/]+/node/.*"}[5m])
+
+# The healthy case, for contrast: per-ServiceAccount selection actually happening.
+increase(envoy_cluster_total_match_count{aether_transport_socket_match=~"spiffe://[^/]+/ns/.*"}[5m])
+```
+
+Three things about that counter, all confirmed against the pinned proxy's
+sources — get them wrong and the query lies:
+
+1. **`default.total_match_count` stays at zero and proves nothing.** Envoy's
+   matcher treats `on_no_match` as a *match*, so an `on_no_match` that names a
+   socket increments that socket's named counter, never `default`. `default` is
+   reached only when there is no `on_no_match` at all, or when the action names
+   a socket absent from `transport_socket_matches` (which also logs
+   `Transport socket '<name>' not found, using default` at warn — there is no
+   stat for that misconfiguration).
+2. **There is a small constant offset.** The counter increments once per upstream
+   connection creation *and* once per `HostImpl` construction, and the
+   construction call passes no filter state, so it lands on `on_no_match`.
+   Expect the node-identity counter to tick up by roughly the endpoint count on
+   every EDS change even when everything is correct. Judge it against the
+   connection rate, not against zero.
+3. **It only counts connections at all because the matcher uses the filter-state
+   input.** Envoy re-resolves per connection only when
+   `usesFilterState() && !downstreamSharedFilterStateObjects().empty()`. A
+   cluster without the matcher (SPIRE off, or before the node SVID) resolves
+   once per host and the counter is meaningless there.
+
+The authoritative cross-check is on the **receiving** side: the destination
+proxy's XFCC / access-log peer URI SAN. Pod→pod mesh traffic must show
+`spiffe://<td>/ns/<ns>/sa/<sa>`; `spiffe://<td>/node/<node>` for traffic that
+came from a workload is the failure. The agent's own #638 discriminator
+(`agent/internal/xds/cache/identitybinding.go`) still names the
+netns→identity index behind it and WARNs on `outbound cluster bound to a foreign
+identity`.
+
+> **Why a wrong cert cannot leak across sources through pooling.** Envoy folds a
+> downstream filter-state object into the upstream connection-pool hash key only
+> if the object implements `Hashable`; `set_filter_state`'s `envoy.string`
+> factory does not, and a pool freezes the transport-socket options of whichever
+> connection allocated it. Node service clusters set
+> `connection_pool_per_downstream_connection: true`
+> (`proxy.NewServiceCluster`, `NewTCPServiceCluster`) — one pool per downstream
+> connection, so there is nothing to share. **Do not turn that off** while the
+> matcher reads a non-hashable filter-state key; the edge proxy sets it false
+> only because it has exactly one identity.
+
+#### Long-lived connections across the upgrade
+
+A connection accepted **before** its listener started stamping the key carries
+only the old key for its whole life, and its new upstream connections would take
+`on_no_match`. Release one changed the `filters` list on every mesh-originating
+filter chain, and Envoy's filter-chain reuse index hashes the whole `FilterChain`
+proto — so those chains were replaced and their connections drained. The drain
+is the server-wide `--drain-time-s`, which the supervisor sets from
+`proxy.hotRestart.drainTime` (**10 s**, not Envoy's 600 s default), after which
+the remaining connections are force-closed with `filter_chain_is_being_removed`.
+A proxy roll settles it outright. So on a cluster that has been through release
+one, no pre-release-one connection can still exist.
+
+#### SPIRE off
+
+No matcher is injected at all: the node SVID is only ever set by the SPIRE
+bridge, and without it every service cluster is emitted with a plain transport
+socket. Release two is a literal no-op there
+(`TestServiceClusterBytesUnaffectedByPodChurnWithSpireOff`).
+
+The edge proxy and the east/west waypoint tunnel are unaffected — the edge has a
+single identity and takes the non-matcher branch, and the waypoint's two-level
+matcher only changed which key its inner sub-trees read.

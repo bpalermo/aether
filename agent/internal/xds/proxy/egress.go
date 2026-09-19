@@ -395,8 +395,8 @@ func UDPLoadAssignment(src *endpointv3.ClusterLoadAssignment, clusterName string
 // a per-source transport socket that uses ALPN "aether-tcp" (UpstreamTCPTransportSocket)
 // instead of "h2", so the destination inbound filter-chain match on
 // application_protocols:["aether-tcp"] routes to the TCP floor tcp_proxy chain.
-func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni string) {
-	matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
+func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, sourceIdentities []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni string) {
+	matcher := UpstreamTransportSocketMatcher(sourceIdentities)
 	if matcher == nil {
 		cluster.TransportSocket = UpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
 		return
@@ -404,16 +404,41 @@ func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[strin
 	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
 
 	cluster.TransportSocketMatcher = matcher
-	cluster.TransportSocketMatches = UpstreamTCPTransportSocketMatches(append(spiffeIDs, nodeSpiffeID), validationContextName, sanURIs, sni)
+	cluster.TransportSocketMatches = UpstreamTCPTransportSocketMatches(withNodeIdentity(sourceIdentities, nodeSpiffeID), validationContextName, sanURIs, sni)
+}
+
+// withNodeIdentity returns the source identities plus the node identity, in a
+// FRESH slice. Never `append(sourceIdentities, nodeSpiffeID)`: the caller reuses
+// one identity slice across every cluster on the node, and an append with spare
+// capacity would write into that shared backing array under clusterMu while xDS
+// goroutines marshal protos built from it.
+func withNodeIdentity(sourceIdentities []string, nodeSpiffeID string) []string {
+	all := make([]string, 0, len(sourceIdentities)+1)
+	all = append(all, sourceIdentities...)
+	return append(all, nodeSpiffeID)
 }
 
 // InjectUpstreamMTLS sets the per-source mTLS transport socket on a service cluster:
-// a transport-socket matcher keyed on the source pod's network namespace selects
-// that pod's client certificate (on-no-match presents the node identity). The
-// matches reference each local workload's SVID over SDS. This is applied at snapshot
-// time because it depends on the current set of local workloads.
+// a transport-socket matcher keyed on the source pod's SPIFFE ID (the
+// aether.source.spiffe_id filter state every mesh-originating chain stamps)
+// selects that pod's client certificate. The matches reference each local
+// workload's SVID over SDS. This is applied at snapshot time because it depends
+// on the current set of local workload IDENTITIES — one entry per ServiceAccount
+// present on the node, not per pod (issue #815, release two).
 //
-// With no local workload mappings the matcher is omitted entirely — an empty
+// ON_NO_MATCH IS THE NODE IDENTITY, and that is deliberate. Some upstream
+// connections legitimately have no source pod: the capture listener's own
+// health/probe paths, anything the node proxy originates on its own behalf, and
+// — during a config transition — a downstream connection accepted by a listener
+// chain that did not stamp the key. The node SVID is a real, attested identity
+// in the same trust domain, so those connections still complete mTLS; the
+// destination simply sees the node rather than a workload. Omitting on_no_match
+// would instead fall through to the cluster's (absent) default transport socket.
+// A node identity arriving where a workload identity is expected is therefore
+// the failure signature to watch, not a connection drop — see the runbook,
+// "#815 release two".
+//
+// With no local workload identities the matcher is omitted entirely — an empty
 // exact_match_map NACKs the whole CDS push — and the node identity is presented
 // directly (what on_no_match would have done for every connection). No
 // transport_socket_matches are set in that branch: without the matcher Envoy
@@ -427,11 +452,11 @@ func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[strin
 // waypoint socket per source identity presenting waypointSNI (the structured
 // <port>.<svc>.<ns>.<meshDomain>), selected by the two-level matcher for
 // endpoints tagged waypoint=true; every other endpoint uses the local socket.
-func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]string, spiffeIDs []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni, waypointSNI string) {
-	allIDs := append(spiffeIDs, nodeSpiffeID)
+func InjectUpstreamMTLS(cluster *clusterv3.Cluster, sourceIdentities []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni, waypointSNI string) {
+	allIDs := withNodeIdentity(sourceIdentities, nodeSpiffeID)
 
 	if waypointSNI == "" {
-		matcher := UpstreamTransportSocketMatcher(netnsToSpiffeID)
+		matcher := UpstreamTransportSocketMatcher(sourceIdentities)
 		if matcher == nil {
 			cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
 			return
@@ -442,7 +467,7 @@ func InjectUpstreamMTLS(cluster *clusterv3.Cluster, netnsToSpiffeID map[string]s
 		return
 	}
 
-	matcher := WaypointTransportSocketMatcher(netnsToSpiffeID, nodeSpiffeID)
+	matcher := WaypointTransportSocketMatcher(sourceIdentities, nodeSpiffeID)
 	if matcher == nil {
 		// No local workloads: nothing originates traffic, so a single plain
 		// socket suffices (mirrors the no-workload path above).

@@ -73,9 +73,17 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 // carry only the netns key — byte-for-byte the pre-#815 shape — picking the
 // identity up on the next rebuild once the trust domain is known. The trust
 // domain is late-bound (agent/internal/identity), so this is a real, if brief,
-// startup state. Unlike the inbound SERVER certificate, a missing source
-// filter-state value is not fatal in release one: nothing reads the key yet
-// (the cluster matcher still keys on the netns until release two).
+// startup state.
+//
+// Since release two the cluster matcher READS this key, so a chain built in
+// that window selects OnNoMatch and its egress presents the NODE identity until
+// the next rebuild. That is a degradation, not a failure: the node SVID is a
+// real attested identity in the same trust domain, so mTLS still completes —
+// unlike the inbound SERVER certificate, where an empty trust domain yields a
+// name the agent never serves and the listener comes up with no certificate at
+// all (the main-worker-03 outage). The same window also leaves the cluster
+// matcher without an entry for the pod's identity, because both sides are
+// derived from the same trust domain, so the two stay consistent.
 func SourceIdentityForPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 	return SpiffeIDFromPod(cniPod, trustDomain)
 }
