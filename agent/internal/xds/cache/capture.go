@@ -240,10 +240,11 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	if c.captureEnabled {
 		// Node-global union, built once for the whole loop (see extensionHTTPFilters).
 		shared := c.extensionHTTPFilters()
-		// Read outside listenerMu: the lock order in this package is
-		// listenerMu (outer) -> localMu (inner) nowhere else, so don't create it.
-		trustDomain := c.currentTrustDomain()
 		c.listenerMu.Lock()
+		// Read INSIDE listenerMu: see rebuildPodListenersLocked. A trust domain
+		// sampled before this lock can be stale (empty at startup) by the time
+		// the loop runs, and an empty one renders `spiffe:///` (#815/#819).
+		trustDomain := c.currentTrustDomain()
 		for netns, entry := range c.listeners {
 			if entry.cniPod == nil {
 				continue
@@ -291,15 +292,14 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		ids = append(ids, id)
 	}
 	nodeSpiffeID := c.nodeSpiffeID
-	trustDomain := c.trustDomain
 	c.localMu.RUnlock()
 
-	if nodeSpiffeID == "" {
-		// Node SVID not yet available; skip TCP clusters until it is.
+	validationContextName := c.validationContextName()
+	if nodeSpiffeID == "" || validationContextName == "" {
+		// Node SVID or trust domain not yet available; skip TCP clusters until
+		// both are (an empty trust domain renders `spiffe://`, #815).
 		return nil
 	}
-
-	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
 
 	// For TCP services, retrieve their SAN namespaces from the cluster map (the HTTP
 	// cluster for the same service is guaranteed to exist if the service is in scope).
@@ -348,12 +348,11 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 
 	c.localMu.RLock()
 	nodeSpiffeID := c.nodeSpiffeID
-	trustDomain := c.trustDomain
 	c.localMu.RUnlock()
-	if nodeSpiffeID == "" {
+	validationContextName := c.validationContextName()
+	if nodeSpiffeID == "" || validationContextName == "" {
 		return nil
 	}
-	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
 
 	c.clusterMu.RLock()
 	resources := make([]types.Resource, 0, len(services))
@@ -924,7 +923,7 @@ func (c *SnapshotCache) SetAuthzSidecar(timeout time.Duration, failureModeAllow 
 // node-global union stays valid for the next pod.
 func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod, shared []*http_connection_managerv3.HttpFilter) []*http_connection_managerv3.HttpFilter {
 	if c.authzSidecar && proxy.HasExtAuthz(shared) {
-		return append([]*http_connection_managerv3.HttpFilter{proxy.SourceMetadataHTTPFilter(cniPod, c.trustDomain)}, shared...)
+		return append([]*http_connection_managerv3.HttpFilter{proxy.SourceMetadataHTTPFilter(cniPod, c.currentTrustDomain())}, shared...)
 	}
 	return shared
 }

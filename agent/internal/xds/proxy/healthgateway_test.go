@@ -15,7 +15,7 @@ import (
 func appProbes(clusters ...string) []HealthGatewayProbe {
 	probes := make([]HealthGatewayProbe, 0, len(clusters))
 	for _, c := range clusters {
-		probes = append(probes, NewHealthGatewayProbe(c))
+		probes = append(probes, NewHealthGatewayProbe(c, ""))
 	}
 	return probes
 }

@@ -126,7 +126,7 @@ func (c *SnapshotCache) collectSourceBindings() map[string]sourceBinding {
 		c.localMu.RUnlock()
 		return nil
 	}
-	trustDomain := c.trustDomain
+	trustDomain := c.currentTrustDomain()
 	sources := make(map[string]sourceBinding, len(c.localWorkloads))
 	for netns, id := range c.localWorkloads {
 		sources[netns] = sourceBinding{presented: id}

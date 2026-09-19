@@ -151,8 +151,9 @@ func (c *SnapshotCache) regenerateAllUDPCaptureListeners() {
 func (c *SnapshotCache) regenerateAllCaptureListeners() {
 	// Node-global union, built once for the whole loop (see extensionHTTPFilters).
 	shared := c.extensionHTTPFilters()
-	trustDomain := c.currentTrustDomain()
 	c.listenerMu.Lock()
+	// Read INSIDE listenerMu: see rebuildPodListenersLocked (#815/#819).
+	trustDomain := c.currentTrustDomain()
 	for netns, entry := range c.listeners {
 		if entry.cniPod == nil {
 			continue

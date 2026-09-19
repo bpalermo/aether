@@ -122,9 +122,7 @@ func (c *SnapshotCache) logInboundIdentityBindings(ctx context.Context, version 
 // compared then). Cleartext chains (SPIRE off) carry no transport socket and
 // are skipped: they present no certificate at all.
 func (c *SnapshotCache) collectInboundBindings() map[string]inboundBinding {
-	c.localMu.RLock()
-	trustDomain := c.trustDomain
-	c.localMu.RUnlock()
+	trustDomain := c.currentTrustDomain()
 	if trustDomain == "" {
 		return nil
 	}

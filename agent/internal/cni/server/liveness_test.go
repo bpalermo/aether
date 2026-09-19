@@ -64,6 +64,9 @@ func servedState(containerID string) *livenessState {
 	st := newLivenessState()
 	st.firstSeen[containerID] = time.Now().Add(-time.Minute)
 	st.sawHealthy[containerID] = struct{}{}
+	// Across Envoy epochs too: an endpoint that has served is advertised
+	// HEALTHY in the registry, and the can't-tell rule turns on exactly that.
+	st.everServed[containerID] = struct{}{}
 	return st
 }
 

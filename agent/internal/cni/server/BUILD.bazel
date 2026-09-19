@@ -62,6 +62,7 @@ go_test(
         "identity_test.go",
         "lifecycle_race_test.go",
         "liveness_hysteresis_test.go",
+        "liveness_inboundgate_test.go",
         "liveness_test.go",
         "metrics_test.go",
         "pod_test.go",

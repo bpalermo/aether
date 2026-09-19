@@ -51,6 +51,14 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		c.metrics.Generated(ctx, time.Since(start).Seconds(), int64(c.version.Load()), retErr)
 	}()
 
+	// Reconcile the per-pod inbound-readiness probes against the node identity
+	// in force RIGHT NOW, before anything reads the listener map. It is a map
+	// walk and a comparison in the steady state (nothing is rebuilt unless the
+	// identity changed), and running it here rather than from a handful of
+	// mutators is what makes "the gate is silently absent forever" unreachable —
+	// see recomputeInboundReadyClusters.
+	c.recomputeInboundReadyClusters()
+
 	listeners := c.Listeners()
 	clusters, endpoints, vhosts := c.clustersEndpointsAndVhosts()
 
