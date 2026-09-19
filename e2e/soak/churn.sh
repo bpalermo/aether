@@ -15,8 +15,8 @@
 #   T0+   what                       why
 #   ----  -------------------------  --------------------------------------------
 #   12    svc-1        24  svc-2
-#   36    proxy  *     48  svc-3
-#   60    mesh-dns     72  agent      the ONLY scheduled agent roll besides TRIPLE
+#   36    mesh-dns     48  svc-3
+#   60    proxy  *     72  agent      the ONLY scheduled agent roll besides TRIPLE
 #   84    svc-5        96  proxy  *
 #   108   svc-1        120 edge
 #   132   svc-2        144 mesh-dns
@@ -40,6 +40,18 @@
 #   * = 30 minutes later an age-matched proxy RSS sample is taken in the
 #       background (sample-proxy-rss.sh --at-age 1800), for #628.
 #
+# ------------------------------------------- why the first proxy roll is at T0+60
+#
+# It used to be at T0+36. On 2026-09-19 that first proxy roll cost 15 mesh_dns
+# timeouts across all five probers while the other five proxy rolls of the same run,
+# with identical echo placement, cost 0/1/0/0/0. The one thing that set it apart is
+# that it replaced the only Envoy generation born BEFORE the load started. Two
+# explanations fit: the pre-load generation itself (connections that predate k6), or
+# a roll landing before the load had settled. Moving it to a full hour after T0 (k6
+# starts ~4 minutes before T0) separates them: if the first roll still costs an order
+# of magnitude more than the rest, it is the pre-load generation, not the timing.
+# mesh-dns took the T0+36 slot; the set of rolls, and the 31 tally, are unchanged.
+#
 # ------------------------------------------------ why the window and the shrink
 #
 # #682: the node agent's demand-scoped dependency set holds each observed upstream
@@ -55,7 +67,12 @@
 # shrink -- not the 1h TTL specifically -- drops the cluster on a node with no local
 # replica and exposes the ODCDS stall, in seconds instead of an hour. svc-5 is the
 # target on purpose: it is the one service k6 declares as an upstream but never
-# actually drives, so bouncing it cannot pollute the k6 error rate or the prober SLI.
+# actually drives, so bouncing it cannot pollute the k6 error rate. It is NOT free on
+# the prober SLI, though this header used to say so: on 2026-09-19 the restore cost 18
+# mesh_dns timeouts (43% of that run's total), all client-side deadline expiries (`DC`
+# in the access log, no UF/UH/URX/NR) ~20s after the agents logged `inbound chain
+# references a secret absent from the snapshot` for svc-5's returning pods. Grade the
+# SHRINK as its own episode.
 #
 # Both steps are opt-out (default ON):  SOAK_NO_ROLL_WINDOW=0   SOAK_SHRINK=0
 set -uo pipefail
@@ -165,7 +182,7 @@ log "churn driver start T0=$(date -u +%FT%TZ) build=$BUILD_LABEL"
 
 # "<offset-minutes> <kind> [name]"
 SCHED=(
-	"12 svc svc-1" "24 svc svc-2" "36 proxy" "48 svc svc-3" "60 meshdns"
+	"12 svc svc-1" "24 svc svc-2" "36 meshdns" "48 svc svc-3" "60 proxy"
 	"72 agent" "84 svc svc-5" "96 proxy" "108 svc svc-1" "120 edge"
 	"132 svc svc-2" "144 meshdns" "156 svc svc-3" "168 svc svc-4" "180 svc svc-5"
 	"192 svc svc-1" "204 edge" "216 proxy" "228 svc svc-2" "240 svc svc-4"
