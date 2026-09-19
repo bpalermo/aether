@@ -19,6 +19,32 @@ const attrStream = attribute.Key("aether.spire.stream")
 
 const streamSVID = "svid"
 
+// attrIdentity labels whose credential an update carried, and attrUpdate what the
+// update was relative to what the bridge already served. Both are closed sets.
+const (
+	attrIdentity = attribute.Key("aether.spire.identity")
+	attrUpdate   = attribute.Key("aether.spire.update")
+	attrBundle   = attribute.Key("aether.spire.bundle")
+)
+
+const (
+	identityPod  = "pod"
+	identityNode = "node"
+
+	// updateInitial is the first credential served for a subject in this agent
+	// process (every subject after an agent restart); updateRotated replaced a
+	// different one already served; updateUnchanged is a redelivery of the same
+	// bytes, which is what a re-subscribe after a stream failure produces.
+	updateInitial   = "initial"
+	updateRotated   = "rotated"
+	updateUnchanged = "unchanged"
+
+	// bundleOwn is the agent's own Workload API trust bundle; bundleFederated is
+	// one pod's federated_bundles contribution to the served union.
+	bundleOwn       = "own"
+	bundleFederated = "federated"
+)
+
 // bridgeMetrics holds the subscription-stream instruments. All methods are
 // nil-receiver-safe so the bridge runs unchanged when telemetry is disabled.
 //
@@ -41,6 +67,13 @@ type bridgeMetrics struct {
 	// seeded at zero for the same reason as the pair above.
 	refNotFound metric.Int64Counter
 	permDenied  metric.Int64Counter
+
+	// Healthy-path instruments. Everything above counts a failure, so a rotation
+	// — the most important thing the identity path does — left no trace at all:
+	// the 2026-09-19 soak had to infer it from Envoy's per-secret version gauges
+	// with every proxy-roll bucket excluded by hand.
+	svidUpdates   metric.Int64Counter
+	bundleUpdates metric.Int64Counter
 }
 
 // newBridgeMetrics registers the subscription-stream instruments on the given meter.
@@ -74,6 +107,15 @@ func newBridgeMetrics(meter metric.Meter) (*bridgeMetrics, error) {
 		return nil, fmt.Errorf("broker permission denied: %w", err)
 	}
 
+	if m.svidUpdates, err = meter.Int64Counter("aether.agent.spire.svid_updates",
+		metric.WithDescription("X.509-SVIDs the bridge received and served, by identity (pod: a Broker API stream response; node: the agent's own Workload API SVID) and update (initial: first for that subject in this agent process; rotated: replaced a different one; unchanged: same bytes redelivered after a re-subscribe). rotated is the rotation signal: about one per subject per SVID half-life")); err != nil {
+		return nil, fmt.Errorf("svid updates: %w", err)
+	}
+	if m.bundleUpdates, err = meter.Int64Counter("aether.agent.spire.bundle_updates",
+		metric.WithDescription("Changes to the trust-bundle inputs behind the served validation contexts, by bundle (own: the agent's Workload API bundle; federated: one pod's federated_bundles contribution) and update (initial or rotated). own/rotated is a trust-root change")); err != nil {
+		return nil, fmt.Errorf("bundle updates: %w", err)
+	}
+
 	// Seed the publication-ordering and broker-resolution counters at zero. The OTel SDK exports
 	// a counter only after its first Add, so one that never increments — the
 	// healthy case for both of these — never appears in Prometheus at all, and
@@ -84,6 +126,18 @@ func newBridgeMetrics(meter metric.Meter) (*bridgeMetrics, error) {
 	m.emptyBundles.Add(ctx, 0)
 	m.refNotFound.Add(ctx, 0)
 	m.permDenied.Add(ctx, 0)
+	// The healthy-path counters are seeded per attribute set for the same reason:
+	// "no rotated series" must read as zero rotations, not as a missing metric.
+	for _, identity := range []string{identityPod, identityNode} {
+		for _, update := range []string{updateInitial, updateRotated, updateUnchanged} {
+			m.svidUpdates.Add(ctx, 0, metric.WithAttributes(attrIdentity.String(identity), attrUpdate.String(update)))
+		}
+	}
+	for _, bundle := range []string{bundleOwn, bundleFederated} {
+		for _, update := range []string{updateInitial, updateRotated} {
+			m.bundleUpdates.Add(ctx, 0, metric.WithAttributes(attrBundle.String(bundle), attrUpdate.String(update)))
+		}
+	}
 
 	return m, nil
 }
@@ -142,4 +196,21 @@ func (m *bridgeMetrics) permissionDenied(ctx context.Context) {
 		return
 	}
 	m.permDenied.Add(ctx, 1)
+}
+
+// svidUpdated records one X.509-SVID received and served for a pod or for the
+// node agent itself.
+func (m *bridgeMetrics) svidUpdated(ctx context.Context, identity, update string) {
+	if m == nil {
+		return
+	}
+	m.svidUpdates.Add(ctx, 1, metric.WithAttributes(attrIdentity.String(identity), attrUpdate.String(update)))
+}
+
+// bundleUpdated records one change to a trust-bundle input.
+func (m *bridgeMetrics) bundleUpdated(ctx context.Context, bundle, update string) {
+	if m == nil {
+		return
+	}
+	m.bundleUpdates.Add(ctx, 1, metric.WithAttributes(attrBundle.String(bundle), attrUpdate.String(update)))
 }

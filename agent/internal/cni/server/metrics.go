@@ -55,7 +55,26 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	if err := m.registerLifecycleInstruments(meter); err != nil {
 		return nil, err
 	}
+	m.seedCounters()
 	return m, nil
+}
+
+// seedCounters exports every attribute-less counter at zero. The OTel SDK exports
+// a counter only after its first Add, so the healthy case for all of these — they
+// never increment — leaves no series at all, and a grading query cannot tell "no
+// prunes" from "metric missing" (#717 for the #638 counters; the 2026-09 soaks
+// had to reason "no series = no prunes" about orphans_pruned twice running, with
+// the previous agent generation's value lingering through the staleness window
+// after every agent roll).
+func (m *cniMetrics) seedCounters() {
+	ctx := context.Background()
+	for _, c := range []metric.Int64Counter{
+		m.ghostsRemoved, m.missingRegistered, m.stalePruned, m.orphansPruned,
+		m.missingStorage, m.sweepErrors, m.pruneBreaker,
+		m.lostAddEvictions, m.staleRunningEvicts, m.spiffeIDOverrides,
+	} {
+		c.Add(ctx, 0)
+	}
 }
 
 // registerSweepInstruments registers the ghost-sweep counters and the prune-breaker gauge.

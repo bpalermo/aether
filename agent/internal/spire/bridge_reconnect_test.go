@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
 	"aethermesh.dev/common/spire/spiretest"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	brokerpb "github.com/spiffe/go-spiffe/v2/exp/proto/spiffe/broker"
@@ -35,6 +37,10 @@ type brokerFixture struct {
 	ca       *spiretest.CA
 	identity *spiretest.Identity
 	store    SecretStore
+	// reader collects the bridge's instruments. Installed before Start: the
+	// identity refresher records on the healthy path from its first pass, so
+	// swapping the instruments in afterwards races it.
+	reader *sdkmetric.ManualReader
 }
 
 // startBrokerBridge starts a fake broker and a bridge against it, and runs the
@@ -48,6 +54,7 @@ func startBrokerBridge(t *testing.T, store SecretStore, identity *spiretest.Iden
 	b := NewBridge(sock, store, identity, slog.New(slog.DiscardHandler))
 	b.backoffInitial = 10 * time.Millisecond
 	b.backoffMax = 50 * time.Millisecond
+	reader := installTestBridgeMetrics(t, b)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -68,7 +75,7 @@ func startBrokerBridge(t *testing.T, store SecretStore, identity *spiretest.Iden
 		t.Fatal("bridge did not start")
 	}
 
-	return &brokerFixture{bridge: b, broker: fake, ca: ca, identity: identity, store: store}
+	return &brokerFixture{bridge: b, broker: fake, ca: ca, identity: identity, store: store, reader: reader}
 }
 
 // newServedFixture is the common case: an agent identity that already exists and

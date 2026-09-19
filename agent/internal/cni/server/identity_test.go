@@ -64,7 +64,8 @@ func TestReportRejectedSpiffeIDOverride(t *testing.T) {
 			got, found := metricSum(t, reader, spiffeIDOverrideMetric)
 			if !tt.wantLog {
 				assert.Empty(t, buf.String(), "no annotation must produce no log line")
-				assert.False(t, found, "no annotation must not touch the counter")
+				assert.True(t, found, "the counter is seeded, so its series exists before any rejection")
+				assert.Zero(t, got, "no annotation must not touch the counter")
 				return
 			}
 
