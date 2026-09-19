@@ -10,9 +10,28 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func gatewayHCM(t *testing.T, probeClusters []string) *http_connection_managerv3.HttpConnectionManager {
+// appProbes turns a list of app-probe cluster names into gateway entries with
+// today's single-cluster requirement (no inbound-readiness probe).
+func appProbes(clusters ...string) []HealthGatewayProbe {
+	probes := make([]HealthGatewayProbe, 0, len(clusters))
+	for _, c := range clusters {
+		probes = append(probes, NewHealthGatewayProbe(c))
+	}
+	return probes
+}
+
+// decodeGatewayHealthCheck unwraps a gateway health_check filter's typed config.
+func decodeGatewayHealthCheck(t *testing.T, f *http_connection_managerv3.HttpFilter) *health_checkv3.HealthCheck {
 	t.Helper()
-	l := BuildHealthGatewayListener("/run/aether/health.sock", probeClusters)
+	require.Equal(t, httpHealthCheckFilterName, f.GetName())
+	hc := &health_checkv3.HealthCheck{}
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(hc))
+	return hc
+}
+
+func gatewayHCM(t *testing.T, probes []HealthGatewayProbe) *http_connection_managerv3.HttpConnectionManager {
+	t.Helper()
+	l := BuildHealthGatewayListener("/run/aether/health.sock", probes)
 	require.Len(t, l.GetFilterChains(), 1)
 	require.Len(t, l.GetFilterChains()[0].GetFilters(), 1)
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
@@ -21,12 +40,12 @@ func gatewayHCM(t *testing.T, probeClusters []string) *http_connection_managerv3
 }
 
 func TestBuildHealthGatewayListener(t *testing.T) {
-	l := BuildHealthGatewayListener("/run/aether/health.sock", []string{"health_b", "health_a"})
+	l := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_b", "health_a"))
 
 	assert.Equal(t, HealthGatewayListenerName, l.GetName())
 	assert.Equal(t, "/run/aether/health.sock", l.GetAddress().GetPipe().GetPath(), "gateway must listen on the UDS, not a port")
 
-	hcm := gatewayHCM(t, []string{"health_b", "health_a"})
+	hcm := gatewayHCM(t, appProbes("health_b", "health_a"))
 	filters := hcm.GetHttpFilters()
 	require.Len(t, filters, 3, "one health_check per cluster + router")
 
@@ -52,8 +71,8 @@ func TestBuildHealthGatewayListener(t *testing.T) {
 // iteration order must produce byte-identical listeners, or every snapshot
 // rebuild would push a spurious LDS update.
 func TestBuildHealthGatewayListener_Deterministic(t *testing.T) {
-	a := BuildHealthGatewayListener("/run/aether/health.sock", []string{"health_x", "health_y", "health_z"})
-	b := BuildHealthGatewayListener("/run/aether/health.sock", []string{"health_z", "health_x", "health_y"})
+	a := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_x", "health_y", "health_z"))
+	b := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_z", "health_x", "health_y"))
 	assert.True(t, proto.Equal(a, b), "gateway listener must be order-independent")
 }
 
@@ -70,6 +89,6 @@ func TestBuildHealthGatewayListener_Empty(t *testing.T) {
 // overload actions: liveness must report app truth, not proxy state, or an
 // overloaded proxy would flap every local pod's registry health cluster-wide.
 func TestHealthGatewayBypassesOverloadManager(t *testing.T) {
-	l := BuildHealthGatewayListener("/run/aether/health.sock", []string{"health_a"})
+	l := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_a"))
 	assert.True(t, l.GetBypassOverloadManager(), "health gateway must bypass overload manager actions")
 }

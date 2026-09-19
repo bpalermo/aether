@@ -79,7 +79,11 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // ORIGINAL_DST cluster, forwarding the original destination in plain TCP.
 //
 // Default off (no listener is generated unless transparent capture is on).
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
+// sourceSpiffeID is the capturing pod's own SPIFFE ID (SourceIdentityForPod),
+// stamped into filter state next to the netns on every chain that originates
+// mesh traffic (see sourceIdentityFilterStateKey). "" reproduces the pre-#815
+// shape exactly.
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -102,15 +106,15 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, capturePort uint32, meshDomai
 	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)*2+1)
 	for _, svc := range tcpServices {
 		// TLSRoute SNI chains (if any) go before the TCP floor chain.
-		tlsChains := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules)
+		tlsChains := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, sourceSpiffeID)
 		chains = append(chains, tlsChains...)
 		// TCP floor chain: passthrough or TCPRoute-weighted.
-		tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules)
+		tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID)
 		if tc != nil {
 			chains = append(chains, tc)
 		}
 	}
-	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
+	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
 
 	l := &listenerv3.Listener{
 		Name: CaptureListenerName(cniPod),
@@ -191,7 +195,7 @@ func buildCaptureListenerFilters() []*listenerv3.ListenerFilter {
 // Filter-chain precedence: destination-IP is more specific than application-protocol
 // in Envoy's match order, BUT this chain only exists for NON-HTTP ClusterIPs, so the
 // global HCM catch-all chain never has a precedence conflict with these chains.
-func buildCaptureTCPFloorFilterChain(svc CaptureTCPService) *listenerv3.FilterChain {
+func buildCaptureTCPFloorFilterChain(svc CaptureTCPService, sourceSpiffeID string) *listenerv3.FilterChain {
 	if svc.ClusterIP == "" || svc.ClusterName == "" {
 		return nil
 	}
@@ -207,10 +211,10 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService) *listenerv3.FilterCh
 				{AddressPrefix: svc.ClusterIP, PrefixLen: wrapperspb.UInt32(32)},
 			},
 		},
-		Filters: []*listenerv3.Filter{
-			buildNetworkNamespaceFilterState(),
+		Filters: append(
+			buildSourceFilterStates(sourceSpiffeID),
 			buildTCPProxyNetworkFilter(fmt.Sprintf("cap_tcp_%s", svc.ClusterName), svc.ClusterName),
-		},
+		),
 	}
 }
 
@@ -236,7 +240,7 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService) *listenerv3.FilterCh
 //
 // In scoped (non-redirect-all) mode the chain stays a catch-all: only mesh
 // ClusterIPs are captured (all cleartext HTTP) and there is no passthrough fallback.
-func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
+func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
 
 	prefix := []*http_connection_managerv3.HttpFilter{
@@ -261,10 +265,10 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitSt
 
 	fc := &listenerv3.FilterChain{
 		Name: fmt.Sprintf("capture_%s", cniPod.GetName()),
-		Filters: []*listenerv3.Filter{
-			buildNetworkNamespaceFilterState(),
+		Filters: append(
+			buildSourceFilterStates(sourceSpiffeID),
 			buildHTTPConnectionManagerFilter(hcm),
-		},
+		),
 	}
 	if scopeToCleartext {
 		// raw_buffer = cleartext (tls_inspector marks TLS "tls") + detected HTTP

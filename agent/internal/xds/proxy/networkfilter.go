@@ -18,12 +18,88 @@ import (
 const (
 	// networkNamespaceFilterStateKey is the filter state key for the network namespace
 	networkNamespaceFilterStateKey = "aether.network.network_namespace"
+
+	// sourceIdentityFilterStateKey carries the SOURCE POD'S SPIFFE ID, written as
+	// a literal string by every listener chain that can originate mesh traffic.
+	//
+	// TWO-RELEASE CONTRACT (issue #815) — read this before touching either key.
+	//
+	// Today the cluster transport_socket_matcher
+	// (UpstreamTransportSocketMatcher, transportsocketmatch.go) keys its
+	// exact_match_map on networkNamespaceFilterStateKey. A netns path is unique
+	// PER POD, so every local pod ADD/DEL rewrites a field of EVERY mesh cluster
+	// on the node; under delta-xDS each rewritten EDS cluster re-warms for the
+	// full 15 s EDS initial_fetch_timeout and the warming→active swap then
+	// DrainAndDeletes every upstream connection pool on the node. Measured on the
+	// live cluster: 24–33 clusters warming for exactly 15 s per pod ADD.
+	//
+	// The thing the matcher SELECTS is already per-ServiceAccount (the match name
+	// is the SPIFFE ID, UpstreamTransportSocketMatches). So keying the map on the
+	// SPIFFE ID instead makes the Cluster proto byte-stable across pod churn: a
+	// pod of an already-present ServiceAccount changes no cluster at all and
+	// Envoy's hash gate blocks the update.
+	//
+	//	RELEASE ONE (this change): every chain that sets the netns key ALSO sets
+	//	this one. Clusters are untouched and stay byte-identical — asserted by
+	//	TestClusterBytesUnchangedBySourceIdentityFilterState.
+	//
+	//	RELEASE TWO: switch the matcher's FilterStateInput.key to this key. Safe
+	//	only once every proxy in the fleet is running release-one listeners: a
+	//	cluster carrying the new matcher input in front of a listener that sets
+	//	only the old key matches nothing, falls to OnNoMatch = the node identity,
+	//	and presents the WRONG client certificate (#686 territory).
+	//
+	//	RELEASE THREE, at the earliest: only then may networkNamespaceFilterStateKey
+	//	be removed from the listeners. Removing it in release two would strand any
+	//	proxy still holding a release-one cluster on the OnNoMatch path in exactly
+	//	the same way, in the other direction.
+	//
+	// Namespaced under "aether." like the netns key so it can never collide with
+	// an Envoy-owned filter state object name.
+	sourceIdentityFilterStateKey = "aether.source.spiffe_id"
 )
 
 // buildNetworkNamespaceFilterState creates a filter that captures the network namespace
 // from Envoy's filter state and makes it available to upstream filters.
 func buildNetworkNamespaceFilterState() *listenerv3.Filter {
 	return buildSetFilterState(networkNamespaceFilterStateKey, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%")
+}
+
+// buildSourceIdentityFilterState stores the source pod's SPIFFE ID in filter
+// state as a LITERAL inline string (not a %FILTER_STATE(...)% substitution —
+// Envoy has no notion of the pod's mesh identity, the control plane does).
+// The value is the identity proxy.SpiffeIDFromPod derives for the pod, i.e.
+// exactly the name of the SDS secret whose certificate the upstream connection
+// must present.
+//
+// A literal contains no '%', so SubstitutionFormatString passes it through
+// unchanged; the format parser only treats %…% pairs as commands.
+//
+// Shared with the upstream connection with the SAME semantics as the netns key
+// (SharedWithUpstream ONCE) because it is destined for the same consumer: the
+// cluster's transport-socket matcher reads it through
+// TransportSocketOptions::downstreamSharedFilterStateObjects(), which is
+// populated only from filter state objects marked shared. ONCE scopes the
+// propagation to the immediate upstream hop, so a future chained/internal hop
+// cannot silently inherit source-identity cert selection.
+func buildSourceIdentityFilterState(sourceSpiffeID string) *listenerv3.Filter {
+	return buildSetFilterState(sourceIdentityFilterStateKey, sourceSpiffeID)
+}
+
+// buildSourceFilterStates returns the source-attribution network filters every
+// mesh-originating filter chain carries, in a FIXED order (netns first, then
+// identity): these land in the chain's repeated `filters` field, whose order is
+// part of the listener's bytes and therefore of its delta-xDS hash.
+//
+// sourceSpiffeID may be empty — before the trust domain is known there is no
+// identity to stamp — in which case only the netns filter is emitted, which is
+// byte-for-byte what this chain carried before issue #815.
+func buildSourceFilterStates(sourceSpiffeID string) []*listenerv3.Filter {
+	filters := []*listenerv3.Filter{buildNetworkNamespaceFilterState()}
+	if sourceSpiffeID != "" {
+		filters = append(filters, buildSourceIdentityFilterState(sourceSpiffeID))
+	}
+	return filters
 }
 
 // buildSetFilterState creates a set_filter_state network filter that stores a value in filter state.

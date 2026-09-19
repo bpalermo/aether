@@ -72,7 +72,7 @@ type L4Backend = l4project.Backend
 // weighted_clusters tcp_proxy routing to the rule's backends.
 //
 // Returns nil for invalid inputs so callers can skip them cleanly.
-func BuildCaptureTCPRouteFilterChain(svc CaptureTCPService, rules []L4ServiceRoute) *listenerv3.FilterChain {
+func BuildCaptureTCPRouteFilterChain(svc CaptureTCPService, rules []L4ServiceRoute, sourceSpiffeID string) *listenerv3.FilterChain {
 	if svc.ClusterIP == "" || svc.ClusterName == "" {
 		return nil
 	}
@@ -81,7 +81,7 @@ func BuildCaptureTCPRouteFilterChain(svc CaptureTCPService, rules []L4ServiceRou
 	}
 	if len(rules) == 0 {
 		// No rules: fall back to the passthrough floor chain.
-		return buildCaptureTCPFloorFilterChain(svc)
+		return buildCaptureTCPFloorFilterChain(svc, sourceSpiffeID)
 	}
 
 	// Collect all backends across all rules (TCPRoute rules are connection-level,
@@ -91,7 +91,7 @@ func BuildCaptureTCPRouteFilterChain(svc CaptureTCPService, rules []L4ServiceRou
 		l4RulesToWeightedClusters(rules),
 	)
 	if tcpProxy == nil {
-		return buildCaptureTCPFloorFilterChain(svc)
+		return buildCaptureTCPFloorFilterChain(svc, sourceSpiffeID)
 	}
 
 	return &listenerv3.FilterChain{
@@ -101,10 +101,7 @@ func BuildCaptureTCPRouteFilterChain(svc CaptureTCPService, rules []L4ServiceRou
 				{AddressPrefix: svc.ClusterIP, PrefixLen: wrapperspb.UInt32(32)},
 			},
 		},
-		Filters: []*listenerv3.Filter{
-			buildNetworkNamespaceFilterState(),
-			tcpProxy,
-		},
+		Filters: append(buildSourceFilterStates(sourceSpiffeID), tcpProxy),
 	}
 }
 
@@ -122,7 +119,7 @@ func BuildCaptureTCPRouteFilterChain(svc CaptureTCPService, rules []L4ServiceRou
 // avoid matching SNI from other services, since a client can set any SNI.
 // Without the IP match, a TLSRoute for service A could accidentally intercept
 // TLS connections headed for service B if they happen to carry the same SNI.
-func BuildCaptureTLSRouteFilterChains(svc CaptureTCPService, rules []L4ServiceRoute) []*listenerv3.FilterChain {
+func BuildCaptureTLSRouteFilterChains(svc CaptureTCPService, rules []L4ServiceRoute, sourceSpiffeID string) []*listenerv3.FilterChain {
 	if svc.ClusterIP == "" || net.ParseIP(svc.ClusterIP) == nil {
 		return nil
 	}
@@ -147,10 +144,7 @@ func BuildCaptureTLSRouteFilterChains(svc CaptureTCPService, rules []L4ServiceRo
 				},
 				ServerNames: rule.SNIHostnames,
 			},
-			Filters: []*listenerv3.Filter{
-				buildNetworkNamespaceFilterState(),
-				tcpProxy,
-			},
+			Filters: append(buildSourceFilterStates(sourceSpiffeID), tcpProxy),
 		})
 	}
 	return chains

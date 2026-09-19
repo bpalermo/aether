@@ -37,6 +37,9 @@ func (c *SnapshotCache) SetNodeIdentity(ctx context.Context, nodeSpiffeID string
 	// The node SVID gates (and is embedded in) every cached mTLS-injected
 	// cluster; rebuild them before the snapshot reads the cache (issue #537).
 	c.recomputeMTLSClusters()
+	// It is also the client certificate each pod's inbound-readiness probe
+	// presents (issue #815), so those clusters only exist once it has landed.
+	c.recomputeInboundReadyClusters()
 
 	return c.generateSnapshot(ctx)
 }

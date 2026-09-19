@@ -32,12 +32,13 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "aether.internal", false, nil)
+			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())
-			// Outbound has 2 filters: set_filter_state + http_connection_manager
-			assert.Len(t, fc.GetFilters(), 2)
+			// Outbound has 3 filters: the two source set_filter_state entries
+			// (netns, then SPIFFE ID — issue #815) + http_connection_manager.
+			assert.Len(t, fc.GetFilters(), 3)
 			assert.Nil(t, fc.GetTransportSocket(), "outbound filter chain should not have TLS transport socket")
 		})
 	}
@@ -47,11 +48,11 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 // non-pass-through health_check readiness filter ahead of the router, matched
 // on the shared readiness path probed by the CNI plugin from inside the netns.
 func TestOutboundChainReadinessFilter(t *testing.T) {
-	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "aether.internal", false, nil)
-	require.Len(t, fc.GetFilters(), 2)
+	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+	require.Len(t, fc.GetFilters(), 3)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
+	require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
 
 	assert.False(t, hcm.GetStripAnyHostPort(),
 		"authority :port is a routing selector (FQDN:port → that port's cluster); must NOT be stripped")
@@ -80,8 +81,8 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "my-pod", ServiceAccount: "checkout"}
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	fc := buildDefaultOutboundHTTPFilterChain(pod, "aether.internal", false, nil)
-	require.NoError(t, fc.GetFilters()[1].GetTypedConfig().UnmarshalTo(hcm))
+	fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+	require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
 
 	filters := hcm.GetHttpFilters()
 	require.Len(t, filters, 5, "expected health_check + subset + on_demand + stats + router")

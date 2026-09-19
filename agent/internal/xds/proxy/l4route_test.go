@@ -11,6 +11,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// lastFilter returns a chain's final network filter — the tcp_proxy. The
+// source set_filter_state entries in front of it grew from one to two with
+// issue #815, so the tests index from the end rather than from a fixed offset.
+func lastFilter(chain *listenerv3.FilterChain) *listenerv3.Filter {
+	return chain.Filters[len(chain.Filters)-1]
+}
+
 // unmarshalTCPProxy extracts the TcpProxy from a network filter.
 func unmarshalTCPProxy(t *testing.T, f *listenerv3.Filter) *tcp_proxyv3.TcpProxy {
 	t.Helper()
@@ -29,12 +36,13 @@ func TestBuildCaptureTCPRouteFilterChain_Passthrough(t *testing.T) {
 		ClusterName: "tcp:svc-a.aether.internal",
 		ClusterIP:   "10.0.0.10",
 	}
-	chain := BuildCaptureTCPRouteFilterChain(svc, nil)
+	chain := BuildCaptureTCPRouteFilterChain(svc, nil, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
 	assert.Equal(t, "cap_tcp_tcp:svc-a.aether.internal", chain.Name)
-	// Should have two filters: set_filter_state + tcp_proxy
-	require.Len(t, chain.Filters, 2)
-	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	// Three filters: the two source set_filter_state entries (netns, then
+	// SPIFFE ID — issue #815) + tcp_proxy.
+	require.Len(t, chain.Filters, 3)
+	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	// Single-cluster form
 	assert.Equal(t, "tcp:svc-a.aether.internal", tcp.GetCluster())
 }
@@ -49,10 +57,10 @@ func TestBuildCaptureTCPRouteFilterChain_SingleBackend(t *testing.T) {
 	rules := []L4ServiceRoute{
 		{Backends: []L4Backend{{Service: "svc-a", Cluster: "tcp:svc-a.aether.internal", Weight: 1}}},
 	}
-	chain := BuildCaptureTCPRouteFilterChain(svc, rules)
+	chain := BuildCaptureTCPRouteFilterChain(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
-	require.Len(t, chain.Filters, 2)
-	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	require.Len(t, chain.Filters, 3)
+	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	assert.Equal(t, "tcp:svc-a.aether.internal", tcp.GetCluster())
 }
 
@@ -69,7 +77,7 @@ func TestBuildCaptureTCPRouteFilterChain_WeightedBackends(t *testing.T) {
 			{Service: "svc-b-v2", Cluster: "tcp:svc-b-v2.aether.internal", Weight: 20},
 		}},
 	}
-	chain := BuildCaptureTCPRouteFilterChain(svc, rules)
+	chain := BuildCaptureTCPRouteFilterChain(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
 	// prefix_ranges should match the ClusterIP/32
 	require.NotNil(t, chain.FilterChainMatch)
@@ -77,8 +85,8 @@ func TestBuildCaptureTCPRouteFilterChain_WeightedBackends(t *testing.T) {
 	assert.Equal(t, "10.0.0.20", chain.FilterChainMatch.PrefixRanges[0].AddressPrefix)
 	assert.Equal(t, uint32(32), chain.FilterChainMatch.PrefixRanges[0].PrefixLen.GetValue())
 
-	require.Len(t, chain.Filters, 2)
-	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	require.Len(t, chain.Filters, 3)
+	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	wc := tcp.GetWeightedClusters()
 	require.NotNil(t, wc, "expected weighted_clusters form")
 	require.Len(t, wc.Clusters, 2)
@@ -100,9 +108,9 @@ func TestBuildCaptureTCPRouteFilterChain_ZeroWeightDrain(t *testing.T) {
 			{Service: "svc-b-v2", Cluster: "tcp:svc-b-v2.aether.internal", Weight: 1},
 		}},
 	}
-	chain := BuildCaptureTCPRouteFilterChain(svc, rules)
+	chain := BuildCaptureTCPRouteFilterChain(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
-	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	// Only the non-drained backend survives → single-cluster form, no weighted set.
 	assert.Nil(t, tcp.GetWeightedClusters(), "drained backend must not appear in weighted_clusters")
 	assert.Equal(t, "tcp:svc-b-v2.aether.internal", tcp.GetCluster())
@@ -119,11 +127,11 @@ func TestBuildCaptureTCPRouteFilterChain_AllDrained(t *testing.T) {
 			{Service: "svc-b-v2", Cluster: "tcp:svc-b-v2.aether.internal", Weight: 0},
 		}},
 	}
-	chain := BuildCaptureTCPRouteFilterChain(svc, rules)
+	chain := BuildCaptureTCPRouteFilterChain(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	// buildWeightedTCPProxy returns nil for an empty set → BuildCaptureTCPRouteFilterChain
 	// falls back to the passthrough floor chain (still a valid chain, not the routed one).
 	require.NotNil(t, chain)
-	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	assert.Nil(t, tcp.GetWeightedClusters())
 	assert.Equal(t, "tcp:svc-b.aether.internal", tcp.GetCluster(), "all-drained falls back to the floor cluster")
 }
@@ -144,9 +152,9 @@ func TestBuildCaptureTCPRouteFilterChain_DuplicateClustersWeightMerged(t *testin
 			{Cluster: "tcp:svc-c-v1.aether.internal", Weight: 10},
 		}},
 	}
-	chain := BuildCaptureTCPRouteFilterChain(svc, rules)
+	chain := BuildCaptureTCPRouteFilterChain(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
-	tcp := unmarshalTCPProxy(t, chain.Filters[1])
+	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	wc := tcp.GetWeightedClusters()
 	require.NotNil(t, wc)
 	// v1: 50+10=60, v2: 50
@@ -161,7 +169,7 @@ func TestBuildCaptureTCPRouteFilterChain_DuplicateClustersWeightMerged(t *testin
 // TestBuildCaptureTCPRouteFilterChain_InvalidIP returns nil for invalid IP.
 func TestBuildCaptureTCPRouteFilterChain_InvalidIP(t *testing.T) {
 	svc := CaptureTCPService{ClusterName: "tcp:svc-x.aether.internal", ClusterIP: "not-an-ip"}
-	chain := BuildCaptureTCPRouteFilterChain(svc, nil)
+	chain := BuildCaptureTCPRouteFilterChain(svc, nil, "spiffe://aether.internal/ns/default/sa/test")
 	assert.Nil(t, chain)
 }
 
@@ -185,7 +193,7 @@ func TestBuildCaptureTLSRouteFilterChains_Basic(t *testing.T) {
 			},
 		},
 	}
-	chains := BuildCaptureTLSRouteFilterChains(svc, rules)
+	chains := BuildCaptureTLSRouteFilterChains(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	require.Len(t, chains, 2)
 
 	// Chain 0: two SNI names → single backend
@@ -194,13 +202,13 @@ func TestBuildCaptureTLSRouteFilterChains_Basic(t *testing.T) {
 	assert.ElementsMatch(t, []string{"a.example.com", "b.example.com"}, c0.FilterChainMatch.ServerNames)
 	require.Len(t, c0.FilterChainMatch.PrefixRanges, 1)
 	assert.Equal(t, "10.0.1.10", c0.FilterChainMatch.PrefixRanges[0].AddressPrefix)
-	tcp0 := unmarshalTCPProxy(t, c0.Filters[1])
+	tcp0 := unmarshalTCPProxy(t, lastFilter(c0))
 	assert.Equal(t, "tcp:svc-d-v1.aether.internal", tcp0.GetCluster())
 
 	// Chain 1: one SNI → weighted backends
 	c1 := chains[1]
 	assert.Equal(t, []string{"c.example.com"}, c1.FilterChainMatch.ServerNames)
-	tcp1 := unmarshalTCPProxy(t, c1.Filters[1])
+	tcp1 := unmarshalTCPProxy(t, lastFilter(c1))
 	wc := tcp1.GetWeightedClusters()
 	require.NotNil(t, wc)
 	require.Len(t, wc.Clusters, 2)
@@ -217,7 +225,7 @@ func TestBuildCaptureTLSRouteFilterChains_EmptyRuleSkipped(t *testing.T) {
 		{SNIHostnames: []string{"x.example.com"}, Backends: nil},
 		{SNIHostnames: []string{"y.example.com"}, Backends: []L4Backend{{Cluster: "tcp:svc-e-v2.aether.internal", Weight: 1}}},
 	}
-	chains := BuildCaptureTLSRouteFilterChains(svc, rules)
+	chains := BuildCaptureTLSRouteFilterChains(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	require.Len(t, chains, 1, "only the rule with both SNI and backends should produce a chain")
 	assert.Equal(t, []string{"y.example.com"}, chains[0].FilterChainMatch.ServerNames)
 }
