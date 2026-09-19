@@ -24,9 +24,19 @@ common --@envoy//bazel:enable_bzlmod=True
 # DELETES the previous version directory on every bump, so an unpinned registry
 # breaks the build the next time upstream publishes. bed06c78 is the newest commit
 # at which envoy@1.40.0-dev.20260904.13144fb.envoy and its full transitive
-# .envoy-suffixed closure all resolve (HEAD does not: it bumped thrift and
-# protoc-gen-validate without updating envoy's registry MODULE.bazel). See
-# README.md "Envoy version bumps" for the recipe that finds the next such commit.
+# .envoy-suffixed closure all resolve. See README.md "Envoy version bumps" for the
+# recipe that finds the next such commit.
+#
+# Re-verified 2026-09-19 against registry main @8818c934: still the newest
+# resolvable commit, and STILL THE ONLY one. The registry has published no new
+# `envoy` module version since 2026-09-04 (modules/envoy/metadata.json lists
+# exactly 1.40.0-dev.20260904.13144fb.envoy), while five modules the closure still
+# requests have been bumped out from under it and their old directories deleted:
+# quiche 260824→260831 (d558744), protoc-gen-validate 1.3.0→1.3.3
+# (a0c0ce7), thrift 0.22.0→0.24.0 (72b6bb0), envoy_toolshed 0.4.13→0.4.14→0.4.15
+# (dd48349/c806347) and proto-converter (8818c93). Every commit after bed06c78 is
+# therefore unresolvable until upstream publishes a matching envoy snapshot — the
+# next bump is gated on THAT, not on picking a newer commit here.
 common --registry=https://bcr.bazel.build/
 common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/bed06c78cb1ea901164f4d248c3e5167f720e068
 
