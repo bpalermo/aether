@@ -33,6 +33,7 @@ go_test(
     srcs = [
         "identity_hold_test.go",
         "initial_snapshot_test.go",
+        "local_only_severity_test.go",
         "odcds_test.go",
         "refresh_identity_test.go",
         "refresh_test.go",

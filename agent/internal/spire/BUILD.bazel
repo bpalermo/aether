@@ -39,6 +39,7 @@ go_test(
         "bridge_push_ordering_test.go",
         "bridge_reconnect_test.go",
         "bridge_test.go",
+        "bridge_unreachable_severity_test.go",
         "bridge_update_metrics_test.go",
         "converter_test.go",
         "node_svid_test.go",

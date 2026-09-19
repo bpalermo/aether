@@ -43,11 +43,22 @@ type AgentXdsServer struct {
 	// the edge, whose source is still created synchronously).
 	identity IdentityGate
 
+	// identityWatch is the same identity, consulted for LOG SEVERITY only. The
+	// edge does not hold its first snapshot for identity (a 404-only table is what
+	// it serves before its first reconcile anyway), but "the registry is
+	// unreachable because this workload has no SVID yet" is still the designed
+	// #740 wait and must not read as a fault (#766).
+	identityWatch IdentityGate
+
 	// readyTimeout bounds the initial snapshot's wait for a registry that can
 	// serve endpoints. A field rather than the bare constant so tests can hold
 	// the unreachable-registrar path to a fraction of a second; production
 	// never changes it from registryReadyTimeout.
 	readyTimeout time.Duration
+
+	// retryBackoff is the background retry's first delay after a local-only
+	// start; a field for the same reason readyTimeout is one.
+	retryBackoff time.Duration
 }
 
 // IdentityGate is the mesh identity as the xDS server needs to see it: is it
@@ -70,6 +81,22 @@ type IdentityGate interface {
 //
 // Pass a nil gate (or never call this) to keep the pre-#740 behaviour.
 func (s *AgentXdsServer) SetIdentityGate(gate IdentityGate) { s.identity = gate }
+
+// SetIdentityWatch lets the server tell "unreachable because this workload has no
+// SVID yet" from a real registry fault when it logs, WITHOUT holding the first
+// snapshot the way SetIdentityGate does. For the edge.
+func (s *AgentXdsServer) SetIdentityWatch(gate IdentityGate) { s.identityWatch = gate }
+
+// identityPending reports whether this workload is still waiting for its first
+// SVID, by whichever view of the identity was wired.
+func (s *AgentXdsServer) identityPending() bool {
+	for _, gate := range []IdentityGate{s.identity, s.identityWatch} {
+		if gate != nil && !gate.HasSVID() {
+			return true
+		}
+	}
+	return false
+}
 
 // NewAgentXdsServer creates a new AgentXdsServer.
 // It initializes an xDS server with a snapshot cache and registers itself as a callback
@@ -104,6 +131,7 @@ func NewAgentXdsServer(ctx context.Context, clusterName string, nodeName string,
 		storage:      storage,
 		cache:        snapshotCache,
 		readyTimeout: registryReadyTimeout,
+		retryBackoff: time.Second,
 	}
 
 	aXdsServer.AddCallback(aXdsServer)
@@ -243,9 +271,21 @@ func (s *AgentXdsServer) loadClustersUntil(ctx context.Context, deadline time.Ti
 // startLocalOnly publishes what the node knows on its own and keeps trying for
 // the rest of the process's life. Deliberately loud: a node running on
 // local-only config has no cross-node endpoints at all.
+//
+// The one exception is a workload that has no SVID yet: it cannot complete a
+// handshake with the registrar, so the load was always going to fail, the wait
+// is the designed #740 one (owned and escalated by the identity source's own
+// logger), and the background retry repairs it the moment the SVID lands. That
+// is WARN — an ERROR there tripped every "zero ERROR lines" gate on a healthy
+// edge roll (#766). The retry escalates if identity arrives and it still fails.
 func (s *AgentXdsServer) startLocalOnly(ctx context.Context, err error) {
-	s.log.ErrorContext(ctx, "registry unavailable for initial snapshot; starting with local-only config and retrying in background", "error", err)
-	go s.retryInitialRegistryLoad(ctx)
+	waitingForIdentity := s.identityPending()
+	if waitingForIdentity {
+		s.log.WarnContext(ctx, "registry unreachable for the initial snapshot while this workload waits for its first SVID; starting with local-only config, the background retry takes over", "error", err)
+	} else {
+		s.log.ErrorContext(ctx, "registry unavailable for initial snapshot; starting with local-only config and retrying in background", "error", err)
+	}
+	go s.retryInitialRegistryLoad(ctx, waitingForIdentity)
 }
 
 // identityHoldLogInterval is how often the identity hold re-announces itself.
@@ -320,11 +360,19 @@ const (
 	maxInitialRegistryLoadBackoff = 2 * time.Second
 )
 
+// retriesAfterIdentityBeforeError is how many failed loads the background retry
+// tolerates AFTER the SVID has arrived before a start that was excused as
+// "waiting for identity" stops being excused.
+const retriesAfterIdentityBeforeError = 3
+
 // retryInitialRegistryLoad retries the registry-derived snapshot load with
-// capped exponential backoff until it succeeds or ctx ends.
-func (s *AgentXdsServer) retryInitialRegistryLoad(ctx context.Context) {
+// capped exponential backoff until it succeeds or ctx ends. excused means the
+// local-only start was logged at WARN because identity was pending; once it is
+// not, a registry that still cannot be loaded is a fault after all.
+func (s *AgentXdsServer) retryInitialRegistryLoad(ctx context.Context, excused bool) {
 	const maxBackoff = 30 * time.Second
-	backoff := time.Second
+	backoff := s.retryBackoff
+	failuresWithIdentity := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -333,6 +381,13 @@ func (s *AgentXdsServer) retryInitialRegistryLoad(ctx context.Context) {
 		}
 		if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
 			s.log.DebugContext(ctx, "registry still unavailable; will retry", "backoff", backoff.String(), "error", err)
+			if excused && !s.identityPending() {
+				failuresWithIdentity++
+				if failuresWithIdentity >= retriesAfterIdentityBeforeError {
+					excused = false
+					s.log.ErrorContext(ctx, "registry still unavailable although this workload now has its SVID; serving local-only config and retrying in background", "error", err)
+				}
+			}
 			if backoff < maxBackoff {
 				backoff *= 2
 			}

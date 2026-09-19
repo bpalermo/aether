@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -245,4 +247,46 @@ func TestDrainDelayForPod(t *testing.T) {
 	assert.Equal(t, 14*time.Second, s.drainDelayForPod(withSleep(15, &grace30)), "sleep 15: generous window")
 	assert.Equal(t, 28*time.Second, s.drainDelayForPod(withSleep(60, &grace30)), "sleep > grace: capped 2s short of hard kill")
 	assert.Equal(t, 14*time.Second, s.drainDelayForPod(withSleep(15, nil)), "no grace recorded: sleep governs")
+}
+
+// svidState is an IdentityWatch whose answer the test sets.
+type svidState bool
+
+func (s svidState) HasSVID() bool { return bool(s) }
+
+// TestHandlePodTerminatingFallbackSeverity is #766's third site. The first
+// failure always has a fallback, so it is WARN. The fallback failing too is an
+// ERROR — a terminating pod stays selectable until its CNI DEL or the next ghost
+// sweep — unless this agent has no SVID yet: then no registry call could have
+// succeeded, the wait is the designed #740 one, and a termination that happens to
+// land in that second must not cost a healthy agent roll its clean ERROR log.
+func TestHandlePodTerminatingFallbackSeverity(t *testing.T) {
+	for name, tt := range map[string]struct {
+		watch     IdentityWatch
+		wantError bool
+	}{
+		"no identity view wired": {watch: nil, wantError: true},
+		"SVID held":              {watch: svidState(true), wantError: true},
+		"SVID pending":           {watch: svidState(false), wantError: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := storage.NewMockStorage[*cniv1.CNIPod]()
+			require.NoError(t, store.AddResource(ctx, types.ContainerID("container-a"), validCNIPod("pod-a", "default", "container-a")))
+			reg := &unregisterRecordingRegistry{}
+			reg.registerEndpointErr = assert.AnError
+			reg.unregisterEndpointsErr = assert.AnError
+			s := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), "")
+			var out bytes.Buffer
+			s.log = slog.New(slog.NewJSONHandler(&out, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			s.SetIdentityWatch(tt.watch)
+
+			s.handlePodTerminating(ctx, terminatingK8sPod("pod-a", "default", "test-node"))
+
+			assert.Contains(t, out.String(), "falling back to deregistration")
+			assert.Contains(t, out.String(), "the next ghost sweep removes it", "the line names who owns the recovery")
+			assert.NotContains(t, out.String(), "CNI DEL will retry", "since #798 a DEL does not retry against an agent that is down")
+			assert.Equal(t, tt.wantError, strings.Contains(out.String(), `"level":"ERROR"`))
+		})
+	}
 }
