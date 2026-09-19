@@ -203,9 +203,7 @@ func TestInboundIdentityBindingSummaryAboveThreshold(t *testing.T) {
 		c.listeners[pod.GetNetworkNamespace()] = listenerEntry{inbound: l, cniPod: pod}
 	}
 	c.listenerMu.Unlock()
-	c.localMu.Lock()
-	c.trustDomain = bindingTrustDomain
-	c.localMu.Unlock()
+	c.setTrustDomain(bindingTrustDomain)
 
 	rec.reset()
 	require.NoError(t, c.generateSnapshot(ctx))

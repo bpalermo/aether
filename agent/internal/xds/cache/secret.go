@@ -38,8 +38,11 @@ func (c *SnapshotCache) SetNodeIdentity(ctx context.Context, nodeSpiffeID string
 	// cluster; rebuild them before the snapshot reads the cache (issue #537).
 	c.recomputeMTLSClusters()
 	// It is also the client certificate each pod's inbound-readiness probe
-	// presents (issue #815), so those clusters only exist once it has landed.
-	c.recomputeInboundReadyClusters()
+	// presents (issue #815). That recompute is NOT triggered from here: the
+	// SPIRE bridge calls this method exactly once ever (`if firstServe`), so a
+	// trigger hanging off it can be missed permanently — which is how
+	// main-worker-05 ran a whole agent lifetime with no probe clusters at all on
+	// 2026-09-19. generateSnapshot reconciles them on every push instead.
 
 	return c.generateSnapshot(ctx)
 }

@@ -35,15 +35,21 @@ func newHealthGatewayClient(socketPath string) *healthGatewayClient {
 	}
 }
 
-// appHealth reports the active-HC health of one health-probe cluster:
+// clusterHealth reports the active-HC health of ONE probe cluster, by its own
+// gateway path (/healthz/<cluster>):
 //
-//	200 → (healthy, known)     the pod's host passes its health check
+//	200 → (healthy, known)     that cluster's host passes its health check
 //	503 → (unhealthy, known)   it fails (includes HC warm-up; caller grace)
-//	404 → (_, not known)       the pod's gateway filter is not programmed yet
+//	404 → (_, not known)       that cluster's gateway filter is not programmed
+//
+// 404 is a normal answer, not an error. For health_<pod> it means the pod is
+// not programmed yet; for inboundready_<pod> it means the pod is UNGATED — the
+// agent has no mTLS readiness opinion about it and must fall back to the
+// application probe alone (issue #815).
 //
 // Any other status or a transport error is returned as an error (the gateway
 // itself is unreachable or misbehaving — the caller aborts the tick).
-func (c *healthGatewayClient) appHealth(ctx context.Context, probeCluster string) (healthy, known bool, err error) {
+func (c *healthGatewayClient) clusterHealth(ctx context.Context, probeCluster string) (healthy, known bool, err error) {
 	// The authority is irrelevant for a UDS dial; "health-gateway" only labels it.
 	url := "http://health-gateway" + proxy.HealthGatewayPath(probeCluster)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

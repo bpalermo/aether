@@ -27,6 +27,8 @@ type localMTLSState struct {
 // holding clusterMu because no code path acquires clusterMu while holding
 // localMu (localMu critical sections never nest another lock).
 func (c *SnapshotCache) localMTLSSnapshot() localMTLSState {
+	trustDomain := c.currentTrustDomain()
+
 	c.localMu.RLock()
 	defer c.localMu.RUnlock()
 
@@ -34,8 +36,8 @@ func (c *SnapshotCache) localMTLSSnapshot() localMTLSState {
 		netnsToID:             make(map[string]string, len(c.localWorkloads)),
 		ids:                   make([]string, 0, len(c.localWorkloads)),
 		nodeSpiffeID:          c.nodeSpiffeID,
-		trustDomain:           c.trustDomain,
-		validationContextName: fmt.Sprintf("spiffe://%s", c.trustDomain),
+		trustDomain:           trustDomain,
+		validationContextName: proxy.ValidationContextName(trustDomain),
 	}
 	for netns, id := range c.localWorkloads {
 		st.netnsToID[netns] = id
@@ -93,9 +95,16 @@ func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLS
 	if ref, ok := serviceref.ParseKey(entry.service); ok {
 		saName = ref.Name
 	}
-	sanURIs := make([]string, 0, len(entry.sanNamespaces))
-	for _, ns := range entry.sanNamespaces {
-		sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", st.trustDomain, ns, saName))
+	// With no trust domain there is no identity to pin: emit NO SAN matchers
+	// rather than "spiffe:///ns/…", which matches nothing and can never be
+	// satisfied by a real peer certificate (#815). The next recompute — one
+	// happens on every snapshot — fills them in.
+	var sanURIs []string
+	if st.trustDomain != "" {
+		sanURIs = make([]string, 0, len(entry.sanNamespaces))
+		for _, ns := range entry.sanNamespaces {
+			sanURIs = append(sanURIs, fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", st.trustDomain, ns, saName))
+		}
 	}
 	entry.sanURIs = sanURIs
 
@@ -103,7 +112,7 @@ func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLS
 	// sanURIs), and before the node SVID is served the bare cluster is emitted
 	// without the matcher — both leave mtlsCluster nil.
 	entry.mtlsCluster = nil
-	if entry.tcp || entry.cluster == nil || st.nodeSpiffeID == "" {
+	if entry.tcp || entry.cluster == nil || st.nodeSpiffeID == "" || st.trustDomain == "" {
 		return
 	}
 

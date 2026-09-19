@@ -3,7 +3,6 @@ package cache
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 
@@ -158,38 +157,67 @@ type inboundReadyIdentity struct {
 	trustDomain  string
 }
 
-// inboundReadyIdentitySnapshot copies the node identity under localMu. Callers
-// take it BEFORE listenerMu so the two locks are never nested.
+// inboundReadyIdentitySnapshot copies the node identity currently in force.
+// The trust domain is read from its atomic holder (the single source of truth);
+// only the node SVID needs localMu.
 func (c *SnapshotCache) inboundReadyIdentitySnapshot() inboundReadyIdentity {
 	c.localMu.RLock()
-	defer c.localMu.RUnlock()
-	return inboundReadyIdentity{nodeSpiffeID: c.nodeSpiffeID, trustDomain: c.trustDomain}
+	nodeSpiffeID := c.nodeSpiffeID
+	c.localMu.RUnlock()
+	return inboundReadyIdentity{nodeSpiffeID: nodeSpiffeID, trustDomain: c.currentTrustDomain()}
+}
+
+// inboundGateMissing names the precondition that keeps a pod's inbound-readiness
+// probe from being programmed, or "" when the probe is programmed. It is the
+// text the "gate absent" INFO line and the ungated-pods gauge are explained by.
+func (c *SnapshotCache) inboundGateMissing(cniPod *cniv1.CNIPod, id inboundReadyIdentity) string {
+	if reason := c.inboundGateNodeMissing(id); reason != "" {
+		return reason
+	}
+	switch {
+	case cniPod == nil:
+		return "no CNI pod recorded for this listener entry"
+	case cniPod.GetNetworkNamespace() == "":
+		return "pod has no network namespace to bind the probe into"
+	default:
+		return ""
+	}
+}
+
+// inboundGateNodeMissing names the NODE-WIDE precondition the gate is waiting
+// on, independent of any one pod, or "" when the node is ready to gate.
+func (c *SnapshotCache) inboundGateNodeMissing(id inboundReadyIdentity) string {
+	switch {
+	case c.edge:
+		return "edge mode: no per-pod listeners"
+	case !c.spireEnabled:
+		return "SPIRE disabled: the inbound listener is cleartext, there is no handshake to prove"
+	case id.trustDomain == "":
+		return "no trust domain yet"
+	case id.nodeSpiffeID == "":
+		return "no node SVID yet (nothing to present as the probe's client certificate)"
+	default:
+		return ""
+	}
 }
 
 // inboundReadyClusterFor builds a pod's inbound-readiness probe cluster, or
-// returns nil when the probe would be meaningless or unbuildable (issue #815):
+// returns nil when the probe would be meaningless or unbuildable (issue #815);
+// inboundGateMissing enumerates and names those cases.
 //
-//   - edge mode: no local workloads, no per-pod listeners at all;
-//   - SPIRE off: the inbound listener is CLEARTEXT (buildInboundCleartextFilterChain),
-//     so there is no handshake to prove and no secret to wait for. The whole
-//     feature is then inert and the SPIRE-off snapshot stays byte-identical;
-//   - no node SVID yet, or no trust domain yet: there is no client certificate
-//     to present. Emitting the cluster anyway would make it permanently
-//     unhealthy and demote every pod on the node. SetNodeIdentity rebuilds
-//     these the moment the SPIRE bridge delivers the node SVID;
-//   - no netns: nothing to bind the probe's dial into.
+// A nil result is "this pod is UNGATED", not "this pod is unhealthy": the pod's
+// gateway then carries no /healthz/inboundready_<pod> path at all and the
+// liveness loop falls back to the app probe alone — the pre-#815 behaviour —
+// while counting the pod as ungated so the absence is queryable.
 func (c *SnapshotCache) inboundReadyClusterFor(cniPod *cniv1.CNIPod, id inboundReadyIdentity) types.Resource {
-	if c.edge || !c.spireEnabled || cniPod == nil {
-		return nil
-	}
-	if id.nodeSpiffeID == "" || id.trustDomain == "" || cniPod.GetNetworkNamespace() == "" {
+	if c.inboundGateMissing(cniPod, id) != "" {
 		return nil
 	}
 	return proxy.NewInboundReadyProbeCluster(
 		proxy.InboundReadyClusterName(cniPod),
 		cniPod.GetNetworkNamespace(),
 		id.nodeSpiffeID,
-		fmt.Sprintf("spiffe://%s", id.trustDomain),
+		proxy.ValidationContextName(id.trustDomain),
 		proxy.SpiffeIDFromPod(cniPod, id.trustDomain),
 	)
 }
@@ -207,30 +235,87 @@ func inboundReadyClusterName(entry listenerEntry) string {
 	return cl.GetName()
 }
 
-// recomputeInboundReadyClusters rebuilds every entry's inbound-readiness probe
-// cluster from the current node identity. Called when that identity arrives or
-// changes (SetNodeIdentity) and after a bulk listener load — the probes name the
-// node SVID as their client certificate, so before it lands there is nothing to
-// build.
+// recomputeInboundReadyClusters brings every entry's inbound-readiness probe up
+// to date with the current node identity, and reports how many pods ended up
+// gated and ungated.
 //
-// Rebuilding every entry (rather than only the changed pod) is deliberate: the
-// rendered proto is a pure function of (pod, node identity), so a pod whose
-// inputs did not change is rebuilt to BYTE-IDENTICAL config and costs the data
-// plane nothing — the delta-xDS hash is unchanged and Envoy skips it.
-func (c *SnapshotCache) recomputeInboundReadyClusters() {
+// It runs on EVERY snapshot generation, not on a handful of hand-picked
+// triggers. The original #819 shape recomputed only from a bulk listener load
+// and from SetNodeIdentity — which the SPIRE bridge calls exactly once, on the
+// first node SVID it ever serves (`if firstServe`). Any ordering in which both
+// of those fire while one precondition is still missing left the gate absent
+// for the entire life of the agent, with nothing to re-run it and no signal:
+// main-worker-05 on 2026-09-19 emitted no inboundready_* cluster at all despite
+// a served node SVID. Convergence must not depend on catching a specific event.
+//
+// The per-entry work is skipped when the entry was already rendered from this
+// identity, so the steady state is a map walk and a comparison — no proto is
+// rebuilt and, by construction, no snapshot bytes change
+// (TestSnapshotRegenerationIsANoOpPush).
+func (c *SnapshotCache) recomputeInboundReadyClusters() (gated, ungated int) {
 	id := c.inboundReadyIdentitySnapshot()
 
 	c.listenerMu.Lock()
 	defer c.listenerMu.Unlock()
 	for netns, entry := range c.listeners {
-		entry.inboundReadyCluster = c.inboundReadyClusterFor(entry.cniPod, id)
-		c.listeners[netns] = entry
+		if !entry.inboundReadyRendered || entry.inboundReadyFrom != id {
+			entry.inboundReadyCluster = c.inboundReadyClusterFor(entry.cniPod, id)
+			entry.inboundReadyFrom = id
+			entry.inboundReadyRendered = true
+			c.listeners[netns] = entry
+		}
+		if entry.inboundReadyCluster != nil {
+			gated++
+		} else {
+			ungated++
+		}
 	}
+	c.reportInboundGateState(id, ungated, gated)
+	return gated, ungated
+}
+
+// reportInboundGateState logs the node's inbound-readiness gate state, ONCE on
+// the first evaluation and again on every change, naming the missing
+// precondition when the gate is not active. "The gate is silently absent" was
+// the second half of the 2026-09-19 failure; one grep-able line per agent
+// answers it without a metrics backend.
+func (c *SnapshotCache) reportInboundGateState(id inboundReadyIdentity, ungated, gated int) {
+	active := gated > 0 && ungated == 0
+	reason := ""
+	if !active {
+		reason = c.inboundGateNodeMissing(id)
+		if reason == "" {
+			reason = "no local pods yet, or a pod with no network namespace"
+		}
+	}
+	state := inboundGateState{active: active, reason: reason, gated: gated, ungated: ungated}
+
+	c.inboundGateMu.Lock()
+	unchanged := c.inboundGateReported && c.lastInboundGate == state
+	c.lastInboundGate = state
+	c.inboundGateReported = true
+	c.inboundGateMu.Unlock()
+	if unchanged {
+		return
+	}
+	if active {
+		c.log.Info("inbound-readiness promotion gate ACTIVE: HEALTHY requires an mTLS handshake with the pod's own inbound listener",
+			"gated_pods", gated)
+		return
+	}
+	c.log.Info("inbound-readiness promotion gate NOT active for every local pod; those pods keep the application probe alone",
+		"gated_pods", gated, "ungated_pods", ungated, "missing", reason)
 }
 
 func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustDomain string) error {
 	netns := cniPod.GetNetworkNamespace()
 	c.log.DebugContext(ctx, "adding listeners for pod", "pod", cniPod.GetName(), "namespace", cniPod.GetNamespace(), "netns", netns)
+
+	// Record the trust domain BEFORE anything derived from it is built or
+	// published. The cache must never hold a listener whose identity came from a
+	// trust domain it does not itself know: a concurrent regeneration reading the
+	// cache's copy would then rebuild that listener from "" (#815/#819).
+	c.setTrustDomain(trustDomain)
 
 	// One node-global extension union for both the pod's HTTP listeners and its
 	// capture listener (see extensionHTTPFilters).
@@ -250,32 +335,31 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 		return err
 	}
 
-	// The node identity the pod's inbound-readiness probe presents. Read before
-	// listenerMu (localMu is never nested inside it).
+	// The node identity the pod's inbound-readiness probe presents. The trust
+	// domain is the one just recorded, so this can only be short of the node
+	// SVID — and the per-snapshot recompute fills the probe in the moment that
+	// lands, with no dependence on a one-shot trigger.
 	readyIdentity := c.inboundReadyIdentitySnapshot()
-	if readyIdentity.trustDomain == "" {
-		// First pod on a fresh agent: setLocalWorkload below records the trust
-		// domain, but the probe is built here. Use the one the CNI ADD carries.
-		readyIdentity.trustDomain = trustDomain
-	}
 
 	c.listenerMu.Lock()
 	if c.listeners == nil {
 		c.listeners = make(map[string]listenerEntry)
 	}
 	c.listeners[netns] = listenerEntry{
-		inbound:             inbound,
-		outbound:            outbound,
-		capture:             capture,
-		udpCapture:          udpCapture,
-		cniPod:              cniPod,
-		appClusters:         clustersToResources(appClusters),
-		healthCluster:       healthCluster,
-		inboundReadyCluster: c.inboundReadyClusterFor(cniPod, readyIdentity),
+		inbound:              inbound,
+		outbound:             outbound,
+		capture:              capture,
+		udpCapture:           udpCapture,
+		cniPod:               cniPod,
+		appClusters:          clustersToResources(appClusters),
+		healthCluster:        healthCluster,
+		inboundReadyCluster:  c.inboundReadyClusterFor(cniPod, readyIdentity),
+		inboundReadyFrom:     readyIdentity,
+		inboundReadyRendered: true,
 	}
 	c.listenerMu.Unlock()
 
-	c.setLocalWorkload(netns, proxy.SpiffeIDFromPod(cniPod, trustDomain), trustDomain)
+	c.setLocalWorkload(netns, proxy.SpiffeIDFromPod(cniPod, trustDomain))
 
 	// Contribute the pod's own service and declared upstreams to the node
 	// dependency set; a change signals the refresher to rebuild the scoped
@@ -528,6 +612,16 @@ func clustersToResources(clusters []*clusterv3.Cluster) []types.Resource {
 func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store storage.Storage[*cniv1.CNIPod], trustDomain string) error {
 	c.log.DebugContext(ctx, "generating listeners")
 
+	// Record the trust domain FIRST — before a single listener enters the map.
+	//
+	// This is the structural half of the #815/#819 fix. The old code recorded it
+	// AFTER publishing the whole listener map, which left a window (710 ms on
+	// main-worker-03, 2026-09-19) in which the cache held 15 per-pod listeners
+	// and an empty trust domain. Any regeneration that started in that window —
+	// the gamma reconciler's first SetServiceChainFilters did, at 17:31:22.024Z —
+	// read "" and rewrote every inbound chain as `spiffe:///ns/…`.
+	c.setTrustDomain(trustDomain)
+
 	pods, err := store.GetAll(ctx)
 	if err != nil {
 		return err
@@ -609,17 +703,13 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 	for netns, id := range local {
 		c.localWorkloads[netns] = id
 	}
-	c.trustDomain = trustDomain
 	c.localMu.Unlock()
 
 	// The merged workload map (and trust domain) feed every cached
 	// mTLS-injected cluster; rebuild them before the snapshot below reads the
-	// cache (issue #537).
+	// cache (issue #537). The per-pod inbound-readiness probes are refreshed by
+	// generateSnapshot itself, so they need no trigger here.
 	c.recomputeMTLSClusters()
-	// Now that the trust domain is recorded, render each pod's inbound-readiness
-	// probe (a no-op until the SPIRE bridge delivers the node SVID, which calls
-	// SetNodeIdentity and recomputes again).
-	c.recomputeInboundReadyClusters()
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)

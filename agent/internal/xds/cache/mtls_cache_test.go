@@ -200,6 +200,12 @@ func TestCachedMTLSClusterInvalidatedOnNodeIdentity(t *testing.T) {
 	ctx := context.Background()
 	ns := "default"
 
+	// As in production: the agent seeds the cache's trust domain at wiring time
+	// (identity.NewTrustDomain(meshDomain), #740) — long before any cluster is
+	// loaded. Upstream mTLS cannot be injected without one, because the
+	// validation context is named "spiffe://<trust-domain>" (#815).
+	c.setTrustDomain("aether.internal")
+
 	declareDeps(c, "aether-test/echo")
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", echoRegistry(&ns)))
 

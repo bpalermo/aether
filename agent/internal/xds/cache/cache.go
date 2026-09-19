@@ -349,20 +349,42 @@ type SnapshotCache struct {
 	// changes; the registry refresher rebuilds the scoped snapshot on it.
 	depChanged chan struct{}
 
+	// trustDomain is THE single source of truth for the workload trust domain
+	// inside this cache: every SPIFFE ID, SDS secret name, SAN matcher and
+	// source-identity filter-state value the agent emits is derived from it, and
+	// nothing else may hold a second copy.
+	//
+	// It is deliberately an atomic value rather than a field under localMu. The
+	// trust domain is LATE-BOUND (agent/internal/identity.TrustDomain, #740), so
+	// every builder has to read it at the moment it uses it; making that read
+	// lock-free removes the only reason a caller ever had to hoist it above the
+	// lock it then writes under. That hoist is what caused the 2026-09-19
+	// main-worker-03 outage: regenerateAllHTTPListeners read the (still empty)
+	// trust domain BEFORE blocking on listenerMu, and rewrote every inbound
+	// listener with `spiffe:///ns/…` once it got the lock — chains Envoy could
+	// never resolve a secret for. See setTrustDomain / currentTrustDomain.
+	trustDomain atomic.String
+
 	localMu sync.RWMutex
 	// localWorkloads maps a local pod's network namespace to its SPIFFE ID. It
 	// drives the outbound clusters' transport-socket matcher so each upstream
 	// connection presents the originating pod's client certificate.
 	localWorkloads map[string]string
-	// trustDomain is the workload trust domain captured from listener loads,
-	// used to name the upstream mTLS validation context.
-	trustDomain string
 	// nodeSpiffeID is the agent's node identity (set by the SPIRE bridge once the
 	// node SVID is served). Outbound clusters present it as the client certificate
 	// on the transport-socket matcher's no-match path (e.g. active health-check
 	// probes, which carry no source-pod filter state); while empty, upstream mTLS
 	// injection is skipped.
 	nodeSpiffeID string
+
+	// inboundGateMu guards the edge-triggered inbound-readiness gate report.
+	inboundGateMu sync.Mutex
+	// lastInboundGate is the gate state the last report announced, so steady
+	// state is silent and every transition produces exactly one line.
+	lastInboundGate inboundGateState
+	// inboundGateReported marks that the first evaluation has been announced —
+	// the line an operator greps for to answer "is the gate on at all?".
+	inboundGateReported bool
 
 	// bindingMu guards lastBindings. Only generateSnapshot writes it (already
 	// serialized by snapshotMu); the lock keeps the invariant local so a future
@@ -474,10 +496,36 @@ type listenerEntry struct {
 	// nil whenever the probe cannot mean anything: SPIRE off (the inbound
 	// listener is cleartext, there is no handshake to prove), or the node SVID /
 	// trust domain not yet known (there is no client certificate to present).
-	// A nil here is exactly today's single-cluster gateway behaviour for that
-	// pod, so the degradation is "no new gate", never "gate that never opens".
-	// Rebuilt by recomputeInboundReadyClusters when the node identity changes.
+	// A nil here means the pod's gateway carries NO inbound-readiness path at
+	// all, which the liveness loop reads as "ungated" (and counts, and says so
+	// once) — never as "unhealthy".
+	//
+	// Rebuilt by recomputeInboundReadyClusters, which runs on every snapshot
+	// generation and is a no-op for an entry already rendered from the current
+	// identity. That is the fix for main-worker-05 (2026-09-19), where the two
+	// one-shot triggers the field originally had — a bulk listener load and the
+	// single firstServe SetNodeIdentity call — both fired while one precondition
+	// was still missing, and nothing ever re-ran them: the gate was silently
+	// absent for the whole life of the agent.
 	inboundReadyCluster types.Resource
+	// inboundReadyFrom is the node identity inboundReadyCluster was rendered
+	// from, so the per-snapshot recompute can skip an entry that is already
+	// current instead of re-marshalling a proto it would only rebuild to the
+	// same bytes.
+	inboundReadyFrom inboundReadyIdentity
+	// inboundReadyRendered marks that inboundReadyCluster (nil or not) reflects
+	// inboundReadyFrom. Needed because "nil, correctly" and "nil, never tried"
+	// are different states.
+	inboundReadyRendered bool
+}
+
+// inboundGateState is the node's inbound-readiness gate state as last reported.
+// Comparable so the report is edge-triggered.
+type inboundGateState struct {
+	active  bool
+	reason  string
+	gated   int
+	ungated int
 }
 
 // clusterEntry holds a cluster definition, its pre-built load assignment,
@@ -689,9 +737,9 @@ func (c *SnapshotCache) SetEdgeHTTPRedirect(enabled bool) {
 // The node proxy sets these via the SPIRE bridge instead. It is the pre-start
 // seed; UpdateEdgeIdentity is the after-start form.
 func (c *SnapshotCache) SetEdgeIdentity(spiffeID, trustDomain string) {
+	c.setTrustDomain(trustDomain)
 	c.localMu.Lock()
 	c.nodeSpiffeID = spiffeID
-	c.trustDomain = trustDomain
 	c.localMu.Unlock()
 
 	// Rebuild the cached mTLS-injected clusters (usually a no-op here: the
@@ -709,11 +757,11 @@ func (c *SnapshotCache) SetEdgeIdentity(spiffeID, trustDomain string) {
 // It is the edge's counterpart to SetNodeIdentity, which does the same for the
 // node proxy when the SPIRE bridge delivers the node SVID.
 func (c *SnapshotCache) UpdateEdgeIdentity(ctx context.Context, spiffeID, trustDomain string) error {
+	trustDomainChanged := c.setTrustDomain(trustDomain)
 	c.localMu.Lock()
-	unchanged := c.nodeSpiffeID == spiffeID && c.trustDomain == trustDomain
+	unchanged := c.nodeSpiffeID == spiffeID && !trustDomainChanged
 	if !unchanged {
 		c.nodeSpiffeID = spiffeID
-		c.trustDomain = trustDomain
 	}
 	c.localMu.Unlock()
 	if unchanged {
@@ -784,29 +832,80 @@ func (c *SnapshotCache) SetStaticDependencies(services []string) {
 	}
 }
 
-// currentTrustDomain returns the workload trust domain the cache last captured
-// from a listener load (setLocalWorkload / LoadListenersFromStorage), under
-// localMu.
+// currentTrustDomain returns the workload trust domain in force right now.
 //
-// It is the late-bound identity fact the per-pod listener rebuild paths need
-// (they have no trustDomain argument of their own): it names the pod SPIFFE ID
-// stamped into the outbound chains' filter state (issue #815) and the inbound
-// chain's SDS server certificate. Callers read it BEFORE taking listenerMu —
-// this package otherwise never nests listenerMu around localMu, and there is no
-// reason to start.
+// READ IT AT THE POINT OF USE. It is lock-free precisely so that no caller ever
+// needs to cache it across a lock acquisition: a value read before blocking on
+// listenerMu can be arbitrarily stale (and, at startup, EMPTY), and anything
+// built from an empty trust domain is an unresolvable `spiffe:///…` reference.
+// The listener rebuild loops therefore read it INSIDE their listenerMu critical
+// section, which also makes the whole loop use one consistent value because
+// setTrustDomain takes listenerMu to publish a change.
 func (c *SnapshotCache) currentTrustDomain() string {
-	c.localMu.RLock()
-	defer c.localMu.RUnlock()
-	return c.trustDomain
+	return c.trustDomain.Load()
 }
 
-// setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping
-// and the workload trust domain, used to build the outbound mTLS transport
-// socket matcher.
-func (c *SnapshotCache) setLocalWorkload(netns, spiffeID, trustDomain string) {
+// validationContextName is the SDS name of the trust-domain bundle
+// ("spiffe://<trust-domain>"), or "" when the trust domain is not known yet —
+// never the malformed "spiffe://" that formatting an empty domain produces.
+func (c *SnapshotCache) validationContextName() string {
+	return proxy.ValidationContextName(c.currentTrustDomain())
+}
+
+// setTrustDomain publishes the workload trust domain and reports whether it
+// CHANGED. It is the only writer of c.trustDomain.
+//
+// It stores under listenerMu even though the value itself is atomic: that makes
+// the trust domain constant for the duration of every listener-rebuild critical
+// section, so no rebuild can straddle a change and no snapshot can mix
+// identities from two trust domains.
+//
+// An empty trust domain is never published over a known one: the seed
+// (identity.TrustDomain, #740) is always non-empty, so "" only ever means an
+// uninitialised caller, and accepting it would un-name every SDS secret in the
+// snapshot.
+func (c *SnapshotCache) setTrustDomain(trustDomain string) bool {
+	if trustDomain == "" {
+		return false
+	}
+	c.listenerMu.Lock()
+	defer c.listenerMu.Unlock()
+	return c.trustDomain.Swap(trustDomain) != trustDomain
+}
+
+// SetTrustDomain records the workload trust domain and, when it CHANGES with
+// listeners already published, rebuilds everything derived from it — inbound
+// SDS server certificates, source-identity filter state, upstream SAN matchers
+// and the per-pod inbound-readiness probes — and publishes exactly ONE snapshot
+// carrying the new identity.
+//
+// Callers: the agent's SPIRE reconciler, which seeds the cache with the mesh
+// domain before any listener exists and folds in SPIRE's real trust domain when
+// the first SVID lands.
+func (c *SnapshotCache) SetTrustDomain(ctx context.Context, trustDomain string) error {
+	if !c.setTrustDomain(trustDomain) {
+		return nil
+	}
+	if c.listenerCount() == 0 {
+		return nil // seeded before anything was built; nothing to rebuild
+	}
+	c.log.InfoContext(ctx, "workload trust domain changed; rebuilding every identity-derived resource", "trustDomain", trustDomain)
+	c.rebuildIdentityDerived(ctx)
+	return nil
+}
+
+// listenerCount returns how many per-pod listener entries the cache holds.
+func (c *SnapshotCache) listenerCount() int {
+	c.listenerMu.RLock()
+	defer c.listenerMu.RUnlock()
+	return len(c.listeners)
+}
+
+// setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping,
+// used to build the outbound mTLS transport socket matcher.
+func (c *SnapshotCache) setLocalWorkload(netns, spiffeID string) {
 	c.localMu.Lock()
 	c.localWorkloads[netns] = spiffeID
-	c.trustDomain = trustDomain
 	c.localMu.Unlock()
 
 	// Every service cluster's per-source matcher embeds the netns→identity

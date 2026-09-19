@@ -449,7 +449,14 @@ func reconcileSpireIdentity(
 		l.InfoContext(ctx, "resolved workload trust domain from SPIRE", "trustDomain", resolved)
 
 		if !trustDomain.Set(resolved) {
-			return // SPIRE confirmed the seed: nothing to rebuild
+			// SPIRE confirmed the seed. Publish it anyway: SetTrustDomain is a
+			// no-op on an unchanged value, and this makes the cache's copy a
+			// consequence of the holder rather than of whoever happened to call
+			// LoadListenersFromStorage first (#815).
+			if err := snapshotCache.SetTrustDomain(ctx, resolved); err != nil {
+				l.ErrorContext(ctx, "failed to record the resolved trust domain on the xDS cache", "error", err, "trustDomain", resolved)
+			}
+			return
 		}
 		l.WarnContext(ctx, "SPIRE issues into a different trust domain than the mesh domain; rebuilding listeners from storage",
 			"meshDomain", cfg.MeshDomain, "trustDomain", resolved)

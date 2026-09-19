@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"maps"
+	"slices"
 	"testing"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -8,6 +10,7 @@ import (
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 const testNodeIdentity = "spiffe://" + testTrustDomain + "/ns/aether-system/sa/aether-agent"
@@ -157,35 +160,57 @@ func TestInboundReadyChainAlwaysExists(t *testing.T) {
 	assert.Equal(t, 1, h2Chains, "exactly one no-SNI h2 chain, which the probe's ALPN selects")
 }
 
-// TestHealthGatewayRequiresBothProbes: the pod's gateway path is gated on the
-// app probe AND the inbound-readiness probe, while the PATH still names only
-// the app probe cluster (so the agent's liveness loop is unchanged).
-func TestHealthGatewayRequiresBothProbes(t *testing.T) {
+// TestHealthGatewayProbesHaveSeparatePaths: each probe cluster gets its OWN
+// gateway path reflecting that cluster alone. #819 ANDed both behind
+// /healthz/health_<pod>, which made "the app is fine but the mesh inbound never
+// came up" indistinguishable from "the app died" — and cost main-worker-03 four
+// endpoints on 2026-09-19.
+func TestHealthGatewayProbesHaveSeparatePaths(t *testing.T) {
 	probe := NewHealthGatewayProbe("health_echo-1", "inboundready_echo-1")
-	assert.Equal(t, "health_echo-1", probe.Cluster)
-	assert.Equal(t, []string{"health_echo-1", "inboundready_echo-1"}, probe.Requires)
+	assert.Equal(t, "health_echo-1", probe.AppCluster)
+	assert.Equal(t, "inboundready_echo-1", probe.InboundReadyCluster)
 
 	hcm := gatewayHCM(t, []HealthGatewayProbe{probe})
 	filters := hcm.GetHttpFilters()
-	require.Len(t, filters, 2, "one health_check filter + router")
+	require.Len(t, filters, 3, "one health_check filter per cluster + router")
 
-	hc := decodeGatewayHealthCheck(t, filters[0])
-	assert.Equal(t, HealthGatewayPath("health_echo-1"), hc.GetHeaders()[0].GetStringMatch().GetExact())
-	require.Len(t, hc.GetClusterMinHealthyPercentages(), 2)
-	for _, name := range []string{"health_echo-1", "inboundready_echo-1"} {
+	// Sorted cluster order: health_ before inboundready_.
+	for i, name := range []string{"health_echo-1", "inboundready_echo-1"} {
+		hc := decodeGatewayHealthCheck(t, filters[i])
+		assert.Equal(t, HealthGatewayPath(name), hc.GetHeaders()[0].GetStringMatch().GetExact())
+		require.Len(t, hc.GetClusterMinHealthyPercentages(), 1,
+			"each path must reflect exactly one cluster, so the agent can weigh the two facts separately")
 		require.Contains(t, hc.GetClusterMinHealthyPercentages(), name)
 		assert.Equal(t, float64(100), hc.GetClusterMinHealthyPercentages()[name].GetValue())
 	}
 }
 
-// TestHealthGatewayProbeDedupesAndSorts: the requirement set must be a pure
-// function of its inputs — empty names dropped, duplicates collapsed, order
-// fixed — so an equal pod set never re-hashes the gateway listener.
-func TestHealthGatewayProbeDedupesAndSorts(t *testing.T) {
-	assert.Equal(t, []string{"health_a"}, NewHealthGatewayProbe("health_a").Requires)
-	assert.Equal(t, []string{"health_a"}, NewHealthGatewayProbe("health_a", "").Requires,
-		"a pod with no inbound-readiness probe keeps today's single-cluster gate")
-	assert.Equal(t, []string{"health_a"}, NewHealthGatewayProbe("health_a", "health_a").Requires)
-	assert.Equal(t, []string{"health_a", "inboundready_a"},
-		NewHealthGatewayProbe("health_a", "inboundready_a").Requires)
+// TestHealthGatewayUngatedPodKeepsAppPathOnly: a pod with no inbound-readiness
+// probe gets exactly the pre-#815 gateway shape — one filter, the app path —
+// and NO /healthz/inboundready_<pod>, so the agent reads 404 there and treats
+// the pod as ungated rather than unhealthy.
+func TestHealthGatewayUngatedPodKeepsAppPathOnly(t *testing.T) {
+	hcm := gatewayHCM(t, []HealthGatewayProbe{NewHealthGatewayProbe("health_a", "")})
+	filters := hcm.GetHttpFilters()
+	require.Len(t, filters, 2, "one health_check filter + router")
+
+	hc := decodeGatewayHealthCheck(t, filters[0])
+	assert.Equal(t, HealthGatewayPath("health_a"), hc.GetHeaders()[0].GetStringMatch().GetExact())
+	assert.Equal(t, []string{"health_a"}, slices.Collect(maps.Keys(hc.GetClusterMinHealthyPercentages())))
+}
+
+// TestHealthGatewayFilterOrderIsDeterministic: filters are emitted in sorted
+// cluster order regardless of the probe slice's order, so a pod-set-equal
+// snapshot never re-hashes the listener (#135).
+func TestHealthGatewayFilterOrderIsDeterministic(t *testing.T) {
+	forward := gatewayHCM(t, []HealthGatewayProbe{
+		NewHealthGatewayProbe("health_b", "inboundready_b"),
+		NewHealthGatewayProbe("health_a", "inboundready_a"),
+	})
+	reverse := gatewayHCM(t, []HealthGatewayProbe{
+		NewHealthGatewayProbe("health_a", "inboundready_a"),
+		NewHealthGatewayProbe("health_b", "inboundready_b"),
+	})
+	require.Len(t, forward.GetHttpFilters(), 5)
+	assert.True(t, proto.Equal(forward, reverse), "gateway config must not depend on probe order")
 }

@@ -72,8 +72,23 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 		return nil, fmt.Errorf("network namespace is required")
 	}
 
+	// The mTLS inbound listener's WHOLE PURPOSE is to present this pod's
+	// certificate, and the certificate is named by its SPIFFE ID. Without a
+	// trust domain there is no such name, so refuse rather than emit
+	// `spiffe:///ns/…`: a chain carrying that name never resolves a secret, so
+	// the listener never listen()s, so the pod is unreachable on the mesh —
+	// permanently, because the malformed config is already published
+	// (main-worker-03, 2026-09-19; issue #815). The caller keeps the pod's
+	// previous listener and retries on the next rebuild.
+	//
+	// Cleartext (SPIRE off) needs no identity at all and is unaffected — that
+	// path stays byte-identical.
+	if !cleartext && trustDomain == "" {
+		return nil, fmt.Errorf("inbound listener for pod %s/%s: %w", cniPod.GetNamespace(), cniPod.GetName(), ErrNoTrustDomain)
+	}
+
 	tlsCertificateSecretName := SpiffeIDFromPod(cniPod, trustDomain)
-	validationContextName := fmt.Sprintf("spiffe://%s", trustDomain)
+	validationContextName := ValidationContextName(trustDomain)
 
 	var chains []*listenerv3.FilterChain
 	var listenerFilters []*listenerv3.ListenerFilter

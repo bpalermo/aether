@@ -6,6 +6,7 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	"aethermesh.dev/common/serviceref"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -412,8 +413,58 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 	// Node-global union, built once for the whole loop (see extensionHTTPFilters):
 	// the rebuilt union is exactly what this regeneration exists to propagate.
 	shared := c.extensionHTTPFilters()
-	trustDomain := c.currentTrustDomain()
+
 	c.listenerMu.Lock()
+	c.rebuildPodListenersLocked("extension-union change", shared)
+	c.listenerMu.Unlock()
+
+	// Push the rebuilt listeners immediately (the dependency signal ALSO triggers a
+	// registry reload, but that path only runs when the refresher is up — and prompt
+	// convergence beats waiting a debounce for a pure listener change).
+	if err := c.generateListenerSnapshot(context.Background()); err != nil {
+		c.log.Error("failed to regenerate snapshot after extension-union change", "error", err)
+	}
+}
+
+// rebuildIdentityDerived rebuilds every per-pod listener and every cached
+// mTLS-injected cluster from the trust domain now in force, and publishes ONE
+// snapshot carrying the result (issue #815: a trust-domain change must be
+// atomic with respect to snapshot publication — no snapshot may mix identities
+// from two trust domains).
+func (c *SnapshotCache) rebuildIdentityDerived(ctx context.Context) {
+	shared := c.extensionHTTPFilters()
+
+	c.listenerMu.Lock()
+	c.rebuildPodListenersLocked("trust-domain change", shared)
+	c.listenerMu.Unlock()
+
+	// SAN matchers and the per-source matcher's identities are named from the
+	// trust domain too.
+	c.recomputeMTLSClusters()
+
+	if err := c.generateSnapshot(ctx); err != nil {
+		c.log.ErrorContext(ctx, "failed to regenerate snapshot after a trust-domain change", "error", err)
+	}
+}
+
+// rebuildPodListenersLocked rebuilds every entry's inbound, outbound and
+// capture listener in place. Caller holds listenerMu for writing.
+//
+// THE TRUST DOMAIN IS READ HERE, INSIDE THE LOCK, ON PURPOSE. Reading it before
+// acquiring listenerMu is what broke main-worker-03 on 2026-09-19: the value was
+// sampled while a concurrent LoadListenersFromStorage had not yet recorded it,
+// the caller then blocked on listenerMu for the ~700 ms that load took, and
+// rewrote all 15 per-pod listeners with `spiffe:///ns/…` server-certificate
+// names Envoy could never resolve. setTrustDomain publishes under this same
+// lock, so a rebuild can neither straddle a change nor observe a stale value.
+//
+// A pod whose listeners cannot be built — including because the trust domain is
+// not known yet (proxy.ErrNoTrustDomain) — is SKIPPED with its name in the log
+// and keeps whatever it already had. Skipping is strictly better than emitting
+// a malformed identity: the previous config is at worst stale, while
+// `spiffe:///` is unserviceable and permanent.
+func (c *SnapshotCache) rebuildPodListenersLocked(reason string, shared []*http_connection_managerv3.HttpFilter) {
+	trustDomain := c.currentTrustDomain()
 	for netns, entry := range c.listeners {
 		if entry.cniPod == nil {
 			continue
@@ -421,22 +472,20 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 		extensionFilters := c.podExtensionHTTPFilters(entry.cniPod, shared)
 		newCapture, err := c.generateCaptureListener(entry.cniPod, trustDomain, extensionFilters)
 		if err != nil {
-			c.log.Error("failed to regenerate capture listener on extension-union change",
-				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			c.log.Warn("skipping capture listener regeneration for pod",
+				"reason", reason, "netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
 		newOutbound, err := proxy.GenerateOutboundHTTPListener(entry.cniPod, proxy.SourceIdentityForPod(entry.cniPod, trustDomain), c.meshDomain, c.emitStatsPod, extensionFilters)
 		if err != nil {
-			c.log.Error("failed to regenerate outbound listener on extension-union change",
-				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			c.log.Warn("skipping outbound listener regeneration for pod",
+				"reason", reason, "netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
-		// The same trust domain the outbound chains above stamp, read once under
-		// localMu (it used to be read off the field without the lock).
 		newInbound, err := proxy.NewInboundListener(entry.cniPod, trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(entry.cniPod))
 		if err != nil {
-			c.log.Error("failed to regenerate inbound listener on extension-union change",
-				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
+			c.log.Warn("skipping inbound listener regeneration for pod",
+				"reason", reason, "netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
 		c.applyWaypointInboundServerNames(newInbound, entry.cniPod)
@@ -444,13 +493,6 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 		entry.outbound = newOutbound
 		entry.inbound = newInbound
 		c.listeners[netns] = entry
-	}
-	c.listenerMu.Unlock()
-	// Push the rebuilt listeners immediately (the dependency signal ALSO triggers a
-	// registry reload, but that path only runs when the refresher is up — and prompt
-	// convergence beats waiting a debounce for a pure listener change).
-	if err := c.generateListenerSnapshot(context.Background()); err != nil {
-		c.log.Error("failed to regenerate snapshot after extension-union change", "error", err)
 	}
 }
 

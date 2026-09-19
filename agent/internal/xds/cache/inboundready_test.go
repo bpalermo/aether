@@ -71,8 +71,8 @@ func clusterNames(t *testing.T, c *SnapshotCache) map[string]*clusterv3.Cluster 
 }
 
 // TestInboundReadyClusterGatesPromotion: with SPIRE on and the node SVID
-// served, the pod gets an inboundready_<pod> cluster and its gateway path
-// requires BOTH probes.
+// served, the pod gets an inboundready_<pod> cluster and its OWN gateway path,
+// while /healthz/health_<pod> keeps meaning the application probe alone.
 func TestInboundReadyClusterGatesPromotion(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
@@ -88,17 +88,18 @@ func TestInboundReadyClusterGatesPromotion(t *testing.T) {
 	assert.NotNil(t, probe.GetTransportSocket())
 
 	requires := gatewayMinHealthy(t, c)
-	assert.ElementsMatch(t,
-		[]string{"health_echo-1", "inboundready_echo-1"},
+	assert.Equal(t, []string{"health_echo-1"},
 		requires[proxy.HealthGatewayPath("health_echo-1")],
-		"the pod's gateway path must require the app probe AND the inbound-readiness probe")
+		"the app path must reflect the app probe ALONE, as it did before #815")
+	assert.Equal(t, []string{"inboundready_echo-1"},
+		requires[proxy.HealthGatewayPath("inboundready_echo-1")],
+		"the inbound-readiness probe gets its own path so the agent can tell the two facts apart")
 }
 
 // TestInboundReadyAbsentBeforeNodeIdentity: the probe presents the node SVID,
-// so before it lands there is nothing to build. The gateway must then keep
-// exactly today's single-cluster gate — emitting a requirement on a cluster the
-// snapshot does not carry would make the health_check filter answer 503 forever
-// and demote every pod on the node.
+// so before it lands there is nothing to build. The gateway must then carry NO
+// /healthz/inboundready_<pod> path at all — 404 there is how the liveness loop
+// learns the pod is UNGATED rather than unhealthy.
 func TestInboundReadyAbsentBeforeNodeIdentity(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
@@ -110,11 +111,15 @@ func TestInboundReadyAbsentBeforeNodeIdentity(t *testing.T) {
 		[]string{"health_echo-1"},
 		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("health_echo-1")],
 		"without a node SVID the gate must stay exactly as it was")
+	assert.NotContains(t, gatewayMinHealthy(t, c), proxy.HealthGatewayPath("inboundready_echo-1"),
+		"an ungated pod must have no inbound-readiness path, so the agent reads 404")
 
-	// The SVID arriving must materialise both the cluster and the gate.
+	// The SVID arriving must materialise both the cluster and its path — with no
+	// further trigger than the next snapshot.
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 	assert.Contains(t, clusterNames(t, c), "inboundready_echo-1")
-	assert.Len(t, gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("health_echo-1")], 2)
+	assert.Equal(t, []string{"inboundready_echo-1"},
+		gatewayMinHealthy(t, c)[proxy.HealthGatewayPath("inboundready_echo-1")])
 }
 
 // TestInboundReadyAbsentWithSpireOff is the SPIRE-off byte-identity guard: with

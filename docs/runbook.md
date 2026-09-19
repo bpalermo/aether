@@ -1139,28 +1139,137 @@ past removal still need a live netns to *succeed* rather than merely fail cleanl
 ### A pod never becomes routable: what HEALTHY means since #815
 
 An endpoint is advertised to the mesh only after the node agent's liveness loop
-promotes it to `HEALTH_HEALTHY`. Since issue #815 that promotion asserts **two**
-things about the pod, not one:
+promotes it to `HEALTH_HEALTHY`. Since issue #815 the agent probes **two**
+independent facts about each local pod, on **two separate gateway paths**:
 
-| Probe cluster | What it proves | Transport |
-|---|---|---|
-| `health_<pod>` | the application answers (HTTP GET on the readiness path, or a raw TCP connect for a `protocol: tcp` pod) | cleartext, in the pod's netns |
-| `inboundready_<pod>` | the pod's **mesh inbound listener** is listening, has loaded the pod's own SVID, and it verifies as that pod | mTLS, node identity → `127.0.0.1:18008` in the pod's netns, SAN-pinned to the pod's SPIFFE ID |
+| Gateway path | Probe cluster | What it proves | Transport |
+|---|---|---|---|
+| `/healthz/health_<pod>` | `health_<pod>` | the application answers (HTTP GET on the readiness path, or a raw TCP connect for a `protocol: tcp` pod) | cleartext, in the pod's netns |
+| `/healthz/inboundready_<pod>` | `inboundready_<pod>` | the pod's **mesh inbound listener** is listening, has loaded the pod's own SVID, and it verifies as that pod | mTLS, node identity → `127.0.0.1:18008` in the pod's netns, SAN-pinned to the pod's SPIFFE ID |
 
-The second one is new. It exists because `health_<pod>` has no SDS dependency at
-all, while the inbound listener does not `listen()` until its SVID arrives — so
-an endpoint used to be advertised HEALTHY while its mesh port still returned
-ECONNREFUSED (measured: promotion p50 5.8 s against an SVID at 6.1–8.4 s).
+Each path reflects **its own cluster only**. `/healthz/health_<pod>` means
+exactly what it meant before #815. A `404` on either path means "not programmed"
+— for the inbound path that is the normal, expected answer for an **ungated**
+pod, and it is never read as unhealthy.
 
-The gateway path is unchanged (`/healthz/health_<pod>`); the filter behind it
-now requires both clusters at 100 % healthy. **`inboundready_<pod>` is not
-emitted at all** when SPIRE is disabled (the inbound listener is cleartext, so
-there is nothing to prove) or before the node SVID has been served (there is no
-client certificate to present) — in both cases the gate is exactly what it was.
+`inboundready_<pod>` exists because `health_<pod>` has no SDS dependency at all,
+while the inbound listener does not `listen()` until its SVID arrives — so an
+endpoint used to be advertised HEALTHY while its mesh port still returned
+ECONNREFUSED (measured: promotion p50 5.8 s against an SVID at 6.1–8.4 s). It is
+**not emitted** when SPIRE is disabled (the inbound listener is cleartext, so
+there is nothing to prove), before the node SVID has been served (no client
+certificate to present), in edge mode, or for a pod with no netns.
 
-**Reading a pod that is stuck un-promoted.** Both probe clusters keep their
-per-pod stats (they must — the `health_check` filter answers by READING their
-membership gauges; never exclude those, see the 2026-06-11 outage note in
+> **Why the two paths are separate, and not ANDed.** The first attempt (#819)
+> put both clusters behind the single `/healthz/health_<pod>` path. The agent
+> could then only see their conjunction, so "the application is fine but the
+> mesh inbound never came up" was indistinguishable from "the application died".
+> On 2026-09-19 main-worker-03 published inbound listeners with an EMPTY trust
+> domain, the conjunction went 503, and four **already-serving** endpoints were
+> demoted and never re-promoted. A signal meant to gate a *first* promotion had
+> become a permanent trap.
+
+#### The promotion rules
+
+| application probe | inbound-readiness probe | endpoint already serving? | agent's decision |
+|---|---|---|---|
+| fails | any | any | **UNHEALTHY** (warm-up grace and the demote streak still apply) |
+| passes | `404` (ungated) | any | **HEALTHY** — no gate is programmed for this pod |
+| passes | passing | any | **HEALTHY** — application up *and* mesh inbound proven |
+| passes | never passed this epoch | **yes** | **HEALTHY** — *can't-tell*: an already-serving endpoint is never pulled on the TLS probe alone. WARN + `inbound_gate_held_pods` |
+| passes | never passed this epoch | **no** | **held un-promoted** — this is the hole the gate closes. WARN after 60 s |
+| passes | passed earlier, failing now | any | **UNHEALTHY** after the demote streak — expired SVID, or the listener lost its secret |
+
+"Already serving" means the endpoint **is or has been advertised HEALTHY** in
+the registry, not merely that the application probe passed once. Active-mode
+endpoints register HEALTHY at CNI ADD and so qualify immediately; EDS-mode
+endpoints register UNHEALTHY and qualify only after their first promotion. This
+survives an Envoy epoch change on purpose — after a proxy roll the endpoint is
+still advertised, which is exactly why the unproven probe must be can't-tell.
+
+#### Metrics
+
+| Metric | Meaning |
+|---|---|
+| `aether_agent_liveness_inbound_gate_pods{aether_gate_state="gated"\|"ungated"}` | local pods with / without the gate programmed, recorded every liveness pass (5 s) |
+| `aether_agent_liveness_inbound_gate_held_pods` | pods currently held un-promoted, or serving only on the can't-tell fallback |
+| `aether_agent_liveness_health_transitions_total{aether_health_from,aether_health_to}` | endpoint health transitions; **seeded at 0** for HEALTHY→UNHEALTHY and UNHEALTHY→HEALTHY so "zero demotions" is gradeable |
+
+```promql
+# Is the gate on at all on every node? A standing ungated count with SPIRE
+# enabled means the gate is missing, not that the pods are fine.
+max_over_time(aether_agent_liveness_inbound_gate_pods{aether_gate_state="ungated"}[5m]) > 0
+
+# Anything held by the TLS probe right now.
+max_over_time(aether_agent_liveness_inbound_gate_held_pods[5m]) > 0
+
+# Demotions, per node. This series now exists even when it is zero.
+increase(aether_agent_liveness_health_transitions_total{aether_health_from="HEALTH_HEALTHY",aether_health_to="HEALTH_UNHEALTHY"}[10m])
+```
+
+The agent also logs the gate state once per change (and once at startup):
+
+```
+inbound-readiness promotion gate ACTIVE: HEALTHY requires an mTLS handshake with the pod's own inbound listener  gated_pods=5
+inbound-readiness promotion gate NOT active for every local pod; those pods keep the application probe alone  gated_pods=0 ungated_pods=5 missing="no node SVID yet (…)"
+```
+
+and one rate-limited WARN per held pod (once per 5 min, after a 60 s grace):
+
+```
+liveness: pod held by the inbound-readiness probe  pod=svc-1-… probe_cluster=inboundready_svc-1-… gateway_path=/healthz/inboundready_svc-1-… why="held un-promoted: the inbound mTLS probe has never passed (inbound listener has no certificate, or its SDS secret name is not served)"
+```
+
+#### Named failure: `envoy_sds_spiffe_ns_*` — listeners built with an EMPTY trust domain
+
+**Signature.** Envoy subscribes to SDS secrets named `spiffe:///ns/<ns>/sa/<sa>`
+— note the **missing trust domain** between the second and third slash. The
+agent never serves that name, so the secret never resolves, the inbound listener
+never gets a certificate, and the pod is unreachable on the mesh. The healthy
+form is `spiffe://aether.internal/ns/…`.
+
+```promql
+# Any proxy subscribing to a trust-domain-less secret. Should be EMPTY, always.
+{__name__=~"envoy_sds_spiffe_ns_.*"}
+
+# The specific shape seen on main-worker-03, 2026-09-19:
+envoy_sds_spiffe_ns_aether_test_sa_.*_init_fetch_timeout_total == 1
+# with update_attempt == 1 and NO update_success.
+```
+
+The agent says the same thing directly — grep its log for:
+
+```
+inbound chain bound to a foreign identity   bound_spiffe_id=spiffe:///ns/aether-test/sa/svc-1
+                                            pod_spiffe_id=spiffe://aether.internal/ns/aether-test/sa/svc-1
+                                            secret_served=false
+```
+
+**Cause.** The node agent's trust domain is late-bound (#740). #819 had the
+listener-regeneration paths sample the cache's copy *before* blocking on
+`listenerMu`, while `LoadListenersFromStorage` published the listener map
+*before* recording the trust domain. A reconciler that started inside that
+window (~700 ms on main-worker-03) read `""`, waited out the load on the lock,
+and then rewrote every per-pod listener with the malformed name.
+
+**It cannot recur by construction**, and every layer is asserted by a test:
+`proxy.SpiffeIDFromPod` returns `""` rather than `spiffe:///`; builders that
+need a real identity refuse with `proxy.ErrNoTrustDomain`; the cache's trust
+domain is a single atomic value read at the point of use, inside the same
+`listenerMu` section that writes the listeners; and it is recorded before any
+listener is published.
+
+**If you see it anyway:** the pods are not repairable in place — the malformed
+config is already in Envoy. Roll the node's agent (which republishes every
+listener from the now-known trust domain); if that does not clear it, roll the
+workloads. Then reopen #815 with the agent's first 2 s of log, which contains
+the ordering.
+
+#### Reading a pod that is stuck un-promoted
+
+Both probe clusters keep their per-pod stats (they must — the `health_check`
+filter answers by READING their membership gauges; never exclude those, see the
+2026-06-11 outage note in
 `charts/aether/templates/agent-proxy-configmap.yaml`). The cluster name is
 lifted into the `aether.cluster` tag by the proxy's `stats_tags`, so:
 
@@ -1186,26 +1295,53 @@ increase(envoy_cluster_ssl_connection_error{aether_cluster=~"inboundready_.*"}[5
 Ranked causes, most to least common:
 
 1. **The pod's SVID has not arrived.** Normal for the first 6–8 s after CNI ADD;
-   the promotion simply waits. Persistent means SPIRE — check the agent for
-   `SubscribeToX509SVID` retries and see "The agent is stuck waiting for SPIRE".
-2. **The node SVID has not arrived.** Then the probe cluster is not emitted at
-   all (`inboundready_*` is absent from `envoy_cluster_membership_total`), the
-   gate silently reverts to the app probe, and the node's outbound mTLS is
-   degraded anyway. Same SPIRE check.
-3. **`fail_verify_san` on the probe.** Something other than the expected pod is
+   a *never-promoted* pod simply waits, and an *already-serving* one keeps
+   serving. Persistent means SPIRE — check the agent for `SubscribeToX509SVID`
+   retries and see "The agent is stuck waiting for SPIRE".
+2. **The listeners were built with an empty trust domain.** See the named
+   failure above. `envoy_sds_spiffe_ns_*` distinguishes it from (1) in one query:
+   in (1) the secret name is correct and merely unserved; here it is malformed.
+3. **The node SVID has not arrived.** Then the probe cluster is not emitted at
+   all, `inbound_gate_pods{aether_gate_state="ungated"}` is nonzero, the agent
+   logs the "NOT active" line naming this precondition, and the node's outbound
+   mTLS is degraded anyway. Same SPIRE check.
+4. **`fail_verify_san` on the probe.** Something other than the expected pod is
    answering `:18008` in that netns — the #638 stale-endpoint / recycled-pod-IP
    shape. See "Attributing an `ssl_fail_verify_san` event".
-4. **A stale netns entry.** The pod is gone but its entry survives until the
+5. **A stale netns entry.** The pod is gone but its entry survives until the
    ghost sweep; the probe fails cleanly (a `NETWORK` health-check failure, not a
    crash, on the pinned snapshot). See the stale-netns section.
 
-**After a proxy roll.** A new Envoy epoch starts every host failed and must
-re-fetch each pod's SDS secret before the probe can pass, so the gateway 503s
-briefly for every pod on the node. The liveness loop absorbs that deliberately:
-a pod that has already served is demoted only after `livenessDemoteStreak` (3)
-CONSECUTIVE failing observations — 15 s — and any tick that could not reach the
-gateway at all re-arms the full warm-up grace for every pod on the next tick
-that can. So a proxy roll must produce **zero** `HEALTH_HEALTHY → UNHEALTHY`
-transitions. If you see a node-wide demotion wave aligned with a proxy roll,
-that budget was not enough — raise it rather than removing the probe, and say
-so on #815.
+#### The gate is silently absent
+
+`inbound_gate_pods{aether_gate_state="ungated"}` standing above zero with SPIRE
+enabled means those pods have **no** `/healthz/inboundready_<pod>` path and are
+being judged on the application probe alone. That is a safe degradation, not an
+outage — but it means the premature-promotion hole is open again, so it is worth
+an alert. main-worker-05 ran a whole agent lifetime like that on 2026-09-19 with
+no signal whatsoever; the agent now says which precondition is missing at
+startup and on every change, and the probes are reconciled on every snapshot
+rather than off one-shot triggers, so a missed event can no longer strand them.
+
+#### After a proxy roll
+
+A new Envoy epoch starts every host failed and must re-fetch each pod's SDS
+secret before the inbound probe can pass. Every pod on the node is then in the
+can't-tell row (application up, TLS unproven, already serving), so **no endpoint
+is demoted** — that is the rule, not a timing budget.
+
+Two guards remain and still earn their place:
+
+- **`livenessDemoteStreak` (3 observations, 15 s).** The proxy supervisor's
+  two-epoch overlap keeps the gateway socket answering across a hot restart, so
+  the agent may never observe an unreachable tick and never re-arm. The new
+  epoch's *application* probe also starts FAILED for up to two ticks. The streak
+  covers that, and absorbs a single transient failure of a TLS probe that has
+  already passed this epoch.
+- **The gateway re-arm.** A proxy *container* restart does take the socket away;
+  the first tick that reaches the gateway again re-arms the warm-up grace and
+  clears this epoch's `tlsPassed` marks for every pod.
+
+A node-wide demotion wave aligned with a proxy roll is therefore a bug, not a
+tuning problem — capture `aether_agent_liveness_health_transitions_total` and
+the agent log and reopen #815.

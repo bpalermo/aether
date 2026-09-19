@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -15,6 +16,16 @@ const meterName = "aether/agent-cni-server"
 const (
 	attrHealthFrom = attribute.Key("aether.health.from")
 	attrHealthTo   = attribute.Key("aether.health.to")
+	// attrGateState labels the inbound-readiness gate gauge: "gated" (the pod
+	// has an inboundready_<pod> path on the health gateway) or "ungated" (it
+	// does not — the pod is judged on its application probe alone).
+	attrGateState = attribute.Key("aether.gate.state")
+)
+
+// Gate-state attribute values.
+const (
+	gateStateGated   = "gated"
+	gateStateUngated = "ungated"
 )
 
 // cniMetrics holds the reconciliation-loop instruments. All methods are
@@ -40,6 +51,8 @@ type cniMetrics struct {
 	healthTransitions  metric.Int64Counter
 	promotionDelay     metric.Float64Histogram
 	spiffeIDOverrides  metric.Int64Counter
+	inboundGatePods    metric.Int64Gauge
+	inboundGateHeld    metric.Int64Gauge
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
@@ -56,7 +69,28 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 		return nil, err
 	}
 	m.seedCounters()
+	m.seedHealthTransitions()
 	return m, nil
+}
+
+// seedHealthTransitions exports aether.agent.liveness.health_transitions at zero
+// for the two attribute sets a grader actually asks about.
+//
+// Without this there is no series at all until the first transition, so "zero
+// demotions" and "the metric does not exist" look identical — which is exactly
+// what happened on 2026-09-19: four endpoints were demoted HEALTHY→UNHEALTHY on
+// main-worker-03 and the release could not be graded against the metric,
+// because no HEALTHY→UNHEALTHY series had ever existed on any node.
+func (m *cniMetrics) seedHealthTransitions() {
+	ctx := context.Background()
+	healthy := registryv1.ServiceEndpoint_HEALTH_HEALTHY.String()
+	unhealthy := registryv1.ServiceEndpoint_HEALTH_UNHEALTHY.String()
+	for _, pair := range [][2]string{{healthy, unhealthy}, {unhealthy, healthy}} {
+		m.healthTransitions.Add(ctx, 0, metric.WithAttributes(
+			attrHealthFrom.String(pair[0]),
+			attrHealthTo.String(pair[1]),
+		))
+	}
 }
 
 // seedCounters exports every attribute-less counter at zero. The OTel SDK exports
@@ -159,6 +193,14 @@ func (m *cniMetrics) registerLifecycleInstruments(meter metric.Meter) error {
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(promotionDelayBuckets...)); err != nil {
 		return fmt.Errorf("promotion delay: %w", err)
+	}
+	if m.inboundGatePods, err = meter.Int64Gauge("aether.agent.liveness.inbound_gate_pods",
+		metric.WithDescription("Local pods by whether the inbound-readiness promotion gate is programmed for them (state=gated) or absent (state=ungated), recorded every liveness pass; a standing ungated count with SPIRE on means the gate is silently missing (#815, main-worker-05 2026-09-19)")); err != nil {
+		return fmt.Errorf("inbound gate pods: %w", err)
+	}
+	if m.inboundGateHeld, err = meter.Int64Gauge("aether.agent.liveness.inbound_gate_held_pods",
+		metric.WithDescription("Local pods the inbound-readiness probe is currently holding: never promoted because it has not passed, or serving only because an already-serving endpoint is never demoted on it alone; nonzero means a pod's mesh inbound listener is not proving itself (#815)")); err != nil {
+		return fmt.Errorf("inbound gate held pods: %w", err)
 	}
 	if m.spiffeIDOverrides, err = meter.Int64Counter("aether.agent.identity.spiffe_id_override_rejected",
 		metric.WithDescription("Pods carrying the rejected aether.io/spiffe-id annotation, whose mesh identity was derived from the pod's own namespace/ServiceAccount instead (#669); nonzero means someone is trying to choose a workload identity by annotation")); err != nil {
@@ -268,6 +310,18 @@ func (m *cniMetrics) healthTransition(ctx context.Context, from, to string) {
 		attrHealthFrom.String(from),
 		attrHealthTo.String(to),
 	))
+}
+
+// inboundGateObserved records the inbound-readiness gate's coverage for this
+// node, every liveness pass, zeros included — so "the gate is absent" is one
+// query rather than the absence of a series (#815).
+func (m *cniMetrics) inboundGateObserved(ctx context.Context, gated, ungated, held int) {
+	if m == nil {
+		return
+	}
+	m.inboundGatePods.Record(ctx, int64(gated), metric.WithAttributes(attrGateState.String(gateStateGated)))
+	m.inboundGatePods.Record(ctx, int64(ungated), metric.WithAttributes(attrGateState.String(gateStateUngated)))
+	m.inboundGateHeld.Record(ctx, int64(held))
 }
 
 // promotionDelayObserved records how long a new pod sat between its health
