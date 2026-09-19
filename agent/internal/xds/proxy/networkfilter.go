@@ -44,8 +44,9 @@ const (
 	//	chain that sets the netns key ALSO sets this one. Clusters untouched and
 	//	byte-identical.
 	//
-	//	RELEASE TWO (SHIPPED, this release): the matcher's FilterStateInput.key is
-	//	this key. Both keys are still stamped on every originating chain.
+	//	RELEASE TWO (#822, SHIPPED — talos-main rev225, chart 0.92.28): the
+	//	matcher's FilterStateInput.key is this key. Both keys are still stamped
+	//	on every originating chain.
 	//	UPGRADE CONSTRAINT: a proxy must run release-one (or later) LISTENERS
 	//	before it is handed release-two CLUSTERS. Upgrading a node straight from a
 	//	pre-#819 build is NOT supported — the agent publishes both in one
@@ -56,23 +57,72 @@ const (
 	//	OnNoMatch, and presents the NODE identity instead of the pod's (#686
 	//	territory). Go through release one first.
 	//
-	//	RELEASE THREE, NOT YET: drop networkNamespaceFilterStateKey from the
-	//	listeners. Allowed only once no supported upgrade path can run
-	//	release-two-or-later clusters against pre-release-one listeners — i.e.
-	//	once the oldest supported chart/agent version is >= release one AND every
-	//	proxy has been through a filter-chain-changing LDS update or a restart
-	//	since. Doing it in release two would strand any proxy still holding a
-	//	pre-release-one cluster on the OnNoMatch path in exactly the same way, in
-	//	the other direction. The netns key costs one set_filter_state entry per
-	//	chain; there is no hurry.
+	//	RELEASE THREE (drop networkNamespaceFilterStateKey from the listeners):
+	//	EVALUATED 2026-09-19 AND CLOSED. BOTH KEYS STAY. Do not "finish" the
+	//	contract by deleting the netns key — that is a net loss:
+	//
+	//	  - It buys ~240 bytes. Unlike the cluster matcher, the netns entry on a
+	//	    LISTENER carries no per-pod state: its value is the constant format
+	//	    string below, byte-identical on every chain of every pod, so it
+	//	    causes no churn and no re-warm. Deleting it saves one
+	//	    set_filter_state entry (~240 B) per mesh-originating filter chain
+	//	    (~0.5–1 KB per pod) and one format-string evaluation per new
+	//	    downstream connection. That is the entire benefit.
+	//	  - It costs rollback, permanently. While the listeners stamp BOTH keys
+	//	    a proxy is safe against clusters from EITHER side of release two, so
+	//	    a downgrade below 0.92.28 is hitless — which this very issue needed
+	//	    once (release one was rolled back on talos-main, 2026-09-19). A
+	//	    listener stamping only the SPIFFE ID, facing a pre-release-two
+	//	    netns-keyed cluster, matches nothing and takes OnNoMatch: on this
+	//	    mesh that is the AGENT'S OWN SVID,
+	//	    spiffe://<td>/ns/aether-system/sa/aether-agent — NOT
+	//	    spiffe://<td>/node/<node> (#825). A permanent version floor of
+	//	    0.92.28 in exchange for 240 bytes is a bad trade.
+	//	  - It costs a deploy. Every per-pod chain's bytes change again, so
+	//	    Envoy replaces and drains every mesh pod's filter chains once more.
+	//	  - accesslog.go's `source_netns` attribute is the netns key's ONLY
+	//	    remaining reader and would have to move with it; see
+	//	    buildNetworkNamespaceFilterState.
+	//
+	//	If some LATER change is already re-keying every mesh-originating chain
+	//	(#824's source-side peer-identity access-log field is the obvious
+	//	candidate), fold the removal into that change — the deploy and the
+	//	access-log migration are then already paid for, and the only remaining
+	//	cost is the version floor. On its own it is not worth a release.
 	//
 	// Namespaced under "aether." like the netns key so it can never collide with
 	// an Envoy-owned filter state object name.
 	sourceIdentityFilterStateKey = "aether.source.spiffe_id"
 )
 
-// buildNetworkNamespaceFilterState creates a filter that captures the network namespace
-// from Envoy's filter state and makes it available to upstream filters.
+// buildNetworkNamespaceFilterState copies Envoy's OWN downstream-netns filter
+// state object into an aether-namespaced, upstream-shared copy.
+//
+// The source object is native: Envoy sets `envoy.network.network_namespace`
+// (Network::DownstreamNetworkNamespace) in the ActiveTcpSocket constructor, at
+// accept time, whenever the listener's address carries a
+// network_namespace_filepath — which every per-pod listener here does
+// (listener.go, capture.go, ingress.go, l4route.go). It is LifeSpan::Connection
+// and PLAIN-formattable (serializeAsString is overridden; serializeAsProto is
+// not, so `:PLAIN` is mandatory — the formatter defaults to TYPED, which renders
+// "-"). Not populated for QUIC/HTTP3 or internal listeners.
+//
+// SINCE RELEASE TWO THIS COPY HAS EXACTLY ONE READER: accesslog.go's
+// `source_netns` attribute. The cluster transport_socket_matcher moved to
+// sourceIdentityFilterStateKey in #822, and the SharedWithUpstream: ONCE below
+// is now vestigial for this key (nothing upstream reads it). It is left as-is
+// deliberately — changing it would rewrite every per-pod filter chain's bytes
+// for no behavioural gain.
+//
+// If this copy is ever dropped (see the RELEASE THREE note on
+// sourceIdentityFilterStateKey), the access log does NOT need it: an HCM
+// access-log substitution can read the native object directly, because the
+// per-stream filter state parents onto the connection-lifespan store. But
+// beware the semantics change — the native object is the netns the LISTENER is
+// bound in, so on the INBOUND listener it is the DESTINATION pod's netns, and a
+// field still called `source_netns` would then be wrong. Rename it (the schema
+// already has reporter-relative `pod_name`/`pod_namespace`, so `local_netns`
+// fits) rather than repointing it in place.
 func buildNetworkNamespaceFilterState() *listenerv3.Filter {
 	return buildSetFilterState(networkNamespaceFilterStateKey, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%")
 }
