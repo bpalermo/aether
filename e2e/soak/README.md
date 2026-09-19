@@ -35,15 +35,28 @@ kubectl get pods -n aether-system
 #   sum by (tier) (rate(aether_probe_requests_total{result="success"}[3m]))   -> ~25/s
 #   sum by (tier) (rate(aether_probe_requests_total{result!="success"}[5m]))  -> 0
 
-# 3. Start load, then churn. Detached — churn sleeps ~7h32m, and `nohup setsid` is
-#    mandatory: on 2026-09-03 the harness reaped a plain `&` job at T0+75m.
+# 3. Start load, then churn ~4 minutes later, once all five runners report
+#    60.00 iters/s and 0 interrupted. T0 is the churn driver's own start line. k6
+#    runs 8h30m, so with this offset it outlasts the graded T0+8h window by ~25
+#    minutes and EXITS BY ITSELF (~T0+8h26m): the runners cannot self-restart
+#    inside the window (the 2026-09-06 artifact), and the end-of-test summary
+#    exists to be read. Detached — churn sleeps ~7h32m, and `nohup setsid` from the
+#    MAIN session is mandatory: on 2026-09-03 the harness reaped a plain `&` job at
+#    T0+75m, and a driver started inside a subagent dies with it.
 kubectl apply -f e2e/soak/k6-runner.yaml
 nohup setsid bash e2e/soak/churn.sh "rev192/0.92.0" >/dev/null 2>&1 &
 
 # 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself).
 bash e2e/soak/sample-proxy-rss.sh --at-age 1800
 
-# 5. Teardown at T0+8h.
+# 5. Teardown AFTER k6 has exited on its own (~T0+8h26m), never at T0+8h sharp:
+#    k6 publishes no metrics to Prometheus here, so `http_req_failed` exists only
+#    in each runner's end-of-test summary, and deleting the DaemonSet first loses
+#    it. The container restarts once after exiting, so the summary is in
+#    `logs --previous`.
+for p in $(kubectl -n aether-test get pods -o name | grep k6-soak-loader); do
+  kubectl -n aether-test logs --previous "$p" | grep -E 'http_req_failed|iterations|dropped'
+done
 kubectl delete -f e2e/soak/k6-runner.yaml
 grep -c ROLLED /tmp/soak-churn.log      # expect 31
 grep -E "no-roll window|SHRINK" /tmp/soak-churn.log
@@ -59,8 +72,8 @@ forgot the TRIPLE's proxy. The set of rolls has not changed, only the tally.
 | T0+ (min) | Roll | | T0+ (min) | Roll |
 |---|---|---|---|---|
 | 12 | svc-1 | | 24 | svc-2 |
-| 36 | **proxy** \* | | 48 | svc-3 |
-| 60 | mesh-dns | | 72 | **agent** |
+| 36 | mesh-dns | | 48 | svc-3 |
+| 60 | **proxy** \* — the first one, a full hour after T0 (see below) | | 72 | **agent** |
 | 84 | svc-5 | | 96 | **proxy** \* |
 | 108 | svc-1 | | 120 | edge |
 | 132 | svc-2 | | 144 | mesh-dns |
@@ -79,6 +92,17 @@ forgot the TRIPLE's proxy. The set of rolls has not changed, only the tally.
 
 \* = 30 minutes after that proxy roll an age-matched RSS sample is taken in the
 background (`sample-proxy-rss.sh --at-age 1800`), for #628. Six samples per run.
+
+### The first proxy roll (T0+60)
+
+It used to be at T0+36. On 2026-09-19 that first roll cost **15 mesh_dns timeouts
+across all five probers**, while the other five proxy rolls of the same run — identical
+`echo` placement — cost 0 / 1 / 0 / 0 / 0. What set it apart is that it replaced the
+only Envoy generation born *before* the load started. Either that generation is the
+cause (connections that predate k6), or the roll simply landed before the load had
+settled. A full hour of steady load before the first roll separates the two: if it still
+costs an order of magnitude more than the rest, it is the pre-load generation. Grade the
+first proxy roll as its own episode either way, and do not average it into the others.
 
 ### The no-roll window (#682)
 
@@ -103,9 +127,18 @@ it read first** (never a hard-coded number; an EXIT/INT/TERM trap restores it ev
 the driver is killed mid-shrink).
 
 `svc-5` is the target on purpose: it is the one service the k6 script declares as an
-upstream but never actually drives, so bouncing it cannot pollute the k6 error rate or
-the prober SLI. The observable is the log pair — `service left dependency set` in the
-agent log, `cm odcds: ... timed out` in the proxy log.
+upstream but never actually drives, so bouncing it cannot pollute the k6 error rate.
+**It is not free on the prober SLI**, though this file used to say so: on 2026-09-19 the
+restore cost **18 mesh_dns timeouts — 43% of that run's total and its largest single
+episode**. The chain was: `svc-5` back at 07:03:01Z → agents WARN `inbound chain
+references a secret absent from the snapshot` (`…/sa/svc-5`) at :03 → prober requests
+expiring client-side at :20–:22 (`DC` / `downstream_remote_disconnect` in the access
+log; no `UF`, `UH`, `URX` or `NR`, and upstream hosts on three nodes, so routing and
+`echo` were healthy — added latency on the busiest node, not an outage). Grade the SHRINK
+as its own episode and keep it out of any "steady-state" error rate. The #682 observable
+is the log pair — `expired observed upstreams from node dependency set` in the agent log
+(not `service left dependency set`, which no build logs), `cm odcds: ... timed out` in
+the proxy log.
 
 Opt out with `SOAK_SHRINK=0` (default on); `SOAK_SHRINK_TARGET` / `SOAK_SHRINK_SECONDS`
 retarget it.
@@ -148,7 +181,15 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
   `dns_nxdomain`, `dns_timeout` **all zero**. A residual `http_error` (~0.02%) is the
   known cross-node drain path, tracked separately.
 - **#682 episodes during the no-roll window or SHRINK are the harness working, not a
-  regression** — attribute via the agent log line `service left dependency set`.
+  regression** — attribute via the agent log line
+  `expired observed upstreams from node dependency set`.
+- **The first proxy roll and the SHRINK are graded as their own episodes.** Attribute every non-success to its bracketing step from the RAW counter
+  series at 30–60s resolution: `x - x offset 8h` silently drops an error series that did
+  not exist at the offset, and the unseeded ones are exactly the ones that matter.
+- **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
+  4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
+  `aether_agent_spire_svid_updates_total{aether_spire_update="rotated"}` counts them;
+  the prober delta in each rotation minute must be zero.
 
 ## Hard-won gotchas
 
