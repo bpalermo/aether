@@ -763,6 +763,26 @@ that the value is zero (#717).
 | `rejected the request as malformed; not retrying` | A bug in the agent (missing security header, bad reference). Never self-heals. | File it; the subscription is dead until the agent restarts. |
 | Every subscribe fails `Unavailable` on a healthy SPIRE agent | The agent's SPIFFE ID is not in `spire-agent.brokerAPI.brokers.*` — an unauthorised broker is rejected at the **TLS layer**, which gRPC reports as `Unavailable`, not `PermissionDenied`. | Fix `idTemplate` to the agent's real ServiceAccount ID. |
 
+**Is rotation happening?** The counters above only count failures; the healthy
+path has its own pair, also seeded at zero per attribute set:
+
+```promql
+# pod SVIDs rotated per node — expect about one per managed pod per SVID
+# half-life (2h at the default 4h TTL). `initial` is every pod after an agent
+# restart, `unchanged` a redelivery after a stream re-subscribe.
+sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod", aether_spire_update="rotated"}[3h]))
+# the agent's own SVID (identity="node"), and the trust-bundle inputs:
+# bundle="own", update="rotated" is a trust-ROOT change — SPIRE's 24h signing-CA
+# rotation does not move it, because the bundle is the upstream root.
+sum by (k8s_node_name, aether_spire_bundle, aether_spire_update) (increase(aether_agent_spire_bundle_updates_total[24h]))
+```
+
+A pod whose `rotated` count stays at zero past its SVID half-life while its
+neighbours rotate is holding a certificate that will expire; the agent also logs
+`pod SVID rotated` / `node SVID rotated` at INFO. Before these existed a rotation
+could only be inferred from Envoy's `envoy_sds_*_version` gauges, with every
+proxy-roll minute excluded by hand (a new Envoy changes every gauge once).
+
 Trust bundles do **not** come from the broker (its bundle RPC also needs a
 workload reference, which a node with no managed pods does not have). They are
 built from the agent's **own** Workload API bundle plus the union of the

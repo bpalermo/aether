@@ -95,8 +95,8 @@ func TestCNIMetrics_SweepFailed(t *testing.T) {
 	}
 	// A failed sweep reconciled nothing: correction counters must stay at zero
 	// and the stale pod gauge must not be (mis)recorded as 0.
-	if _, found := metricSum(t, reader, "aether.agent.ghost_sweep.ghosts_removed"); found {
-		t.Error("ghosts_removed recorded on failed sweep")
+	if got, _ := metricSum(t, reader, "aether.agent.ghost_sweep.ghosts_removed"); got != 0 {
+		t.Errorf("ghosts_removed = %d on a failed sweep, want the seeded 0", got)
 	}
 	if _, found := metricSum(t, reader, "aether.agent.storage.pods"); found {
 		t.Error("storage.pods recorded on failed sweep")
@@ -112,5 +112,36 @@ func TestCNIMetrics_HealthTransition(t *testing.T) {
 
 	if got, _ := metricSum(t, reader, "aether.agent.liveness.health_transitions"); got != 2 {
 		t.Errorf("health_transitions = %d, want 2", got)
+	}
+}
+
+// TestCNIMetrics_CountersSeededAtZero: a healthy agent never increments these, so
+// without a seed they export no series and "zero" cannot be told from "missing".
+func TestCNIMetrics_CountersSeededAtZero(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	if _, err := newCNIMetrics(provider.Meter("test")); err != nil {
+		t.Fatalf("newCNIMetrics() error = %v", err)
+	}
+
+	for _, name := range []string{
+		"aether.agent.ghost_sweep.ghosts_removed",
+		"aether.agent.ghost_sweep.missing_registered",
+		"aether.agent.ghost_sweep.stale_pruned",
+		"aether.agent.ghost_sweep.orphans_pruned",
+		"aether.agent.ghost_sweep.missing_storage",
+		"aether.agent.ghost_sweep.errors",
+		"aether.agent.ghost_sweep.prune_breaker_tripped",
+		"aether.agent.ghost_sweep.lost_add_evictions",
+		"aether.agent.ghost_sweep.stale_running_evictions",
+		"aether.agent.identity.spiffe_id_override_rejected",
+	} {
+		got, found := metricSum(t, reader, name)
+		if !found {
+			t.Errorf("%s: no series exported before its first increment", name)
+		}
+		if got != 0 {
+			t.Errorf("%s = %d, want 0", name, got)
+		}
 	}
 }
