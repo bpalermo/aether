@@ -1455,12 +1455,26 @@ identity's counter on a service cluster is the no-match counter**:
 
 ```promql
 # Connections that selected the NODE identity on a mesh service cluster.
-# Expect a small non-zero floor (see note 2) — compare it against the cluster's
-# upstream_cx_total, not against zero.
-increase(envoy_cluster_total_match_count{aether_transport_socket_match=~"spiffe://[^/]+/node/.*"}[5m])
+#
+# TWO traps, both hit during the rev225 validation (2026-09-19):
+#  - the exported family is envoy_cluster_match_count_total — Prometheus' OTLP
+#    ingest moves "total" to the end; envoy_cluster_total_match_count does not exist;
+#  - on a node agent the "node identity" is the AGENT'S OWN SVID,
+#    spiffe://<td>/ns/<agent-namespace>/sa/<agent-serviceaccount>
+#    (spiffe://aether.internal/ns/aether-system/sa/aether-agent on talos-main) —
+#    NOT spiffe://<td>/node/<node>. A `/node/` selector matches nothing and reads
+#    as a clean zero. Take the value from the agent log line `served node SVID`.
+#
+# It is 0 over any quiet window and ticks only when a cluster's endpoints change
+# (note 2): during a pod ADD the increments sit entirely on THAT service's cluster.
+# Growing with traffic across clusters = workloads are presenting the agent's identity.
+sum by (node, aether_cluster) (increase(envoy_cluster_match_count_total{
+  aether_transport_socket_match="spiffe://aether.internal/ns/aether-system/sa/aether-agent"}[5m]))
 
-# The healthy case, for contrast: per-ServiceAccount selection actually happening.
-increase(envoy_cluster_total_match_count{aether_transport_socket_match=~"spiffe://[^/]+/ns/.*"}[5m])
+# The healthy case, for contrast: per-ServiceAccount selection actually happening
+# (every identity EXCEPT the agent's).
+sum by (node, aether_transport_socket_match) (increase(envoy_cluster_match_count_total{
+  aether_transport_socket_match!="spiffe://aether.internal/ns/aether-system/sa/aether-agent"}[5m]))
 ```
 
 Three things about that counter, all confirmed against the pinned proxy's
@@ -1485,10 +1499,14 @@ sources — get them wrong and the query lies:
    cluster without the matcher (SPIRE off, or before the node SVID) resolves
    once per host and the counter is meaningless there.
 
-The authoritative cross-check is on the **receiving** side: the destination
-proxy's XFCC / access-log peer URI SAN. Pod→pod mesh traffic must show
-`spiffe://<td>/ns/<ns>/sa/<sa>`; `spiffe://<td>/node/<node>` for traffic that
-came from a workload is the failure. The agent's own #638 discriminator
+The authoritative cross-check would be on the **receiving** side — which verified
+identity did the destination see — but it is **not available today**: the OTLP
+access-log format has no peer-identity field (no XFCC, no
+`%DOWNSTREAM_PEER_URI_SAN%`; #824). Until it has one, the counter above and, for
+routes behind ext_authz, the OPA decision log's
+`metadataContext.filterMetadata["aether.source"].spiffeId` (source-side, so a
+weaker control) are what there is. The failure signature is a workload's traffic
+arriving with the **agent's** identity. The agent's own #638 discriminator
 (`agent/internal/xds/cache/identitybinding.go`) still names the
 netns→identity index behind it and WARNs on `outbound cluster bound to a foreign
 identity`.

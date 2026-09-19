@@ -154,11 +154,13 @@ data:
         # (one family per ServiceAccount, permanently in Prometheus' name index
         # — the trap from the 2026-09-19 17:32Z incident). Lift it into an
         # attribute instead, collapsing to one
-        #   envoy_cluster_total_match_count{aether_cluster, aether_transport_socket_match}
+        #   envoy_cluster_match_count_total{aether_cluster, aether_transport_socket_match}
+        # (Prometheus' OTLP ingest moves "total" to the end of the name)
         # family. This is THE no-match signal: the cluster matcher's on_no_match
         # names the NODE identity, and Envoy counts an on_no_match against the
         # NAMED socket (never against `default`), so a rising
-        # aether_transport_socket_match="spiffe://<td>/node/…" on a mesh service
+        # aether_transport_socket_match="<the agent's own SVID, e.g.
+        # spiffe://<td>/ns/aether-system/sa/aether-agent>" on a mesh service
         # cluster means connections are not carrying aether.source.spiffe_id.
         # The `default.total_match_count` counter keeps its own name; it is
         # reached only with no on_no_match at all, or when an action names a
