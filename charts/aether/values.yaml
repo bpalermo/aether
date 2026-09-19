@@ -425,6 +425,20 @@ proxy:
     # error. It used to be compared raw, so `allow` silently meant DENY (#770).
     timeout: 200ms
     failureMode: DENY
+    # The sidecar used to run with `resources: {}`: unbounded, and invisible to
+    # node CPU/memory request accounting on a DaemonSet that is on every node.
+    # OPA idles at ~10 Mi / ~0 m with a small policy (measured on 1.20.2); the
+    # request reflects that, the memory limit leaves room for a real policy and
+    # its decision cache. No CPU limit, deliberately: this is on the request path
+    # of every authorized route and throttling it turns into ext_authz timeouts,
+    # which under failureMode DENY are 403s. Applies to both the OPA preset and a
+    # bring-your-own image.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 128Mi
   # UDS delivery for workloads that serve on a Unix domain socket (proposal 034
   # Phase 1). Gates BOTH halves: the proxy container's /var/lib/kubelet/pods
   # hostPath mount (the only bridge from the host mount namespace to a pod's
@@ -682,8 +696,14 @@ controller:
     digest: "{@//controller/cmd/controller:image_push.digest}"
     tag: ""
     pullPolicy: Always
-  # Leader election is on; extra replicas are warm standbys.
-  replicaCount: 1
+  # Two by default. Leader election is on, so the second replica is a warm
+  # standby for the reconcilers and the node-taint guard — but the admission
+  # webhooks are served by EVERY replica, and they are failurePolicy: Ignore:
+  # while no replica answers, pods are admitted unmutated, so a pod created in an
+  # aether.io/managed namespace silently comes up OUTSIDE the mesh and a managed
+  # pod misses its ndots. With one replica, deleting the leader measured a 49 s
+  # gap (talos-main, 2026-09-19); a node drain or an image pull makes it longer.
+  replicaCount: 2
   # Empty = chart default: preferred podAntiAffinity away from the registrars'
   # node (soft). Set to replace the default entirely.
   affinity: {}

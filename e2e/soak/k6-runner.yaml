@@ -3,6 +3,26 @@
 # exercises mesh DNS + the cross-node data path under churn.
 #
 # The ConfigMap this mounts is built from k6-mesh-soak.js — see README.md.
+#
+# The PriorityClass exists because a runner is a DaemonSet pod: it cannot move.
+# On 2026-09-19 main-worker-01 (85% CPU requested) had to make room for a surging
+# aether-proxy pod twice, the scheduler picked the priority-0 k6 runner as the
+# victim both times, and that node's end-of-test summary — the only place
+# http_req_failed exists — was lost. With the runner above the priority-0 test
+# workloads, the victim is a svc-N Deployment pod instead, which reschedules on
+# another node and costs nothing. It stays far below every platform and system
+# class and never preempts anything itself.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: aether-soak-loader
+  labels:
+    app.kubernetes.io/name: k6-soak-loader
+value: 1000
+preemptionPolicy: Never
+globalDefault: false
+description: "aether soak load generator: outranks the priority-0 test workloads as a preemption victim, preempts nothing."
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -29,6 +49,7 @@ spec:
         config.aether.io/upstreams: "echo,svc-1,svc-2,svc-3,svc-4,svc-5"
         capture.aether.io/exclude-outbound-ports: "6565"
     spec:
+      priorityClassName: aether-soak-loader
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

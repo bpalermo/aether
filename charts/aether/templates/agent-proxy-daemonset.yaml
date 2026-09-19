@@ -280,7 +280,10 @@ spec:
           args:
             - "run"
             - "--server"
-            - "--disable-telemetry"
+            # No phone-home version check. OPA 1.20 deprecates the old spelling
+            # (--disable-telemetry) in favour of this one; a future release that
+            # drops it would stop the sidecar from starting.
+            - "--skip-version-check"
             # Bind OPA's diagnostic API to a per-pod UDS, NOT a host TCP port. The
             # proxy DS is hostNetwork=true, so 127.0.0.1:8181 would be host-wide and
             # collide between the old and surged-in new pod during every rollout
@@ -306,6 +309,10 @@ spec:
           volumeMounts:
             - name: authz-socket
               mountPath: /run/aether/authz
+          {{- end }}
+          {{- with .Values.proxy.authzSidecar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
