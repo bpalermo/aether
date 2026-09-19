@@ -134,30 +134,7 @@ func (s *CNIServer) handlePodTerminating(ctx context.Context, pod *corev1.Pod) {
 	drainCtx, drainCancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
 	defer drainCancel()
 	if err := s.registry.RegisterEndpoint(drainCtx, serviceName, protocol, endpoint); err != nil {
-		// WARN: there is a fallback, and it is tried on the next line.
-		log.WarnContext(ctx, "termination: failed to mark endpoint draining; falling back to deregistration", "error", err)
-		// Removal is strictly safer than leaving the endpoint selectable.
-		if _, ips, exErr := registry.ExtractCNIPodInformation(cur); exErr == nil {
-			unregCtx, unregCancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
-			unregErr := s.registry.UnregisterEndpoints(unregCtx, serviceName, ips)
-			unregCancel()
-			if unregErr != nil {
-				// The endpoint stays selectable until something removes it. That
-				// something is the pod's CNI DEL when this agent serves it, and the
-				// ghost sweep otherwise — since #798 a DEL no longer waits for, or
-				// retries against, an agent that is down. Both are reliable, so the
-				// line says who owns the recovery; it stays at ERROR because until
-				// then a terminating pod can still be picked for new requests — unless
-				// this agent has no SVID yet, in which case no registry call could
-				// have succeeded and the wait is the designed one (#740, #766).
-				level := slog.LevelError
-				if s.identityPending() {
-					level = slog.LevelWarn
-				}
-				log.Log(ctx, level, "termination: fallback deregistration also failed; the endpoint stays registered until the pod's CNI DEL or the next ghost sweep removes it",
-					"error", unregErr, "waitingForIdentity", s.identityPending())
-			}
-		}
+		s.deregisterAfterFailedDrainMark(ctx, log, cur, serviceName, err)
 		return
 	}
 	log.InfoContext(ctx, "pod terminating: endpoint marked draining ahead of shutdown", "service", serviceName)
@@ -259,4 +236,33 @@ func (s *CNIServer) findStoredPod(ctx context.Context, name, namespace string) *
 		}
 	}
 	return nil
+}
+
+// deregisterAfterFailedDrainMark is the fallback when the DRAINING mark could not
+// be written: removal is strictly safer than leaving the endpoint selectable.
+//
+// Severity (#766): the failed mark has a fallback, so it is WARN. The fallback
+// failing too means the endpoint stays selectable until something removes it —
+// the pod's CNI DEL when this agent serves it, the ghost sweep otherwise (since
+// #798 a DEL neither waits for nor retries against an agent that is down). That
+// is an ERROR, unless this agent has no SVID yet: then no registry call could
+// have succeeded and the wait is the designed #740 one.
+func (s *CNIServer) deregisterAfterFailedDrainMark(ctx context.Context, log *slog.Logger, pod *cniv1.CNIPod, serviceName string, markErr error) {
+	log.WarnContext(ctx, "termination: failed to mark endpoint draining; falling back to deregistration", "error", markErr)
+	_, ips, exErr := registry.ExtractCNIPodInformation(pod)
+	if exErr != nil {
+		return
+	}
+	unregCtx, unregCancel := context.WithTimeout(ctx, lifecycleRegistryTimeout)
+	defer unregCancel()
+	unregErr := s.registry.UnregisterEndpoints(unregCtx, serviceName, ips)
+	if unregErr == nil {
+		return
+	}
+	level := slog.LevelError
+	if s.identityPending() {
+		level = slog.LevelWarn
+	}
+	log.Log(ctx, level, "termination: fallback deregistration also failed; the endpoint stays registered until the pod's CNI DEL or the next ghost sweep removes it",
+		"error", unregErr, "waitingForIdentity", s.identityPending())
 }

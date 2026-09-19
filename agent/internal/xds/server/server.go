@@ -365,6 +365,22 @@ const (
 // "waiting for identity" stops being excused.
 const retriesAfterIdentityBeforeError = 3
 
+// stillExcused decides whether a failed background load is still covered by "this
+// workload has no SVID yet". It stays covered while identity is pending, and for
+// retriesAfterIdentityBeforeError failures after it arrives; then it logs the one
+// ERROR the local-only start was spared and reports false.
+func (s *AgentXdsServer) stillExcused(ctx context.Context, err error, failuresWithIdentity *int) bool {
+	if s.identityPending() {
+		return true
+	}
+	*failuresWithIdentity++
+	if *failuresWithIdentity < retriesAfterIdentityBeforeError {
+		return true
+	}
+	s.log.ErrorContext(ctx, "registry still unavailable although this workload now has its SVID; serving local-only config and retrying in background", "error", err)
+	return false
+}
+
 // retryInitialRegistryLoad retries the registry-derived snapshot load with
 // capped exponential backoff until it succeeds or ctx ends. excused means the
 // local-only start was logged at WARN because identity was pending; once it is
@@ -381,12 +397,8 @@ func (s *AgentXdsServer) retryInitialRegistryLoad(ctx context.Context, excused b
 		}
 		if err := s.cache.LoadClustersFromRegistry(ctx, s.clusterName, s.nodeName, s.registry); err != nil {
 			s.log.DebugContext(ctx, "registry still unavailable; will retry", "backoff", backoff.String(), "error", err)
-			if excused && !s.identityPending() {
-				failuresWithIdentity++
-				if failuresWithIdentity >= retriesAfterIdentityBeforeError {
-					excused = false
-					s.log.ErrorContext(ctx, "registry still unavailable although this workload now has its SVID; serving local-only config and retrying in background", "error", err)
-				}
+			if excused {
+				excused = s.stillExcused(ctx, err, &failuresWithIdentity)
 			}
 			if backoff < maxBackoff {
 				backoff *= 2
