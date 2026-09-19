@@ -32,27 +32,20 @@ metadata:
   labels:
     {{- include "prober.labels" . | nindent 4 }}
 ---
+# The target's ServiceAccount IS its mesh identity and its mesh service name: the
+# agent registers a pod under its ServiceAccount, and the registrar generates (and
+# owns, and prunes) the `authz-echo` mesh Service from that registration. So there
+# is deliberately NO Service in this chart. 0.4.0 shipped a hand-written one and no
+# ServiceAccount: the pods ran as `default`, registered as a mesh service literally
+# named `default`, and the registrar pruned the hand-written `authz-echo` Service
+# ("service gone from registry") a second before `helm --wait` looked for it.
 apiVersion: v1
-kind: Service
+kind: ServiceAccount
 metadata:
   name: authz-echo
   namespace: {{ $ns }}
   labels:
     {{- include "prober.labels" . | nindent 4 }}
-    aether.io/mesh-service: "true"
-  annotations:
-    aether.io/service: authz-echo
-    aether.io/port: "8080"
-    aether.io/app-protocol: http
-spec:
-  type: ClusterIP
-  selector:
-    app: authz-echo
-  ports:
-    - name: mesh
-      port: 18081
-      targetPort: 18081
-      protocol: TCP
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -74,7 +67,11 @@ spec:
       labels:
         app: authz-echo
         aether.io/managed: "true"
+      annotations:
+        # The application's own listener; the mesh inbound port forwards here.
+        endpoint.aether.io/port: "8080"
     spec:
+      serviceAccountName: authz-echo
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -114,7 +111,8 @@ spec:
             capabilities:
               drop: ["ALL"]
 ---
-# The route that uses the filter: every request to authz-echo is checked.
+# The route that uses the filter: every request to authz-echo is checked. The
+# targetRef names the registrar-generated mesh Service (see the ServiceAccount).
 apiVersion: config.aether.io/v1
 kind: HTTPFilter
 metadata:
