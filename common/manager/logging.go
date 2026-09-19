@@ -15,7 +15,7 @@ import (
 // controller-runtime at it (via the logr→slog bridge).
 func SetupLogging(debug bool, name string) *slog.Logger {
 	l := log.Named(log.NewLogger(debug), name)
-	ctrl.SetLogger(logr.FromSlogHandler(l.Handler()))
+	ctrl.SetLogger(logr.FromSlogHandler(controllerRuntimeHandler(l.Handler())))
 	return l
 }
 
@@ -55,6 +55,6 @@ func SetupManagerLogging(ctx context.Context, cfg Config, name, version string) 
 
 	otelHandler := otelslog.NewHandler(name, otelslog.WithLoggerProvider(provider))
 	l := log.Named(log.NewLoggerWithHandler(cfg.Debug, otelHandler), name)
-	ctrl.SetLogger(logr.FromSlogHandler(l.Handler()))
+	ctrl.SetLogger(logr.FromSlogHandler(controllerRuntimeHandler(l.Handler())))
 	return l, setup.BestEffortShutdown(shutdown)
 }

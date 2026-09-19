@@ -189,7 +189,10 @@ sum by (tier, result) (increase(aether_probe_requests_total[8h]))
 - **SVID rotation** is a bar since the SPIFFE Broker API (proposal 036): with the default
   4h TTL a pod rotates every ~2h, so an 8h run sees four cycles.
   `aether_agent_spire_svid_updates_total{aether_spire_update="rotated"}` counts them;
-  the prober delta in each rotation minute must be zero.
+  the prober delta in each rotation minute must be zero. `rotated` also counts the
+  fresh SVIDs a restarted SPIRE agent mints (a whole node's pods at once), so a churn
+  step that deletes a `spire-agent` pod is NOT a rotation cycle — exclude that node's
+  restart minute when counting cycles.
 
 ## Hard-won gotchas
 

@@ -265,6 +265,12 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 	}
 	s.lifecycleMu.Unlock()
 
+	// The one line a served CNI DEL leaves. Without it a successful removal showed
+	// up only as two anonymous "setting snapshot" DEBUG lines, and telling "a late
+	// DEL cleaned this pod up" from "the ghost sweep pruned it" meant reading
+	// snapshot timestamps (#799).
+	log.InfoContext(ctx, "pod removed: CNI DEL served", "netns", storedPod.GetNetworkNamespace(), "containerID", containerId)
+
 	// Best-effort: wait for Envoy to ACK removal of both per-pod listeners —
 	// the inbound listener also binds (and dials) inside the pod netns, so
 	// netns teardown must not race either of them. Uses the request ctx so it

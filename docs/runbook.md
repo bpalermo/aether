@@ -768,14 +768,25 @@ path has its own pair, also seeded at zero per attribute set:
 
 ```promql
 # pod SVIDs rotated per node — expect about one per managed pod per SVID
-# half-life (2h at the default 4h TTL). `initial` is every pod after an agent
-# restart, `unchanged` a redelivery after a stream re-subscribe.
+# half-life (2h at the default 4h TTL). `initial` is every pod after an AETHER
+# agent restart (a new process has served nothing yet). `unchanged` is the same
+# certificate redelivered: a stream that dropped and re-subscribed while the
+# SPIRE agent stayed up.
 sum by (k8s_node_name) (increase(aether_agent_spire_svid_updates_total{aether_spire_identity="pod", aether_spire_update="rotated"}[3h]))
 # the agent's own SVID (identity="node"), and the trust-bundle inputs:
 # bundle="own", update="rotated" is a trust-ROOT change — SPIRE's 24h signing-CA
 # rotation does not move it, because the bundle is the upstream root.
 sum by (k8s_node_name, aether_spire_bundle, aether_spire_update) (increase(aether_agent_spire_bundle_updates_total[24h]))
 ```
+
+**`rotated` is "the certificate changed", not "the TTL ran down".** A restarted
+SPIRE agent re-attests and mints fresh SVIDs for every pod on its node, so a
+`spire-agent` restart moves `rotated` by that node's pod count (+1 for the node
+SVID) and leaves `unchanged` at zero — measured on rev219: one `spire-agent` pod
+delete, `pod/rotated` 0 → 7, `node/rotated` 0 → 1. That is correct, and it means
+a rotation-cadence reading has to exclude the minutes in which that node's
+`spire-agent` restarted (`kube_pod_start_time{namespace="spire-system"}`), exactly
+as proxy-roll minutes had to be excluded from the Envoy gauges this replaced.
 
 A pod whose `rotated` count stays at zero past its SVID half-life while its
 neighbours rotate is holding a certificate that will expire; the agent also logs

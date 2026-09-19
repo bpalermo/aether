@@ -1,9 +1,10 @@
 # Proposal: Replace SPIRE's Delegated Identity API with the SPIFFE Broker API
 
-**Status:** Accepted — 2026-09-18; phase 0 (k8s-talos-main#79) and phase 1 (#802)
-are implemented, deployed (talos-main rev217) and validated; phases 2 and 3 are
-platform-side and wait on a soak ([k8s-talos-main#77](https://github.com/bpalermo/k8s-talos-main/issues/77)).
-The measured result is in the Outcome section below.
+**Status:** Accepted — 2026-09-18; phases 0 (k8s-talos-main#79), 1 (#802) and 2
+(k8s-talos-main#96) are implemented, deployed and validated on talos-main, including
+an 8-hour soak; phase 3 (`enforced` access policy) is platform-side and pending
+([k8s-talos-main#77](https://github.com/bpalermo/k8s-talos-main/issues/77)).
+The measured results are in the two Outcome sections below.
 **Author:** Bruno Palermo
 **Relates:** the mesh mTLS model (per-pod app inbound, every hop mTLS), the
 SPIRE startup decoupling (#740), the monotonic SDS publication (#784), the
@@ -189,13 +190,52 @@ What it did **not** show, recorded so the next validation covers it:
   the first attempt, so the retry path and the bounded first receive are covered
   by unit tests only. A burst scale-up or a node drain is the way to provoke it.
 - **No rotation was observed.** `default_x509_svid_ttl` on this cluster is 4 h
-  (half-life ~2 h); the 8-hour soak spans several and is the decisive check.
+  (half-life ~2 h); the 8-hour soak spans several and is the decisive check (done:
+  see the next section).
 - **`PermissionDenied` was never provoked** — `permissive` was in force; phase 3's
   `enforced` path is untested.
 - A startup race logs one ERROR per managed pod when the stored-pod resubscribe
   runs before the agent's own SVID has landed (the mTLS dial has no client
   certificate yet). It self-heals in about a second at no cost; the severity is
   wrong, not the behaviour (#766).
+
+## Outcome (8-hour soak and phase 2, 2026-09-19)
+
+An 8-hour churned soak (31 rolls, incl. two agent rolls and a concurrent agent +
+proxy + service roll) on rev218 (`0.92.24-15332e2`), then phase 2.
+
+| Measure | Result |
+|---|---|
+| Pod-SVID rotation | **4 cycles** at ~2 h (half-life of the 4 h TTL), on workloads churn never rolled; prober delta in every rotation bucket: 0. The clock is SPIRE-side: the cadence survived both agent rolls, because a resubscribe through the Broker returns SPIRE's cached SVID |
+| Signing-CA rotation | SPIRE's 24 h CA activated ~02:41Z, inside the window; rotation cycles 3 and 4 and every re-mint after it were issued by the new CA at zero cost. The X.509 bundle is the upstream root and does not move on that cycle |
+| `permission_denied` / `reference_not_found` / #638 / `sds_push_*` / xDS rejects | 0 for 8 h |
+| SLI | liveness 0 / 719,998; mesh-DNS 42 timeouts / 1,439,996, none identity-related; k6 0.00505 % |
+| **Phase 2** (admin socket and `authorizedDelegates` removed, k8s-talos-main#96) | `spire-agent` rolled node by node; every pod resubscribed in 17.2 – 17.8 s per node, 0 prober errors, 0 `permission_denied`; a cold agent start with no admin socket on the node is clean. The rev216 rollback path is gone with it |
+
+What the soak changed in the design's favour, and what it exposed:
+
+- **#804:** a pod pruned by the ghost sweep kept its Broker subscription, which then
+  retried `NotFound` for the agent's lifetime. The delegated bridge leaked the same
+  way, silently — the Broker's explicit `NotFound` and its counter are what made it
+  visible. Fixed in #805. It needs every CNI DEL for the pod to miss the agent (the
+  runtime re-issues DEL at sandbox removal), which is why it is rare and why it
+  cannot be forced from a harness; the regression test is in-process.
+- **The agent had no signal for a healthy rotation**; the cycles above were read
+  from Envoy's per-secret version gauges. #806 adds
+  `aether.agent.spire.svid_updates{identity, update}` and `bundle_updates`.
+  `update="rotated"` means *the certificate changed*: a restarted SPIRE agent
+  re-mints a whole node's SVIDs and counts as `rotated` too.
+- **#766** is closed (#807): the designed retries around a missing SVID or a
+  restarting SPIRE agent log at WARN and escalate only when the excuse lapses. A
+  SPIRE agent restart used to cost four ERROR lines per managed pod; it costs none.
+- **The `NotFound` race at CNI ADD has still never fired** — not in a replica burst,
+  not in 31 rolls. It stays covered by unit tests only.
+- Upstream, cosmetic: every `spire-agent` logs one ERROR on its first Broker
+  subscription (`unrecognized service for connection metrics: spiffe.broker.API`).
+
+Still open: **phase 3** — `access_policy: enforced` together with the
+`impersonate-via-spire` grant, in one change — and the selector gain, which remains
+theoretical while controller-manager entries carry only `k8s:pod-uid`.
 
 ## Rejected alternatives
 
