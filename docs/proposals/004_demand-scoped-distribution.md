@@ -116,22 +116,6 @@ delegated liveness as EDS `HealthStatus`, which every roll since #143 runs on:
 The destination-side probe path (health gateway + `health_<pod>` clusters) is
 untouched — it is O(local pods) and is the *source* of EDS health.
 
-> **Amendment (issue #815, 2026-09-19).** Because client-side active HC is gone,
-> the destination-side gateway is now the *only* thing standing between "a pod
-> exists" and "every client in the mesh sends it traffic" — so what it vets has
-> to be the whole routability condition. `health_<pod>` alone is not: it dials
-> the application in cleartext inside the pod's netns and has no SDS dependency,
-> while the pod's mesh inbound listener does not `listen()` until its SVID
-> arrives (measured: promotion p50 5.8 s vs SVID 6.1–8.4 s, one pod promoted in
-> ≤0.5 s). A second per-pod probe cluster, `inboundready_<pod>`, closes it: a
-> connect-only TCP health check over an mTLS `UpstreamTlsContext` against the
-> pod's own `:18008`, SAN-pinned to the pod's SPIFFE ID, so "healthy" means the
-> inbound listener is listening, has loaded this pod's certificate, and it
-> verifies as this pod. The gateway filter requires both clusters; the gateway
-> PATH is unchanged (`/healthz/health_<pod>`). Inert with SPIRE off and until
-> the node SVID is served — a pod without the probe keeps exactly the
-> single-cluster gate. Still O(local pods).
-
 ### What stays exactly as-is
 
 - Registrar write path, write-behind, snapshot-first semantics (#145)

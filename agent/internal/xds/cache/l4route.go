@@ -151,13 +151,12 @@ func (c *SnapshotCache) regenerateAllUDPCaptureListeners() {
 func (c *SnapshotCache) regenerateAllCaptureListeners() {
 	// Node-global union, built once for the whole loop (see extensionHTTPFilters).
 	shared := c.extensionHTTPFilters()
-	trustDomain := c.currentTrustDomain()
 	c.listenerMu.Lock()
 	for netns, entry := range c.listeners {
 		if entry.cniPod == nil {
 			continue
 		}
-		newCapture, err := c.generateCaptureListener(entry.cniPod, trustDomain, c.podExtensionHTTPFilters(entry.cniPod, shared))
+		newCapture, err := c.generateCaptureListener(entry.cniPod, c.podExtensionHTTPFilters(entry.cniPod, shared))
 		if err != nil {
 			c.log.Error("failed to regenerate capture listener on L4-route change",
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)

@@ -58,11 +58,7 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 // podExtensionHTTPFilters. It is passed in rather than recomputed here because
 // the union is node-global and every caller in a per-pod loop would otherwise
 // rebuild it once (twice, on the outbound+capture path) per pod.
-// trustDomain names the pod's own SPIFFE ID, which every mesh-originating chain
-// on this listener stamps into filter state next to the netns (issue #815,
-// proxy.SourceIdentityForPod). Callers that have it from the CNI ADD pass it
-// through; the regeneration paths pass c.currentTrustDomain().
-func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomain string, extensionFilters []*http_connection_managerv3.HttpFilter) (types.Resource, error) {
+func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, extensionFilters []*http_connection_managerv3.HttpFilter) (types.Resource, error) {
 	if !c.captureEnabled {
 		return nil, nil
 	}
@@ -85,7 +81,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 	}
 	c.captureMu.RUnlock()
 
-	l, err := proxy.GenerateCaptureListener(cniPod, proxy.SourceIdentityForPod(cniPod, trustDomain), meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
+	l, err := proxy.GenerateCaptureListener(cniPod, meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -240,15 +236,12 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	if c.captureEnabled {
 		// Node-global union, built once for the whole loop (see extensionHTTPFilters).
 		shared := c.extensionHTTPFilters()
-		// Read outside listenerMu: the lock order in this package is
-		// listenerMu (outer) -> localMu (inner) nowhere else, so don't create it.
-		trustDomain := c.currentTrustDomain()
 		c.listenerMu.Lock()
 		for netns, entry := range c.listeners {
 			if entry.cniPod == nil {
 				continue
 			}
-			newCapture, err := c.generateCaptureListener(entry.cniPod, trustDomain, c.podExtensionHTTPFilters(entry.cniPod, shared))
+			newCapture, err := c.generateCaptureListener(entry.cniPod, c.podExtensionHTTPFilters(entry.cniPod, shared))
 			if err != nil {
 				c.log.Error("failed to regenerate capture listener on TCP-services change",
 					"netns", netns, "pod", entry.cniPod.GetName(), "error", err)

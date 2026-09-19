@@ -412,28 +412,25 @@ func (c *SnapshotCache) regenerateAllHTTPListeners() {
 	// Node-global union, built once for the whole loop (see extensionHTTPFilters):
 	// the rebuilt union is exactly what this regeneration exists to propagate.
 	shared := c.extensionHTTPFilters()
-	trustDomain := c.currentTrustDomain()
 	c.listenerMu.Lock()
 	for netns, entry := range c.listeners {
 		if entry.cniPod == nil {
 			continue
 		}
 		extensionFilters := c.podExtensionHTTPFilters(entry.cniPod, shared)
-		newCapture, err := c.generateCaptureListener(entry.cniPod, trustDomain, extensionFilters)
+		newCapture, err := c.generateCaptureListener(entry.cniPod, extensionFilters)
 		if err != nil {
 			c.log.Error("failed to regenerate capture listener on extension-union change",
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
-		newOutbound, err := proxy.GenerateOutboundHTTPListener(entry.cniPod, proxy.SourceIdentityForPod(entry.cniPod, trustDomain), c.meshDomain, c.emitStatsPod, extensionFilters)
+		newOutbound, err := proxy.GenerateOutboundHTTPListener(entry.cniPod, c.meshDomain, c.emitStatsPod, extensionFilters)
 		if err != nil {
 			c.log.Error("failed to regenerate outbound listener on extension-union change",
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
-		// The same trust domain the outbound chains above stamp, read once under
-		// localMu (it used to be read off the field without the lock).
-		newInbound, err := proxy.NewInboundListener(entry.cniPod, trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(entry.cniPod))
+		newInbound, err := proxy.NewInboundListener(entry.cniPod, c.trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(entry.cniPod))
 		if err != nil {
 			c.log.Error("failed to regenerate inbound listener on extension-union change",
 				"netns", netns, "pod", entry.cniPod.GetName(), "error", err)

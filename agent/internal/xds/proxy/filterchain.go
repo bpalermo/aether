@@ -19,9 +19,7 @@ import (
 // before the router so it observes the final route/cluster. The chart mounts the
 // module .so on the proxy unconditionally; Envoy rejects the listener if the
 // referenced dynamic module is absent.
-// sourceSpiffeID is the originating pod's SPIFFE ID, stamped into filter state
-// alongside the netns (see sourceIdentityFilterStateKey).
-func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
+func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
 	hcm := buildHTTPConnectionManager("outbound_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil)
 
 	// strip_any_host_port stays OFF: the authority port is a first-class routing
@@ -58,7 +56,8 @@ func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, m
 		},
 	}
 
-	networkFilters := buildSourceFilterStates(sourceSpiffeID)
+	var networkFilters []*listenerv3.Filter
+	networkFilters = append(networkFilters, buildNetworkNamespaceFilterState())
 	networkFilters = append(networkFilters, buildHTTPConnectionManagerFilter(hcm))
 
 	return &listenerv3.FilterChain{

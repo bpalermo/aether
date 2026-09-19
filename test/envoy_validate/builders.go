@@ -37,7 +37,6 @@ import (
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
-	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -136,33 +135,11 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	tunnel := proxy.BuildWaypointTunnelListener(proxy.DefaultEastWestTunnelPort,
 		[]*listenerv3.FilterChain{proxy.BuildWaypointTunnelChain("echo." + meshDomain)})
 
-	// The per-pod inbound-readiness probe (issue #815): a TCP (connect-only)
-	// active health check over an mTLS UpstreamTlsContext, SAN-pinned to the
-	// pod's own SPIFFE ID, dialing the pod's mesh inbound inside its netns.
-	// Validated here so stock-proxy acceptance of "TCP health check + TLS
-	// transport socket + combined validation context" is a build-time gate.
-	inboundReady := proxy.NewInboundReadyProbeCluster(
-		proxy.InboundReadyClusterName(pod),
-		pod.GetNetworkNamespace(),
-		fmt.Sprintf("spiffe://%s/node/test-node", trustDomain),
-		"spiffe://"+trustDomain,
-		proxy.SpiffeIDFromPod(pod, trustDomain),
-	)
-	rewriteSDSToExplicitSource(inboundReady)
-
 	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, waypointCluster, ewIngress, authzSidecarCluster()}
 	staticClusters = append(staticClusters, appClusters...)
-	staticClusters = append(staticClusters, healthCluster, inboundReady)
+	staticClusters = append(staticClusters, healthCluster)
 
-	// The agent-facing health gateway, whose per-pod health_check filter now
-	// gates on BOTH probe clusters (issue #815). Validating it proves the
-	// two-entry cluster_min_healthy_percentages is accepted and that both
-	// referenced clusters resolve.
-	healthGateway := proxy.BuildHealthGatewayListener("/run/aether/health.sock", []proxy.HealthGatewayProbe{
-		proxy.NewHealthGatewayProbe(healthCluster.GetName(), inboundReady.GetName()),
-	})
-
-	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound, tunnel, healthGateway}), nil
+	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound, tunnel}), nil
 }
 
 // newWaypointServiceCluster is newServiceCluster with the proposal 019 waypoint
@@ -281,7 +258,6 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	}
 	captureListener, err := proxy.GenerateCaptureListener(
 		pod,
-		proxy.SourceIdentityForPod(pod, trustDomain),
 		15006,
 		meshDomain,
 		false, // emitStatsPod
@@ -713,45 +689,6 @@ func pipeEndpoint(clusterName, path string) *endpointv3.ClusterLoadAssignment {
 // All other structural elements (TLS, addresses, cluster types, SAN matchers)
 // remain and are validated; aether_stats is tested by the proxy workspace's
 // envoy_cc_test targets.
-// rewriteSDSToExplicitSource repoints a cluster's upstream TLS SDS references
-// from `ads: {}` to an explicit api_config_source naming the static xds_cluster.
-//
-// This is a WORKAROUND FOR `--mode validate` ONLY; the mesh ships `ads: {}`.
-//
-// `envoy --mode validate` SEGFAULTS on any STATIC cluster whose transport
-// socket resolves a secret over `ads: {}`: a static cluster's startPreInit runs
-// during MainImpl::initialize, which fires the SDS init target, and
-// Secret::SdsApi::initialize() then dereferences an ADS mux that
-// Server::ValidationInstance never builds. Reproduced standalone against the
-// pinned binary (1.40.0-dev) with a two-cluster bootstrap and nothing aether in
-// it; the same cluster with an explicit api_config_source validates OK. It is a
-// property of the validation server, not of the config.
-//
-// It does not arise in production because these probe clusters are delivered
-// over CDS as SECONDARY clusters, after the ADS stream is up — unlike a
-// bootstrap static_resources cluster, which is what this harness has to model.
-// Rewriting only the SDS config source keeps everything this gate exists to
-// check — STATIC + netns bind config + TCP health check + UpstreamTlsContext +
-// SAN-pinned combined validation context — under a real Envoy's parser.
-func rewriteSDSToExplicitSource(c *clusterv3.Cluster) {
-	ts := c.GetTransportSocket()
-	if ts == nil {
-		return
-	}
-	var ctx tlsv3.UpstreamTlsContext
-	if err := ts.GetTypedConfig().UnmarshalTo(&ctx); err != nil {
-		return
-	}
-	explicit := config.SDSConfigSourceFromCluster("xds_cluster")
-	for _, sc := range ctx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs() {
-		sc.SdsConfig = explicit
-	}
-	if combined := ctx.GetCommonTlsContext().GetCombinedValidationContext(); combined != nil {
-		combined.ValidationContextSdsSecretConfig.SdsConfig = explicit
-	}
-	ts.ConfigType = &corev3.TransportSocket_TypedConfig{TypedConfig: mustAny(&ctx)}
-}
-
 func stripCustomFilters(bs *bootstrapv3.Bootstrap) {
 	for _, lis := range bs.GetStaticResources().GetListeners() {
 		for _, fc := range lis.GetFilterChains() {

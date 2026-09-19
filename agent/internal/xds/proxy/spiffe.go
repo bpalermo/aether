@@ -31,24 +31,6 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 	return fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, cniPod.GetNamespace(), cniPod.GetServiceAccount())
 }
 
-// SourceIdentityForPod returns the SPIFFE ID that the pod's mesh-originating
-// listener chains stamp into filter state (sourceIdentityFilterStateKey,
-// networkfilter.go) so the cluster transport-socket matcher can select the
-// pod's client certificate by identity rather than by netns path (issue #815).
-//
-// It is SpiffeIDFromPod with one guard: an unknown trust domain yields "", not
-// the malformed "spiffe:///ns/…/sa/…" that formatting an empty domain would
-// produce. The chains then carry only the netns key — byte-for-byte the
-// pre-#815 shape — and pick the identity up on the next rebuild once the trust
-// domain is known. The trust domain is late-bound (agent/internal/identity), so
-// this is a real, if brief, startup state.
-func SourceIdentityForPod(cniPod *cniv1.CNIPod, trustDomain string) string {
-	if cniPod == nil || trustDomain == "" {
-		return ""
-	}
-	return SpiffeIDFromPod(cniPod, trustDomain)
-}
-
 // SpiffeIDOverrideAnnotation returns the pod's aether.io/spiffe-id annotation
 // value and whether a non-empty one is present. The value is never honoured
 // (see SpiffeIDFromPod); callers use it to surface the rejected override — WARN

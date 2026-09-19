@@ -67,16 +67,6 @@ func servedState(containerID string) *livenessState {
 	return st
 }
 
-// reconcileUntilDemote runs enough ticks for a previously-serving pod's failing
-// observations to clear livenessDemoteStreak (issue #815): a single 503 is
-// deliberately not a demotion any more, because it cannot be told apart from a
-// fresh Envoy epoch re-establishing the pod's inbound-readiness probe.
-func reconcileUntilDemote(srvr *CNIServer, state *livenessState) {
-	for range livenessDemoteStreak {
-		srvr.reconcileLiveness(context.Background(), state)
-	}
-}
-
 // TestReconcileLivenessSkipsRemovedPod is the R4 regression test
 // (docs/proposals/002): a pod observed in the tick's GetAll snapshot but removed
 // from storage before the health re-registration (a concurrent RemovePod) must
@@ -117,7 +107,7 @@ func TestReconcileLivenessSkipsRemovedPod(t *testing.T) {
 		srvr := newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 
 		state := servedState(pod.GetContainerId())
-		reconcileUntilDemote(srvr, state)
+		srvr.reconcileLiveness(context.Background(), state)
 
 		assert.Equal(t, 1, reg.registered, "healthy->unhealthy transition must re-register")
 		assert.Equal(t, registryv1.ServiceEndpoint_HEALTH_UNHEALTHY, state.last[pod.GetContainerId()])

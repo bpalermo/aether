@@ -39,13 +39,6 @@ const (
 	// healthProbeClusterPrefix marks the per-pod health-probe clusters (active HC
 	// of the app, separate from the app_<pod> delivery cluster).
 	healthProbeClusterPrefix = "health_"
-	// inboundReadyClusterPrefix marks the per-pod inbound-readiness probe
-	// clusters (active mTLS HC of the pod's OWN mesh inbound listener). Kept
-	// distinct from healthProbeClusterPrefix so the chart's stats exclusions can
-	// address the two sets separately — and so the ^cluster\.health_[^.]*\.…
-	// exclusion cannot accidentally swallow this cluster's membership gauges,
-	// which the health gateway's health_check filter READS (2026-06-11 outage).
-	inboundReadyClusterPrefix = "inboundready_"
 	// appHealthCheckHost is the Host header sent on the app readiness HTTP health
 	// check (HTTP/1.1 requires a Host).
 	appHealthCheckHost = "localhost"
@@ -248,20 +241,12 @@ func NewAppCluster(name string, addr AppAddress, port uint16, http2 bool) *clust
 // cluster (app_<pod> delivery or health_<pod> probe), as opposed to a
 // registry-derived service cluster.
 func IsPerPodClusterName(name string) bool {
-	return strings.HasPrefix(name, appClusterPrefix) ||
-		strings.HasPrefix(name, healthProbeClusterPrefix) ||
-		strings.HasPrefix(name, inboundReadyClusterPrefix)
+	return strings.HasPrefix(name, appClusterPrefix) || strings.HasPrefix(name, healthProbeClusterPrefix)
 }
 
 // HealthProbeClusterName returns the name of the per-pod health-probe cluster.
 func HealthProbeClusterName(cniPod *cniv1.CNIPod) string {
 	return fmt.Sprintf("%s%s", healthProbeClusterPrefix, cniPod.GetName())
-}
-
-// InboundReadyClusterName returns the name of the per-pod inbound-readiness
-// probe cluster (inboundready_<pod>).
-func InboundReadyClusterName(cniPod *cniv1.CNIPod) string {
-	return fmt.Sprintf("%s%s", inboundReadyClusterPrefix, cniPod.GetName())
 }
 
 // PassthroughClusterName is the cluster name for the ORIGINAL_DST passthrough
@@ -401,116 +386,4 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 	}
 	c.HealthChecks = []*corev3.HealthCheck{hc}
 	return c
-}
-
-// NewInboundReadyProbeCluster builds the per-pod cluster whose only job is to
-// actively prove that the pod's OWN mesh inbound listener is serving mTLS with
-// the pod's own certificate (issue #815, the promotion hole).
-//
-// WHY IT EXISTS. Until now an endpoint was promoted to HEALTHY on the app probe
-// alone (health_<pod>), which dials the application in cleartext and has no SDS
-// dependency whatsoever. The inbound listener, meanwhile, is published at CNI
-// ADD while the pod's SVID arrives asynchronously 6-8 s later; while the
-// listener warms, Envoy has BOUND its socket but not called listen(), so a peer
-// gets ECONNREFUSED. Measured promotion p50 was 5.8 s against a 6.1-8.4 s SVID,
-// and one pod promoted in <=0.5 s — i.e. the mesh advertised an endpoint whose
-// mesh port refused connections.
-//
-// WHAT "HEALTHY" MEANS HERE. The health check is TCP with an EMPTY send payload
-// (connect-only) over a TLS transport socket, which is a deliberate composition:
-// Envoy's TCP health-check session succeeds on the Connected event, and a
-// connection with a TLS transport socket does not raise Connected until the
-// handshake has completed (SslSocket::doHandshake raises it; RawBufferSocket
-// raises it on connect). So a pass means, in one signal:
-//
-//	the inbound listener is listening (not warming, not absent)
-//	AND it presented a certificate
-//	AND that certificate verifies against the mesh trust bundle
-//	AND its URI SAN is exactly THIS pod's SPIFFE ID.
-//
-// No bytes are sent and no request is made, so nothing downstream of the
-// filter chain (route table, authz/RBAC, the app) participates.
-//
-// ADDRESSING. 127.0.0.1:defaultInboundPort bound into the pod's network
-// namespace — the same netns hop the app clusters use. The inbound listener
-// binds 0.0.0.0:defaultInboundPort in that netns, including for UDS-delivery
-// pods (UDS changes app delivery, never the mesh inbound), so this always
-// addresses it.
-//
-// CHAIN SELECTION. ALPN "h2" and NO SNI, which lands on the inbound listener's
-// no-SNI HCM chain (filter_chain_match application_protocols:["h2"], see
-// buildInboundFilterChains). That chain always exists on an mTLS inbound
-// listener and is the one real mesh HTTP traffic uses. The alternative — no
-// ALPN — would land on the TCP floor default chain, whose tcp_proxy opens an
-// upstream connection to the application on every single probe.
-//
-// CLIENT IDENTITY. nodeSpiffeID: the node's own SVID, the same secret the
-// service clusters' transport-socket matcher presents on its no-match path for
-// node-originated connections (active health checks carry no source-pod filter
-// state). The inbound DownstreamTlsContext requires a client certificate and
-// validates it against the trust-domain bundle with no SAN restriction, so the
-// node identity is accepted; nothing about inbound validation is loosened here.
-//
-// podSpiffeID pins the SERVER side: the probe must not pass because SOMETHING
-// answered on that address, only because THIS pod did.
-func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextName, podSpiffeID string) *clusterv3.Cluster {
-	addr := AppAddress{Netns: netns}
-	return &clusterv3.Cluster{
-		Name: name,
-		// Per-pod stats, never collapsed: the health gateway's health_check
-		// filter answers this pod's readiness by READING this cluster's
-		// membership_healthy/membership_total gauges. A shared alt_stat_name
-		// would merge every pod's membership into one gauge and one unready pod
-		// would gate every pod (the 2026-06-11 stats outage, from the other
-		// direction). Same reason NewAppHealthProbeCluster clears it.
-		AltStatName:                   "",
-		ConnectTimeout:                durationpb.New(2 * time.Second),
-		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		ClusterDiscoveryType:          &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
-		LoadAssignment: &endpointv3.ClusterLoadAssignment{
-			ClusterName: name,
-			Endpoints: []*endpointv3.LocalityLbEndpoints{
-				{
-					LbEndpoints: []*endpointv3.LbEndpoint{
-						{
-							HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
-								Endpoint: &endpointv3.Endpoint{
-									Address: addr.endpoint(defaultInboundPort),
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		UpstreamBindConfig: addr.bindConfig(),
-		// Plain UpstreamTlsContext, NOT InjectUpstreamMTLS: this cluster is
-		// node-originated by construction (a health checker carries no source-pod
-		// filter state), so a per-source transport_socket_matcher would only ever
-		// take its no-match branch — and embedding the local pod set is precisely
-		// the CDS-churn defect the rest of #815 is removing.
-		TransportSocket: UpstreamTransportSocket(nodeSpiffeID, validationContextName, []string{podSpiffeID}, "" /* no SNI: the no-SNI h2 chain */),
-		HealthChecks: []*corev3.HealthCheck{
-			{
-				Timeout:            durationpb.New(1 * time.Second),
-				Interval:           durationpb.New(5 * time.Second),
-				HealthyThreshold:   wrapperspb.UInt32(1),
-				UnhealthyThreshold: wrapperspb.UInt32(2),
-				// This cluster never carries routed traffic, so Envoy would
-				// otherwise apply its no-traffic cadence (60s) after the first
-				// check — the same 30-62s promotion delay measured on the app
-				// probe (e2e 2026-06-11). Keep the pin.
-				NoTrafficInterval:        durationpb.New(5 * time.Second),
-				NoTrafficHealthyInterval: durationpb.New(5 * time.Second),
-				// A fresh connection (and therefore a fresh handshake) per check
-				// is the whole point: a reused connection would stop re-proving
-				// the certificate. Connect-only checks close the connection
-				// themselves, so this only documents the intent.
-				ReuseConnection: wrapperspb.Bool(false),
-				HealthChecker: &corev3.HealthCheck_TcpHealthCheck_{
-					TcpHealthCheck: &corev3.HealthCheck_TcpHealthCheck{},
-				},
-			},
-		},
-	}
 }

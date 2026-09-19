@@ -466,18 +466,6 @@ type listenerEntry struct {
 	// health check (delegated liveness) on the primary port, kept separate from
 	// the app clusters so the HC does not gate the delivery path.
 	healthCluster types.Resource
-	// inboundReadyCluster is the unrouted per-pod cluster carrying the active
-	// mTLS health check of the pod's OWN inbound listener (issue #815,
-	// proxy.NewInboundReadyProbeCluster). It gates promotion on the pod's mesh
-	// port actually being reachable with the pod's own certificate.
-	//
-	// nil whenever the probe cannot mean anything: SPIRE off (the inbound
-	// listener is cleartext, there is no handshake to prove), or the node SVID /
-	// trust domain not yet known (there is no client certificate to present).
-	// A nil here is exactly today's single-cluster gateway behaviour for that
-	// pod, so the degradation is "no new gate", never "gate that never opens".
-	// Rebuilt by recomputeInboundReadyClusters when the node identity changes.
-	inboundReadyCluster types.Resource
 }
 
 // clusterEntry holds a cluster definition, its pre-built load assignment,
@@ -782,22 +770,6 @@ func (c *SnapshotCache) SetStaticDependencies(services []string) {
 	if !equalSets(before, after) {
 		c.signalDependencyChange()
 	}
-}
-
-// currentTrustDomain returns the workload trust domain the cache last captured
-// from a listener load (setLocalWorkload / LoadListenersFromStorage), under
-// localMu.
-//
-// It is the late-bound identity fact the per-pod listener rebuild paths need
-// (they have no trustDomain argument of their own): it names the pod SPIFFE ID
-// stamped into the outbound chains' filter state (issue #815) and the inbound
-// chain's SDS server certificate. Callers read it BEFORE taking listenerMu —
-// this package otherwise never nests listenerMu around localMu, and there is no
-// reason to start.
-func (c *SnapshotCache) currentTrustDomain() string {
-	c.localMu.RLock()
-	defer c.localMu.RUnlock()
-	return c.trustDomain
 }
 
 // setLocalWorkload records a local pod's network namespace -> SPIFFE ID mapping
