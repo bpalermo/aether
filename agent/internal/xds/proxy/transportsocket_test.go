@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	transport_sockets_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,4 +75,34 @@ func TestUpstreamTransportSocket_SANPinning(t *testing.T) {
 	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(utc))
 	assert.Nil(t, utc.GetCommonTlsContext().GetCombinedValidationContext())
 	require.NotNil(t, utc.GetCommonTlsContext().GetValidationContextSdsSecretConfig())
+}
+
+// TestUpstreamTransportSocket_NoSessionResumption pins max_session_keys to 0 on
+// EVERY upstream builder. Envoy defaults it to 1, and a resumed session carries
+// the peer certificate of the server that created it — which is then re-checked
+// against this context's SAN matchers, so a session resumed against the wrong
+// server reports (or trusts) an identity that never came off the connection
+// (#829). Upstream envoy#45982 scopes the cache by SNI, but aether's SNI is a
+// port number, so that scoping cannot discriminate here. If this test fails, the
+// mesh has silently re-enabled cross-server session reuse.
+func TestUpstreamTransportSocket_NoSessionResumption(t *testing.T) {
+	sans := []string{"spiffe://aether.internal/ns/aether-test/sa/echo"}
+
+	for name, ts := range map[string]*corev3.TransportSocket{
+		"http":     UpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", sans, "8080"),
+		"tcp":      UpstreamTCPTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", sans, "8080"),
+		"edge":     EdgeUpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/edge", "spiffe://aether.internal", sans, "8080"),
+		"edge-tcp": EdgeUpstreamTCPTransportSocket("spiffe://aether.internal/ns/x/sa/edge", "spiffe://aether.internal", sans),
+		// The inbound-readiness probe dials each local pod's inbound listener in
+		// its own netns, so its peers are this node's own pods — precisely the
+		// population whose SVIDs leaked into other clusters' handshakes in #829.
+		"inboundready": UpstreamTransportSocket("spiffe://aether.internal/ns/aether-system/sa/aether-agent", "spiffe://aether.internal", sans, ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			utc := &transport_sockets_v3.UpstreamTlsContext{}
+			require.NoError(t, ts.GetTypedConfig().UnmarshalTo(utc))
+			require.NotNil(t, utc.GetMaxSessionKeys(), "max_session_keys must be set explicitly; unset means Envoy's default of 1")
+			assert.Zero(t, utc.GetMaxSessionKeys().GetValue(), "client-side TLS session resumption must stay disabled")
+		})
+	}
 }

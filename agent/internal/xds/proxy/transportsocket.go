@@ -143,7 +143,25 @@ func upstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 	// inbound listener demuxes filter chains by server_names = the port. Empty
 	// for single-port/default callers, which hit the destination's default
 	// chain. SNI is routing only — identity is the validated SVID/SAN.
-	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{CommonTlsContext: common, Sni: sni})
+	//
+	// MaxSessionKeys: 0 disables the client-side TLS session cache, and it is
+	// load-bearing for identity, not a performance knob (#829). Envoy defaults
+	// max_session_keys to 1, and a resumed session carries the peer certificate
+	// of the server that CREATED it — which Envoy then re-checks against this
+	// context's match_typed_subject_alt_names. Resume a session made against one
+	// server while dialling another and the handshake fails reporting a peer SVID
+	// that never came off the connection, or (worse) succeeds against a stale
+	// identity. Upstream envoy#45982 scopes that cache by SNI, but the SNI here
+	// is a PORT NUMBER, so every aether context collapses onto the same key
+	// ("8080", or "" for the floor) and the scoping is inert for us. We lose
+	// nothing by switching resumption off: upstream connections are long-lived
+	// pooled h2, so full handshakes are rare and amortised, and the mesh's whole
+	// premise is that the SVID on this connection is this peer's.
+	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{
+		CommonTlsContext: common,
+		Sni:              sni,
+		MaxSessionKeys:   wrapperspb.UInt32(0),
+	})
 }
 
 // edgeDownstreamTLSFromSDS terminates external (north-south) TLS at the edge
