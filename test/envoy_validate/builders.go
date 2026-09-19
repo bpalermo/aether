@@ -118,6 +118,18 @@ func EdgeBootstrapJSON() ([]byte, error) {
 func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
 
+	// Access logging ON for this bootstrap, so the OTel access logger's ~30
+	// %COMMAND% operators are parsed by a real Envoy. Until #824 nothing in this
+	// harness enabled it, so the entire access-log config — every substitution
+	// operator, the DYNAMIC_METADATA and FILTER_STATE specs, the filter tree —
+	// reached production without ever having been through the config loader.
+	// Envoy resolves format strings at load, so a typo or an operator that does
+	// not exist in the pinned build fails validation here instead of rendering
+	// "-" on every line in production. The collector cluster the logger names
+	// must exist in the bootstrap (accessLogCluster below).
+	proxy.SetAccessLogConfig(proxy.AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+	defer proxy.SetAccessLogConfig(proxy.AccessLogConfig{})
+
 	authzEntry := proxy.AuthzSidecarHTTPFilter(200*time.Millisecond, false)
 	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, meshDomain, false, false, []*http_connection_managerv3.HttpFilter{authzEntry}, nil, "")
 	if err != nil {
@@ -158,7 +170,7 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 
 	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, perSourceCluster, waypointCluster, ewIngress, authzSidecarCluster()}
 	staticClusters = append(staticClusters, appClusters...)
-	staticClusters = append(staticClusters, healthCluster, inboundReady)
+	staticClusters = append(staticClusters, healthCluster, inboundReady, accessLogCluster())
 
 	// The agent-facing health gateway, whose per-pod health_check filter now
 	// gates on BOTH probe clusters (issue #815). Validating it proves the
@@ -635,6 +647,25 @@ func newBootstrap(clusters []*clusterv3.Cluster, listeners []*listenerv3.Listene
 
 // xdsCluster is the static cluster the agent's xDS server listens on (UDS).
 // All ADS config-source references inside generated resources resolve to it.
+// accessLogCluster is the OTLP sink the access logger references by name
+// ("otel_collector"). Envoy validates that an envoy_grpc access logger names a
+// known cluster, so the bootstrap must carry it once access logging is on.
+func accessLogCluster() *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:           "otel_collector",
+		ConnectTimeout: durationpb.New(5e9), // 5 s
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_STATIC,
+		},
+		LoadAssignment: pipeEndpoint("otel_collector", xdsSockPath),
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				config.Http2ProtocolOptions(),
+			),
+		},
+	}
+}
+
 func xdsCluster() *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name:           "xds_cluster",

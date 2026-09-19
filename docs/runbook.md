@@ -1509,14 +1509,35 @@ sources — get them wrong and the query lies:
    cluster without the matcher (SPIRE off, or before the node SVID) resolves
    once per host and the counter is meaningless there.
 
-The authoritative cross-check would be on the **receiving** side — which verified
-identity did the destination see — but it is **not available today**: the OTLP
-access-log format has no peer-identity field (no XFCC, no
-`%DOWNSTREAM_PEER_URI_SAN%`; #824). Until it has one, the counter above and, for
-routes behind ext_authz, the OPA decision log's
-`metadataContext.filterMetadata["aether.source"].spiffeId` (source-side, so a
-weaker control) are what there is. The failure signature is a workload's traffic
-arriving with the **agent's** identity. The agent's own #638 discriminator
+The authoritative cross-check is on the **receiving** side — which verified
+identity did the destination actually see — and since #824 the access log carries
+it. Every other identity field in a line is something the control plane baked
+into the emitting pod's own config, so a line can say who it *thinks* it is; these
+two are the certificate the other end presented and this proxy validated:
+
+| field | on | is |
+|---|---|---|
+| `downstream_peer_uri_san` | `reporter="destination"` (the per-pod inbound listener) | the CALLER's verified SPIFFE ID |
+| `upstream_peer_uri_san` | `reporter="source"` (outbound/capture) | the SERVER certificate the destination proxy presented |
+
+```logsql
+# Mesh traffic arriving as the node agent instead of a workload — the signature of
+# the cluster matcher falling to on_no_match (#815). Expect ZERO rows.
+log_name:"aether_access_logs" AND reporter:"destination"
+  AND downstream_peer_uri_san:"spiffe://aether.internal/ns/aether-system/sa/aether-agent"
+
+# The #638 cross-wiring from the client side: which server identity did we accept?
+log_name:"aether_access_logs" AND reporter:"source" AND upstream_peer_uri_san:*
+```
+
+Both render `-` where the hop is not mTLS (SPIRE disabled, cleartext inbound, the
+loopback hop to the local application), so a `-` is not a finding on its own —
+check `reporter` and whether that hop is meant to be mTLS. For routes behind
+ext_authz the OPA decision log's
+`metadataContext.filterMetadata["aether.source"].spiffeId` remains available, but
+it is the source's *claim* about itself and a weaker control than the fields
+above. The failure signature is a workload's traffic arriving with the **agent's**
+identity. The agent's own #638 discriminator
 (`agent/internal/xds/cache/identitybinding.go`) still names the
 netns→identity index behind it and WARNs on `outbound cluster bound to a foreign
 identity`.
