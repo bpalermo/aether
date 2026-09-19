@@ -257,7 +257,12 @@ func (c *brokerClient) pump(
 		resp, err := stream.Recv()
 		if err != nil {
 			if streamCtx.Err() == nil {
-				c.log.ErrorContext(streamCtx, "X.509 SVID subscription stream ended", "error", err, "pod", ref.String())
+				// WARN, not ERROR: an established stream ending is what a SPIRE agent
+				// restart looks like from here (one line per managed pod), the cached
+				// SVID keeps serving, and the bridge re-subscribes at once. If the
+				// endpoint stays away, the bridge's own subscribe ladder is what
+				// escalates to ERROR (#766).
+				c.log.WarnContext(streamCtx, "X.509 SVID subscription stream ended; the bridge re-subscribes", "error", err, "pod", ref.String())
 			}
 			return
 		}

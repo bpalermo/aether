@@ -51,6 +51,17 @@ const identityRefreshInterval = 30 * time.Second
 // the only thing that distinguishes the two is how long it has been going on.
 const referenceUnresolvedWarnAfter = 30 * time.Second
 
+// brokerUnreachableErrorAfter is how long subscribes may keep failing with
+// Unavailable before the per-attempt line escalates from WARN to ERROR.
+//
+// A brief Unavailable is designed, twice over: a restarted agent runs its
+// stored-pod resubscribe before its own SVID has landed, so the Broker's mutual
+// TLS has no client certificate for a second or so (#740); and a SPIRE agent
+// restart takes the socket away for ~35s. Both logged one ERROR per managed pod
+// per attempt and healed at zero cost (#766). Two minutes matches the readiness
+// dwell: past it the node is NotReady and an operator is already being told.
+const brokerUnreachableErrorAfter = 2 * time.Minute
+
 // Backoff policy for re-establishing Broker subscription streams after a failed
 // subscribe or a disconnect (e.g. a SPIRE agent restart). Matches the registrar
 // watch-stream policy. The backoff resets only once a subscribe succeeds, so a
@@ -450,9 +461,10 @@ func classifyBrokerError(err error) brokerRetry {
 }
 
 // reportSubscribeError logs and counts a failed subscribe and returns the retry
-// policy. unresolvedSince carries how long the reference has been failing to
-// resolve, which is the only thing that distinguishes the benign CNI-ADD race
-// from a reference that is never going to resolve.
+// policy. unresolvedSince carries how long this subscription has been failing
+// since its last success, which is the only thing that distinguishes the benign
+// cases (the CNI-ADD race; an agent or SPIRE agent that has just restarted) from
+// a reference that is never going to resolve or an endpoint that is really gone.
 func (b *Bridge) reportSubscribeError(ctx context.Context, err error, spiffeID string, ref PodRef, unresolvedSince *time.Time) brokerRetry {
 	retry := classifyBrokerError(err)
 	code := status.Code(err)
@@ -482,8 +494,17 @@ func (b *Bridge) reportSubscribeError(ctx context.Context, err error, spiffeID s
 		b.log.ErrorContext(ctx, "the SPIFFE Broker Endpoint rejected the request as malformed; not retrying (this is a bug in the aether agent)",
 			"spiffeID", spiffeID, "pod", ref.String(), "error", err)
 	default:
-		b.log.ErrorContext(ctx, "subscribing to the pod's X.509 SVIDs failed; retrying",
-			"spiffeID", spiffeID, "pod", ref.String(), "code", code.String(), "error", err)
+		if unresolvedSince.IsZero() {
+			*unresolvedSince = time.Now()
+		}
+		elapsed := time.Since(*unresolvedSince)
+		level := slog.LevelWarn
+		if elapsed >= brokerUnreachableErrorAfter {
+			level = slog.LevelError
+		}
+		b.log.Log(ctx, level, "subscribing to the pod's X.509 SVIDs failed; retrying",
+			"spiffeID", spiffeID, "pod", ref.String(), "code", code.String(),
+			"elapsed", elapsed.Round(time.Millisecond), "errorAfter", brokerUnreachableErrorAfter, "error", err)
 	}
 
 	return retry

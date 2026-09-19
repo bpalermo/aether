@@ -289,7 +289,7 @@ func runAgent(ctx context.Context) (retErr error) {
 	// self-heal evictions. It is registered with the manager further down.
 	reasserter := newCNIConflistReasserter()
 
-	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain.Get(), chainStateOf(reasserter)); err != nil {
+	if err = setupCNIServer(m, localStorage, reg, snapshotCache, ackTracker, spireBridge, identityTrustDomain.Get(), chainStateOf(reasserter), cniIdentityWatchOf(spireSource)); err != nil {
 		return err
 	}
 
@@ -652,6 +652,15 @@ func identityGateOf(src *commonspire.WaitingSource) xdsServer.IdentityGate {
 	return src
 }
 
+// cniIdentityWatchOf is identityGateOf for the CNI server, with the same
+// nil-pointer-in-an-interface guard.
+func cniIdentityWatchOf(src *commonspire.WaitingSource) cniServer.IdentityWatch {
+	if src == nil {
+		return nil
+	}
+	return src
+}
+
 // wireCNIConflistReasserter registers the re-assert loop with the manager. A nil
 // reasserter (the kill switch) is a no-op.
 func wireCNIConflistReasserter(m ctrl.Manager, reasserter *cniconflist.Reasserter) error {
@@ -855,7 +864,7 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 // setupCNIServer creates and registers a CNI gRPC server as a runnable with the Manager.
 // The server listens on a Unix domain socket and handles pod registration/deregistration
 // requests from the CNI plugin binary. It stores pod data locally and triggers xDS snapshot updates.
-func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string, chain cniconflist.ChainState) error {
+func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod], registry registry.Registry, snapshotCache *cache.SnapshotCache, ackTracker *ack.Tracker, spireBridge *spire.Bridge, trustDomain string, chain cniconflist.ChainState, identity cniServer.IdentityWatch) error {
 	// Create a registry and CNI server
 	cniSrv, err := cniServer.NewCNIServer(
 		cfg.ClusterName,
@@ -879,6 +888,7 @@ func setupCNIServer(m ctrl.Manager, localStorage storage.Storage[*cniv1.CNIPod],
 	// something the server needs in order to exist. Same shape as
 	// snapshotCache.SetMeshDNSSnapshotPath.
 	cniSrv.SetChainState(chain)
+	cniSrv.SetIdentityWatch(identity)
 	if err = m.Add(cniSrv); err != nil {
 		return fmt.Errorf("failed to add CNI server: %w", err)
 	}
