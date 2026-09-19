@@ -378,10 +378,20 @@ same snapshot, but LDS and CDS are separate xDS responses with no ordering
 guarantee, so a release-two cluster can briefly face a pre-release-one listener.
 That connection matches nothing and takes `on_no_match` = the node identity.
 
-Both keys are still stamped after release two; the old one is removed no earlier
-than release three, which will carry the same constraint in the other direction.
-Verification and the runtime failure signature are under *"#815 release two"* in
-§8.
+**This is the only version-ordering constraint #815 will ever impose.** Both
+keys are stamped permanently. A third release that dropped
+`aether.network.network_namespace` from the listeners was evaluated on
+2026-09-19 and **closed**: on a listener that key carries no per-pod state (its
+value is a constant format string), so removing it would save about 240 bytes
+per mesh-originating filter chain and nothing else — while creating the
+mirror-image constraint forever, and costing another full re-key of every mesh
+pod's filter chains to deploy.
+
+Keeping both keys is also what makes **rolling back below `0.92.28` safe**: a
+proxy whose listeners stamp both keys matches correctly against clusters from
+*either* side of release two. This issue needed exactly that once — release one
+was rolled back on talos-main on 2026-09-19. Verification and the runtime
+failure signature are under *"#815 release two"* in §8.
 
 There are also two standalone charts, installed independently: **`prober`**
 (`charts/prober`) — the external mesh-availability prober (proposal 013; its

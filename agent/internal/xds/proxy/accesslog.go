@@ -112,6 +112,13 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			kv("requested_server_name", "%REQUESTED_SERVER_NAME%"),
 			kv("route_name", "%ROUTE_NAME%"),
 			kv("traceparent", "%REQ(TRACEPARENT)%"),
+			// The ONLY remaining reader of the aether netns filter-state copy
+			// (buildNetworkNamespaceFilterState) since #822 moved the cluster
+			// matcher off it. Source-side only: the copy is stamped by the five
+			// mesh-ORIGINATING chains, of which just two (outbound_http,
+			// capture_http) carry an access log, so every destination-reporter
+			// line renders "-". Verified peer identity on the inbound side is
+			// #824, and is a different mechanism (%DOWNSTREAM_PEER_URI_SAN%).
 			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
 			// RBAC AUDIT shadow decision — populated when the INBOUND listener carries an
 			// AUDIT-mode RBAC filter (scope INBOUND, proposal 026 M4). Envoy prepends the
