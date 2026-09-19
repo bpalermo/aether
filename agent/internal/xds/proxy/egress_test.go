@@ -54,15 +54,17 @@ func TestNewServiceCluster(t *testing.T) {
 }
 
 func TestInjectUpstreamMTLS(t *testing.T) {
-	netnsToID := map[string]string{
-		"/ns/a": "spiffe://example.org/ns/test/sa/pod-a",
-		"/ns/b": "spiffe://example.org/ns/test/sa/pod-b",
+	// Two pods of pod-a's ServiceAccount plus one of pod-b's: the SET is what
+	// reaches the cluster, so the duplicate collapses (issue #815 release two).
+	ids := []string{
+		"spiffe://example.org/ns/test/sa/pod-a",
+		"spiffe://example.org/ns/test/sa/pod-b",
+		"spiffe://example.org/ns/test/sa/pod-a",
 	}
-	ids := []string{"spiffe://example.org/ns/test/sa/pod-a", "spiffe://example.org/ns/test/sa/pod-b"}
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
 	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "8080", "")
+	InjectUpstreamMTLS(c, ids, node, "spiffe://example.org", nil, "8080", "")
 
 	// Per-source mTLS: a match per workload identity + the node identity, and
 	// on-no-match presents the node identity.
@@ -70,23 +72,29 @@ func TestInjectUpstreamMTLS(t *testing.T) {
 	for _, m := range c.GetTransportSocketMatches() {
 		names[m.GetName()] = true
 	}
-	assert.True(t, names[ids[0]] && names[ids[1]] && names[node], "matches for both pods and the node")
+	assert.True(t, names[ids[0]] && names[ids[1]] && names[node], "matches for both service accounts and the node")
+	assert.Len(t, c.GetTransportSocketMatches(), 3, "the duplicate identity collapses to one match")
 	require.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch(), "on-no-match present")
-	assert.GreaterOrEqual(t, len(c.GetTransportSocketMatcher().GetMatcherTree().GetExactMatchMap().GetMap()), 1,
-		"exact_match_map must never be empty (proto validation rejects it)")
+
+	// The exact_match_map is keyed by SOURCE IDENTITY, one entry per
+	// ServiceAccount — never by netns, and never per pod.
+	entries := c.GetTransportSocketMatcher().GetMatcherTree().GetExactMatchMap().GetMap()
+	assert.Len(t, entries, 2, "one entry per ServiceAccount present on the node")
+	assert.Contains(t, entries, ids[0])
+	assert.Contains(t, entries, ids[1])
+	assert.NotContains(t, entries, node, "the node identity is reached via on_no_match, not an entry")
 }
 
 // TestInjectUpstreamMTLS_Waypoint pins the two-level matcher (proposal 019
 // Design A): each source identity carries a local (port-SNI) AND a waypoint
 // (structured-SNI) socket, and the matcher branches on the endpoint waypoint
-// metadata before the source netns.
+// metadata before the source identity.
 func TestInjectUpstreamMTLS_Waypoint(t *testing.T) {
-	netnsToID := map[string]string{"/ns/a": "spiffe://example.org/ns/test/sa/pod-a"}
 	ids := []string{"spiffe://example.org/ns/test/sa/pod-a"}
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
 	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-	InjectUpstreamMTLS(c, netnsToID, ids, node, "spiffe://example.org", nil, "8080", "8080.svc-a.aether.internal")
+	InjectUpstreamMTLS(c, ids, node, "spiffe://example.org", nil, "8080", "8080.svc-a.aether.internal")
 
 	names := map[string]bool{}
 	for _, m := range c.GetTransportSocketMatches() {
@@ -106,7 +114,7 @@ func TestInjectUpstreamMTLS_Waypoint(t *testing.T) {
 	assert.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch().GetMatcher(), "default is the local sub-matcher")
 }
 
-// TestInjectUpstreamMTLS_NoLocalWorkloads: an empty netns→SPIFFE-ID map must
+// TestInjectUpstreamMTLS_NoLocalWorkloads: an empty source-identity set must
 // not produce a matcher — an empty exact_match_map fails Envoy's proto
 // validation and NACKs the whole CDS push (observed on agents starting before
 // any local workload mapping exists, and permanent on nodes with no managed
@@ -116,14 +124,14 @@ func TestInjectUpstreamMTLS_Waypoint(t *testing.T) {
 func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
-	for name, netnsToID := range map[string]map[string]string{
-		"nil map":              nil,
-		"empty map":            {},
-		"only invalid entries": {"": "spiffe://example.org/x", "/ns/a": ""},
+	for name, ids := range map[string][]string{
+		"nil slice":            nil,
+		"empty slice":          {},
+		"only invalid entries": {"", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-			InjectUpstreamMTLS(c, netnsToID, nil, node, "spiffe://example.org", nil, "8080", "")
+			InjectUpstreamMTLS(c, ids, node, "spiffe://example.org", nil, "8080", "")
 
 			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
 			assert.Empty(t, c.GetTransportSocketMatches(), "no legacy matches without the matcher")

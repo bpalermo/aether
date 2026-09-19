@@ -7,14 +7,16 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	setFilterStatev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
 	set_filter_state_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
+	tsinputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/transport_socket/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
-// Release-one tests for issue #815: every listener chain that can originate
-// mesh traffic stamps BOTH the netns filter-state key (which the cluster
-// transport-socket matcher reads today) and the source pod's SPIFFE ID (which
-// it will read in release two). Nothing about the clusters changes yet.
+// Issue #815: every listener chain that can originate mesh traffic stamps BOTH
+// the netns filter-state key and the source pod's SPIFFE ID. Release one added
+// the second key; release two moved the cluster transport-socket matcher onto
+// it. The netns key stays on the listeners until release three.
 
 const (
 	testSourcePod      = "echo-1"
@@ -67,10 +69,11 @@ func requireBothSourceKeys(t *testing.T, chain *listenerv3.FilterChain, what str
 }
 
 // TestSourceIdentityStampedOnEveryMeshOriginatingChain enumerates the listener
-// kinds that can open an upstream mesh connection. Each one must stamp both
-// keys — release two switches the cluster matcher to the identity key in one
-// step, and any chain that sets only the old key would then fall to OnNoMatch
-// (the node identity = the wrong client certificate, #686 territory).
+// kinds that can open an upstream mesh connection. Each one must stamp the
+// identity key — the cluster matcher reads it since release two, and a chain
+// that sets only the netns key falls to OnNoMatch (the node identity presented
+// instead of the pod's, #686 territory). The netns key must stay too until
+// release three, so both are asserted.
 func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	pod := sourceTestPod()
 	id := SourceIdentityForPod(pod, testTrustDomain)
@@ -173,20 +176,75 @@ func TestSourceFilterStatesOrderIsFixed(t *testing.T) {
 	}
 }
 
-// TestClusterMatcherStillKeyedOnNetns is the release-one boundary: the cluster
-// transport_socket_matcher must NOT have moved to the new key yet. Flipping it
-// is release two, and only after every proxy in the fleet is stamping both.
-func TestClusterMatcherStillKeyedOnNetns(t *testing.T) {
-	m := UpstreamTransportSocketMatcher(map[string]string{"/var/run/netns/cni-a": testSourceIdentity})
+// TestClusterMatcherKeyedOnSourceIdentity is the release-TWO boundary (it
+// replaces release one's TestClusterMatcherStillKeyedOnNetns): the cluster
+// transport_socket_matcher reads the source-identity key, and no netns path
+// survives anywhere in the matcher.
+//
+// Both halves matter. The input must name the new KEY — reading the old key
+// would simply have kept the defect. And no netns may remain: a netns path
+// anywhere in the cluster proto is per-pod state, which is precisely what makes
+// a cluster re-hash on every pod event (the cache-side scan of the whole
+// serialized cluster is TestNoNetnsPathInServiceClusterBytes).
+func TestClusterMatcherKeyedOnSourceIdentity(t *testing.T) {
+	const otherIdentity = "spiffe://" + testTrustDomain + "/ns/" + testSourceNS + "/sa/other"
+
+	// Two pods of one ServiceAccount plus a pod of another: three pods, two
+	// entries. That collapse IS the fix.
+	m := UpstreamTransportSocketMatcher([]string{testSourceIdentity, otherIdentity, testSourceIdentity})
 	require.NotNil(t, m)
 
 	input := m.GetMatcherTree().GetInput()
 	require.NotNil(t, input)
-	assert.Equal(t, filterStateInputName, input.GetName())
+	assert.Equal(t, filterStateInputName, input.GetName(),
+		"still the transport-socket-scoped FilterStateInput, not the generic network one")
 
-	// The exact_match_map is still keyed by netns path, not identity.
+	var fsi tsinputsv3.FilterStateInput
+	require.NoError(t, input.GetTypedConfig().UnmarshalTo(&fsi))
+	assert.Equal(t, sourceIdentityFilterStateKey, fsi.GetKey(),
+		"release two reads aether.source.spiffe_id; see sourceIdentityFilterStateKey")
+	assert.NotEqual(t, networkNamespaceFilterStateKey, fsi.GetKey())
+
 	entries := m.GetMatcherTree().GetExactMatchMap().GetMap()
-	require.Contains(t, entries, "/var/run/netns/cni-a",
-		"release one must not change the cluster matcher; see sourceIdentityFilterStateKey")
-	require.NotContains(t, entries, testSourceIdentity)
+	require.Len(t, entries, 2, "one entry per ServiceAccount, not per pod")
+	require.Contains(t, entries, testSourceIdentity)
+	require.Contains(t, entries, otherIdentity)
+	require.NotContains(t, entries, sourceTestPod().GetNetworkNamespace())
+
+	// Nothing in the serialized matcher may mention a netns path.
+	b, err := proto.Marshal(m)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "/var/run/netns/")
+	assert.NotContains(t, string(b), networkNamespaceFilterStateKey)
+}
+
+// TestClusterMatcherIsOrderIndependent: the exact_match_map is a proto map, and
+// go-control-plane hashes the DETERMINISTICALLY marshalled cluster for
+// delta-xDS — but the entry SET is what must be stable, and the caller builds
+// the identity list by ranging a Go map. Two shuffled orders, and a list with
+// the duplicates a multi-pod ServiceAccount produces, must all marshal to the
+// same bytes.
+func TestClusterMatcherIsOrderIndependent(t *testing.T) {
+	a := "spiffe://" + testTrustDomain + "/ns/aether-test/sa/a"
+	b := "spiffe://" + testTrustDomain + "/ns/aether-test/sa/b"
+	c := "spiffe://" + testTrustDomain + "/ns/aether-test/sa/c"
+
+	marshal := func(ids []string) []byte {
+		m := UpstreamTransportSocketMatcher(ids)
+		require.NotNil(t, m)
+		out, err := proto.MarshalOptions{Deterministic: true}.Marshal(m)
+		require.NoError(t, err)
+		return out
+	}
+
+	want := marshal([]string{a, b, c})
+	for _, ids := range [][]string{
+		{c, b, a},
+		{b, a, c},
+		{a, b, c, a, b, c},       // six pods, three ServiceAccounts
+		{"", a, c, "", b, a, ""}, // pods whose identity is not known yet
+	} {
+		assert.Equal(t, want, marshal(ids),
+			"the matcher must be a function of the identity SET alone (%v)", ids)
+	}
 }

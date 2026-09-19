@@ -18,16 +18,23 @@ import (
 //     the SDS secret of the SAME name. The socket name and the secret name are
 //     literally the same string, so "this match presents a different secret
 //     than it is named for" is structurally impossible.
-//   - transport_socket_matcher: an exact_match_map from the source pod's
-//     network namespace (the aether.network.network_namespace filter state,
-//     shared with the upstream connection) to one of those names, built from
-//     c.localWorkloads.
+//   - transport_socket_matcher: an exact_match_map from the SOURCE IDENTITY
+//     (the aether.source.spiffe_id filter state, shared with the upstream
+//     connection) to the match of the same name, built from the identity SET of
+//     c.localWorkloads. Since issue #815 release two the map is keyed by
+//     identity, not by netns path — so the proto is byte-stable across pod churn
+//     within a ServiceAccount. The netns → identity step did not disappear; it
+//     MOVED into the listener, which stamps the identity the agent derived for
+//     the pod owning that netns (proxy.SourceIdentityForPod).
 //
-// So the whole (source pod → cluster → client-cert secret) binding reduces to
-// ONE node-wide index: c.localWorkloads[netns] → SPIFFE ID. It is identical for
-// every outbound cluster on the node — which is exactly the shape #638 observes
-// in the field (one wrong identity presented toward many distinct clusters in a
-// single time slice, never a per-cluster or per-endpoint scatter).
+// So the whole (source pod → cluster → client-cert secret) binding still
+// reduces to ONE node-wide index: c.localWorkloads[netns] → SPIFFE ID. It is
+// identical for every outbound cluster on the node — which is exactly the shape
+// #638 observes in the field (one wrong identity presented toward many distinct
+// clusters in a single time slice, never a per-cluster or per-endpoint scatter).
+// This file still watches exactly the right table: what changed is only WHERE
+// the lookup happens (listener, once per connection) rather than WHAT decides
+// the client certificate.
 //
 // WHAT CAN THEREFORE GO WRONG is not the secret naming but that index:
 //
@@ -36,12 +43,14 @@ import (
 //     listeners, then setLocalWorkload) and the remove path (RemovePod: delete
 //     listener, then removeLocalWorkload), and are merged separately again by
 //     LoadListenersFromStorage on agent start.
-//   - The map key is the pod's network-namespace PATH, which the kubelet/CNI
+//   - The index key is the pod's network-namespace PATH, which the kubelet/CNI
 //     reuses. A missed or late CNI DEL leaves a departed pod's identity bound
-//     to a netns path a NEW pod may already be stamping onto its connections —
-//     the new pod then presents the departed (co-located) workload's SVID until
-//     the next AddPod write lands, which is precisely the "duration = time to
-//     next push" fingerprint.
+//     to a netns path a NEW pod may already be using — the new pod's listener
+//     is then generated stamping the departed (co-located) workload's SPIFFE ID
+//     until the next AddPod write lands, which is precisely the "duration =
+//     time to next push" fingerprint. Release two did not change this: the
+//     wrong identity is now baked into the listener instead of looked up in the
+//     cluster, and the same c.localWorkloads entry is the cause either way.
 //
 // This file makes that index observable: it names the binding each snapshot
 // delivers, but only when it CHANGED, and cross-checks the presented identity

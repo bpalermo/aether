@@ -126,9 +126,15 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 
 	passthrough := proxy.NewPassthroughOriginalDstCluster()
 	svcCluster := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
+	// The per-source mTLS shape every mesh service cluster actually carries: the
+	// one-level transport_socket_matcher whose exact_match_map is keyed by the
+	// aether.source.spiffe_id filter state, with two local ServiceAccounts
+	// (issue #815 release two).
+	perSourceCluster := newPerSourceServiceCluster("per-source-echo."+meshDomain, trustDomain, "default", "echo")
 	// Exercises the proposal 019 two-level transport-socket matcher (endpoint
-	// waypoint metadata -> source netns) + the endpoint_metadata matcher input,
-	// so `envoy --mode validate` proves the config is accepted by a real Envoy.
+	// waypoint metadata -> source identity) + the endpoint_metadata matcher
+	// input, so `envoy --mode validate` proves the config is accepted by a real
+	// Envoy.
 	waypointCluster := newWaypointServiceCluster("waypoint-echo."+meshDomain, trustDomain, "default", "echo")
 	// Proposal 019 Phase 3b dest side: the host-netns tunnel listener (wildcard
 	// SNI -> tcp_proxy passthrough) and its STATIC ew_ingress cluster.
@@ -150,7 +156,7 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	)
 	rewriteSDSToExplicitSource(inboundReady)
 
-	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, waypointCluster, ewIngress, authzSidecarCluster()}
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, perSourceCluster, waypointCluster, ewIngress, authzSidecarCluster()}
 	staticClusters = append(staticClusters, appClusters...)
 	staticClusters = append(staticClusters, healthCluster, inboundReady)
 
@@ -165,15 +171,26 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound, tunnel, healthGateway}), nil
 }
 
-// newWaypointServiceCluster is newServiceCluster with the proposal 019 waypoint
-// wiring: the two-level transport-socket matcher (waypoint metadata -> netns) and
-// both the local (port-SNI) and waypoint (structured-SNI) socket sets, injected
-// via the same InjectUpstreamMTLS the agent uses.
-func newWaypointServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
+// newPerSourceServiceCluster is newServiceCluster with the ONE-LEVEL per-source
+// transport-socket matcher the mesh uses on every node without the waypoint:
+// an exact_match_map on the aether.source.spiffe_id filter state (issue #815
+// release two) whose entries name one transport_socket_match per local
+// ServiceAccount, plus on_no_match = the node identity.
+//
+// Two local source identities are modelled on purpose: a one-entry map would
+// still validate if the map were somehow degenerate, and this is the exact
+// shape the byte-stability argument rests on. Stock-Envoy acceptance of the
+// matcher input name is the thing being gated here — a wrong extension name
+// resolves to nullopt at RUNTIME and validates fine, so what this catches is
+// the structural half (unknown @type, empty map, dangling socket name).
+func newPerSourceServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
 	nodeID := fmt.Sprintf("spiffe://%s/node/test-node", td)
 	validationCtxName := fmt.Sprintf("spiffe://%s", td)
 	sanURI := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, svcName)
-	netnsToID := map[string]string{"/var/run/netns/cni-test": sanURI}
+	sources := []string{
+		fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, "source-a"),
+		fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, "source-b"),
+	}
 
 	c := &clusterv3.Cluster{
 		Name:           clusterName,
@@ -191,7 +208,36 @@ func newWaypointServiceCluster(clusterName, td, namespace, svcName string) *clus
 			),
 		},
 	}
-	proxy.InjectUpstreamMTLS(c, netnsToID, []string{sanURI}, nodeID, validationCtxName, []string{sanURI}, "8080", "8080."+clusterName)
+	proxy.InjectUpstreamMTLS(c, sources, nodeID, validationCtxName, []string{sanURI}, "8080", "")
+	return c
+}
+
+// newWaypointServiceCluster is newServiceCluster with the proposal 019 waypoint
+// wiring: the two-level transport-socket matcher (waypoint metadata -> source
+// identity) and both the local (port-SNI) and waypoint (structured-SNI) socket
+// sets, injected via the same InjectUpstreamMTLS the agent uses.
+func newWaypointServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
+	nodeID := fmt.Sprintf("spiffe://%s/node/test-node", td)
+	validationCtxName := fmt.Sprintf("spiffe://%s", td)
+	sanURI := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, svcName)
+
+	c := &clusterv3.Cluster{
+		Name:           clusterName,
+		ConnectTimeout: durationpb.New(5e9),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_EDS,
+		},
+		EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			EdsConfig: config.XDSConfigSourceADS(),
+		},
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(32 * 1024),
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": mustAny(
+				config.Http2ProtocolOptions(),
+			),
+		},
+	}
+	proxy.InjectUpstreamMTLS(c, []string{sanURI}, nodeID, validationCtxName, []string{sanURI}, "8080", "8080."+clusterName)
 	return c
 }
 

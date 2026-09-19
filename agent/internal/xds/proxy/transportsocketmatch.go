@@ -63,6 +63,33 @@ func waypointSocketName(id string) string { return id + waypointSocketSuffix }
 // identitySocketName is the local (port-SNI) variant — the bare identity.
 func identitySocketName(id string) string { return id }
 
+// sortedUniqueIdentities returns the non-empty SPIFFE IDs in ids, deduplicated
+// and sorted.
+//
+// Every per-source structure on a cluster — transport_socket_matches (a
+// repeated field) and the matcher's exact_match_map (keyed by identity) — is
+// built from this, so all of them are a pure function of the SET of identities
+// present on the node, never of the order the caller happened to range a map
+// in. That is the whole point: pods sharing a ServiceAccount collapse to one
+// entry, so pod churn within a ServiceAccount changes nothing (issue #815), and
+// a reshuffled input cannot re-hash the cluster (incident #135).
+func sortedUniqueIdentities(ids []string) []string {
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	sort.Strings(unique)
+	return unique
+}
+
 // UpstreamTransportSocketMatches returns one transport socket match per unique
 // SPIFFE ID among the local workloads. Each match presents that workload's
 // client certificate (over SPIRE-served SDS) for upstream mTLS. The match name
@@ -87,19 +114,7 @@ func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName st
 // with the given sni. name lets a cluster carry two variants of each source
 // identity's socket (local + waypoint) that differ only in SNI.
 func upstreamTransportSocketMatchesNamed(spiffeIDs []string, validationContextName string, sanURIs []string, sni string, name func(string) string) []*clusterv3.Cluster_TransportSocketMatch {
-	unique := make([]string, 0, len(spiffeIDs))
-	seen := make(map[string]struct{}, len(spiffeIDs))
-	for _, id := range spiffeIDs {
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		unique = append(unique, id)
-	}
-	sort.Strings(unique)
+	unique := sortedUniqueIdentities(spiffeIDs)
 
 	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
 	for _, id := range unique {
@@ -113,35 +128,56 @@ func upstreamTransportSocketMatchesNamed(spiffeIDs []string, validationContextNa
 }
 
 // UpstreamTransportSocketMatcher returns a matcher keyed on the
-// aether.network.network_namespace filter state (set on each pod's outbound
-// listener and shared with the upstream connection). Its exact_match_map maps
-// each local pod's network namespace to a TransportSocketNameAction naming that
-// pod's SPIFFE ID — the match name used by UpstreamTransportSocketMatches — so
-// the upstream connection presents the originating pod's certificate.
+// aether.source.spiffe_id filter state — the SOURCE POD'S SPIFFE ID, stamped as
+// a literal by every mesh-originating listener chain (buildSourceFilterStates,
+// networkfilter.go) and shared with the upstream connection. Its
+// exact_match_map maps each local SOURCE IDENTITY to a TransportSocketNameAction
+// naming the match of the same name (UpstreamTransportSocketMatches), so the
+// upstream connection presents the originating pod's certificate.
 //
-// Returns nil when no valid netns→SPIFFE-ID entries exist: an empty
+// RELEASE TWO of issue #815. Until this change the map was keyed by the source
+// pod's NETNS PATH, which is unique PER POD: every local pod ADD/DEL rewrote a
+// field of EVERY mesh cluster on the node, each rewritten EDS cluster re-warmed
+// for the full 15 s EDS initial_fetch_timeout (delta-xDS sends no EDS request
+// for an already-watched name), and the warming→active swap then drained every
+// upstream connection pool on the node. Measured on talos-main: 20–33 clusters
+// warming for exactly 15 s per pod ADD, 30 s for two.
+//
+// The thing this matcher SELECTS was always per-ServiceAccount (the match name
+// is the SPIFFE ID), so keying the map by identity loses nothing and makes the
+// Cluster proto BYTE-STABLE across pod churn within a ServiceAccount: only the
+// first pod of a ServiceAccount arriving on the node, or the last one leaving,
+// changes a cluster at all. Everything else hits Envoy's hash gate and warms
+// nothing. See sourceIdentityFilterStateKey for the three-release contract.
+//
+// Entries are built from the SORTED, deduplicated identity set. exact_match_map
+// is a proto map, which proto.MarshalOptions{Deterministic:true} canonicalises
+// for the delta-xDS hash (see cache/ordering.go) — but the dedup is what makes
+// the SET, and therefore the bytes, independent of how many pods back each
+// identity.
+//
+// Returns nil when there are no valid source identities: an empty
 // exact_match_map fails proto validation (`MatchMapValidationError.Map: value
 // must contain at least 1 pair(s)`), making Envoy NACK the entire CDS push —
 // observed on agents starting before any local workload mapping exists, and
 // permanent on nodes with zero managed pods (e2e 2026-06-10). Callers fall
 // back to a plain transport socket.
-func UpstreamTransportSocketMatcher(netnsToSpiffeID map[string]string) *matcherv3.Matcher {
-	return upstreamTransportSocketMatcherNamed(netnsToSpiffeID, identitySocketName)
+func UpstreamTransportSocketMatcher(sourceIdentities []string) *matcherv3.Matcher {
+	return upstreamTransportSocketMatcherNamed(sourceIdentities, identitySocketName)
 }
 
 // upstreamTransportSocketMatcherNamed is UpstreamTransportSocketMatcher with the
-// selected socket name derived via name(id) — so the same netns→identity map can
+// selected socket name derived via name(id) — so the same identity set can
 // drive the local or the waypoint socket variant.
-func upstreamTransportSocketMatcherNamed(netnsToSpiffeID map[string]string, name func(string) string) *matcherv3.Matcher {
-	m := make(map[string]*matcherv3.Matcher_OnMatch, len(netnsToSpiffeID))
-	for netns, id := range netnsToSpiffeID {
-		if netns == "" || id == "" {
-			continue
-		}
-		m[netns] = transportSocketNameOnMatch(name(id))
-	}
-	if len(m) == 0 {
+func upstreamTransportSocketMatcherNamed(sourceIdentities []string, name func(string) string) *matcherv3.Matcher {
+	unique := sortedUniqueIdentities(sourceIdentities)
+	if len(unique) == 0 {
 		return nil
+	}
+
+	m := make(map[string]*matcherv3.Matcher_OnMatch, len(unique))
+	for _, id := range unique {
+		m[id] = transportSocketNameOnMatch(name(id))
 	}
 
 	return &matcherv3.Matcher{
@@ -149,7 +185,7 @@ func upstreamTransportSocketMatcherNamed(netnsToSpiffeID map[string]string, name
 			MatcherTree: &matcherv3.Matcher_MatcherTree{
 				Input: &xdscorev3.TypedExtensionConfig{
 					Name:        filterStateInputName,
-					TypedConfig: config.TypedConfig(&tsinputsv3.FilterStateInput{Key: networkNamespaceFilterStateKey}),
+					TypedConfig: config.TypedConfig(&tsinputsv3.FilterStateInput{Key: sourceIdentityFilterStateKey}),
 				},
 				TreeType: &matcherv3.Matcher_MatcherTree_ExactMatchMap{
 					ExactMatchMap: &matcherv3.Matcher_MatcherTree_MatchMap{
@@ -163,18 +199,19 @@ func upstreamTransportSocketMatcherNamed(netnsToSpiffeID map[string]string, name
 
 // WaypointTransportSocketMatcher builds the two-level transport-socket matcher
 // (proposal 019 Design A): branch first on the chosen endpoint's envoy.lb
-// "waypoint" metadata, then on the source pod's netns. A waypoint-tagged
+// "waypoint" metadata, then on the source pod's SPIFFE ID. A waypoint-tagged
 // (cross-cluster) endpoint selects the source's WAYPOINT socket (structured SNI);
 // every other endpoint selects the source's LOCAL socket (port SNI). Both
-// sub-trees fall back to the node identity's respective socket when no local pod
-// matches the source netns. Returns nil when there are no local workloads (the
-// caller then uses a plain single transport socket, as without waypoint).
-func WaypointTransportSocketMatcher(netnsToSpiffeID map[string]string, nodeSpiffeID string) *matcherv3.Matcher {
-	local := upstreamTransportSocketMatcherNamed(netnsToSpiffeID, identitySocketName)
+// sub-trees fall back to the node identity's respective socket when the source
+// identity is not one of the node's local workloads. Returns nil when there are
+// no local workloads (the caller then uses a plain single transport socket, as
+// without waypoint).
+func WaypointTransportSocketMatcher(sourceIdentities []string, nodeSpiffeID string) *matcherv3.Matcher {
+	local := upstreamTransportSocketMatcherNamed(sourceIdentities, identitySocketName)
 	if local == nil {
 		return nil
 	}
-	waypoint := upstreamTransportSocketMatcherNamed(netnsToSpiffeID, waypointSocketName)
+	waypoint := upstreamTransportSocketMatcherNamed(sourceIdentities, waypointSocketName)
 	local.OnNoMatch = transportSocketNameOnMatch(identitySocketName(nodeSpiffeID))
 	waypoint.OnNoMatch = transportSocketNameOnMatch(waypointSocketName(nodeSpiffeID))
 
@@ -218,19 +255,7 @@ func WaypointTransportSocketMatcher(netnsToSpiffeID map[string]string, nodeSpiff
 // leaving the floor connection on the default socket with no "aether-tcp" ALPN, so
 // the inbound floor chain wouldn't match and the mTLS connection would reset.
 func UpstreamTCPTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string, sni string) []*clusterv3.Cluster_TransportSocketMatch {
-	unique := make([]string, 0, len(spiffeIDs))
-	seen := make(map[string]struct{}, len(spiffeIDs))
-	for _, id := range spiffeIDs {
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		unique = append(unique, id)
-	}
-	sort.Strings(unique)
+	unique := sortedUniqueIdentities(spiffeIDs)
 
 	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
 	for _, id := range unique {

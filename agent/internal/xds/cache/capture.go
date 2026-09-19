@@ -285,10 +285,12 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 	}
 
 	c.localMu.RLock()
-	netnsToID := make(map[string]string, len(c.localWorkloads))
+	// The identity SET, not the per-pod index: the TCP floor clusters carry the
+	// same per-source matcher as the HTTP ones, keyed by source SPIFFE ID since
+	// issue #815 release two, so two pods of one ServiceAccount contribute one
+	// entry and pod churn within it changes no cluster bytes.
 	ids := make([]string, 0, len(c.localWorkloads))
-	for netns, id := range c.localWorkloads {
-		netnsToID[netns] = id
+	for _, id := range c.localWorkloads {
 		ids = append(ids, id)
 	}
 	nodeSpiffeID := c.nodeSpiffeID
@@ -324,7 +326,7 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		// (server_names > application_protocols > default) — the connection lands on
 		// the HCM, which can't parse the raw TCP stream and 503s. An empty SNI lets it
 		// fall through to the inbound default floor chain (tcp_proxy to the app).
-		proxy.InjectUpstreamTCPMTLS(cl, netnsToID, ids, nodeSpiffeID, validationContextName, sanURIs, "")
+		proxy.InjectUpstreamTCPMTLS(cl, ids, nodeSpiffeID, validationContextName, sanURIs, "")
 		resources = append(resources, cl)
 	}
 	c.clusterMu.RUnlock()

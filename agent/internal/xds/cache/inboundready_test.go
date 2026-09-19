@@ -141,11 +141,13 @@ func TestInboundReadyAbsentWithSpireOff(t *testing.T) {
 }
 
 // TestSpireOffSnapshotIsByteIdenticalAcrossTheChange pins the stronger claim:
-// with SPIRE off, the ENTIRE cluster set a pod produces is unchanged by #815
-// (clusters are not touched at all in release one, and the probe is not built).
-// It is written as an invariant — the pod's cluster set with SPIRE off must be
-// exactly {app_*, health_*} — so it fails loudly if a later release starts
-// emitting the probe unconditionally.
+// with SPIRE off, the ENTIRE cluster set a pod produces is unchanged by #815 —
+// the probe is not built, and (release two) no per-source transport-socket
+// matcher is injected either, because the node SVID is never served when the
+// SPIRE bridge is not running. It is written as an invariant — the pod's
+// cluster set with SPIRE off must be exactly {app_*, health_*} — so it fails
+// loudly if a later release starts emitting the probe unconditionally. The
+// matcher half is TestServiceClusterBytesUnaffectedByPodChurnWithSpireOff.
 func TestSpireOffSnapshotIsByteIdenticalAcrossTheChange(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetSpireEnabled(false)

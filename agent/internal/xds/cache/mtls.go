@@ -10,11 +10,18 @@ import (
 )
 
 // localMTLSState is a point-in-time copy of the node-wide upstream-mTLS inputs
-// (guarded by localMu): the local workloads' netns→SPIFFE-ID map, the node
-// SVID, and the trust domain. The per-entry mTLS caches (clusterEntry.sanURIs
-// and clusterEntry.mtlsCluster) are rendered from it.
+// (guarded by localMu): the SET of local workload SPIFFE IDs, the node SVID, and
+// the trust domain. The per-entry mTLS caches (clusterEntry.sanURIs and
+// clusterEntry.mtlsCluster) are rendered from it.
+//
+// ids is the only per-workload input, and it is an identity SET — one entry per
+// ServiceAccount present on the node, deduplicated and sorted downstream by
+// proxy.sortedUniqueIdentities. That is what makes a cluster's bytes invariant
+// under pod churn within a ServiceAccount (issue #815, release two). The
+// netns→identity index it used to carry lives on in c.localWorkloads, which the
+// #638 outbound-identity discriminator (identitybinding.go) still reads — but
+// nothing in the Cluster proto is keyed by netns any more.
 type localMTLSState struct {
-	netnsToID             map[string]string
 	ids                   []string
 	nodeSpiffeID          string
 	trustDomain           string
@@ -33,14 +40,12 @@ func (c *SnapshotCache) localMTLSSnapshot() localMTLSState {
 	defer c.localMu.RUnlock()
 
 	st := localMTLSState{
-		netnsToID:             make(map[string]string, len(c.localWorkloads)),
 		ids:                   make([]string, 0, len(c.localWorkloads)),
 		nodeSpiffeID:          c.nodeSpiffeID,
 		trustDomain:           trustDomain,
 		validationContextName: proxy.ValidationContextName(trustDomain),
 	}
-	for netns, id := range c.localWorkloads {
-		st.netnsToID[netns] = id
+	for _, id := range c.localWorkloads {
 		st.ids = append(st.ids, id)
 	}
 	return st
@@ -133,7 +138,7 @@ func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLS
 		if c.waypointEnabled {
 			waypointSNI = entry.sni + "." + proxy.ServiceClusterName(entry.service, c.meshDomain)
 		}
-		proxy.InjectUpstreamMTLS(cl, st.netnsToID, st.ids, st.nodeSpiffeID, st.validationContextName, sanURIs, entry.sni, waypointSNI)
+		proxy.InjectUpstreamMTLS(cl, st.ids, st.nodeSpiffeID, st.validationContextName, sanURIs, entry.sni, waypointSNI)
 	}
 	entry.mtlsCluster = cl
 }
