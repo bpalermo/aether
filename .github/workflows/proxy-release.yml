@@ -389,7 +389,10 @@ jobs:
       contents: write
       issues: write
     env:
-      TRACKING_ISSUE_TITLE: proxy releases pending chart pin
+      # Renamed with the semantics (#724): this thread now means "a release needed
+      # a human", not "a release happened". The old title belonged to the rolling
+      # log and must not be reused, or closing it would simply respawn it.
+      TRACKING_ISSUE_TITLE: proxy release needs a human
     steps:
       # Decide the mode before anything else, so every later step can branch on
       # it, and report the token's remaining life (the rotation reminder).
@@ -637,34 +640,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # One rolling tracking issue, exact-title matched (the search is fuzzy,
-          # the select is not). Created on first use.
+          # Find the escalation issue if one is already open, exact-title matched
+          # (the search is fuzzy, the select is not). NOT created here -- see the
+          # "Escalate to the tracking issue" step.
           num="$(gh issue list --state open --limit 100 \
             --search "\"${TRACKING_ISSUE_TITLE}\" in:title" \
             --json number,title \
             --jq "[.[] | select(.title == \"${TRACKING_ISSUE_TITLE}\")] | .[0].number // empty")"
-          if [ -z "$num" ]; then
-            issue_body="$RUNNER_TEMP/issue-body.md"
-            cat > "$issue_body" <<'ISSUEBODY'
-          Rolling tracker for the `proxy-release` -> chart-pin flow (#703, #727).
-
-          Every `proxy-release` run publishes a commit-SHA-tagged multi-arch
-          `aether-proxy` image, pins `charts/aether/values.yaml` to it and pushes
-          the result to `chore/proxy-image-bump-<short sha>`.
-
-          With the `RELEASE_PAT` fine-grained token present it also opens the PR and
-          arms auto-merge, and comments here with the PR and the token's remaining
-          life. Without it (missing, expired, rejected) it falls back to the #703
-          hand-off and the comment carries the exact `gh pr create` one-liner to run
-          by hand.
-
-          Either way: let `ci` + `proxy` go green, squash-merge, then deploy and
-          assert `appVersion` (docs/runbook.md §7).
-          ISSUEBODY
-            url="$(gh issue create --title "${TRACKING_ISSUE_TITLE}" --body-file "$issue_body")"
-            num="${url##*/}"
-            echo "created tracking issue #${num}: ${url}"
-          fi
+          # NOTE: find only. Creating it here is what made this a rolling log of
+          # "nothing to do" (#724) and what made closing the issue useless -- the
+          # next run just opened a new one. The escalation step at the end of this
+          # job creates it on demand, and only when a human is actually needed.
           echo "number=$num" >> "$GITHUB_OUTPUT"
 
       # AUTO MODE. Opens the PR with the PAT, arms auto-merge, closes superseded
@@ -676,7 +662,6 @@ jobs:
         if: steps.pin.outputs.changed == 'true' && steps.token.outputs.mode == 'auto'
         env:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
-          ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           INDEX_DIGEST: ${{ needs.manifest.outputs.index_digest }}
@@ -685,7 +670,6 @@ jobs:
           CHART_FROM: ${{ steps.chart.outputs.from }}
           CHART_TO: ${{ steps.chart.outputs.to }}
           EXPIRY: ${{ steps.token.outputs.expiry }}
-          ISSUE: ${{ steps.issue.outputs.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           echo "::add-mask::$RELEASE_PAT"
@@ -713,6 +697,7 @@ jobs:
           # ever touch PRs the release flow itself produced: the head branch
           # pattern AND the body marker.
           closed=""
+          supersede_failed=""
           # shellcheck disable=SC2016  # the backticks are jq string literals
           others="$(GH_TOKEN="$RELEASE_PAT" gh pr list --state open --limit 100 \
             --json number,headRefName,body \
@@ -726,6 +711,7 @@ jobs:
               closed="${closed:+${closed}, }#${other}"
               echo "closed superseded PR #${other}"
             else
+              supersede_failed=1
               echo "::warning::could not close superseded PR #${other}"
             fi
           done
@@ -752,8 +738,18 @@ jobs:
             echo "(\`docs/runbook.md\` §7: commit-suffixed chart tag + the \`appVersion\` assert)."
           } > "$record"
           cat "$record" >> "$GITHUB_STEP_SUMMARY"
-          GH_TOKEN="$ISSUE_TOKEN" gh issue comment "$ISSUE" --body-file "$record"
-          echo "commented on tracking issue #${ISSUE}"
+          cp "$record" "$RUNNER_TEMP/tracker-record.md"
+
+          # Reach for the issue tracker ONLY when a human has something to do
+          # (#724). On the happy path the run summary is the entire record: 13 of
+          # 13 pin PRs auto-merged with no human involvement, so a comment per
+          # release buried the rare one that mattered.
+          needs_human=false
+          case "$automerge" in *"could not be armed"*) needs_human=true ;; esac
+          [ -n "$supersede_failed" ] && needs_human=true
+          # The <30d warning renders "day(s)"; the healthy case renders "days".
+          case "$EXPIRY" in *"day(s)"*|*rotate*|*unparseable*) needs_human=true ;; esac
+          echo "needs_human=$needs_human" >> "$GITHUB_OUTPUT"
           echo "opened=true" >> "$GITHUB_OUTPUT"
 
       # MANUAL MODE (#703): no usable token, or the PR could not be opened.
@@ -774,7 +770,6 @@ jobs:
           CHART_TO: ${{ steps.chart.outputs.to }}
           REASON: ${{ steps.token.outputs.reason }}
           EXPIRY: ${{ steps.token.outputs.expiry }}
-          ISSUE: ${{ steps.issue.outputs.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           body="$RUNNER_TEMP/pr-body.md"
@@ -804,8 +799,59 @@ jobs:
           } > "$handoff"
 
           cat "$handoff" >> "$GITHUB_STEP_SUMMARY"
-          gh issue comment "$ISSUE" --body-file "$handoff"
-          echo "commented on tracking issue #${ISSUE}"
+          cp "$handoff" "$RUNNER_TEMP/tracker-record.md"
+
+      # ESCALATION (#724). The ONLY step that writes to the issue tracker, and it
+      # runs only when a human actually has something to do: the auto path could
+      # not arm auto-merge, a superseded pin PR was left open, the token is
+      # expiring or expired, or the release fell back to the #703 hand-off.
+      #
+      # It used to comment on EVERY release. 13 of 13 pin PRs auto-merged with no
+      # human involvement, so the thread became a log whose every entry said
+      # "nothing to do" -- which buries the rare entry that does not. Silence here
+      # now means the release needed nobody.
+      - name: Escalate to the tracking issue
+        if: |
+          steps.pin.outputs.changed == 'true' &&
+          (steps.pr.outputs.opened != 'true' || steps.pr.outputs.needs_human == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.issue.outputs.number }}
+        run: |
+          record="$RUNNER_TEMP/tracker-record.md"
+          if [ ! -s "$record" ]; then
+            echo "::warning::escalation triggered but no record was written"
+            exit 0
+          fi
+
+          num="$ISSUE"
+          if [ -z "$num" ]; then
+            issue_body="$RUNNER_TEMP/issue-body.md"
+            cat > "$issue_body" <<'ISSUEBODY'
+          Escalation thread for the `proxy-release` -> chart-pin flow (#703, #727).
+
+          A `proxy-release` run publishes a commit-SHA-tagged multi-arch
+          `aether-proxy` image, pins `charts/aether/values.yaml` to it, pushes
+          `chore/proxy-image-bump-<short sha>`, opens the PR with `RELEASE_PAT` and
+          arms auto-merge. **That path is silent** -- the run summary is the record.
+
+          A comment appears here only when the run needs a human: auto-merge could
+          not be armed, a superseded pin PR was left open, `RELEASE_PAT` is expiring
+          or rejected, or the run fell back to the #703 manual hand-off (in which
+          case the comment carries the exact `gh pr create` one-liner).
+
+          So an empty thread means every release since went through untouched. When
+          a comment does appear: let `ci` + `proxy` go green, squash-merge, then
+          deploy and assert `appVersion` (docs/runbook.md §7).
+          ISSUEBODY
+            url="$(gh issue create --title "${TRACKING_ISSUE_TITLE}" --body-file "$issue_body")"
+            num="${url##*/}"
+            echo "created escalation issue #${num}: ${url}"
+          fi
+
+          gh issue comment "$num" --body-file "$record"
+          echo "escalated to issue #${num}"
 
       - name: Chart already pinned to this sha
         if: steps.pin.outputs.changed != 'true'
