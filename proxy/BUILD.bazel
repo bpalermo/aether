@@ -46,6 +46,42 @@ pkg_tar(
     tags = ["manual"],
 )
 
+# OCI provenance for the image below (aether #837): the aether commit, this
+# repository as `org.opencontainers.image.source` (which OVERRIDES the value
+# inherited from distroless/cc, that used to be the image's only annotation and
+# pointed at GoogleContainerTools/distroless), and the Envoy pin — module
+# version, upstream commit and bazel-registry commit — which is the one fact
+# about a running proxy that is recoverable no other way.
+#
+# Used for BOTH `labels` (image config) and `annotations` (manifest), so the
+# Envoy pin is readable from `crane manifest` without pulling the config blob.
+#
+# This adds no timestamp: `created` stays unset and the history entries stay
+# `bazel bu…`. The image is still bit-for-bit reproducible at a given commit.
+genrule(
+    name = "image_metadata",
+    srcs = [
+        ".bazelrc",
+        "MODULE.bazel",
+    ],
+    outs = ["image_metadata.txt"],
+    cmd = "$(location //bazel:image_metadata.sh) $(location MODULE.bazel) $(location .bazelrc) >$@",
+    # Undocumented genrule attr that makes the workspace status files inputs
+    # (bazelbuild/bazel#4942). Envoy's own
+    # //source/common/version:generate_version_linkstamp uses it for the same
+    # reason.
+    stamp = 1,
+    # BUILD_SCM_REVISION is a VOLATILE status key, and Bazel deliberately treats
+    # volatile-status.txt as constant metadata so it invalidates nothing. Left
+    # cacheable, this action would happily reuse an earlier commit's sha and
+    # stamp the image with it — a confidently wrong provenance answer, which is
+    # the failure mode #837 exists to remove. Re-running two `sed`s on every
+    # build is free, and the output is byte-identical at a given commit, so
+    # :image and :push below still get action-cache hits.
+    tags = ["no-cache"],
+    tools = ["//bazel:image_metadata.sh"],
+)
+
 # Custom aether-proxy image: distroless/cc base + the custom Envoy binary.
 # Single-arch, built for the build host's native arch. Multi-arch is assembled in
 # CI from two native per-arch builds (amd64 on ubuntu-latest, arm64 on
@@ -54,8 +90,10 @@ pkg_tar(
 # builds it too (separate RBE pools).
 oci_image(
     name = "image",
+    annotations = ":image_metadata",
     base = "@distroless_cc",
     entrypoint = ["/usr/local/bin/envoy"],
+    labels = ":image_metadata",
     tars = [
         ":envoy_tar",
     ],
