@@ -110,8 +110,10 @@ func TestNewInboundListener_IgnoresSpiffeIDAnnotation(t *testing.T) {
 		require.Len(t, certs, 1)
 		assert.Equal(t, "spiffe://example.org/ns/tenant-a/sa/worker", certs[0].GetName(),
 			"chain %s must present the derived SVID, not the annotated one", fc.GetName())
+		// The SDS-rotated trust bundle now sits inside the combined validation
+		// context, alongside the inline client SAN pin (#843).
 		assert.Equal(t, "spiffe://example.org",
-			tlsCtx.GetCommonTlsContext().GetValidationContextSdsSecretConfig().GetName())
+			tlsCtx.GetCommonTlsContext().GetCombinedValidationContext().GetValidationContextSdsSecretConfig().GetName())
 	}
 }
 
@@ -307,4 +309,78 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 	tcp := &tcp_proxyv3.TcpProxy{}
 	require.NoError(t, tcpFloor.GetFilters()[0].GetTypedConfig().UnmarshalTo(tcp))
 	assert.Equal(t, "app_svc-a_8080", tcp.GetCluster(), "tcp_proxy must forward to the pod's primary app cluster")
+}
+
+// TestNewInboundListener_EveryMTLSChainPinsTheClientSAN is the listener-level
+// half of issue #843: EVERY chain that terminates mTLS must pin the client SAN,
+// not just the HTTP ones.
+//
+// The TCP floor is the chain that matters most here and is the easiest to
+// forget. It is the listener's DEFAULT chain, so anything that matches nothing
+// more specific lands on it, and tcp_proxy forwards raw bytes to the pod's
+// application — there is no XFCC and no HTTP-level authorization behind it at
+// all. An unpinned floor would be a hole underneath every pinned HTTP chain.
+func TestNewInboundListener_EveryMTLSChainPinsTheClientSAN(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "pod-a",
+		Namespace:        "aether-test",
+		ServiceAccount:   "echo",
+		NetworkNamespace: "/var/run/netns/cni-a",
+		Ips:              []string{"10.0.0.1"},
+		// Two served ports, so the per-port SNI chains are exercised too.
+		Annotations: map[string]string{aetherannotations.AnnotationEndpointPorts: "8080,9090"},
+	}
+
+	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, l.GetFilterChains())
+
+	var checked int
+	for _, fc := range l.GetFilterChains() {
+		ts := fc.GetTransportSocket()
+		require.NotNil(t, ts, "chain %s terminates mTLS and must carry a transport socket", fc.GetName())
+
+		var ctx tlsv3.DownstreamTlsContext
+		require.NoError(t, ts.GetTypedConfig().UnmarshalTo(&ctx))
+		require.True(t, ctx.GetRequireClientCertificate().GetValue(), "chain %s", fc.GetName())
+
+		matchers := ctx.GetCommonTlsContext().GetCombinedValidationContext().
+			GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
+		require.Len(t, matchers, 1, "chain %s must pin the client SAN", fc.GetName())
+		assert.Equal(t, tlsv3.SubjectAltNameMatcher_URI, matchers[0].GetSanType(), "chain %s", fc.GetName())
+		assert.Equal(t, "spiffe://aether.internal/ns/", matchers[0].GetMatcher().GetPrefix(), "chain %s", fc.GetName())
+		checked++
+	}
+	// TCP floor + no-SNI h2 chain + one per served port.
+	assert.GreaterOrEqual(t, checked, 4, "the floor, the h2 chain and every per-port chain must all be covered")
+}
+
+// TestNewInboundListener_NoTrustDomainRefuses is the guard that makes
+// DownstreamTransportSocket's unpinned branch unreachable in production, and it
+// is why that branch needs no runtime counter of its own: the reachable
+// "no trust domain" outcome is a REFUSAL the caller logs and retries, never a
+// silently downgraded listener.
+//
+// Refusing is also the only safe answer for an inbound listener specifically —
+// building one anyway would name an SDS secret ("spiffe:///ns/…") the agent
+// never serves, so the listener would come up with no certificate and the pod
+// would be unreachable on the mesh permanently (#815, main-worker-03).
+func TestNewInboundListener_NoTrustDomainRefuses(t *testing.T) {
+	pod := &cniv1.CNIPod{
+		Name:             "pod-a",
+		Namespace:        "aether-test",
+		ServiceAccount:   "echo",
+		NetworkNamespace: "/var/run/netns/cni-a",
+		Ips:              []string{"10.0.0.1"},
+	}
+
+	_, err := NewInboundListener(pod, "", false, false, nil, nil)
+	require.ErrorIs(t, err, ErrNoTrustDomain, "an mTLS inbound listener with no trust domain must be refused, not downgraded")
+
+	// Cleartext (SPIRE off) needs no identity and is unaffected: no transport
+	// socket at all, so there is nothing to pin.
+	l, err := NewInboundListener(pod, "", false, true, nil, nil)
+	require.NoError(t, err, "the cleartext path must stay byte-identical")
+	require.Len(t, l.GetFilterChains(), 1)
+	assert.Nil(t, l.GetFilterChains()[0].GetTransportSocket())
 }

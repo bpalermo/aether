@@ -3,6 +3,7 @@ package proxy
 import (
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -152,19 +153,41 @@ func TestInboundReadyProbeClusterHasNoSourceMatcher(t *testing.T) {
 }
 
 // TestInboundReadyProbeIsAcceptedByInboundValidation reads the two halves
-// against each other: the inbound listener requires a client certificate and
-// validates it against the trust-domain bundle with NO SAN restriction, so the
-// node identity the probe presents is accepted without loosening anything.
+// against each other, and it is the test that would have caught a rev222-class
+// outage in this change.
+//
+// The inbound listener requires a client certificate whose URI SAN starts with
+// "spiffe://<td>/ns/" (#843). The probe dials every local pod's inbound
+// presenting the NODE identity, so if that identity did not satisfy the pin,
+// every inbound-readiness probe on every node would fail the handshake and the
+// agent would demote endpoints it had just promoted. On this mesh the node
+// identity is spiffe://<td>/ns/aether-system/sa/aether-agent — the agent is an
+// ordinary pod, so SPIRE's fallback ClusterSPIFFEID issues it a /ns/ workload
+// SVID, NOT the spiffe://<td>/node/<node> shape some fixtures still spell
+// (#825). This test pins that dependency so a change to either half is loud.
 func TestInboundReadyProbeIsAcceptedByInboundValidation(t *testing.T) {
-	ts := DownstreamTransportSocket(testSourceIdentity, "spiffe://"+testTrustDomain)
+	ts := DownstreamTransportSocket(testSourceIdentity, "spiffe://"+testTrustDomain, testTrustDomain)
 	var down tlsv3.DownstreamTlsContext
 	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(&down))
 
 	assert.True(t, down.GetRequireClientCertificate().GetValue())
-	assert.Nil(t, down.GetCommonTlsContext().GetCombinedValidationContext(),
-		"inbound pins no client SAN, so any trust-domain identity — including the node's — is accepted")
-	require.NotNil(t, down.GetCommonTlsContext().GetValidationContextSdsSecretConfig())
-	assert.Equal(t, "spiffe://"+testTrustDomain, down.GetCommonTlsContext().GetValidationContextSdsSecretConfig().GetName())
+	combined := down.GetCommonTlsContext().GetCombinedValidationContext()
+	require.NotNil(t, combined, "inbound pins the client SAN to a workload shape")
+	assert.Equal(t, "spiffe://"+testTrustDomain, combined.GetValidationContextSdsSecretConfig().GetName(),
+		"the trust bundle still rotates over SDS")
+
+	matchers := combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
+	require.Len(t, matchers, 1)
+	prefix := matchers[0].GetMatcher().GetPrefix()
+	require.NotEmpty(t, prefix, "the pin must be a prefix matcher, not exact")
+
+	// The certificate the probe actually presents must satisfy the pin.
+	assert.True(t, strings.HasPrefix(testNodeIdentity, prefix),
+		"the node identity %q must satisfy the inbound client pin %q, or every probe handshake fails",
+		testNodeIdentity, prefix)
+	// So must an ordinary pod's, which is what real mesh traffic presents.
+	assert.True(t, strings.HasPrefix(testSourceIdentity, prefix),
+		"a workload identity %q must satisfy the inbound client pin %q", testSourceIdentity, prefix)
 }
 
 // TestInboundReadyChainAlwaysExists: the probe's ALPN/SNI choice targets the
@@ -172,7 +195,7 @@ func TestInboundReadyProbeIsAcceptedByInboundValidation(t *testing.T) {
 // every mTLS pod, including single-port ones.
 func TestInboundReadyChainAlwaysExists(t *testing.T) {
 	pod := sourceTestPod()
-	chains := buildInboundFilterChains(pod, testSourceIdentity, "spiffe://"+testTrustDomain, false, nil, nil)
+	chains := buildInboundFilterChains(pod, testSourceIdentity, "spiffe://"+testTrustDomain, testTrustDomain, false, nil, nil)
 
 	var h2Chains int
 	for _, fc := range chains {
