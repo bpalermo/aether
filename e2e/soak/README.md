@@ -44,7 +44,12 @@ kubectl get pods -n aether-system
 #    MAIN session is mandatory: on 2026-09-03 the harness reaped a plain `&` job at
 #    T0+75m, and a driver started inside a subagent dies with it.
 kubectl apply -f e2e/soak/k6-runner.yaml
-nohup setsid bash e2e/soak/churn.sh "rev192/0.92.0" >/dev/null 2>&1 &
+# REFUSE to start a second driver. Two of them share /tmp/soak-churn.log and
+# interleave their schedules into ~62 rolls instead of 31, which does not fail
+# the run -- it silently invalidates it. Match on the ABSOLUTE path, never on
+# "soak/churn.sh": see "Stopping the churn driver" below for why.
+pgrep -f "bash $PWD/e2e/soak/churn.sh" && echo "a driver is already running" || \
+  nohup setsid bash "$PWD/e2e/soak/churn.sh" "rev192/0.92.0" >/dev/null 2>&1 &
 
 # 4. Age-matched proxy RSS baseline at T0+30m (churn.sh takes the rest itself).
 bash e2e/soak/sample-proxy-rss.sh --at-age 1800
@@ -58,7 +63,10 @@ for p in $(kubectl -n aether-test get pods -o name | grep k6-soak-loader); do
   kubectl -n aether-test logs --previous "$p" | grep -E 'http_req_failed|iterations|dropped'
 done
 kubectl delete -f e2e/soak/k6-runner.yaml
-grep -c ROLLED /tmp/soak-churn.log      # expect 31
+# Count ROLLED in the CURRENT log only. churn.sh archives the previous run as
+# /tmp/soak-churn.log.<ts>.prev, and older runs left /tmp/soak-churn-*.log
+# behind, so `grep -c ROLLED /tmp/soak-churn*` inflates the tally across runs.
+grep -c ROLLED /tmp/soak-churn.log      # expect 31 -- this exact path, no glob
 grep -E "no-roll window|SHRINK" /tmp/soak-churn.log
 column -t /tmp/soak-proxy-rss.tsv       # the #628 age-matched series
 ```
@@ -146,6 +154,48 @@ retarget it.
 **Authorization:** rolling these shared `talos-main` workloads for soak validation is
 standing-authorized, and scaling `svc-5` down and back up for 90s is the same class of
 action on the same harness namespace.
+
+## Stopping the churn driver
+
+**Stop it with `kill -9 <pid>`.** Both of the obvious alternatives are cases
+where the safety action causes the harm, which is exactly why they are written
+down rather than merely fixed.
+
+```bash
+# Find it by ABSOLUTE path, and read the pid before you kill anything.
+pgrep -af "bash .*/e2e/soak/churn.sh"
+kill -9 <pid>
+# The driver leaves nothing behind except an unrestored SHRINK, and that only
+# if you kill it inside the 90-second shrink window (T0+450m):
+kubectl -n aether-test get deployment/svc-5   # expect the pre-shrink replicas
+```
+
+**Do not `pkill -f "soak/churn.sh"`.** The pattern appears in the command line
+of the shell that is *running the pkill*, so `pkill` matches and kills your own
+session too. `pgrep -cf` has the same flaw in the harmless direction: it counts
+one driver too many, so "two drivers are running" is usually one driver and your
+own shell. Anchoring the pattern to the absolute script path (`bash
+/…/e2e/soak/churn.sh`) fixes both, because the issuing command line does not
+contain that.
+
+**Do not expect `kill -TERM` to stop it.** Before #835 the driver had a single
+`trap restore_shrink EXIT INT TERM`, and `restore_shrink` *returns* rather than
+exiting — so a TERM that reached the in-flight `sleep` ran the handler, the
+handler returned, and control fell straight through to **the next roll**. The
+signal sent to stop the driver made it fire early: an unscheduled
+`ROLLED aether-test/deployment/svc-1` at 23:10:32Z on 2026-09-19, with the
+driver still running afterwards. In the log that reads as "the tool ignored my
+signal", which sends you debugging the wrong thing — the tool did the opposite,
+and the two need different debugging. The traps are now split
+(`EXIT` / `INT`→130 / `TERM`→143) so TERM terminates, but `kill -9` remains the
+documented way to stop it: a TERM delivered to the driver's pid alone leaves its
+`sleep` child running, and bash defers the handler until that `sleep` returns —
+up to twelve minutes later.
+
+**Never edit `churn.sh` while a soak is running.** Bash reads a script
+incrementally, by byte offset, so rewriting the file under a running driver can
+drop it into the middle of a different statement. Patches to this script land
+between runs only.
 
 ## Proxy RSS sampling (#628)
 

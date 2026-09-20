@@ -93,6 +93,7 @@ symbol upload is keyed by (#653).
 | `bazel/build_config/` | the compiled-in Envoy extension set, as a tiny local module (`envoy_build_config`) |
 | `bazel/platforms/BUILD.bazel` | BuildBuddy RBE exec platforms (amd64 / arm64), derived from Envoy's |
 | `bazel/get_workspace_status` | `--workspace_status_command` stamping script |
+| `bazel/image_metadata.sh` | emits the image's OCI provenance labels (aether commit + the Envoy pin) |
 | `BUILD.bazel` | custom `envoy_cc_binary` + `oci_image`/`oci_push`/`oci_load` + `image_test` |
 | `integration/` | `build_id_test`, `symtab_test`, container-structure-test config |
 | `source/extensions/filters/http/aether_stats/` | native C++ `aether_stats` filter (compiled into `//:envoy`) |
@@ -111,6 +112,88 @@ symbol upload is keyed by (#653).
   `@envoy` is a registry module, so a patch needs a
   `single_version_override(patches = [...])` in `MODULE.bazel`. Prefer
   upstreaming.
+
+## Which Envoy is this? (`envoy_server_version`, and the image labels)
+
+### What `envoy_server_version` actually reports
+
+**It reports the _aether_ commit the proxy image was built from. It says nothing
+about Envoy.** Do not try to match it against the pin — it will never agree, and
+the disagreement is not a bug (aether #837).
+
+You do not have to take that on inference. The pinned-Envoy target — today
+`//test/envoy_validate:envoy_bin`, via `//bazel/proxy_pin`; #841 factors it out,
+so `bazel query` for it if the label has moved — is the Envoy binary extracted
+from the **published** `aether-proxy` image at the digest
+`charts/aether/values.yaml` pins. You can ask it directly, locally, with no
+cluster:
+
+```console
+$ bazel build //test/envoy_validate:envoy_bin
+$ "$(bazel info output_base)/$(bazel cquery --output=files //test/envoy_validate:envoy_bin)" --version
+envoy  version: cff8beb87eb685a44e00cf70c1a534695039da1b/1.40.0-dev/Clean/RELEASE/BoringSSL
+```
+
+`cff8beb87eb685a44e00cf70c1a534695039da1b` is an **aether** commit — it is that
+image's own `tag:` in `values.yaml`. The Envoy part of the string is just
+`1.40.0-dev`, with no Envoy revision in it anywhere. So for that image the gauge
+is `0xcff8be`; a proxy reporting something else is simply an older image.
+
+The chain that produces it, end to end:
+
+1. `.bazelrc` sets `--workspace_status_command="bash bazel/get_workspace_status"`,
+   and that script runs `git rev-parse HEAD`. `proxy/` is a *nested* workspace
+   inside the aether git repository, so `BUILD_SCM_REVISION` is the **aether**
+   commit. Envoy is a bzlmod dependency here; nothing ever asks *its* git for a
+   revision.
+2. `envoy_cc_binary` defaults to `stamp = 1` (Envoy's `bazel/envoy_binary.bzl`),
+   which is `cc_binary`'s "always stamp, even under `--nostamp`". So the
+   `//source/common/version:version_linkstamp` linkstamp compiles that real sha
+   in even though no build here passes `--stamp`. (Verified: with a plain
+   `cc_binary`, `--nostamp` yields the redacted `BUILD_SCM_REVISION` of `"0"`;
+   with `stamp = 1` it yields the workspace-status value.)
+3. `VersionInfo::revision()` returns it, and Envoy's `server.cc` does
+   `atoull(revision().substr(0, 6), 16)` to set the `server.version` gauge.
+
+So the gauge is the **first six hex digits of the aether commit**. The reading
+that opened #837 decodes cleanly that way:
+
+```
+envoy_server_version = 3121738 = 0x2FA24A -> aether commit 2fa24a8
+  "test: drop duplicate integration targets ... (#772) (#788)"
+```
+
+That is a genuinely useful fact — it tells you which aether tree cut the proxy —
+but it is only 24 bits of it, and it is *not* the Envoy revision. `13144f`, the
+first six digits of the pinned `1.40.0-dev.20260904.13144fb.envoy`, is what you
+would be looking for and it is nowhere in the process.
+
+### Where the Envoy revision actually is: the image labels
+
+`//:image_metadata` (see `bazel/image_metadata.sh`) parses the pin out of the
+two files that define it and puts it on the image as both OCI **labels** (image
+config) and **annotations** (manifest):
+
+| key | value |
+|---|---|
+| `org.opencontainers.image.source` | `https://github.com/bpalermo/aether` — **overrides** the `GoogleContainerTools/distroless` value inherited from the base, which used to be the image's only annotation |
+| `org.opencontainers.image.revision` | the aether commit; the same sha the gauge reports the first six digits of |
+| `dev.aethermesh.envoy.module-version` | e.g. `1.40.0-dev.20260904.13144fb.envoy` |
+| `dev.aethermesh.envoy.revision` | e.g. `13144fb` — the upstream Envoy commit |
+| `dev.aethermesh.envoy.bazel-registry` | the `envoyproxy/bazel-registry` commit; the other half of the pin (see "Envoy version bumps") |
+
+To read them off a published image, without pulling it:
+
+```bash
+crane config ghcr.io/bpalermo/aether/aether-proxy@sha256:… | jq .config.Labels
+crane manifest ghcr.io/bpalermo/aether/aether-proxy@sha256:… | jq .annotations
+```
+
+None of this costs reproducibility: the labels are fixed strings, `created`
+stays unset (`1970-01-01T00:00:00Z`) and the history entries stay `bazel bu…`.
+The metadata genrule is tagged `no-cache` on purpose — `BUILD_SCM_REVISION` is a
+*volatile* workspace-status key, which Bazel deliberately does not invalidate
+on, so a cacheable action would re-stamp a stale commit.
 
 ## Envoy version bumps
 

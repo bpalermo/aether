@@ -6,7 +6,30 @@ load("@rules_img//img:load.bzl", "image_load")
 load("@rules_img//img:push.bzl", "image_push")
 load("//tools/buildid:defs.bzl", "content_build_id")
 
-def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None):
+# OCI provenance, on the config (labels) AND on the descriptors (annotations).
+#
+# #837: nothing we published carried any `org.opencontainers.image.*` of its
+# own. rules_img inherits `org.opencontainers.image.base.{name,digest}` from the
+# pulled base and nothing else, so a tool walking annotations for provenance
+# either found nothing or -- on the rules_oci proxy image, whose distroless/cc
+# base does carry one -- found `org.opencontainers.image.source` pointing at
+# GoogleContainerTools/distroless. A confidently wrong answer, which is worse
+# than an absent one. Setting `source` explicitly OVERRIDES that inherited value.
+#
+# `revision` is a fixed string, not a clock: it does not touch the zero
+# timestamps or the `bazel bu…` history entries, which stay exactly as they are.
+IMAGE_SOURCE_URL = "https://github.com/bpalermo/aether"
+
+# `{{.STABLE_GIT_COMMIT}}` is a Go template expanded by rules_img from the
+# workspace status (bazel/workspace_status.sh). STABLE_, not the pre-existing
+# volatile GIT_COMMIT, so the expansion is part of the action's cache key --
+# see the comment on that key in workspace_status.sh.
+_PROVENANCE = {
+    "org.opencontainers.image.source": IMAGE_SOURCE_URL,
+    "org.opencontainers.image.revision": "{{.STABLE_GIT_COMMIT}}",
+}
+
+def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "@distroless_static", container_test_configs = ["testdata/container_test.yaml"], tars_layer = None, extra_labels = {}):
     """
     Creates a containerized binary from Go sources.
 
@@ -24,8 +47,12 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
         registry: image registry
         base: base image
         tars: additional image layers
+        extra_labels: image-specific OCI config labels merged on top of the
+          shared provenance set (which callers cannot drop).
     """
     binary_name = binary[1:]
+    labels = dict(_PROVENANCE)
+    labels.update(extra_labels)
     entrypoint = "/{}".format(binary_name)
 
     image_binary = "{}_buildid_binary".format(name)
@@ -82,12 +109,25 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
             compress = "zstd",  # Use zstd compression (optional, uses global default otherwise)
         )
 
+    # `stamp = "force"` rather than the default "auto" (#837). "auto" defers to
+    # Bazel's --stamp, which only the publish workflow and the Makefile push
+    # targets pass; everywhere else the `{{.STABLE_GIT_COMMIT}}` placeholder
+    # would be baked in LITERALLY, so a `bazel run …:image_load` image would
+    # claim a revision of "{{.STABLE_GIT_COMMIT}}". "force" makes the label
+    # correct in every build configuration -- dev, PR CI and release alike --
+    # at the cost of the tiny ExpandTemplate action taking stable-status.txt as
+    # an input. volatile-status.txt (BUILD_TIMESTAMP) is also an input but is
+    # constant-metadata to Bazel, so it never invalidates anything: two builds
+    # at the same commit still produce a byte-identical image.
     image_manifest(
         name = "image_manifest",
         base = base,
         layers = [":binary_layer", ":additional_layer"] if image_tars_layer else [":binary_layer"],
         visibility = ["//visibility:private"],
         entrypoint = [entrypoint],
+        labels = labels,
+        annotations = _PROVENANCE,
+        stamp = "force",
     )
 
     image_index(
@@ -98,6 +138,11 @@ def go_multi_arch_image(name, binary, repository, registry = "ghcr.io", base = "
             "@rules_go//go/toolchain:linux_arm64",
         ],
         visibility = ["//visibility:private"],
+        # The index is the artifact the chart pins, so it carries the provenance
+        # too: a tool that reads only the top-level descriptor never has to walk
+        # into a per-platform manifest to answer "which commit is this?".
+        annotations = _PROVENANCE,
+        stamp = "force",
     )
 
     # image_load uses image_index so the platform transition builds the Go
