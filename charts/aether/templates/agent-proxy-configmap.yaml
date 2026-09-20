@@ -371,6 +371,29 @@ data:
             explicit_http_config:
               http2_protocol_options: {}
 {{- end }}
+      # The agent's xDS socket. The proxy opens TWO KINDS of gRPC stream on it:
+      #
+      #   1. ONE delta-ADS stream (dynamic_resources.ads_config above), carrying
+      #      LDS/CDS/EDS/RDS and every STATICALLY named SDS secret;
+      #   2. state-of-the-world SecretDiscoveryService streams — ONE PER SECRET
+      #      NAME — used only by the mesh clusters' per-connection certificate
+      #      selector, appearing lazily as each local identity first originates
+      #      traffic.
+      #
+      # The second kind is not a tidiness failure, it is load-bearing (issue
+      # #842). Envoy builds a separate secret provider for the selector
+      # (warm=false) from the one a static reference builds (warm=true), so one
+      # secret name gets two watches. Put both on the delta-ADS mux and Envoy's
+      # WatchMap deduplicates the interest, the second watch never sends a
+      # subscribe, the control plane never resends, and the upstream mTLS
+      # handshake PAUSES — no error, no stat, no transport failure reason, the
+      # request just hangs. That is the rev228 outage; docs/runbook.md "#842"
+      # has the full account. The agent serves SecretDiscoveryService on this
+      # same socket (common/xds/xds.go), so these streams need no new cluster.
+      #
+      # ⚠ max_concurrent_streams below does NOT cap them: on an upstream cluster
+      # it is what Envoy ADVERTISES for PEER-initiated streams. The limit on
+      # streams Envoy opens is the agent's own grpc.MaxConcurrentStreams(1000).
       - name: agent_xds
         type: STATIC
         load_assignment:

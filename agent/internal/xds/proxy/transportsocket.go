@@ -28,7 +28,90 @@ const (
 	// SourceIdentityCertMapperFilterStateKey object off the downstream-shared
 	// filter state and returns its string, or default_value when absent.
 	filterStateCertMapperName = "envoy.tls.upstream_certificate_mappers.filter_state_override"
+
+	// AgentXDSClusterName is the bootstrap-defined static cluster the node proxy
+	// reaches its agent on (the /run/aether/xds.sock pipe). It is the cluster
+	// dynamic_resources.ads_config already names; it MUST stay spelled the way
+	// charts/aether/templates/agent-proxy-configmap.yaml spells it.
+	//
+	// The on-demand certificate selector points at it through its OWN
+	// api_config_source rather than through `ads: {}` — see
+	// meshCertSelectorSDSSource, where the reason is the whole of issue #842's
+	// rev228 outage.
+	AgentXDSClusterName = "agent_xds"
 )
+
+// meshCertSelectorSDSSource is the config source the per-connection certificate
+// selector fetches client certificates over, and it is DELIBERATELY NOT the
+// shared ADS stream every other SDS reference on this proxy uses.
+//
+// # Why (issue #842, the rev228 outage)
+//
+// Envoy's SecretManagerImpl keys a secret provider on
+// `hash(ConfigSource) + "." + name + warm` (secret_manager_impl.h). The
+// on-demand selector always asks with warm=false (it must not hold its cluster
+// in warming); every statically named SDS reference asks with warm=true. So for
+// one secret name Envoy builds TWO independent SdsApi objects with TWO
+// independent watches.
+//
+// On a node proxy those two watches are not hypothetical. EVERY local pod's
+// SVID is already named statically by that pod's own inbound listener
+// (DownstreamTransportSocket), and the node SVID — the selector's default_value
+// AND its prefetch — is already named statically by every inboundready_<pod>
+// probe cluster. The selector is therefore always the SECOND subscriber.
+//
+// Put both watches on one DELTA_GRPC mux and the second one starves. Envoy's
+// delta WatchMap deduplicates subscription interest per (type_url, resource
+// name) across watches, so the second watch contributes nothing to
+// resource_names_subscribe; no request goes out; and a delta control plane —
+// correctly — sends only what changed, which is nothing. The second watch never
+// receives the resource. It burns its 15 s initial_fetch_timeout
+// (`sds.<name>.init_fetch_timeout`, the one stat that moved on the fleet) and
+// then does nothing else, because SdsApi::onConfigUpdateFailed only calls
+// init_target_.ready() — it does NOT notify the parked certificate-selection
+// callback.
+//
+// The result is the worst shape a mesh has: the upstream handshake is SUSPENDED,
+// not failed. No ssl_connection_error, no ssl_fail_verify_san, no
+// upstream_transport_failure_reason — the request hangs until the cluster's
+// connect_timeout or, sooner, until the downstream client gives up (DC).
+//
+// # Why a separate api_config_source fixes it
+//
+// A distinct ConfigSource gets its own gRPC mux with its own WatchMap, so the
+// selector's subscription can no longer be deduplicated against a static one.
+// It also changes `hash(ConfigSource)`, but that alone would NOT be enough: the
+// provider key would differ while the mux — and therefore the watch map that
+// does the deduplication — stayed shared. Adding an initial_fetch_timeout to
+// `ads: {}` to perturb the hash is NOT a fix. The stream has to be separate.
+//
+// SotW (ApiConfigSource_GRPC, what SDSConfigSourceFromCluster emits) rather than
+// DELTA_GRPC is chosen deliberately: Envoy's SotW GrpcMuxImpl::addWatch queues a
+// discovery request unconditionally and a SotW response carries every requested
+// resource, so the failure above is structurally impossible on this stream even
+// if some future reference does land on it.
+//
+// # What it costs, measured
+//
+// Envoy builds a mux PER non-ADS subscription, so this is not one extra stream
+// but ONE STREAM PER SECRET NAME the selector resolves — i.e. per identity
+// actually originating traffic on this node, appearing lazily on first use.
+// Observed directly in //test/mtlspool (one gRPC stream per name, each with its
+// own version/nonce sequence). Each carries exactly one resource, so the SotW
+// re-send on a secret version bump is one certificate, not the node's set.
+//
+// Nothing caps that below the agent's own server-side limit: the chart's
+// `max_concurrent_streams: 10` on agent_xds is what the proxy ADVERTISES to the
+// peer for peer-initiated streams, not a limit on streams Envoy opens. The
+// governing value is the agent's grpc.MaxConcurrentStreams(1000)
+// (common/xds/xds.go).
+//
+// The agent already serves SecretDiscoveryService on the same socket as ADS
+// (common/xds/xds.go registers both), so this needs no new listener, no new
+// bootstrap cluster and no chart change beyond a comment.
+func meshCertSelectorSDSSource() *corev3.ConfigSource {
+	return config.SDSConfigSourceFromCluster(AgentXDSClusterName)
+}
 
 // upstreamCertSelector builds the per-connection client-certificate selector
 // every mesh upstream socket carries since issue #842.
@@ -57,6 +140,10 @@ const (
 //
 // defaultSecretName is what a connection with NO filter state gets. Required
 // (min_len: 1) and deliberately the NODE identity — see meshUpstreamCertSelector.
+//
+// sdsSource MUST be a config source no statically named secret reference uses —
+// see meshCertSelectorSDSSource, which is the whole of the rev228 outage. Do not
+// "simplify" this back to config.XDSConfigSourceADS().
 //
 // The secret is fetched over sdsSource on first use; the cluster initializes
 // without waiting for it ("allowing the parent cluster or listener to accept
@@ -174,8 +261,9 @@ func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 // (ALPN h2, the SAN pin, the SNI, MaxSessionKeys 0) is byte-identical to
 // UpstreamTransportSocket.
 func MeshUpstreamTransportSocket(nodeSpiffeID string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
-	sds := config.XDSConfigSourceADS()
-	return upstreamTransportSocket("", validationContextName, sanURIs, sni, sds, upstreamCertSelector(nodeSpiffeID, sds))
+	return upstreamTransportSocket("", validationContextName, sanURIs, sni,
+		config.XDSConfigSourceADS(),
+		upstreamCertSelector(nodeSpiffeID, meshCertSelectorSDSSource()))
 }
 
 // UpstreamTCPTransportSocket creates a TLS transport socket for TCP-proxy upstream
@@ -193,8 +281,9 @@ func UpstreamTCPTransportSocket(tlsCertificateSecretName string, validationConte
 // floor: the same per-connection certificate selector, with no ALPN so the
 // destination inbound demuxes to its TCP floor default chain.
 func MeshUpstreamTCPTransportSocket(nodeSpiffeID string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
-	sds := config.XDSConfigSourceADS()
-	return upstreamTransportSocket("", validationContextName, sanURIs, sni, sds, upstreamCertSelector(nodeSpiffeID, sds), "")
+	return upstreamTransportSocket("", validationContextName, sanURIs, sni,
+		config.XDSConfigSourceADS(),
+		upstreamCertSelector(nodeSpiffeID, meshCertSelectorSDSSource()), "")
 }
 
 // EdgeUpstreamTransportSocket is UpstreamTransportSocket for the edge proxy: it

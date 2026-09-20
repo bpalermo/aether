@@ -181,7 +181,7 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	)
 	rewriteSDSToExplicitSource(inboundReady)
 
-	staticClusters := []*clusterv3.Cluster{xdsCluster(), passthrough, svcCluster, perSourceCluster, waypointCluster, ewIngress, authzSidecarCluster()}
+	staticClusters := []*clusterv3.Cluster{xdsCluster(), agentXDSCluster(), passthrough, svcCluster, perSourceCluster, waypointCluster, ewIngress, authzSidecarCluster()}
 	staticClusters = append(staticClusters, appClusters...)
 	staticClusters = append(staticClusters, healthCluster, inboundReady, accessLogCluster())
 
@@ -866,6 +866,23 @@ func accessLogCluster() *clusterv3.Cluster {
 			),
 		},
 	}
+}
+
+// agentXDSCluster is the chart's agent_xds cluster, present here because since
+// issue #842's fix the per-connection certificate selector names it in its own
+// api_config_source instead of riding `ads: {}`.
+//
+// It must exist for that reference to resolve: an api_config_source naming an
+// unknown cluster is a dangling reference, and the only reason it does not fail
+// `envoy --mode validate` today is that the on-demand SDS subscription is
+// created lazily on the main dispatcher, which validate mode never runs. The
+// bootstrap test asserts the reference resolves against these clusters, so the
+// gate does not depend on that accident.
+func agentXDSCluster() *clusterv3.Cluster {
+	c := xdsCluster()
+	c.Name = proxy.AgentXDSClusterName
+	c.LoadAssignment = pipeEndpoint(proxy.AgentXDSClusterName, xdsSockPath)
+	return c
 }
 
 func xdsCluster() *clusterv3.Cluster {

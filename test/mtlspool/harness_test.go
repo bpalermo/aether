@@ -380,26 +380,7 @@ func uriSAN(rawCerts [][]byte) string {
 func startSDS(t *testing.T, p *pki, identities []string) string {
 	t.Helper()
 
-	secrets := make([]types.Resource, 0, len(identities)+1)
-	for _, id := range identities {
-		certPath, keyPath := p.leaf(t, leafFileName(id), id, false)
-		secrets = append(secrets, &tlsv3.Secret{
-			Name: id, // the SPIFFE ID IS the secret name
-			Type: &tlsv3.Secret_TlsCertificate{TlsCertificate: &tlsv3.TlsCertificate{
-				CertificateChain: fileDataSource(certPath),
-				PrivateKey:       fileDataSource(keyPath),
-			}},
-		})
-	}
-	secrets = append(secrets, &tlsv3.Secret{
-		Name: validationContextName,
-		Type: &tlsv3.Secret_ValidationContext{ValidationContext: &tlsv3.CertificateValidationContext{
-			// SAN matchers stay INLINE in the upstream context (aether layers
-			// them over the SDS-rotated bundle via a combined validation
-			// context), so the SDS-served half carries only the trust anchor.
-			TrustedCa: fileDataSource(p.caPath),
-		}},
-	})
+	secrets := secretResources(t, p, identities)
 
 	snapshot, err := cachev3.NewSnapshot("1", map[resourcev3.Type][]types.Resource{
 		resourcev3.SecretType: secrets,
@@ -422,6 +403,36 @@ func startSDS(t *testing.T, p *pki, identities []string) string {
 	t.Cleanup(gs.Stop)
 
 	return ln.Addr().String()
+}
+
+// secretResources builds the xDS Secret resources a control plane serves for
+// this harness: one TLS certificate per identity, NAMED BY THAT IDENTITY'S
+// SPIFFE ID, plus the trust bundle. Shared by the standalone SDS server
+// (startSDS) and by the ADS control plane (ads_sds_test.go), so both deliver
+// byte-identical secrets and the only variable between them is the transport.
+func secretResources(t *testing.T, p *pki, identities []string) []types.Resource {
+	t.Helper()
+
+	secrets := make([]types.Resource, 0, len(identities)+1)
+	for _, id := range identities {
+		certPath, keyPath := p.leaf(t, leafFileName(id), id, false)
+		secrets = append(secrets, &tlsv3.Secret{
+			Name: id, // the SPIFFE ID IS the secret name
+			Type: &tlsv3.Secret_TlsCertificate{TlsCertificate: &tlsv3.TlsCertificate{
+				CertificateChain: fileDataSource(certPath),
+				PrivateKey:       fileDataSource(keyPath),
+			}},
+		})
+	}
+	return append(secrets, &tlsv3.Secret{
+		Name: validationContextName,
+		Type: &tlsv3.Secret_ValidationContext{ValidationContext: &tlsv3.CertificateValidationContext{
+			// SAN matchers stay INLINE in the upstream context (aether layers
+			// them over the SDS-rotated bundle via a combined validation
+			// context), so the SDS-served half carries only the trust anchor.
+			TrustedCa: fileDataSource(p.caPath),
+		}},
+	})
 }
 
 // leafFileName turns a SPIFFE ID into a filesystem-safe leaf name.
@@ -592,6 +603,18 @@ func downgradeToNonHashable(f *listenerv3.Filter) {
 func meshCluster(t *testing.T, destAddr string) *clusterv3.Cluster {
 	t.Helper()
 
+	cl := newMeshCluster(t, destAddr)
+	rewriteSDSToHarness(t, cl.GetTransportSocket())
+	return cl
+}
+
+// newMeshCluster is meshCluster WITHOUT the SDS rewrite: every config source is
+// still production's `ads: {}`. The ADS harness (ads_sds_test.go) uses it,
+// because repointing the selector at a bespoke api_config_source is precisely
+// the substitution that hid issue #842's production failure.
+func newMeshCluster(t *testing.T, destAddr string) *clusterv3.Cluster {
+	t.Helper()
+
 	cl := proxy.NewServiceCluster(meshClusterName, meshClusterName, meshClusterName, nil)
 
 	// EDS -> STATIC. Everything else about the cluster is production's.
@@ -618,7 +641,6 @@ func meshCluster(t *testing.T, destAddr string) *clusterv3.Cluster {
 	if cl.GetTransportSocket() == nil {
 		t.Fatal("InjectUpstreamMTLS produced no transport socket")
 	}
-	rewriteSDSToHarness(t, cl.GetTransportSocket())
 
 	return cl
 }
