@@ -171,6 +171,59 @@ func CaptureUDPListenerName(podName string) string {
 // clusters are plain EDS with no transport socket. This is a known limitation
 // of the UDP floor (proposal 018 Phase 3b).
 //
+// UnsupportedUDPRouteShapes reports the UDPRoute inputs that
+// GenerateUDPCaptureListener will silently discard, as human-readable reasons.
+// Empty means everything in udpRoutes is faithfully represented.
+//
+// It exists because the discard is otherwise invisible from both ends (#873):
+// the UDPRoute is accepted by the API, common/l4project resolves and weights its
+// backends correctly, and then the UDP path keeps ONE cluster and drops the
+// rest. There is no NACK, no warning and no stat, so the first symptom is
+// datagrams arriving somewhere unintended.
+//
+// It mirrors GenerateUDPCaptureListener's selection EXACTLY -- first non-empty
+// service over a sorted key list, then backends[0] -- so the two cannot drift
+// apart silently. Three shapes are unrepresentable today:
+//
+//  1. more than one backend on the chosen service: udp_proxy carries a single
+//     Cluster route specifier, so weights are discarded;
+//  2. a second UDPRoute-backed service on the same pod: there is one UDP
+//     listener per pod and it is already bound to the first;
+//  3. weight 0 on the chosen backend: for TCP and TLS that means DRAIN (#492),
+//     and UDP forwards to it anyway.
+//
+// This is a pure function by design: the proxy package builds config and does
+// not log. The caller decides what to do with the reasons.
+func UnsupportedUDPRouteShapes(udpRoutes map[string][]L4Backend) []string {
+	var chosenSvc, chosenCluster string
+	var reasons []string
+
+	for _, svc := range slices.Sorted(maps.Keys(udpRoutes)) {
+		backends := udpRoutes[svc]
+		if len(backends) == 0 {
+			continue
+		}
+		if chosenSvc == "" {
+			chosenSvc, chosenCluster = svc, backends[0].Cluster
+			if len(backends) > 1 {
+				reasons = append(reasons, fmt.Sprintf(
+					"service %q has %d backends but udp_proxy carries a single cluster: only %q is used and the backend weights are discarded",
+					svc, len(backends), chosenCluster))
+			}
+			if backends[0].Weight == 0 {
+				reasons = append(reasons, fmt.Sprintf(
+					"service %q backend %q has weight 0 (drain) but UDP forwards to it anyway: weight 0 is honoured for TCP and TLS, not UDP",
+					svc, chosenCluster))
+			}
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf(
+			"service %q is dropped entirely: the pod has ONE UDP capture listener and it is already bound to %q (service %q)",
+			svc, chosenCluster, chosenSvc))
+	}
+	return reasons
+}
+
 // Returns nil if udpRoutes is empty (no listener generated until there are routes).
 func GenerateUDPCaptureListener(podName, netns string, captureUDPPort uint32, udpRoutes map[string][]L4Backend) (*listenerv3.Listener, error) {
 	if podName == "" {
