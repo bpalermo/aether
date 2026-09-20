@@ -62,6 +62,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -73,6 +74,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const (
@@ -88,6 +90,13 @@ const (
 	// bounds is unbounded, so the number only has to be small compared with
 	// "never".
 	firstRequestBudget = 15 * time.Second
+
+	// rotationBudget is how long a re-issued SVID may take to reach the data
+	// plane after the control plane publishes it. SPIRE rotates on a ~4h TTL, so
+	// nothing in production depends on this being fast -- it depends on it
+	// HAPPENING. The bound exists because "eventually" is not a property a test
+	// can fail on, and because the failure mode here is a stall.
+	rotationBudget = 20 * time.Second
 )
 
 // ---------------------------------------------------------------------------
@@ -100,6 +109,37 @@ const (
 // socket, and agent/internal/xds/cache builds its cache with ads=false too).
 type adsControlPlane struct {
 	socketPath string
+	cache      cachev3.SnapshotCache
+	// resources is the snapshot currently served, kept so a rotation can
+	// replace ONE resource type and leave the rest alone.
+	resources map[resourcev3.Type][]types.Resource
+}
+
+// rotateSecrets republishes the snapshot with a new generation of secrets and
+// everything else unchanged, under a new version — which is exactly the shape
+// of an SVID rotation at the agent (SnapshotCache.SetSecrets replaces the whole
+// secret map and regenerates the snapshot; clusters and listeners do not move).
+//
+// Replacing the whole snapshot instead would silently withdraw the listeners
+// over LDS and the test would fail with "connection refused" rather than
+// anything to do with certificates.
+func (cp *adsControlPlane) rotateSecrets(t *testing.T, version string, secrets []types.Resource) {
+	t.Helper()
+
+	next := make(map[resourcev3.Type][]types.Resource, len(cp.resources))
+	for typ, res := range cp.resources {
+		next[typ] = res
+	}
+	next[resourcev3.SecretType] = secrets
+
+	snapshot, err := cachev3.NewSnapshot(version, next)
+	if err != nil {
+		t.Fatalf("build rotated snapshot: %v", err)
+	}
+	if err := cp.cache.SetSnapshot(context.Background(), envoyNodeID, snapshot); err != nil {
+		t.Fatalf("set rotated snapshot: %v", err)
+	}
+	cp.resources = next
 }
 
 // startADSControlPlane serves clusters, listeners and secrets on ONE stream.
@@ -148,7 +188,7 @@ func startADSControlPlane(t *testing.T, resources map[resourcev3.Type][]types.Re
 	go func() { _ = gs.Serve(ln) }()
 	t.Cleanup(gs.Stop)
 
-	return &adsControlPlane{socketPath: socketPath}
+	return &adsControlPlane{socketPath: socketPath, cache: cache, resources: resources}
 }
 
 // xdsTrace logs what the proxy asks for and what the control plane answers
@@ -237,12 +277,34 @@ func pipeEndpoint(clusterName, socketPath string) *endpointv3.ClusterLoadAssignm
 type adsProxyHandle struct {
 	*proxyHandle
 	adminAddr string
+	cp        *adsControlPlane
 }
 
 // startEnvoyOverADS runs the pinned proxy against a production-shaped bootstrap:
 // nothing but the ADS cluster in static_resources, everything else over one
 // delta-ADS stream, and NO SDS config source rewritten.
-func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, staticallyReferenced ...string) *adsProxyHandle {
+// adsOptions are the axes the ADS harness varies. They are deliberately named
+// after the PRODUCTION facts they model, not after the Envoy fields they set.
+type adsOptions struct {
+	// staticallyReferenced names identities whose SVID is ALSO named, up front,
+	// by an inbound listener on the same proxy -- which on a real node is every
+	// local pod's own identity plus the node SVID. It is the condition that
+	// makes the certificate selector the SECOND subscriber for that name.
+	staticallyReferenced []string
+
+	// freshUpstreamConnectionPerRequest sets max_requests_per_connection: 1 on
+	// the mesh cluster, so every request opens a NEW upstream connection and
+	// therefore re-runs certificate selection.
+	//
+	// It is how the rotation test observes a rotation deterministically instead
+	// of waiting for an idle pooled connection to be reclaimed. It models
+	// nothing about production except the moment production reaches anyway: the
+	// next connection after the secret changed. Existing connections keeping
+	// their old certificate is correct and is not what is under test here.
+	freshUpstreamConnectionPerRequest bool
+}
+
+func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, opts adsOptions) *adsProxyHandle {
 	t.Helper()
 
 	bin, err := envoybin.Path()
@@ -260,12 +322,17 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, staticallyReferenc
 		sourceListener("source_a", spiffeSourceA, portA, true),
 		sourceListener("source_b", spiffeSourceB, portB, true),
 	}
-	for i, id := range staticallyReferenced {
+	for i, id := range opts.staticallyReferenced {
 		listeners = append(listeners, inboundListener(t, fmt.Sprintf("inbound_%d", i), id, freePort(t)))
 	}
 
+	mesh := newMeshCluster(t, destAddr)
+	if opts.freshUpstreamConnectionPerRequest {
+		setMaxRequestsPerConnection(t, mesh, 1)
+	}
+
 	cp := startADSControlPlane(t, map[resourcev3.Type][]types.Resource{
-		resourcev3.ClusterType:  {newMeshCluster(t, destAddr)},
+		resourcev3.ClusterType:  {mesh},
 		resourcev3.ListenerType: listeners,
 		resourcev3.SecretType:   secretResources(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode}),
 	})
@@ -319,11 +386,34 @@ func startEnvoyOverADS(t *testing.T, p *pki, destAddr string, staticallyReferenc
 			addrB: fmt.Sprintf("127.0.0.1:%d", portB),
 		},
 		adminAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
+		cp:        cp,
 	}
 	// The listeners arrive over LDS, so this also proves the stream is up.
 	waitListening(t, h.addrA)
 	waitListening(t, h.addrB)
 	return h
+}
+
+// setMaxRequestsPerConnection sets the cluster's upstream
+// max_requests_per_connection, inside typed_extension_protocol_options where
+// the v3 API wants it -- the same-named field directly on Cluster is deprecated
+// and recent Envoy rejects deprecated fields by default.
+func setMaxRequestsPerConnection(t *testing.T, cl *clusterv3.Cluster, n uint32) {
+	t.Helper()
+
+	any, ok := cl.GetTypedExtensionProtocolOptions()[config.UpstreamHTTPProtocolOptionsKey]
+	if !ok {
+		t.Fatalf("cluster %q has no upstream HTTP protocol options to amend", cl.GetName())
+	}
+	var opts httpv3.HttpProtocolOptions
+	if err := any.UnmarshalTo(&opts); err != nil {
+		t.Fatalf("unmarshal upstream HTTP protocol options: %v", err)
+	}
+	if opts.GetCommonHttpProtocolOptions() == nil {
+		opts.CommonHttpProtocolOptions = &corev3.HttpProtocolOptions{}
+	}
+	opts.CommonHttpProtocolOptions.MaxRequestsPerConnection = wrapperspb.UInt32(n)
+	cl.TypedExtensionProtocolOptions[config.UpstreamHTTPProtocolOptionsKey] = config.TypedConfig(&opts)
 }
 
 // stats returns the admin /stats lines whose name contains substr.
@@ -376,7 +466,7 @@ func TestUpstreamHandshakeCompletesWithADSDeliveredSecrets(t *testing.T) {
 
 	p := newPKI(t)
 	dest := startDestination(t, p)
-	h := startEnvoyOverADS(t, p, dest.addr)
+	h := startEnvoyOverADS(t, p, dest.addr, adsOptions{})
 
 	obs, elapsed := timedCall(t, "source-a", h.addrA)
 
@@ -410,7 +500,7 @@ func TestSecondIdentityAlsoResolvesOverADS(t *testing.T) {
 
 	p := newPKI(t)
 	dest := startDestination(t, p)
-	h := startEnvoyOverADS(t, p, dest.addr)
+	h := startEnvoyOverADS(t, p, dest.addr, adsOptions{})
 
 	a, elapsedA := timedCall(t, "source-a", h.addrA)
 	b, elapsedB := timedCall(t, "source-b", h.addrB)
@@ -466,6 +556,7 @@ func timedCall(t *testing.T, name, addr string) (observation, time.Duration) {
 		_, _ = fmt.Sscanf(resp.Header.Get("x-aether-conn-id"), "%d", &id)
 		done <- result{obs: observation{
 			peerURISAN: resp.Header.Get("x-aether-peer-uri-san"),
+			peerSerial: resp.Header.Get("x-aether-peer-serial"),
 			connID:     id,
 		}}
 	}()
@@ -568,7 +659,9 @@ func TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced(t *testing.T
 	// inboundready_<pod> probe clusters name it, and it is ALSO the selector's
 	// prefetch_secret_names entry, so the default certificate is exposed to the
 	// same double reference as every workload identity.
-	h := startEnvoyOverADS(t, p, dest.addr, spiffeSourceA, spiffeSourceB, spiffeNode)
+	h := startEnvoyOverADS(t, p, dest.addr, adsOptions{
+		staticallyReferenced: []string{spiffeSourceA, spiffeSourceB, spiffeNode},
+	})
 
 	obs, elapsed := timedCall(t, "source-a", h.addrA)
 	t.Logf("first request completed in %s: destination verified %s", elapsed, obs.peerURISAN)
@@ -584,4 +677,112 @@ func TestOnDemandCertificateResolvesWhenAlreadyStaticallyReferenced(t *testing.T
 		"the destination must verify source-a's own certificate")
 	require.NotEqual(t, "0", st["cluster."+meshClusterName+".on_demand_secret.cert_updated"],
 		"cert_updated never moved: the selector requested a secret and none was ever applied")
+}
+
+// TestRotatedSVIDIsPickedUpOverTheSelectorStream closes the gap the fix for
+// #842 would otherwise have opened, and it is the reason this PR is not a
+// one-line change.
+//
+// Moving the certificate selector off `ads: {}` onto its own SotW
+// SecretDiscoveryService stream fixes the cold fetch. It says nothing about the
+// SECOND thing that stream has to do: deliver a NEW VERSION of a secret it has
+// already resolved. SPIRE rotates SVIDs on roughly a 4 h TTL, so an 8 h soak
+// crosses about two rotations while a 60-75 minute deploy validation crosses
+// none. If rotation were broken here, the first thing to notice would be a soak
+// four hours in — and because this subsystem fails by PAUSING, it would present
+// as the soak going quiet rather than as an error.
+//
+// What is asserted:
+//
+//   - the destination eventually verifies a DIFFERENT certificate for the same
+//     SPIFFE ID (the serial changes; the SAN cannot, that is what a rotation is);
+//   - it happens within rotationBudget, not merely "eventually";
+//   - EVERY request throughout succeeds. A rotation that resolved correctly but
+//     stalled a request in the middle would still be a data-plane outage, and
+//     with this failure mode a stall is what it would look like.
+//
+// The certificate is also referenced statically, as in the reproduction above,
+// because that is the shape of a real node and rotation has to work in it.
+func TestRotatedSVIDIsPickedUpOverTheSelectorStream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a real Envoy; skipped under -test.short")
+	}
+
+	p := newPKI(t)
+	dest := startDestination(t, p)
+	identities := []string{spiffeSourceA, spiffeSourceB, spiffeNode}
+	h := startEnvoyOverADS(t, p, dest.addr, adsOptions{
+		staticallyReferenced: identities,
+		// Every request on a new upstream connection, so "has the selector
+		// picked up the new certificate" is answered by the next request rather
+		// than by whenever a pooled connection happens to be reclaimed. A
+		// pooled connection legitimately keeps the certificate it handshook
+		// with; that is not what is under test.
+		freshUpstreamConnectionPerRequest: true,
+	})
+
+	before, _ := timedCall(t, "source-a", h.addrA)
+	require.Equal(t, spiffeSourceA, before.peerURISAN)
+	require.NotEqual(t, "-", before.peerSerial, "the destination must report the peer's certificate serial")
+	t.Logf("pre-rotation:  SAN=%s serial=%s", before.peerURISAN, before.peerSerial)
+
+	updatedBefore := h.certUpdated(t)
+
+	// Re-issue every identity and publish under a new snapshot version, which is
+	// what the agent's SPIRE bridge does on an SVID rotation.
+	h.cp.rotateSecrets(t, "2", secretResourcesGen(t, p, identities, 2))
+	t.Log("rotated: generation 2 of every SVID published at snapshot version 2")
+
+	deadline := time.Now().Add(rotationBudget)
+	var after observation
+	var attempts int
+	for time.Now().Before(deadline) {
+		attempts++
+		// timedCall fails the test on ANY non-completion, so a rotation that
+		// stalls the data plane is caught here rather than being retried away.
+		after, _ = timedCall(t, "source-a", h.addrA)
+		require.Equal(t, spiffeSourceA, after.peerURISAN,
+			"the identity must not change across a rotation, only the certificate")
+		if after.peerSerial != before.peerSerial {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	t.Logf("post-rotation: SAN=%s serial=%s after %d request(s) in %s",
+		after.peerURISAN, after.peerSerial, attempts, rotationBudget-time.Until(deadline))
+
+	require.NotEqualf(t, before.peerSerial, after.peerSerial,
+		"the selector never picked up the rotated SVID within %s: the destination still verifies "+
+			"certificate serial %s. On its own stream a re-resolved secret must be pushed to the "+
+			"already-open watch; if it is not, every proxy keeps a frozen certificate until it "+
+			"expires and the mesh fails CLOSED some hours after a deploy nobody will connect it to",
+		rotationBudget, before.peerSerial)
+
+	// cert_updated is the selector's only success signal, and a rotation is
+	// exactly a second success for a name it already had. Reading it as a
+	// positive obligation is what distinguishes "the new certificate was
+	// applied" from "nothing happened and the old one still works".
+	updatedAfter := h.certUpdated(t)
+	require.Greaterf(t, updatedAfter, updatedBefore,
+		"cert_updated did not move across the rotation (%d -> %d): the new secret was never applied",
+		updatedBefore, updatedAfter)
+	t.Logf("cert_updated: %d -> %d across the rotation", updatedBefore, updatedAfter)
+}
+
+// certUpdated reads the mesh cluster's on_demand_secret.cert_updated counter.
+// Absent means zero — Envoy does not render a counter it has never touched,
+// which is precisely how the rev228 outage hid.
+func (h *adsProxyHandle) certUpdated(t *testing.T) int {
+	t.Helper()
+
+	raw, ok := h.stats(t, "on_demand_secret")["cluster."+meshClusterName+".on_demand_secret.cert_updated"]
+	if !ok {
+		return 0
+	}
+	var n int
+	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil {
+		t.Fatalf("parse cert_updated %q: %v", raw, err)
+	}
+	return n
 }

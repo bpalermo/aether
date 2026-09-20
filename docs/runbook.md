@@ -1807,6 +1807,28 @@ the fix.
 climbs → `sds.<name>.init_fetch_timeout` → `/config_dump?resource=dynamic_warming_secrets`
 (the starved names sit there with `version_info: "uninitialized"`).
 
+⚠ **`cert_requested` and `cert_active` cannot be compared across a hot restart.**
+Two live Envoy epochs both export; when the parent's series goes away the summed
+GAUGE (`cert_active`) drops to the child's alone while the COUNTER
+(`cert_requested`) keeps the merged total, because StatMerger transfers gauges
+absolute and counters as deltas. On rev228 that produced a w05 reading of
+`requested=55, active=28` that looked like 27 secret removals and was not.
+Check `envoy_server_live` and `envoy_server_hot_restart_epoch` before reading
+anything into the pair.
+
+**Rotation.** An SVID rotation re-resolves a secret the selector already holds,
+and it must arrive on the selector's own stream. New upstream connections then
+present the new certificate; connections already established keep the one they
+handshook with, which is correct. SPIRE rotates on a ~4 h TTL, so a 60–75 minute
+deploy validation crosses no rotation while an 8 h soak crosses about two — i.e.
+a rotation defect would first appear as a soak going quiet several hours in,
+with no error anywhere. `//test/mtlspool`'s
+`TestRotatedSVIDIsPickedUpOverTheSelectorStream` is the build-time gate for it:
+it republishes every SVID under a new snapshot version and requires the
+destination to verify a different certificate SERIAL for the same SPIFFE ID
+within a bound, with `cert_updated` moving and every request completing
+throughout.
+
 #### THE ALERT THIS BREAKS — cross-repo
 
 `AetherClusterIdentityNoMatch` (k8s-talos-main, GitOps #109) queries

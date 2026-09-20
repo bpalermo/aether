@@ -232,6 +232,9 @@ func writeFile(t *testing.T, path string, data []byte) {
 // Envoy hop from the harness without changing what is being measured.
 type observation struct {
 	peerURISAN string
+	// peerSerial identifies WHICH certificate for that identity -- the
+	// discriminator a rotation needs, since the SPIFFE ID does not change.
+	peerSerial string
 	connID     uint64
 }
 
@@ -245,6 +248,12 @@ type destination struct {
 type connRecord struct {
 	id  uint64
 	san string
+	// serial is the peer leaf's certificate serial number. The SAN is stable
+	// across a rotation -- a rotated SVID carries the SAME SPIFFE ID -- so the
+	// serial is the only thing that distinguishes "the selector is still using
+	// the certificate it resolved an hour ago" from "the selector picked up the
+	// new one". Every leaf this PKI issues gets a distinct serial.
+	serial string
 }
 
 // peerRegistry maps a client's remote address to what that connection proved.
@@ -262,10 +271,10 @@ type peerRegistry struct {
 	records map[string]connRecord
 }
 
-func (r *peerRegistry) put(remote, san string) {
+func (r *peerRegistry) put(remote, san, serial string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.records[remote] = connRecord{id: r.seq.Add(1), san: san}
+	r.records[remote] = connRecord{id: r.seq.Add(1), san: san, serial: serial}
 }
 
 func (r *peerRegistry) get(remote string) connRecord {
@@ -316,7 +325,8 @@ func startDestination(t *testing.T, p *pki) *destination {
 				remote := hello.Conn.RemoteAddr().String()
 				cfg := baseTLS()
 				cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-					reg.put(remote, uriSAN(rawCerts))
+					san, serial := leafFacts(rawCerts)
+					reg.put(remote, san, serial)
 					return nil
 				}
 				return cfg, nil
@@ -329,6 +339,7 @@ func startDestination(t *testing.T, p *pki) *destination {
 				san = "-"
 			}
 			w.Header().Set("x-aether-peer-uri-san", san)
+			w.Header().Set("x-aether-peer-serial", rec.serial)
 			w.Header().Set("x-aether-conn-id", fmt.Sprint(rec.id))
 			w.WriteHeader(http.StatusOK)
 		}),
@@ -343,17 +354,27 @@ func startDestination(t *testing.T, p *pki) *destination {
 	return &destination{addr: ln.Addr().String(), srv: srv}
 }
 
-// uriSAN returns the first URI SAN of the leaf client certificate, or "-".
-// A SPIFFE SVID carries exactly one.
-func uriSAN(rawCerts [][]byte) string {
+// leafFacts returns the first URI SAN of the leaf client certificate and its
+// serial number, or "-" for either. A SPIFFE SVID carries exactly one URI SAN.
+//
+// Both are read from the certificate the destination VERIFIED, not from
+// anything the client asserted.
+func leafFacts(rawCerts [][]byte) (san, serial string) {
 	if len(rawCerts) == 0 {
-		return "-"
+		return "-", "-"
 	}
 	leaf, err := x509.ParseCertificate(rawCerts[0])
-	if err != nil || len(leaf.URIs) == 0 {
-		return "-"
+	if err != nil {
+		return "-", "-"
 	}
-	return leaf.URIs[0].String()
+	san, serial = "-", "-"
+	if len(leaf.URIs) > 0 {
+		san = leaf.URIs[0].String()
+	}
+	if leaf.SerialNumber != nil {
+		serial = leaf.SerialNumber.String()
+	}
+	return san, serial
 }
 
 // ---------------------------------------------------------------------------
@@ -411,11 +432,23 @@ func startSDS(t *testing.T, p *pki, identities []string) string {
 // (startSDS) and by the ADS control plane (ads_sds_test.go), so both deliver
 // byte-identical secrets and the only variable between them is the transport.
 func secretResources(t *testing.T, p *pki, identities []string) []types.Resource {
+	return secretResourcesGen(t, p, identities, 1)
+}
+
+// secretResourcesGen is secretResources with a GENERATION: every identity is
+// re-issued as a fresh certificate, under the same SPIFFE ID and therefore the
+// same secret name, but with a new serial and its own files on disk.
+//
+// That is what an SVID rotation is. The distinct file paths matter: the secrets
+// are delivered as file data sources, so re-issuing over the same path would
+// mutate what the PREVIOUS generation's resource points at and the test would
+// pass without anything having been delivered.
+func secretResourcesGen(t *testing.T, p *pki, identities []string, gen int) []types.Resource {
 	t.Helper()
 
 	secrets := make([]types.Resource, 0, len(identities)+1)
 	for _, id := range identities {
-		certPath, keyPath := p.leaf(t, leafFileName(id), id, false)
+		certPath, keyPath := p.leaf(t, fmt.Sprintf("%s-g%d", leafFileName(id), gen), id, false)
 		secrets = append(secrets, &tlsv3.Secret{
 			Name: id, // the SPIFFE ID IS the secret name
 			Type: &tlsv3.Secret_TlsCertificate{TlsCertificate: &tlsv3.TlsCertificate{
@@ -841,6 +874,7 @@ func (c *sourceClient) call(t *testing.T) observation {
 	_, _ = fmt.Sscanf(resp.Header.Get("x-aether-conn-id"), "%d", &id)
 	return observation{
 		peerURISAN: resp.Header.Get("x-aether-peer-uri-san"),
+		peerSerial: resp.Header.Get("x-aether-peer-serial"),
 		connID:     id,
 	}
 }
