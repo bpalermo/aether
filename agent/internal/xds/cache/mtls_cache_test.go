@@ -274,3 +274,54 @@ func TestCachedMTLSClusterInvalidatedOnSANNamespaceChange(t *testing.T) {
 	assert.Equal(t, []string{"spiffe://aether.internal/ns/prod/sa/echo"},
 		pinnedSANs(t, snapshotEchoCluster(t, c, "node-1")))
 }
+
+// TestNodeProxyPerSourceClustersPoolPerDownstreamConnection is the regression
+// guard for issue #831.
+//
+// The source workload's SPIFFE ID reaches the cluster through filter state set
+// with set_filter_state's default FactoryKey "envoy.string", which builds a
+// Router::StringAccessorImpl. That type is NOT Envoy::Hashable, and
+// CommonUpstreamTransportSocketFactory::hashKey folds a downstream shared
+// filter-state object into the upstream connection-pool hash ONLY for Hashable
+// objects. The identity that selects the client certificate therefore
+// contributes ZERO BYTES to the pool key.
+//
+// What keeps that from being a workload-to-workload authorization hole is
+// connection_pool_per_downstream_connection, which mixes the downstream
+// connection id into the hash (cluster_manager_impl.cc, in both the HTTP and
+// TCP pool paths) and so gives each source pod its own pool. Without it, two
+// pods with different ServiceAccounts share one upstream HTTP/2 connection and
+// the destination verifies — and stamps into XFCC — whichever certificate
+// created it. Demonstrated end to end against a real Envoy in //test/mtlspool.
+//
+// So on the node proxy the flag is SECURITY configuration, not a throughput
+// knob: any cluster carrying a per-source transport_socket_matcher must set it.
+// (The edge sets it false, correctly — one identity cannot leak into itself.)
+func TestNodeProxyPerSourceClustersPoolPerDownstreamConnection(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+	ns := "default"
+
+	require.NoError(t, c.AddPod(ctx, echoTestPod(), "aether.internal"))
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", echoRegistry(&ns)))
+
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+
+	checked := 0
+	for name, res := range snap.GetResources(resourcev3.ClusterType) {
+		cl, ok := res.(*clusterv3.Cluster)
+		if !ok || cl.GetTransportSocketMatcher() == nil {
+			continue
+		}
+		checked++
+		assert.Truef(t, cl.GetConnectionPoolPerDownstreamConnection(),
+			"cluster %q selects a client certificate per source identity but shares "+
+				"upstream pools across downstream connections: the source identity is "+
+				"not in the pool key (non-Hashable envoy.string filter state), so a "+
+				"pooled connection would carry another workload's certificate (#831)",
+			name)
+	}
+	require.NotZero(t, checked, "no per-source cluster in the snapshot: the guard checked nothing")
+}

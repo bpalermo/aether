@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+# Arch-appropriate Envoy binary, selected at analysis time.
+#
+# This is the binary the mesh actually deploys, not a stock Envoy release:
+# //bazel/proxy_pin:extensions.bzl extracts /usr/local/bin/envoy from the
+# aether-proxy image at the digest //charts/aether:values.yaml pins. The custom
+# proxy compiles most upstream extensions out, so exercising stock Envoy would
+# accept configs the real proxy NACKs (#709). Moving the chart pin moves every
+# gate that depends on this; there is no version to keep in sync here.
+alias(
+    name = "envoy_bin",
+    actual = select({
+        "@platforms//cpu:x86_64": "@pinned_envoy_linux_amd64//:envoy",
+        "@platforms//cpu:aarch64": "@pinned_envoy_linux_arm64//:envoy",
+    }),
+    visibility = ["//test:__subpackages__"],
+)
+
+go_library(
+    name = "envoybin",
+    srcs = ["envoybin.go"],
+    importpath = "aethermesh.dev/test/envoybin",
+    visibility = ["//test:__subpackages__"],
+)

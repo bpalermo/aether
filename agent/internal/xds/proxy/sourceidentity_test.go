@@ -64,7 +64,7 @@ func requireBothSourceKeys(t *testing.T, chain *listenerv3.FilterChain, what str
 	require.Lenf(t, got, 2, "%s must carry exactly the two source filter-state entries", what)
 	assert.Equalf(t, networkNamespaceFilterStateKey, got[0][0], "%s: netns key must stay first", what)
 	assert.Equalf(t, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%", got[0][1], "%s: netns value unchanged", what)
-	assert.Equalf(t, sourceIdentityFilterStateKey, got[1][0], "%s: identity key must follow the netns key", what)
+	assert.Equalf(t, SourceIdentityFilterStateKey, got[1][0], "%s: identity key must follow the netns key", what)
 	assert.Equalf(t, testSourceIdentity, got[1][1], "%s: identity must be the pod's SPIFFE ID, as a literal", what)
 }
 
@@ -172,7 +172,7 @@ func TestSourceFilterStatesOrderIsFixed(t *testing.T) {
 		got := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), testSourceIdentity, testTrustDomain, false, nil))
 		require.Len(t, got, 2)
 		require.Equal(t, networkNamespaceFilterStateKey, got[0][0])
-		require.Equal(t, sourceIdentityFilterStateKey, got[1][0])
+		require.Equal(t, SourceIdentityFilterStateKey, got[1][0])
 	}
 }
 
@@ -201,8 +201,8 @@ func TestClusterMatcherKeyedOnSourceIdentity(t *testing.T) {
 
 	var fsi tsinputsv3.FilterStateInput
 	require.NoError(t, input.GetTypedConfig().UnmarshalTo(&fsi))
-	assert.Equal(t, sourceIdentityFilterStateKey, fsi.GetKey(),
-		"release two reads aether.source.spiffe_id; see sourceIdentityFilterStateKey")
+	assert.Equal(t, SourceIdentityFilterStateKey, fsi.GetKey(),
+		"release two reads aether.source.spiffe_id; see SourceIdentityFilterStateKey")
 	assert.NotEqual(t, networkNamespaceFilterStateKey, fsi.GetKey())
 
 	entries := m.GetMatcherTree().GetExactMatchMap().GetMap()

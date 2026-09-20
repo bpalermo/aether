@@ -120,6 +120,37 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			// line renders "-". Verified peer identity on the inbound side is
 			// #824, and is a different mechanism (%DOWNSTREAM_PEER_URI_SAN%).
 			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
+			// The source identity the control plane CLAIMED for this hop: the
+			// literal SPIFFE ID buildSourceIdentityFilterState stamped on this
+			// filter chain, which is also the exact_match_map key the cluster's
+			// transport_socket_matcher uses to pick the client certificate
+			// (#815 release two). Source-side only — the key is stamped by the
+			// mesh-ORIGINATING chains, so a destination-reporter line renders "-".
+			//
+			// Its value is in pairing it with the verified fields, because the
+			// two answer different questions and a mismatch is a defect:
+			//
+			//   - source line: source_spiffe_id is what this proxy MEANT to
+			//     present. Its counterpart is the destination line's
+			//     downstream_peer_uri_san (#824), which is what the destination
+			//     actually VERIFIED. Join the two on x_request_id; they must be
+			//     equal. They diverge if the matcher fell to on_no_match (the
+			//     node/agent SVID appears at the destination, #686/#825) or if
+			//     an upstream connection carrying another source's certificate
+			//     were reused for this stream (issue #831 — prevented today by
+			//     connection_pool_per_downstream_connection on every mesh
+			//     cluster the node proxy builds, and demonstrated in
+			//     //test/mtlspool).
+			//   - "-" here on a source-reporter line means the chain stamped no
+			//     identity at all, i.e. the trust domain was still unknown when
+			//     the listener was generated (#819).
+			//
+			// :PLAIN is MANDATORY. %FILTER_STATE(key)% defaults to TYPED, and
+			// Router::StringAccessorImpl does not implement serializeAsProto, so
+			// the TYPED form renders "-" on every line — silently, since a
+			// never-populated field is indistinguishable from an absent one. The
+			// same trap is documented at buildNetworkNamespaceFilterState.
+			kv("source_spiffe_id", "%FILTER_STATE("+SourceIdentityFilterStateKey+":PLAIN)%"),
 			// RBAC AUDIT shadow decision — populated when the INBOUND listener carries an
 			// AUDIT-mode RBAC filter (scope INBOUND, proposal 026 M4). Envoy prepends the
 			// shadow_rules_stat_prefix ("aether_audit_") to both the stat counter names AND

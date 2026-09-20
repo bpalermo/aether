@@ -1,0 +1,48 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# Runs a REAL aether-proxy Envoy with two source identities on one node and
+# checks that the destination verifies the right client certificate on every
+# request (issue #831).
+#
+# Run with:
+#   bazel test //test/mtlspool:mtlspool_test
+#   bazel test //test/mtlspool:mtlspool_test --test_output=all
+#
+# Tagged "envoy-validate" alongside //test/envoy_validate — both gates need the
+# pinned proxy binary and neither needs Docker.
+# size=medium: two Envoy processes and ~40 round trips, ~10 s wall time.
+go_test(
+    name = "mtlspool_test",
+    size = "medium",
+    srcs = [
+        "harness_test.go",
+        "pool_identity_test.go",
+    ],
+    data = ["//test/envoybin:envoy_bin"],
+    tags = [
+        "envoy-validate",
+        # The Envoy binary reads /proc on startup and both ends bind loopback
+        # sockets; run outside the strict sandbox.
+        "no-sandbox",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//agent/internal/xds/config",
+        "//agent/internal/xds/proxy",
+        "//test/envoybin",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
+        "@com_github_envoyproxy_go_control_plane_envoy//type/matcher/v3:matcher",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//types/known/durationpb",
+    ],
+)

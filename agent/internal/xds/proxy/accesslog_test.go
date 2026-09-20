@@ -62,7 +62,7 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 		"upstream_service_time", "x_forwarded_for", "user_agent", "x_request_id",
 		"authority", "upstream_host", "upstream_cluster", "upstream_local_address",
 		"downstream_local_address", "downstream_remote_address", "requested_server_name",
-		"route_name", "traceparent", "source_netns",
+		"route_name", "traceparent", "source_netns", "source_spiffe_id",
 		"rbac_shadow_result", "rbac_shadow_policy",
 	} {
 		assert.Contains(t, attrs, key, "missing access-log attribute %q", key)
@@ -83,6 +83,39 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 		attrs["rbac_shadow_policy"],
 		"rbac_shadow_policy must use the aether_audit_-prefixed metadata key",
 	)
+}
+
+// TestAccessLogCarriesClaimedSourceIdentity is issue #831's observability half:
+// a log line already carries the VERIFIED peer identity (#824), but nothing said
+// which identity this proxy INTENDED to present. Without both, a certificate
+// leak between source workloads is invisible — the destination reports a
+// perfectly valid mesh identity, just not the caller's.
+//
+// The two hard requirements are the key and the ":PLAIN" suffix. The key must be
+// the one the originating chains actually stamp, and %FILTER_STATE(key)% with no
+// format defaults to TYPED, which renders "-" for a Router::StringAccessorImpl
+// (no serializeAsProto) — a silent, permanently empty field.
+func TestAccessLogCarriesClaimedSourceIdentity(t *testing.T) {
+	t.Cleanup(func() { SetAccessLogConfig(AccessLogConfig{}) })
+	SetAccessLogConfig(AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+
+	logs := buildAccessLog(ReporterSource, "pod-a", "aether-test")
+	require.Len(t, logs, 1)
+	var cfg otelaccesslogv3.OpenTelemetryAccessLogConfig
+	require.NoError(t, proto.Unmarshal(logs[0].GetTypedConfig().GetValue(), &cfg))
+	attrs := map[string]string{}
+	for _, kv := range cfg.GetAttributes().GetValues() {
+		attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
+	}
+
+	assert.Equal(t, "%FILTER_STATE("+SourceIdentityFilterStateKey+":PLAIN)%", attrs["source_spiffe_id"],
+		"source_spiffe_id must read the key the originating chains stamp, in PLAIN form")
+	assert.Contains(t, attrs["source_spiffe_id"], ":PLAIN)%",
+		"without :PLAIN the formatter defaults to TYPED and renders \"-\" forever")
+
+	// The claimed identity and the verified peer are complementary, never
+	// substitutes: the point of the field is that the pair can disagree.
+	assert.Equal(t, "%UPSTREAM_PEER_URI_SAN%", attrs["upstream_peer_uri_san"])
 }
 
 // TestAccessLogCarriesVerifiedPeerIdentity is issue #824: every other identity
