@@ -25,6 +25,9 @@ kubectl apply -n aether-test -f e2e/soak/echo.yaml
 kubectl -n aether-test get pods -l app=echo -o wide   # expect 3, on 3 different nodes
 
 # 1. Load the k6 script as a ConfigMap (source of truth is the .js file here).
+#    RE-RUN THIS after any edit to k6-mesh-soak.js -- the pod mounts the
+#    ConfigMap, so an edited .js that was never re-applied runs the OLD script
+#    and the run looks normal while measuring the wrong thing.
 kubectl create configmap k6-soak-script -n aether-test \
   --from-file=test.js=e2e/soak/k6-mesh-soak.js \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -292,6 +295,21 @@ Each of these invalidated a real run:
 - `echo.yaml` — the mesh_dns SLI target (3 replicas, soft hostname spread). Apply before
   a run; it is the workload the mesh_dns tier actually measures.
 - `k6-mesh-soak.js` — load script (constant-arrival-rate, qualified mesh names, no OTLP).
+  Since #846 it also splits failures into classes (`dns`, `conn`, `tls`,
+  `timeout`, `proto`, `http_4xx`, `http_5xx`, `other`) and prints them at the
+  end of the run, because k6's own summary aggregates across tags and makes
+  every transport failure look alike — which is why the rev226 soak's ~510
+  failures could never be attributed. Collect it from the runner logs:
+
+  ```bash
+  kubectl -n aether-test logs <k6-runner-pod> | grep -A12 'failure classes'
+  # machine-readable, one line:
+  kubectl -n aether-test logs <k6-runner-pod> | grep AETHER_METRIC
+  ```
+
+  Read `classified=N of http_req_failed≈M` first: **N < M means a failure mode
+  `classify()` does not recognise**, and that gap is itself the finding. A
+  non-zero `other` means the same thing one level down.
 - `k6-runner.yaml` — the 5-node runner DaemonSet.
 - `churn.sh` — the 31-roll churn driver plus the no-roll window and the demand-set
   shrink; takes a build label for the log header.
