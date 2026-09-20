@@ -84,3 +84,45 @@ func TestBuildAccessLogEnabled(t *testing.T) {
 		"rbac_shadow_policy must use the aether_audit_-prefixed metadata key",
 	)
 }
+
+// TestAccessLogCarriesVerifiedPeerIdentity is issue #824: every other identity
+// field in a log line is something the control plane baked into the emitting
+// pod's own config, so a line can say who it THINKS it is but never who the
+// other end actually proved to be. Each hop logs exactly the peer it verified:
+// the inbound (destination) listener logs the caller's certificate, the egress
+// (source) side logs the server certificate it validated.
+func TestAccessLogCarriesVerifiedPeerIdentity(t *testing.T) {
+	t.Cleanup(func() { SetAccessLogConfig(AccessLogConfig{}) })
+	SetAccessLogConfig(AccessLogConfig{Enabled: true, SuccessSampleRate: 100})
+
+	attrsFor := func(reporter string) map[string]string {
+		logs := buildAccessLog(reporter, "pod-a", "aether-test")
+		require.Len(t, logs, 1)
+		var cfg otelaccesslogv3.OpenTelemetryAccessLogConfig
+		require.NoError(t, proto.Unmarshal(logs[0].GetTypedConfig().GetValue(), &cfg))
+		attrs := map[string]string{}
+		for _, kv := range cfg.GetAttributes().GetValues() {
+			attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
+		}
+		return attrs
+	}
+
+	dst := attrsFor(ReporterDestination)
+	assert.Equal(t, "%DOWNSTREAM_PEER_URI_SAN%", dst["downstream_peer_uri_san"],
+		"the inbound hop must log the CALLER's verified identity")
+	assert.NotContains(t, dst, "upstream_peer_uri_san",
+		"the upstream peer on an inbound listener is the local app over loopback: always empty")
+
+	src := attrsFor(ReporterSource)
+	assert.Equal(t, "%UPSTREAM_PEER_URI_SAN%", src["upstream_peer_uri_san"],
+		"the egress hop must log the SERVER certificate it validated (#638's client-side view)")
+	assert.NotContains(t, src, "downstream_peer_uri_san",
+		"the downstream peer on an egress listener is the local app over loopback: always empty")
+
+	// Neither operator may displace the identity fields a line already carries:
+	// the peer identity is the VERIFIED counterpart to those, not a replacement.
+	for _, key := range []string{"reporter", "pod_name", "pod_namespace"} {
+		assert.Contains(t, dst, key)
+		assert.Contains(t, src, key)
+	}
+}

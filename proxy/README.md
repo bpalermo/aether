@@ -128,7 +128,19 @@ HEAD the `envoy` module can reference `.envoy`-suffixed versions that no longer
 exist. Envoy's own `.bazelrc` pins a commit that predates the publication of its
 own snapshot, so it cannot be copied either.
 
-The bump recipe is therefore a **resolvability loop** — find the newest registry
+**Check `modules/envoy/metadata.json` first.** It lists every `envoy` version the
+registry currently publishes, and one API call answers the whole question:
+
+```bash
+gh api repos/envoyproxy/bazel-registry/contents/modules/envoy/metadata.json \
+  --jq '.content' | base64 -d | jq .versions
+```
+
+If the only version listed is the one already pinned, there is nothing to bump to
+and the loop below will confirm it the slow way. The real gate on a bump is a new
+`envoy` snapshot, not a newer registry commit.
+
+Otherwise the bump recipe is a **resolvability loop** — find the newest registry
 commit at which the whole `.envoy`-suffixed closure resolves:
 
 ```bash
@@ -143,6 +155,30 @@ git clone https://github.com/envoyproxy/bazel-registry.git /tmp/br
 # Take the newest commit with zero misses.
 ```
 
+Two traps when checking a candidate commit:
+
+- **`--registry` accumulates; it does not override.** Adding
+  `--registry=…/<candidate>` on the command line *appends* a registry behind the
+  two `.bazelrc` already pins, so the pinned commit still answers every lookup
+  and the probe passes no matter how broken the candidate is. To
+  test a candidate you must edit the `--registry=` line in `.bazelrc`, and pass
+  `--lockfile_mode=off` so `MODULE.bazel.lock` does not answer from cache.
+- **A missing version directory is only fatal if nothing requests a higher
+  one.** Bazel selects the MVS maximum, so `foo@1.3.0.envoy` resolves fine if
+  some other module in the closure asks for `foo@1.3.3.envoy` and *that*
+  directory exists. The step-3 rule above is the conservative approximation; if
+  it rejects a commit you otherwise want, re-check against the selected version
+  rather than the requested one.
+
+If the loop finds no commit newer than the current pin, that is the normal
+steady state between snapshots, **not** a failed bump: the registry keeps one
+version per module and bumps siblings ahead of `modules/envoy/<version>`, so
+after a snapshot publishes it is usually resolvable for only a handful of
+commits. Do not "fix" the misses with `single_version_override` — forcing a
+sibling past what the `envoy` module was published against buys an unvalidated
+combination that only a multi-hour CI build can disprove. Wait for the next
+snapshot.
+
 Then, in one commit:
 
 1. `MODULE.bazel`: set `envoy` and `envoy_api` to that snapshot version.
@@ -156,10 +192,17 @@ Then, in one commit:
 5. Run the local `bazel mod` checks above, then push and let CI build both
    arches.
 
-When a stable release publishes a `1.40.0.envoy` (etc.) module, move to it and
-re-pin the root `MODULE.bazel`'s `@envoy_binary_linux_*` (used by
-`//test/envoy_validate` for `envoy --mode validate`) to the matching release at
-the same time.
+When a stable release publishes a `1.40.0.envoy` (etc.) module, move to it. As of
+2026-09-19 no such module exists — `modules/envoy/metadata.json` still lists only
+the `1.40.0-dev.20260904.13144fb.envoy` snapshot.
+
+Nothing in the root workspace needs re-pinning alongside it any more. The root
+`MODULE.bazel` used to carry `@envoy_binary_linux_*`, a stock Envoy release asset
+that `//test/envoy_validate` ran `envoy --mode validate` with, and that pin had to
+move in step. #709 replaced it: `//bazel/proxy_pin` now lifts
+`/usr/local/bin/envoy` out of the aether-proxy image at the digest
+`charts/aether/values.yaml` pins, so the validate gate follows the chart pin — and
+therefore this module — with no second version to keep in sync.
 
 The `aether_stats` C++ extension builds against this same Envoy tree, so there
 is no separate SDK version to keep in sync.

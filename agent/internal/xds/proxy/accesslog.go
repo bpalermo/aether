@@ -131,12 +131,50 @@ func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.Acces
 			kv("rbac_shadow_policy", "%DYNAMIC_METADATA(envoy.filters.http.rbac:aether_audit_shadow_effective_policy_id)%"),
 		}},
 	}
+	// Appended rather than inlined above: the field is reporter-dependent, and
+	// keeping the common set one flat literal keeps that list readable.
+	otelCfg.Attributes.Values = append(otelCfg.Attributes.Values, peerIdentityFields(reporter)...)
 
 	return []*accesslogv3.AccessLog{{
 		Name:       "envoy.access_loggers.open_telemetry",
 		Filter:     accessLogFilter(),
 		ConfigType: &accesslogv3.AccessLog_TypedConfig{TypedConfig: config.TypedConfig(otelCfg)},
 	}}
+}
+
+// peerIdentityFields returns the VERIFIED mTLS peer identity for this hop — the
+// URI SAN of the certificate the other end actually presented and this proxy
+// validated, which is the only identity in an access-log line that a workload
+// cannot assert about itself.
+//
+// Split by reporter because each side has exactly one interesting peer and the
+// other operator would render "-" on every line:
+//
+//   - destination (the per-pod INBOUND listener): DOWNSTREAM_PEER_URI_SAN is the
+//     CALLER's identity, verified against the mesh trust bundle. This is what
+//     answers "which workload actually called me", and what makes a wrong client
+//     certificate visible in the logs — issue #824, and the check the release-two
+//     validation of #815 could not run: a workload's traffic arriving as the node
+//     agent's own SVID is the signature of the cluster matcher falling to
+//     on_no_match.
+//   - source (outbound_http / capture_http): UPSTREAM_PEER_URI_SAN is the SERVER
+//     certificate the destination proxy presented. That is the client-side view of
+//     the #638 identity cross-wiring, where envoy_cluster_ssl_fail_verify_san today
+//     says only that SOME peer failed SAN validation.
+//
+// Both render "-" when the hop is not mTLS (SPIRE disabled, cleartext inbound,
+// the loopback hop to the local application), so this costs one field per line
+// and no configuration branch beyond the reporter. Cardinality is bounded by the
+// number of ServiceAccounts, the same bound aether_stats already carries.
+func peerIdentityFields(reporter string) []*otlpcommonv1.KeyValue {
+	if reporter == ReporterDestination {
+		return []*otlpcommonv1.KeyValue{
+			kv("downstream_peer_uri_san", "%DOWNSTREAM_PEER_URI_SAN%"),
+		}
+	}
+	return []*otlpcommonv1.KeyValue{
+		kv("upstream_peer_uri_san", "%UPSTREAM_PEER_URI_SAN%"),
+	}
 }
 
 // accessLogFilter keeps a log entry only when it is NOT a health/liveness probe
