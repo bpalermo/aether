@@ -25,6 +25,7 @@ go_test(
     name = "config_test",
     srcs = [
         "common_test.go",
+        "determinism_test.go",
         "http_test.go",
     ],
     embed = [":config"],
@@ -33,5 +34,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//reflect/protoreflect",
     ],
 )
