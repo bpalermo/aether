@@ -49,6 +49,50 @@ jobs:
               - '!proxy/**/*.md'
               - '.github/workflows/proxy.yml'
 
+  # ShellCheck over the proxy workspace's shell (#848). It runs HERE, not in the
+  # `ci` workflow, because `ci`'s `changes` filter excludes `proxy/**/!(*.md)`
+  # outright — on a proxy-only PR the whole control-plane workflow skips, so a
+  # gate that lived only there would be silent in exactly the case that matters.
+  # This workflow is the one that fires on a proxy change.
+  #
+  # Both steps run from the repository ROOT (no `working-directory: proxy`): the
+  # target is a root-workspace sh_library over symlinks into //proxy, which is
+  # how it gets past //.bazelignore at all. See //bazel/lint/proxy_shell.
+  #
+  # Cheap by construction — shellcheck over four source files, no toolchain, no
+  # C++, no Envoy — so it needs no RBE and no BuildBuddy key, and it is a
+  # separate job from `test` rather than a step inside it so it reports in
+  # seconds instead of waiting on the compile matrix.
+  shell:
+    needs: changes
+    if: needs.changes.outputs.proxy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      # First: is every proxy script actually reachable by the aspect? A script
+      # added without its symlink would pass the lint step below by simply not
+      # being in it.
+      - name: Every proxy shell script is mirrored into the lint target
+        run: scripts/check-proxy-shell-lint.sh
+
+      # Then: lint them. `--config=lint` plus fail_on_violation, NOT
+      # `--config=ci` — that pulls in `--config=remote` and would need the
+      # BuildBuddy key for a job that has no compile to offload.
+      - name: ShellCheck the proxy workspace's shell
+        run: |
+          bazel build \
+            --config=lint \
+            --@aspect_rules_lint//lint:fail_on_violation \
+            //bazel/lint/proxy_shell:all //scripts:all
+
   test:
     needs: changes
     if: needs.changes.outputs.proxy == 'true'
@@ -118,7 +162,7 @@ jobs:
   # the matrix skips); fails only if a leg that actually ran failed.
   proxy:
     if: always()
-    needs: [changes, test]
+    needs: [changes, shell, test]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any proxy job failed or was cancelled
