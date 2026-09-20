@@ -77,4 +77,10 @@ go_test(
     target_compatible_with = [
         "@platforms//os:linux",
     ],
+    deps = [
+        "//agent/internal/xds/proxy",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
+        "@org_golang_google_protobuf//encoding/protojson",
+    ],
 )

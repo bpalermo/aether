@@ -19,6 +19,27 @@ import (
 const (
 	// OutboundHTTPRouteName is the name of the outbound HTTP route configuration
 	OutboundHTTPRouteName = "out_http"
+
+	// OutboundRouteInitialFetchTimeout bounds how long the egress listener stays
+	// WARMING for the first out_http RDS delivery before Envoy gives up waiting
+	// and activates it with an unresolved route table (issue #817).
+	//
+	// 15s is deliberate on both sides:
+	//
+	//   - It is Envoy's own default for ConfigSource.initial_fetch_timeout, so
+	//     stating it changes no behaviour — it pins the value where a test can
+	//     see it instead of leaving it to an upstream default that could drift.
+	//   - It equals the agent's registryReadyTimeout (the budget PreListen
+	//     spends trying to build a registry-backed initial snapshot before it
+	//     falls back to local-only). A shorter warming budget would let a fresh
+	//     Envoy epoch activate the egress listener while the agent that feeds it
+	//     is still inside its own initial-snapshot budget — reopening exactly the
+	//     404 NR window this constant exists for.
+	//
+	// Longer is not free: on a COLD proxy start there is no previous epoch
+	// holding the listen socket, so extra warming is extra time with no egress
+	// listener at all, and listeners_warming holds the proxy un-Ready for it.
+	OutboundRouteInitialFetchTimeout = 15 * time.Second
 )
 
 // outboundRetryPolicy returns the retry policy applied to every client-side
@@ -228,10 +249,26 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 // virtual host (mesh-shaped authorities → ODCDS, everything else → 404). The outbound
 // listener never passes through (it only sees mesh-DNS authorities), so the catch-all
 // keeps its hard-404 fallthrough.
+//
+// The catch-all is the FLOOR of this table, not a decoration on a non-empty one:
+// vhosts may legitimately be empty (an agent that started local-only and has no
+// registry-derived service vhosts yet) and the result is still a complete,
+// resolvable out_http — liveness 200 on MeshLivePath, mesh-shaped authorities to
+// ODCDS, everything else an instant 404. Callers must therefore emit this
+// UNCONDITIONALLY; see the RDS-resolution note in the agent snapshot builder
+// (issue #817).
+//
+// The result owns its virtual_hosts slice. Appending the catch-all straight onto
+// the caller's slice would write it into that slice's spare capacity, handing a
+// caller that reuses the backing array a table with someone else's catch-all in
+// it.
 func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
+	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
+	all = append(all, vhosts...)
+	all = append(all, buildOnDemandCatchAllVirtualHost(meshDomain, false))
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
-		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain, false)),
+		VirtualHosts: all,
 	}
 }
 

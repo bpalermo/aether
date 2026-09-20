@@ -334,9 +334,16 @@ func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
 // service never leaks to the ORIGINAL_DST passthrough (kube-proxy) while its
 // dedicated cap_http vhost is mid-rebuild. Ignored when redirectAll is false (no
 // passthrough to shadow a target).
+//
+// Like the outbound table this is emitted unconditionally, catch-all and all,
+// and it owns its virtual_hosts slice rather than appending onto the caller's
+// (see BuildOutboundRouteConfiguration).
 func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string, redirectAll bool, knownTargets ...KnownTargetRoute) *routev3.RouteConfiguration {
+	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
+	all = append(all, vhosts...)
+	all = append(all, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll, knownTargets...))
 	return &routev3.RouteConfiguration{
 		Name:         CaptureHTTPRouteName,
-		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll, knownTargets...)),
+		VirtualHosts: all,
 	}
 }
