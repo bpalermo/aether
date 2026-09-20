@@ -261,13 +261,41 @@ func reportPath(def string) string {
 	return def
 }
 
+// reportOnCleanup arranges for the ConformanceReport to be written once the
+// suite has gone quiescent. It MUST be called BEFORE cSuite.Run.
+//
+// gateway-api v1.6.2 moved the suite's `running = false` out of the tail of
+// Run() and into a t.Cleanup registered inside it, while Report() still refuses
+// to render while that flag is set ("can't generate report: the test suite is
+// currently running"). Calling Report() straight after Run() returns — which is
+// what this runner used to do — therefore fails 100% of the time on >= v1.6.2,
+// whatever the per-test outcomes were. Cleanups run LIFO, so registering ours
+// first puts it AFTER the suite's: `running` is already clear, and every
+// parallel subtest has finished, which the old call site never waited for.
+func reportOnCleanup(t *testing.T, cSuite *suite.ConformanceTestSuite, path string) {
+	t.Helper()
+	t.Cleanup(func() { writeReport(t, cSuite, path) })
+}
+
+// writeReport renders and persists the report. It records failures with Errorf
+// rather than require: it runs as a cleanup, and a FailNow there would skip the
+// suite's remaining cleanups (its base-resource teardown).
 func writeReport(t *testing.T, cSuite *suite.ConformanceTestSuite, path string) {
 	t.Helper()
 	report, err := cSuite.Report()
-	require.NoError(t, err)
+	if err != nil {
+		t.Errorf("conformance report: %v", err)
+		return
+	}
 	raw, err := yaml.Marshal(report)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, raw, 0o600))
+	if err != nil {
+		t.Errorf("marshal conformance report: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Errorf("write conformance report to %s: %v", path, err)
+		return
+	}
 	t.Logf("Conformance report written to %s:\n%s", path, string(raw))
 }
 
@@ -320,8 +348,8 @@ func TestAetherGatewayHTTP(t *testing.T) {
 	cSuite, err := suite.NewConformanceTestSuite(opts)
 	require.NoError(t, err)
 	cSuite.Setup(t, tests.ConformanceTests)
+	reportOnCleanup(t, cSuite, opts.ReportOutputPath)
 	require.NoError(t, cSuite.Run(t, tests.ConformanceTests))
-	writeReport(t, cSuite, opts.ReportOutputPath)
 }
 
 // meshNamespaces are the conformance namespaces the MESH-HTTP overlay creates. They
@@ -394,6 +422,7 @@ func TestAetherMeshHTTP(t *testing.T) {
 	cSuite, err := suite.NewConformanceTestSuite(opts)
 	require.NoError(t, err)
 	cSuite.Setup(t, tests.ConformanceTests)
+	reportOnCleanup(t, cSuite, opts.ReportOutputPath)
 	// Close the exec-timing race before driving requests: redirect-all capture makes
 	// the just-applied backend pods slow to go Ready (see prewarmNamespaces).
 	prewarmNamespaces(t, cs, 5*time.Minute, meshNamespaces...)
@@ -403,5 +432,4 @@ func TestAetherMeshHTTP(t *testing.T) {
 	if err := cSuite.Run(t, tests.ConformanceTests); err != nil {
 		t.Logf("MESH-HTTP run returned an error (per-test results are in the report): %v", err)
 	}
-	writeReport(t, cSuite, opts.ReportOutputPath)
 }
