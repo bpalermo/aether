@@ -1148,6 +1148,33 @@ proxy **served** it, then compared with the node whose proxy was restarting.
      identity was not bound per-server, and `upstream_host` is not the TLS-terminating
      peer; record it and re-open the transport path.
 
+### Known-unexercised code paths
+
+Recovery branches that have never run in production. **This is the system working, not a
+backlog** — it is recorded so nobody mistakes "no data" for "untested logic", and so nobody
+re-attempts a trigger that is known not to be forceable. Retired from #813, which was an
+umbrella that could not close.
+
+| path | why it has never fired | how it is covered |
+|---|---|---|
+| snapshot stale-netns guard, `aether_agent_snapshot_stale_netns_skipped_total` (#798) | a replacement agent returns in ~5 s, inside the 60 s `NetnsUnpinDelay` | would need an agent held down > 60 s on a node with a terminated app pod there |
+| CNI DEL `agent unreachable` WARN, the `<pin>.delfail` give-up path, the pin unlink (#796) | same — the agent comes back too fast | unit-tested |
+| supervisor `drain_fallback` (#797) | the normal drain path always wins | `aether_supervisor_shutdown_branch_total{branch="drain_fallback"}` has never been non-zero anywhere |
+| edge xDS "registry unreachable … while this workload waits for its first SVID" (#807) | both edge pods reach the registrar in ~3 s | unit-tested only |
+| `svid_updates{update="unchanged"}` (#806) | a SPIRE agent restart re-mints, so it counts `rotated` | would need a Broker stream that drops while the SPIRE agent stays up |
+| orphan prune → SVID unsubscribe (#804) | **not forceable from a harness** — the runtime re-issues CNI DEL at sandbox removal and a restarted agent serves it before the first sweep pass (measured 2026-09-19) | proven once in production (2026-09-18); the deterministic check is the in-process test from #805 |
+
+Two cautions when tempted to "test" one of these:
+
+- **Contriving the precondition proves the branch compiles, not that it behaves.** Forcing
+  `drain_fallback` or the #807 WARN by hand exercises the code under conditions you invented,
+  which is the same trap as a test you author both sides of.
+- **#804 in particular should not be re-attempted from a harness.** That was measured and
+  ruled out; the in-process test is the coverage.
+
+Genuine test debt is tracked separately — see #868 for L4 route e2e coverage, which is a
+shipped default-on feature with no end-to-end test at all.
+
 ### A pod is stuck `Terminating`, or a node has stale netns entries (#245, #796)
 
 Two related symptoms, one mechanism: the pod's CNI DEL never completed.
