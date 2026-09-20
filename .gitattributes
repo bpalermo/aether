@@ -15,3 +15,18 @@ go.sum linguist-generated=true
 # fight the proxy's own conventions. rules_lint honors `rules-lint-ignored`, so
 # mark the whole tree out of the root format/lint.
 proxy/** rules-lint-ignored=true
+
+# //bazel/lint/proxy_shell holds nothing but source symlinks INTO that tree —
+# the bridge that lets the shellcheck aspect see proxy shell past
+# //.bazelignore (#848). They must inherit the exclusion above, for two
+# reasons. Formatting one is formatting a proxy file by another name, which the
+# line above deliberately declines to do; and shfmt refuses outright ("refusing
+# to atomically replace ... as it is not one already"), which failed
+# `make format` rather than skipping the file.
+#
+# This does NOT weaken the lint. `rules-lint-ignored` is consulted by the
+# format multirun's `git ls-files` discovery only; the shellcheck aspect runs
+# over an sh_library's srcs in the Bazel graph and never looks at
+# .gitattributes. Reaching these files with the linter and not the formatter is
+# exactly the intent.
+bazel/lint/proxy_shell/** rules-lint-ignored=true
