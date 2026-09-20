@@ -119,6 +119,7 @@ go_test(
         "inboundready_test.go",
         "ingress_test.go",
         "l4route_test.go",
+        "l4route_udp_unsupported_test.go",
         "listener_test.go",
         "listenerfilter_test.go",
         "networkfilter_test.go",
