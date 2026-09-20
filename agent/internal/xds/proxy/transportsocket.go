@@ -33,20 +33,50 @@ func sdsSecretConfigFrom(secretName string, source *corev3.ConfigSource) *transp
 
 // DownstreamTransportSocket creates a TLS transport socket for downstream (inbound) connections.
 // It requires mutual TLS and retrieves certificates and validation context via ADS-served SDS.
-func DownstreamTransportSocket(tlsCertificateSecretName string, validationContextName string) *corev3.TransportSocket {
-	downstreamTlsContext := &transport_sockets_v3.DownstreamTlsContext{
-		RequireClientCertificate: wrapperspb.Bool(true),
-		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
-			TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
-				sdsSecretConfig(tlsCertificateSecretName),
-			},
-			ValidationContextType: &transport_sockets_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
-				ValidationContextSdsSecretConfig: sdsSecretConfig(validationContextName),
-			},
+//
+// It also pins the CLIENT identity to a workload SVID SHAPE: the peer
+// certificate must carry a URI SAN with the
+// "spiffe://<trust-domain>/ns/" prefix (issue #843). RequireClientCertificate
+// alone proves only that SOME certificate this trust bundle signs was
+// presented; the inbound HCM then stamps that certificate's URI SAN into XFCC
+// with SANITIZE_SET (ingress.go), and downstream RBAC/ext_authz rules key on
+// that value. Requiring the SPIFFE path to be /ns/<ns>/sa/<sa> rejects a
+// non-workload certificate and is what makes the XFCC value structurally
+// trustworthy. It deliberately does NOT pin a specific ServiceAccount: in a
+// mesh any workload may legitimately call, so identity-level authorization
+// belongs in RBAC/ext_authz, which this pin is the precondition for.
+//
+// trustDomain == "" emits NO matcher — byte-identical to the pre-#843 shape —
+// rather than the unservable "spiffe:///ns/" (see WorkloadSANPrefix). That
+// branch is defence in depth, not a live path: NewInboundListener already
+// refuses with ErrNoTrustDomain before reaching here on the mTLS path, so the
+// only reachable "no trust domain" outcome is a skipped pod with a WARN naming
+// it, never a silently unpinned listener. //test/envoy_validate asserts the
+// shape over the generated bootstrap bytes so a future caller that bypasses
+// that guard fails the build instead of shipping an unpinned inbound.
+func DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain string) *corev3.TransportSocket {
+	common := &transport_sockets_v3.CommonTlsContext{
+		TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
+			sdsSecretConfig(tlsCertificateSecretName),
 		},
 	}
 
-	return transportSocket(downstreamTlsContext)
+	if prefix := WorkloadSANPrefix(trustDomain); prefix == "" {
+		common.ValidationContextType = &transport_sockets_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
+			ValidationContextSdsSecretConfig: sdsSecretConfig(validationContextName),
+		}
+	} else {
+		common.ValidationContextType = combinedValidationContextFromMatchers(
+			validationContextName,
+			[]*transport_sockets_v3.SubjectAltNameMatcher{uriSANPrefixMatcher(prefix)},
+			config.XDSConfigSourceADS(),
+		)
+	}
+
+	return transportSocket(&transport_sockets_v3.DownstreamTlsContext{
+		RequireClientCertificate: wrapperspb.Bool(true),
+		CommonTlsContext:         common,
+	})
 }
 
 // UpstreamTransportSocket creates a TLS transport socket for upstream (outbound) connections.
@@ -164,6 +194,36 @@ func combinedValidationContext(validationContextName string, sanURIs []string, s
 			},
 		})
 	}
+	return combinedValidationContextFromMatchers(validationContextName, matchers, sdsSource)
+}
+
+// uriSANPrefixMatcher matches any URI SAN starting with prefix.
+//
+// Envoy builds a generic StringSanMatcher(GEN_URI, matcher) for san_type: URI
+// (source/common/tls/cert_validator/san_matcher.cc), so the full StringMatcher
+// surface — prefix included — applies. Only DNS gets special treatment there
+// (an exact matcher becomes RFC 6125 wildcard matching); URI is plain string
+// matching, which is what a SPIFFE path prefix needs.
+func uriSANPrefixMatcher(prefix string) *transport_sockets_v3.SubjectAltNameMatcher {
+	return &transport_sockets_v3.SubjectAltNameMatcher{
+		SanType: transport_sockets_v3.SubjectAltNameMatcher_URI,
+		Matcher: &matcherv3.StringMatcher{
+			MatchPattern: &matcherv3.StringMatcher_Prefix{Prefix: prefix},
+		},
+	}
+}
+
+// combinedValidationContextFromMatchers layers inline SAN matchers over the
+// SDS-rotated trust bundle. It is the one shape both directions of the mesh use
+// — the upstream SERVER pin (exact per-service SPIFFE IDs) and the inbound
+// CLIENT pin (a workload-shape URI prefix) — so the trust bundle keeps
+// rotating over SDS while the matchers stay inline static config.
+//
+// Callers must not pass an empty matcher list: an empty
+// match_typed_subject_alt_names renders a validation context that pins nothing
+// (issue #832), and the unpinned form must always be an explicit branch at the
+// call site rather than a by-product here.
+func combinedValidationContextFromMatchers(validationContextName string, matchers []*transport_sockets_v3.SubjectAltNameMatcher, sdsSource *corev3.ConfigSource) *transport_sockets_v3.CommonTlsContext_CombinedValidationContext {
 	return &transport_sockets_v3.CommonTlsContext_CombinedValidationContext{
 		CombinedValidationContext: &transport_sockets_v3.CommonTlsContext_CombinedCertificateValidationContext{
 			DefaultValidationContext: &transport_sockets_v3.CertificateValidationContext{

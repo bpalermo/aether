@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -11,7 +12,7 @@ import (
 )
 
 func TestDownstreamTransportSocket(t *testing.T) {
-	ts := DownstreamTransportSocket("spiffe://example.org/ns/default/sa/my-sa", "spiffe://example.org")
+	ts := DownstreamTransportSocket("spiffe://example.org/ns/default/sa/my-sa", "spiffe://example.org", "example.org")
 
 	require.NotNil(t, ts)
 	assert.Equal(t, tlsTransportSocketName, ts.GetName())
@@ -24,7 +25,112 @@ func TestDownstreamTransportSocket(t *testing.T) {
 	assert.True(t, ctx.GetRequireClientCertificate().GetValue())
 	require.Len(t, ctx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs(), 1)
 	assert.Equal(t, "spiffe://example.org/ns/default/sa/my-sa", ctx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs()[0].GetName())
-	assert.Equal(t, "spiffe://example.org", ctx.GetCommonTlsContext().GetValidationContextSdsSecretConfig().GetName())
+	// The trust bundle still rotates over SDS; it just lives one level down now
+	// that inline SAN matchers sit alongside it.
+	assert.Equal(t, "spiffe://example.org",
+		ctx.GetCommonTlsContext().GetCombinedValidationContext().GetValidationContextSdsSecretConfig().GetName())
+}
+
+// TestDownstreamTransportSocket_ClientSANPin is issue #843: RequireClientCertificate
+// alone proves only that SOME certificate the trust bundle signs was presented,
+// and the inbound HCM then stamps that certificate's URI SAN into XFCC with
+// SANITIZE_SET for RBAC/ext_authz to key on. The pin requires the SPIFFE path
+// to be a workload one (/ns/<ns>/sa/<sa>), which is what makes the XFCC value
+// structurally trustworthy.
+func TestDownstreamTransportSocket_ClientSANPin(t *testing.T) {
+	ts := DownstreamTransportSocket("spiffe://aether.internal/ns/default/sa/echo", "spiffe://aether.internal", "aether.internal")
+
+	var ctx transport_sockets_v3.DownstreamTlsContext
+	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(&ctx))
+
+	combined := ctx.GetCommonTlsContext().GetCombinedValidationContext()
+	require.NotNil(t, combined, "the client pin uses the combined validation context")
+	assert.Equal(t, "spiffe://aether.internal", combined.GetValidationContextSdsSecretConfig().GetName(),
+		"the SDS-rotated trust bundle must survive the pin")
+
+	matchers := combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
+	require.Len(t, matchers, 1)
+	assert.Equal(t, transport_sockets_v3.SubjectAltNameMatcher_URI, matchers[0].GetSanType())
+	assert.Equal(t, "spiffe://aether.internal/ns/", matchers[0].GetMatcher().GetPrefix(),
+		"a PREFIX, not an exact match: the destination cannot know which ServiceAccount may call it")
+	assert.Empty(t, matchers[0].GetMatcher().GetExact(),
+		"an exact matcher here would pin one ServiceAccount and break every other legitimate caller")
+}
+
+// TestDownstreamTransportSocket_AcceptsAndRejects walks concrete SPIFFE IDs
+// through the prefix the socket ships, so the pin is described by what it lets
+// in rather than by its own spelling. Envoy evaluates match_typed_subject_alt_names
+// as a plain string prefix for san_type: URI (StringSanMatcher(GEN_URI, …) in
+// source/common/tls/cert_validator/san_matcher.cc), so strings.HasPrefix is the
+// same predicate the proxy applies.
+func TestDownstreamTransportSocket_AcceptsAndRejects(t *testing.T) {
+	ts := DownstreamTransportSocket("spiffe://aether.internal/ns/default/sa/echo", "spiffe://aether.internal", "aether.internal")
+	var ctx transport_sockets_v3.DownstreamTlsContext
+	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(&ctx))
+	prefix := ctx.GetCommonTlsContext().GetCombinedValidationContext().
+		GetDefaultValidationContext().GetMatchTypedSubjectAltNames()[0].GetMatcher().GetPrefix()
+
+	accepted := []string{
+		// An ordinary mesh workload.
+		"spiffe://aether.internal/ns/default/sa/echo",
+		// A workload in another namespace: any mesh peer may legitimately call.
+		"spiffe://aether.internal/ns/other-team/sa/api",
+		// The node agent's own SVID — the inbound-readiness probe presents this
+		// on every local pod every 5s. Rejecting it would demote endpoints.
+		"spiffe://aether.internal/ns/aether-system/sa/aether-agent",
+		// The edge gateway's SVID (edge-clusterspiffeid.yaml).
+		"spiffe://aether.internal/ns/aether-ingress/sa/aether-edge",
+	}
+	for _, id := range accepted {
+		assert.True(t, strings.HasPrefix(id, prefix), "%s must be accepted", id)
+	}
+
+	rejected := []string{
+		// SPIRE's own agent/node identities: signed by the same bundle, not a
+		// workload. This is the class the pin exists to exclude.
+		"spiffe://aether.internal/spire/agent/k8s_psat/talos-main/abc123",
+		"spiffe://aether.internal/node/main-worker-01",
+		// Another trust domain. Already unreachable in the client direction
+		// (the upstream pin is exact on the LOCAL trust domain); this closes
+		// the same hole on the server side.
+		"spiffe://evil.example/ns/default/sa/echo",
+		// A near-miss path that is not the /ns/ workload shape.
+		"spiffe://aether.internal/nsfoo/sa/echo",
+	}
+	for _, id := range rejected {
+		assert.False(t, strings.HasPrefix(id, prefix), "%s must be rejected", id)
+	}
+}
+
+// TestDownstreamTransportSocket_NoTrustDomainEmitsNoMatcher is the #815/#819
+// guard rail, and the reason this branch exists at all.
+//
+// With an empty trust domain the prefix would render "spiffe:///ns/", which
+// matches no certificate any CA in the mesh has ever issued — so EVERY inbound
+// handshake on that pod would fail, permanently, because the malformed config
+// is already published. That is the rev222 failure mode with a whole node's
+// blast radius. Emitting no matcher is a real (if brief) authentication
+// downgrade, and it is still strictly the lesser evil: the listener keeps
+// working and the next rebuild pins it.
+//
+// In production this branch is unreachable — NewInboundListener returns
+// ErrNoTrustDomain first (see TestNewInboundListener_NoTrustDomainRefuses) — so
+// it is defence in depth for a future caller, not a live path.
+func TestDownstreamTransportSocket_NoTrustDomainEmitsNoMatcher(t *testing.T) {
+	ts := DownstreamTransportSocket("", "", "")
+
+	var ctx transport_sockets_v3.DownstreamTlsContext
+	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(&ctx))
+
+	assert.Nil(t, ctx.GetCommonTlsContext().GetCombinedValidationContext(),
+		"no trust domain must emit NO matcher, never the unservable spiffe:///ns/ prefix")
+	require.NotNil(t, ctx.GetCommonTlsContext().GetValidationContextSdsSecretConfig(),
+		"the bundle-only validation context is the fallback shape")
+	assert.True(t, ctx.GetRequireClientCertificate().GetValue(),
+		"a client certificate is still required; only the shape check is deferred")
+
+	assert.Empty(t, WorkloadSANPrefix(""), "the malformed prefix must be unrepresentable at the source")
+	assert.Equal(t, "spiffe://aether.internal/ns/", WorkloadSANPrefix("aether.internal"))
 }
 
 func TestUpstreamTransportSocket(t *testing.T) {

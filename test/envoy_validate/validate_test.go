@@ -165,6 +165,21 @@ func TestEnvoyValidate(t *testing.T) {
 			t.Errorf("%s: upstream TLS contexts with no match_typed_subject_alt_names: %v\n"+
 				"an unpinned context authenticates ANY workload in the trust domain, not the service asked for", b.name, unpinned)
 		}
+		// The inbound half of the same property (issue #843): a chain that
+		// REQUIRES a client certificate must also say what shape that
+		// certificate has to be. Without it the handshake proves only that the
+		// trust bundle signed something, and the XFCC the HCM stamps
+		// SANITIZE_SET from that certificate carries no more weight than the
+		// bundle does. Envoy accepts the unpinned form, so this too is checked
+		// on the bytes rather than by the validate below.
+		unpinnedIn, err := UnpinnedInboundChains(data)
+		if err != nil {
+			t.Fatalf("inbound SAN-pin check %s: %v", b.name, err)
+		}
+		if len(unpinnedIn) > 0 {
+			t.Errorf("%s: mTLS-terminating filter chains with no client match_typed_subject_alt_names: %v\n"+
+				"require_client_certificate alone accepts any certificate the trust bundle signs, including non-workload identities", b.name, unpinnedIn)
+		}
 	}
 
 	// Validate each bootstrap with Envoy.

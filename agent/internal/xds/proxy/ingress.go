@@ -98,7 +98,7 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 		chains = []*listenerv3.FilterChain{buildInboundCleartextFilterChain(cniPod, emitStatsPod, extensionFilters, inboundFilter)}
 	} else {
 		listenerFilters = buildInboundListenerFilters()
-		chains = buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName, emitStatsPod, extensionFilters, inboundFilter)
+		chains = buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter)
 	}
 
 	return &listenerv3.Listener{
@@ -164,7 +164,7 @@ func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, e
 //     Demux is the standard "h2" ALPN for HTTP vs no-ALPN for TCP — no bespoke token.
 //
 // SNI is port routing only — identity stays the terminated mTLS SVID.
-func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) []*listenerv3.FilterChain {
+func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) []*listenerv3.FilterChain {
 	defaultPort := AppPortFromPod(cniPod)
 	ports := AppPortsFromPod(cniPod)
 
@@ -172,14 +172,14 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 
 	// TCP floor chain: the DEFAULT (no match) → tcp_proxy to the primary app loopback
 	// port. A no-ALPN mTLS connection (the source tcp_proxy egress) lands here.
-	chains = append(chains, buildInboundTCPFloorFilterChain(cniPod, defaultPort, tlsCertificateSecretName, validationContextName))
+	chains = append(chains, buildInboundTCPFloorFilterChain(cniPod, defaultPort, tlsCertificateSecretName, validationContextName, trustDomain))
 
 	// No-SNI HCM chain: matches application_protocols ["h2"] (the mesh HTTP/2
 	// transport) on the primary port. Per-port SNI chains follow.
-	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, emitStatsPod, extensionFilters, inboundFilter))
+	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
 	// One chain per served port, SNI-matched on the port number.
 	for _, port := range ports {
-		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, emitStatsPod, extensionFilters, inboundFilter))
+		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
 	}
 	return chains
 }
@@ -190,12 +190,18 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 // no ALPN — matches nothing more specific (HTTP chains require "h2" or a port SNI)
 // and lands here, terminating mTLS and routing all bytes via tcp_proxy to the pod's
 // primary application cluster (app_<pod>_<defaultPort>) on loopback.
-func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, tlsCertificateSecretName, validationContextName string) *listenerv3.FilterChain {
+//
+// It carries the same workload-shape client SAN pin as the HTTP chains (#843).
+// There is no XFCC on this path — tcp_proxy forwards raw bytes — so the pin is
+// the ONLY thing standing between a non-workload certificate in the trust
+// bundle and the pod's application port. That makes it more load-bearing here,
+// not less.
+func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string) *listenerv3.FilterChain {
 	appCluster := AppClusterName(cniPod, defaultPort)
 	return &listenerv3.FilterChain{
 		Name:             fmt.Sprintf("in_tcp_%s", cniPod.GetName()),
 		FilterChainMatch: nil, // default chain: no ALPN / no SNI → the TCP floor
-		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
+		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
 		Filters: []*listenerv3.Filter{
 			buildTCPProxyNetworkFilter(fmt.Sprintf("%s_%s", inboundTCPFloorStatPrefix, cniPod.GetName()), appCluster),
 		},
@@ -208,7 +214,7 @@ func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, t
 // sni is non-empty the chain is SNI-matched (server_names); the empty-sni chain
 // is the default (no match criteria). chainPort selects both the app cluster
 // and the chain name suffix.
-func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
+func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort))
 	applyInboundFilter(rc, inboundFilter)
 	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc)
@@ -249,7 +255,7 @@ func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16,
 		Name:             name,
 		FilterChainMatch: match,
 		Filters:          []*listenerv3.Filter{buildHTTPConnectionManagerFilter(hcm)},
-		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName),
+		TransportSocket:  DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, trustDomain),
 	}
 }
 

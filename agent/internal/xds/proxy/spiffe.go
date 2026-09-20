@@ -32,6 +32,39 @@ func ValidationContextName(trustDomain string) string {
 	return "spiffe://" + trustDomain
 }
 
+// WorkloadSANPrefix is the URI-SAN prefix every mesh WORKLOAD SVID shares —
+// "spiffe://<trust-domain>/ns/" — or "" when the trust domain is unknown.
+//
+// It is the client-side pin the inbound listener applies (issue #843). The
+// destination cannot know WHICH ServiceAccount may call it — in a mesh any
+// workload legitimately may — but it can require that the peer certificate is
+// STRUCTURALLY a workload SVID: a SPIFFE ID in this trust domain whose path is
+// /ns/<ns>/sa/<sa>. That rejects anything issued under a different path
+// (SPIRE's own /spire/agent/… node identities, or any non-workload
+// infrastructure identity the bundle happens to sign) and is what makes the
+// XFCC value the inbound HCM stamps SANITIZE_SET structurally trustworthy —
+// the property every XFCC-derived RBAC/ext_authz rule already assumes.
+//
+// It returns "" rather than "spiffe:///ns/" on an empty trust domain, the same
+// refusal ValidationContextName and SpiffeIDFromPod make. A prefix built from
+// an empty trust domain matches NO real certificate, so it would fail every
+// inbound handshake — the #815/#819 failure mode with the blast radius of a
+// whole node. Callers emit NO matcher on "" (see DownstreamTransportSocket).
+//
+// The trust domain is the LOCAL one, which makes this pin exactly as
+// restrictive as the upstream pin the mesh already ships
+// (cache/mtls.go renders spiffe://<local-td>/ns/<ns>/sa/<svc> exact matchers).
+// Cross-trust-domain traffic is therefore already impossible in the client
+// direction; proposal 019 states a shared trust domain as a precondition and
+// defers SPIRE federation. If federation is ever enabled, BOTH pins have to be
+// widened together — neither one alone is the gate.
+func WorkloadSANPrefix(trustDomain string) string {
+	if trustDomain == "" {
+		return ""
+	}
+	return "spiffe://" + trustDomain + "/ns/"
+}
+
 // SpiffeIDFromPod returns the mesh SPIFFE ID of a local pod, derived — and only
 // ever derived — from the mesh trust domain and the pod's own namespace and
 // ServiceAccount, following the SPIRE convention
