@@ -11,6 +11,7 @@ import (
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
@@ -134,4 +135,55 @@ func TestOutboundChainRDSInitialFetchTimeout(t *testing.T) {
 	assert.Equal(t, OutboundRouteInitialFetchTimeout, cs.GetInitialFetchTimeout().AsDuration())
 	assert.Equal(t, 15*time.Second, OutboundRouteInitialFetchTimeout,
 		"kept equal to the agent's registryReadyTimeout; changing one without the other reopens the #817 window")
+}
+
+// TestOutboundChainRDSIdenticalAcrossPods is the emitted-resource half of the
+// #852 guard; the constructor half lives in
+// //agent/internal/xds/config:determinism_test.
+//
+// Every meshed pod on the node gets its own egress listener, and each one emits
+// its own copy of the out_http Rds. Envoy keys RDS provider reuse on a hash of
+// the WHOLE Rds message and matches on that hash alone, so those N copies
+// collapse onto one provider, one route table and one subscription only while
+// they agree. Anything per-pod leaking into that message splits them into N
+// independent providers — a valid config, a healthy proxy, no NACK, and because
+// the egress HCM stat_prefix is the constant "outbound_http", not even a new
+// stat series: http.outbound_http.rds.out_http.config_reload would simply start
+// counting N per push.
+//
+// One caveat the assertion deliberately does not encode: config_source's
+// initial_fetch_timeout is released before that hash and restored after, so it
+// alone cannot split a provider. Comparing the whole marshalled Rds is stricter
+// than Envoy's own key on purpose — an out_http Rds that varies per pod is a bug
+// regardless of which field Envoy happens to normalise away this release.
+//
+// The pods below differ in every field the chain builder reads, so agreement
+// here means the Rds genuinely does not depend on the pod.
+func TestOutboundChainRDSIdenticalAcrossPods(t *testing.T) {
+	pods := []*cniv1.CNIPod{
+		{Name: "checkout-abc", Namespace: "shop", ServiceAccount: "checkout"},
+		{Name: "payments-xyz", Namespace: "billing", ServiceAccount: "payments"},
+	}
+
+	var want []byte
+	for _, pod := range pods {
+		fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/"+pod.GetNamespace()+"/sa/"+pod.GetServiceAccount(), "aether.internal", true, nil)
+		require.Len(t, fc.GetFilters(), 3)
+
+		hcm := &http_connection_managerv3.HttpConnectionManager{}
+		require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
+
+		rds := hcm.GetRds()
+		require.NotNil(t, rds)
+		got, err := proto.Marshal(rds)
+		require.NoError(t, err)
+
+		if want == nil {
+			want = got
+			continue
+		}
+		require.Equal(t, want, got,
+			"the out_http Rds differs between pods: Envoy would create one RDS subscription, "+
+				"route table and stats scope PER POD instead of sharing one (issue #852)")
+	}
 }
