@@ -72,6 +72,19 @@ spec:
         endpoint.aether.io/port: "8080"
     spec:
       serviceAccountName: authz-echo
+      # Spread the canary's TARGET across nodes (#818). Both replicas landing on
+      # one node puts the whole canary path — source proxy and destination — behind
+      # a single node's proxy, so a roll of that one proxy reads as "authz down"
+      # rather than as the roll it is. Soft (ScheduleAnyway), matching the harness
+      # echo deployment: spreading is worth having, but never worth leaving the
+      # canary unscheduled, since an unscheduled canary is indistinguishable from
+      # a broken one.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: authz-echo}
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -166,8 +179,14 @@ spec:
               echo "authz-canary loop start $(date -u +%FT%TZ) url=$url allow={{ .Values.authzCanary.allow.expect }} deny={{ .Values.authzCanary.deny.expect }}"
               ok=0
               while true; do
-                a=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H '{{ .Values.authzCanary.allow.header }}' "$url" 2>/dev/null || echo 000)
-                d=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || echo 000)
+                # curl already prints 000 for %{http_code} on a connect failure, so a
+                # `|| echo 000` appends a SECOND one and the FAIL line reads
+                # allow=000000 (#818). Default only when the capture is genuinely
+                # empty — which is what a killed curl, not a failed one, produces.
+                a=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H '{{ .Values.authzCanary.allow.header }}' "$url" 2>/dev/null)
+                d=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null)
+                [ -n "$a" ] || a=000
+                [ -n "$d" ] || d=000
                 if [ "$a" = "{{ .Values.authzCanary.allow.expect }}" ] && [ "$d" = "{{ .Values.authzCanary.deny.expect }}" ]; then
                   ok=$((ok+1))
                   [ $((ok % {{ .Values.authzCanary.heartbeatEvery }})) -eq 0 ] && echo "$(date -u +%FT%TZ) OK cycles=$ok"
