@@ -489,7 +489,13 @@ func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextNam
 		// filter state), so a per-source transport_socket_matcher would only ever
 		// take its no-match branch — and embedding the local pod set is precisely
 		// the CDS-churn defect the rest of #815 is removing.
-		TransportSocket: UpstreamTransportSocket(nodeSpiffeID, validationContextName, []string{podSpiffeID}, "" /* no SNI: the no-SNI h2 chain */),
+		//
+		// And it is the probe's OWN context, not the mesh helper's (#836): this
+		// cluster's TLS state must not be reachable by application traffic, since
+		// its peer is always a local pod presenting that pod's SVID. See
+		// InboundReadyProbeTransportSocket for the invariant; the SAN pin and the
+		// empty SNI are unchanged.
+		TransportSocket: InboundReadyProbeTransportSocket(nodeSpiffeID, validationContextName, podSpiffeID),
 		HealthChecks: []*corev3.HealthCheck{
 			{
 				Timeout:            durationpb.New(1 * time.Second),

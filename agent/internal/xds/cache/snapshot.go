@@ -192,6 +192,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// that TERMINATED the connection — which #686's client-side check cannot
 	// see.
 	c.logInboundIdentityBindings(ctx, v)
+	// The third identity fact a snapshot can get wrong silently (#832): a
+	// cluster published with NO server-identity SAN pin. The two checks above
+	// ask "is the identity we present the right one"; this one asks "are we
+	// checking the identity we are handed at all".
+	c.reportUnpinnedClusters(ctx, v)
 
 	return nil
 }
