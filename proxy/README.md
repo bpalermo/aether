@@ -121,10 +121,12 @@ symbol upload is keyed by (#653).
 about Envoy.** Do not try to match it against the pin — it will never agree, and
 the disagreement is not a bug (aether #837).
 
-You do not have to take that on inference. `//test/envoy_validate:envoy_bin`
-(via `//bazel/proxy_pin`) is the Envoy binary extracted from the **published**
-`aether-proxy` image at the digest `charts/aether/values.yaml` pins, so you can
-ask it directly, locally, with no cluster:
+You do not have to take that on inference. The pinned-Envoy target — today
+`//test/envoy_validate:envoy_bin`, via `//bazel/proxy_pin`; #841 factors it out,
+so `bazel query` for it if the label has moved — is the Envoy binary extracted
+from the **published** `aether-proxy` image at the digest
+`charts/aether/values.yaml` pins. You can ask it directly, locally, with no
+cluster:
 
 ```console
 $ bazel build //test/envoy_validate:envoy_bin
