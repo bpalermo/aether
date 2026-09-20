@@ -51,6 +51,14 @@ IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller)
 # Origin-heartbeat lease TTL is 30s (replicator default); how long verify waits
 # for the mirror to expire after the origin dies (TTL + keepalive/gRPC slack).
 FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-90}"
+# How long step 3 keeps sampling the client call after the mirror is CONFIRMED
+# gone, in ~1s steps. Deliberately far beyond the pass budget so that a run which
+# blows the budget still yields a NUMBER instead of only a verdict (#597).
+WITHDRAW_CAP="${WITHDRAW_CAP:-120}"
+# The PASS bar, unchanged at 30s. Measured end to end the path is ~150ms, so if
+# a correctly-anchored measurement ever lands repeatedly in the 20-35s band the
+# right response is to investigate, not to widen this.
+WITHDRAW_BUDGET="${WITHDRAW_BUDGET:-30}"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -102,8 +110,7 @@ dump_echo_eds() {
 		return
 	fi
 	printf '\033[1;33m  -- envoy EDS for echo on %s (admin /clusters, node %s) --\033[0m\n' "$CLUSTER_A" "$node" >&2
-	hosts="$(docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
-		grep -i echo | head -40 || true)"
+	hosts="$(echo_host_rows "$node")"
 	if [ -n "$hosts" ]; then
 		printf '%s\n' "$hosts" | sed 's/^/    /' >&2
 		printf '    ^ the host should be b-node-ip:%s; a pod IP means the waypoint rewrite\n' "$TUNNEL_PORT" >&2
@@ -202,8 +209,7 @@ dump_failover_state() {
 	# cluster means the registry withdrew but the data plane did not.
 	printf '\033[1;33m  -- envoy EDS for echo (admin /clusters, node %s) --\033[0m\n' "$node" >&2
 	local hosts
-	hosts="$(docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
-		grep -i echo | head -40 || true)"
+	hosts="$(echo_host_rows "$node")"
 	if [ -n "$hosts" ]; then
 		printf '%s\n' "$hosts" | sed 's/^/    /' >&2
 		printf '    ^ cause (3): Envoy STILL holds echo hosts after the registry withdrew\n' >&2
@@ -479,9 +485,70 @@ YAML
 	ok "workloads deployed"
 }
 
-# mirror_present <cluster-of-etcd> <region-prefix-to-look-for>
+# now_ms: milliseconds since epoch. The withdrawal this suite measures is
+# designed to take ~150ms, so second resolution would round the entire quantity
+# away.
+now_ms() { date +%s%3N; }
+
+# echo_host_rows <node-container>: the HOST rows for echo clusters out of Envoy's
+# admin /clusters, and nothing else.
+#
+# The filter matters (#597). /clusters prints, per cluster, ~15 CONFIG rows
+# (`echo::default_priority::max_connections::1024`) and only then its HOST rows
+# (`echo::10.0.0.1:8080::health_flags::healthy`). The previous
+# `grep -i echo | head -40` truncated inside the config rows of the three echo
+# clusters and so could NEVER reach a host row -- yet the caller asserted
+# "Envoy STILL holds echo hosts" on any non-empty match. It printed that verdict
+# on the 2026-09-18 run over a dump containing zero host rows. A gate that
+# cannot fail is worse than no gate, because it is quoted as evidence.
+#
+# Host rows are the ones carrying an address: `::<ip>:<port>::`.
+echo_host_rows() {
+	docker exec "$1" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
+		grep -iE '^[^:]*echo[^:]*::[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+::' | head -60 || true
+}
+
+# mirror_state <cluster-of-etcd> <region-prefix-to-look-for>
+#   0 = keys present   1 = keys absent   2 = THE READ ITSELF FAILED
+#
+# The third value is the whole point, and its absence was issue #597. The old
+# implementation was:
+#
+#     docker exec ... etcdctl get --prefix ... --keys-only 2>/dev/null | grep -q .
+#
+# which discards stderr and takes the pipeline's status from `grep`. A docker
+# exec that could not start, or an etcdctl that timed out, produces no output --
+# and is therefore INDISTINGUISHABLE from "the keys are gone". Step 3's expiry
+# loop breaks on the first "gone", so a single hiccup on a contended runner made
+# the harness declare the mirror expired while it was still there, and start its
+# 30s stopwatch up to ~29s before the event it claims to measure. The two red
+# runs of 2026-09-18/19 are exactly this, and they ran the SAME commit as a green
+# one (0459c2a4), which is why no bisect could ever have found it.
+#
+# Read failures are LOUD (stderr) and never silently mean "absent".
+mirror_state() {
+	local out rc=0
+	out="$(docker exec "$(etcd_name "$1")" etcdctl --command-timeout=5s \
+		get --prefix "/aether/v1/regions/$2/" --keys-only 2>&1)" || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		printf '\033[1;33m  !! etcd read on %s FAILED (rc=%s) -- NOT treated as "absent": %s\033[0m\n' \
+			"$1" "$rc" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" >&2
+		return 2
+	fi
+	if printf '%s' "$out" | grep -q '[^[:space:]]'; then
+		return 0
+	fi
+	return 1
+}
+
+# mirror_present <cluster> <region>: strict boolean for the wait loops -- true
+# ONLY on a successful read that found keys. A read failure is false here, which
+# is correct for "keep waiting" but NEVER for "it is gone"; use mirror_state
+# directly wherever absence is the success condition.
 mirror_present() {
-	docker exec "$(etcd_name "$1")" etcdctl get --prefix "/aether/v1/regions/$2/" --keys-only 2>/dev/null | grep -q .
+	local st=0
+	mirror_state "$1" "$2" || st=$?
+	[ "$st" -eq 0 ]
 }
 
 client_code() {
@@ -525,32 +592,70 @@ verify() {
 	log "3/4 failover: kill region $region_b's registrar (replicator leader) -> its mirror in etcd-a must EXPIRE at the lease TTL"
 	kubectl --context "kind-$CLUSTER_B" -n "$NS" scale deploy/aether-registrar --replicas=0 >/dev/null
 	kubectl --context "kind-$CLUSTER_B" -n "$NS" wait --for=delete pod -l app.kubernetes.io/component=registrar --timeout=90s >/dev/null 2>&1 || true
-	local waited=0 gone=0
+	local waited=0 gone=0 st=0 readfail=0
 	while [ "$waited" -lt "$FAILOVER_TIMEOUT" ]; do
-		if ! mirror_present "$CLUSTER_A" "$region_b"; then
+		st=0
+		mirror_state "$CLUSTER_A" "$region_b" || st=$?
+		case "$st" in
+		1)
+			# A SUCCESSFUL read that found nothing. This is the only condition
+			# that may anchor the stopwatch (#597).
 			gone=1
 			break
-		fi
+			;;
+		2)
+			# The read failed. Say so, keep polling -- do NOT conclude "expired".
+			readfail=$((readfail + 1))
+			;;
+		esac
 		sleep 5
 		waited=$((waited + 5))
 	done
-	[ "$gone" = "1" ] || die "mirrored $region_b keys still in etcd-a after ${FAILOVER_TIMEOUT}s (lease did not lapse)"
-	ok "mirror expired in etcd-a ${waited}s after origin death (origin-heartbeat lease lapse, no peer GC)"
-	mirror_present "$CLUSTER_B" "$region_b" || die "region $region_b's ORIGIN data vanished from its own etcd (must persist)"
+	[ "$gone" = "1" ] || die "mirrored $region_b keys still in etcd-a after ${FAILOVER_TIMEOUT}s (lease did not lapse; ${readfail} etcd read failure(s) along the way -- if that count is high the runner was contended and the lease verdict is unreliable)"
+	# THE ANCHOR. Everything below is measured from here: the instant a
+	# successful read first saw the mirror gone.
+	local t_gone
+	t_gone="$(now_ms)"
+	ok "mirror expired in etcd-a ${waited}s after origin death (origin-heartbeat lease lapse, no peer GC; ${readfail} read failure(s) tolerated)"
+
+	st=0
+	mirror_state "$CLUSTER_B" "$region_b" || st=$?
+	case "$st" in
+	1) die "region $region_b's ORIGIN data vanished from its own etcd (must persist)" ;;
+	2) die "could not read etcd-b to confirm region $region_b's ORIGIN data survived -- the read FAILED; this is not evidence either way (#597)" ;;
+	esac
 	ok "origin data intact in etcd-b (only the mirror expired)"
+
 	# a's registrar drops echo from its snapshot -> the client call must fail.
-	# 30s is a deliberately generous budget for a path designed to withdraw in
-	# well under a second; see dump_failover_state() for why it is not widened.
-	for i in 1 2 3 4 5 6; do
+	#
+	# Sample at ~1s rather than the old 6x5s, and report the elapsed time on
+	# EVERY run -- pass or fail. The designed path is watch-driven and measures
+	# ~150ms end to end, so a coarse pass/fail against a 30s budget threw away
+	# the only number that can tell "comfortably fast" from "about to regress",
+	# and left the two competing explanations for a red run indistinguishable.
+	# A failing run now says how far past the budget it went, which discriminates
+	# them on a SINGLE red run instead of needing a distribution over twenty.
+	local t_fail="" withdraw_ms=-1
+	for i in $(seq 1 "$WITHDRAW_CAP"); do
 		code="$(client_code)"
-		[ "$code" != "200" ] && break
-		sleep 5
+		if [ "$code" != "200" ]; then
+			t_fail="$(now_ms)"
+			withdraw_ms=$((t_fail - t_gone))
+			break
+		fi
+		sleep 1
 	done
-	if [ "$code" = "200" ]; then
-		dump_failover_state
-		die "client(a) still reaches echo 30s after the region-b mirror expired — the withdrawal path is WATCH-driven (a's registrar syncs off the etcd watch; the 5s poll is only a backstop), so the designed latency is sub-second plus debounce and 30s is ~2 orders of magnitude off it. Read the sections above in order to name the stalled hop: registry (is the mirror really gone from etcd-a?), registrar (a lapsed/re-establishing etcd watch = degraded to the 5s poll; lease/leader/mirror lines = a replicator leader-election gap), agent (did the snapshot rebuild without echo?), envoy /clusters (hosts still there = the withdrawal never reached the data plane, which would mean cross-cluster failover latency is NOT bounded by the origin-heartbeat lease). Refs #597"
+	if [ "$withdraw_ms" -ge 0 ]; then
+		printf 'AETHER_METRIC replicator_withdraw_seconds=%s.%03d\n' \
+			"$((withdraw_ms / 1000))" "$((withdraw_ms % 1000))"
+	else
+		printf 'AETHER_METRIC replicator_withdraw_seconds=+inf cap=%ss\n' "$WITHDRAW_CAP"
 	fi
-	ok "client(a) -> echo now fails ($code) — a's EDS dropped the dead region"
+	if [ "$code" = "200" ] || [ "$withdraw_ms" -gt $((WITHDRAW_BUDGET * 1000)) ]; then
+		dump_failover_state
+		die "client(a) took ${withdraw_ms}ms to stop reaching echo after the region-b mirror expired (budget ${WITHDRAW_BUDGET}s; -1 means it never stopped within ${WITHDRAW_CAP}s) — the withdrawal path is WATCH-driven (a's registrar syncs off the etcd watch; the 5s poll is only a backstop), so the designed latency is sub-second plus debounce and 30s is ~2 orders of magnitude off it. Read the sections above in order to name the stalled hop: registry (is the mirror really gone from etcd-a?), registrar (a lapsed/re-establishing etcd watch = degraded to the 5s poll; lease/leader/mirror lines = a replicator leader-election gap), agent (did the snapshot rebuild without echo?), envoy /clusters (hosts still there = the withdrawal never reached the data plane, which would mean cross-cluster failover latency is NOT bounded by the origin-heartbeat lease). Refs #597"
+	fi
+	ok "client(a) -> echo now fails ($code) after ${withdraw_ms}ms — a's EDS dropped the dead region (budget ${WITHDRAW_BUDGET}s)"
 
 	log "4/4 recovery: restore region $region_b's registrar -> resync re-mirrors under a fresh lease"
 	kubectl --context "kind-$CLUSTER_B" -n "$NS" scale deploy/aether-registrar --replicas=2 >/dev/null
