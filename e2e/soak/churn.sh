@@ -122,7 +122,20 @@ restore_shrink() {
 		fi
 	fi
 }
-trap restore_shrink EXIT INT TERM
+# Split on purpose (#835). `trap restore_shrink EXIT INT TERM` made `kill -TERM`
+# do the OPPOSITE of stopping the driver: restore_shrink RETURNS rather than
+# exiting, the signal had already interrupted the in-flight `sleep` inside
+# waituntil, so control fell straight through to the NEXT roll. The driver kept
+# running, one roll ahead of schedule -- observed live on 2026-09-19 as an
+# unscheduled `ROLLED aether-test/deployment/svc-1`. In the log that reads as
+# "the tool ignored my signal", which sends you debugging the wrong thing.
+#
+# EXIT stays as the idempotent safety net: restore_shrink clears SHRINK_PREV
+# before it scales, so the EXIT trap firing again after an INT/TERM handler has
+# already run is a no-op. 130/143 are the conventional 128+SIGINT / 128+SIGTERM.
+trap restore_shrink EXIT
+trap 'restore_shrink; exit 130' INT
+trap 'restore_shrink; exit 143' TERM
 
 # Sleep until T0 + $1 minutes.
 waituntil() {
