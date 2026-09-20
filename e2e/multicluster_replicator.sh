@@ -74,6 +74,46 @@ dump_mesh_dns() {
 	done
 }
 
+# The other half of step 2's failure evidence, ported from the 019 waypoint
+# harness this suite was forked from (e2e/multicluster_waypoint.sh:dump_echo_eds).
+# The fork took TUNNEL_PORT and dump_mesh_dns but not this function, which left
+# the constant unused (SC2034, #853) and step 2 diagnosable only down to "DNS
+# resolved / did not resolve".
+#
+# That is one bit short of the question step 2 actually asks. Its data path is
+# mirror AND waypoint, and once mesh-DNS is cleared there are still two distinct
+# causes with the same curl 000:
+#   * 'a' never turned the mirrored keys into an endpoint — the replicator did
+#     its job (step 1 already proved the keys are in etcd-a) but a's registrar or
+#     agent did not project them, which is a REPLICATION-side failure;
+#   * 'a' has the endpoint but at the wrong address — a pod IP instead of
+#     b-node-ip:$TUNNEL_PORT — meaning the east/west waypoint rewrite did not
+#     happen, which is a 019 failure and nothing to do with this suite.
+# The EDS host tells them apart in one line. Same admin-access shape and the
+# same one-shot-on-failure discipline as dump_failover_state (see its comment on
+# why nothing scrapes /clusters); that dump answers step 3's withdrawal question
+# and reads the same endpoint for the opposite purpose.
+dump_echo_eds() {
+	local node hosts
+	node="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" get pod -l app=client \
+		-o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)"
+	if [ -z "$node" ]; then
+		printf '\033[1;33m  -- envoy EDS: SKIPPED (client pod node unresolved) --\033[0m\n' >&2
+		return
+	fi
+	printf '\033[1;33m  -- envoy EDS for echo on %s (admin /clusters, node %s) --\033[0m\n' "$CLUSTER_A" "$node" >&2
+	hosts="$(docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
+		grep -i echo | head -40 || true)"
+	if [ -n "$hosts" ]; then
+		printf '%s\n' "$hosts" | sed 's/^/    /' >&2
+		printf '    ^ the host should be b-node-ip:%s; a pod IP means the waypoint rewrite\n' "$TUNNEL_PORT" >&2
+		printf '      did not happen (019, not replication)\n' >&2
+	else
+		printf '    (no echo cluster in Envoy — step 1 proved the mirrored keys reached etcd-a,\n' >&2
+		printf '     so the break is a-side projection: read a'"'"'s registrar and agent logs)\n' >&2
+	fi
+}
+
 # Step 3's NEGATIVE assertion — client(a) must STOP reaching echo once region-b's
 # mirror expires from etcd-a — is the only withdrawal assertion in this suite and
 # the only one that flakes (#597). The withdrawal path is WATCH-driven end to end:
@@ -477,7 +517,8 @@ verify() {
 	done
 	if [ "$code" != "200" ]; then
 		dump_mesh_dns "$CLUSTER_A" "$CLUSTER_B"
-		die "cross-region call returned $code (expected 200) — the target is a MESH DNS NAME, so rule out resolution using the mesh-dns state above before digging into cross-region routing"
+		dump_echo_eds
+		die "cross-region call returned $code (expected 200) — the target is a MESH DNS NAME, so rule out resolution using the mesh-dns state above, then read the EDS dump: an echo host at b-node-ip:$TUNNEL_PORT clears replication and points at the data path, a pod IP means the waypoint rewrite did not happen, and no echo cluster at all means 'a' never projected the mirrored keys step 1 just proved are in etcd-a"
 	fi
 	ok "cross-region call succeeded (HTTP 200) over mirror + waypoint"
 

@@ -1,0 +1,26 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# //bazel's own shell, in range of the shellcheck aspect (#853). See
+# //scripts:scripts_shell for why these targets exist at all.
+#
+# `workspace_status.sh` is the stamping script every `bazel build` runs
+# (`--workspace_status_command` in .bazelrc), so a syntax or quoting error in it
+# breaks every build in the repository; it had never been linted. This is a
+# plain sh_library over source files and is NOT the workspace-status wiring —
+# nothing in the build graph depends on it, the flag names the path directly.
+#
+# The glob is deliberately non-recursive. //bazel/lint, //bazel/format,
+# //bazel/img, //bazel/helm, //bazel/protodoc and //bazel/proxy_pin are their own
+# packages, and a glob cannot cross a package boundary — `glob(["**/*.sh"])`
+# would silently stop at each BUILD.bazel rather than reaching into them. If one
+# of them ever gains a script it needs its own target, which is what
+# scripts/check-shell-lint.sh is there to notice.
+#
+# //bazel/lint/proxy_shell is covered by its own target and its own completeness
+# guard (scripts/check-proxy-shell-lint.sh, #848) — those srcs are symlinks into
+# the .bazelignore'd //proxy workspace and are not root-workspace shell.
+sh_library(
+    name = "bazel_shell",
+    srcs = glob(["*.sh"]),
+    visibility = ["//visibility:private"],
+)

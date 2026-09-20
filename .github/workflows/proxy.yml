@@ -59,10 +59,15 @@ jobs:
   # target is a root-workspace sh_library over symlinks into //proxy, which is
   # how it gets past //.bazelignore at all. See //bazel/lint/proxy_shell.
   #
-  # Cheap by construction — shellcheck over four source files, no toolchain, no
-  # C++, no Envoy — so it needs no RBE and no BuildBuddy key, and it is a
+  # Cheap by construction — shellcheck over a dozen source files, no toolchain,
+  # no C++, no Envoy — so it needs no RBE and no BuildBuddy key, and it is a
   # separate job from `test` rather than a step inside it so it reports in
   # seconds instead of waiting on the compile matrix.
+  #
+  # `//scripts:all` is here because check-proxy-shell-lint.sh lives there and a
+  # gate that is itself unlinted is the same bug one level up. Since #853 that
+  # target is all of scripts/, not one file; //e2e and //bazel are the `ci`
+  # workflow's `shell` job, which is where a root-shell PR actually lands.
   shell:
     needs: changes
     if: needs.changes.outputs.proxy == 'true'

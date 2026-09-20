@@ -1,0 +1,21 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# The e2e harnesses, in range of the shellcheck aspect (#853). See
+# //scripts:scripts_shell for why these targets exist at all.
+#
+# These are the longest and least-exercised shell in the repository — each one
+# stands up two kind clusters and is run by hand, so a latent quoting bug
+# surfaces as a red suite at 2am rather than as a compile error. All three
+# SC2155/SC2034 findings that #853 had to clear before the gate could be turned
+# on were here.
+#
+# Per-directory targets (this one, //e2e/pressure, //e2e/soak) rather than one
+# recursive target, for two reasons. A glob cannot cross a package boundary, so
+# `glob(["**/*.sh"])` here would stop dead at //e2e/udsecho's BUILD.bazel and
+# quietly cover less than it appears to; and a per-directory target keeps the
+# lint failure label pointing at the directory the script lives in.
+sh_library(
+    name = "e2e_shell",
+    srcs = glob(["*.sh"]),
+    visibility = ["//visibility:private"],
+)
