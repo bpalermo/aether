@@ -82,6 +82,14 @@ type Metrics struct {
 	// for that pod while presenting a co-located workload's SVID — which is
 	// exactly what a caller's ssl_fail_verify_san rejects.
 	inboundBindingMismatch metric.Int64Counter
+	// udpRouteUnsupported counts UDPRoute inputs a snapshot generation could NOT
+	// represent and therefore discarded (issue #873): backend weights beyond the
+	// first, a second UDPRoute-backed service on the same pod, or a weight-0
+	// drain that UDP forwards to anyway. The discard is otherwise invisible from
+	// both ends -- the route is accepted, the projector weights it correctly, and
+	// the data plane quietly ignores it -- so this counter is the only signal
+	// that a UDPRoute is not doing what its author wrote.
+	udpRouteUnsupported metric.Int64Counter
 }
 
 // snapshotDurationBuckets are the explicit boundaries, in SECONDS, for
@@ -152,6 +160,10 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Inbound filter chains bound to another workload's SDS server-certificate secret")); err != nil {
 		return nil, fmt.Errorf("inbound binding mismatch: %w", err)
 	}
+	if m.udpRouteUnsupported, err = meter.Int64Counter("aether.agent.l4route.udp_unsupported",
+		metric.WithDescription("UDPRoute inputs discarded because the UDP capture listener cannot represent them (#873)")); err != nil {
+		return nil, err
+	}
 	if m.clusterUnpinned, err = meter.Int64Counter("aether.agent.identity.cluster_unpinned",
 		metric.WithDescription("Mesh clusters published with no server-identity SAN pin (handshake proves trust-domain membership only)")); err != nil {
 		return nil, fmt.Errorf("cluster unpinned: %w", err)
@@ -213,6 +225,16 @@ func (m *Metrics) ClusterUnpinned(ctx context.Context, n int64) {
 // (#796/#717). Pod names are deliberately NOT attributes (unbounded
 // cardinality); the skip logs the pod at WARN, once per pod. A no-op for
 // n <= 0, so the healthy case rides on the zero seeded at registration.
+// UDPRouteUnsupported counts n UDPRoute inputs discarded by ONE snapshot
+// generation because the per-pod UDP capture listener cannot represent them
+// (#873). Non-zero means a UDPRoute on this node is not doing what it says.
+func (m *Metrics) UDPRouteUnsupported(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.udpRouteUnsupported.Add(ctx, n)
+}
+
 func (m *Metrics) StaleNetnsSkipped(ctx context.Context, n int64) {
 	if m == nil || n <= 0 {
 		return

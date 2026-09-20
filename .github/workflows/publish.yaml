@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless cosign signing (#873 is unrelated; see the Sign step below). The
+  # signer exchanges this OIDC token with Fulcio for a short-lived certificate
+  # bound to this workflow's identity, so NO private key exists to store or
+  # rotate. Without it the sign step fails closed rather than signing with
+  # something weaker.
+  id-token: write
 
 # Serialise publishes (#692). Every run pushes the *same* mutable chart tags
 # (`charts/aether:<Chart.yaml version>` in particular, which does not change per
@@ -85,3 +91,138 @@ jobs:
           # udsecho: UDS validation workloads (proposal 034 PR 3b) — chart + image
           # bundle like prober; the chart pins the image digest at package time.
           bazel run --stamp --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} //charts/udsecho:udsecho.push
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      # Sign every published image, keyless.
+      #
+      # WHERE THE SIGNATURE GOES: cosign's tag scheme puts it in the SAME
+      # repository as the image, under a tag derived from the image digest --
+      # `sha256:abc…` becomes the tag `sha256-abc….sig`. It is an ordinary OCI
+      # image manifest whose layer is
+      # application/vnd.dev.cosign.simplesigning.v1+json, with the signature,
+      # certificate and Rekor bundle in its annotations.
+      #
+      # This is deliberately NOT the OCI 1.1 referrers scheme, and that choice is
+      # forced: **ghcr.io does not implement the Referrers API.** Verified against
+      # four repositories including our own and oras-project/oras -- GET
+      # /v2/<repo>/referrers/<digest> returns 404 on all of them while
+      # /v2/<repo>/tags/list and /manifests/ succeed with the same token. The tag
+      # scheme demonstrably works there: fluxcd/source-controller carries 18 live
+      # `.sig` tags on ghcr today. It is also why rules_img's own signing support
+      # (signing_config + rules_img_signer_cosign) cannot be used for this repo --
+      # it attaches signatures ONLY as referrers, with no fallback.
+      #
+      # --recursive signs the index AND every child manifest. Our images are
+      # multi-arch (amd64/arm64), so signing only the index would leave anyone who
+      # pulls by per-arch digest with an unsigned manifest.
+      #
+      # Signing is a separate step AFTER the pushes rather than part of them: a
+      # signature that fails to attach must not leave the images unpublished, and
+      # the images are pushed by digest above so nothing here can change what was
+      # published.
+      - name: Sign published images (keyless)
+        env:
+          COSIGN_YES: "true"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Every image this workflow publishes. Keep in sync with the
+          # go_multi_arch_image() repositories; a missing entry silently ships an
+          # UNSIGNED image, so the verify step below re-reads this same list.
+          repos=(
+            bpalermo/aether/agent
+            bpalermo/aether/mesh-dns
+            bpalermo/aether/proxy-supervisor
+            bpalermo/aether/cni-install
+            bpalermo/aether/registrar
+            bpalermo/aether/controller
+            bpalermo/aether/prober
+            bpalermo/aether/udsecho
+          )
+
+          # Resolve each image's INDEX DIGEST rather than signing a tag. Signing a
+          # tag re-resolves it inside cosign, which is a TOCTOU window against a
+          # mutable tag; the digest is what was actually published.
+          registry_token() {
+            curl -fsS -u "x:${GH_TOKEN}" \
+              "https://ghcr.io/token?scope=repository:$1:pull&service=ghcr.io" |
+              python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'
+          }
+
+          signed=0
+          for repo in "${repos[@]}"; do
+            tok="$(registry_token "$repo")"
+
+            # The commit-suffixed tag (`<tag>-<full sha>`) is the only immutable
+            # one -- `dev` is rewritten by every publish (#692).
+            tag="$(curl -fsS -H "Authorization: Bearer $tok" \
+              "https://ghcr.io/v2/${repo}/tags/list" |
+              python3 -c "import sys,json;ts=json.load(sys.stdin).get('tags') or [];print(next((t for t in ts if t.endswith('-${COMMIT}')),''))")"
+            if [ -z "$tag" ]; then
+              echo "::error::no tag ending in -${COMMIT} in ${repo}; refusing to sign a tag that is not this commit"
+              exit 1
+            fi
+
+            digest="$(curl -fsSI -H "Authorization: Bearer $tok" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json' \
+              "https://ghcr.io/v2/${repo}/manifests/${tag}" |
+              tr -d '\r' | sed -nE 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*//p' | head -1)"
+            if [ -z "$digest" ]; then
+              echo "::error::could not resolve a digest for ghcr.io/${repo}:${tag}"
+              exit 1
+            fi
+
+            echo "signing ghcr.io/${repo}@${digest} (from ${tag})"
+            cosign sign --recursive "ghcr.io/${repo}@${digest}"
+            # Hand the EXACT reference to the verify step. It must not re-resolve
+            # the list itself: a second copy of the repo list can drift from this
+            # one, and re-resolving a tag would let verify pass against something
+            # other than what was signed.
+            echo "ghcr.io/${repo}@${digest}" >> signed-images.txt
+            signed=$((signed + 1))
+          done
+
+          # A loop that signs nothing must not report success. This is the same
+          # class of defect as the shellcheck aspect that linted zero files
+          # (#853): a step that passes because it did nothing is worse than a
+          # failing one.
+          if [ "$signed" -ne "${#repos[@]}" ]; then
+            echo "::error::signed ${signed} of ${#repos[@]} images"
+            exit 1
+          fi
+          echo "signed ${signed} image(s)"
+
+      # Prove the signatures are actually there AND verifiable. Without this the
+      # sign step could succeed while attaching something nothing can verify, and
+      # nobody would find out until an admission controller began rejecting
+      # images.
+      #
+      # It verifies the exact digests the sign step recorded -- not a re-derived
+      # list and not a tag -- so it cannot pass against a different artefact than
+      # the one that was signed.
+      - name: Verify the signatures
+        run: |
+          set -euo pipefail
+
+          # An empty or missing list means the sign step signed nothing while
+          # reporting success. Fail rather than "verify" zero images (#853).
+          if [ ! -s signed-images.txt ]; then
+            echo "::error::no signed images were recorded -- the sign step signed nothing"
+            exit 1
+          fi
+
+          n=0
+          while read -r ref; do
+            [ -n "$ref" ] || continue
+            cosign verify \
+              --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/publish\\.yaml@" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$ref" >/dev/null
+            echo "verified ${ref}"
+            n=$((n + 1))
+          done < signed-images.txt
+          echo "verified ${n} signature(s)"

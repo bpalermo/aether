@@ -24,6 +24,7 @@ import (
 
 	configprotov1 "aethermesh.dev/api/aether/config/v1"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/extensionfilter"
 	"aethermesh.dev/common/udspath"
 
@@ -371,6 +372,325 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 		[]*clusterv3.Cluster{xdsCluster(), passthrough, httpSvc, tcpSvc2},
 		[]*listenerv3.Listener{captureListener},
 	), nil
+}
+
+// ---------------------------------------------------------------------------
+// L4 routes: TCPRoute / TLSRoute / UDPRoute (proposal 018 Phase 3b, issue #868)
+// ---------------------------------------------------------------------------
+//
+// These three bootstraps are the per-PR half of #868's coverage. The nightly
+// kind harness exercises the L4 data path; what a real Envoy accepts is checked
+// here, because it is cheap, needs no cluster, and gates every PR
+// (scripts/ci-impacted-targets.sh classifies //test/envoy_validate as a unit
+// target).
+//
+// The three shapes and why each is worth an Envoy's opinion:
+//
+//   - TCPRoute: the per-ClusterIP floor chain carries a tcp_proxy with
+//     weighted_clusters instead of a single cluster.
+//   - TLSRoute: per-SNI chains match prefix_ranges + server_names and sit on
+//     the SAME listener as the floor chain, which matches the same /32 with NO
+//     server_names. Envoy rejects a listener whose filter chains are ambiguous,
+//     so it is Envoy — not a Go assertion — that certifies the coexistence.
+//     That coexistence IS the fall-through the harness then drives: a
+//     non-matching SNI reaching the floor is designed behaviour, not a bug.
+//   - UDPRoute: a connection-less UDP listener must carry NO filter_chains
+//     ("N filter chain(s) specified for connection-less UDP listener"), so the
+//     udp_proxy config rides listener_filters. That rule is recorded in a
+//     comment in l4route.go and nothing checked it until now.
+//
+// Service keys are namespace-qualified "<ns>/<svc>" because that is what the
+// cluster namers parse (proxy.ServiceClusterName -> serviceref.ParseKey).
+
+const (
+	l4TCPParent   = "default/l4-front"
+	l4TCPBackendA = "default/l4-a"
+	l4TCPBackendB = "default/l4-b"
+
+	l4TLSParent   = "default/l4-tls-front"
+	l4TLSBackendA = "default/l4-tls-a"
+	l4TLSBackendB = "default/l4-tls-b"
+
+	l4UDPBackend = "default/l4-udp-a"
+
+	// L4TCPParentClusterIP and L4TLSParentClusterIP are the parent Services'
+	// ClusterIPs: the /32 every chain of that leg matches on.
+	L4TCPParentClusterIP = "10.96.2.20"
+	L4TLSParentClusterIP = "10.96.2.30"
+
+	// L4TCPWeightA and L4TCPWeightB are the TCPRoute fixture's backendRef
+	// weights. Deliberately unequal and not co-prime with each other's sum, so
+	// a builder that normalised or swapped them would be visible.
+	L4TCPWeightA = 75
+	L4TCPWeightB = 25
+
+	// L4SNIAlpha and L4SNIBravo are the TLSRoute fixture's two hostnames — one
+	// TLSRoute object each, because TLSRoute.Spec.Hostnames is route-level.
+	L4SNIAlpha = "a.l4.test"
+	L4SNIBravo = "b.l4.test"
+
+	// L4UDPBackendPort is the backend's APPLICATION UDP port. The UDP floor has
+	// no inbound mTLS hop, so udp_proxy dials this port directly.
+	L4UDPBackendPort = 9001
+	// l4UDPMeshInboundPort is the mesh inbound TCP port the shared bare-name EDS
+	// load assignment carries, and therefore the port proxy.UDPLoadAssignment
+	// has to rewrite AWAY from. The exact number is not the assertion; that it
+	// differs from L4UDPBackendPort is.
+	l4UDPMeshInboundPort = 18008
+	// l4UDPEndpointIP is the backend pod IP in the inline UDP load assignment.
+	l4UDPEndpointIP = "10.244.3.7"
+)
+
+// L4TCPBackendClusterA and friends are the data-plane cluster names the L4
+// fixtures reference, exported so the test asserts on the names the builders
+// actually emitted rather than re-deriving them from a second copy of the
+// naming rule.
+func L4TCPBackendClusterA() string { return proxy.TCPClusterName(l4TCPBackendA, meshDomain) }
+
+// L4TCPBackendClusterB is the second TCPRoute backend's TCP floor cluster.
+func L4TCPBackendClusterB() string { return proxy.TCPClusterName(l4TCPBackendB, meshDomain) }
+
+// L4TLSBackendClusterA is the a.l4.test SNI chain's backend cluster.
+func L4TLSBackendClusterA() string { return proxy.TCPClusterName(l4TLSBackendA, meshDomain) }
+
+// L4TLSBackendClusterB is the b.l4.test SNI chain's backend cluster.
+func L4TLSBackendClusterB() string { return proxy.TCPClusterName(l4TLSBackendB, meshDomain) }
+
+// L4TLSParentFloorCluster is the TLS parent's own TCP floor cluster: where a
+// connection whose SNI matches no TLSRoute deliberately lands.
+func L4TLSParentFloorCluster() string { return proxy.TCPClusterName(l4TLSParent, meshDomain) }
+
+// L4UDPBackendCluster is the UDPRoute backend's plaintext UDP cluster.
+func L4UDPBackendCluster() string { return proxy.UDPClusterName(l4UDPBackend, meshDomain) }
+
+// CaptureTCPRouteBootstrapJSON builds a capture bootstrap whose per-ClusterIP
+// floor chain is a TCPRoute-weighted tcp_proxy (proposal 018 Phase 3b) over two
+// backends, 75/25.
+//
+// The weighted form is what a TCPRoute produces and what the floor chain never
+// carries without one, so this is the only place in the harness where Envoy
+// parses a TcpProxy_WeightedClusters at all.
+func CaptureTCPRouteBootstrapJSON() ([]byte, error) {
+	bs, err := buildCaptureTCPRouteBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
+	pod := testPod()
+
+	svc := proxy.CaptureTCPService{
+		// The production ClusterName is the "tcp:"-prefixed floor cluster, not
+		// the bare mesh authority (cache/capture.go builds it with
+		// proxy.TCPClusterName). Spelling it any other way here would model a
+		// listener the agent never emits.
+		ClusterName: proxy.TCPClusterName(l4TCPParent, meshDomain),
+		ClusterIP:   L4TCPParentClusterIP,
+		TCPRouteRules: []proxy.L4ServiceRoute{{
+			Backends: []proxy.L4Backend{
+				{Service: l4TCPBackendA, Cluster: L4TCPBackendClusterA(), Weight: L4TCPWeightA},
+				{Service: l4TCPBackendB, Cluster: L4TCPBackendClusterB(), Weight: L4TCPWeightB},
+			},
+		}},
+	}
+
+	listener, err := proxy.GenerateCaptureListener(
+		pod,
+		proxy.SourceIdentityForPod(pod, trustDomain),
+		meshconst.ProxyCapturePort,
+		meshDomain,
+		false, // emitStatsPod
+		[]proxy.CaptureTCPService{svc},
+		true, // withPassthrough (redirect-all, the shipped default)
+		nil,  // extensionFilters
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateCaptureListener: %w", err)
+	}
+
+	return newBootstrap(
+		[]*clusterv3.Cluster{
+			xdsCluster(),
+			// The floor clusters' per-connection certificate selector fetches
+			// over its own api_config_source naming agent_xds (#842), so the
+			// bootstrap has to define it or the reference dangles.
+			agentXDSCluster(),
+			proxy.NewPassthroughOriginalDstCluster(),
+			newTCPFloorCluster(l4TCPBackendA, "l4-a"),
+			newTCPFloorCluster(l4TCPBackendB, "l4-b"),
+		},
+		[]*listenerv3.Listener{listener},
+	), nil
+}
+
+// CaptureTLSRouteBootstrapJSON builds a capture bootstrap carrying two TLSRoute
+// SNI chains ALONGSIDE the parent's TCP floor chain on one listener.
+//
+// The three chains all match prefix_ranges <ClusterIP>/32; two of them add
+// server_names and one does not. Envoy resolves that by specificity — SNI match
+// wins, no SNI match falls through to the floor — and rejects filter chains it
+// cannot disambiguate, so `--mode validate` accepting this listener is the
+// structural half of the fall-through behaviour #868 asks for.
+func CaptureTLSRouteBootstrapJSON() ([]byte, error) {
+	bs, err := buildCaptureTLSRouteBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
+	pod := testPod()
+
+	svc := proxy.CaptureTCPService{
+		ClusterName: proxy.TCPClusterName(l4TLSParent, meshDomain),
+		ClusterIP:   L4TLSParentClusterIP,
+		// No TCPRouteRules on purpose: the parent keeps its plain passthrough
+		// floor chain, which is the chain a non-matching SNI is DESIGNED to
+		// reach. Adding a TCPRoute here would hide that half of the shape.
+		TLSRouteRules: []proxy.L4ServiceRoute{
+			{
+				SNIHostnames: []string{L4SNIAlpha},
+				Backends: []proxy.L4Backend{
+					{Service: l4TLSBackendA, Cluster: L4TLSBackendClusterA(), Weight: 1},
+				},
+			},
+			{
+				SNIHostnames: []string{L4SNIBravo},
+				Backends: []proxy.L4Backend{
+					{Service: l4TLSBackendB, Cluster: L4TLSBackendClusterB(), Weight: 1},
+				},
+			},
+		},
+	}
+
+	listener, err := proxy.GenerateCaptureListener(
+		pod,
+		proxy.SourceIdentityForPod(pod, trustDomain),
+		meshconst.ProxyCapturePort,
+		meshDomain,
+		false, // emitStatsPod
+		[]proxy.CaptureTCPService{svc},
+		true, // withPassthrough
+		nil,  // extensionFilters
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateCaptureListener: %w", err)
+	}
+
+	return newBootstrap(
+		[]*clusterv3.Cluster{
+			xdsCluster(),
+			agentXDSCluster(),
+			proxy.NewPassthroughOriginalDstCluster(),
+			// The floor chain routes to the PARENT's own TCP cluster; the SNI
+			// chains route to the backends'.
+			newTCPFloorCluster(l4TLSParent, "l4-tls-front"),
+			newTCPFloorCluster(l4TLSBackendA, "l4-tls-a"),
+			newTCPFloorCluster(l4TLSBackendB, "l4-tls-b"),
+		},
+		[]*listenerv3.Listener{listener},
+	), nil
+}
+
+// CaptureUDPBootstrapJSON builds the connection-less UDP capture listener plus
+// the plaintext "udp:" cluster it routes to (proposal 018 Phase 3b).
+//
+// SCOPE, deliberately narrow: this models DELIVERY only. udp_proxy's route
+// specifier here is a bare Cluster taken from the first backend of the
+// lexicographically first service, so backend SELECTION is not expressible and
+// weights are discarded — issue #873. An assertion that UDP picks between
+// backends would fail by design, so there is none.
+func CaptureUDPBootstrapJSON() ([]byte, error) {
+	bs, err := buildCaptureUDPBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+func buildCaptureUDPBootstrap() (*bootstrapv3.Bootstrap, error) {
+	pod := testPod()
+
+	udpCluster := L4UDPBackendCluster()
+	listener, err := proxy.GenerateUDPCaptureListener(
+		pod.GetName(),
+		pod.GetNetworkNamespace(),
+		meshconst.ProxyCapturePort,
+		map[string][]proxy.L4Backend{
+			l4UDPBackend: {{Service: l4UDPBackend, Cluster: udpCluster, Weight: 1}},
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GenerateUDPCaptureListener: %w", err)
+	}
+	if listener == nil {
+		return nil, fmt.Errorf("GenerateUDPCaptureListener returned no listener for a non-empty route set")
+	}
+
+	// The production cluster is built from the service's EXISTING (TCP inbound,
+	// :18008) load assignment, rewritten by proxy.UDPLoadAssignment onto the
+	// backend's application UDP port. Model it the same way round so the
+	// rewrite is what produces the fixture, not a hand-written UDP endpoint.
+	la := proxy.UDPLoadAssignment(meshInboundLoadAssignment(l4UDPBackend), udpCluster, L4UDPBackendPort)
+	if la == nil {
+		return nil, fmt.Errorf("UDPLoadAssignment returned nil")
+	}
+
+	return newBootstrap(
+		[]*clusterv3.Cluster{
+			xdsCluster(),
+			proxy.NewUDPServiceCluster(udpCluster, l4UDPBackend, la),
+		},
+		[]*listenerv3.Listener{listener},
+	), nil
+}
+
+// newTCPFloorCluster builds a service's "tcp:" floor cluster exactly as
+// SnapshotCache.captureTCPClusters does: NewTCPServiceCluster plus the
+// per-connection mesh mTLS socket, SAN-pinned to the backend's workload
+// identity. saName is the bare service name the SPIFFE ID's sa/ segment
+// carries (refreshEntryMTLSLocked uses the bare name, not the key).
+func newTCPFloorCluster(serviceKey, saName string) *clusterv3.Cluster {
+	c := proxy.NewTCPServiceCluster(proxy.TCPClusterName(serviceKey, meshDomain), serviceKey, serviceKey)
+	proxy.InjectUpstreamTCPMTLS(
+		c,
+		fmt.Sprintf(nodeSpiffeIDFmt, trustDomain),
+		fmt.Sprintf("spiffe://%s", trustDomain),
+		[]string{fmt.Sprintf("spiffe://%s/ns/default/sa/%s", trustDomain, saName)},
+		"", // no SNI on the floor: the peer must demux to its inbound default chain
+	)
+	return c
+}
+
+// meshInboundLoadAssignment is the shared bare-name EDS load assignment a mesh
+// service carries: the destination pod's mesh INBOUND TCP port, which is
+// exactly what the UDP path must not use.
+func meshInboundLoadAssignment(clusterName string) *endpointv3.ClusterLoadAssignment {
+	return &endpointv3.ClusterLoadAssignment{
+		ClusterName: clusterName,
+		Endpoints: []*endpointv3.LocalityLbEndpoints{{
+			LbEndpoints: []*endpointv3.LbEndpoint{{
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+					Endpoint: &endpointv3.Endpoint{
+						Address: &corev3.Address{
+							Address: &corev3.Address_SocketAddress{
+								SocketAddress: &corev3.SocketAddress{
+									Protocol: corev3.SocketAddress_TCP,
+									Address:  l4UDPEndpointIP,
+									PortSpecifier: &corev3.SocketAddress_PortValue{
+										PortValue: l4UDPMeshInboundPort,
+									},
+								},
+							},
+						},
+					},
+				},
+			}},
+		}},
+	}
 }
 
 // OutboundZeroVhostRouteBootstrapJSON builds a bootstrap whose listener inlines
