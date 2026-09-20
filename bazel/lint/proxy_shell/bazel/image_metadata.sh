@@ -1,0 +1,1 @@
+../../../../proxy/bazel/image_metadata.sh

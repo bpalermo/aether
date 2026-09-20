@@ -33,6 +33,13 @@ bazel_dep(name = "rules_buf", version = "0.5.4")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
 bazel_dep(name = "rules_helm", version = "0.32.0")
 
+# sh_library, for //bazel/lint/proxy_shell (#848) — the only thing in this
+# workspace that declares shell as a Bazel target, and the reason the shellcheck
+# aspect in //bazel/lint:linters.bzl has anything to visit at all. Bazel 9 no
+# longer provides the native sh_* rules, and autoloading them needs this module
+# in the graph regardless. Same version the //proxy workspace already pins.
+bazel_dep(name = "rules_shell", version = "0.8.0")
+
 # BuildBuddy RBE toolchain — provides the hosted-executor platform and a matching
 # Ubuntu CC toolchain for remote execution (--config=remote). aether is pure-Go,
 # but RBE actions still resolve a CC toolchain for the exec platform, which this
