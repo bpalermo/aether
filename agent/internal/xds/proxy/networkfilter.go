@@ -19,7 +19,7 @@ const (
 	// networkNamespaceFilterStateKey is the filter state key for the network namespace
 	networkNamespaceFilterStateKey = "aether.network.network_namespace"
 
-	// sourceIdentityFilterStateKey carries the SOURCE POD'S SPIFFE ID, written as
+	// SourceIdentityFilterStateKey carries the SOURCE POD'S SPIFFE ID, written as
 	// a literal string by every listener chain that can originate mesh traffic,
 	// and read by the cluster transport_socket_matcher
 	// (UpstreamTransportSocketMatcher, transportsocketmatch.go) since release two.
@@ -92,7 +92,12 @@ const (
 	//
 	// Namespaced under "aether." like the netns key so it can never collide with
 	// an Envoy-owned filter state object name.
-	sourceIdentityFilterStateKey = "aether.source.spiffe_id"
+	//
+	// EXPORTED so the out-of-tree runtime harness (//test/mtlspool) stamps the
+	// same key production does rather than re-spelling the literal: that test
+	// asserts an end-to-end identity property, and a drifted key would make it
+	// pass by matching nothing.
+	SourceIdentityFilterStateKey = "aether.source.spiffe_id"
 )
 
 // buildNetworkNamespaceFilterState copies Envoy's OWN downstream-netns filter
@@ -109,13 +114,13 @@ const (
 //
 // SINCE RELEASE TWO THIS COPY HAS EXACTLY ONE READER: accesslog.go's
 // `source_netns` attribute. The cluster transport_socket_matcher moved to
-// sourceIdentityFilterStateKey in #822, and the SharedWithUpstream: ONCE below
+// SourceIdentityFilterStateKey in #822, and the SharedWithUpstream: ONCE below
 // is now vestigial for this key (nothing upstream reads it). It is left as-is
 // deliberately — changing it would rewrite every per-pod filter chain's bytes
 // for no behavioural gain.
 //
 // If this copy is ever dropped (see the RELEASE THREE note on
-// sourceIdentityFilterStateKey), the access log does NOT need it: an HCM
+// SourceIdentityFilterStateKey), the access log does NOT need it: an HCM
 // access-log substitution can read the native object directly, because the
 // per-stream filter state parents onto the connection-lifespan store. But
 // beware the semantics change — the native object is the netns the LISTENER is
@@ -145,10 +150,10 @@ func buildNetworkNamespaceFilterState() *listenerv3.Filter {
 // propagation to the immediate upstream hop, so a future chained/internal hop
 // cannot silently inherit source-identity cert selection.
 func buildSourceIdentityFilterState(sourceSpiffeID string) *listenerv3.Filter {
-	return buildSetFilterState(sourceIdentityFilterStateKey, sourceSpiffeID)
+	return buildSetFilterState(SourceIdentityFilterStateKey, sourceSpiffeID)
 }
 
-// buildSourceFilterStates returns the source-attribution network filters every
+// BuildSourceFilterStates returns the source-attribution network filters every
 // mesh-originating filter chain carries, in a FIXED order (netns first, then
 // identity): these land in the chain's repeated `filters` field, whose order is
 // part of the listener's bytes and therefore of its delta-xDS hash.
@@ -156,7 +161,7 @@ func buildSourceIdentityFilterState(sourceSpiffeID string) *listenerv3.Filter {
 // sourceSpiffeID may be empty — before the trust domain is known there is no
 // identity to stamp — in which case only the netns filter is emitted, which is
 // byte-for-byte what this chain carried before issue #815.
-func buildSourceFilterStates(sourceSpiffeID string) []*listenerv3.Filter {
+func BuildSourceFilterStates(sourceSpiffeID string) []*listenerv3.Filter {
 	filters := []*listenerv3.Filter{buildNetworkNamespaceFilterState()}
 	if sourceSpiffeID != "" {
 		filters = append(filters, buildSourceIdentityFilterState(sourceSpiffeID))

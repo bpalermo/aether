@@ -137,10 +137,29 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 			resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(c.virtualHostVhosts())}
 		}
 	} else {
-		var routes []types.Resource
-		if len(vhosts) > 0 {
-			routes = append(routes, proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain))
-		}
+		routes := make([]types.Resource, 0, 2)
+		// ALWAYS emitted, zero vhosts included — exactly as the edge and capture
+		// route configs are. It used to be conditional on len(vhosts) > 0, which
+		// made an agent with nothing to publish (a local-only start, see
+		// loadInitialRegistryConfig) omit out_http from the snapshot entirely.
+		//
+		// Omitting it is not "an empty route table"; under delta ADS it is NO
+		// RESPONSE AT ALL. go-control-plane only writes a delta response when the
+		// subscription has resources or removals (respondDelta), and a first-time
+		// RDS subscriber to a name the snapshot has never carried produces
+		// neither — so the watch just stays open and silent. Envoy's egress
+		// listener then warms for the whole initial_fetch_timeout, activates with
+		// an unresolved route table, and answers 404 NR route_not_found on
+		// everything until a later snapshot finally carries out_http. Measured on
+		// main-worker-02, 2026-09-19: LDS at 16:08:50.558Z, first 404 at
+		// 16:09:05.214Z (14.7s ≈ the 15s timeout), first RDS 91ms after the last
+		// 404 (issue #817).
+		//
+		// With the config always present the subscription resolves on the first
+		// push, and BuildOutboundRouteConfiguration's on-demand catch-all makes
+		// the zero-vhost table a working one: mesh-shaped authorities reach their
+		// cluster through ODCDS rather than a dead 404.
+		routes = append(routes, proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain))
 		// Transparent capture (proposal 018, Phase 3a): the cap_http table the per-pod
 		// capture listeners reference over RDS. Always emitted when capture is on (it
 		// carries the on-demand catch-all) so the listeners' RDS resolves even with no
@@ -154,9 +173,10 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 				c.captureVhosts(), c.meshDomain, c.captureRedirectAll, c.captureKnownTargets()...,
 			))
 		}
-		if len(routes) > 0 {
-			resources[resourcev3.RouteType] = routes
-		}
+		// Unconditional: out_http is always in `routes`, so an agent with nothing
+		// to publish still hands Envoy a RouteType set its RDS subscription can
+		// resolve against.
+		resources[resourcev3.RouteType] = routes
 	}
 
 	c.log.DebugContext(ctx, "setting snapshot", "version", v,
@@ -192,6 +212,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// that TERMINATED the connection — which #686's client-side check cannot
 	// see.
 	c.logInboundIdentityBindings(ctx, v)
+	// The third identity fact a snapshot can get wrong silently (#832): a
+	// cluster published with NO server-identity SAN pin. The two checks above
+	// ask "is the identity we present the right one"; this one asks "are we
+	// checking the identity we are handed at all".
+	c.reportUnpinnedClusters(ctx, v)
 
 	return nil
 }

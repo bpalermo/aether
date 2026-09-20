@@ -88,6 +88,31 @@ func TestInboundReadyProbeClusterTLS(t *testing.T) {
 		"a probe that passes because SOMETHING answered on :18008 proves nothing")
 }
 
+// TestInboundReadyProbeHasItsOwnTLSSessionState is the #836 boundary: the
+// probe's TLS state must not be reachable by application traffic.
+//
+// The probe's peer is always a local pod presenting that pod's SVID, so a
+// session it deposits carries a certificate no mesh cluster may ever resume
+// against — which is what happened in #829. max_session_keys is therefore
+// pinned to 0 on the probe's OWN context, not inherited from the mesh builder:
+// this assertion has to keep holding if someone re-enables resumption for mesh
+// traffic (e.g. once upstream envoy#45982's SNI-scoped cache makes it
+// defensible), so DO NOT rewrite it to read the mesh helper's value.
+func TestInboundReadyProbeHasItsOwnTLSSessionState(t *testing.T) {
+	ctx := inboundReadyTLS(t, testInboundReadyCluster(t))
+
+	require.NotNil(t, ctx.GetMaxSessionKeys(),
+		"max_session_keys must be SET, not left to Envoy's default of 1")
+	assert.Equal(t, uint32(0), ctx.GetMaxSessionKeys().GetValue(),
+		"the readiness probe must never create resumable session state; a health check gains nothing from resumption")
+
+	// Built directly, not via the mesh helper — the probe keeps its own context
+	// so mesh traffic cannot share anything with it.
+	direct := InboundReadyProbeTransportSocket(testNodeIdentity, "spiffe://"+testTrustDomain, testSourceIdentity)
+	assert.True(t, proto.Equal(direct, testInboundReadyCluster(t).GetTransportSocket()),
+		"the probe cluster must use InboundReadyProbeTransportSocket verbatim")
+}
+
 // TestInboundReadyProbeClusterHealthCheck: TCP with an EMPTY send payload.
 // Envoy's TCP health-check session succeeds on the Connected event, and a
 // connection with a TLS transport socket does not raise Connected until the

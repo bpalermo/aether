@@ -57,7 +57,7 @@ func TestUpstreamTransportSocketMatcher(t *testing.T) {
 		"must be envoy.matching.inputs.transport_socket_filter_state, not the generic filter_state")
 	var input tsinputsv3.FilterStateInput
 	require.NoError(t, proto.Unmarshal(tree.GetInput().GetTypedConfig().GetValue(), &input))
-	assert.Equal(t, sourceIdentityFilterStateKey, input.GetKey(),
+	assert.Equal(t, SourceIdentityFilterStateKey, input.GetKey(),
 		"release two keys the matcher on the source SPIFFE ID, not the netns path")
 
 	// One entry per ServiceAccount; the action names the SPIFFE ID, which is

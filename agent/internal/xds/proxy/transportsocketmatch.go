@@ -129,7 +129,7 @@ func upstreamTransportSocketMatchesNamed(spiffeIDs []string, validationContextNa
 
 // UpstreamTransportSocketMatcher returns a matcher keyed on the
 // aether.source.spiffe_id filter state — the SOURCE POD'S SPIFFE ID, stamped as
-// a literal by every mesh-originating listener chain (buildSourceFilterStates,
+// a literal by every mesh-originating listener chain (BuildSourceFilterStates,
 // networkfilter.go) and shared with the upstream connection. Its
 // exact_match_map maps each local SOURCE IDENTITY to a TransportSocketNameAction
 // naming the match of the same name (UpstreamTransportSocketMatches), so the
@@ -148,7 +148,7 @@ func upstreamTransportSocketMatchesNamed(spiffeIDs []string, validationContextNa
 // Cluster proto BYTE-STABLE across pod churn within a ServiceAccount: only the
 // first pod of a ServiceAccount arriving on the node, or the last one leaving,
 // changes a cluster at all. Everything else hits Envoy's hash gate and warms
-// nothing. See sourceIdentityFilterStateKey for the three-release contract.
+// nothing. See SourceIdentityFilterStateKey for the three-release contract.
 //
 // Entries are built from the SORTED, deduplicated identity set. exact_match_map
 // is a proto map, which proto.MarshalOptions{Deterministic:true} canonicalises
@@ -185,7 +185,7 @@ func upstreamTransportSocketMatcherNamed(sourceIdentities []string, name func(st
 			MatcherTree: &matcherv3.Matcher_MatcherTree{
 				Input: &xdscorev3.TypedExtensionConfig{
 					Name:        filterStateInputName,
-					TypedConfig: config.TypedConfig(&tsinputsv3.FilterStateInput{Key: sourceIdentityFilterStateKey}),
+					TypedConfig: config.TypedConfig(&tsinputsv3.FilterStateInput{Key: SourceIdentityFilterStateKey}),
 				},
 				TreeType: &matcherv3.Matcher_MatcherTree_ExactMatchMap{
 					ExactMatchMap: &matcherv3.Matcher_MatcherTree_MatchMap{

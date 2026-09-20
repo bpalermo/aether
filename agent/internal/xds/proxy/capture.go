@@ -81,7 +81,7 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // Default off (no listener is generated unless transparent capture is on).
 // sourceSpiffeID is the capturing pod's own SPIFFE ID (SourceIdentityForPod),
 // stamped into filter state next to the netns on every chain that originates
-// mesh traffic (see sourceIdentityFilterStateKey). "" reproduces the pre-#815
+// mesh traffic (see SourceIdentityFilterStateKey). "" reproduces the pre-#815
 // shape exactly.
 func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
@@ -212,7 +212,7 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService, sourceSpiffeID strin
 			},
 		},
 		Filters: append(
-			buildSourceFilterStates(sourceSpiffeID),
+			BuildSourceFilterStates(sourceSpiffeID),
 			buildTCPProxyNetworkFilter(fmt.Sprintf("cap_tcp_%s", svc.ClusterName), svc.ClusterName),
 		),
 	}
@@ -266,7 +266,7 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomai
 	fc := &listenerv3.FilterChain{
 		Name: fmt.Sprintf("capture_%s", cniPod.GetName()),
 		Filters: append(
-			buildSourceFilterStates(sourceSpiffeID),
+			BuildSourceFilterStates(sourceSpiffeID),
 			buildHTTPConnectionManagerFilter(hcm),
 		),
 	}
@@ -334,9 +334,16 @@ func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
 // service never leaks to the ORIGINAL_DST passthrough (kube-proxy) while its
 // dedicated cap_http vhost is mid-rebuild. Ignored when redirectAll is false (no
 // passthrough to shadow a target).
+//
+// Like the outbound table this is emitted unconditionally, catch-all and all,
+// and it owns its virtual_hosts slice rather than appending onto the caller's
+// (see BuildOutboundRouteConfiguration).
 func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string, redirectAll bool, knownTargets ...KnownTargetRoute) *routev3.RouteConfiguration {
+	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
+	all = append(all, vhosts...)
+	all = append(all, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll, knownTargets...))
 	return &routev3.RouteConfiguration{
 		Name:         CaptureHTTPRouteName,
-		VirtualHosts: append(vhosts, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll, knownTargets...)),
+		VirtualHosts: all,
 	}
 }

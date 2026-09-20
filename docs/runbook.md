@@ -1005,6 +1005,35 @@ _stream:{service.name="aether-agent"} AND "inbound chain bound to a foreign iden
 sum by (node) (increase(aether_agent_identity_inbound_binding_mismatch_total[1h]))
 ```
 
+#### The unpinned-cluster signal (#832)
+
+The two discriminators above ask *"is the identity we present the right one"*. This one
+asks *"are we checking the identity we are handed at all"*. A mesh cluster whose upstream
+validation context carries no `match_typed_subject_alt_names` authenticates **any**
+workload in the trust domain, so a foreign endpoint in its load assignment produces a
+clean handshake and a delivered request instead of the `ssl_fail_verify_san` rejection
+that caught #829. It is the fail-**open** direction.
+
+- **WARN `mesh clusters published with no server-identity SAN pin`** + counter
+  `aether_agent_identity_cluster_unpinned_total` — emitted **once per snapshot**, naming
+  the clusters (first 20) with `count`, `trust_domain` and a `reason`:
+  - `trust domain not yet known` — the deliberate lesser evil over `spiffe:///ns/…`,
+    which is unservable and cost rev222 four endpoints (#815/#819). Bounded to the window
+    before SPIRE resolves the trust domain; **more than a snapshot or two of this is the
+    bug**, and until now it was invisible.
+  - `service endpoints carry no namespace metadata` — not a window at all: it lasts as
+    long as the registry serves those endpoints.
+
+```promql
+# Seeded at zero, so a live zero is a real series (not an absent one).
+sum by (node) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
+```
+
+The config-shape half is a build-time gate: `//test/envoy_validate` asserts every upstream
+TLS context in a generated bootstrap carries a non-empty `match_typed_subject_alt_names`.
+`envoy --mode validate` **accepts** an unpinned context, so validation passing says nothing
+about it.
+
 #### The ledger join, with the terminating-node column
 
 The join that has been missing: each failing request must be attributed to the node whose
@@ -1542,16 +1571,44 @@ identity. The agent's own #638 discriminator
 netns→identity index behind it and WARNs on `outbound cluster bound to a foreign
 identity`.
 
-> **Why a wrong cert cannot leak across sources through pooling.** Envoy folds a
-> downstream filter-state object into the upstream connection-pool hash key only
-> if the object implements `Hashable`; `set_filter_state`'s `envoy.string`
-> factory does not, and a pool freezes the transport-socket options of whichever
-> connection allocated it. Node service clusters set
-> `connection_pool_per_downstream_connection: true`
-> (`proxy.NewServiceCluster`, `NewTCPServiceCluster`) — one pool per downstream
-> connection, so there is nothing to share. **Do not turn that off** while the
-> matcher reads a non-hashable filter-state key; the edge proxy sets it false
-> only because it has exactly one identity.
+> **Why a wrong cert cannot leak across sources through pooling — now
+> demonstrated, not derived (issue #831).** Envoy folds a downstream
+> filter-state object into the upstream connection-pool hash key only if the
+> object implements `Hashable`; `set_filter_state`'s `envoy.string` factory
+> builds a `Router::StringAccessorImpl`, which does not, and a pool freezes the
+> transport-socket options of whichever connection allocated it. The source
+> SPIFFE ID therefore contributes **zero bytes** to the pool key. Node service
+> clusters set `connection_pool_per_downstream_connection: true`
+> (`proxy.NewServiceCluster`, `NewTCPServiceCluster`), which mixes the
+> downstream connection id into the hash instead — one pool per downstream
+> connection, so there is nothing to share.
+>
+> `//test/mtlspool` runs the real pinned proxy with two source ServiceAccounts
+> on one node and measures the identity the destination verifies. With the flag
+> on, each source is verified as itself on its own upstream connection. With it
+> off — the only change — **every** request from the second source is verified
+> as the first, multiplexed onto one HTTP/2 connection.
+>
+> So this is **security configuration, not a throughput knob**. Do not turn it
+> off while the matcher reads a non-hashable filter-state key: the result is a
+> silent workload-to-workload authorization failure (both identities are valid
+> mesh workloads, and the destination's validation context pins no client SAN,
+> so it cannot object). The edge proxy sets it false only because it has exactly
+> one identity. `TestNodeProxyPerSourceClustersPoolPerDownstreamConnection`
+> (`agent/internal/xds/cache/`) fails the build if any per-source cluster loses
+> the flag.
+>
+> Since #831 the source access log also carries `source_spiffe_id` — the
+> identity the control plane stamped for that hop. Joined to the destination
+> line's `downstream_peer_uri_san` on `x_request_id` the two must be equal; a
+> disagreement is either a matcher miss (the node/agent SVID appears at the
+> destination) or a pooling leak. Both were previously invisible.
+>
+> ```logsql
+> # The claimed source identity, per hop. "-" means the chain stamped none at
+> # all, i.e. the trust domain was still unknown when it was generated (#819).
+> log_name:"aether_access_logs" AND reporter:"source" AND source_spiffe_id:*
+> ```
 
 #### Long-lived connections across the upgrade
 

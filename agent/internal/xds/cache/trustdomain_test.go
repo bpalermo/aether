@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"aethermesh.dev/agent/storage"
 	"aethermesh.dev/agent/types"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
@@ -297,6 +299,112 @@ func TestSetTrustDomainRefusesEmpty(t *testing.T) {
 
 	empty := newTestCache("node-2")
 	assert.Empty(t, empty.validationContextName(), "no trust domain must yield no name, never the bare \"spiffe://\"")
+}
+
+// clusterUnpinnedCtr is the #832 counter: mesh clusters a snapshot publishes
+// with no server-identity SAN pin.
+const clusterUnpinnedCtr = "aether.agent.identity.cluster_unpinned"
+
+// addPinnedCluster installs an outbound cluster entry whose endpoints DO carry
+// a namespace, so the entry is SAN-pinned whenever the trust domain is known.
+func addPinnedCluster(c *SnapshotCache, name string) {
+	c.clusterMu.Lock()
+	c.clusters[name] = clusterEntry{
+		cluster:       &clusterv3.Cluster{Name: name},
+		service:       "aether-test/echo",
+		sanNamespaces: []string{"aether-test"},
+	}
+	c.clusterMu.Unlock()
+	c.recomputeMTLSClusters()
+}
+
+// TestEmptyTrustDomainReportsUnpinnedClusters pins the OTHER half of the
+// empty-trust-domain choice (issue #832). Emitting no SAN matchers rather than
+// "spiffe:///ns/…" is right — that is the rev222 outage — but the cluster that
+// results proves only trust-domain membership, so ANY mesh workload satisfies
+// its handshake. The window is supposed to be one snapshot wide; until now
+// nothing said whether it was, and a window that outlives its bound looked
+// exactly like one that never happened.
+//
+// So: a WARN naming the affected clusters, once per snapshot, and a counter.
+// The absence of `spiffe:///` (asserted above) is still necessary but is no
+// longer sufficient.
+func TestEmptyTrustDomainReportsUnpinnedClusters(t *testing.T) {
+	c, rec, reader := newBindingTestCache(t)
+	ctx := context.Background()
+
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+	addPinnedCluster(c, bindingClusterName)
+
+	// Healthy: pinned, so nothing is WARNed — and the counter is a readable
+	// ZERO rather than an absent series (the seeding this repo keeps relearning).
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.Empty(t, rec.with(unpinnedClusterMsg), "a SAN-pinned snapshot must be silent")
+	assert.Equal(t, int64(0), counterValue(t, reader, clusterUnpinnedCtr))
+	assert.True(t, metricPresent(t, reader, clusterUnpinnedCtr),
+		"the zero must be exported, or a grading query cannot tell it from a counter that never fired")
+
+	// Re-open the window: the trust domain is unknown again, so the pin cannot
+	// be rendered and the cluster goes out unpinned.
+	c.trustDomain.Store("")
+	c.recomputeMTLSClusters()
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	warns := rec.with(unpinnedClusterMsg)
+	require.Len(t, warns, 1, "once per snapshot, not once per cluster")
+	assert.Equal(t, slog.LevelWarn, warns[0].level)
+	assert.Contains(t, warns[0].attrs["clusters"], bindingClusterName,
+		"the WARN has to NAME the affected clusters to be actionable")
+	assert.Equal(t, "1", warns[0].attrs["count"])
+	assert.Equal(t, "trust domain not yet known", warns[0].attrs["reason"])
+	assert.Equal(t, int64(1), counterValue(t, reader, clusterUnpinnedCtr))
+
+	// The lesser evil is still what is emitted: loud, but never `spiffe:///`.
+	assertNoMalformedIdentity(t, c, "node-1")
+
+	// And it keeps being reported for as long as it lasts — the point is to
+	// measure the window, so a second snapshot in the same state counts again.
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+	require.Len(t, rec.with(unpinnedClusterMsg), 1)
+	assert.Equal(t, int64(2), counterValue(t, reader, clusterUnpinnedCtr))
+
+	// Recovery: once the trust domain is known the pin is rendered again, the
+	// WARN stops, and the counter stops advancing.
+	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+	c.recomputeMTLSClusters()
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.Empty(t, rec.with(unpinnedClusterMsg))
+	assert.Equal(t, int64(2), counterValue(t, reader, clusterUnpinnedCtr))
+}
+
+// TestUnpinnedClusterReportNamesTheOtherCause: an empty trust domain is not the
+// only way to lose the pin. A service whose endpoints carry no Kubernetes
+// namespace metadata renders no SAN URIs either — and unlike the trust-domain
+// window that state is not bounded at all, it persists for as long as the
+// registry serves those endpoints. The WARN distinguishes the two so an
+// operator is not sent looking for a SPIRE problem that is not there.
+func TestUnpinnedClusterReportNamesTheOtherCause(t *testing.T) {
+	c, rec, reader := newBindingTestCache(t)
+	ctx := context.Background()
+
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
+	// No sanNamespaces: endpoints without namespace metadata.
+	addOutboundCluster(c, bindingClusterName)
+
+	rec.reset()
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	warns := rec.with(unpinnedClusterMsg)
+	require.Len(t, warns, 1)
+	assert.Equal(t, "service endpoints carry no namespace metadata", warns[0].attrs["reason"])
+	assert.Equal(t, raceTrustDomain, warns[0].attrs["trust_domain"])
+	assert.Equal(t, int64(1), counterValue(t, reader, clusterUnpinnedCtr))
 }
 
 // TestNoResourceBytesCarryMalformedPrefix is a belt-and-braces check that the

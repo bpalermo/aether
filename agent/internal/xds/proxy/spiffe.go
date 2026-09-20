@@ -65,7 +65,7 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 }
 
 // SourceIdentityForPod returns the SPIFFE ID that the pod's mesh-originating
-// listener chains stamp into filter state (sourceIdentityFilterStateKey,
+// listener chains stamp into filter state (SourceIdentityFilterStateKey,
 // networkfilter.go) so the cluster transport-socket matcher can select the
 // pod's client certificate by identity rather than by netns path (issue #815).
 //

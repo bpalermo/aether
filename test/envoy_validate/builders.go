@@ -361,6 +361,70 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	), nil
 }
 
+// OutboundZeroVhostRouteBootstrapJSON builds a bootstrap whose listener inlines
+// the out_http RouteConfiguration the agent publishes when it has NOTHING to
+// publish — zero service virtual hosts, i.e. the local-only start of issue #817.
+//
+// That table used not to be emitted at all, which under delta ADS meant the
+// egress listener's RDS subscription was answered with silence, warmed out, and
+// went active with no routes (404 NR route_not_found on everything). It is now
+// unconditional, so what a real Envoy has to accept is a RouteConfiguration
+// consisting of the on-demand catch-all and nothing else: the liveness
+// direct-response, the mesh-authority safe_regex → cluster_header ODCDS route,
+// and the hard 404 fallthrough. Inlining it as a static route_config is the only
+// way this offline gate can see an RDS-delivered table at all.
+func OutboundZeroVhostRouteBootstrapJSON() ([]byte, error) {
+	bs, err := buildOutboundZeroVhostRouteBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+// buildOutboundZeroVhostRouteBootstrap assembles the zero-vhost out_http config.
+func buildOutboundZeroVhostRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
+	routeCfg := proxy.BuildOutboundRouteConfiguration(nil, meshDomain)
+	if len(routeCfg.GetVirtualHosts()) != 1 {
+		return nil, fmt.Errorf("zero-vhost out_http must carry exactly the catch-all, got %d virtual hosts",
+			len(routeCfg.GetVirtualHosts()))
+	}
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{
+		StatPrefix: "out_http_validate",
+		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{
+			RouteConfig: routeCfg,
+		},
+		HttpFilters: []*http_connection_managerv3.HttpFilter{{
+			Name: "envoy.filters.http.router",
+			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{
+				TypedConfig: mustAny(&routerv3.Router{}),
+			},
+		}},
+	}
+	listener := &listenerv3.Listener{
+		Name: "out_http_validate",
+		Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+			Address:       "127.0.0.1",
+			PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 15012},
+		}}},
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: mustAny(hcm)},
+			}},
+		}},
+	}
+
+	// The catch-all's non-mesh fallthrough is a direct 404 here (the outbound
+	// listener never passes through), so no passthrough cluster is needed; the
+	// mesh-authority route resolves its cluster from :authority via ODCDS, which
+	// names no cluster at config load either.
+	return newBootstrap(
+		[]*clusterv3.Cluster{xdsCluster()},
+		[]*listenerv3.Listener{listener},
+	), nil
+}
+
 // CaptureRouteTargetBootstrapJSON builds a bootstrap whose listener inlines the
 // cap_http RouteConfiguration for a GAMMA route TARGET addressed on its REAL
 // Service port (proposal 023 M2): the vhost carries
@@ -576,6 +640,68 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 		[]*clusterv3.Cluster{xdsCluster(), spire, edgeSvc},
 		[]*listenerv3.Listener{edgeHTTP, edgeHTTPS, edgeH3},
 	), nil
+}
+
+// UnpinnedMeshClusters returns the names of every upstream TLS context in a
+// generated bootstrap that carries NO match_typed_subject_alt_names — i.e.
+// every cluster whose handshake would prove trust-domain membership and nothing
+// else, so any mesh workload satisfies it (issue #832).
+//
+// It is the config-shape half of that issue's gate, and it runs over the exact
+// bytes handed to `envoy --mode validate`: Envoy ACCEPTS an unpinned validation
+// context, so this is a shape a passing validate can never catch. Nothing here
+// is allow-listed by name — a cluster is checked precisely when it has an
+// UpstreamTlsContext, so the passthrough, app, health, xds, spire_agent and
+// waypoint-ingress clusters (no TLS at all) are out of scope automatically, and
+// a NEW mesh cluster added to a builder is in scope the moment it grows one.
+//
+// Each returned name is "<cluster>" for a plain transport_socket or
+// "<cluster>/<match>" for a transport_socket_matches entry (the per-source mTLS
+// shape, where the pin lives on every match INCLUDING the node-identity
+// on_no_match one).
+func UnpinnedMeshClusters(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+
+	var unpinned []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		pinned, err := upstreamTLSPinned(c.GetTransportSocket())
+		if err != nil {
+			return nil, fmt.Errorf("cluster %s: %w", c.GetName(), err)
+		}
+		if !pinned {
+			unpinned = append(unpinned, c.GetName())
+		}
+		for _, m := range c.GetTransportSocketMatches() {
+			pinned, err := upstreamTLSPinned(m.GetTransportSocket())
+			if err != nil {
+				return nil, fmt.Errorf("cluster %s match %s: %w", c.GetName(), m.GetName(), err)
+			}
+			if !pinned {
+				unpinned = append(unpinned, c.GetName()+"/"+m.GetName())
+			}
+		}
+	}
+	return unpinned, nil
+}
+
+// upstreamTLSPinned reports whether a transport socket is SAN-pinned. A socket
+// that is absent or is not an UpstreamTlsContext is "pinned" vacuously: it has
+// no upstream peer identity to check in the first place.
+func upstreamTLSPinned(ts *corev3.TransportSocket) (bool, error) {
+	if ts.GetTypedConfig() == nil || !ts.GetTypedConfig().MessageIs(&tlsv3.UpstreamTlsContext{}) {
+		return true, nil
+	}
+	var ctx tlsv3.UpstreamTlsContext
+	if err := ts.GetTypedConfig().UnmarshalTo(&ctx); err != nil {
+		return false, fmt.Errorf("unmarshal UpstreamTlsContext: %w", err)
+	}
+	// The pin lives in the COMBINED validation context; the plain
+	// ValidationContextSdsSecretConfig form carries the trust bundle alone.
+	return len(ctx.GetCommonTlsContext().GetCombinedValidationContext().
+		GetDefaultValidationContext().GetMatchTypedSubjectAltNames()) > 0, nil
 }
 
 // marshalBootstrap serialises a Bootstrap proto to protojson, stripping
