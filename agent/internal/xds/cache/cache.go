@@ -802,13 +802,6 @@ func (c *SnapshotCache) HasRegistryService(name string) bool {
 	return cat.HasService(name)
 }
 
-// perDownstreamConnectionPool reports whether service clusters should key
-// upstream pools by the downstream connection. True for the node proxy (many
-// workload identities); false for the single-identity edge (full multiplexing).
-func (c *SnapshotCache) perDownstreamConnectionPool() bool {
-	return !c.edge
-}
-
 // SetStaticDependencies replaces the fixed (edge) dependency set with the given
 // services and signals a dependency change if it differs, so the scoped
 // registry watch and the cluster snapshot rebuild to exactly the exposed set.

@@ -48,7 +48,7 @@ func TestEdgeUpstreamTransportSocket(t *testing.T) {
 // TestNewServiceCluster_EdgePoolingOff verifies the edge passes pooling off for
 // full upstream multiplexing on its single identity.
 func TestNewServiceCluster_EdgePoolingOff(t *testing.T) {
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, false)
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
 	assert.False(t, c.GetConnectionPoolPerDownstreamConnection())
 }
 

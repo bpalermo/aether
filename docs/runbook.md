@@ -1411,6 +1411,13 @@ the agent log and reopen #815.
 
 ### #815 release two: every pod event used to re-warm every cluster on the node
 
+> ⚠ **SUPERSEDED BY #842 — see "per-connection certificate selection" below.**
+> The `transport_socket_matcher` this section is about no longer exists, and
+> with it the `envoy_cluster_match_count_total` queries here measure nothing.
+> The *history* is still the right context for the re-warm behaviour and for the
+> failure vocabulary, so it is kept; the **queries and the stat names are
+> stale**. Do not build an alert from this section.
+
 **What changed.** Every mesh service cluster carries a per-source upstream-mTLS
 `transport_socket_matcher`. Its `exact_match_map` used to be keyed by the source
 pod's **netns path**, which is unique per pod — so one CNI ADD or DEL rewrote a
@@ -1633,3 +1640,185 @@ socket. Release two is a literal no-op there
 The edge proxy and the east/west waypoint tunnel are unaffected — the edge has a
 single identity and takes the non-matcher branch, and the waypoint's two-level
 matcher only changed which key its inner sub-trees read.
+
+### #842: per-connection certificate selection (and the alert it breaks)
+
+**Read the #815 section above first** — this replaces the mechanism it
+describes, and the two share a failure vocabulary.
+
+**What changed.** A mesh service cluster no longer carries
+`transport_socket_matches` or a `transport_socket_matcher`. It carries **one**
+transport socket whose `custom_tls_certificate_selector` resolves the client
+certificate per connection:
+
+```
+envoy.tls.certificate_selectors.on_demand_secret
+  config_source:      the agent's ADS stream
+  certificate_mapper: envoy.tls.upstream_certificate_mappers.filter_state_override
+                        default_value: <the node SVID>
+  prefetch_secret_names: [<the node SVID>]
+```
+
+The mapper reads the filter-state object named — exactly, and not
+configurably — `envoy.tls.certificate_mappers.on_demand_secret` off
+`TransportSocketOptions::downstreamSharedFilterStateObjects()` and returns its
+string **as the SDS secret name**. Every mesh-originating listener chain stamps
+the source pod's SPIFFE ID there, and aether's SDS secret names *are* SPIFFE
+IDs, so the two join with no lookup table in between.
+
+Two things follow, and they are the point of the change:
+
+- **A mesh cluster's bytes no longer depend on the node's workloads at all.**
+  #815 release two made them invariant under pod churn *within* a
+  ServiceAccount; the first pod of a new ServiceAccount arriving, and the last
+  one leaving, still rewrote every mesh cluster on the node and cost one 15 s
+  EDS re-warm each. Those are free now. **No pod event changes a service
+  cluster.**
+- **`connection_pool_per_downstream_connection` is gone from every mesh
+  cluster.** The object is stamped with the `envoy.hashable_string` factory, so
+  the source identity reaches
+  `CommonUpstreamTransportSocketFactory::hashKey` and upstream pools partition
+  per (host, **source identity**) instead of per downstream connection. Pods
+  sharing a ServiceAccount now share an upstream HTTP/2 connection; pods that do
+  not, cannot.
+
+> ⚠ **THE FACTORY IS SECURITY CONFIGURATION.** `envoy.string` builds a
+> `Router::StringAccessorImpl`, which is not `Envoy::Hashable`; `hashKey` folds
+> a shared filter-state object into the pool key only behind a `dynamic_cast`
+> to `Hashable`. Reverting the factory while the flag stays off re-opens the
+> #831 leak — a pooled connection carries another workload's client
+> certificate, the handshake succeeds, and the destination stamps the wrong
+> identity into XFCC. It fails **open**. `//test/mtlspool` reproduces it as a
+> negative control and would go green-for-the-wrong-reason if the pair were
+> broken; read its `TestSharedPoolLeaksSourceIdentity` before touching either.
+
+> ⚠ **`max_session_keys` must stay 0.** A client context supports a custom
+> certificate selector only with session resumption off (`tls.proto`): a cached
+> session is keyed without reference to which on-demand certificate produced it,
+> so a resumed one would carry a certificate the selector did not choose. #834
+> already set it to 0 for #829; it is now load-bearing for two reasons.
+
+#### THE ALERT THIS BREAKS — cross-repo
+
+`AetherClusterIdentityNoMatch` (k8s-talos-main, GitOps #109) queries
+
+```promql
+sum by (node, aether_cluster) (increase(envoy_cluster_match_count_total{
+  aether_transport_socket_match="spiffe://aether.internal/ns/aether-system/sa/aether-agent"}[5m]))
+```
+
+**That series no longer exists.** `cluster.<c>.<match>.total_match_count` is
+emitted per `transport_socket_matches` entry, and mesh clusters now have none.
+The rule does not error — it matches nothing and evaluates to a clean zero, so
+it looks permanently healthy. **This is a vacuous gate and must be removed or
+repointed in the same window this ships**, or the fleet loses its "workload
+traffic is presenting the agent identity" signal without anyone noticing.
+
+**The replacement, in order of strength:**
+
+1. **The destination-side access log — already the authoritative check.** It
+   measures what the other end actually verified, not what this proxy intended:
+
+   ```logsql
+   # Mesh traffic arriving as the node agent instead of a workload. Expect ZERO.
+   log_name:"aether_access_logs" AND reporter:"destination"
+     AND downstream_peer_uri_san:"spiffe://aether.internal/ns/aether-system/sa/aether-agent"
+   ```
+
+   The runbook already called this "the authoritative cross-check" while the
+   counter existed; it is now the primary.
+
+2. **The source-side access log's `source_spiffe_id`.** Absent (`-`) is
+   *precisely* the condition that makes the mapper fall back to `default_value`,
+   so it is the direct successor to the no-match counter — and it is per
+   request, not per connection:
+
+   ```logsql
+   log_name:"aether_access_logs" AND reporter:"source" AND source_spiffe_id:"-"
+   ```
+
+3. **`cluster.<c>.on_demand_secret.cert_requested` / `.cert_updated` /
+   `.cert_active`** (the selector's own stats, from
+   `ALL_CERT_SELECTION_STATS`). These say the on-demand path is *working* — a
+   `cert_active` gauge of 1 on a node with several ServiceAccounts sending
+   traffic means only the default is ever being fetched. They do **not**
+   identify which identity, so they are a liveness signal for the mechanism, not
+   a replacement for (1) or (2).
+
+The agent's own discriminator
+(`agent/internal/xds/cache/identitybinding.go`) is unchanged and still WARNs
+`outbound cluster bound to a foreign identity` on the control-plane side.
+
+#### First-connection handshake pause
+
+On-demand SDS **pauses the handshake** on the first connection per (secret name,
+worker thread, cluster) while the SDS response lands. The fetch is from the
+node-local agent over its ADS UDS with the secret already in the snapshot, so it
+is a local round trip.
+
+The cluster itself does **not** warm on any of it, and that is a real change in
+the other direction. A statically referenced SDS certificate is fetched through
+a *warming* provider, whose init target fires only once the secret arrives — so
+a client certificate the agent failed to serve used to hold its cluster in
+warming for `initial_fetch_timeout` and then bring it up with
+`upstream_context_secrets_not_ready`. The on-demand path creates its providers
+with `warm=false` (`SecretManagerImpl::DynamicSecretProviders::findOrCreate`:
+"the warming target only fires after a secret is fetched, while non-warming one
+pre-fetches"), so **no mesh cluster blocks on a client-certificate secret any
+more** — including the prefetched node SVID. The cost moves from cluster
+warming, which is node-wide, to one paused handshake, which is not.
+
+It is bounded and amortised: `prefetch_secret_names` carries the node SVID, so
+the no-filter-state path (health checks, anything the proxy originates itself)
+never pauses at all; a workload identity pays it once per cluster per worker,
+and the per-identity pool then keeps that connection alive. Set against what it
+replaces — `connection_pool_per_downstream_connection` forced a **full mTLS
+handshake on every downstream connection**, measured at ~25 ms of a 29 ms p50
+hop (#735) — this is strictly cheaper.
+
+**Workload identities are deliberately NOT prefetched.** Listing them would put
+the node's identity set back into every cluster's bytes, which is exactly the
+churn #815 and this change removed.
+
+> If a secret name is never served, the handshake stays paused rather than
+> failing fast; the request then ends on its route timeout. That cannot happen
+> for an identity the agent stamped (it stamps only identities it serves), but
+> it is the shape to look for if `on_demand_secret.cert_requested` climbs
+> without `cert_updated` following.
+
+#### What is unchanged
+
+- **The server-identity SAN pin** (`match_typed_subject_alt_names`) and the
+  SDS-rotated trust bundle. They were never per-source.
+- **The `inboundready_<pod>` probe cluster.** It has no selector: it keeps its
+  own statically named certificate (the node SVID) and its own
+  `MaxSessionKeys: 0` (#836/#840). A health checker carries no filter state, so
+  had it used the selector it would have taken `default_value` on every probe —
+  the same node SVID, by a longer route. Leaving it alone also preserves the
+  #836 boundary: nothing the probe does may be observable by application
+  traffic.
+- **The edge proxy.** One identity, no source filter state, and its SDS comes
+  straight from the SPIRE agent rather than the agent's ADS stream. A selector
+  would add a handshake pause and buy nothing, so `EdgeUpstreamTransportSocket`
+  keeps its statically named certificate.
+- **The waypoint split** (proposal 019, off by default). SNI is a property of
+  the transport socket, not of the certificate, so a waypoint-enabled cluster
+  still carries two sockets — but they are now a fixed two (`local`, `waypoint`)
+  selected by endpoint metadata, independent of the node's identity set, and
+  their match names are bounded constants rather than SPIFFE IDs.
+- **SPIRE off.** No node SVID means no `default_value`, so no selector and no
+  transport socket at all — the cluster is emitted bare exactly as before.
+
+#### Rollback
+
+The listeners stamp **both** identity keys for one release: `aether.source.spiffe_id`
+(what a pre-#842 cluster's matcher reads) and the certificate-mapper key. A
+rollback to release-two clusters is therefore hitless, the same dual-key overlap
+#815 used. One release after this ships, the netns copy and
+`aether.source.spiffe_id` can be retired together, with the access log's
+`source_spiffe_id` attribute repointed at the mapper key (the attribute NAME
+stays).
+
+Rolling **forward** replaces every mesh-originating filter chain (the `filters`
+list gains an entry), so those chains drain once on `--drain-time-s` (10 s here)
+— the same one-time cost release one paid.

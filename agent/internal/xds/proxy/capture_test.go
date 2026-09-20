@@ -93,8 +93,8 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 		ip := fc.GetFilterChainMatch().GetPrefixRanges()[0].GetAddressPrefix()
 		ips[ip] = true
 		assert.Equal(t, uint32(32), fc.GetFilterChainMatch().GetPrefixRanges()[0].GetPrefixLen().GetValue())
-		require.Len(t, fc.GetFilters(), 3, "netns + source-identity filter state (#815) + tcp_proxy")
-		assert.Equal(t, "envoy.filters.network.tcp_proxy", fc.GetFilters()[2].GetName())
+		require.Len(t, fc.GetFilters(), 4, "netns + source identity (#815) + cert-mapper identity (#842) + tcp_proxy")
+		assert.Equal(t, "envoy.filters.network.tcp_proxy", fc.GetFilters()[3].GetName())
 	}
 	assert.True(t, ips["10.96.1.10"], "svc-a ClusterIP chain present")
 	assert.True(t, ips["10.96.1.20"], "svc-b ClusterIP chain present")

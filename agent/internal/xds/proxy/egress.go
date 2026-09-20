@@ -196,21 +196,36 @@ func subsetKeyCombos(keys []string) [][]string {
 	return combos
 }
 
-// NewServiceCluster builds an EDS service cluster. perDownstreamConnectionPool
-// keys upstream connection pools by the downstream connection so a source pod's
-// connection (and its client certificate) is never reused for another source —
-// required on the node proxy, which multiplexes many workload identities. The
-// edge proxy carries a single identity and passes false for full upstream
-// multiplexing (immune to the per-downstream-pool leak class).
-func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []string, perDownstreamConnectionPool bool) *clusterv3.Cluster {
+// NewServiceCluster builds an EDS service cluster.
+//
+// IT NO LONGER SETS connection_pool_per_downstream_connection, and that is the
+// second half of issue #842. The flag gave every downstream connection its own
+// upstream pool, which is what kept a node proxy hosting many workload
+// identities from handing source B a pooled connection carrying source A's
+// client certificate (#831, reproduced by //test/mtlspool's negative control).
+// It bought that correctness by making upstream h2 multiplexing across sources
+// impossible: one upstream connection and one full mTLS handshake per
+// downstream connection, forever.
+//
+// The pool key now carries the source identity directly. The listener stamps
+// the source SPIFFE ID with the HASHABLE string factory
+// (SourceIdentityCertMapperFilterStateKey) and shares it with the upstream, so
+// CommonUpstreamTransportSocketFactory::hashKey folds it into the pool hash and
+// pools partition per (host, source identity) — the correct granularity, and
+// strictly finer than what the certificate requires. Pods sharing a
+// ServiceAccount can now share an upstream connection; pods that do not, cannot.
+//
+// THE TWO ARE A PAIR. Removing the flag without the hashable filter state
+// re-opens the leak, and it fails OPEN: XFCC reports the wrong caller and
+// nothing errors. //test/mtlspool asserts both directions.
+func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
 		Name: name,
 		// Stats stay keyed by the bare service name (cardinality rounds 1-2
 		// shapes unchanged by the FQDN/port cluster naming).
-		AltStatName:                           altStatName,
-		ConnectTimeout:                        durationpb.New(2 * time.Second),
-		PerConnectionBufferLimitBytes:         wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		ConnectionPoolPerDownstreamConnection: perDownstreamConnectionPool,
+		AltStatName:                   altStatName,
+		ConnectTimeout:                durationpb.New(2 * time.Second),
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_EDS,
 		},
@@ -297,13 +312,20 @@ func NewServiceCluster(name, edsServiceName, altStatName string, subsetKeys []st
 //     routes to the TCP floor filter chain, not the HCM.
 //   - subset_selectors and retry circuit-breakers are omitted — TCP proxy doesn't use
 //     subset routing or the HTTP retry mechanism.
-func NewTCPServiceCluster(name, edsServiceName, altStatName string, perDownstreamConnectionPool bool) *clusterv3.Cluster {
+//
+// Like NewServiceCluster it no longer sets
+// connection_pool_per_downstream_connection (issue #842); the source identity
+// is in the pool key instead. tcp_proxy takes a whole upstream connection per
+// downstream connection anyway, so the flag bought this cluster type nothing
+// but a distinct pool per connection — but it was still the thing that made
+// certificate selection safe, and it comes off for the same reason and at the
+// same time as the HTTP one.
+func NewTCPServiceCluster(name, edsServiceName, altStatName string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{
-		Name:                                  name,
-		AltStatName:                           altStatName,
-		ConnectTimeout:                        durationpb.New(2 * time.Second),
-		PerConnectionBufferLimitBytes:         wrapperspb.UInt32(perConnectionBufferLimitBytes),
-		ConnectionPoolPerDownstreamConnection: perDownstreamConnectionPool,
+		Name:                          name,
+		AltStatName:                   altStatName,
+		ConnectTimeout:                durationpb.New(2 * time.Second),
+		PerConnectionBufferLimitBytes: wrapperspb.UInt32(perConnectionBufferLimitBytes),
 		ClusterDiscoveryType: &clusterv3.Cluster_Type{
 			Type: clusterv3.Cluster_EDS,
 		},
@@ -391,93 +413,60 @@ func UDPLoadAssignment(src *endpointv3.ClusterLoadAssignment, clusterName string
 	return la
 }
 
-// InjectUpstreamTCPMTLS is InjectUpstreamMTLS for TCP floor clusters: it injects
-// a per-source transport socket that uses ALPN "aether-tcp" (UpstreamTCPTransportSocket)
-// instead of "h2", so the destination inbound filter-chain match on
-// application_protocols:["aether-tcp"] routes to the TCP floor tcp_proxy chain.
-func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, sourceIdentities []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni string) {
-	matcher := UpstreamTransportSocketMatcher(sourceIdentities)
-	if matcher == nil {
-		cluster.TransportSocket = UpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
-		return
-	}
-	matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
-
-	cluster.TransportSocketMatcher = matcher
-	cluster.TransportSocketMatches = UpstreamTCPTransportSocketMatches(withNodeIdentity(sourceIdentities, nodeSpiffeID), validationContextName, sanURIs, sni)
+// InjectUpstreamTCPMTLS is InjectUpstreamMTLS for TCP floor clusters: the same
+// per-connection certificate selection, on a socket that advertises no ALPN so
+// the destination inbound demuxes it to the TCP floor's default chain.
+func InjectUpstreamTCPMTLS(cluster *clusterv3.Cluster, nodeSpiffeID, validationContextName string, sanURIs []string, sni string) {
+	cluster.TransportSocket = MeshUpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
 }
 
-// withNodeIdentity returns the source identities plus the node identity, in a
-// FRESH slice. Never `append(sourceIdentities, nodeSpiffeID)`: the caller reuses
-// one identity slice across every cluster on the node, and an append with spare
-// capacity would write into that shared backing array under clusterMu while xDS
-// goroutines marshal protos built from it.
-func withNodeIdentity(sourceIdentities []string, nodeSpiffeID string) []string {
-	all := make([]string, 0, len(sourceIdentities)+1)
-	all = append(all, sourceIdentities...)
-	return append(all, nodeSpiffeID)
-}
-
-// InjectUpstreamMTLS sets the per-source mTLS transport socket on a service cluster:
-// a transport-socket matcher keyed on the source pod's SPIFFE ID (the
-// aether.source.spiffe_id filter state every mesh-originating chain stamps)
-// selects that pod's client certificate. The matches reference each local
-// workload's SVID over SDS. This is applied at snapshot time because it depends
-// on the current set of local workload IDENTITIES — one entry per ServiceAccount
-// present on the node, not per pod (issue #815, release two).
+// InjectUpstreamMTLS sets the mesh upstream mTLS transport socket on a service
+// cluster.
 //
-// ON_NO_MATCH IS THE NODE IDENTITY, and that is deliberate. Some upstream
-// connections legitimately have no source pod: the capture listener's own
-// health/probe paths, anything the node proxy originates on its own behalf, and
-// — during a config transition — a downstream connection accepted by a listener
-// chain that did not stamp the key. The node SVID is a real, attested identity
-// in the same trust domain, so those connections still complete mTLS; the
-// destination simply sees the node rather than a workload. Omitting on_no_match
-// would instead fall through to the cluster's (absent) default transport socket.
-// A node identity arriving where a workload identity is expected is therefore
-// the failure signature to watch, not a connection drop — see the runbook,
-// "#815 release two".
+// SINCE ISSUE #842 THIS IS ONE SOCKET, NOT A PER-IDENTITY LIST. The socket's
+// custom_tls_certificate_selector resolves the client certificate per
+// connection from the source SPIFFE ID the originating listener chain stamped
+// into shared filter state; the certificate is fetched over SDS on demand. What
+// it replaced was a `transport_socket_matches` entry per local ServiceAccount
+// plus a `transport_socket_matcher` whose exact_match_map named them — a
+// structure that had to be rebuilt, and re-pushed, whenever the node's identity
+// set changed.
 //
-// With no local workload identities the matcher is omitted entirely — an empty
-// exact_match_map NACKs the whole CDS push — and the node identity is presented
-// directly (what on_no_match would have done for every connection). No
-// transport_socket_matches are set in that branch: without the matcher Envoy
-// falls back to legacy metadata matching, where an empty match criteria set
-// would select the first entry for every endpoint.
+// WHY THAT MATTERS BEYOND TIDINESS: the cluster proto is now invariant under
+// the local identity set entirely. #815 release two made it invariant under pod
+// churn within a ServiceAccount, but the FIRST pod of a new ServiceAccount
+// landing on a node (and the LAST one leaving) still rewrote every mesh cluster
+// on that node, and each rewritten EDS cluster re-warmed for the full 15 s EDS
+// initial_fetch_timeout before its warming→active swap drained every upstream
+// pool. Those last two events cost nothing now: nothing about a mesh cluster
+// depends on which workloads are running.
+//
+// NODE IDENTITY IS THE DEFAULT, and that is deliberate — it is the same choice,
+// for the same connections, that the removed matcher's on_no_match made. Some
+// upstream connections legitimately have no source pod: paths the node proxy
+// originates on its own behalf, and — during a config transition — a downstream
+// connection accepted by a listener chain that did not stamp the key. The node
+// SVID is a real, attested identity in the same trust domain, so those
+// connections still complete mTLS; the destination simply sees the node rather
+// than a workload. A node identity arriving where a WORKLOAD identity is
+// expected remains the failure signature to watch (never a connection drop) —
+// see docs/runbook.md, "#842".
+//
 // sanURIs (the service's expected server SPIFFE IDs) pin the upstream peer
-// identity on every emitted socket; empty disables pinning (bundle-only).
-// InjectUpstreamMTLS wires the cluster's per-source upstream mTLS. sni is the
-// local (intra-cluster) SNI — the destination port. When waypointSNI is
-// non-empty (proposal 019 waypoint enabled), the cluster additionally carries a
-// waypoint socket per source identity presenting waypointSNI (the structured
-// <port>.<svc>.<ns>.<meshDomain>), selected by the two-level matcher for
-// endpoints tagged waypoint=true; every other endpoint uses the local socket.
-func InjectUpstreamMTLS(cluster *clusterv3.Cluster, sourceIdentities []string, nodeSpiffeID, validationContextName string, sanURIs []string, sni, waypointSNI string) {
-	allIDs := withNodeIdentity(sourceIdentities, nodeSpiffeID)
-
+// identity; empty disables pinning (bundle-only). sni is the local
+// (intra-cluster) SNI — the destination port. When waypointSNI is non-empty
+// (proposal 019 waypoint enabled) the cluster carries TWO sockets instead of
+// one, differing only in SNI, selected by endpoint metadata — SNI is a property
+// of the socket, not of the certificate, so that split survives #842 while the
+// identity split does not.
+func InjectUpstreamMTLS(cluster *clusterv3.Cluster, nodeSpiffeID, validationContextName string, sanURIs []string, sni, waypointSNI string) {
 	if waypointSNI == "" {
-		matcher := UpstreamTransportSocketMatcher(sourceIdentities)
-		if matcher == nil {
-			cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
-			return
-		}
-		matcher.OnNoMatch = transportSocketNameOnMatch(nodeSpiffeID)
-		cluster.TransportSocketMatcher = matcher
-		cluster.TransportSocketMatches = UpstreamTransportSocketMatches(allIDs, validationContextName, sanURIs, sni)
+		cluster.TransportSocket = MeshUpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
 		return
 	}
 
-	matcher := WaypointTransportSocketMatcher(sourceIdentities, nodeSpiffeID)
-	if matcher == nil {
-		// No local workloads: nothing originates traffic, so a single plain
-		// socket suffices (mirrors the no-workload path above).
-		cluster.TransportSocket = UpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni)
-		return
-	}
-	cluster.TransportSocketMatcher = matcher
-	local := upstreamTransportSocketMatchesNamed(allIDs, validationContextName, sanURIs, sni, identitySocketName)
-	waypoint := upstreamTransportSocketMatchesNamed(allIDs, validationContextName, sanURIs, waypointSNI, waypointSocketName)
-	cluster.TransportSocketMatches = append(local, waypoint...)
+	cluster.TransportSocketMatcher = WaypointTransportSocketMatcher()
+	cluster.TransportSocketMatches = WaypointTransportSocketMatches(nodeSpiffeID, validationContextName, sanURIs, sni, waypointSNI)
 }
 
 // remoteClusterPriorityBand is added to a remote-cluster endpoint's locality

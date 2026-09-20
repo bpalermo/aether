@@ -8,6 +8,8 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
+	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
@@ -55,27 +57,37 @@ func snapshotEchoCluster(t *testing.T, c *SnapshotCache, nodeName string) *clust
 	return echo
 }
 
-// matchNames collects the names of a cluster's transport socket matches.
-func matchNames(cl *clusterv3.Cluster) map[string]bool {
-	names := map[string]bool{}
-	for _, m := range cl.GetTransportSocketMatches() {
-		names[m.GetName()] = true
-	}
-	return names
-}
-
-// pinnedSANs extracts the exact-match SAN URIs pinned on the first transport
-// socket match's upstream validation context.
+// pinnedSANs extracts the exact-match SAN URIs pinned on the cluster's upstream
+// validation context. Since #842 a mesh cluster carries ONE transport socket
+// (the waypoint variant carries two, which differ only in SNI), so there is one
+// validation context to read.
 func pinnedSANs(t *testing.T, cl *clusterv3.Cluster) []string {
 	t.Helper()
-	require.NotEmpty(t, cl.GetTransportSocketMatches())
+	require.NotNil(t, cl.GetTransportSocket())
 	utc := &tlsv3.UpstreamTlsContext{}
-	require.NoError(t, cl.GetTransportSocketMatches()[0].GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
+	require.NoError(t, cl.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
 	var got []string
 	for _, sm := range utc.GetCommonTlsContext().GetCombinedValidationContext().GetDefaultValidationContext().GetMatchTypedSubjectAltNames() {
 		got = append(got, sm.GetMatcher().GetExact())
 	}
 	return got
+}
+
+// certMapperDefault returns the secret name a connection with no source
+// identity presents: the on-demand selector's mapper default_value.
+func certMapperDefault(t *testing.T, cl *clusterv3.Cluster) string {
+	t.Helper()
+	require.NotNil(t, cl.GetTransportSocket())
+	utc := &tlsv3.UpstreamTlsContext{}
+	require.NoError(t, cl.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
+	sel := utc.GetCommonTlsContext().GetCustomTlsCertificateSelector()
+	require.NotNil(t, sel, "mesh cluster must carry the per-connection certificate selector")
+
+	onDemand := &on_demand_secretv3.Config{}
+	require.NoError(t, sel.GetTypedConfig().UnmarshalTo(onDemand))
+	mapper := &filter_state_overridev3.Config{}
+	require.NoError(t, onDemand.GetCertificateMapper().GetTypedConfig().UnmarshalTo(mapper))
+	return mapper.GetDefaultValue()
 }
 
 // TestCachedMTLSClusterMatchesInlineInjection is the byte-identity proof for
@@ -101,9 +113,8 @@ func TestCachedMTLSClusterMatchesInlineInjection(t *testing.T) {
 				require.NoError(t, c.SetNodeIdentity(context.Background(), nodeIdentity))
 			},
 			expected: func() *clusterv3.Cluster {
-				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil), true)
-				proxy.InjectUpstreamMTLS(cl, []string{testPodSpiffeID},
-					nodeIdentity, validationContextName, sanURIs, "18080", "")
+				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil))
+				proxy.InjectUpstreamMTLS(cl, nodeIdentity, validationContextName, sanURIs, "18080", "")
 				return cl
 			},
 		},
@@ -115,9 +126,8 @@ func TestCachedMTLSClusterMatchesInlineInjection(t *testing.T) {
 				require.NoError(t, c.SetNodeIdentity(context.Background(), nodeIdentity))
 			},
 			expected: func() *clusterv3.Cluster {
-				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil), true)
-				proxy.InjectUpstreamMTLS(cl, []string{testPodSpiffeID},
-					nodeIdentity, validationContextName, sanURIs, "18080", "18080."+fqdn)
+				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil))
+				proxy.InjectUpstreamMTLS(cl, nodeIdentity, validationContextName, sanURIs, "18080", "18080."+fqdn)
 				return cl
 			},
 		},
@@ -129,7 +139,7 @@ func TestCachedMTLSClusterMatchesInlineInjection(t *testing.T) {
 				c.SetStaticDependencies([]string{"aether-test/echo"})
 			},
 			expected: func() *clusterv3.Cluster {
-				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil), false)
+				cl := proxy.NewServiceCluster(fqdn, "aether-test/echo", "aether-test/echo", proxy.SortSubsetKeys(nil))
 				cl.TransportSocket = proxy.EdgeUpstreamTransportSocket(nodeIdentity, validationContextName, sanURIs, "18080")
 				return cl
 			},
@@ -150,11 +160,23 @@ func TestCachedMTLSClusterMatchesInlineInjection(t *testing.T) {
 	}
 }
 
-// TestCachedMTLSClusterInvalidatedOnWorkloadChange verifies the netns→identity
-// invalidation path: adding or removing a local pod AFTER the registry load
-// must rebuild the cached injected cluster so the per-source matcher tracks
-// the local workload set (a stale cache would silently downgrade the new
-// pod's outbound mTLS to the node certificate).
+// TestCachedMTLSClusterInvalidatedOnWorkloadChange used to verify the reverse
+// of what it now asserts, and the inversion IS issue #842.
+//
+// It checked that adding or removing a local pod after the registry load
+// rebuilt the cached cluster, because the per-source transport_socket_matcher
+// had to track the local workload set — a stale cache would have silently
+// downgraded the new pod's outbound mTLS to the node certificate. #815 made
+// that set-valued (one entry per ServiceAccount) so pod churn WITHIN a
+// ServiceAccount stopped mattering, but the first pod of a NEW ServiceAccount
+// still rewrote every mesh cluster on the node, and every rewritten EDS cluster
+// then re-warmed for the full 15 s EDS initial_fetch_timeout before its
+// warming→active swap drained every upstream pool on that node.
+//
+// The certificate is chosen per connection now, so the cluster has no workload
+// input at all: a pod arriving or leaving — of a new ServiceAccount or an
+// existing one — must leave the emitted cluster BYTE-IDENTICAL, which is what
+// lets Envoy's cluster hash gate drop the update entirely.
 func TestCachedMTLSClusterInvalidatedOnWorkloadChange(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
@@ -164,12 +186,22 @@ func TestCachedMTLSClusterInvalidatedOnWorkloadChange(t *testing.T) {
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", echoRegistry(&ns)))
 
-	names := matchNames(snapshotEchoCluster(t, c, "node-1"))
-	assert.True(t, names[testPodSpiffeID], "initial matcher carries the first pod's identity")
-	otherID := "spiffe://aether.internal/ns/aether-test/sa/other"
-	assert.False(t, names[otherID], "second pod not added yet")
+	bytesOf := func() []byte {
+		out, err := proto.MarshalOptions{Deterministic: true}.Marshal(snapshotEchoCluster(t, c, "node-1"))
+		require.NoError(t, err)
+		return out
+	}
 
-	// A second pod lands AFTER the load: the cached cluster must be rebuilt.
+	initial := bytesOf()
+	// The one identity a mesh cluster still names is the NODE's — the mapper's
+	// default_value, presented by connections that carry no source identity.
+	assert.Equal(t, nodeIdentity, certMapperDefault(t, snapshotEchoCluster(t, c, "node-1")))
+	assert.NotContains(t, string(initial), testPodSpiffeID,
+		"a mesh cluster must not name any workload identity")
+
+	// A pod of a DIFFERENT ServiceAccount lands after the load. Before #842
+	// this was the expensive case: a new identity in the matcher's
+	// exact_match_map, so every mesh cluster on the node re-warmed.
 	other := &cniv1.CNIPod{
 		Name:             "other-1",
 		Namespace:        "aether-test",
@@ -177,16 +209,12 @@ func TestCachedMTLSClusterInvalidatedOnWorkloadChange(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-b",
 	}
 	require.NoError(t, c.AddPod(ctx, other, "aether.internal"))
+	assert.Equal(t, initial, bytesOf(),
+		"a NEW ServiceAccount arriving must not change a mesh cluster's bytes (#842)")
 
-	names = matchNames(snapshotEchoCluster(t, c, "node-1"))
-	assert.True(t, names[otherID], "matcher must pick up a pod added after the registry load")
-	assert.True(t, names[testPodSpiffeID], "first pod's identity is retained")
-
-	// And removed again on pod deletion.
 	require.NoError(t, c.RemovePod(ctx, "/var/run/netns/cni-b"))
-	names = matchNames(snapshotEchoCluster(t, c, "node-1"))
-	assert.False(t, names[otherID], "matcher must drop a removed pod's identity")
-	assert.True(t, names[testPodSpiffeID], "first pod's identity is retained")
+	assert.Equal(t, initial, bytesOf(),
+		"the LAST pod of a ServiceAccount leaving must not change a mesh cluster's bytes (#842)")
 }
 
 // TestCachedMTLSClusterInvalidatedOnNodeIdentity verifies the node-SVID
@@ -276,27 +304,26 @@ func TestCachedMTLSClusterInvalidatedOnSANNamespaceChange(t *testing.T) {
 }
 
 // TestNodeProxyPerSourceClustersPoolPerDownstreamConnection is the regression
-// guard for issue #831.
+// guard that used to demand connection_pool_per_downstream_connection on every
+// per-source cluster (issue #831) and now demands the arrangement that replaced
+// it (issue #842). The two are mutually exclusive, and only one of them is a
+// design.
 //
-// The source workload's SPIFFE ID reaches the cluster through filter state set
-// with set_filter_state's default FactoryKey "envoy.string", which builds a
-// Router::StringAccessorImpl. That type is NOT Envoy::Hashable, and
+// #831's mechanism was real: set_filter_state's default "envoy.string" factory
+// builds a Router::StringAccessorImpl, which is NOT Envoy::Hashable, and
 // CommonUpstreamTransportSocketFactory::hashKey folds a downstream shared
-// filter-state object into the upstream connection-pool hash ONLY for Hashable
-// objects. The identity that selects the client certificate therefore
-// contributes ZERO BYTES to the pool key.
+// filter-state object into the upstream pool hash ONLY for Hashable objects, so
+// the identity that selects the client certificate contributed ZERO BYTES to
+// the pool key. connection_pool_per_downstream_connection covered that by
+// mixing the downstream connection id in instead — correct, but at the cost of
+// one upstream connection and one full mTLS handshake per downstream
+// connection, forever.
 //
-// What keeps that from being a workload-to-workload authorization hole is
-// connection_pool_per_downstream_connection, which mixes the downstream
-// connection id into the hash (cluster_manager_impl.cc, in both the HTTP and
-// TCP pool paths) and so gives each source pod its own pool. Without it, two
-// pods with different ServiceAccounts share one upstream HTTP/2 connection and
-// the destination verifies — and stamps into XFCC — whichever certificate
-// created it. Demonstrated end to end against a real Envoy in //test/mtlspool.
-//
-// So on the node proxy the flag is SECURITY configuration, not a throughput
-// knob: any cluster carrying a per-source transport_socket_matcher must set it.
-// (The edge sets it false, correctly — one identity cannot leak into itself.)
+// #842 put the identity in the key where it belongs (envoy.hashable_string) and
+// took the flag off. So the invariant is inverted, and its two halves must be
+// checked TOGETHER — the flag's absence is safe only because the identity is
+// hashable, and //test/mtlspool proves the pair end to end against a real
+// Envoy. A cluster that had neither would be the #831 leak.
 func TestNodeProxyPerSourceClustersPoolPerDownstreamConnection(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
@@ -312,16 +339,47 @@ func TestNodeProxyPerSourceClustersPoolPerDownstreamConnection(t *testing.T) {
 	checked := 0
 	for name, res := range snap.GetResources(resourcev3.ClusterType) {
 		cl, ok := res.(*clusterv3.Cluster)
-		if !ok || cl.GetTransportSocketMatcher() == nil {
+		if !ok || cl.GetTransportSocket() == nil {
 			continue
 		}
+		utc := &tlsv3.UpstreamTlsContext{}
+		if cl.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc) != nil {
+			continue
+		}
+		if utc.GetCommonTlsContext().GetCustomTlsCertificateSelector() == nil {
+			continue // not a per-source mesh cluster (edge, probe, app)
+		}
 		checked++
-		assert.Truef(t, cl.GetConnectionPoolPerDownstreamConnection(),
-			"cluster %q selects a client certificate per source identity but shares "+
-				"upstream pools across downstream connections: the source identity is "+
-				"not in the pool key (non-Hashable envoy.string filter state), so a "+
-				"pooled connection would carry another workload's certificate (#831)",
-			name)
+		assert.Falsef(t, cl.GetConnectionPoolPerDownstreamConnection(),
+			"cluster %q still keys pools by the downstream connection: since #842 the "+
+				"source identity is in the pool key, and keeping the flag costs all "+
+				"upstream h2 multiplexing across sources for nothing", name)
+		assert.Zerof(t, utc.GetMaxSessionKeys().GetValue(),
+			"cluster %q must keep max_session_keys 0: a client context supports a "+
+				"custom certificate selector only with session resumption off, and a "+
+				"resumed session would carry a certificate the selector did not choose", name)
 	}
 	require.NotZero(t, checked, "no per-source cluster in the snapshot: the guard checked nothing")
+}
+
+// TestMeshClusterNamesOnlyTheNodeIdentity: the ONLY SPIFFE ID a mesh cluster
+// may contain is the mapper's default_value (the node SVID). Any workload
+// identity in a cluster's bytes is per-node state, and per-node state in a
+// cluster is what made every pod event re-hash every cluster (#815).
+func TestMeshClusterNamesOnlyTheNodeIdentity(t *testing.T) {
+	c := newTestCache("node-1")
+	ctx := context.Background()
+	ns := "default"
+
+	require.NoError(t, c.AddPod(ctx, echoTestPod(), "aether.internal"))
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", echoRegistry(&ns)))
+
+	cl := snapshotEchoCluster(t, c, "node-1")
+	b, err := proto.Marshal(cl)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(b), nodeIdentity, "the node SVID is the mapper's default_value")
+	assert.NotContains(t, string(b), testPodSpiffeID, "no local workload identity may appear")
+	assert.NotContains(t, string(b), testPodNetns, "and certainly no netns path")
 }

@@ -98,6 +98,68 @@ const (
 	// asserts an end-to-end identity property, and a drifted key would make it
 	// pass by matching nothing.
 	SourceIdentityFilterStateKey = "aether.source.spiffe_id"
+
+	// SourceIdentityCertMapperFilterStateKey carries the SAME value as
+	// SourceIdentityFilterStateKey — the source pod's SPIFFE ID — under the
+	// name Envoy's upstream certificate mapper reads, and with a HASHABLE
+	// factory so it reaches the upstream connection-pool key (issue #842).
+	//
+	// THE NAME IS NOT OURS TO CHOOSE. The
+	// envoy.tls.upstream_certificate_mappers.filter_state_override mapper
+	// hardcodes the lookup — it walks
+	// TransportSocketOptions::downstreamSharedFilterStateObjects() comparing
+	// obj.name_ against the literal "envoy.tls.certificate_mappers.on_demand_secret"
+	// (source/extensions/transport_sockets/tls/cert_mappers/filter_state_override/config.cc
+	// at the pinned 1.40.0-dev.20260904.13144fb snapshot) and falls back to its
+	// configured default_value on any miss. There is no configurable key, so a
+	// namespaced "aether.*" name is not available here. It is an Envoy-owned
+	// name by construction, which is why it is spelled in full rather than
+	// built from a prefix: a typo is a SILENT fallback to the node identity,
+	// never an error.
+	//
+	// THE FACTORY IS THE POINT. set_filter_state's default "envoy.string"
+	// factory builds Router::StringAccessorImpl, which is NOT Envoy::Hashable;
+	// CommonUpstreamTransportSocketFactory::hashKey folds a downstream shared
+	// filter-state object into the upstream pool key only behind
+	// dynamic_cast<const Hashable*>. "envoy.hashable_string" builds
+	// HashableString — StringAccessorImpl PLUS Hashable, hash() =
+	// xxHash64(value) — so the source identity finally contributes bytes to the
+	// pool key and upstream pools partition per (host, source identity). That
+	// is what let connection_pool_per_downstream_connection come off every mesh
+	// cluster (#831/#841 established the flag was the only thing preventing a
+	// cross-source client-certificate leak; #842 replaced it with the correct
+	// partition).
+	//
+	// THE VALUE MUST STAY BOUNDED. Envoy exposes the hashable factory under an
+	// explicitly named, documented-with-a-warning extension rather than a
+	// boolean precisely because anything per-request here multiplies upstream
+	// connections. A SPIFFE ID is bounded by ServiceAccounts-per-node, which is
+	// exactly the partition the client certificate needs. Never put a
+	// per-request or per-pod value in this key.
+	//
+	// WHY THIS IS A SECOND OBJECT AND NOT A RENAME OF THE KEY ABOVE. Both are
+	// stamped, carrying the same string, for one release — the same dual-key
+	// overlap #815 used (see the RELEASE THREE note above, which asks for
+	// exactly this whenever a change is already re-keying every
+	// mesh-originating chain). SourceIdentityFilterStateKey is what a
+	// PRE-#842 cluster's transport_socket_matcher reads, so while both are
+	// stamped a rollback to release-two clusters stays hitless; it is also
+	// accesslog.go's `source_spiffe_id`, so no access-log migration rides on
+	// this change. One release after #842 has shipped, the netns copy and
+	// SourceIdentityFilterStateKey can both be retired together, with the
+	// access log repointed at this key (the attribute NAME stays
+	// `source_spiffe_id`; only the key it reads moves).
+	SourceIdentityCertMapperFilterStateKey = "envoy.tls.certificate_mappers.on_demand_secret"
+
+	// genericStringFactory builds Router::StringAccessorImpl — readable by
+	// %FILTER_STATE(...)% and by matcher inputs, invisible to the upstream pool
+	// hash.
+	genericStringFactory = "envoy.string"
+	// hashableStringFactory builds HashableString: the same StringAccessor
+	// surface PLUS Envoy::Hashable, so the value reaches
+	// CommonUpstreamTransportSocketFactory::hashKey. See
+	// SourceIdentityCertMapperFilterStateKey.
+	hashableStringFactory = "envoy.hashable_string"
 )
 
 // buildNetworkNamespaceFilterState copies Envoy's OWN downstream-netns filter
@@ -129,7 +191,7 @@ const (
 // already has reporter-relative `pod_name`/`pod_namespace`, so `local_netns`
 // fits) rather than repointing it in place.
 func buildNetworkNamespaceFilterState() *listenerv3.Filter {
-	return buildSetFilterState(networkNamespaceFilterStateKey, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%")
+	return buildSetFilterState(networkNamespaceFilterStateKey, genericStringFactory, "%FILTER_STATE(envoy.network.network_namespace:PLAIN)%")
 }
 
 // buildSourceIdentityFilterState stores the source pod's SPIFFE ID in filter
@@ -150,34 +212,65 @@ func buildNetworkNamespaceFilterState() *listenerv3.Filter {
 // propagation to the immediate upstream hop, so a future chained/internal hop
 // cannot silently inherit source-identity cert selection.
 func buildSourceIdentityFilterState(sourceSpiffeID string) *listenerv3.Filter {
-	return buildSetFilterState(SourceIdentityFilterStateKey, sourceSpiffeID)
+	return buildSetFilterState(SourceIdentityFilterStateKey, genericStringFactory, sourceSpiffeID)
+}
+
+// buildCertMapperIdentityFilterState stamps the same SPIFFE ID under the name
+// Envoy's filter_state_override upstream certificate mapper reads, using the
+// HASHABLE string factory so the value also partitions the upstream connection
+// pool. See SourceIdentityCertMapperFilterStateKey for why the key is an
+// Envoy-owned literal, why the factory is load-bearing, and why this is stamped
+// alongside (not instead of) SourceIdentityFilterStateKey.
+//
+// SharedWithUpstream: ONCE is not optional for this one — unlike the other two
+// keys it is REQUIRED for the feature to work at all. Both readers
+// (hashKey and the mapper) look only at
+// TransportSocketOptions::downstreamSharedFilterStateObjects(), which is
+// populated exclusively from shared filter-state objects. An unshared object is
+// invisible to both, and the failure is silent: the mapper returns its
+// default_value (the node identity) and the pool key loses the identity term —
+// i.e. exactly the #831 leak, minus the flag that used to mask it.
+func buildCertMapperIdentityFilterState(sourceSpiffeID string) *listenerv3.Filter {
+	return buildSetFilterState(SourceIdentityCertMapperFilterStateKey, hashableStringFactory, sourceSpiffeID)
 }
 
 // BuildSourceFilterStates returns the source-attribution network filters every
-// mesh-originating filter chain carries, in a FIXED order (netns first, then
-// identity): these land in the chain's repeated `filters` field, whose order is
-// part of the listener's bytes and therefore of its delta-xDS hash.
+// mesh-originating filter chain carries, in a FIXED order (netns, then the
+// aether identity key, then the certificate-mapper identity key): these land in
+// the chain's repeated `filters` field, whose order is part of the listener's
+// bytes and therefore of its delta-xDS hash.
+//
+// The third entry is APPENDED rather than substituted for the second so the
+// order of the first two is unchanged from #822 — only new bytes are added to
+// the end of the list.
 //
 // sourceSpiffeID may be empty — before the trust domain is known there is no
 // identity to stamp — in which case only the netns filter is emitted, which is
-// byte-for-byte what this chain carried before issue #815.
+// byte-for-byte what this chain carried before issue #815. A chain built in
+// that window selects no certificate by identity, so its egress presents the
+// node identity (the mapper's default_value) until the next rebuild — the same
+// degradation, for the same reason, as the pre-#842 OnNoMatch path.
 func BuildSourceFilterStates(sourceSpiffeID string) []*listenerv3.Filter {
 	filters := []*listenerv3.Filter{buildNetworkNamespaceFilterState()}
 	if sourceSpiffeID != "" {
-		filters = append(filters, buildSourceIdentityFilterState(sourceSpiffeID))
+		filters = append(filters,
+			buildSourceIdentityFilterState(sourceSpiffeID),
+			buildCertMapperIdentityFilterState(sourceSpiffeID),
+		)
 	}
 	return filters
 }
 
-// buildSetFilterState creates a set_filter_state network filter that stores a value in filter state.
-func buildSetFilterState(objectKey string, inlineStringFormatString string) *listenerv3.Filter {
+// buildSetFilterState creates a set_filter_state network filter that stores a
+// value in filter state under objectKey, built by the named object factory.
+func buildSetFilterState(objectKey, factoryKey string, inlineStringFormatString string) *listenerv3.Filter {
 	filter := &set_filter_state_v3.Config{
 		OnNewConnection: []*setFilterStatev3.FilterStateValue{
 			{
 				Key: &setFilterStatev3.FilterStateValue_ObjectKey{
 					ObjectKey: objectKey,
 				},
-				FactoryKey: "envoy.string",
+				FactoryKey: factoryKey,
 				Value: &setFilterStatev3.FilterStateValue_FormatString{
 					FormatString: &corev3.SubstitutionFormatString{
 						Format: &corev3.SubstitutionFormatString_TextFormatSource{

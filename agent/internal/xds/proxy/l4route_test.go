@@ -39,9 +39,10 @@ func TestBuildCaptureTCPRouteFilterChain_Passthrough(t *testing.T) {
 	chain := BuildCaptureTCPRouteFilterChain(svc, nil, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
 	assert.Equal(t, "cap_tcp_tcp:svc-a.aether.internal", chain.Name)
-	// Three filters: the two source set_filter_state entries (netns, then
-	// SPIFFE ID — issue #815) + tcp_proxy.
-	require.Len(t, chain.Filters, 3)
+	// Four filters: the three source set_filter_state entries (netns, the aether
+	// identity key — issue #815 — and the certificate-mapper identity key —
+	// issue #842) + tcp_proxy.
+	require.Len(t, chain.Filters, 4)
 	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	// Single-cluster form
 	assert.Equal(t, "tcp:svc-a.aether.internal", tcp.GetCluster())
@@ -59,7 +60,7 @@ func TestBuildCaptureTCPRouteFilterChain_SingleBackend(t *testing.T) {
 	}
 	chain := BuildCaptureTCPRouteFilterChain(svc, rules, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
-	require.Len(t, chain.Filters, 3)
+	require.Len(t, chain.Filters, 4)
 	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	assert.Equal(t, "tcp:svc-a.aether.internal", tcp.GetCluster())
 }
@@ -85,7 +86,7 @@ func TestBuildCaptureTCPRouteFilterChain_WeightedBackends(t *testing.T) {
 	assert.Equal(t, "10.0.0.20", chain.FilterChainMatch.PrefixRanges[0].AddressPrefix)
 	assert.Equal(t, uint32(32), chain.FilterChainMatch.PrefixRanges[0].PrefixLen.GetValue())
 
-	require.Len(t, chain.Filters, 3)
+	require.Len(t, chain.Filters, 4)
 	tcp := unmarshalTCPProxy(t, lastFilter(chain))
 	wc := tcp.GetWeightedClusters()
 	require.NotNil(t, wc, "expected weighted_clusters form")

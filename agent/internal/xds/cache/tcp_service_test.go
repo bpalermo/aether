@@ -15,10 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// tcpTransportSocketFilterStateExtName is the correct Envoy extension name for
-// the transport-socket-specific FilterStateInput, exported here for assertions.
-const tcpTransportSocketFilterStateExtName = "envoy.matching.inputs.transport_socket_filter_state"
-
 // TestLoadClustersFromRegistry_TCPCluster verifies that a PROTOCOL_TCP service
 // produces a "tcp:<svc>.<domain>" floor cluster whose EDS resolves to the
 // service's registry endpoints — the data path the transparent-capture TCP floor
@@ -70,40 +66,33 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	require.True(t, ok, "tcp floor cluster must be present")
 	assert.Equal(t, "aether-test/echo-tcp", tcpCluster.GetEdsClusterConfig().GetServiceName(),
 		"tcp cluster EDS resource is the namespace-qualified service key")
-	// With a local pod present, the per-source mTLS transport socket is injected
-	// via the matcher (not a single TransportSocket).
-	require.NotNil(t, tcpCluster.GetTransportSocketMatcher(), "tcp floor cluster must carry the per-source mTLS matcher")
+	// Per-source mTLS is one socket with a per-connection certificate selector
+	// (#842); the per-identity matcher and socket list are gone. The TCP floor
+	// follows the HTTP path exactly — it differs only in ALPN and SNI.
+	assert.Nil(t, tcpCluster.GetTransportSocketMatcher(), "the per-identity matcher is gone (#842)")
+	assert.Empty(t, tcpCluster.GetTransportSocketMatches())
+	require.NotNil(t, tcpCluster.GetTransportSocket(), "tcp floor cluster must carry the mesh upstream socket")
 
-	// The transport socket matcher must use the transport-socket-specific
-	// FilterStateInput extension, NOT the generic network filter_state input.
-	// Using "envoy.matching.inputs.filter_state" in a cluster transport_socket_matcher
-	// causes Envoy to silently return nullopt (wrong MatchingData type), so the
-	// exact-match never fires and every upstream connection falls to OnNoMatch,
-	// presenting the node identity instead of the per-source pod cert. For tcp_proxy
-	// upstreams with SAN pinning this causes TLS handshake failures (client cert SAN
-	// mismatch against the service's expected namespace), manifesting as upstream_cx_total=0.
-	inputName := tcpCluster.GetTransportSocketMatcher().GetMatcherTree().GetInput().GetName()
-	assert.Equal(t, tcpTransportSocketFilterStateExtName, inputName,
-		"TCP floor cluster transport_socket_matcher must use envoy.matching.inputs.transport_socket_filter_state")
+	utc := &tlsv3.UpstreamTlsContext{}
+	require.NoError(t, tcpCluster.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
+	require.NotNil(t, utc.GetCommonTlsContext().GetCustomTlsCertificateSelector(),
+		"tcp floor cluster must carry the per-connection certificate selector")
+	assert.Empty(t, utc.GetCommonTlsContext().GetAlpnProtocols(),
+		"the TCP floor sends NO ALPN so the destination inbound demuxes to its default chain")
 
-	// SAN pinning regression (020 Part 1): every per-source transport socket must
-	// pin the peer identity with the BARE ServiceAccount name in the sa/ segment —
+	// SAN pinning regression (020 Part 1): the transport socket must pin the
+	// peer identity with the BARE ServiceAccount name in the sa/ segment —
 	// "spiffe://<td>/ns/<endpoint-ns>/sa/echo-tcp" — NOT the namespace-qualified
 	// key ("sa/aether-test/echo-tcp"), which never matches an SVID and fails every
 	// TCP-floor handshake with fail_verify_san (observed on talos, 2026-07-02).
-	require.NotEmpty(t, tcpCluster.GetTransportSocketMatches())
-	for _, m := range tcpCluster.GetTransportSocketMatches() {
-		utc := &tlsv3.UpstreamTlsContext{}
-		require.NoError(t, m.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
-		combined := utc.GetCommonTlsContext().GetCombinedValidationContext()
-		require.NotNil(t, combined, "per-source socket pins the server identity (match %s)", m.GetName())
-		var got []string
-		for _, sm := range combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames() {
-			got = append(got, sm.GetMatcher().GetExact())
-		}
-		assert.Equal(t, []string{"spiffe://aether.internal/ns/default/sa/echo-tcp"}, got,
-			"SAN pin uses the bare SA name (match %s)", m.GetName())
+	combined := utc.GetCommonTlsContext().GetCombinedValidationContext()
+	require.NotNil(t, combined, "the tcp floor socket pins the server identity")
+	var got []string
+	for _, sm := range combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames() {
+		got = append(got, sm.GetMatcher().GetExact())
 	}
+	assert.Equal(t, []string{"spiffe://aether.internal/ns/default/sa/echo-tcp"}, got,
+		"SAN pin uses the bare SA name")
 
 	// No HTTP cluster/vhost for a TCP-only service.
 	_, hasHTTP := clusters["echo-tcp.aether-test.aether.internal"]

@@ -335,7 +335,7 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 	defaultCla, defaultEpMap, buckets := buildHTTPEndpointBuckets(serviceName, endpoints, localRegion, localZone, waypoint, defaultPort)
 
 	c.clusters[serviceName] = clusterEntry{
-		cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
+		cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys),
 		loadAssignment: defaultCla,
 		endpoints:      defaultEpMap,
 		vhost:          outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName], chainFilters, serviceName),
@@ -353,7 +353,7 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(serviceName string, endpoint
 		pcla.Endpoints = b.eps
 		proxy.SortLocalityLbEndpoints(pcla.Endpoints)
 		c.clusters[portName] = clusterEntry{
-			cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
+			cluster:        proxy.NewServiceCluster(portName, portName, serviceName, sortedKeys),
 			loadAssignment: pcla,
 			endpoints:      b.epMap,
 			vhost:          outboundPortVhostWithChainFilter(portName, chainFilters, serviceName),
@@ -420,7 +420,7 @@ func (c *SnapshotCache) buildPortAliasesLocked(serviceName, fqdn string, default
 			// EDS resource name is the BARE service (not the alias): the alias is the
 			// same endpoint set as the default cluster, so it must not publish a
 			// second, duplicate load assignment.
-			cluster:       proxy.NewServiceCluster(alias, serviceName, serviceName, sortedKeys, c.perDownstreamConnectionPool()),
+			cluster:       proxy.NewServiceCluster(alias, serviceName, serviceName, sortedKeys),
 			sanNamespaces: sanNamespaces,
 			service:       serviceName,
 			sni:           strconv.Itoa(int(port)),
