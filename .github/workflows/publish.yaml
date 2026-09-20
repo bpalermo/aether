@@ -153,19 +153,57 @@ jobs:
               python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'
           }
 
+          # List EVERY tag in a repo, following the registry's pagination.
+          #
+          # /v2/<repo>/tags/list returns ONE PAGE -- 100 tags on ghcr -- and
+          # signals the rest with an RFC5988 `Link: <...>; rel="next"` header.
+          # Tags come back in ascending order, so the tag we just pushed sorts
+          # LAST and is in the final page, never the first. The agent repo has
+          # 667 tags today; a single unpaginated call sees 100 of them and the
+          # commit is not among them.
+          #
+          # That is exactly how this step failed on e3b58e6: the tag
+          # `dev-e3b58e6...` existed in the registry and the lookup could not
+          # see it, so a correct sign step reported the images unpublished.
+          # A lookup that silently examines 15% of its input is the #853 shape.
+          #
+          # `last=` is the cursor; ghcr's own next-URL carries `n=0`, so re-state
+          # a real page size rather than following that URL verbatim.
+          all_tags() {
+            local repo="$1" tok="$2" last="" hdr body url
+            hdr="$(mktemp)"
+            while :; do
+              url="https://ghcr.io/v2/${repo}/tags/list?n=1000"
+              [ -n "$last" ] && url="${url}&last=${last}"
+              body="$(curl -fsS -D "$hdr" -H "Authorization: Bearer $tok" "$url")"
+              printf '%s' "$body" |
+                python3 -c 'import sys,json;[print(t) for t in (json.load(sys.stdin).get("tags") or [])]'
+              # No rel="next" means this was the final page.
+              grep -qi '^link:.*rel="next"' "$hdr" || break
+              last="$(printf '%s' "$body" |
+                python3 -c 'import sys,json;ts=json.load(sys.stdin).get("tags") or [];print(ts[-1] if ts else "")')"
+              [ -n "$last" ] || break
+            done
+            rm -f "$hdr"
+          }
+
           signed=0
           for repo in "${repos[@]}"; do
             tok="$(registry_token "$repo")"
 
             # The commit-suffixed tag (`<tag>-<full sha>`) is the only immutable
             # one -- `dev` is rewritten by every publish (#692).
-            tag="$(curl -fsS -H "Authorization: Bearer $tok" \
-              "https://ghcr.io/v2/${repo}/tags/list" |
-              python3 -c "import sys,json;ts=json.load(sys.stdin).get('tags') or [];print(next((t for t in ts if t.endswith('-${COMMIT}')),''))")"
+            tags="$(all_tags "$repo" "$tok")"
+            n_tags="$(printf '%s\n' "$tags" | grep -c . || true)"
+            tag="$(printf '%s\n' "$tags" | grep -E -- "-${COMMIT}$" | head -1)"
             if [ -z "$tag" ]; then
-              echo "::error::no tag ending in -${COMMIT} in ${repo}; refusing to sign a tag that is not this commit"
+              # Report the scan size. "not found in 667" is a real absence;
+              # "not found in 100" means the pagination regressed, and the two
+              # must never look the same again.
+              echo "::error::no tag ending in -${COMMIT} in ${repo} (scanned ${n_tags} tags); refusing to sign a tag that is not this commit"
               exit 1
             fi
+            echo "resolved ${repo}: ${tag} (scanned ${n_tags} tags)"
 
             digest="$(curl -fsSI -H "Authorization: Bearer $tok" \
               -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json' \
