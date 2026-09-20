@@ -4,9 +4,12 @@
 package config
 
 import (
+	"time"
+
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // XDSConfigSourceADS creates a ConfigSource that uses ADS (Aggregated Discovery Service)
@@ -14,6 +17,32 @@ import (
 func XDSConfigSourceADS() *corev3.ConfigSource {
 	return &corev3.ConfigSource{
 		ConfigSourceSpecifier: &corev3.ConfigSource_Ads{},
+	}
+}
+
+// XDSConfigSourceADSWithInitialFetch is XDSConfigSourceADS with an EXPLICIT
+// initial_fetch_timeout.
+//
+// What the field actually does, because the name invites the opposite reading
+// (issue #817): it bounds how long the owning listener stays WARMING for the
+// first config on this subscription. When it expires Envoy gives up waiting and
+// moves the listener to active ANYWAY — with whatever it has, which for a route
+// config that never arrived is nothing at all. So it is a fail-OPEN bound, not a
+// gate: setting it can never stop a listener going active with an unresolved
+// route table, it only decides how long the control plane is given first.
+//
+// 0 means "wait forever", which is NOT a safe alternative here: an agent that is
+// permanently unable to publish would wedge the egress listener in warming for
+// the life of the process, turning a degraded route table into a total
+// data-plane outage on that node (and the proxy would never report Ready).
+//
+// Envoy's own default is 15s, so passing 15s is a PIN rather than a behaviour
+// change — it makes the value protocol-visible, assertable in
+// //test/envoy_validate, and immune to an upstream default drift.
+func XDSConfigSourceADSWithInitialFetch(d time.Duration) *corev3.ConfigSource {
+	return &corev3.ConfigSource{
+		ConfigSourceSpecifier: &corev3.ConfigSource_Ads{},
+		InitialFetchTimeout:   durationpb.New(d),
 	}
 }
 

@@ -361,6 +361,70 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	), nil
 }
 
+// OutboundZeroVhostRouteBootstrapJSON builds a bootstrap whose listener inlines
+// the out_http RouteConfiguration the agent publishes when it has NOTHING to
+// publish — zero service virtual hosts, i.e. the local-only start of issue #817.
+//
+// That table used not to be emitted at all, which under delta ADS meant the
+// egress listener's RDS subscription was answered with silence, warmed out, and
+// went active with no routes (404 NR route_not_found on everything). It is now
+// unconditional, so what a real Envoy has to accept is a RouteConfiguration
+// consisting of the on-demand catch-all and nothing else: the liveness
+// direct-response, the mesh-authority safe_regex → cluster_header ODCDS route,
+// and the hard 404 fallthrough. Inlining it as a static route_config is the only
+// way this offline gate can see an RDS-delivered table at all.
+func OutboundZeroVhostRouteBootstrapJSON() ([]byte, error) {
+	bs, err := buildOutboundZeroVhostRouteBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	return marshalBootstrap(bs)
+}
+
+// buildOutboundZeroVhostRouteBootstrap assembles the zero-vhost out_http config.
+func buildOutboundZeroVhostRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
+	routeCfg := proxy.BuildOutboundRouteConfiguration(nil, meshDomain)
+	if len(routeCfg.GetVirtualHosts()) != 1 {
+		return nil, fmt.Errorf("zero-vhost out_http must carry exactly the catch-all, got %d virtual hosts",
+			len(routeCfg.GetVirtualHosts()))
+	}
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{
+		StatPrefix: "out_http_validate",
+		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{
+			RouteConfig: routeCfg,
+		},
+		HttpFilters: []*http_connection_managerv3.HttpFilter{{
+			Name: "envoy.filters.http.router",
+			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{
+				TypedConfig: mustAny(&routerv3.Router{}),
+			},
+		}},
+	}
+	listener := &listenerv3.Listener{
+		Name: "out_http_validate",
+		Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+			Address:       "127.0.0.1",
+			PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 15012},
+		}}},
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: mustAny(hcm)},
+			}},
+		}},
+	}
+
+	// The catch-all's non-mesh fallthrough is a direct 404 here (the outbound
+	// listener never passes through), so no passthrough cluster is needed; the
+	// mesh-authority route resolves its cluster from :authority via ODCDS, which
+	// names no cluster at config load either.
+	return newBootstrap(
+		[]*clusterv3.Cluster{xdsCluster()},
+		[]*listenerv3.Listener{listener},
+	), nil
+}
+
 // CaptureRouteTargetBootstrapJSON builds a bootstrap whose listener inlines the
 // cap_http RouteConfiguration for a GAMMA route TARGET addressed on its REAL
 // Service port (proposal 023 M2): the vhost carries

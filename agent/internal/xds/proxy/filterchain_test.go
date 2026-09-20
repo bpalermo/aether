@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"testing"
+	"time"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
@@ -101,4 +102,36 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 	// emit_pod is set (off by default here).
 	assert.Equal(t, "my-pod", fields["source_pod"].GetStringValue())
 	assert.False(t, fields["emit_pod"].GetBoolValue())
+}
+
+// TestOutboundChainRDSInitialFetchTimeout pins the egress RDS warming budget
+// (issue #817).
+//
+// initial_fetch_timeout is how long the listener stays WARMING for the first
+// out_http delivery; when it expires Envoy activates the listener anyway, with
+// an unresolved route table, and 404 NR route_not_found is what the mesh sees.
+// Leaving the field unset inherits Envoy's default rather than stating one, and
+// an unstated value is one no test can hold still.
+//
+// The value must not drop below the agent's own registryReadyTimeout, or a
+// fresh Envoy epoch can activate the egress listener while the agent feeding it
+// is still inside its initial-snapshot budget.
+func TestOutboundChainRDSInitialFetchTimeout(t *testing.T) {
+	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+	require.Len(t, fc.GetFilters(), 3)
+
+	hcm := &http_connection_managerv3.HttpConnectionManager{}
+	require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
+
+	rds := hcm.GetRds()
+	require.NotNil(t, rds, "the egress listener routes over RDS")
+	assert.Equal(t, OutboundHTTPRouteName, rds.GetRouteConfigName())
+
+	cs := rds.GetConfigSource()
+	require.NotNil(t, cs)
+	assert.NotNil(t, cs.GetAds(), "RDS rides the ADS stream")
+	require.NotNil(t, cs.GetInitialFetchTimeout(), "the egress RDS warming budget must be explicit, not inherited")
+	assert.Equal(t, OutboundRouteInitialFetchTimeout, cs.GetInitialFetchTimeout().AsDuration())
+	assert.Equal(t, 15*time.Second, OutboundRouteInitialFetchTimeout,
+		"kept equal to the agent's registryReadyTimeout; changing one without the other reopens the #817 window")
 }

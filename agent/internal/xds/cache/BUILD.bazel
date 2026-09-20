@@ -90,6 +90,7 @@ go_test(
         "observedstore_test.go",
         "odcds_test.go",
         "outbound_mtls_test.go",
+        "outboundroute_test.go",
         "podchurn_cds_test.go",
         "races_test.go",
         "route_memo_test.go",
