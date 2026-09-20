@@ -51,10 +51,14 @@ func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, m
 	prefix = append(prefix, extensionFilters...)
 	hcm.HttpFilters = append(prefix, hcm.HttpFilters...)
 
+	// RDS over ADS, with an explicit initial_fetch_timeout so the warming budget
+	// for the first out_http delivery is stated rather than inherited from
+	// Envoy's default (issue #817). See OutboundRouteInitialFetchTimeout for why
+	// 15s, and why raising it or setting it to 0 would be worse.
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
 			RouteConfigName: OutboundHTTPRouteName,
-			ConfigSource:    config.XDSConfigSourceADS(),
+			ConfigSource:    config.XDSConfigSourceADSWithInitialFetch(OutboundRouteInitialFetchTimeout),
 		},
 	}
 
