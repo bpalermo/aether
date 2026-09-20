@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"regexp"
@@ -29,6 +30,23 @@ func (c *SnapshotCache) generateUDPCaptureListener(cniPod *cniv1.CNIPod) (types.
 		return nil, nil
 	}
 	udpRoutes := c.udpServiceRoutesSnapshot()
+
+	// Say out loud what the UDP path is about to throw away (#873). The listener
+	// carries ONE cluster, so extra backends, a second UDPRoute-backed service
+	// and a weight-0 drain are all silently dropped -- with no NACK and no stat,
+	// the first symptom would be datagrams arriving somewhere unintended. This
+	// does not change what is generated; it makes the gap discoverable without
+	// reading the generator.
+	if reasons := proxy.UnsupportedUDPRouteShapes(udpRoutes); len(reasons) > 0 {
+		c.metrics.UDPRouteUnsupported(context.Background(), int64(len(reasons)))
+		for _, reason := range reasons {
+			c.log.Warn("UDPRoute input discarded: the per-pod UDP capture listener cannot represent it",
+				"pod", cniPod.GetName(),
+				"reason", reason,
+				"issue", "873")
+		}
+	}
+
 	l, err := proxy.GenerateUDPCaptureListener(
 		cniPod.GetName(),
 		cniPod.GetNetworkNamespace(),
