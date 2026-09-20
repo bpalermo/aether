@@ -315,6 +315,25 @@ func TestNodeBootstrapCarriesPerConnectionCertSelector(t *testing.T) {
 		if onDemand.GetConfigSource() == nil {
 			t.Fatalf("cluster %q: on_demand_secret has no config_source (required)", c.GetName())
 		}
+		// The selector must NOT ride `ads: {}` (issue #842, the rev228 outage):
+		// every secret it asks for is already subscribed on that mux by a static
+		// reference, Envoy's delta WatchMap deduplicates the interest away, and
+		// the handshake then pauses forever with no error and no stat. It gets
+		// its own api_config_source — and that source must name a cluster this
+		// bootstrap actually defines, or the reference dangles.
+		if onDemand.GetConfigSource().GetAds() != nil {
+			t.Fatalf("cluster %q: the certificate selector fetches over the shared ADS stream; "+
+				"it needs its own api_config_source (issue #842)", c.GetName())
+		}
+		api := onDemand.GetConfigSource().GetApiConfigSource()
+		if api == nil || len(api.GetGrpcServices()) != 1 {
+			t.Fatalf("cluster %q: the certificate selector needs exactly one explicit gRPC config source", c.GetName())
+		}
+		backing := api.GetGrpcServices()[0].GetEnvoyGrpc().GetClusterName()
+		if !staticClusterNames(bs)[backing] {
+			t.Fatalf("cluster %q: the certificate selector's config source names cluster %q, "+
+				"which this bootstrap does not define — a dangling SDS reference", c.GetName(), backing)
+		}
 		mapper := &filter_state_overridev3.Config{}
 		if err := onDemand.GetCertificateMapper().GetTypedConfig().UnmarshalTo(mapper); err != nil {
 			t.Fatalf("cluster %q: certificate_mapper is not a filter_state_override config: %v", c.GetName(), err)
@@ -329,4 +348,14 @@ func TestNodeBootstrapCarriesPerConnectionCertSelector(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no cluster in the node bootstrap carries a per-connection certificate selector: the envoy --mode validate gate proves nothing about issue #842")
 	}
+}
+
+// staticClusterNames is the set of clusters a bootstrap defines statically, for
+// checking that a config source's backing cluster actually resolves.
+func staticClusterNames(bs *bootstrapv3.Bootstrap) map[string]bool {
+	names := make(map[string]bool, len(bs.GetStaticResources().GetClusters()))
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		names[c.GetName()] = true
+	}
+	return names
 }
