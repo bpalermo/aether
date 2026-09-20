@@ -42,6 +42,15 @@ format-check:
 lint:
 	@bazel build --config=lint //...
 
+# Is every shell script actually reachable by the shellcheck aspect? `make lint`
+# can only lint what an sh_* target hands it, and for this repository's whole
+# life that was nothing (#853). A script in a directory with no sh_* target is
+# still silently outside the gate, so assert the coverage rather than assume it.
+# Also a required CI job (`shell` in .github/workflows/ci.yaml).
+.PHONY: check-shell-lint
+check-shell-lint:
+	@scripts/check-shell-lint.sh
+
 .PHONY: build-agent
 build-agent:
 	@bazel build //agent/cmd/agent/...

@@ -254,7 +254,12 @@ chart_dir() {
 }
 
 install_aether() {
-	local etcd="http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ETCD_NAME"):2379" charts
+	# Declared and assigned separately (SC2155): `local x="$(cmd)"` is a single
+	# `local` builtin whose exit status is the builtin's, not the substitution's,
+	# so `set -e` cannot see `docker inspect` fail on a missing/stopped etcd
+	# container and the install would proceed with "http://:2379".
+	local etcd charts
+	etcd="http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ETCD_NAME"):2379"
 	charts="$(chart_dir)"
 	local img
 	img() { echo "--set $1.image.repository=ghcr.io/bpalermo/aether/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }

@@ -29,11 +29,14 @@ load("@rules_shell//shell:sh_library.bzl", "sh_library")
 # un-cover it again, so scripts/check-proxy-shell-lint.sh asserts the two sets
 # agree; the `proxy` workflow runs it (and this target) on every proxy change.
 #
-# Scope note: the root workspace's OWN shell (scripts/, e2e/, bazel/) is not
-# covered either — before this package the repo declared no sh_* target at all,
-# so the shellcheck aspect had nothing to visit anywhere. That is #853,
-# deliberately not fixed here: three of those scripts have live warnings and
-# fixing them is not #848.
+# Scope note: the root workspace's OWN shell (scripts/, e2e/, bazel/) was not
+# covered either — before this package nothing in the repo handed the aspect a
+# single source file, so shellcheck had nothing to read anywhere. That was #853,
+# deliberately left out of #848 because three of those scripts had live warnings
+# and fixing them was not this change. It is fixed now: //scripts, //bazel,
+# //e2e, //e2e/pressure and //e2e/soak each declare an sh_library, and
+# scripts/check-shell-lint.sh is the completeness guard for that set exactly as
+# scripts/check-proxy-shell-lint.sh is for this one.
 sh_library(
     name = "proxy_shell",
     srcs = [

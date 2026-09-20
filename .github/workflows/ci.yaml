@@ -158,6 +158,64 @@ jobs:
       - name: Audit the Go dependency surface
         run: scripts/go-deps-audit.sh
 
+  # ShellCheck over the ROOT workspace's own shell (#853). The sibling of
+  # proxy.yml's `shell` job, and here for the mirror-image reason: that job lives
+  # in `proxy` because `ci`'s `changes` filter excludes `proxy/**/!(*.md)`, so a
+  # proxy-only PR skips this whole workflow. This gate covers scripts/, e2e/ and
+  # bazel/, none of which is excluded — `control_plane` is `'**'` minus the proxy
+  # tree — so a PR that touches nothing but a root shell script lands here and
+  # nowhere else. Putting it in `proxy` would make it skip in exactly the case it
+  # exists for, which is the same bug #853 is about.
+  #
+  # Its own job rather than steps inside `test`, for three reasons. `test` needs
+  # the BuildBuddy key and the RBE path to offload compiles, and this has no
+  # compile to offload — `--config=lint` plus fail_on_violation, NOT
+  # `--config=ci`. `test` is `needs: [changes, diff]` and skips when bazel-diff
+  # finds nothing impacted, so the shell gate would inherit a scoping decision it
+  # has no reason to trust. And the completeness check below is not a Bazel
+  # target at all. `test` still lints any impacted sh_* target as a side effect of
+  # `--config=ci`; that is a second net, not this one.
+  #
+  # Cheap by construction: shellcheck over 17 source files, no toolchain, no Go,
+  # so it reports in seconds instead of riding the critical path.
+  shell:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      # First: is every script actually reachable by the aspect? The srcs are
+      # per-package globs and a glob cannot cross a package boundary, so a script
+      # added under a directory with no sh_* target would pass the lint step below
+      # by simply not being in it — the vacuous-gate failure mode one level down.
+      - name: Every root-workspace shell script is covered by an sh_* target
+        run: scripts/check-shell-lint.sh
+
+      # Then: lint them. The target list comes from a query rather than being
+      # written out here, so a new package's sh_library is covered the moment the
+      # check above starts demanding one. The empty test is a query-failure
+      # tripwire — an empty list would otherwise "pass" by linting nothing, which
+      # is the shape of the bug this job exists for.
+      - name: ShellCheck the root workspace's shell
+        run: |
+          mapfile -t targets < <(bazel query 'kind("sh_(binary|library|test)", //...)')
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::the sh_* query returned nothing — refusing to pass a lint gate on an empty set (#853)"
+            exit 1
+          fi
+          printf 'linting %d shell target(s)\n' "${#targets[@]}"
+          bazel build \
+            --config=lint \
+            --@aspect_rules_lint//lint:fail_on_violation \
+            "${targets[@]}"
+
   envoy-api-parity:
     needs: changes
     # The agent's xDS bindings (go.mod: go-control-plane/envoy) must track the
@@ -567,7 +625,7 @@ jobs:
   # (and often `integration`) skip for an empty impact set.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, test, race, integration, e2e]
+    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, shell, test, race, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any control-plane job failed or was cancelled

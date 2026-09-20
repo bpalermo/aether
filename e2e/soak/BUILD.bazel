@@ -1,0 +1,12 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# The soak driver's shell (churn.sh, sample-proxy-rss.sh), in range of the
+# shellcheck aspect (#853). Its own package for the same reason as
+# //e2e/pressure; see //e2e:e2e_shell.
+#
+# k6-mesh-soak.js is JavaScript and no linter here covers it.
+sh_library(
+    name = "soak_shell",
+    srcs = glob(["*.sh"]),
+    visibility = ["//visibility:private"],
+)

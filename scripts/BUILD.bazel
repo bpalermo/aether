@@ -1,18 +1,31 @@
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
 
-# The #848 coverage guard, declared as a Bazel target so the shellcheck aspect
-# in //bazel/lint:linters.bzl lints it too. A gate that is itself unlinted is
-# the same bug one level up.
+# Every script in //scripts, declared so the shellcheck aspect in
+# //bazel/lint:linters.bzl has something to visit here (#853).
 #
-# It is the only script here for now. The rest of this directory — and
-# e2e/**, bazel/*.sh — are equally invisible to `make lint`, because until this
-# change the repository declared no sh_* target at all and the shellcheck aspect
-# had nothing anywhere to visit. Widening `srcs` to glob(["*.sh"]) is a two-word
-# edit, but three of those scripts have live SC2155/SC2034 warnings and fixing
-# them is a different change from #848, so it is #853 rather than something
-# smuggled in here.
+# The aspect's `rule_kinds` is sh_binary/sh_library/sh_test and nothing else, so
+# before #848 — which declared the first sh_* target in this repository, for the
+# //proxy bridge — `--config=lint` ran shellcheck over precisely zero files.
+# `make lint` was green because it had no input, which is indistinguishable from
+# green because the shell is clean.
+#
+# `glob(["*.sh"])` rather than an explicit list: the failure mode this target
+# exists to prevent is a script that nobody remembered to cover, so the srcs
+# must not be a list anyone has to remember to append to. scripts/ has no
+# subdirectories and no non-shell files; if it grows either, the glob still only
+# claims `*.sh` here and the sibling directory needs its own target (see
+# //e2e/pressure and //e2e/soak for why the targets are per-directory).
+#
+# `scripts/check-shell-lint.sh` asserts that the union of these targets' srcs
+# covers every shell script in the repository, so adding one in a directory with
+# no target fails rather than silently falling outside the gate.
+#
+# This replaces the single-file `check_proxy_shell_lint` target added by #848:
+# the guard it named is still here, it is simply one of the seven files the glob
+# now picks up. Only `//scripts:all` was ever referenced (by .github/workflows/
+# proxy.yml), so nothing depended on the old name.
 sh_library(
-    name = "check_proxy_shell_lint",
-    srcs = ["check-proxy-shell-lint.sh"],
+    name = "scripts_shell",
+    srcs = glob(["*.sh"]),
     visibility = ["//visibility:private"],
 )
