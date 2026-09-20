@@ -26,6 +26,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"aethermesh.dev/agent/internal/xds/proxy"
+	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // envoyBinary returns the path to the Envoy binary from the Bazel runfiles tree.
@@ -134,6 +139,7 @@ func TestEnvoyValidate(t *testing.T) {
 		{"node_uds_bootstrap.json", NodeUDSBootstrapJSON},
 		{"capture_bootstrap.json", CaptureBootstrapJSON},
 		{"capture_route_target_bootstrap.json", CaptureRouteTargetBootstrapJSON},
+		{"outbound_zero_vhost_route_bootstrap.json", OutboundZeroVhostRouteBootstrapJSON},
 		{"edge_bootstrap.json", EdgeBootstrapJSON},
 	}
 
@@ -173,5 +179,63 @@ func TestEnvoyValidate(t *testing.T) {
 				t.Fatalf("envoy --mode validate failed for %s: %v", b.name, err)
 			}
 		})
+	}
+}
+
+// TestNodeBootstrapEgressRDSInitialFetchTimeout reads the SERIALISED node
+// bootstrap — the same bytes `envoy --mode validate` above loads — and asserts
+// the egress listener's RDS config source states its initial_fetch_timeout
+// (issue #817).
+//
+// The field bounds how long the listener stays warming for the first out_http
+// delivery; when it expires Envoy activates the listener regardless, with an
+// unresolved route table, which is the 404 NR route_not_found window #817 is
+// about. Envoy's default happens to be the same 15s, so this is a pin rather
+// than a behaviour change: an unstated value is one that can drift under the
+// mesh without any test noticing.
+//
+// This asserts through protojson rather than the builder's return value on
+// purpose — a field lost in marshalling (or stripped alongside the custom
+// filters) would still pass an in-memory check.
+func TestNodeBootstrapEgressRDSInitialFetchTimeout(t *testing.T) {
+	data, err := NodeBootstrapJSON()
+	if err != nil {
+		t.Fatalf("NodeBootstrapJSON: %v", err)
+	}
+
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal node bootstrap: %v", err)
+	}
+
+	var found int
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		for _, fc := range l.GetFilterChains() {
+			for _, f := range fc.GetFilters() {
+				// Matched on the typed config's type URL, not the filter name:
+				// the HCM is emitted under the deprecated "envoy.http_connection_manager"
+				// alias, and a name check would silently find nothing.
+				hcm := &http_connection_managerv3.HttpConnectionManager{}
+				if err := f.GetTypedConfig().UnmarshalTo(hcm); err != nil {
+					continue
+				}
+				rds := hcm.GetRds()
+				if rds == nil || rds.GetRouteConfigName() != proxy.OutboundHTTPRouteName {
+					continue
+				}
+				found++
+				ift := rds.GetConfigSource().GetInitialFetchTimeout()
+				if ift == nil {
+					t.Fatalf("listener %q: out_http RDS config source has no initial_fetch_timeout", l.GetName())
+				}
+				if got := ift.AsDuration(); got != proxy.OutboundRouteInitialFetchTimeout {
+					t.Fatalf("listener %q: out_http RDS initial_fetch_timeout = %s, want %s",
+						l.GetName(), got, proxy.OutboundRouteInitialFetchTimeout)
+				}
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("no listener in the node bootstrap references the out_http route config over RDS")
 	}
 }
