@@ -602,6 +602,16 @@ jobs:
       - name: Open or update the nightly-failure issue
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job deliberately does NOT check out the repo — it only calls the
+          # GitHub API. But `gh` infers the target repository from git remotes, so
+          # without a checkout every `gh issue` call died with
+          # "failed to run git: fatal: not a git repository" and the job that
+          # exists to report failures reported nothing. GH_REPO names it
+          # explicitly, which is cheaper than a checkout we do not otherwise need.
+          # It ran for the first time on 2026-09-13 (nothing had failed before
+          # that) and failed on every nightly run since, so eight consecutive
+          # e2e failures went unannounced.
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RESULTS: |
             build=${{ needs.build.result }}
