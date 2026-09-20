@@ -3,6 +3,8 @@ package proxy
 import (
 	"aethermesh.dev/agent/internal/xds/config"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
+	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	transport_sockets_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/proto"
@@ -12,7 +14,73 @@ import (
 const (
 	// tlsTransportSocketName is the Envoy TLS transport socket name
 	tlsTransportSocketName = "envoy.transport_sockets.tls"
+
+	// onDemandCertSelectorName is the upstream TLS certificate SELECTOR: it
+	// resolves the client certificate per connection, fetching the named secret
+	// over SDS on demand rather than requiring it to be listed in the context.
+	// Registered for the upstream side as
+	// Ssl::UpstreamTlsCertificateSelectorConfigFactory (Envoy
+	// source/extensions/transport_sockets/tls/cert_selectors/on_demand/config.cc).
+	onDemandCertSelectorName = "envoy.tls.certificate_selectors.on_demand_secret"
+
+	// filterStateCertMapperName is the upstream certificate MAPPER the selector
+	// calls to turn a connection into a secret name: it reads the
+	// SourceIdentityCertMapperFilterStateKey object off the downstream-shared
+	// filter state and returns its string, or default_value when absent.
+	filterStateCertMapperName = "envoy.tls.upstream_certificate_mappers.filter_state_override"
 )
+
+// upstreamCertSelector builds the per-connection client-certificate selector
+// every mesh upstream socket carries since issue #842.
+//
+// This is the whole of the per-source mTLS mechanism now. It replaced a
+// per-identity `transport_socket_matches` list plus a `transport_socket_matcher`
+// whose exact_match_map named every local ServiceAccount — the structure #815
+// spent three releases making cheap to rebuild, and which this deletes outright.
+// One socket per cluster; the certificate is chosen per connection from filter
+// state.
+//
+// Three things make it work, and all three must hold together:
+//
+//   - The source pod's SPIFFE ID reaches the upstream connection as a SHARED
+//     filter-state object under the mapper's hardcoded name
+//     (buildCertMapperIdentityFilterState).
+//   - OUR SDS SECRET NAMES ARE SPIFFE IDs. The mapper returns the filter-state
+//     string verbatim AS THE SECRET NAME, so this only works because the two are
+//     the same string. They are: the SPIRE bridge publishes one secret per local
+//     workload named by proxy.SpiffeIDFromPod, which is the same function
+//     SourceIdentityForPod stamps into the listener. Check both ends before
+//     changing either — a mismatch is a silent fallback to default_value.
+//   - The object is HASHABLE, so the identity is in the upstream pool key and a
+//     pool can never hand a connection carrying one identity's certificate to
+//     another source. Without that this configuration is the #831 leak.
+//
+// defaultSecretName is what a connection with NO filter state gets. Required
+// (min_len: 1) and deliberately the NODE identity — see meshUpstreamCertSelector.
+//
+// The secret is fetched over sdsSource on first use; the cluster initializes
+// without waiting for it ("allowing the parent cluster or listener to accept
+// connections without warming"), and the FIRST handshake per (secret name,
+// worker) is paused until the SDS response lands. prefetchSecretNames starts
+// those fetches at config load instead; we prefetch exactly the default so the
+// no-filter-state path never pauses, and deliberately NOT the workload
+// identities — listing them would put the per-node identity SET back into every
+// cluster's bytes, which is the churn #815 removed.
+func upstreamCertSelector(defaultSecretName string, sdsSource *corev3.ConfigSource) *corev3.TypedExtensionConfig {
+	return &corev3.TypedExtensionConfig{
+		Name: onDemandCertSelectorName,
+		TypedConfig: config.TypedConfig(&on_demand_secretv3.Config{
+			ConfigSource: sdsSource,
+			CertificateMapper: &corev3.TypedExtensionConfig{
+				Name: filterStateCertMapperName,
+				TypedConfig: config.TypedConfig(&filter_state_overridev3.Config{
+					DefaultValue: defaultSecretName,
+				}),
+			},
+			PrefetchSecretNames: []string{defaultSecretName},
+		}),
+	}
+}
 
 // sdsSecretConfig creates an SDS secret config that fetches secrets via ADS
 // (the agent-served snapshot secrets used by the node proxy).
@@ -89,7 +157,25 @@ func DownstreamTransportSocket(tlsCertificateSecretName, validationContextName, 
 // leaves registry poisoning able to impersonate a service (an attacker-
 // registered endpoint would present a valid but WRONG identity).
 func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
-	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS())
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS(), nil)
+}
+
+// MeshUpstreamTransportSocket is the ONE upstream socket a node-proxy mesh
+// service cluster carries since issue #842. It is UpstreamTransportSocket with
+// the statically named client certificate replaced by the per-connection
+// on-demand certificate selector (upstreamCertSelector): the certificate is
+// chosen at handshake time from the source pod's SPIFFE ID in filter state,
+// instead of by a per-identity transport_socket_matches list the control plane
+// had to rebuild whenever the node's identity SET changed.
+//
+// nodeSpiffeID is the selector's default_value — the certificate a connection
+// carrying no source identity presents, which is what the pre-#842 matcher's
+// on_no_match presented for exactly the same connections. Everything else
+// (ALPN h2, the SAN pin, the SNI, MaxSessionKeys 0) is byte-identical to
+// UpstreamTransportSocket.
+func MeshUpstreamTransportSocket(nodeSpiffeID string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
+	sds := config.XDSConfigSourceADS()
+	return upstreamTransportSocket("", validationContextName, sanURIs, sni, sds, upstreamCertSelector(nodeSpiffeID, sds))
 }
 
 // UpstreamTCPTransportSocket creates a TLS transport socket for TCP-proxy upstream
@@ -100,7 +186,15 @@ func UpstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 // demultiplexing TCP from HTTP with the standard h2 ALPN instead of a bespoke token.
 // sanURIs and sni semantics are unchanged.
 func UpstreamTCPTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
-	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS(), "")
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS(), nil, "")
+}
+
+// MeshUpstreamTCPTransportSocket is MeshUpstreamTransportSocket for the TCP
+// floor: the same per-connection certificate selector, with no ALPN so the
+// destination inbound demuxes to its TCP floor default chain.
+func MeshUpstreamTCPTransportSocket(nodeSpiffeID string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
+	sds := config.XDSConfigSourceADS()
+	return upstreamTransportSocket("", validationContextName, sanURIs, sni, sds, upstreamCertSelector(nodeSpiffeID, sds), "")
 }
 
 // EdgeUpstreamTransportSocket is UpstreamTransportSocket for the edge proxy: it
@@ -109,7 +203,7 @@ func UpstreamTCPTransportSocket(tlsCertificateSecretName string, validationConte
 // SAN pinning is unchanged — match_typed_subject_alt_names is inline static
 // config; only the validation-context bundle comes over SDS.
 func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
-	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName))
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName), nil)
 }
 
 // EdgeUpstreamTCPTransportSocket is EdgeUpstreamTransportSocket for TCP floor
@@ -120,14 +214,23 @@ func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationCont
 // established that the SNI must be empty for the floor — a non-empty SNI would
 // hit the destination's per-port HCM chain instead of the floor default.
 func EdgeUpstreamTCPTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string) *corev3.TransportSocket {
-	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, "" /* no SNI */, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName), "" /* no ALPN */)
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, "" /* no SNI */, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName), nil, "" /* no ALPN */)
 }
 
 // upstreamTransportSocket builds an upstream TLS context. With no alpnOverride the
 // ALPN is "h2" (HTTP/2 mesh transport). An alpnOverride of "" suppresses ALPN
 // entirely — the TCP floor path, so the destination inbound demuxes it as the
 // default (non-h2) chain; any other override value sets that explicit ALPN list.
-func upstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string, sdsSource *corev3.ConfigSource, alpnOverride ...string) *corev3.TransportSocket {
+//
+// EXACTLY ONE of tlsCertificateSecretName and certSelector supplies the client
+// certificate. A nil certSelector is the static form: one SDS secret named up
+// front (the edge, and the pre-#842 mesh shape). A non-nil certSelector is the
+// per-connection form, and then NO tls_certificate_sds_secret_configs is
+// emitted at all — the selector owns certificate resolution end to end, and a
+// statically named certificate beside it would be dead config that the cluster
+// still has to resolve before it leaves warming, reintroducing the very
+// coupling the selector removes.
+func upstreamTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string, sdsSource *corev3.ConfigSource, certSelector *corev3.TypedExtensionConfig, alpnOverride ...string) *corev3.TransportSocket {
 	alpn := []string{"h2"}
 	if len(alpnOverride) > 0 {
 		if alpnOverride[0] == "" {
@@ -140,9 +243,13 @@ func upstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 		// Clusters speak HTTP/2 upstream ("h2"); the TCP floor sends no ALPN so the
 		// destination inbound demuxes it to the default tcp_proxy chain (HTTP matches "h2").
 		AlpnProtocols: alpn,
-		TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
+	}
+	if certSelector != nil {
+		common.CustomTlsCertificateSelector = certSelector
+	} else {
+		common.TlsCertificateSdsSecretConfigs = []*transport_sockets_v3.SdsSecretConfig{
 			sdsSecretConfigFrom(tlsCertificateSecretName, sdsSource),
-		},
+		}
 	}
 
 	if len(sanURIs) == 0 {
@@ -171,6 +278,16 @@ func upstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 	// nothing by switching resumption off: upstream connections are long-lived
 	// pooled h2, so full handshakes are rare and amortised, and the mesh's whole
 	// premise is that the SVID on this connection is this peer's.
+	//
+	// SINCE #842 IT IS ALSO A PRECONDITION OF THE CERTIFICATE SELECTOR, not just
+	// a defence against #829. tls.proto states that a client context supports
+	// more than one TLS certificate only when custom_tls_certificate_selector is
+	// explicitly defined AND max_session_keys is 0 — a cached client session is
+	// keyed without reference to which on-demand certificate produced it, so
+	// resuming one would hand a connection a certificate the selector did not
+	// choose for it. That is exactly the cross-source mix-up this change exists
+	// to make impossible. Raising max_session_keys here breaks per-source
+	// identity, not merely performance. Keep it 0.
 	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{
 		CommonTlsContext: common,
 		Sni:              sni,

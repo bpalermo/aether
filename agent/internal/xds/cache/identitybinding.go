@@ -10,31 +10,36 @@ import (
 
 // The outbound identity-binding discriminator (issue #638).
 //
-// WHAT THE BINDING ACTUALLY IS. Every mTLS-injected outbound cluster carries
-// the same two pieces of config (built by proxy.InjectUpstreamMTLS):
+// WHAT THE BINDING ACTUALLY IS. Since issue #842 an mTLS-injected outbound
+// cluster carries ONE transport socket (built by proxy.InjectUpstreamMTLS)
+// whose custom_tls_certificate_selector resolves the client certificate per
+// connection:
 //
-//   - transport_socket_matches: one entry per unique local SPIFFE ID (plus the
-//     node identity), NAMED by that SPIFFE ID, whose transport socket fetches
-//     the SDS secret of the SAME name. The socket name and the secret name are
-//     literally the same string, so "this match presents a different secret
-//     than it is named for" is structurally impossible.
-//   - transport_socket_matcher: an exact_match_map from the SOURCE IDENTITY
-//     (the aether.source.spiffe_id filter state, shared with the upstream
-//     connection) to the match of the same name, built from the identity SET of
-//     c.localWorkloads. Since issue #815 release two the map is keyed by
-//     identity, not by netns path — so the proto is byte-stable across pod churn
-//     within a ServiceAccount. The netns → identity step did not disappear; it
-//     MOVED into the listener, which stamps the identity the agent derived for
-//     the pod owning that netns (proxy.SourceIdentityForPod).
+//   - the originating listener chain stamps the source pod's SPIFFE ID into
+//     shared filter state (proxy.SourceIdentityCertMapperFilterStateKey, with
+//     the hashable string factory);
+//   - Envoy's filter_state_override certificate mapper reads that object off
+//     TransportSocketOptions::downstreamSharedFilterStateObjects() and returns
+//     its string AS THE SDS SECRET NAME — or, finding nothing, the configured
+//     default_value, which is the node SVID;
+//   - the on_demand_secret selector fetches that secret and the handshake uses
+//     it.
+//
+// The filter-state value and the secret name are literally the same string, so
+// "this connection presents a different secret than the identity it claims" is
+// structurally impossible — the same property the old transport_socket_matches
+// had, where the match name WAS the secret name.
 //
 // So the whole (source pod → cluster → client-cert secret) binding still
 // reduces to ONE node-wide index: c.localWorkloads[netns] → SPIFFE ID. It is
 // identical for every outbound cluster on the node — which is exactly the shape
 // #638 observes in the field (one wrong identity presented toward many distinct
 // clusters in a single time slice, never a per-cluster or per-endpoint scatter).
-// This file still watches exactly the right table: what changed is only WHERE
-// the lookup happens (listener, once per connection) rather than WHAT decides
-// the client certificate.
+// This file still watches exactly the right table. What has changed twice is
+// only WHERE the lookup happens: #815 moved it from the cluster into the
+// listener, and #842 removed the cluster's half entirely — the cluster no longer
+// names ANY workload identity, so a stale or wrong binding can now only come
+// from the listener side, i.e. from this index.
 //
 // WHAT CAN THEREFORE GO WRONG is not the secret naming but that index:
 //
@@ -48,9 +53,10 @@ import (
 //     to a netns path a NEW pod may already be using — the new pod's listener
 //     is then generated stamping the departed (co-located) workload's SPIFFE ID
 //     until the next AddPod write lands, which is precisely the "duration =
-//     time to next push" fingerprint. Release two did not change this: the
-//     wrong identity is now baked into the listener instead of looked up in the
-//     cluster, and the same c.localWorkloads entry is the cause either way.
+//     time to next push" fingerprint. Neither #815 release two nor #842
+//     changed this: the wrong identity is baked into the listener rather than
+//     looked up in the cluster, and the same c.localWorkloads entry is the
+//     cause either way — #842 only made the cluster stop participating at all.
 //
 // This file makes that index observable: it names the binding each snapshot
 // delivers, but only when it CHANGED, and cross-checks the presented identity
@@ -75,9 +81,10 @@ type sourceBinding struct {
 	// podIdentity is the SPIFFE ID derived from that pod's OWN namespace and
 	// ServiceAccount — the identity it is entitled to present. "" when unknown.
 	podIdentity string
-	// presented is c.localWorkloads[netns]: the transport-socket match name the
-	// matcher selects for this netns, and therefore the SDS client-certificate
-	// secret name the outbound clusters bind. Should equal podIdentity.
+	// presented is c.localWorkloads[netns]: the SPIFFE ID this netns's listener
+	// chain stamps into filter state, and therefore — the certificate mapper
+	// returns it verbatim — the SDS client-certificate secret every outbound
+	// connection from this pod fetches. Should equal podIdentity.
 	presented string
 }
 

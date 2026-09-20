@@ -7,18 +7,22 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
+	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 const nodeIdentity = "spiffe://aether.internal/ns/aether-system/sa/aether-agent"
 
 // TestServiceClusterMTLSInjected verifies that once a local pod and the node
-// identity are known, each service cluster carries the per-source mTLS matcher
-// (the originating pod's identity plus the node identity for the on-no-match
-// fallback), injected at snapshot time.
+// identity are known, each service cluster carries the per-source upstream mTLS
+// the mesh actually uses: since #842 that is ONE transport socket whose
+// custom_tls_certificate_selector resolves the client certificate per connection
+// from the source identity in filter state, with the node SVID as the default.
 func TestServiceClusterMTLSInjected(t *testing.T) {
 	c := newTestCache("node-1")
 	ctx := context.Background()
@@ -49,29 +53,45 @@ func TestServiceClusterMTLSInjected(t *testing.T) {
 
 	echo, ok := clusters["echo.aether-test.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
-	require.NotNil(t, echo.GetTransportSocketMatcher(), "service cluster must carry the per-source mTLS matcher")
+	// Since #842 per-source mTLS is ONE socket with a per-connection certificate
+	// selector, not a matcher over a per-identity socket list.
+	assert.Nil(t, echo.GetTransportSocketMatcher(), "the per-identity matcher is gone (#842)")
+	assert.Empty(t, echo.GetTransportSocketMatches())
+	require.NotNil(t, echo.GetTransportSocket(), "service cluster must carry the mesh upstream socket")
 
-	// The matcher input must be the transport-socket-specific FilterStateInput
-	// (envoy.matching.inputs.transport_socket_filter_state), NOT the generic
-	// "envoy.matching.inputs.filter_state". Using the wrong extension name causes
-	// Envoy to silently return nullopt in the transport_socket_matcher context,
-	// so the exact-match never fires and all connections fall to OnNoMatch
-	// (always node identity, never per-source cert).
-	inputName := echo.GetTransportSocketMatcher().GetMatcherTree().GetInput().GetName()
-	assert.Equal(t, "envoy.matching.inputs.transport_socket_filter_state", inputName,
-		"transport_socket_matcher input must be the transport-socket-scoped FilterStateInput")
+	utc := &tlsv3.UpstreamTlsContext{}
+	require.NoError(t, echo.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
 
-	names := map[string]bool{}
-	for _, m := range echo.GetTransportSocketMatches() {
-		names[m.GetName()] = true
-	}
-	assert.True(t, names["spiffe://aether.internal/ns/aether-test/sa/echo"], "match for the local pod identity")
-	assert.True(t, names[nodeIdentity], "match for the node identity (on-no-match fallback)")
+	// The selector/mapper NAMES are informational — Envoy resolves these
+	// extensions by the typed_config type URL, and `envoy --mode validate`
+	// accepts a bogus name (measured on the pinned proxy, 2026-09-20). So
+	// nothing downstream catches a rename: pinning them here is the only guard,
+	// and it is a cheap one.
+	sel := utc.GetCommonTlsContext().GetCustomTlsCertificateSelector()
+	require.NotNil(t, sel, "service cluster must carry the per-connection certificate selector")
+	assert.Equal(t, "envoy.tls.certificate_selectors.on_demand_secret", sel.GetName())
+
+	onDemand := &on_demand_secretv3.Config{}
+	require.NoError(t, sel.GetTypedConfig().UnmarshalTo(onDemand))
+	assert.Equal(t, "envoy.tls.upstream_certificate_mappers.filter_state_override",
+		onDemand.GetCertificateMapper().GetName(),
+		"the mapper that reads the source identity off the downstream-shared filter state")
+
+	mapper := &filter_state_overridev3.Config{}
+	require.NoError(t, onDemand.GetCertificateMapper().GetTypedConfig().UnmarshalTo(mapper))
+	assert.Equal(t, nodeIdentity, mapper.GetDefaultValue(),
+		"a connection with no source identity presents the node SVID (the old on_no_match)")
+
+	// No workload identity is named anywhere on the cluster: the local pod's
+	// certificate is selected at handshake time from filter state.
+	b, err := proto.Marshal(echo)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "spiffe://aether.internal/ns/aether-test/sa/echo")
 }
 
-// TestServiceClusterNoMTLSWithoutNodeIdentity verifies the upstream mTLS matcher is
-// not injected until the node SVID is served (its on-no-match references the node
-// identity).
+// TestServiceClusterNoMTLSWithoutNodeIdentity verifies upstream mTLS is not
+// injected until the node SVID is served: the certificate selector's mapper
+// requires a non-empty default_value, and the node SVID is it.
 func TestServiceClusterNoMTLSWithoutNodeIdentity(t *testing.T) {
 	c := newTestCache("node-1")
 	declareDeps(c, "aether-test/echo")
@@ -90,13 +110,16 @@ func TestServiceClusterNoMTLSWithoutNodeIdentity(t *testing.T) {
 	require.NoError(t, err)
 	echo, ok := snap.GetResources(resourcev3.ClusterType)["echo.aether-test.aether.internal"].(*clusterv3.Cluster)
 	require.True(t, ok, "echo cluster must be present")
+	// Nothing mTLS at all before the node SVID: the selector's default_value is
+	// the node identity and the proto requires it to be non-empty, so the
+	// cluster is emitted bare rather than with an unservable empty default.
 	assert.Nil(t, echo.GetTransportSocketMatcher(), "no mTLS matcher before the node SVID is served")
+	assert.Nil(t, echo.GetTransportSocket(), "no upstream mTLS socket before the node SVID is served")
 }
 
 // TestServiceClusterSANPinning verifies the snapshot-time injection pins the
 // upstream peer identity to the service's expected SPIFFE IDs, derived from
-// its endpoints' namespaces — on the per-source matches AND the no-match
-// (node identity) path alike. This is the anti-registry-poisoning control: a
+// its endpoints' namespaces. This is the anti-registry-poisoning control: a
 // valid-but-wrong SVID must fail the handshake.
 func TestServiceClusterSANPinning(t *testing.T) {
 	c := newTestCache("node-1")
@@ -130,16 +153,17 @@ func TestServiceClusterSANPinning(t *testing.T) {
 		"spiffe://aether.internal/ns/aether-test/sa/echo",
 		"spiffe://aether.internal/ns/default/sa/echo",
 	}
-	require.NotEmpty(t, echo.GetTransportSocketMatches())
-	for _, m := range echo.GetTransportSocketMatches() {
-		utc := &tlsv3.UpstreamTlsContext{}
-		require.NoError(t, m.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
-		combined := utc.GetCommonTlsContext().GetCombinedValidationContext()
-		require.NotNil(t, combined, "every per-source socket pins the server identity (match %s)", m.GetName())
-		var got []string
-		for _, sm := range combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames() {
-			got = append(got, sm.GetMatcher().GetExact())
-		}
-		assert.Equal(t, wantSANs, got, "sorted namespace union renders the expected identities")
+	// The SERVER-identity pin is unchanged by #842 — it was never per-source, so
+	// collapsing the per-source socket list did not touch it. There is now one
+	// socket to check instead of one per local ServiceAccount.
+	require.NotNil(t, echo.GetTransportSocket())
+	utc := &tlsv3.UpstreamTlsContext{}
+	require.NoError(t, echo.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc))
+	combined := utc.GetCommonTlsContext().GetCombinedValidationContext()
+	require.NotNil(t, combined, "the mesh upstream socket pins the server identity")
+	var got []string
+	for _, sm := range combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames() {
+		got = append(got, sm.GetMatcher().GetExact())
 	}
+	assert.Equal(t, wantSANs, got, "sorted namespace union renders the expected identities")
 }

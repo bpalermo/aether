@@ -13,19 +13,24 @@ import (
 )
 
 // localMTLSState is a point-in-time copy of the node-wide upstream-mTLS inputs
-// (guarded by localMu): the SET of local workload SPIFFE IDs, the node SVID, and
-// the trust domain. The per-entry mTLS caches (clusterEntry.sanURIs and
-// clusterEntry.mtlsCluster) are rendered from it.
+// (guarded by localMu): the node SVID and the trust domain. The per-entry mTLS
+// caches (clusterEntry.sanURIs and clusterEntry.mtlsCluster) are rendered from
+// it.
 //
-// ids is the only per-workload input, and it is an identity SET — one entry per
-// ServiceAccount present on the node, deduplicated and sorted downstream by
-// proxy.sortedUniqueIdentities. That is what makes a cluster's bytes invariant
-// under pod churn within a ServiceAccount (issue #815, release two). The
-// netns→identity index it used to carry lives on in c.localWorkloads, which the
-// #638 outbound-identity discriminator (identitybinding.go) still reads — but
-// nothing in the Cluster proto is keyed by netns any more.
+// IT NO LONGER CARRIES THE LOCAL WORKLOAD IDENTITIES, and that absence is issue
+// #842. It used to hold the identity SET, because every mesh cluster's
+// transport_socket_matches and transport_socket_matcher were built from it. The
+// client certificate is now chosen per connection from filter state, so a
+// cluster has NO per-workload input at all: the only identity it names is the
+// node's, as the certificate mapper's default_value. That is what makes a
+// cluster's bytes invariant under every pod event, not merely under churn
+// within a ServiceAccount (which is as far as #815 release two could get).
+//
+// The netns→identity index lives on in c.localWorkloads, which the #638
+// outbound-identity discriminator (identitybinding.go) still reads and which the
+// LISTENERS are generated from — that is where the source identity enters the
+// data plane now.
 type localMTLSState struct {
-	ids                   []string
 	nodeSpiffeID          string
 	trustDomain           string
 	validationContextName string
@@ -42,16 +47,11 @@ func (c *SnapshotCache) localMTLSSnapshot() localMTLSState {
 	c.localMu.RLock()
 	defer c.localMu.RUnlock()
 
-	st := localMTLSState{
-		ids:                   make([]string, 0, len(c.localWorkloads)),
+	return localMTLSState{
 		nodeSpiffeID:          c.nodeSpiffeID,
 		trustDomain:           trustDomain,
 		validationContextName: proxy.ValidationContextName(trustDomain),
 	}
-	for _, id := range c.localWorkloads {
-		st.ids = append(st.ids, id)
-	}
-	return st
 }
 
 // recomputeMTLSClusters rebuilds every cluster entry's cached mTLS material
@@ -149,7 +149,7 @@ func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLS
 		if c.waypointEnabled {
 			waypointSNI = entry.sni + "." + proxy.ServiceClusterName(entry.service, c.meshDomain)
 		}
-		proxy.InjectUpstreamMTLS(cl, st.ids, st.nodeSpiffeID, st.validationContextName, sanURIs, entry.sni, waypointSNI)
+		proxy.InjectUpstreamMTLS(cl, st.nodeSpiffeID, st.validationContextName, sanURIs, entry.sni, waypointSNI)
 	}
 	entry.mtlsCluster = cl
 }

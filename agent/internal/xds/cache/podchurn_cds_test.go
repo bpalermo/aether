@@ -10,6 +10,7 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/require"
@@ -192,11 +193,19 @@ func TestServiceClusterBytesStableWithinServiceAccount(t *testing.T) {
 	require.Equal(t, before, afterSiblingDel, "the whole CDS set must be back to the pre-ADD bytes")
 }
 
-// TestServiceClusterBytesChangeOnFirstAndLastPodOfServiceAccount pins the other
-// half: the matcher is still per-ServiceAccount state, so the FIRST pod of a new
-// ServiceAccount and the LAST pod of a departing one DO rewrite every service
-// cluster — reversibly. These are the only pod events that still cost a
-// node-wide re-warm, and quantifying them is the point of the test.
+// TestServiceClusterBytesChangeOnFirstAndLastPodOfServiceAccount pinned the
+// residual cost #815 could not remove: the matcher's exact_match_map was
+// per-ServiceAccount state, so the FIRST pod of a new ServiceAccount and the
+// LAST pod of a departing one DID rewrite every service cluster on the node —
+// 20-30 clusters re-warming for the full 15 s EDS initial_fetch_timeout,
+// draining every upstream pool on that node when they swapped active.
+//
+// Issue #842 removed that last input. The certificate is chosen per connection
+// from filter state, so a mesh cluster names no workload identity at all and
+// NO pod event changes a service cluster's bytes. The assertion is inverted,
+// deliberately and with the issue number on it: if a future change reintroduces
+// a per-identity field (a prefetch_secret_names list of workload identities is
+// the obvious way), this test goes red and says why.
 func TestServiceClusterBytesChangeOnFirstAndLastPodOfServiceAccount(t *testing.T) {
 	c, ctx := churnFixture(t)
 	before := clusterResourceDigests(t, c, "node-1")
@@ -217,24 +226,28 @@ func TestServiceClusterBytesChangeOnFirstAndLastPodOfServiceAccount(t *testing.T
 			continue
 		}
 		serviceClusters++
-		require.NotEqualf(t, digest, afterAdd[name],
-			"cluster %s kept its bytes although a NEW source identity arrived; the "+
-				"matcher must gain an entry for it or that pod's egress would fall to "+
-				"on_no_match and present the node identity", name)
+		require.Equalf(t, digest, afterAdd[name],
+			"cluster %s changed bytes when the FIRST pod of a new ServiceAccount "+
+				"arrived. Since #842 nothing about a mesh cluster depends on the node's "+
+				"workloads, and a change here means one does again — every mesh cluster "+
+				"on the node would re-warm for 15 s and drain its upstream pools", name)
 	}
 	require.GreaterOrEqual(t, serviceClusters, 3)
 
-	// Per-pod clusters of the resident pod stay untouched even here.
+	// Per-pod clusters of the resident pod stay untouched, as before.
 	for name, digest := range before {
 		if !proxy.IsPerPodClusterName(name) {
 			continue
 		}
 		require.Equalf(t, digest, afterAdd[name], "per-pod cluster %s changed bytes", name)
 	}
+	// The newcomer's OWN per-pod clusters are new, so the whole CDS set is not
+	// equal — only the service clusters are.
+	require.Contains(t, afterAdd, "inboundready_"+newcomer.GetName())
 
-	// The LAST pod of that ServiceAccount leaving restores the byte-for-byte
-	// pre-ADD state: a create/destroy pair is a round trip, so repeated churn
-	// cannot ratchet the cluster set into an ever-growing shape.
+	// And the LAST pod of that ServiceAccount leaving restores the pre-ADD set
+	// exactly: a create/destroy pair is a round trip, so repeated churn cannot
+	// ratchet the cluster set into an ever-growing shape.
 	require.NoError(t, c.RemovePod(ctx, newcomer.GetNetworkNamespace()))
 	afterDel := clusterResourceDigests(t, c, "node-1")
 	require.Equal(t, before, afterDel, "the DEL must restore the pre-ADD bytes exactly")
@@ -315,8 +328,14 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
 
-	needles := []string{"/var/run/netns/cni-a", "/var/run/netns/cni-c", "/var/run/netns/"}
-	matchers := 0
+	// Since #842 the scan covers MORE than netns: a mesh cluster must not name
+	// any local WORKLOAD identity either. The only SPIFFE ID it may carry is the
+	// node's, as the certificate mapper's default_value.
+	needles := []string{
+		"/var/run/netns/cni-a", "/var/run/netns/cni-c", "/var/run/netns/",
+		"spiffe://aether.internal/ns/aether-test/sa/svc-5",
+	}
+	selectors := 0
 	for name, r := range snap.GetResources(resourcev3.ClusterType) {
 		if !isServiceClusterName(name) {
 			// Per-pod app_/health_/inboundready_ clusters legitimately dial
@@ -325,19 +344,23 @@ func TestNoNetnsPathInServiceClusterBytes(t *testing.T) {
 		}
 		cl, ok := r.(*clusterv3.Cluster)
 		require.True(t, ok)
-		if cl.GetTransportSocketMatcher() != nil {
-			matchers++
+		utc := &tlsv3.UpstreamTlsContext{}
+		if cl.GetTransportSocket() != nil &&
+			cl.GetTransportSocket().GetTypedConfig().UnmarshalTo(utc) == nil &&
+			utc.GetCommonTlsContext().GetCustomTlsCertificateSelector() != nil {
+			selectors++
 		}
 		b, err := cachev3.MarshalResource(r)
 		require.NoError(t, err)
 		for _, needle := range needles {
 			require.NotContainsf(t, string(b), needle,
-				"service cluster %s still embeds a netns path (%q): the per-source "+
-					"matcher must be keyed by source SPIFFE ID (issue #815 release two)", name, needle)
+				"service cluster %s still embeds per-node state (%q): certificate "+
+					"selection is per CONNECTION since #842, so nothing about the node's "+
+					"workloads belongs in a cluster", name, needle)
 		}
 	}
-	require.GreaterOrEqual(t, matchers, 3,
-		"the fixture must emit service clusters that actually carry the matcher")
+	require.GreaterOrEqual(t, selectors, 3,
+		"the fixture must emit service clusters that actually carry the certificate selector")
 }
 
 // isServiceClusterName reports whether a cluster name is a registry-derived mesh

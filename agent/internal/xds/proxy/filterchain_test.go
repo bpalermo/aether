@@ -40,7 +40,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 			assert.Equal(t, tt.expectedChainName, fc.GetName())
 			// Outbound has 3 filters: the two source set_filter_state entries
 			// (netns, then SPIFFE ID — issue #815) + http_connection_manager.
-			assert.Len(t, fc.GetFilters(), 3)
+			assert.Len(t, fc.GetFilters(), 4, "netns + identity + cert-mapper identity (#842) + HCM")
 			assert.Nil(t, fc.GetTransportSocket(), "outbound filter chain should not have TLS transport socket")
 		})
 	}
@@ -51,10 +51,10 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 // on the shared readiness path probed by the CNI plugin from inside the netns.
 func TestOutboundChainReadinessFilter(t *testing.T) {
 	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
-	require.Len(t, fc.GetFilters(), 3)
+	require.Len(t, fc.GetFilters(), 4)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
+	require.NoError(t, fc.GetFilters()[3].GetTypedConfig().UnmarshalTo(hcm))
 
 	assert.False(t, hcm.GetStripAnyHostPort(),
 		"authority :port is a routing selector (FQDN:port → that port's cluster); must NOT be stripped")
@@ -84,7 +84,7 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
 	fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
-	require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
+	require.NoError(t, fc.GetFilters()[3].GetTypedConfig().UnmarshalTo(hcm))
 
 	filters := hcm.GetHttpFilters()
 	require.Len(t, filters, 5, "expected health_check + subset + on_demand + stats + router")
@@ -119,10 +119,10 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 // is still inside its initial-snapshot budget.
 func TestOutboundChainRDSInitialFetchTimeout(t *testing.T) {
 	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
-	require.Len(t, fc.GetFilters(), 3)
+	require.Len(t, fc.GetFilters(), 4)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
+	require.NoError(t, fc.GetFilters()[3].GetTypedConfig().UnmarshalTo(hcm))
 
 	rds := hcm.GetRds()
 	require.NotNil(t, rds, "the egress listener routes over RDS")
@@ -168,10 +168,10 @@ func TestOutboundChainRDSIdenticalAcrossPods(t *testing.T) {
 	var want []byte
 	for _, pod := range pods {
 		fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/"+pod.GetNamespace()+"/sa/"+pod.GetServiceAccount(), "aether.internal", true, nil)
-		require.Len(t, fc.GetFilters(), 3)
+		require.Len(t, fc.GetFilters(), 4)
 
 		hcm := &http_connection_managerv3.HttpConnectionManager{}
-		require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
+		require.NoError(t, fc.GetFilters()[3].GetTypedConfig().UnmarshalTo(hcm))
 
 		rds := hcm.GetRds()
 		require.NotNil(t, rds)

@@ -146,25 +146,29 @@ data:
         # collapse to listener.{inbound,out_http}.* labeled by aether.pod.
         - tag_name: aether.pod
           regex: "^listener\\.(?:inbound|out_http)(_([^.]+))\\."
-        # Per-transport-socket-match counter (issue #815 release two). Envoy
-        # scopes it as
+        # Per-transport-socket-match counter. Envoy scopes it as
         #   cluster.<cluster>.<match name>.total_match_count
-        # and every match on a mesh service cluster is NAMED BY A SPIFFE ID, so
-        # without this regex the SPIFFE ID ends up in the exported metric NAME
-        # (one family per ServiceAccount, permanently in Prometheus' name index
-        # — the trap from the 2026-09-19 17:32Z incident). Lift it into an
-        # attribute instead, collapsing to one
-        #   envoy_cluster_match_count_total{aether_cluster, aether_transport_socket_match}
-        # (Prometheus' OTLP ingest moves "total" to the end of the name)
-        # family. This is THE no-match signal: the cluster matcher's on_no_match
-        # names the NODE identity, and Envoy counts an on_no_match against the
-        # NAMED socket (never against `default`), so a rising
-        # aether_transport_socket_match="<the agent's own SVID, e.g.
-        # spiffe://<td>/ns/aether-system/sa/aether-agent>" on a mesh service
-        # cluster means connections are not carrying aether.source.spiffe_id.
-        # The `default.total_match_count` counter keeps its own name; it is
-        # reached only with no on_no_match at all, or when an action names a
-        # socket that does not exist.
+        #
+        # ⚠ SINCE ISSUE #842 A MESH SERVICE CLUSTER HAS NO TRANSPORT SOCKET
+        # MATCHES AT ALL, so this counter no longer exists for them and neither
+        # does the `aether_transport_socket_match` attribute. The per-identity
+        # match list was replaced by ONE socket whose
+        # custom_tls_certificate_selector picks the client certificate per
+        # connection from filter state, and a selector emits no per-identity
+        # counter. Anything querying
+        # envoy_cluster_match_count_total{aether_transport_socket_match=...} on a
+        # mesh cluster — notably the AetherClusterIdentityNoMatch alert in
+        # k8s-talos-main — now measures NOTHING and reads as a clean zero.
+        # The replacement no-match signal is the access log; see
+        # docs/runbook.md, "#842: per-connection certificate selection".
+        #
+        # The regex stays because it is still correct for the ONE case that can
+        # still produce a SPIFFE-ID-named match: none today, and the waypoint
+        # variant (proposal 019, off by default) names its two sockets "local"
+        # and "waypoint", which are bounded and safe in a metric name. Keeping it
+        # costs nothing and means a future SPIFFE-named match cannot silently
+        # reintroduce one metric family per ServiceAccount — permanently, in
+        # Prometheus' name index (the trap from the 2026-09-19 17:32Z incident).
         #
         # ⚠ Group 1 carries the TRAILING separator ("<id>.") and not the leading
         # one, exactly like the aether.cluster regex above. Every extractor sees

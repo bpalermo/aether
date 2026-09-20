@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,9 +35,17 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	setfilterstatenetv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
+	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -48,10 +57,13 @@ const (
 	spiffeSourceA = "spiffe://" + trustDomain + "/ns/demo/sa/source-a"
 	spiffeSourceB = "spiffe://" + trustDomain + "/ns/demo/sa/source-b"
 
-	// The node identity. It is what a transport_socket_matcher MISS presents
-	// (InjectUpstreamMTLS sets on_no_match to it), so seeing this at the
-	// destination is a different defect from seeing the other workload's ID —
-	// keeping it distinct is what lets the test tell #686/#825 from #831.
+	// The node identity — the certificate mapper's default_value, i.e. what a
+	// connection carrying NO source identity presents (before #842 it was the
+	// transport_socket_matcher's on_no_match, for exactly the same connections).
+	// Seeing this at the destination is therefore a DIFFERENT defect from seeing
+	// the other workload's ID: it means the filter state never reached the
+	// upstream, not that a pool leaked. Keeping it distinct is what lets this
+	// test tell #686/#825 apart from #831.
 	spiffeNode = "spiffe://" + trustDomain + "/node/test-node"
 
 	// The DESTINATION workload's server identity, pinned by the upstream
@@ -66,17 +78,44 @@ const (
 	upstreamSNI = "18008"
 
 	meshClusterName = "mesh_echo"
+
+	// validationContextName is the SDS name of the trust bundle, spelled the way
+	// proxy.ValidationContextName renders it.
+	validationContextName = "spiffe://" + trustDomain
+
+	// sdsClusterName is the static cluster the harness points every SDS config
+	// source at. Production uses `ads: {}` (the agent's own stream); the harness
+	// has no ADS, so the sources are rewritten to an explicit api_config_source
+	// (rewriteSDSToHarness) — the same substitution //test/envoy_validate makes,
+	// and the only deviation from production config in this file.
+	sdsClusterName = "sds_cluster"
+
+	// envoyNodeID must match the key the harness SDS snapshot cache is set
+	// under (cachev3.IDHash keys by node id).
+	envoyNodeID = "test-node"
 )
+
+// factoryKeyLabel names the set_filter_state object factory a run uses, for the
+// test log.
+func factoryKeyLabel(hashable bool) string {
+	if hashable {
+		return "envoy.hashable_string"
+	}
+	return "envoy.string"
+}
 
 // ---------------------------------------------------------------------------
 // Certificates
 // ---------------------------------------------------------------------------
 
 // pki is a throwaway trust domain: one CA, one leaf per identity, on disk in
-// PEM. SDS delivery is deliberately NOT modelled — the property under test is
-// which certificate an upstream CONNECTION ends up carrying, which is decided
-// by pool selection long after the secret has been resolved. Files keep the
-// harness to one process.
+// PEM. The leaves are handed to the harness SDS server (startSDS) as
+// file-backed data sources, so delivery goes through a real
+// SecretDiscoveryService while the key material stays in one process.
+//
+// SDS used to be deliberately un-modelled here, because the property under test
+// was decided by pool selection long after the secret had resolved. Issue #842
+// moved certificate resolution INTO the handshake, so it has to be real now.
 type pki struct {
 	dir    string
 	caPEM  []byte
@@ -318,13 +357,138 @@ func uriSAN(rawCerts [][]byte) string {
 }
 
 // ---------------------------------------------------------------------------
+// SDS
+// ---------------------------------------------------------------------------
+
+// startSDS runs a REAL SDS server — go-control-plane's snapshot cache behind
+// the v3 SecretDiscoveryService — serving one TLS certificate per identity,
+// NAMED BY THAT IDENTITY'S SPIFFE ID, plus the trust bundle.
+//
+// Before issue #842 this harness used file-backed certificates, because the
+// property under test (which certificate an upstream CONNECTION ends up
+// carrying) was decided by pool selection long after the secret had resolved.
+// That is no longer true: the certificate is now chosen DURING the handshake by
+// the on-demand selector, which derives a secret name from filter state and
+// starts an SDS fetch for it. Remove SDS from the harness and there is nothing
+// left to test.
+//
+// It also pins the property the whole mechanism rests on and nothing else
+// checks: AETHER'S SDS SECRET NAMES ARE SPIFFE IDs. The mapper returns the
+// filter-state string verbatim as the secret name, so a control plane whose
+// secrets were named anything else would silently serve every connection the
+// default certificate.
+func startSDS(t *testing.T, p *pki, identities []string) string {
+	t.Helper()
+
+	secrets := make([]types.Resource, 0, len(identities)+1)
+	for _, id := range identities {
+		certPath, keyPath := p.leaf(t, leafFileName(id), id, false)
+		secrets = append(secrets, &tlsv3.Secret{
+			Name: id, // the SPIFFE ID IS the secret name
+			Type: &tlsv3.Secret_TlsCertificate{TlsCertificate: &tlsv3.TlsCertificate{
+				CertificateChain: fileDataSource(certPath),
+				PrivateKey:       fileDataSource(keyPath),
+			}},
+		})
+	}
+	secrets = append(secrets, &tlsv3.Secret{
+		Name: validationContextName,
+		Type: &tlsv3.Secret_ValidationContext{ValidationContext: &tlsv3.CertificateValidationContext{
+			// SAN matchers stay INLINE in the upstream context (aether layers
+			// them over the SDS-rotated bundle via a combined validation
+			// context), so the SDS-served half carries only the trust anchor.
+			TrustedCa: fileDataSource(p.caPath),
+		}},
+	})
+
+	snapshot, err := cachev3.NewSnapshot("1", map[resourcev3.Type][]types.Resource{
+		resourcev3.SecretType: secrets,
+	})
+	if err != nil {
+		t.Fatalf("build SDS snapshot: %v", err)
+	}
+	cache := cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
+	if err := cache.SetSnapshot(context.Background(), envoyNodeID, snapshot); err != nil {
+		t.Fatalf("set SDS snapshot: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for SDS: %v", err)
+	}
+	gs := grpc.NewServer()
+	secretservice.RegisterSecretDiscoveryServiceServer(gs, serverv3.NewServer(context.Background(), cache, nil))
+	go func() { _ = gs.Serve(ln) }()
+	t.Cleanup(gs.Stop)
+
+	return ln.Addr().String()
+}
+
+// leafFileName turns a SPIFFE ID into a filesystem-safe leaf name.
+func leafFileName(spiffeID string) string {
+	return strings.NewReplacer("://", "_", "/", "_").Replace(spiffeID)
+}
+
+// sdsCluster is the static cluster the rewritten SDS config sources point at.
+func sdsCluster(addr string) *clusterv3.Cluster {
+	return &clusterv3.Cluster{
+		Name:                 sdsClusterName,
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
+		ConnectTimeout:       durationpb.New(5 * time.Second),
+		LoadAssignment:       staticEndpoint(sdsClusterName, addr),
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			config.UpstreamHTTPProtocolOptionsKey: config.TypedConfig(config.Http2ProtocolOptions()),
+		},
+	}
+}
+
+// rewriteSDSToHarness repoints every SDS config source inside an upstream TLS
+// context at the harness's static SDS cluster: the validation context's, and —
+// the one a naive field walk misses — the on-demand certificate SELECTOR's,
+// which lives inside a typed Any and has to be unpacked to be reached.
+//
+// This is the ONLY place the harness diverges from the config the agent emits.
+func rewriteSDSToHarness(t *testing.T, ts *corev3.TransportSocket) {
+	t.Helper()
+
+	var ctx tlsv3.UpstreamTlsContext
+	if err := ts.GetTypedConfig().UnmarshalTo(&ctx); err != nil {
+		t.Fatalf("unmarshal upstream TLS context: %v", err)
+	}
+	explicit := config.SDSConfigSourceFromCluster(sdsClusterName)
+
+	for _, sc := range ctx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs() {
+		sc.SdsConfig = explicit
+	}
+	if combined := ctx.GetCommonTlsContext().GetCombinedValidationContext(); combined != nil {
+		combined.ValidationContextSdsSecretConfig.SdsConfig = explicit
+	}
+	if sc := ctx.GetCommonTlsContext().GetValidationContextSdsSecretConfig(); sc != nil {
+		sc.SdsConfig = explicit
+	}
+	if sel := ctx.GetCommonTlsContext().GetCustomTlsCertificateSelector(); sel != nil {
+		var onDemand on_demand_secretv3.Config
+		if err := sel.GetTypedConfig().UnmarshalTo(&onDemand); err != nil {
+			t.Fatalf("unmarshal on_demand_secret selector: %v", err)
+		}
+		onDemand.ConfigSource = explicit
+		sel.TypedConfig = config.TypedConfig(&onDemand)
+	}
+
+	ts.ConfigType = &corev3.TransportSocket_TypedConfig{TypedConfig: config.TypedConfig(&ctx)}
+}
+
+// ---------------------------------------------------------------------------
 // Envoy
 // ---------------------------------------------------------------------------
 
 // sourceListener models one source pod's egress path: a filter chain that
 // stamps the source-attribution filter states with PRODUCTION's builder, then
 // an HCM routing everything at the shared mesh cluster.
-func sourceListener(name, spiffeID string, port int) *listenerv3.Listener {
+//
+// hashable is the ONE variable the negative control changes — see
+// downgradeToNonHashable.
+func sourceListener(name, spiffeID string, port int, hashable bool) *listenerv3.Listener {
 	hcm := &hcmv3.HttpConnectionManager{
 		StatPrefix: name,
 		CodecType:  hcmv3.HttpConnectionManager_AUTO,
@@ -360,7 +524,7 @@ func sourceListener(name, spiffeID string, port int) *listenerv3.Listener {
 			// mesh-originating chain makes (filterchain.go, capture.go,
 			// l4route.go). Re-spelling the set_filter_state proto here would let
 			// the harness drift from production and pass by matching nothing.
-			Filters: append(proxy.BuildSourceFilterStates(spiffeID), &listenerv3.Filter{
+			Filters: append(sourceFilterStates(spiffeID, hashable), &listenerv3.Filter{
 				Name:       "envoy.filters.network.http_connection_manager",
 				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: config.TypedConfig(hcm)},
 			}),
@@ -368,18 +532,67 @@ func sourceListener(name, spiffeID string, port int) *listenerv3.Listener {
 	}
 }
 
-// meshCluster is proxy.NewServiceCluster — the real node-proxy service cluster,
-// including its connection_pool_per_downstream_connection setting and its h2
-// upstream protocol options — rewritten from EDS to STATIC so it resolves
-// without a control plane, and given a per-source transport_socket_matcher.
+// sourceFilterStates returns production's source-attribution filters, optionally
+// DOWNGRADED so the certificate-mapper key is built by the non-hashable
+// "envoy.string" object factory instead of "envoy.hashable_string".
 //
-// perDownstreamPool is a parameter rather than a constant so the test can run
-// the identical scenario with aether's real setting and with it removed. That
-// second run is the negative control: it is the configuration #831 assumes.
-func meshCluster(t *testing.T, p *pki, destAddr string, perDownstreamPool bool) *clusterv3.Cluster {
+// The downgrade is applied to production's own output rather than spelled from
+// scratch, so the negative control differs from the positive case in EXACTLY
+// one field of one filter. That is what makes the comparison mean something:
+// the object is still there, still shared with the upstream, still found by the
+// certificate mapper (HashableString and StringAccessorImpl both satisfy the
+// mapper's dynamic_cast to Router::StringAccessor) — the ONLY thing that
+// changes is whether CommonUpstreamTransportSocketFactory::hashKey can see it,
+// because that gate is a dynamic_cast to Envoy::Hashable.
+func sourceFilterStates(spiffeID string, hashable bool) []*listenerv3.Filter {
+	filters := proxy.BuildSourceFilterStates(spiffeID)
+	if hashable {
+		return filters
+	}
+	for _, f := range filters {
+		downgradeToNonHashable(f)
+	}
+	return filters
+}
+
+func downgradeToNonHashable(f *listenerv3.Filter) {
+	var cfg setfilterstatenetv3.Config
+	if err := f.GetTypedConfig().UnmarshalTo(&cfg); err != nil {
+		return // not a set_filter_state filter
+	}
+	changed := false
+	for _, v := range cfg.GetOnNewConnection() {
+		if v.GetObjectKey() != proxy.SourceIdentityCertMapperFilterStateKey {
+			continue
+		}
+		v.FactoryKey = "envoy.string"
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: config.TypedConfig(&cfg)}
+}
+
+// meshCluster is the real node-proxy mesh service cluster: proxy.NewServiceCluster
+// plus proxy.InjectUpstreamMTLS — the same two calls the agent's snapshot makes —
+// rewritten from EDS to STATIC so it resolves without a control plane, with its
+// SDS config sources repointed at the harness SDS server.
+//
+// Since issue #842 there is nothing per-identity left to model: the cluster
+// carries ONE transport socket whose custom_tls_certificate_selector resolves
+// the client certificate per connection from filter state. The harness
+// therefore no longer hand-builds transport_socket_matches — there are none —
+// which also removes the last place it could have drifted from production's
+// certificate wiring.
+//
+// connection_pool_per_downstream_connection is likewise no longer a parameter.
+// It is simply absent, because production no longer sets it; its absence is
+// half of what this file exists to check.
+func meshCluster(t *testing.T, destAddr string) *clusterv3.Cluster {
 	t.Helper()
 
-	cl := proxy.NewServiceCluster(meshClusterName, meshClusterName, meshClusterName, nil, perDownstreamPool)
+	cl := proxy.NewServiceCluster(meshClusterName, meshClusterName, meshClusterName, nil)
 
 	// EDS -> STATIC. Everything else about the cluster is production's.
 	cl.ClusterDiscoveryType = &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC}
@@ -390,78 +603,24 @@ func meshCluster(t *testing.T, p *pki, destAddr string, perDownstreamPool bool) 
 	cl.LbSubsetConfig = nil
 	cl.LoadAssignment = staticEndpoint(meshClusterName, destAddr)
 
-	// One transport socket per source identity, named by the SPIFFE ID exactly
-	// as proxy.UpstreamTransportSocketMatches names them, plus the node identity.
-	type sock struct {
-		name string
-		file string
-		id   string
+	if cl.GetConnectionPoolPerDownstreamConnection() {
+		t.Fatal("production re-enabled connection_pool_per_downstream_connection: " +
+			"this harness would then pass for the wrong reason, because per-downstream " +
+			"pools separate the two sources whatever the pool key contains")
 	}
-	var matches []*clusterv3.Cluster_TransportSocketMatch
-	for _, s := range []sock{
-		{spiffeSourceA, "source-a", spiffeSourceA},
-		{spiffeSourceB, "source-b", spiffeSourceB},
-		{spiffeNode, "node", spiffeNode},
-	} {
-		certPath, keyPath := p.leaf(t, s.file, s.id, false)
-		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
-			Name:            s.name,
-			TransportSocket: fileUpstreamTLS(p.caPath, certPath, keyPath),
-		})
-	}
-	cl.TransportSocketMatches = matches
 
-	// PRODUCTION's matcher, unmodified: the exact_match_map keyed on
-	// proxy.SourceIdentityFilterStateKey via
-	// envoy.matching.inputs.transport_socket_filter_state.
-	matcher := proxy.UpstreamTransportSocketMatcher([]string{spiffeSourceA, spiffeSourceB})
-	if matcher == nil {
-		t.Fatal("UpstreamTransportSocketMatcher returned nil for two identities")
+	// PRODUCTION's upstream mTLS, unmodified. There is exactly one socket, so
+	// the SNI is identical across every upstream connection by construction —
+	// which preserves what the old hand-built matches had to be careful about:
+	// serverNameOverride IS in the pool hash, so a per-source SNI would separate
+	// the pools for an unrelated reason and silently destroy this test's power.
+	proxy.InjectUpstreamMTLS(cl, spiffeNode, validationContextName, []string{spiffeDest}, upstreamSNI, "")
+	if cl.GetTransportSocket() == nil {
+		t.Fatal("InjectUpstreamMTLS produced no transport socket")
 	}
-	cl.TransportSocketMatcher = matcher
-	// A matcher MISS falls through to the cluster's default transport socket.
-	// Production instead sets on_no_match to the node identity; both land on the
-	// node certificate, which is the point — a miss must be distinguishable at
-	// the destination from a pooling leak.
-	nodeCert, nodeKey := p.leaf(t, "node-default", spiffeNode, false)
-	cl.TransportSocket = fileUpstreamTLS(p.caPath, nodeCert, nodeKey)
+	rewriteSDSToHarness(t, cl.GetTransportSocket())
 
 	return cl
-}
-
-// fileUpstreamTLS mirrors proxy.UpstreamTransportSocket (ALPN h2, URI-SAN-pinned
-// combined validation) with the SDS references replaced by files.
-//
-// Every socket is byte-identical apart from the certificate, and in particular
-// carries the SAME SNI: sni is part of the upstream pool hash key, so varying
-// it per source would separate the pools for a reason that has nothing to do
-// with the filter state.
-func fileUpstreamTLS(caPath, certPath, keyPath string) *corev3.TransportSocket {
-	ctx := &tlsv3.UpstreamTlsContext{
-		Sni: upstreamSNI,
-		CommonTlsContext: &tlsv3.CommonTlsContext{
-			AlpnProtocols: []string{"h2"},
-			TlsCertificates: []*tlsv3.TlsCertificate{{
-				CertificateChain: fileDataSource(certPath),
-				PrivateKey:       fileDataSource(keyPath),
-			}},
-			ValidationContextType: &tlsv3.CommonTlsContext_ValidationContext{
-				ValidationContext: &tlsv3.CertificateValidationContext{
-					TrustedCa: fileDataSource(caPath),
-					MatchTypedSubjectAltNames: []*tlsv3.SubjectAltNameMatcher{{
-						SanType: tlsv3.SubjectAltNameMatcher_URI,
-						Matcher: &matcherv3.StringMatcher{
-							MatchPattern: &matcherv3.StringMatcher_Exact{Exact: spiffeDest},
-						},
-					}},
-				},
-			},
-		},
-	}
-	return &corev3.TransportSocket{
-		Name:       "envoy.transport_sockets.tls",
-		ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: config.TypedConfig(ctx)},
-	}
 }
 
 func fileDataSource(path string) *corev3.DataSource {
@@ -505,15 +664,24 @@ type proxyHandle struct {
 }
 
 // startEnvoy writes a static bootstrap and runs the pinned aether-proxy Envoy
-// against it.
+// against it, alongside a real SDS server serving one certificate per identity.
+//
+// hashable selects the ONE variable under test: whether the source-identity
+// filter-state object is built by "envoy.hashable_string" (production) or by
+// the non-hashable "envoy.string". Everything else — the cluster, the sockets,
+// the SNI, the certificates, the request pattern — is identical between the two
+// runs, so any difference in the result comes from the pool key and nothing
+// else.
 //
 // --concurrency 1 is LOAD-BEARING. Connection pools are per worker thread, so
 // with more than one worker the two source connections can land on different
 // workers and get separate pools for a reason unrelated to the pool key. The
 // production node proxy runs many workers and therefore leaks only between
 // sources that happen to share one; pinning to a single worker makes the
-// property deterministic instead of probabilistic.
-func startEnvoy(t *testing.T, p *pki, destAddr string, perDownstreamPool bool) *proxyHandle {
+// property deterministic instead of probabilistic. It is also what makes
+// "exactly two upstream connections" a meaningful assertion: with N workers the
+// correct answer would be "between 2 and 2N".
+func startEnvoy(t *testing.T, p *pki, destAddr string, hashable bool) *proxyHandle {
 	t.Helper()
 
 	bin, err := envoybin.Path()
@@ -525,14 +693,16 @@ func startEnvoy(t *testing.T, p *pki, destAddr string, perDownstreamPool bool) *
 		t.Fatalf("locate envoy: %v", err)
 	}
 
+	sdsAddr := startSDS(t, p, []string{spiffeSourceA, spiffeSourceB, spiffeNode})
+
 	portA, portB := freePort(t), freePort(t)
 	bs := &bootstrapv3.Bootstrap{
-		Node: &corev3.Node{Id: "test-node", Cluster: "aether"},
+		Node: &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
-			Clusters: []*clusterv3.Cluster{meshCluster(t, p, destAddr, perDownstreamPool)},
+			Clusters: []*clusterv3.Cluster{meshCluster(t, destAddr), sdsCluster(sdsAddr)},
 			Listeners: []*listenerv3.Listener{
-				sourceListener("source_a", spiffeSourceA, portA),
-				sourceListener("source_b", spiffeSourceB, portB),
+				sourceListener("source_a", spiffeSourceA, portA, hashable),
+				sourceListener("source_b", spiffeSourceB, portB, hashable),
 			},
 		},
 	}
@@ -543,7 +713,7 @@ func startEnvoy(t *testing.T, p *pki, destAddr string, perDownstreamPool bool) *
 	}
 	path := filepath.Join(t.TempDir(), "bootstrap.json")
 	writeFile(t, path, data)
-	t.Logf("bootstrap: %s (connection_pool_per_downstream_connection=%v)", path, perDownstreamPool)
+	t.Logf("bootstrap: %s (source identity factory=%s)", path, factoryKeyLabel(hashable))
 
 	cmd := exec.Command(bin, "-c", path,
 		"--concurrency", "1",

@@ -152,10 +152,9 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 
 	passthrough := proxy.NewPassthroughOriginalDstCluster()
 	svcCluster := newServiceCluster("echo."+meshDomain, trustDomain, "default", "echo")
-	// The per-source mTLS shape every mesh service cluster actually carries: the
-	// one-level transport_socket_matcher whose exact_match_map is keyed by the
-	// aether.source.spiffe_id filter state, with two local ServiceAccounts
-	// (issue #815 release two).
+	// The per-source mTLS shape every mesh service cluster actually carries:
+	// since #842, one socket with an on-demand certificate selector driven by
+	// the source-identity filter state.
 	perSourceCluster := newPerSourceServiceCluster("per-source-echo."+meshDomain, trustDomain, "default", "echo")
 	// Exercises the proposal 019 two-level transport-socket matcher (endpoint
 	// waypoint metadata -> source identity) + the endpoint_metadata matcher
@@ -197,26 +196,25 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound, tunnel, healthGateway}), nil
 }
 
-// newPerSourceServiceCluster is newServiceCluster with the ONE-LEVEL per-source
-// transport-socket matcher the mesh uses on every node without the waypoint:
-// an exact_match_map on the aether.source.spiffe_id filter state (issue #815
-// release two) whose entries name one transport_socket_match per local
-// ServiceAccount, plus on_no_match = the node identity.
+// newPerSourceServiceCluster is newServiceCluster with the per-source upstream
+// mTLS every mesh cluster carries: since issue #842 that is ONE transport
+// socket whose custom_tls_certificate_selector
+// (envoy.tls.certificate_selectors.on_demand_secret, with the
+// envoy.tls.upstream_certificate_mappers.filter_state_override mapper) resolves
+// the client certificate per connection.
 //
-// Two local source identities are modelled on purpose: a one-entry map would
-// still validate if the map were somehow degenerate, and this is the exact
-// shape the byte-stability argument rests on. Stock-Envoy acceptance of the
-// matcher input name is the thing being gated here — a wrong extension name
-// resolves to nullopt at RUNTIME and validates fine, so what this catches is
-// the structural half (unknown @type, empty map, dangling socket name).
+// What this gate catches is the structural half, and it is worth being precise
+// about it because the runtime half fails OPEN. Both extensions are resolved by
+// NAME at config load, so a typo'd or absent extension is an
+// `envoy --mode validate` FAILURE here — which is the point, because a wrong
+// name would otherwise surface in production only as every connection quietly
+// presenting the mapper's default_value. What validation cannot see is whether
+// the filter-state object actually arrives on the upstream connection; that is
+// //test/mtlspool's job.
 func newPerSourceServiceCluster(clusterName, td, namespace, svcName string) *clusterv3.Cluster {
 	nodeID := fmt.Sprintf(nodeSpiffeIDFmt, td)
 	validationCtxName := fmt.Sprintf("spiffe://%s", td)
 	sanURI := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, svcName)
-	sources := []string{
-		fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, "source-a"),
-		fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", td, namespace, "source-b"),
-	}
 
 	c := &clusterv3.Cluster{
 		Name:           clusterName,
@@ -234,7 +232,7 @@ func newPerSourceServiceCluster(clusterName, td, namespace, svcName string) *clu
 			),
 		},
 	}
-	proxy.InjectUpstreamMTLS(c, sources, nodeID, validationCtxName, []string{sanURI}, "8080", "")
+	proxy.InjectUpstreamMTLS(c, nodeID, validationCtxName, []string{sanURI}, "8080", "")
 	return c
 }
 
@@ -263,7 +261,7 @@ func newWaypointServiceCluster(clusterName, td, namespace, svcName string) *clus
 			),
 		},
 	}
-	proxy.InjectUpstreamMTLS(c, []string{sanURI}, nodeID, validationCtxName, []string{sanURI}, "8080", "8080."+clusterName)
+	proxy.InjectUpstreamMTLS(c, nodeID, validationCtxName, []string{sanURI}, "8080", "8080."+clusterName)
 	return c
 }
 

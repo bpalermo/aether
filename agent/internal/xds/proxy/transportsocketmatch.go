@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"sort"
-
 	"aethermesh.dev/agent/internal/xds/config"
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	matcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
@@ -11,36 +9,45 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
+// PER-SOURCE CERTIFICATE SELECTION NO LONGER LIVES HERE (issue #842).
+//
+// Until #842 every mesh service cluster carried a `transport_socket_matches`
+// list with one entry per local SPIFFE ID and a `transport_socket_matcher`
+// whose exact_match_map named each of them, keyed on the source-identity filter
+// state via envoy.matching.inputs.transport_socket_filter_state. That structure
+// is gone: a cluster now carries ONE transport socket whose
+// custom_tls_certificate_selector resolves the client certificate per
+// connection (upstreamCertSelector, transportsocket.go).
+//
+// Three consequences worth knowing before reviving anything like it:
+//
+//   - A cluster's bytes no longer depend on the node's identity set AT ALL.
+//     #815 release two made them invariant under pod churn WITHIN a
+//     ServiceAccount; the first pod of a new ServiceAccount arriving, and the
+//     last one leaving, still rewrote every mesh cluster and cost one 15 s
+//     EDS re-warm each. Those two events are now free as well.
+//   - The per-match stat `cluster.<c>.<match>.total_match_count` disappears
+//     with the matches. See docs/runbook.md, "#842": the replacement
+//     no-match signal is the source-side access log's `source_spiffe_id`
+//     (absent/"-" is precisely the condition that makes the certificate mapper
+//     fall back to default_value) plus the destination-side
+//     `downstream_peer_uri_san`, which was already the authoritative check.
+//   - The "wrong matcher input name" trap is gone with the input: the generic
+//     envoy.matching.inputs.filter_state reads StreamInfo filter state and
+//     silently returns nullopt in a transport-socket matcher, which used to
+//     mean every connection took on_no_match and presented the node identity
+//     (#301). The mapper has the same failure mode for a different reason — it
+//     hardcodes its lookup name — which is why
+//     SourceIdentityCertMapperFilterStateKey is spelled out in one place.
+//
+// What REMAINS here is the proposal 019 waypoint split, which is not about
+// identity at all: a cross-cluster endpoint must be dialed with a structured
+// SNI and a local one with the port SNI, and SNI is a property of the transport
+// socket, not of the certificate. That needs two sockets and a matcher on the
+// CHOSEN ENDPOINT's metadata — two fixed entries, independent of how many
+// identities the node hosts.
+
 const (
-	// filterStateInputName is the transport-socket-specific matcher input that
-	// reads a filter state object from TransportSocketOptions.
-	//
-	// This is envoy.matching.inputs.transport_socket_filter_state
-	// (envoy/extensions/matching/common_inputs/transport_socket/v3/FilterStateInput),
-	// NOT the generic "envoy.matching.inputs.filter_state"
-	// (envoy/extensions/matching/common_inputs/network/v3/FilterStateInput).
-	//
-	// The distinction is critical:
-	//   - The generic input (filter_state) reads from StreamInfo::filterState()
-	//     on the connection. It is registered for network/HTTP matcher contexts
-	//     (filter chain matching, route matching, etc.).
-	//   - The transport-socket-specific input (transport_socket_filter_state)
-	//     reads from TransportSocketOptions::downstreamSharedFilterStateObjects(),
-	//     which are the filter state objects propagated from the downstream
-	//     connection via SharedWithUpstream. It is registered for the
-	//     transport_socket_matcher context on a cluster.
-	//
-	// Using the generic name in a cluster transport_socket_matcher causes the
-	// input factory to be resolved for the wrong matcher data type
-	// (TransportSocketMatchingData instead of NetworkMatchingData). The factory
-	// returns nullopt (no value), the exact-match never fires, and evaluation
-	// falls to OnNoMatch — selecting the node identity for every upstream
-	// connection regardless of source pod. Per-source cert selection is silently
-	// broken. For tcp_proxy upstream connections the wrong socket can also cause
-	// TLS handshake failures (wrong client cert vs SAN-pinned peer expectation),
-	// manifesting as upstream_cx_total staying 0 because connections open but
-	// immediately reset before the pool records them.
-	filterStateInputName = "envoy.matching.inputs.transport_socket_filter_state"
 	// transportSocketNameActionName is the matcher action extension that selects
 	// a named transport socket.
 	transportSocketNameActionName = "envoy.matching.action.transport_socket.name"
@@ -48,173 +55,53 @@ const (
 	// the transport-socket-matcher context (Envoy TransportSocketMatchingData,
 	// after LB selection). Used to branch on the waypoint tag stamped on
 	// cross-cluster endpoints (proposal 019) so a single cluster can present a
-	// different SNI per endpoint while still selecting the source pod's cert.
+	// different SNI per endpoint.
 	endpointMetadataInputName = "envoy.matching.inputs.endpoint_metadata"
-	// waypointSocketSuffix distinguishes the waypoint transport socket (structured
-	// SNI) from the local one (port SNI) for the same source identity within one
-	// cluster's transport_socket_matches.
-	waypointSocketSuffix = "|waypoint"
+
+	// localSocketName / waypointSocketName are the ONLY two transport-socket
+	// match names the mesh emits since #842, and only on a waypoint-enabled
+	// cluster. They are deliberately short constants rather than identities:
+	// a match name ends up in the Envoy stat `cluster.<c>.<name>.total_match_count`,
+	// and SPIFFE-ID-named matches used to put one metric family per
+	// ServiceAccount into Prometheus' name index (the 2026-09-19 17:32Z trap the
+	// chart's aether.transport_socket_match tag regex exists to undo).
+	localSocketName    = "local"
+	waypointSocketName = "waypoint"
 )
 
-// waypointSocketName is the transport_socket_matches name for the waypoint
-// (structured-SNI) variant of a source identity's socket.
-func waypointSocketName(id string) string { return id + waypointSocketSuffix }
-
-// identitySocketName is the local (port-SNI) variant — the bare identity.
-func identitySocketName(id string) string { return id }
-
-// sortedUniqueIdentities returns the non-empty SPIFFE IDs in ids, deduplicated
-// and sorted.
+// WaypointTransportSocketMatches returns the two transport sockets a
+// waypoint-enabled mesh cluster carries: the LOCAL one (port SNI) and the
+// WAYPOINT one (structured SNI). Both resolve the client certificate through
+// the same per-connection certificate selector, so they differ in exactly one
+// field — the SNI — which is the whole reason two sockets are still needed.
 //
-// Every per-source structure on a cluster — transport_socket_matches (a
-// repeated field) and the matcher's exact_match_map (keyed by identity) — is
-// built from this, so all of them are a pure function of the SET of identities
-// present on the node, never of the order the caller happened to range a map
-// in. That is the whole point: pods sharing a ServiceAccount collapse to one
-// entry, so pod churn within a ServiceAccount changes nothing (issue #815), and
-// a reshuffled input cannot re-hash the cluster (incident #135).
-func sortedUniqueIdentities(ids []string) []string {
-	unique := make([]string, 0, len(ids))
-	seen := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		unique = append(unique, id)
-	}
-	sort.Strings(unique)
-	return unique
-}
-
-// UpstreamTransportSocketMatches returns one transport socket match per unique
-// SPIFFE ID among the local workloads. Each match presents that workload's
-// client certificate (over SPIRE-served SDS) for upstream mTLS. The match name
-// is the SPIFFE ID itself so the matcher's TransportSocketNameAction can
-// reference it; pods sharing a service account share a single match.
-//
-// Matches are emitted in sorted SPIFFE-ID order regardless of input order:
-// transport_socket_matches is a repeated field, so its order is part of the
-// cluster's bytes — and the delta-xDS cache decides "changed" by hashing those
-// bytes. Callers build the ID list from map iteration; without the sort every
-// snapshot bump (e.g. an SVID rotation) reshuffled the field, made every
-// service cluster hash as changed, and sent Envoy a full CDS replace + EDS
-// re-warm cycle each time (observed as `cds: N added/updated, skipped 0
-// unmodified` + `initial fetch timed out` every push, and unbounded proxy
-// memory growth under long-lived downstream connections).
-func UpstreamTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string, sni string) []*clusterv3.Cluster_TransportSocketMatch {
-	return upstreamTransportSocketMatchesNamed(spiffeIDs, validationContextName, sanURIs, sni, identitySocketName)
-}
-
-// upstreamTransportSocketMatchesNamed builds one transport socket match per
-// unique SPIFFE ID, named by name(id) and presenting UpstreamTransportSocket
-// with the given sni. name lets a cluster carry two variants of each source
-// identity's socket (local + waypoint) that differ only in SNI.
-func upstreamTransportSocketMatchesNamed(spiffeIDs []string, validationContextName string, sanURIs []string, sni string, name func(string) string) []*clusterv3.Cluster_TransportSocketMatch {
-	unique := sortedUniqueIdentities(spiffeIDs)
-
-	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
-	for _, id := range unique {
-		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
-			Name:            name(id),
+// The list is a fixed two entries whatever the node hosts, so it contributes
+// nothing to cluster churn.
+func WaypointTransportSocketMatches(nodeSpiffeID, validationContextName string, sanURIs []string, sni, waypointSNI string) []*clusterv3.Cluster_TransportSocketMatch {
+	return []*clusterv3.Cluster_TransportSocketMatch{
+		{
+			Name:            localSocketName,
 			Match:           &structpb.Struct{},
-			TransportSocket: UpstreamTransportSocket(id, validationContextName, sanURIs, sni),
-		})
-	}
-	return matches
-}
-
-// UpstreamTransportSocketMatcher returns a matcher keyed on the
-// aether.source.spiffe_id filter state — the SOURCE POD'S SPIFFE ID, stamped as
-// a literal by every mesh-originating listener chain (BuildSourceFilterStates,
-// networkfilter.go) and shared with the upstream connection. Its
-// exact_match_map maps each local SOURCE IDENTITY to a TransportSocketNameAction
-// naming the match of the same name (UpstreamTransportSocketMatches), so the
-// upstream connection presents the originating pod's certificate.
-//
-// RELEASE TWO of issue #815. Until this change the map was keyed by the source
-// pod's NETNS PATH, which is unique PER POD: every local pod ADD/DEL rewrote a
-// field of EVERY mesh cluster on the node, each rewritten EDS cluster re-warmed
-// for the full 15 s EDS initial_fetch_timeout (delta-xDS sends no EDS request
-// for an already-watched name), and the warming→active swap then drained every
-// upstream connection pool on the node. Measured on talos-main: 20–33 clusters
-// warming for exactly 15 s per pod ADD, 30 s for two.
-//
-// The thing this matcher SELECTS was always per-ServiceAccount (the match name
-// is the SPIFFE ID), so keying the map by identity loses nothing and makes the
-// Cluster proto BYTE-STABLE across pod churn within a ServiceAccount: only the
-// first pod of a ServiceAccount arriving on the node, or the last one leaving,
-// changes a cluster at all. Everything else hits Envoy's hash gate and warms
-// nothing. See SourceIdentityFilterStateKey for the three-release contract.
-//
-// Entries are built from the SORTED, deduplicated identity set. exact_match_map
-// is a proto map, which proto.MarshalOptions{Deterministic:true} canonicalises
-// for the delta-xDS hash (see cache/ordering.go) — but the dedup is what makes
-// the SET, and therefore the bytes, independent of how many pods back each
-// identity.
-//
-// Returns nil when there are no valid source identities: an empty
-// exact_match_map fails proto validation (`MatchMapValidationError.Map: value
-// must contain at least 1 pair(s)`), making Envoy NACK the entire CDS push —
-// observed on agents starting before any local workload mapping exists, and
-// permanent on nodes with zero managed pods (e2e 2026-06-10). Callers fall
-// back to a plain transport socket.
-func UpstreamTransportSocketMatcher(sourceIdentities []string) *matcherv3.Matcher {
-	return upstreamTransportSocketMatcherNamed(sourceIdentities, identitySocketName)
-}
-
-// upstreamTransportSocketMatcherNamed is UpstreamTransportSocketMatcher with the
-// selected socket name derived via name(id) — so the same identity set can
-// drive the local or the waypoint socket variant.
-func upstreamTransportSocketMatcherNamed(sourceIdentities []string, name func(string) string) *matcherv3.Matcher {
-	unique := sortedUniqueIdentities(sourceIdentities)
-	if len(unique) == 0 {
-		return nil
-	}
-
-	m := make(map[string]*matcherv3.Matcher_OnMatch, len(unique))
-	for _, id := range unique {
-		m[id] = transportSocketNameOnMatch(name(id))
-	}
-
-	return &matcherv3.Matcher{
-		MatcherType: &matcherv3.Matcher_MatcherTree_{
-			MatcherTree: &matcherv3.Matcher_MatcherTree{
-				Input: &xdscorev3.TypedExtensionConfig{
-					Name:        filterStateInputName,
-					TypedConfig: config.TypedConfig(&tsinputsv3.FilterStateInput{Key: SourceIdentityFilterStateKey}),
-				},
-				TreeType: &matcherv3.Matcher_MatcherTree_ExactMatchMap{
-					ExactMatchMap: &matcherv3.Matcher_MatcherTree_MatchMap{
-						Map: m,
-					},
-				},
-			},
+			TransportSocket: MeshUpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, sni),
+		},
+		{
+			Name:            waypointSocketName,
+			Match:           &structpb.Struct{},
+			TransportSocket: MeshUpstreamTransportSocket(nodeSpiffeID, validationContextName, sanURIs, waypointSNI),
 		},
 	}
 }
 
-// WaypointTransportSocketMatcher builds the two-level transport-socket matcher
-// (proposal 019 Design A): branch first on the chosen endpoint's envoy.lb
-// "waypoint" metadata, then on the source pod's SPIFFE ID. A waypoint-tagged
-// (cross-cluster) endpoint selects the source's WAYPOINT socket (structured SNI);
-// every other endpoint selects the source's LOCAL socket (port SNI). Both
-// sub-trees fall back to the node identity's respective socket when the source
-// identity is not one of the node's local workloads. Returns nil when there are
-// no local workloads (the caller then uses a plain single transport socket, as
-// without waypoint).
-func WaypointTransportSocketMatcher(sourceIdentities []string, nodeSpiffeID string) *matcherv3.Matcher {
-	local := upstreamTransportSocketMatcherNamed(sourceIdentities, identitySocketName)
-	if local == nil {
-		return nil
-	}
-	waypoint := upstreamTransportSocketMatcherNamed(sourceIdentities, waypointSocketName)
-	local.OnNoMatch = transportSocketNameOnMatch(identitySocketName(nodeSpiffeID))
-	waypoint.OnNoMatch = transportSocketNameOnMatch(waypointSocketName(nodeSpiffeID))
-
+// WaypointTransportSocketMatcher branches on the CHOSEN endpoint's envoy.lb
+// "waypoint" metadata (proposal 019 Design A): a waypoint-tagged
+// (cross-cluster) endpoint selects the waypoint socket's structured SNI, every
+// other endpoint the local socket's port SNI.
+//
+// Before #842 this was a two-LEVEL matcher — waypoint metadata, then source
+// identity — because the second level chose the certificate. The certificate
+// selector does that now, so only the first level survives and the matcher is
+// a constant.
+func WaypointTransportSocketMatcher() *matcherv3.Matcher {
 	return &matcherv3.Matcher{
 		MatcherType: &matcherv3.Matcher_MatcherTree_{
 			MatcherTree: &matcherv3.Matcher_MatcherTree{
@@ -230,42 +117,15 @@ func WaypointTransportSocketMatcher(sourceIdentities []string, nodeSpiffeID stri
 				TreeType: &matcherv3.Matcher_MatcherTree_ExactMatchMap{
 					ExactMatchMap: &matcherv3.Matcher_MatcherTree_MatchMap{
 						Map: map[string]*matcherv3.Matcher_OnMatch{
-							subsetWaypointValue: {
-								OnMatch: &matcherv3.Matcher_OnMatch_Matcher{Matcher: waypoint},
-							},
+							subsetWaypointValue: transportSocketNameOnMatch(waypointSocketName),
 						},
 					},
 				},
 			},
 		},
-		// Any endpoint without the waypoint tag: the local (port-SNI) sub-tree.
-		OnNoMatch: &matcherv3.Matcher_OnMatch{
-			OnMatch: &matcherv3.Matcher_OnMatch_Matcher{Matcher: local},
-		},
+		// Any endpoint without the waypoint tag: the local (port-SNI) socket.
+		OnNoMatch: transportSocketNameOnMatch(localSocketName),
 	}
-}
-
-// UpstreamTCPTransportSocketMatches is UpstreamTransportSocketMatches for TCP floor
-// clusters: each match uses UpstreamTCPTransportSocket (ALPN "aether-tcp") instead
-// of UpstreamTransportSocket ("h2"). Match names are the bare SPIFFE ID — identical
-// to the HTTP matches — because the shared UpstreamTransportSocketMatcher selects by
-// the source pod's SPIFFE ID, and transport_socket_matches are scoped per cluster
-// (the HTTP <svc> and TCP tcp:<svc> clusters are distinct, so the names never
-// collide). A ":tcp" suffix would never be selected (the matcher emits the bare ID),
-// leaving the floor connection on the default socket with no "aether-tcp" ALPN, so
-// the inbound floor chain wouldn't match and the mTLS connection would reset.
-func UpstreamTCPTransportSocketMatches(spiffeIDs []string, validationContextName string, sanURIs []string, sni string) []*clusterv3.Cluster_TransportSocketMatch {
-	unique := sortedUniqueIdentities(spiffeIDs)
-
-	matches := make([]*clusterv3.Cluster_TransportSocketMatch, 0, len(unique))
-	for _, id := range unique {
-		matches = append(matches, &clusterv3.Cluster_TransportSocketMatch{
-			Name:            id,
-			Match:           &structpb.Struct{},
-			TransportSocket: UpstreamTCPTransportSocket(id, validationContextName, sanURIs, sni),
-		})
-	}
-	return matches
 }
 
 // transportSocketNameOnMatch builds an OnMatch that selects the named transport

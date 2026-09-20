@@ -8,12 +8,16 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
+	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestNewServiceCluster(t *testing.T) {
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
 
 	// FQDN-only: the cluster name IS the mesh authority; the bare service
 	// name stays the stats key (alt_stat_name) and the EDS resource name.
@@ -21,7 +25,14 @@ func TestNewServiceCluster(t *testing.T) {
 	assert.Equal(t, "svc-a", c.GetAltStatName())
 	assert.Equal(t, "svc-a", c.GetEdsClusterConfig().GetServiceName())
 	assert.Equal(t, clusterv3.Cluster_EDS, c.GetType())
-	assert.True(t, c.GetConnectionPoolPerDownstreamConnection(), "per-downstream pools prevent cross-source identity reuse")
+	// Issue #842: the source identity is in the upstream pool key (the hashable
+	// filter state) instead, so pools partition per (host, source identity) and
+	// pods of the same ServiceAccount can share an upstream h2 connection. The
+	// flag is what made cross-source certificate reuse impossible BEFORE that,
+	// so its absence is only safe together with
+	// SourceIdentityCertMapperFilterStateKey — //test/mtlspool asserts the pair.
+	assert.False(t, c.GetConnectionPoolPerDownstreamConnection(),
+		"pools partition by source identity (#842), not by downstream connection")
 	require.NotNil(t, c.GetEdsClusterConfig().GetEdsConfig())
 	// HTTP/2 upstream protocol options for mTLS multiplexing.
 	assert.Contains(t, c.GetTypedExtensionProtocolOptions(), config.UpstreamHTTPProtocolOptionsKey)
@@ -53,91 +64,130 @@ func TestNewServiceCluster(t *testing.T) {
 	assert.True(t, c.GetIgnoreHealthOnHostRemoval(), "EDS removals (early termination drain) must take effect immediately, even for ejected hosts")
 }
 
+// TestInjectUpstreamMTLS pins the post-#842 shape: ONE transport socket whose
+// custom_tls_certificate_selector resolves the client certificate per
+// connection, and NO transport_socket_matches / transport_socket_matcher at all.
 func TestInjectUpstreamMTLS(t *testing.T) {
-	// Two pods of pod-a's ServiceAccount plus one of pod-b's: the SET is what
-	// reaches the cluster, so the duplicate collapses (issue #815 release two).
-	ids := []string{
-		"spiffe://example.org/ns/test/sa/pod-a",
-		"spiffe://example.org/ns/test/sa/pod-b",
-		"spiffe://example.org/ns/test/sa/pod-a",
-	}
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-	InjectUpstreamMTLS(c, ids, node, "spiffe://example.org", nil, "8080", "")
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
+	InjectUpstreamMTLS(c, node, "spiffe://example.org", nil, "8080", "")
 
-	// Per-source mTLS: a match per workload identity + the node identity, and
-	// on-no-match presents the node identity.
-	names := map[string]bool{}
-	for _, m := range c.GetTransportSocketMatches() {
-		names[m.GetName()] = true
-	}
-	assert.True(t, names[ids[0]] && names[ids[1]] && names[node], "matches for both service accounts and the node")
-	assert.Len(t, c.GetTransportSocketMatches(), 3, "the duplicate identity collapses to one match")
-	require.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch(), "on-no-match present")
+	assert.Empty(t, c.GetTransportSocketMatches(), "one socket per cluster since #842")
+	assert.Nil(t, c.GetTransportSocketMatcher(), "certificate selection moved off the matcher")
+	require.NotNil(t, c.GetTransportSocket())
 
-	// The exact_match_map is keyed by SOURCE IDENTITY, one entry per
-	// ServiceAccount — never by netns, and never per pod.
-	entries := c.GetTransportSocketMatcher().GetMatcherTree().GetExactMatchMap().GetMap()
-	assert.Len(t, entries, 2, "one entry per ServiceAccount present on the node")
-	assert.Contains(t, entries, ids[0])
-	assert.Contains(t, entries, ids[1])
-	assert.NotContains(t, entries, node, "the node identity is reached via on_no_match, not an entry")
+	ctx := upstreamTLSContext(t, c.GetTransportSocket())
+	// The client certificate comes from the selector, and ONLY from it: a
+	// statically named certificate beside it would still have to resolve before
+	// the cluster leaves warming, which is the coupling #842 removes.
+	assert.Empty(t, ctx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs(),
+		"no statically named client certificate when the selector owns resolution")
+	sel := ctx.GetCommonTlsContext().GetCustomTlsCertificateSelector()
+	require.NotNil(t, sel, "per-connection certificate selector present")
+	assert.Equal(t, onDemandCertSelectorName, sel.GetName())
+
+	var onDemand on_demand_secretv3.Config
+	require.NoError(t, sel.GetTypedConfig().UnmarshalTo(&onDemand))
+	assert.Equal(t, filterStateCertMapperName, onDemand.GetCertificateMapper().GetName())
+	require.NotNil(t, onDemand.GetConfigSource().GetAds(), "secrets come over the agent's ADS stream")
+	assert.Equal(t, []string{node}, onDemand.GetPrefetchSecretNames(),
+		"only the default is prefetched; prefetching workload identities would put the node's identity set back into the cluster's bytes")
+
+	var mapper filter_state_overridev3.Config
+	require.NoError(t, onDemand.GetCertificateMapper().GetTypedConfig().UnmarshalTo(&mapper))
+	assert.Equal(t, node, mapper.GetDefaultValue(),
+		"a connection with no source identity presents the node SVID — what on_no_match presented before #842")
+	assert.NotEmpty(t, mapper.GetDefaultValue(), "default_value is required (min_len: 1)")
+
+	// The SAN pin, ALPN and session-cache settings are unchanged by #842.
+	assert.Equal(t, []string{"h2"}, ctx.GetCommonTlsContext().GetAlpnProtocols())
+	assert.Zero(t, ctx.GetMaxSessionKeys().GetValue(),
+		"max_session_keys MUST be 0: a client context only supports a custom certificate selector with resumption off")
 }
 
-// TestInjectUpstreamMTLS_Waypoint pins the two-level matcher (proposal 019
-// Design A): each source identity carries a local (port-SNI) AND a waypoint
-// (structured-SNI) socket, and the matcher branches on the endpoint waypoint
-// metadata before the source identity.
-func TestInjectUpstreamMTLS_Waypoint(t *testing.T) {
-	ids := []string{"spiffe://example.org/ns/test/sa/pod-a"}
+// TestInjectUpstreamMTLS_IndependentOfLocalWorkloads is the #842 claim that
+// #815 could not make: a mesh cluster's BYTES do not depend on which workloads
+// run on the node — not on how many pods, and no longer even on which
+// ServiceAccounts.
+//
+// This replaces TestInjectUpstreamMTLS_NoLocalWorkloads, whose premise (an
+// empty identity set must not emit an empty exact_match_map, which would NACK
+// the whole CDS push) is now unrepresentable: there is no identity-keyed map to
+// be empty. The property it protected — a node with no managed pods still gets
+// a valid, usable cluster — is asserted here as the byte-equality of the
+// zero-workload and many-workload cases.
+func TestInjectUpstreamMTLS_IndependentOfLocalWorkloads(t *testing.T) {
 	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
 
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-	InjectUpstreamMTLS(c, ids, node, "spiffe://example.org", nil, "8080", "8080.svc-a.aether.internal")
-
-	names := map[string]bool{}
-	for _, m := range c.GetTransportSocketMatches() {
-		names[m.GetName()] = true
+	build := func() *clusterv3.Cluster {
+		c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
+		InjectUpstreamMTLS(c, node, "spiffe://example.org", nil, "8080", "")
+		return c
 	}
-	// Both variants for the pod and the node.
-	assert.True(t, names[ids[0]], "local socket for the pod")
-	assert.True(t, names[waypointSocketName(ids[0])], "waypoint socket for the pod")
-	assert.True(t, names[node] && names[waypointSocketName(node)], "both node variants")
 
-	// Level 1 branches on endpoint metadata; the "true" leaf is a nested matcher
-	// (the waypoint sub-tree), and on-no-match is the local sub-tree.
+	// There is no longer an input through which the local identity set could
+	// reach the cluster, so two independent builds must be byte-identical —
+	// which is exactly what Envoy's cluster hash gate needs in order to skip the
+	// update (and therefore the 15 s EDS re-warm) on a pod event.
+	a, err := proto.Marshal(build())
+	require.NoError(t, err)
+	b, err := proto.Marshal(build())
+	require.NoError(t, err)
+	assert.Equal(t, a, b, "mesh cluster bytes must be a pure function of the service, not of the node's workloads")
+
+	c := build()
+	require.NotNil(t, c.GetTransportSocket(), "a node with no managed pods still gets a usable cluster")
+	assert.Nil(t, c.GetTransportSocketMatcher())
+}
+
+// TestInjectUpstreamMTLS_Waypoint pins what survives of the proposal 019
+// matcher after #842: SNI is a property of the transport SOCKET, not of the
+// certificate, so a waypoint-enabled cluster still needs two sockets — but the
+// matcher is now a CONSTANT, branching only on the chosen endpoint's waypoint
+// metadata. The second level (source identity) is gone.
+func TestInjectUpstreamMTLS_Waypoint(t *testing.T) {
+	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
+
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil)
+	InjectUpstreamMTLS(c, node, "spiffe://example.org", nil, "8080", "8080.svc-a.aether.internal")
+
+	matches := c.GetTransportSocketMatches()
+	require.Len(t, matches, 2, "exactly two sockets whatever the node hosts")
+	assert.Equal(t, localSocketName, matches[0].GetName())
+	assert.Equal(t, waypointSocketName, matches[1].GetName())
+	// The names are bounded constants, never SPIFFE IDs: a match name lands in
+	// the Envoy stat cluster.<c>.<name>.total_match_count, and an identity there
+	// is one metric family per ServiceAccount in Prometheus' name index.
+	assert.NotContains(t, matches[0].GetName(), "spiffe://")
+	assert.NotContains(t, matches[1].GetName(), "spiffe://")
+
+	// The two differ in exactly one field: the SNI.
+	local := upstreamTLSContext(t, matches[0].GetTransportSocket())
+	waypoint := upstreamTLSContext(t, matches[1].GetTransportSocket())
+	assert.Equal(t, "8080", local.GetSni())
+	assert.Equal(t, "8080.svc-a.aether.internal", waypoint.GetSni())
+	local.Sni, waypoint.Sni = "", ""
+	assert.True(t, proto.Equal(local, waypoint),
+		"local and waypoint sockets must differ ONLY in SNI — both select the certificate the same way")
+
+	// One level only: endpoint metadata -> a socket NAME (not a sub-matcher).
 	tree := c.GetTransportSocketMatcher().GetMatcherTree()
 	assert.Equal(t, endpointMetadataInputName, tree.GetInput().GetName())
 	require.Contains(t, tree.GetExactMatchMap().GetMap(), subsetWaypointValue)
-	assert.NotNil(t, tree.GetExactMatchMap().GetMap()[subsetWaypointValue].GetMatcher(), "waypoint leaf is a sub-matcher")
-	assert.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch().GetMatcher(), "default is the local sub-matcher")
+	assert.Nil(t, tree.GetExactMatchMap().GetMap()[subsetWaypointValue].GetMatcher(),
+		"the waypoint leaf is an ACTION now, not a nested per-identity matcher")
+	assert.NotNil(t, tree.GetExactMatchMap().GetMap()[subsetWaypointValue].GetAction())
+	assert.NotNil(t, c.GetTransportSocketMatcher().GetOnNoMatch().GetAction(), "untagged endpoints take the local socket")
 }
 
-// TestInjectUpstreamMTLS_NoLocalWorkloads: an empty source-identity set must
-// not produce a matcher — an empty exact_match_map fails Envoy's proto
-// validation and NACKs the whole CDS push (observed on agents starting before
-// any local workload mapping exists, and permanent on nodes with no managed
-// pods). The node identity is presented directly instead, and no legacy
-// transport_socket_matches are set (without the matcher, an empty match
-// criteria set would select the first entry for every endpoint).
-func TestInjectUpstreamMTLS_NoLocalWorkloads(t *testing.T) {
-	node := "spiffe://example.org/ns/aether-system/sa/aether-agent"
-
-	for name, ids := range map[string][]string{
-		"nil slice":            nil,
-		"empty slice":          {},
-		"only invalid entries": {"", ""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", nil, true)
-			InjectUpstreamMTLS(c, ids, node, "spiffe://example.org", nil, "8080", "")
-
-			assert.Nil(t, c.GetTransportSocketMatcher(), "no matcher without local workloads")
-			assert.Empty(t, c.GetTransportSocketMatches(), "no legacy matches without the matcher")
-			require.NotNil(t, c.GetTransportSocket(), "node identity presented directly")
-		})
-	}
+// upstreamTLSContext unpacks a transport socket's UpstreamTlsContext.
+func upstreamTLSContext(t *testing.T, ts *corev3.TransportSocket) *tlsv3.UpstreamTlsContext {
+	t.Helper()
+	require.NotNil(t, ts)
+	var ctx tlsv3.UpstreamTlsContext
+	require.NoError(t, ts.GetTypedConfig().UnmarshalTo(&ctx))
+	return &ctx
 }
 
 func TestServiceLocalityLbEndpointFromRegistryEndpoint(t *testing.T) {
@@ -245,7 +295,7 @@ func TestEndpointHealthStatus(t *testing.T) {
 // connections close on (EDS) health failure, panic routing is off, and the
 // retry circuit breaker has headroom for the drain-time reset burst.
 func TestServiceClusterDrainPoolClose(t *testing.T) {
-	c := NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil, true)
+	c := NewServiceCluster("svc-x.aether.internal", "svc-x", "svc-x", nil)
 	assert.True(t, c.GetCloseConnectionsOnHostHealthFailure(),
 		"pools must close at drain-mark, not at the app-exit GOAWAY race")
 	require.NotNil(t, c.GetCommonLbConfig().GetHealthyPanicThreshold())
@@ -291,7 +341,7 @@ func TestServiceFromClusterName(t *testing.T) {
 // TestNewServiceCluster_DerivedSubsetSelectors verifies provider-defined keys
 // become single-key NO_FALLBACK selectors after the fixed ip/pod pair.
 func TestNewServiceCluster_DerivedSubsetSelectors(t *testing.T) {
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"}, true)
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"})
 	selectors := c.GetLbSubsetConfig().GetSubsetSelectors()
 	require.Len(t, selectors, 5)
 	assert.Equal(t, []string{"shard"}, selectors[2].GetKeys())
@@ -411,7 +461,7 @@ func TestSubsetKeyCombos(t *testing.T) {
 // ip/pod singletons (single_host_per_subset, never combined) followed by the
 // derived-key power set, all NO_FALLBACK.
 func TestSubsetSelectors_MultiKey(t *testing.T) {
-	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"}, true)
+	c := NewServiceCluster("svc-a.aether.internal", "svc-a", "svc-a", []string{"shard", "version"})
 	sel := c.GetLbSubsetConfig().GetSubsetSelectors()
 	require.Len(t, sel, 2+3)
 

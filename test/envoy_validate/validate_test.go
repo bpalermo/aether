@@ -30,6 +30,9 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	filter_state_overridev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3"
+	on_demand_secretv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -252,5 +255,78 @@ func TestNodeBootstrapEgressRDSInitialFetchTimeout(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("no listener in the node bootstrap references the out_http route config over RDS")
+	}
+}
+
+// TestNodeBootstrapCarriesPerConnectionCertSelector proves the `envoy --mode
+// validate` gate above is not VACUOUS for issue #842.
+//
+// The validated bootstrap must actually contain the on-demand certificate
+// selector and its filter-state mapper. `envoy --mode validate` instantiates
+// both factories and PGV-validates their configs, so an extension missing from
+// the pinned proxy build, or a config the proto rejects, is a validation
+// FAILURE — which is the whole value of running a real Envoy over this config.
+// But that value is zero if the fixture stopped emitting the selector: the gate
+// would pass on config that does not exercise it, exactly the trap the
+// shell-lint job fell into (aether#853).
+//
+// MEASURED, both ways, on the pinned proxy (2026-09-20):
+//   - emptying filter_state_override's default_value makes validation FAIL with
+//     "ConfigValidationError.DefaultValue: value length must be at least 1
+//     characters" — so the gate really does reach inside the selector;
+//   - corrupting the TypedExtensionConfig's `name` does NOT fail. Extensions
+//     here resolve by the typed_config TYPE URL, and the name is informational.
+//     Do not rely on validation to catch a renamed constant; that is what
+//     TestUpstreamCertSelectorExtensionNames (agent/internal/xds/proxy) is for.
+//
+// So: assert the shape is present, in the marshalled bytes, before trusting
+// that validation accepting them means anything.
+func TestNodeBootstrapCarriesPerConnectionCertSelector(t *testing.T) {
+	data, err := NodeBootstrapJSON()
+	if err != nil {
+		t.Fatalf("NodeBootstrapJSON: %v", err)
+	}
+
+	bs := &bootstrapv3.Bootstrap{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, bs); err != nil {
+		t.Fatalf("unmarshal node bootstrap: %v", err)
+	}
+
+	var checked int
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		ts := c.GetTransportSocket()
+		if ts == nil {
+			continue
+		}
+		utc := &tlsv3.UpstreamTlsContext{}
+		if err := ts.GetTypedConfig().UnmarshalTo(utc); err != nil {
+			continue
+		}
+		sel := utc.GetCommonTlsContext().GetCustomTlsCertificateSelector()
+		if sel == nil {
+			continue
+		}
+		checked++
+
+		onDemand := &on_demand_secretv3.Config{}
+		if err := sel.GetTypedConfig().UnmarshalTo(onDemand); err != nil {
+			t.Fatalf("cluster %q: custom_tls_certificate_selector is not an on_demand_secret config: %v", c.GetName(), err)
+		}
+		if onDemand.GetConfigSource() == nil {
+			t.Fatalf("cluster %q: on_demand_secret has no config_source (required)", c.GetName())
+		}
+		mapper := &filter_state_overridev3.Config{}
+		if err := onDemand.GetCertificateMapper().GetTypedConfig().UnmarshalTo(mapper); err != nil {
+			t.Fatalf("cluster %q: certificate_mapper is not a filter_state_override config: %v", c.GetName(), err)
+		}
+		if mapper.GetDefaultValue() == "" {
+			t.Fatalf("cluster %q: filter_state_override default_value is empty (min_len: 1 — Envoy would reject it)", c.GetName())
+		}
+		if got := utc.GetMaxSessionKeys().GetValue(); got != 0 {
+			t.Fatalf("cluster %q: max_session_keys = %d, want 0 — a client context supports a custom certificate selector only with session resumption off", c.GetName(), got)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no cluster in the node bootstrap carries a per-connection certificate selector: the envoy --mode validate gate proves nothing about issue #842")
 	}
 }

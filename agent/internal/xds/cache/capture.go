@@ -284,15 +284,12 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		return nil
 	}
 
+	// Only the node SVID is read here. The local workload identities used to be
+	// collected too, to build the TCP floor clusters' per-source
+	// transport_socket_matches — since #842 the client certificate is chosen per
+	// connection from filter state, so a floor cluster has no per-workload input
+	// and its bytes do not move when a pod arrives or leaves.
 	c.localMu.RLock()
-	// The identity SET, not the per-pod index: the TCP floor clusters carry the
-	// same per-source matcher as the HTTP ones, keyed by source SPIFFE ID since
-	// issue #815 release two, so two pods of one ServiceAccount contribute one
-	// entry and pod churn within it changes no cluster bytes.
-	ids := make([]string, 0, len(c.localWorkloads))
-	for _, id := range c.localWorkloads {
-		ids = append(ids, id)
-	}
 	nodeSpiffeID := c.nodeSpiffeID
 	c.localMu.RUnlock()
 
@@ -319,14 +316,14 @@ func (c *SnapshotCache) captureTCPClusters() []types.Resource {
 		// HTTP cluster path uses.
 		sanURIs := httpEntry.sanURIs
 		tcpName := proxy.TCPClusterName(e.serviceName, c.meshDomain)
-		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName, c.perDownstreamConnectionPool())
+		cl := proxy.NewTCPServiceCluster(tcpName, e.serviceName, e.serviceName)
 		// NO SNI for the TCP floor: the egress floor connection must NOT carry the
 		// destination port as SNI, or the peer's inbound per-port HCM chain
 		// (server_names:[port]) would win over the inbound TCP floor's default chain
 		// (server_names > application_protocols > default) — the connection lands on
 		// the HCM, which can't parse the raw TCP stream and 503s. An empty SNI lets it
 		// fall through to the inbound default floor chain (tcp_proxy to the app).
-		proxy.InjectUpstreamTCPMTLS(cl, ids, nodeSpiffeID, validationContextName, sanURIs, "")
+		proxy.InjectUpstreamTCPMTLS(cl, nodeSpiffeID, validationContextName, sanURIs, "")
 		resources = append(resources, cl)
 	}
 	c.clusterMu.RUnlock()
@@ -367,7 +364,7 @@ func (c *SnapshotCache) edgeTCPClusters() []types.Resource {
 		// #537); see the node-proxy TCP variant above.
 		sanURIs := entry.sanURIs
 		tcpName := proxy.TCPClusterName(svc, c.meshDomain)
-		cl := proxy.NewTCPServiceCluster(tcpName, svc, svc, false /* edge = single identity, no per-downstream pool */)
+		cl := proxy.NewTCPServiceCluster(tcpName, svc, svc)
 		// Edge variant: fetch SVID/bundle from spire_agent (not ADS), no ALPN, no SNI (TCP floor).
 		cl.TransportSocket = proxy.EdgeUpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
 		resources = append(resources, cl)

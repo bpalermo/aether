@@ -302,13 +302,30 @@ func TestVirtualHostVhostsMergeSharedDomains(t *testing.T) {
 	assert.Equal(t, "svc-2.ns.aether.internal", bVH.GetRoutes()[0].GetRoute().GetCluster())
 }
 
+// TestPerDownstreamConnectionPool: the node proxy USED to set
+// connection_pool_per_downstream_connection (the edge never did — it carries a
+// single identity), because that flag was the only thing keeping a pooled
+// upstream connection from carrying one source's client certificate for
+// another (#831/#841).
+//
+// Issue #842 replaced it with the correct partition — the source SPIFFE ID in
+// the upstream pool key, via the hashable filter-state object — so NEITHER
+// proxy sets it any more, and the node proxy can finally multiplex several pods
+// of one ServiceAccount onto one upstream h2 connection.
+//
+// The flag's absence is only safe together with that hashable key, so this
+// asserts the pair rather than just the flag. The runtime proof is
+// //test/mtlspool.
 func TestPerDownstreamConnectionPool(t *testing.T) {
-	node := newTestCache("node-1")
-	assert.True(t, node.perDownstreamConnectionPool(), "node proxy pools per downstream")
+	// The setting was a property of the PROXY ROLE (node vs edge); it is now a
+	// property of neither, so there is one cluster shape to check.
+	cl := proxy.NewServiceCluster("svc.ns.aether.internal", "ns/svc", "ns/svc", nil)
+	assert.False(t, cl.GetConnectionPoolPerDownstreamConnection(),
+		"#842: pools partition by source identity, not by downstream connection")
 
-	edge := newTestCache("edge-1")
-	edge.SetEdgeMode(8080)
-	assert.False(t, edge.perDownstreamConnectionPool(), "edge multiplexes on its single identity")
+	tcp := proxy.NewTCPServiceCluster("tcp:svc.ns.aether.internal", "ns/svc", "ns/svc")
+	assert.False(t, tcp.GetConnectionPoolPerDownstreamConnection(),
+		"the TCP floor cluster follows the HTTP one")
 }
 
 // TestEdgeHTTPRedirectOptIn verifies that without the opt-in the HTTP listener

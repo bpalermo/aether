@@ -72,7 +72,7 @@ func TestBuildHTTPConnectionManagerFilter(t *testing.T) {
 }
 
 func TestBuildSetFilterState(t *testing.T) {
-	filter := buildSetFilterState("my.key", "%SOME_FORMAT%")
+	filter := buildSetFilterState("my.key", genericStringFactory, "%SOME_FORMAT%")
 
 	require.NotNil(t, filter)
 	assert.Equal(t, "envoy.filters.network.set_filter_state", filter.GetName())
