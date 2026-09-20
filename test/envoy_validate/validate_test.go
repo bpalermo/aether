@@ -152,6 +152,19 @@ func TestEnvoyValidate(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(outDir, b.name), data, 0o644); err != nil {
 			t.Fatalf("write %s: %v", b.name, err)
 		}
+		// Every upstream TLS context must pin the SERVER identity. Envoy
+		// ACCEPTS an unpinned one — the handshake then proves only trust-domain
+		// membership, which any mesh workload satisfies — so `--mode validate`
+		// passing says nothing about it (issue #832). Checked on the same bytes
+		// the validate below reads.
+		unpinned, err := UnpinnedMeshClusters(data)
+		if err != nil {
+			t.Fatalf("SAN-pin check %s: %v", b.name, err)
+		}
+		if len(unpinned) > 0 {
+			t.Errorf("%s: upstream TLS contexts with no match_typed_subject_alt_names: %v\n"+
+				"an unpinned context authenticates ANY workload in the trust domain, not the service asked for", b.name, unpinned)
+		}
 	}
 
 	// Validate each bootstrap with Envoy.

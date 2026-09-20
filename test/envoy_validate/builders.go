@@ -642,6 +642,68 @@ func buildEdgeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	), nil
 }
 
+// UnpinnedMeshClusters returns the names of every upstream TLS context in a
+// generated bootstrap that carries NO match_typed_subject_alt_names — i.e.
+// every cluster whose handshake would prove trust-domain membership and nothing
+// else, so any mesh workload satisfies it (issue #832).
+//
+// It is the config-shape half of that issue's gate, and it runs over the exact
+// bytes handed to `envoy --mode validate`: Envoy ACCEPTS an unpinned validation
+// context, so this is a shape a passing validate can never catch. Nothing here
+// is allow-listed by name — a cluster is checked precisely when it has an
+// UpstreamTlsContext, so the passthrough, app, health, xds, spire_agent and
+// waypoint-ingress clusters (no TLS at all) are out of scope automatically, and
+// a NEW mesh cluster added to a builder is in scope the moment it grows one.
+//
+// Each returned name is "<cluster>" for a plain transport_socket or
+// "<cluster>/<match>" for a transport_socket_matches entry (the per-source mTLS
+// shape, where the pin lives on every match INCLUDING the node-identity
+// on_no_match one).
+func UnpinnedMeshClusters(bootstrapJSON []byte) ([]string, error) {
+	var bs bootstrapv3.Bootstrap
+	if err := protojson.Unmarshal(bootstrapJSON, &bs); err != nil {
+		return nil, fmt.Errorf("unmarshal bootstrap: %w", err)
+	}
+
+	var unpinned []string
+	for _, c := range bs.GetStaticResources().GetClusters() {
+		pinned, err := upstreamTLSPinned(c.GetTransportSocket())
+		if err != nil {
+			return nil, fmt.Errorf("cluster %s: %w", c.GetName(), err)
+		}
+		if !pinned {
+			unpinned = append(unpinned, c.GetName())
+		}
+		for _, m := range c.GetTransportSocketMatches() {
+			pinned, err := upstreamTLSPinned(m.GetTransportSocket())
+			if err != nil {
+				return nil, fmt.Errorf("cluster %s match %s: %w", c.GetName(), m.GetName(), err)
+			}
+			if !pinned {
+				unpinned = append(unpinned, c.GetName()+"/"+m.GetName())
+			}
+		}
+	}
+	return unpinned, nil
+}
+
+// upstreamTLSPinned reports whether a transport socket is SAN-pinned. A socket
+// that is absent or is not an UpstreamTlsContext is "pinned" vacuously: it has
+// no upstream peer identity to check in the first place.
+func upstreamTLSPinned(ts *corev3.TransportSocket) (bool, error) {
+	if ts.GetTypedConfig() == nil || !ts.GetTypedConfig().MessageIs(&tlsv3.UpstreamTlsContext{}) {
+		return true, nil
+	}
+	var ctx tlsv3.UpstreamTlsContext
+	if err := ts.GetTypedConfig().UnmarshalTo(&ctx); err != nil {
+		return false, fmt.Errorf("unmarshal UpstreamTlsContext: %w", err)
+	}
+	// The pin lives in the COMBINED validation context; the plain
+	// ValidationContextSdsSecretConfig form carries the trust bundle alone.
+	return len(ctx.GetCommonTlsContext().GetCombinedValidationContext().
+		GetDefaultValidationContext().GetMatchTypedSubjectAltNames()) > 0, nil
+}
+
 // marshalBootstrap serialises a Bootstrap proto to protojson, stripping
 // custom extensions that require the proxy-workspace Envoy binary.
 func marshalBootstrap(bs *bootstrapv3.Bootstrap) ([]byte, error) {

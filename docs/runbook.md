@@ -1005,6 +1005,35 @@ _stream:{service.name="aether-agent"} AND "inbound chain bound to a foreign iden
 sum by (node) (increase(aether_agent_identity_inbound_binding_mismatch_total[1h]))
 ```
 
+#### The unpinned-cluster signal (#832)
+
+The two discriminators above ask *"is the identity we present the right one"*. This one
+asks *"are we checking the identity we are handed at all"*. A mesh cluster whose upstream
+validation context carries no `match_typed_subject_alt_names` authenticates **any**
+workload in the trust domain, so a foreign endpoint in its load assignment produces a
+clean handshake and a delivered request instead of the `ssl_fail_verify_san` rejection
+that caught #829. It is the fail-**open** direction.
+
+- **WARN `mesh clusters published with no server-identity SAN pin`** + counter
+  `aether_agent_identity_cluster_unpinned_total` — emitted **once per snapshot**, naming
+  the clusters (first 20) with `count`, `trust_domain` and a `reason`:
+  - `trust domain not yet known` — the deliberate lesser evil over `spiffe:///ns/…`,
+    which is unservable and cost rev222 four endpoints (#815/#819). Bounded to the window
+    before SPIRE resolves the trust domain; **more than a snapshot or two of this is the
+    bug**, and until now it was invisible.
+  - `service endpoints carry no namespace metadata` — not a window at all: it lasts as
+    long as the registry serves those endpoints.
+
+```promql
+# Seeded at zero, so a live zero is a real series (not an absent one).
+sum by (node) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
+```
+
+The config-shape half is a build-time gate: `//test/envoy_validate` asserts every upstream
+TLS context in a generated bootstrap carries a non-empty `match_typed_subject_alt_names`.
+`envoy --mode validate` **accepts** an unpinned context, so validation passing says nothing
+about it.
+
 #### The ledger join, with the terminating-node column
 
 The join that has been missing: each failing request must be attributed to the node whose

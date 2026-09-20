@@ -1,7 +1,10 @@
 package cache
 
 import (
+	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/common/serviceref"
@@ -104,6 +107,14 @@ func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLS
 	// rather than "spiffe:///ns/…", which matches nothing and can never be
 	// satisfied by a real peer certificate (#815). The next recompute — one
 	// happens on every snapshot — fills them in.
+	//
+	// That choice is right and the unpinned window is meant to be one snapshot
+	// wide, but an unpinned cluster is an authentication downgrade while it
+	// lasts: the handshake then proves only trust-domain membership, so any mesh
+	// workload satisfies it and a foreign endpoint in the load assignment turns
+	// a would-be rejection into a delivered request. reportUnpinnedClusters
+	// makes every such snapshot loud and counted, so a window that outlives its
+	// bound cannot look identical to one that never happened (#832).
 	var sanURIs []string
 	if st.trustDomain != "" {
 		sanURIs = make([]string, 0, len(entry.sanNamespaces))
@@ -141,4 +152,84 @@ func (c *SnapshotCache) refreshEntryMTLSLocked(entry *clusterEntry, st localMTLS
 		proxy.InjectUpstreamMTLS(cl, st.ids, st.nodeSpiffeID, st.validationContextName, sanURIs, entry.sni, waypointSNI)
 	}
 	entry.mtlsCluster = cl
+}
+
+// maxUnpinnedClusterNames bounds how many cluster names the unpinned WARN
+// renders. The count is always exact; the names are the diagnostic part and a
+// node-wide unpinned state would otherwise put every service on one line.
+const maxUnpinnedClusterNames = 20
+
+// unpinnedClusterMsg is the WARN a snapshot emits when it publishes clusters
+// with no server-identity pin.
+const unpinnedClusterMsg = "mesh clusters published with no server-identity SAN pin"
+
+// reportUnpinnedClusters WARNs once per snapshot, naming the clusters this
+// generation publishes with an EMPTY SAN pin, and counts them (#832).
+//
+// An unpinned cluster's upstream validation context carries no
+// match_typed_subject_alt_names (proxy.upstreamTransportSocket's len == 0
+// branch), so its handshake proves trust-domain membership and nothing more —
+// any mesh workload satisfies it. The pin is what makes a wrong identity loud
+// (#829 was caught by ssl_fail_verify_san); without it the same event is a
+// clean handshake and a delivered request.
+//
+// Two inputs can empty the pin, and the WARN names which:
+//
+//   - the trust domain is not (yet) known, so there is no identity to render —
+//     the deliberate lesser evil over "spiffe:///ns/…" (#815/#819), bounded to
+//     the window before SPIRE resolves it. THIS is the window the issue is
+//     about: it is meant to be one snapshot wide, and nothing observed it.
+//   - the service's endpoints carry no Kubernetes namespace metadata, so
+//     sanNamespaces is empty. Not a window at all: it persists for as long as
+//     the registry keeps serving those endpoints.
+//
+// Called from generateSnapshot with snapshotMu held, next to the #638
+// binding discriminators. Reporting here rather than inside the recompute is
+// deliberate: what matters is what a snapshot PUBLISHES, and a recompute that
+// is superseded before the next generation never reached Envoy.
+func (c *SnapshotCache) reportUnpinnedClusters(ctx context.Context, version string) {
+	names := c.unpinnedClusterNames()
+	if len(names) == 0 {
+		// The healthy case rides on the zero seeded at metric registration —
+		// an unseeded zero reads as a false zero (a counter never incremented
+		// is not a series at all).
+		return
+	}
+
+	trustDomain := c.currentTrustDomain()
+	reason := "service endpoints carry no namespace metadata"
+	if trustDomain == "" {
+		reason = "trust domain not yet known"
+	}
+
+	shown := names
+	if len(shown) > maxUnpinnedClusterNames {
+		shown = append(shown[:maxUnpinnedClusterNames:maxUnpinnedClusterNames], "...")
+	}
+	c.log.WarnContext(ctx, unpinnedClusterMsg,
+		"clusters", strings.Join(shown, " "),
+		"count", len(names),
+		"reason", reason,
+		"trust_domain", trustDomain,
+		"snapshot_version", version)
+	c.metrics.ClusterUnpinned(ctx, int64(len(names)))
+}
+
+// unpinnedClusterNames returns, sorted, the names of the cluster entries whose
+// cached SAN pin is empty. entry.sanURIs is the single render of the pin every
+// emission path reads — the HTTP/edge mTLS cluster (refreshEntryMTLSLocked) and
+// the TCP floor's "tcp:<svc>" cluster (captureTCPClusters / edgeTCPClusters) —
+// so checking it here covers all of them without re-walking the emitted protos.
+func (c *SnapshotCache) unpinnedClusterNames() []string {
+	c.clusterMu.RLock()
+	defer c.clusterMu.RUnlock()
+
+	var names []string
+	for name, entry := range c.clusters {
+		if len(entry.sanURIs) == 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }

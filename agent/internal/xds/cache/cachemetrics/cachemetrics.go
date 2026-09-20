@@ -67,6 +67,15 @@ type Metrics struct {
 	// hot-restart successor NACK the whole response and come up with ZERO
 	// listeners (#717), because the netns jump wraps the parent-socket handoff.
 	staleNetnsSkipped metric.Int64Counter
+	// clusterUnpinned counts mesh clusters a snapshot publishes with NO
+	// server-identity SAN pin (issue #832): their upstream validation context
+	// carries no match_typed_subject_alt_names, so the handshake proves only
+	// trust-domain membership and ANY mesh workload satisfies it. The unpinned
+	// form is a deliberate lesser evil while the trust domain is unknown (the
+	// alternative, "spiffe:///ns/…", is the rev222 outage, #815/#819) — but it
+	// is an authentication downgrade, so the window it covers must be visible
+	// and bounded rather than silent.
+	clusterUnpinned metric.Int64Counter
 	// inboundBindingMismatch counts local pods whose INBOUND filter chains are
 	// bound to an SDS server-certificate secret that is NOT that pod's own
 	// SPIFFE ID (issue #638). Non-zero means the node would TERMINATE mesh mTLS
@@ -143,18 +152,23 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Inbound filter chains bound to another workload's SDS server-certificate secret")); err != nil {
 		return nil, fmt.Errorf("inbound binding mismatch: %w", err)
 	}
+	if m.clusterUnpinned, err = meter.Int64Counter("aether.agent.identity.cluster_unpinned",
+		metric.WithDescription("Mesh clusters published with no server-identity SAN pin (handshake proves trust-domain membership only)")); err != nil {
+		return nil, fmt.Errorf("cluster unpinned: %w", err)
+	}
 
-	// Seed the two #638 discriminator counters and the #717 stale-netns counter
-	// at zero. The OTel SDK exports a counter only after its first Add, so a
-	// counter that is never incremented (the healthy case for all three) never
-	// appears in Prometheus at all — and "no series" is indistinguishable from
-	// "zero" to a grading query. Seeding makes a live zero visible and lets
-	// increase()/rate() work from process start. Observed on talos-main rev200:
-	// neither #638 series existed.
+	// Seed the two #638 discriminator counters, the #717 stale-netns counter and
+	// the #832 unpinned-cluster counter at zero. The OTel SDK exports a counter
+	// only after its first Add, so a counter that is never incremented (the
+	// healthy case for all four) never appears in Prometheus at all — and "no
+	// series" is indistinguishable from "zero" to a grading query. Seeding makes
+	// a live zero visible and lets increase()/rate() work from process start.
+	// Observed on talos-main rev200: neither #638 series existed.
 	ctx := context.Background()
 	m.bindingMismatch.Add(ctx, 0)
 	m.inboundBindingMismatch.Add(ctx, 0)
 	m.staleNetnsSkipped.Add(ctx, 0)
+	m.clusterUnpinned.Add(ctx, 0)
 
 	return m, nil
 }
@@ -180,6 +194,18 @@ func (m *Metrics) InboundBindingMismatch(ctx context.Context, n int64) {
 		return
 	}
 	m.inboundBindingMismatch.Add(ctx, n)
+}
+
+// ClusterUnpinned counts n mesh clusters published by ONE snapshot generation
+// without a server-identity SAN pin (issue #832). Cluster names are deliberately
+// NOT attributes (unbounded cardinality); the snapshot logs them at WARN. A
+// no-op for n <= 0, so the healthy case rides on the zero seeded at
+// registration — an unseeded zero reads as a false zero.
+func (m *Metrics) ClusterUnpinned(ctx context.Context, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.clusterUnpinned.Add(ctx, n)
 }
 
 // StaleNetnsSkipped counts n per-pod listener entries excluded from ONE

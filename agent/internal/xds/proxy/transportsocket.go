@@ -120,23 +120,7 @@ func upstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 			ValidationContextSdsSecretConfig: sdsSecretConfigFrom(validationContextName, sdsSource),
 		}
 	} else {
-		matchers := make([]*transport_sockets_v3.SubjectAltNameMatcher, 0, len(sanURIs))
-		for _, uri := range sanURIs {
-			matchers = append(matchers, &transport_sockets_v3.SubjectAltNameMatcher{
-				SanType: transport_sockets_v3.SubjectAltNameMatcher_URI,
-				Matcher: &matcherv3.StringMatcher{
-					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: uri},
-				},
-			})
-		}
-		common.ValidationContextType = &transport_sockets_v3.CommonTlsContext_CombinedValidationContext{
-			CombinedValidationContext: &transport_sockets_v3.CommonTlsContext_CombinedCertificateValidationContext{
-				DefaultValidationContext: &transport_sockets_v3.CertificateValidationContext{
-					MatchTypedSubjectAltNames: matchers,
-				},
-				ValidationContextSdsSecretConfig: sdsSecretConfigFrom(validationContextName, sdsSource),
-			},
-		}
+		common.ValidationContextType = combinedValidationContext(validationContextName, sanURIs, sdsSource)
 	}
 
 	// SNI carries the destination PORT (multi-port routing): the destination
@@ -161,6 +145,76 @@ func upstreamTransportSocket(tlsCertificateSecretName string, validationContextN
 		CommonTlsContext: common,
 		Sni:              sni,
 		MaxSessionKeys:   wrapperspb.UInt32(0),
+	})
+}
+
+// combinedValidationContext builds the SERVER-identity pin every upstream mTLS
+// context in the mesh shares: the peer's presented SVID must carry a URI SAN
+// exactly matching one of sanURIs, layered over the SDS-rotated trust bundle.
+// Callers must not pass an empty sanURIs — an empty matcher list renders a
+// validation context that pins nothing (see issue #832); the unpinned form is
+// the explicit `len(sanURIs) == 0` branch above, never a by-product here.
+func combinedValidationContext(validationContextName string, sanURIs []string, sdsSource *corev3.ConfigSource) *transport_sockets_v3.CommonTlsContext_CombinedValidationContext {
+	matchers := make([]*transport_sockets_v3.SubjectAltNameMatcher, 0, len(sanURIs))
+	for _, uri := range sanURIs {
+		matchers = append(matchers, &transport_sockets_v3.SubjectAltNameMatcher{
+			SanType: transport_sockets_v3.SubjectAltNameMatcher_URI,
+			Matcher: &matcherv3.StringMatcher{
+				MatchPattern: &matcherv3.StringMatcher_Exact{Exact: uri},
+			},
+		})
+	}
+	return &transport_sockets_v3.CommonTlsContext_CombinedValidationContext{
+		CombinedValidationContext: &transport_sockets_v3.CommonTlsContext_CombinedCertificateValidationContext{
+			DefaultValidationContext: &transport_sockets_v3.CertificateValidationContext{
+				MatchTypedSubjectAltNames: matchers,
+			},
+			ValidationContextSdsSecretConfig: sdsSecretConfigFrom(validationContextName, sdsSource),
+		},
+	}
+}
+
+// InboundReadyProbeTransportSocket builds the upstream TLS context for the
+// per-pod inbound-readiness probe cluster (issue #815) and for NOTHING else.
+//
+// THE INVARIANT: nothing this cluster does may be observable by application
+// traffic (issue #836). The probe dials each local pod's mesh inbound INSIDE
+// that pod's network namespace every 5 s, so its TLS peer is always a pod on
+// this node presenting that pod's own SVID — the one certificate that must
+// never turn up in an unrelated cluster's handshake. In #829 a probe-sourced
+// TLS session did exactly that: mesh clusters resumed from a session the probe
+// had created and were handed a local pod's certificate.
+//
+// That is why this context is written out here in full rather than calling the
+// mesh helper (UpstreamTransportSocket): the probe carries its OWN
+// MaxSessionKeys: 0, so it can never deposit resumable session state whatever
+// the mesh path does. #834 set max_session_keys to 0 on the mesh builders too
+// and that should stay — but it is a global switch someone may reverse for a
+// good reason (upstream envoy#45982 scopes the cache by SNI, which would make
+// resumption defensible again), and this boundary has to hold when they do.
+//
+// Everything else is load-bearing and explained at NewInboundReadyProbeCluster:
+// ALPN "h2" selects the inbound listener's always-present no-SNI HCM chain, the
+// SAN pin (the pod's own SPIFFE ID) is what makes a pass mean "THIS pod
+// answered" rather than "something answered on :18008", and the SNI stays EMPTY
+// because a non-empty SNI is a destination PORT and would select a per-port
+// chain instead.
+func InboundReadyProbeTransportSocket(nodeSpiffeID, validationContextName, podSpiffeID string) *corev3.TransportSocket {
+	return transportSocket(&transport_sockets_v3.UpstreamTlsContext{
+		CommonTlsContext: &transport_sockets_v3.CommonTlsContext{
+			AlpnProtocols: []string{"h2"},
+			TlsCertificateSdsSecretConfigs: []*transport_sockets_v3.SdsSecretConfig{
+				sdsSecretConfig(nodeSpiffeID),
+			},
+			ValidationContextType: combinedValidationContext(validationContextName, []string{podSpiffeID}, config.XDSConfigSourceADS()),
+		},
+		// No SNI: the no-SNI h2 chain (see above).
+		Sni: "",
+		// The probe's own resumption switch, independent of the mesh helper's.
+		// A health check gains nothing from resumption — it runs every 5 s
+		// against one fixed local peer and re-proving the certificate on a fresh
+		// handshake is the entire point of the probe.
+		MaxSessionKeys: wrapperspb.UInt32(0),
 	})
 }
 

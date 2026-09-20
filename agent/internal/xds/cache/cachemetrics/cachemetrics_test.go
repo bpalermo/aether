@@ -57,6 +57,7 @@ func TestCacheMetrics_NilReceiverSafe(t *testing.T) {
 	m.Generated(context.Background(), 0.01, 1, errors.New("boom"))
 	m.UpstreamTTLRefreshed(context.Background(), 3)
 	m.UpstreamsRestored(context.Background(), 3)
+	m.ClusterUnpinned(context.Background(), 3)
 }
 
 // TestCacheMetrics_UpstreamsRestored verifies the restore counter records the
@@ -137,6 +138,9 @@ func TestCacheMetrics_IdentityCountersSeededAtZero(t *testing.T) {
 	for _, name := range []string{
 		"aether.agent.identity.outbound_binding_mismatch",
 		"aether.agent.identity.inbound_binding_mismatch",
+		// #832: a cluster shipped with no SAN pin. Its healthy value is zero
+		// forever, which is exactly the value that would never be exported.
+		"aether.agent.identity.cluster_unpinned",
 	} {
 		v, ok := metricValue(t, reader, name)
 		if !ok {
